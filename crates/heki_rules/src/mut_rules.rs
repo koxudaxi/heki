@@ -376,6 +376,9 @@ pub(crate) fn mut201(
         });
     }
 
+    if rules.is_empty() {
+        return Ok(());
+    }
     let mut keys_by_fqn: FxHashMap<String, FuncKey> = FxHashMap::default();
     for file in cx.index.files.values() {
         for k in file.local_functions.keys() {
@@ -567,7 +570,7 @@ pub(crate) fn mut202(
     if !cx.enabled("MUT202", unit) {
         return;
     }
-    let tcx = TypeCtx::new(&unit.input, &cx.decls, cx.kb);
+    let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     for f in &unit.input.ir.functions {
         if f.is_class_body {
             continue;

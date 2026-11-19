@@ -8,6 +8,7 @@ mod data_rules;
 mod eff_rules;
 mod mut_rules;
 mod opt_rules;
+pub mod project;
 pub mod selection;
 pub mod snapshot;
 
@@ -222,6 +223,9 @@ pub struct CheckExtras<'a> {
     pub soundness_kb: &'a EffectiveSoundnessKb,
     /// `None`: no snapshot was loaded (`MUT103` reports nothing).
     pub snapshot: Option<&'a SummarySnapshot>,
+    /// Declarations of every indexed module, when the caller keeps them up to date (the LSP
+    /// engine); otherwise they are built from the index.
+    pub decls: Option<&'a ProjectDecls>,
 }
 
 /// Shared state of one `heki check` run.
@@ -230,7 +234,7 @@ pub(crate) struct CheckContext<'a> {
     pub kb: &'a EffectiveEcosystemKb,
     pub soundness: &'a EffectiveSoundnessKb,
     pub index: &'a ProjectIndex,
-    pub decls: ProjectDecls,
+    pub decls: &'a ProjectDecls,
     pub units: &'a [ModuleUnit<'a>],
     pub selection: &'a RuleSelection,
     unit_by_path: FxHashMap<&'a Path, usize>,
@@ -246,12 +250,20 @@ pub fn check_project(
     selection: &RuleSelection,
     extras: &CheckExtras<'_>,
 ) -> Result<Vec<Diagnostic>, RuleConfigError> {
+    let owned_decls;
+    let decls = match extras.decls {
+        Some(d) => d,
+        None => {
+            owned_decls = index.project_decls();
+            &owned_decls
+        }
+    };
     let cx = CheckContext {
         config,
         kb,
         soundness: extras.soundness_kb,
         index,
-        decls: index.project_decls(),
+        decls,
         units,
         selection,
         unit_by_path: units
@@ -340,6 +352,7 @@ impl<'a> CheckContext<'a> {
                     path: hop.path.clone(),
                     line,
                     column,
+                    span: hop.span,
                     message: format!("`{}` calls `{}`", hop.caller.qualname, hop.callee),
                 }
             })

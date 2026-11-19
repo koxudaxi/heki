@@ -1,6 +1,7 @@
 //! `heki` CLI — Ruff & `t-linter`-aligned interface for Python Effect & Alias semantic checking.
 
 mod check;
+mod watch;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -154,7 +155,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Commands::Check(args) => check::run(&args),
         Commands::Server(_args) => {
-            eprintln!("heki server (LSP) scaffold — wired in Milestone M7 (`heki_lsp`).");
+            heki_lsp::run_stdio()?;
             Ok(ExitCode::SUCCESS)
         }
         Commands::Rule(args) => {

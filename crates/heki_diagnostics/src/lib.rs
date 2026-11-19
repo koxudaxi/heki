@@ -19,6 +19,8 @@ pub struct RelatedLocation {
     pub path: PathBuf,
     pub line: u32,
     pub column: u32,
+    /// Byte span in `path` (the LSP server converts it with the file's own text).
+    pub span: Span,
     pub message: String,
 }
 
@@ -530,6 +532,7 @@ mod tests {
                 path: PathBuf::from("src/b.py"),
                 line: 3,
                 column: 1,
+                span: Span { start: 0, end: 0 },
                 message: "calls helper".into(),
             }],
             fix: None,

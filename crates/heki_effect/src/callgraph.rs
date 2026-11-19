@@ -33,15 +33,34 @@ const ROUTE_DECORATORS: &[&str] = &[
     "websocket",
 ];
 
-/// Outgoing call sites of every function: `caller -> [(file, index into call_sites)]`.
-fn out_sites(index: &ProjectIndex) -> FxHashMap<FuncKey, Vec<(PathBuf, usize)>> {
-    let mut out: FxHashMap<FuncKey, Vec<(PathBuf, usize)>> = FxHashMap::default();
-    for (path, file) in &index.files {
-        for (i, site) in file.call_sites.iter().enumerate() {
-            out.entry(site.caller.clone())
-                .or_default()
-                .push((path.clone(), i));
-        }
+type OutSites = FxHashMap<FuncKey, Vec<(PathBuf, usize)>>;
+
+/// Add the outgoing call sites of every function of `path` (`caller -> [(file, index)]`; a
+/// function's call sites all live in its own file).
+fn load_out_sites(index: &ProjectIndex, path: &Path, out: &mut OutSites) {
+    let Some(file) = index.files.get(path) else {
+        return;
+    };
+    for (i, site) in file.call_sites.iter().enumerate() {
+        out.entry(site.caller.clone())
+            .or_default()
+            .push((path.to_path_buf(), i));
+    }
+}
+
+/// Outgoing call sites of the functions of the files defining `funcs` (all files for a full
+/// build, the edited region for an update: the cost follows the region, not the project).
+fn out_sites_of<'f>(
+    index: &ProjectIndex,
+    funcs: impl IntoIterator<Item = &'f FuncKey>,
+) -> OutSites {
+    let files: FxHashSet<&Path> = funcs
+        .into_iter()
+        .filter_map(|f| index.func_files.get(f).map(PathBuf::as_path))
+        .collect();
+    let mut out = OutSites::default();
+    for path in files {
+        load_out_sites(index, path, &mut out);
     }
     for sites in out.values_mut() {
         sites.sort();
@@ -71,25 +90,35 @@ pub(crate) fn reset_to_local(index: &mut ProjectIndex, region: &FxHashSet<FuncKe
 }
 
 /// `own` plus every function on a call cycle through `own` (reachable from it and reaching it).
+///
+/// Every node on a path from `own` to a member of the closure also reaches `own`, so the
+/// forward search only expands callers of `own` (computed first, on the reverse call graph):
+/// call sites are loaded for the closure's files only.
 pub(crate) fn scc_closure(index: &ProjectIndex, own: &FxHashSet<FuncKey>) -> FxHashSet<FuncKey> {
-    let out = out_sites(index);
-    let mut forward: FxHashSet<FuncKey> = own.clone();
-    let mut stack: Vec<FuncKey> = own.iter().cloned().collect();
-    while let Some(f) = stack.pop() {
-        for (path, i) in out.get(&f).into_iter().flatten() {
-            for c in project_callees(&index.files[path].call_sites[*i]) {
-                if forward.insert(c.callee.clone()) {
-                    stack.push(c.callee.clone());
-                }
-            }
-        }
-    }
     let mut backward: FxHashSet<FuncKey> = own.clone();
     let mut stack: Vec<FuncKey> = own.iter().cloned().collect();
     while let Some(f) = stack.pop() {
         for caller in index.reverse_call_graph.get(&f).into_iter().flatten() {
             if backward.insert(caller.clone()) {
                 stack.push(caller.clone());
+            }
+        }
+    }
+    let mut out = OutSites::default();
+    let mut loaded: FxHashSet<PathBuf> = FxHashSet::default();
+    let mut forward: FxHashSet<FuncKey> = own.clone();
+    let mut stack: Vec<FuncKey> = own.iter().cloned().collect();
+    while let Some(f) = stack.pop() {
+        if let Some(path) = index.func_files.get(&f)
+            && loaded.insert(path.clone())
+        {
+            load_out_sites(index, path, &mut out);
+        }
+        for (path, i) in out.get(&f).cloned().into_iter().flatten() {
+            for c in project_callees(&index.files[&path].call_sites[i]) {
+                if backward.contains(&c.callee) && forward.insert(c.callee.clone()) {
+                    stack.push(c.callee.clone());
+                }
             }
         }
     }
@@ -109,7 +138,7 @@ pub(crate) fn propagate(index: &mut ProjectIndex, region: &FxHashSet<FuncKey>) {
         return;
     }
     nodes.sort();
-    let out = out_sites(index);
+    let out = out_sites_of(index, &nodes);
     let pos: FxHashMap<&FuncKey, usize> = nodes.iter().enumerate().map(|(i, k)| (k, i)).collect();
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
@@ -385,6 +414,61 @@ fn has_route_decorator(decorators: &[String]) -> bool {
 
 /// Section 2.7 `sync_driven_only`: a private `async def` without route decorators whose every
 /// project caller is a sync function driving the coroutine by hand. Returns changed functions.
+/// [`recompute_sync_driven`] for `candidates` only: the functions whose incoming call sites,
+/// `async`-ness, or decorators may have changed (an edited file's functions and the callees of
+/// its old and new call sites).
+pub(crate) fn recompute_sync_driven_for(
+    index: &mut ProjectIndex,
+    candidates: &FxHashSet<FuncKey>,
+) -> Vec<FuncKey> {
+    let mut wanted: Vec<(FuncKey, bool)> = Vec::new();
+    for func in candidates {
+        let Some(s) = index.summary(func) else {
+            continue;
+        };
+        let callers = index.reverse_call_graph.get(func);
+        let mut any = false;
+        let mut all_ok = true;
+        for caller in callers.into_iter().flatten() {
+            let caller_async = index.summary(caller).is_some_and(|c| c.is_async);
+            let Some(file) = index
+                .func_files
+                .get(caller)
+                .and_then(|p| index.files.get(p))
+            else {
+                continue;
+            };
+            for site in file.call_sites.iter().filter(|site| &site.caller == caller) {
+                if project_callees(site).iter().any(|bc| &bc.callee == func) {
+                    any = true;
+                    all_ok &= !caller_async && !site.is_awaited && site.drives_coroutine_manually;
+                }
+            }
+        }
+        let want = s.is_async
+            && is_private_name(&func.qualname)
+            && !has_route_decorator(&s.decorators)
+            && any
+            && all_ok;
+        wanted.push((func.clone(), want));
+    }
+    let mut changed = Vec::new();
+    for (func, want) in wanted {
+        if let Some(path) = index.func_files.get(&func).cloned()
+            && let Some(s) = index
+                .files
+                .get_mut(&path)
+                .and_then(|f| f.functions.get_mut(&func))
+            && s.sync_driven_only != want
+        {
+            s.sync_driven_only = want;
+            changed.push(func);
+        }
+    }
+    changed.sort();
+    changed
+}
+
 pub(crate) fn recompute_sync_driven(index: &mut ProjectIndex) -> Vec<FuncKey> {
     let mut incoming: FxHashMap<FuncKey, bool> = FxHashMap::default();
     for file in index.files.values() {

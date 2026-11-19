@@ -23,7 +23,7 @@ mod summary;
 
 pub use report::{
     BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
-    group_by_root_cause,
+    boundary_reports_in, group_by_root_cause,
 };
 pub use resolver::{
     Callee, ClassDecl, FunctionDecl, ModuleDecls, ProjectDecls, TypeCtx, Val, detect_src_layout,
@@ -421,6 +421,20 @@ impl ProjectIndex {
         self.update_file(file)
     }
 
+    /// [`Self::reanalyze_module`] against cached project declarations (kept up to date in
+    /// place): the edit costs the size of the module unless its declarations changed. Returns
+    /// whether they did.
+    pub fn reanalyze_module_cached(
+        &mut self,
+        input: &ModuleInput<'_>,
+        kb: &EffectiveEcosystemKb,
+        decls: &mut ProjectDecls,
+    ) -> (IncrementalUpdate, bool) {
+        let changed = resolver::update_module_decls(input, kb, decls);
+        let file = summary::summarize_module(input, decls, kb);
+        (self.update_file(file), changed)
+    }
+
     /// Update a single file's summary and report whether downstream callers are affected.
     ///
     /// `new_file` carries local facts (`local_functions`, `call_sites`, `call_edges`); its
@@ -437,6 +451,15 @@ impl ProjectIndex {
         new_file.functions = new_file.local_functions.clone();
         self.add_file_links(&new_file);
         let own: FxHashSet<FuncKey> = new_file.local_functions.keys().cloned().collect();
+        // `sync_driven_only` can only change for the file's functions and the callees of its
+        // old and new call sites.
+        let mut sync_candidates: FxHashSet<FuncKey> = own.clone();
+        for file in old_file.iter().chain(std::iter::once(&new_file)) {
+            sync_candidates.extend(file.local_functions.keys().cloned());
+            for (_, callee, _) in &file.call_edges {
+                sync_candidates.insert(callee.clone());
+            }
+        }
         self.files.insert(path, new_file);
 
         // Region 0: the file's functions plus every function sharing a (cross-file) SCC with
@@ -451,7 +474,7 @@ impl ProjectIndex {
         }
         callgraph::reset_to_local(self, &region);
         callgraph::propagate(self, &region);
-        let sync_changed = callgraph::recompute_sync_driven(self);
+        let sync_changed = callgraph::recompute_sync_driven_for(self, &sync_candidates);
 
         let mut changed: BTreeSet<FuncKey> = BTreeSet::new();
         for func in &region {
@@ -500,11 +523,35 @@ impl ProjectIndex {
         region = affected.iter().cloned().collect();
         callgraph::reset_to_local(self, &region);
         callgraph::propagate(self, &region);
-        callgraph::recompute_sync_driven(self);
+        callgraph::recompute_sync_driven_for(self, &sync_candidates);
         IncrementalUpdate {
             summary_changed: true,
             affected_callers: affected,
         }
+    }
+
+    /// Defining file of a summarized function.
+    pub fn file_of(&self, func: &FuncKey) -> Option<&Path> {
+        self.func_files.get(func).map(PathBuf::as_path)
+    }
+
+    /// Drop a deleted file: its functions disappear and their callers are re-propagated (the
+    /// update of an empty module, so Early Cutoff and `affected_callers` work as for edits).
+    pub fn remove_file(&mut self, path: &Path) -> IncrementalUpdate {
+        let Some(old) = self.files.get(path) else {
+            return IncrementalUpdate {
+                summary_changed: false,
+                affected_callers: Vec::new(),
+            };
+        };
+        let empty = FileSummary {
+            path: path.to_path_buf(),
+            module_name: old.module_name.clone(),
+            ..FileSummary::default()
+        };
+        let update = self.update_file(empty);
+        self.files.remove(path);
+        update
     }
 
     pub(crate) fn all_functions(&self) -> impl Iterator<Item = FuncKey> + '_ {

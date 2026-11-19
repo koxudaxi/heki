@@ -74,6 +74,7 @@ fn check_with(files: &[(&str, &str)], config: &HekiConfig, select: &[&str]) -> V
     let extras = CheckExtras {
         soundness_kb: &soundness_kb,
         snapshot: None,
+        decls: None,
     };
     check_project(&units, config, &kb, &index, &selection, &extras).unwrap()
 }
@@ -446,6 +447,7 @@ fn mut201_glob_writers_and_bad_targets() {
             &CheckExtras {
                 soundness_kb: &EffectiveSoundnessKb::load_builtin(PythonVersion::PY315).unwrap(),
                 snapshot: None,
+        decls: None,
             }
         ),
         Err(RuleConfigError::InvalidTarget(t)) if t == "nodot"

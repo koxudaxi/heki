@@ -324,6 +324,26 @@ impl ProjectDecls {
         for m in modules {
             out.modules.insert(m.module_name.clone(), m);
         }
+        out.rebuild_subclasses();
+        out
+    }
+
+    /// Replace (or add) one module's declarations; the subclass index is rebuilt because a
+    /// base may be canonicalized through any module.
+    pub fn replace(&mut self, decls: ModuleDecls) {
+        self.modules.insert(decls.module_name.clone(), decls);
+        self.rebuild_subclasses();
+    }
+
+    /// Forget a deleted module.
+    pub fn remove(&mut self, module: &str) {
+        if self.modules.remove(module).is_some() {
+            self.rebuild_subclasses();
+        }
+    }
+
+    fn rebuild_subclasses(&mut self) {
+        let out = &*self;
         let mut subclasses: FxHashMap<String, Vec<String>> = FxHashMap::default();
         for m in out.modules.values() {
             for (qualname, class) in &m.classes {
@@ -340,8 +360,7 @@ impl ProjectDecls {
             subs.sort();
             subs.dedup();
         }
-        out.subclasses = subclasses;
-        out
+        self.subclasses = subclasses;
     }
 
     pub fn module(&self, name: &str) -> Option<&ModuleDecls> {
@@ -533,6 +552,26 @@ impl ProjectDecls {
 /// Build the project declarations used for summarization: structural declarations of
 /// `modules` (plus `others` already known), then Priority 3 attribute types and global types
 /// inferred against them.
+/// Declarations of one edited module completed against `cached` (the project's declarations,
+/// holding this module's previous version), updating `cached` when they changed. The fast
+/// path (completion against the previous version) is exact whenever the module's structure is
+/// unchanged; any difference falls back to completing against the new structure.
+pub(crate) fn update_module_decls(
+    input: &ModuleInput<'_>,
+    kb: &EffectiveEcosystemKb,
+    cached: &mut ProjectDecls,
+) -> bool {
+    let structural = structural_decls(input);
+    let fast = complete_decls(input, structural.clone(), cached, kb);
+    if cached.module(&input.module_name) == Some(&fast) {
+        return false;
+    }
+    cached.replace(structural.clone());
+    let completed = complete_decls(input, structural, cached, kb);
+    cached.replace(completed);
+    true
+}
+
 pub(crate) fn project_decls_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,

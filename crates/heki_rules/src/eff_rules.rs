@@ -5,7 +5,7 @@ use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     BoundaryReport, CallHop, EffectSummary, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect,
-    boundary_reports, group_by_root_cause,
+    boundary_reports, boundary_reports_in, group_by_root_cause,
 };
 use heki_ir::{InstKind, LoopBound};
 use heki_kb::ExecEffectKind;
@@ -40,7 +40,13 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     let relax_tests = cx.config.lint.relax_async_in_tests.unwrap_or(true);
     let mut eff101: Vec<BoundaryReport> = Vec::new();
     let mut eff105: Vec<BoundaryReport> = Vec::new();
-    for r in boundary_reports(cx.index) {
+    // A check of some files (the LSP engine) only needs their own boundaries.
+    let reports = if cx.units.len() < cx.index.files.len() {
+        boundary_reports_in(cx.index, cx.units.iter().map(|u| u.input.path.as_path()))
+    } else {
+        boundary_reports(cx.index)
+    };
+    for r in reports {
         let code = if r.effect == ExecEffectKind::BlockingFs {
             "EFF105"
         } else {

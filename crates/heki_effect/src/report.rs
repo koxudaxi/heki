@@ -6,7 +6,7 @@ use crate::{CallHop, FuncKey, ProjectIndex};
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Reports sharing one root cause are folded into one beyond this many.
 pub const ROOT_CAUSE_GROUP_THRESHOLD: usize = 10;
@@ -51,9 +51,20 @@ impl RootCauseGroup {
 /// Offloads never fire: offload APIs carry no blocking effects and the offloaded callable is
 /// not called. Functions marked `sync_driven_only` are skipped.
 pub fn boundary_reports(index: &ProjectIndex) -> Vec<BoundaryReport> {
+    boundary_reports_in(index, index.files.keys().map(PathBuf::as_path))
+}
+
+/// [`boundary_reports`] restricted to the call sites of `paths` (single-file checks).
+pub fn boundary_reports_in<'p>(
+    index: &ProjectIndex,
+    paths: impl IntoIterator<Item = &'p Path>,
+) -> Vec<BoundaryReport> {
     let mut best: BTreeMap<(PathBuf, Span, FuncKey, ExecEffectKind), Vec<CallHop>> =
         BTreeMap::new();
-    for (path, file) in &index.files {
+    for (path, file) in paths
+        .into_iter()
+        .filter_map(|p| index.files.get_key_value(p))
+    {
         for site in &file.call_sites {
             let Some(caller) = index.summary(&site.caller) else {
                 continue;

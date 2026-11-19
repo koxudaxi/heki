@@ -107,3 +107,51 @@ entry says what was decided and why, so it can be reviewed and reverted one by o
 - 419 files in 1.33 s; diagnostics: `MUT101` 16 (unchanged from M5), `OPT110` 2 (`Blocked`:
   element types unknown), `OPT120` 1 (proven-safe size-dependent suggestion: a BFS queue using
   `pending.pop(0)`). The default `--fix` would change nothing (ARCHITECTURE 3.3 expects 0 for dcg).
+
+## M7 — `heki server` / `heki lsp` and `--watch`
+
+1. **One project pipeline.** Discovery, configuration, parsing, and inline-suppression
+   filtering moved from the CLI into `heki_rules::project` (`Project`, `ProjectEnv`,
+   `parse_source`, `retain_unsuppressed`), shared by `heki check`, `heki snapshot`, `--watch`,
+   and the LSP engine.
+2. **Resident state (ADR-017).** `heki_lsp::Workspace` keeps configuration, knowledge bases,
+   file metadata, the `ProjectIndex`, and the project declarations; IR is built for one file at a
+   time and dropped. A source-level guard test (`invariant_tests`) fails if `Workspace` or the
+   server state gains an IR / semantic-model field.
+3. **Edit flow.** Full text sync. `didChange` (250 ms debounce) re-analyzes only the edited
+   document and applies `update_file`; files it affects (callers of changed summaries, and
+   importers when the module's declarations changed) are queued and re-analyzed on `didSave`.
+   Importers = files whose runtime or `TYPE_CHECKING` imports name the module, a submodule, or
+   a parent package.
+4. **Per-file checks in the editor.** The engine checks one file against the index, so
+   `EFF101` / `EFF105` root-cause grouping (10+ boundaries collapsed into one diagnostic) groups
+   within the file, while `heki check` groups project-wide. Chains in other files keep the spans
+   of their last propagation after a position-only edit (the M4 Early Cutoff ignores spans).
+5. **`heki/stats` request** (not part of LSP) returns the engine counters; the integration test
+   uses it to prove Early Cutoff (`last_summary_changed == false`, `dependent_reanalyses == 0`
+   after a comment-only edit).
+6. **Exit.** tower-lsp only leaves its read loop at stdin EOF, even after `exit`. Editors close
+   stdin; for clients that do not, the server ends 2 s after `shutdown`. The runtime is shut
+   down in the background so the blocking stdin reader cannot keep the process alive.
+7. **Code actions.** `quickfix` for `OPT101` / `OPT102` fixes (preferred), `refactor.rewrite.heki`
+   for proven-safe size-dependent rewrites, and a `quickfix` appending
+   `  # heki: ignore[CODE]` at the end of the diagnostic's line for every diagnostic.
+   `Diagnostic.related` hops became `relatedInformation` with exact UTF-16 ranges;
+   `RelatedLocation` gained a `span` field (also visible in `--output-format json`).
+8. **`--watch`** polls modification times every 200 ms (no watcher dependency), re-analyzes
+   changed files through the same engine, re-checks affected callers / importers immediately,
+   and reloads everything when `pyproject.toml`, `heki.toml`, `.heki.toml`, `--config`, or the
+   summary snapshot changes. It prints the full diagnostic list after every change; `--fix`,
+   `--diff`, `--baseline`, and `--update-baseline` are ignored with a warning. The exit code is the
+   last report's. `HEKI_WATCH_MAX_RUNS` (tests only) stops it after N re-checks.
+9. **Incremental cost.** Measured on the read-only `~/work/dcg-1` workspace (13,166 files
+   including test data; release build): initial index 4.5 s in the background; edit latency
+   after the debounce ~45 ms for a 953-line file (dcg p90), ~85 ms for 4,086 lines, ~650 ms for
+   the 9,482-line `parser/jsonschema.py`. To get there, `ProjectIndex::update_file` no longer
+   scans the whole project: call sites are loaded only for the closure's files, the SCC closure
+   expands callers first, `sync_driven_only` is recomputed for the edited file's functions and
+   their callees, and the engine keeps `ProjectDecls` up to date in place
+   (`reanalyze_module_cached`). The remaining cost on very large files is the re-propagation of
+   every function of the file: classes with hundreds of methods copy the union of their
+   callees' `self` attribute sets on every edge. Interning attribute keys would fix that; it
+   changes the M4 summary representation, so it is left for the owner.

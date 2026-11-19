@@ -18,6 +18,7 @@ heki_ir.workspace = true
 heki_kb.workspace = true
 heki_semantic.workspace = true
 heki_soundness.workspace = true
+ignore.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true

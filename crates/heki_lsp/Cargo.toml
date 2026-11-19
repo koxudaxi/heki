@@ -9,10 +9,15 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+globset.workspace = true
 heki_ast.workspace = true
 heki_diagnostics.workspace = true
 heki_effect.workspace = true
 heki_env.workspace = true
 heki_rules.workspace = true
-heki_soundness.workspace = true
+rustc-hash.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-lsp.workspace = true
