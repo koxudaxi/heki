@@ -62,17 +62,15 @@ struct Publish {
     version: Option<i32>,
 }
 
-/// Absolute, symlink-resolved path of a document (the parent is resolved for unsaved files).
+/// Absolute, symlink-resolved path of a document (the parent is resolved for unsaved files;
+/// a path whose directory does not exist either is kept as it is).
 fn normalize(path: &Path) -> PathBuf {
-    if let Ok(p) = std::fs::canonicalize(path) {
-        return p;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => std::fs::canonicalize(parent)
-            .map(|p| p.join(name))
-            .unwrap_or_else(|_| path.to_path_buf()),
-        _ => path.to_path_buf(),
-    }
+    std::fs::canonicalize(path).unwrap_or_else(|_| {
+        path.parent()
+            .zip(path.file_name())
+            .and_then(|(parent, name)| std::fs::canonicalize(parent).ok().map(|p| p.join(name)))
+            .unwrap_or_else(|| path.to_path_buf())
+    })
 }
 
 fn path_of(uri: &Url) -> Option<PathBuf> {
@@ -140,9 +138,10 @@ impl State {
             let Some(text) = self.text_of(&p) else {
                 continue;
             };
-            let Some(ws) = self.workspace.as_mut() else {
-                break;
-            };
+            let ws = self
+                .workspace
+                .as_mut()
+                .expect("files are queued only by an analysis of the loaded workspace");
             match ws.refresh(&p, &text) {
                 Ok(d) => pubs.extend(self.publish_for(&p, d)),
                 Err(e) => errors.push(e),
@@ -178,14 +177,16 @@ impl Backend {
         }
     }
 
-    async fn blocking<T: Send + 'static>(
+    /// Run `f` on the state in a blocking task. A panic in `f` yields `T::default()` (nothing
+    /// to publish).
+    async fn blocking<T: Default + Send + 'static>(
         state: &Arc<Mutex<State>>,
         f: impl FnOnce(&mut State) -> T + Send + 'static,
-    ) -> Option<T> {
+    ) -> T {
         let state = Arc::clone(state);
         tokio::task::spawn_blocking(move || f(&mut lock(&state)))
             .await
-            .ok()
+            .unwrap_or_default()
     }
 
     /// `heki/stats`: engine counters plus whether the index is ready.
@@ -250,7 +251,7 @@ impl LanguageServer for Backend {
         let client = self.client.clone();
         tokio::spawn(async move {
             let started = Instant::now();
-            let done = Self::blocking(&state, |st| {
+            let (pubs, errors, indexed) = Self::blocking(&state, |st| {
                 let root = st.root.clone().unwrap_or_else(|| PathBuf::from("."));
                 let texts: FxHashMap<PathBuf, String> = st
                     .docs
@@ -269,43 +270,41 @@ impl LanguageServer for Backend {
                 match loaded {
                     Ok((ws, errors)) => {
                         let n = ws.stats().indexed_files;
+                        let open: Vec<(PathBuf, Vec<Diagnostic>)> = st
+                            .docs
+                            .iter()
+                            .map(|(p, doc)| {
+                                let diags = if ws.accepts(p) {
+                                    ws.diagnose(p, &doc.text).unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                (p.clone(), diags)
+                            })
+                            .collect();
                         st.workspace = Some(ws);
-                        let mut pubs = Vec::new();
-                        let open: Vec<PathBuf> = st.docs.keys().cloned().collect();
-                        for p in open {
-                            let Some(ws) = st.workspace.as_ref() else {
-                                break;
-                            };
-                            let diags = if ws.accepts(&p) {
-                                texts
-                                    .get(&p)
-                                    .and_then(|t| ws.diagnose(&p, t).ok())
-                                    .unwrap_or_default()
-                            } else {
-                                Vec::new()
-                            };
-                            pubs.extend(st.publish_for(&p, diags));
-                        }
+                        let pubs = open
+                            .into_iter()
+                            .filter_map(|(p, diags)| st.publish_for(&p, diags))
+                            .collect();
                         (pubs, errors, Some(n))
                     }
                     Err(e) => (Vec::new(), vec![e.to_string()], None),
                 }
             })
             .await;
-            if let Some((pubs, errors, indexed)) = done {
-                if let Some(n) = indexed {
-                    client
-                        .log_message(
-                            MessageType::INFO,
-                            format!(
-                                "heki: indexed {n} file(s) in {} ms",
-                                started.elapsed().as_millis()
-                            ),
-                        )
-                        .await;
-                }
-                Self::send(&client, pubs, errors).await;
+            if let Some(n) = indexed {
+                client
+                    .log_message(
+                        MessageType::INFO,
+                        format!(
+                            "heki: indexed {n} file(s) in {} ms",
+                            started.elapsed().as_millis()
+                        ),
+                    )
+                    .await;
             }
+            Self::send(&client, pubs, errors).await;
         });
     }
 
@@ -323,7 +322,7 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
-        let done = Self::blocking(&self.state, move |st| {
+        let (pubs, errors) = Self::blocking(&self.state, move |st| {
             let text = params.text_document.text;
             st.docs.insert(
                 path.clone(),
@@ -337,9 +336,7 @@ impl LanguageServer for Backend {
             (p.into_iter().collect(), e.into_iter().collect())
         })
         .await;
-        if let Some((pubs, errors)) = done {
-            Self::send(&self.client, pubs, errors).await;
-        }
+        Self::send(&self.client, pubs, errors).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -366,7 +363,7 @@ impl LanguageServer for Backend {
         let client = self.client.clone();
         tokio::spawn(async move {
             tokio::time::sleep(DEBOUNCE).await;
-            let done = Self::blocking(&state, move |st| {
+            let (pubs, errors) = Self::blocking(&state, move |st| {
                 if st.generation.get(&path) != Some(&generation) {
                     return (Vec::new(), Vec::new());
                 }
@@ -377,9 +374,7 @@ impl LanguageServer for Backend {
                 (p.into_iter().collect(), e.into_iter().collect())
             })
             .await;
-            if let Some((pubs, errors)) = done {
-                Self::send(&client, pubs, errors).await;
-            }
+            Self::send(&client, pubs, errors).await;
         });
     }
 
@@ -387,7 +382,7 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
-        let done = Self::blocking(&self.state, move |st| {
+        let (pubs, errors) = Self::blocking(&self.state, move |st| {
             if let (Some(text), Some(doc)) = (params.text, st.docs.get_mut(&path)) {
                 doc.text = text;
             }
@@ -403,9 +398,7 @@ impl LanguageServer for Backend {
             (pubs, errors)
         })
         .await;
-        if let Some((pubs, errors)) = done {
-            Self::send(&self.client, pubs, errors).await;
-        }
+        Self::send(&self.client, pubs, errors).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {

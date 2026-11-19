@@ -148,19 +148,7 @@ impl KindMask {
 
     /// The single kind in the set, if there is exactly one.
     pub fn single(self) -> Option<BuiltinKind> {
-        [
-            BuiltinKind::List,
-            BuiltinKind::Dict,
-            BuiltinKind::Set,
-            BuiltinKind::Tuple,
-            BuiltinKind::Str,
-            BuiltinKind::Bytes,
-            BuiltinKind::Int,
-            BuiltinKind::Float,
-            BuiltinKind::Bool,
-        ]
-        .into_iter()
-        .find(|&k| self == Self::of(k))
+        BuiltinKind::ALL.into_iter().find(|&k| self == Self::of(k))
     }
 }
 
@@ -288,26 +276,33 @@ mod invariant_tests {
         }
         // Walk all `.rs` files in `crates/heki_soundness/src/` and ensure no PEP 484 annotation fields are accessed.
         let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for entry in std::fs::read_dir(src_dir)
+        let rs_files = std::fs::read_dir(src_dir)
             .expect("src dir readable")
             .flatten()
-        {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).expect("rs file readable");
-                // Strip test modules and `//` comments so docs/comments are not falsely matched.
-                let prod = text.split("#[cfg(test)]").next().unwrap_or(&text);
-                for line in prod.lines() {
-                    let code = line.split("//").next().unwrap_or("");
-                    for forbidden in [".annotation", ".return_annotation", ".local_annotations"] {
-                        assert!(
-                            !code.contains(forbidden),
-                            "ADR-004 VIOLATION in {}: `heki_soundness` MUST NEVER trust PEP 484 `{forbidden}`",
-                            path.display()
-                        );
-                    }
-                }
-            }
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|e| e == "rs"));
+        let mut checked = 0;
+        for path in rs_files {
+            let text = std::fs::read_to_string(&path).expect("rs file readable");
+            // Strip test modules and `//` comments so docs/comments are not falsely matched.
+            let prod = text.split("#[cfg(test)]").next().unwrap_or(&text);
+            let offending: Vec<&str> = prod
+                .lines()
+                .map(|line| line.split("//").next().unwrap_or(""))
+                .filter(|code| {
+                    [".annotation", ".return_annotation", ".local_annotations"]
+                        .iter()
+                        .any(|forbidden| code.contains(forbidden))
+                })
+                .collect();
+            let file = path.display();
+            assert!(
+                offending.is_empty(),
+                "ADR-004 VIOLATION in {file}: `heki_soundness` MUST NEVER trust PEP 484 annotations: {offending:?}"
+            );
+            checked += 1;
         }
+        // The walk saw the sources (lib, interpreter, liveness, obligations, opt_rules, edits).
+        assert!(checked >= 6, "only {checked} source files checked");
     }
 }

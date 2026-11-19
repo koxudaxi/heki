@@ -222,12 +222,38 @@ fn stripping_each_obligation_lets_its_counterexample_through() {
         let stripped = analyze_with(REWRITES, &[kind]);
         for f in functions {
             assert!(of(&baseline, f).iter().all(|c| !c.is_safe()), "{f}");
+            // The baseline fails on exactly this obligation: its counterexample when one is
+            // known (`Disproved`), otherwise its first blocker.
+            for c in of(&baseline, f) {
+                let failing = c
+                    .verdict
+                    .counterexample()
+                    .or_else(|| c.verdict.blocker())
+                    .unwrap_or_else(|| panic!("{f}: {c:#?}"));
+                assert_eq!(failing.kind, kind, "{f}: {}", failing.describe());
+                assert!(
+                    failing.describe().starts_with(&format!("{kind}(")),
+                    "{}",
+                    failing.describe()
+                );
+            }
             let cs = of(&stripped, f);
             assert!(!cs.is_empty(), "{f}");
             assert!(
                 cs.iter().all(|c| c.is_safe()),
                 "{kind} stripped, {f} must pass: {cs:#?}"
             );
+            // Stripped, the obligation is recorded as established by the stripping itself.
+            for c in &cs {
+                assert!(c.verdict.counterexample().is_none(), "{f}");
+                let ob = c.verdict.get(kind).unwrap();
+                assert!(
+                    ob.describe()
+                        .ends_with(": disabled for an obligation-stripping test"),
+                    "{}",
+                    ob.describe()
+                );
+            }
         }
         // Only the counterexamples that this obligation guards pass.
         for (f, ..) in rule_shaped() {
@@ -645,4 +671,56 @@ fn analysis_converges_on_irreducible_shapes() {
             .is_established()
     );
     assert!(c.is_safe(), "{:#?}", c.verdict);
+}
+
+// ------------------------------------------------------------------------ invariant guards
+
+#[test]
+fn a_live_old_value_of_the_accumulator_disproves_exclusive_access() {
+    // Python source cannot express it (the write renames `x`), so the IR is changed by hand:
+    // the loop body reads the old `x` again right after `x = x + [i]` (`x is x`).
+    let src = "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+    let kb = EffectiveSoundnessKb::load_builtin(PythonVersion::PY315).unwrap();
+    let opts = AnalysisOptions::default();
+    assert!(analyze_module(&ir_of(src), src, &kb, &opts)[0].is_safe());
+    let mut ir = ir_of(src);
+    let f = ir.functions.iter_mut().find(|f| f.name == "f").unwrap();
+    let (b, i, old) = f
+        .blocks
+        .iter()
+        .enumerate()
+        .find_map(|(b, bb)| {
+            bb.insts
+                .iter()
+                .position(|inst| matches!(inst.kind, heki_ir::InstKind::BinOp { .. }))
+                .map(|i| {
+                    let heki_ir::InstKind::BinOp { lhs, .. } = bb.insts[i].kind else {
+                        unreachable!()
+                    };
+                    (b, i, lhs)
+                })
+        })
+        .unwrap();
+    let dst = VarId(f.var_names.len() as u32);
+    f.var_names.push(None);
+    f.blocks[b].insts.insert(
+        i + 2,
+        heki_ir::Inst {
+            kind: heki_ir::InstKind::Compare {
+                dst,
+                op: heki_ir::CompareOpKind::Is,
+                lhs: old,
+                rhs: old,
+            },
+            span: Span { start: 0, end: 0 },
+        },
+    );
+    let c = &analyze_module(&ir, src, &kb, &opts)[0];
+    assert_eq!(c.verdict.tier, SafetyTier::Disproved, "{:#?}", c.verdict);
+    assert_eq!(
+        status(c, K::ExclusiveAccessAtWrite),
+        &ObligationStatus::Disproved {
+            counterexample: "the old value of `x` is read after the write".into()
+        }
+    );
 }

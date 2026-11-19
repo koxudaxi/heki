@@ -34,12 +34,8 @@ pub struct ProfileData {
 pub enum ProfileError {
     #[error("unsupported or malformed profile dump: {0}")]
     Parse(String),
-    #[error("failed to read profile dump `{path}`: {source}")]
-    Read {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
+    #[error("failed to read profile dump `{path}`: {cause}")]
+    Read { path: String, cause: std::io::Error },
 }
 
 /// `(file, func)` of one collapsed-stack frame, `None` for thread / process markers.
@@ -197,9 +193,9 @@ pub fn parse_gecko(text: &str) -> Result<ProfileData, ProfileError> {
 
 /// Read a dump, detecting the format (`{` starts a gecko JSON dump).
 pub fn load(path: &Path) -> Result<ProfileData, ProfileError> {
-    let text = std::fs::read_to_string(path).map_err(|source| ProfileError::Read {
+    let text = std::fs::read_to_string(path).map_err(|cause| ProfileError::Read {
         path: path.display().to_string(),
-        source,
+        cause,
     })?;
     if text.trim_start().starts_with('{') {
         parse_gecko(&text)

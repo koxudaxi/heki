@@ -329,12 +329,47 @@ impl<'a> Analyzer<'a> {
     /// Find the target scope for a PEP 572 walrus (`:=`) binding:
     /// the innermost enclosing scope that is NOT a `Comprehension`.
     fn walrus_target_scope(&self) -> ScopeId {
-        for &sid in self.scope_stack.iter().rev() {
-            if self.scopes[sid.0 as usize].kind != ScopeKind::Comprehension {
-                return sid;
+        self.scope_stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|sid| self.scopes[sid.0 as usize].kind != ScopeKind::Comprehension)
+            .unwrap_or(ScopeId(0))
+    }
+
+    /// Bind the target `n` of a PEP 572 walrus (`n := value`) in its target scope.
+    fn bind_walrus_target(&mut self, n: &ast::ExprName) {
+        let cur_sid = self.cur_scope_id();
+        let target_sid = self.walrus_target_scope();
+        if self.scopes[target_sid.0 as usize].kind == ScopeKind::Module
+            && (cur_sid != target_sid || self.inlined_comp_depth > 0)
+        {
+            // PEP 572 + PEP 709: walrus inside a module-level generator or inlined
+            // comprehension writes a global dynamically without binding a static module local.
+            if cur_sid != target_sid {
+                self.scopes[cur_sid.0 as usize].add_global(n.id.as_str(), Span::from(n.range));
+            } else {
+                let mangled = self.scopes[cur_sid.0 as usize].mangle(n.id.as_str());
+                self.scopes[cur_sid.0 as usize]
+                    .module_walrus_globals
+                    .insert(mangled);
             }
+        } else if target_sid == cur_sid {
+            self.scopes[cur_sid.0 as usize].add_binding(
+                n.id.as_str(),
+                Span::from(n.range),
+                false,
+                false,
+            );
+        } else {
+            self.scopes[target_sid.0 as usize].add_binding(
+                n.id.as_str(),
+                Span::from(n.range),
+                false,
+                false,
+            );
+            self.scopes[cur_sid.0 as usize].add_nonlocal(n.id.as_str(), Span::from(n.range));
         }
-        ScopeId(0)
     }
 
     fn visit_suite(&mut self, suite: &[Stmt]) {
@@ -386,7 +421,12 @@ impl<'a> Analyzer<'a> {
         match stmt {
             Stmt::FunctionDef(func) => self.visit_function_def(func),
             Stmt::ClassDef(cls) => self.visit_class_def(cls),
-            Stmt::TypeAlias(ta) => self.visit_type_alias(ta),
+            Stmt::TypeAlias(ta) => {
+                // The parser always produces a plain name for `type X = ...`.
+                if let Expr::Name(name) = ta.name.as_ref() {
+                    self.visit_type_alias(ta, name);
+                }
+            }
             Stmt::Return(ret) => {
                 if let Some(v) = &ret.value {
                     self.visit_expr(v);
@@ -721,15 +761,11 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    fn visit_type_alias(&mut self, ta: &ast::StmtTypeAlias) {
+    fn visit_type_alias(&mut self, ta: &ast::StmtTypeAlias, name: &ast::ExprName) {
         let line = self.lines.line(ta.range.start().to_u32());
-        let alias_name = if let Expr::Name(n) = ta.name.as_ref() {
-            self.cur_scope_mut()
-                .add_binding(n.id.as_str(), Span::from(n.range), false, false);
-            n.id.to_string()
-        } else {
-            "<type_alias>".to_string()
-        };
+        self.cur_scope_mut()
+            .add_binding(name.id.as_str(), Span::from(name.range), false, false);
+        let alias_name = name.id.to_string();
 
         let has_type_params = ta
             .type_params
@@ -973,40 +1009,9 @@ impl<'a> Analyzer<'a> {
             },
             Expr::Named(named) => {
                 self.visit_expr(&named.value);
+                // The target is always a name (`InvalidNamedAssignmentTarget`).
                 if let Expr::Name(n) = named.target.as_ref() {
-                    let cur_sid = self.cur_scope_id();
-                    let target_sid = self.walrus_target_scope();
-                    if self.scopes[target_sid.0 as usize].kind == ScopeKind::Module
-                        && (cur_sid != target_sid || self.inlined_comp_depth > 0)
-                    {
-                        // PEP 572 + PEP 709: walrus inside a module-level generator or inlined
-                        // comprehension writes a global dynamically without binding a static module local.
-                        if cur_sid != target_sid {
-                            self.scopes[cur_sid.0 as usize]
-                                .add_global(n.id.as_str(), Span::from(n.range));
-                        } else {
-                            let mangled = self.scopes[cur_sid.0 as usize].mangle(n.id.as_str());
-                            self.scopes[cur_sid.0 as usize]
-                                .module_walrus_globals
-                                .insert(mangled);
-                        }
-                    } else if target_sid == cur_sid {
-                        self.scopes[cur_sid.0 as usize].add_binding(
-                            n.id.as_str(),
-                            Span::from(n.range),
-                            false,
-                            false,
-                        );
-                    } else {
-                        self.scopes[target_sid.0 as usize].add_binding(
-                            n.id.as_str(),
-                            Span::from(n.range),
-                            false,
-                            false,
-                        );
-                        self.scopes[cur_sid.0 as usize]
-                            .add_nonlocal(n.id.as_str(), Span::from(n.range));
-                    }
+                    self.bind_walrus_target(n);
                 }
             }
             Expr::Lambda(lam) => {

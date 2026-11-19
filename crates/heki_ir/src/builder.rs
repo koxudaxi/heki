@@ -75,8 +75,26 @@ enum FunctionBody<'a> {
         generators: &'a [ast::Comprehension],
         elt: &'a Expr,
         key: Option<&'a Expr>,
-        kind: BuiltinKind,
+        kind: CompKind,
     },
+}
+
+/// Accumulator of a list / set / dict comprehension (generator expressions yield instead).
+#[derive(Clone, Copy)]
+enum CompKind {
+    List,
+    Set,
+    Dict,
+}
+
+impl CompKind {
+    fn builtin(self) -> BuiltinKind {
+        match self {
+            Self::List => BuiltinKind::List,
+            Self::Set => BuiltinKind::Set,
+            Self::Dict => BuiltinKind::Dict,
+        }
+    }
 }
 
 struct FunctionSpec<'a> {
@@ -229,15 +247,11 @@ impl<'a> ModuleLowerer<'a> {
         match spec.body {
             FunctionBody::Suite(stmts) => {
                 builder.lower_suite(stmts);
-                if !builder.is_terminated(builder.cur_bb) {
-                    builder.terminate(Terminator::Return(None));
-                }
+                builder.terminate(Terminator::Return(None));
             }
             FunctionBody::Expr(expr) => {
                 let val = builder.lower_expr(expr);
-                if !builder.is_terminated(builder.cur_bb) {
-                    builder.terminate(Terminator::Return(Some(val)));
-                }
+                builder.terminate(Terminator::Return(Some(val)));
             }
             FunctionBody::GenExpr(ge) => {
                 let outer_param = builder.fresh_var(Some(".0".to_string()));
@@ -246,7 +260,7 @@ impl<'a> ModuleLowerer<'a> {
                     &ge.generators,
                     Some(outer_param),
                     false,
-                    |b| {
+                    &|b| {
                         let v = b.lower_expr(&ge.elt);
                         let dst = b.fresh_var(None);
                         b.emit(
@@ -258,15 +272,13 @@ impl<'a> ModuleLowerer<'a> {
                         );
                     },
                 );
-                if !builder.is_terminated(builder.cur_bb) {
-                    builder.terminate(Terminator::Return(None));
-                }
+                builder.terminate(Terminator::Return(None));
             }
             FunctionBody::Comp {
                 generators,
                 elt,
                 key,
-                kind: comp_kind,
+                kind,
             } => {
                 let outer_param = builder.fresh_var(Some(".0".to_string()));
                 builder.write_local(".0", builder.cur_bb, outer_param);
@@ -274,65 +286,20 @@ impl<'a> ModuleLowerer<'a> {
                 builder.emit(
                     InstKind::AllocBuiltin {
                         dst: acc,
-                        kind: comp_kind,
+                        kind: kind.builtin(),
                         elems: Vec::new(),
                     },
                     spec.span,
                 );
-                builder.lower_comprehension_generators(generators, Some(outer_param), false, |b| {
-                    match comp_kind {
-                        BuiltinKind::List => {
-                            let v = b.lower_expr(elt);
-                            let dst = b.fresh_var(None);
-                            b.emit(
-                                InstKind::MethodCall {
-                                    dst,
-                                    recv: acc,
-                                    method: "append".to_string(),
-                                    args: vec![v],
-                                    kwargs: Vec::new(),
-                                    is_awaited: false,
-                                },
-                                Span::from(elt.range()),
-                            );
-                        }
-                        BuiltinKind::Set => {
-                            let v = b.lower_expr(elt);
-                            let dst = b.fresh_var(None);
-                            b.emit(
-                                InstKind::MethodCall {
-                                    dst,
-                                    recv: acc,
-                                    method: "add".to_string(),
-                                    args: vec![v],
-                                    kwargs: Vec::new(),
-                                    is_awaited: false,
-                                },
-                                Span::from(elt.range()),
-                            );
-                        }
-                        BuiltinKind::Dict => {
-                            let k = key
-                                .map(|ke| b.lower_expr(ke))
-                                .unwrap_or_else(|| b.emit_const(ConstLiteral::None, spec.span));
-                            let key_const = key.and_then(extract_const_str);
-                            let v = b.lower_expr(elt);
-                            b.emit(
-                                InstKind::SubscriptStore {
-                                    obj: acc,
-                                    index: k,
-                                    key_const,
-                                    value: v,
-                                },
-                                Span::from(elt.range()),
-                            );
-                        }
-                        _ => {}
-                    }
-                });
-                if !builder.is_terminated(builder.cur_bb) {
-                    builder.terminate(Terminator::Return(Some(acc)));
-                }
+                builder.lower_comprehension_generators(
+                    generators,
+                    Some(outer_param),
+                    false,
+                    &|b| {
+                        b.emit_comp_element(kind, acc, elt, key, spec.span);
+                    },
+                );
+                builder.terminate(Terminator::Return(Some(acc)));
             }
         }
 
@@ -529,6 +496,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         dst
     }
 
+    /// Set the current block's terminator. A block keeps its first terminator: after `return`,
+    /// `raise`, `break` or `continue` the fall-through edges of the enclosing construct are
+    /// dropped here (the code that follows is lowered into a fresh dead block).
     fn terminate(&mut self, term: Terminator) {
         let bb = self.cur_bb;
         if self.terminated[bb.0 as usize] {
@@ -763,16 +733,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
-    fn canonical_var(&self, mut v: VarId) -> VarId {
-        let mut steps = 0usize;
-        while let Some(&next) = self.var_replacements.get(&v) {
-            if next == v || steps > 64 {
-                break;
-            }
-            v = next;
-            steps += 1;
-        }
-        v
+    fn canonical_var(&self, v: VarId) -> VarId {
+        resolve_replacement(&self.var_replacements, v)
     }
 
     // -------------------------------------------------------------------------
@@ -1069,22 +1031,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
         }
 
-        let (class_id, class_qualname) = self
-            .module
-            .class_by_span
-            .get(&span)
-            .cloned()
-            .map(|(cid, q)| (Some(cid), q))
-            .unwrap_or_else(|| {
-                let q = if self.is_module_body {
-                    cls.name.to_string()
-                } else if self.is_class_body {
-                    format!("{}.{}", self.qualname, cls.name)
-                } else {
-                    format!("{}.<locals>.{}", self.qualname, cls.name)
-                };
-                (None, q)
-            });
+        // `heki_semantic` records every `class` statement of the same parse, so its `ClassId`
+        // and qualname are always there.
+        let (class_id, class_qualname) = self.module.class_by_span[&span].clone();
 
         let mut child_outer = self.outer_locals.clone();
         if !self.is_module_body && !self.is_class_body {
@@ -1094,7 +1043,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let child_id = self.module.lower_function_body(FunctionSpec {
             name: cls.name.to_string(),
             qualname: class_qualname.clone(),
-            owner_class: class_id,
+            owner_class: Some(class_id),
             owner_class_qualname: Some(class_qualname),
             is_async: false,
             params: None,
@@ -1256,10 +1205,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     span,
                 );
             }
-            _ => {
-                let rhs = self.lower_expr(&aa.value);
-                self.lower_assign_target(&aa.target, rhs, span);
-            }
+            // The parser rejects every other target (`InvalidAugmentedAssignmentTarget`).
+            _ => {}
         }
     }
 
@@ -1337,6 +1284,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Expr::Starred(s) => {
                 self.lower_assign_target(&s.value, value, Span::from(s.range));
             }
+            // The parser rejects every other target (`InvalidAssignmentTarget`).
             _ => {}
         }
     }
@@ -1391,6 +1339,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     self.lower_delete_target(e);
                 }
             }
+            // The parser rejects every other target (`InvalidDeleteTarget`).
             _ => {}
         }
     }
@@ -1478,9 +1427,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             self.seal_block(orelse_bb);
             self.switch_to(orelse_bb);
             self.lower_suite(&f.orelse);
-            if !self.is_terminated(self.cur_bb) {
-                self.terminate(Terminator::Jump(exit_bb));
-            }
+            self.terminate(Terminator::Jump(exit_bb));
         }
 
         self.seal_block(exit_bb);
@@ -1548,9 +1495,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             self.seal_block(orelse_bb);
             self.switch_to(orelse_bb);
             self.lower_suite(&w.orelse);
-            if !self.is_terminated(self.cur_bb) {
-                self.terminate(Terminator::Jump(exit_bb));
-            }
+            self.terminate(Terminator::Jump(exit_bb));
         }
 
         self.seal_block(exit_bb);
@@ -1588,9 +1533,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         self.switch_to(then_bb);
         self.lower_suite(&if_stmt.body);
-        if !self.is_terminated(self.cur_bb) {
-            self.terminate(Terminator::Jump(merge_bb));
-        }
+        self.terminate(Terminator::Jump(merge_bb));
 
         for (idx, clause) in if_stmt.elif_else_clauses.iter().enumerate() {
             let is_last = idx + 1 == if_stmt.elif_else_clauses.len();
@@ -1610,15 +1553,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 });
                 self.switch_to(c_then);
                 self.lower_suite(&clause.body);
-                if !self.is_terminated(self.cur_bb) {
-                    self.terminate(Terminator::Jump(merge_bb));
-                }
+                self.terminate(Terminator::Jump(merge_bb));
                 next_else_bb = c_else;
             } else {
                 self.lower_suite(&clause.body);
-                if !self.is_terminated(self.cur_bb) {
-                    self.terminate(Terminator::Jump(merge_bb));
-                }
+                self.terminate(Terminator::Jump(merge_bb));
             }
         }
 
@@ -1654,9 +1593,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         self.switch_to(body_bb);
         self.lower_suite(&w.body);
-        if !self.is_terminated(self.cur_bb) {
-            self.terminate(Terminator::Jump(exit_bb));
-        }
+        self.terminate(Terminator::Jump(exit_bb));
 
         self.exc_target_stack.pop();
         self.seal_block(exit_bb);
@@ -1716,9 +1653,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     self.exc_target_stack.pop();
                 }
             }
-            if !self.is_terminated(self.cur_bb) {
-                self.terminate(Terminator::Jump(normal_next));
-            }
+            self.terminate(Terminator::Jump(normal_next));
         }
 
         if let Some(disp) = dispatch_bb {
@@ -1764,9 +1699,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     self.write_var(n.as_str(), v, Span::from(n.range));
                 }
                 self.lower_suite(&eh.body);
-                if !self.is_terminated(self.cur_bb) {
-                    self.terminate(Terminator::Jump(normal_next));
-                }
+                self.terminate(Terminator::Jump(normal_next));
                 cur_disp = fallthrough_bb;
             }
             if finally_bb.is_some() {
@@ -1778,9 +1711,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             self.seal_block(fin);
             self.switch_to(fin);
             self.lower_suite(&t.finalbody);
-            if !self.is_terminated(self.cur_bb) {
-                self.terminate(Terminator::Jump(after_bb));
-            }
+            self.terminate(Terminator::Jump(after_bb));
         }
 
         self.seal_block(after_bb);
@@ -1818,9 +1749,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.switch_to(body_bb);
             }
             self.lower_suite(&case.body);
-            if !self.is_terminated(self.cur_bb) {
-                self.terminate(Terminator::Jump(merge_bb));
-            }
+            self.terminate(Terminator::Jump(merge_bb));
             if !is_last {
                 self.switch_to(next_bb);
             }
@@ -1891,13 +1820,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Expr::Name(n) => self.read_var(n.id.as_str(), span),
             Expr::Named(named) => {
                 let val = self.lower_expr(&named.value);
-                // PEP 572: walrus writes into the enclosing scope, bypassing comprehension target isolation.
+                // PEP 572: walrus writes into the enclosing scope, bypassing comprehension target
+                // isolation. The target is always a name (`InvalidNamedAssignmentTarget`).
                 if let Expr::Name(n) = named.target.as_ref() {
                     let saved = std::mem::take(&mut self.comp_target_renames);
                     self.write_var(n.id.as_str(), val, Span::from(n.range));
                     self.comp_target_renames = saved;
-                } else {
-                    self.lower_assign_target(&named.target, val, span);
                 }
                 val
             }
@@ -1917,7 +1845,10 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::BytesLiteral(_) => self.emit_const(ConstLiteral::Bytes, span),
             Expr::BooleanLiteral(b) => self.emit_const(ConstLiteral::Bool(b.value), span),
-            Expr::NoneLiteral(_) => self.emit_const(ConstLiteral::None, span),
+            // IPython escapes only parse in notebooks; heki parses `.py` sources.
+            Expr::NoneLiteral(_) | Expr::IpyEscapeCommand(_) => {
+                self.emit_const(ConstLiteral::None, span)
+            }
             Expr::EllipsisLiteral(_) => self.emit_const(ConstLiteral::Ellipsis, span),
             Expr::List(l) => {
                 let elems = l.elts.iter().map(|e| self.lower_expr(e)).collect();
@@ -2041,13 +1972,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.read_local_ssa(&temp_name, merge_bb, span)
             }
             Expr::Compare(c) => {
-                // Chained comparisons left-to-right (`operands[0] op[0] operands[1] ...`).
-                let Some((first, rest)) = c.operands.split_first() else {
-                    return self.emit_const(ConstLiteral::Bool(true), span);
-                };
-                let mut lhs = self.lower_expr(first);
+                // Chained comparisons left-to-right (`operands[0] op[0] operands[1] ...`); the
+                // parser always produces at least two operands.
+                let mut lhs = self.lower_expr(&c.operands[0]);
                 let mut last_res = lhs;
-                for (op, rhs_expr) in c.ops.iter().zip(rest.iter()) {
+                for (op, rhs_expr) in c.ops.iter().zip(&c.operands[1..]) {
                     let rhs = self.lower_expr(rhs_expr);
                     let dst = self.fresh_var(None);
                     self.emit(
@@ -2079,16 +2008,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.switch_to(then_bb);
                 let tval = self.lower_expr(&if_expr.body);
                 self.write_local(&temp_name, self.cur_bb, tval);
-                if !self.is_terminated(self.cur_bb) {
-                    self.terminate(Terminator::Jump(merge_bb));
-                }
+                self.terminate(Terminator::Jump(merge_bb));
 
                 self.switch_to(else_bb);
                 let eval = self.lower_expr(&if_expr.orelse);
                 self.write_local(&temp_name, self.cur_bb, eval);
-                if !self.is_terminated(self.cur_bb) {
-                    self.terminate(Terminator::Jump(merge_bb));
-                }
+                self.terminate(Terminator::Jump(merge_bb));
 
                 self.seal_block(merge_bb);
                 self.switch_to(merge_bb);
@@ -2212,12 +2137,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 dst
             }
             Expr::Generator(ge) => {
-                // Outermost `iter` is evaluated eagerly in the enclosing frame!
-                let outer_iter = ge
-                    .generators
-                    .first()
-                    .map(|g| self.lower_expr(&g.iter))
-                    .unwrap_or_else(|| self.emit_const(ConstLiteral::None, span));
+                // Outermost `iter` is evaluated eagerly in the enclosing frame! (The grammar
+                // requires at least one `for` clause.)
+                let outer_iter = self.lower_expr(&ge.generators[0].iter);
 
                 let mut child_outer = self.outer_locals.clone();
                 if !self.is_module_body && !self.is_class_body {
@@ -2255,7 +2177,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::ListComp(lc) => self.lower_comprehension(
                 "<listcomp>",
-                BuiltinKind::List,
+                CompKind::List,
                 &lc.generators,
                 &lc.elt,
                 None,
@@ -2263,7 +2185,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             ),
             Expr::SetComp(sc) => self.lower_comprehension(
                 "<setcomp>",
-                BuiltinKind::Set,
+                CompKind::Set,
                 &sc.generators,
                 &sc.elt,
                 None,
@@ -2271,7 +2193,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             ),
             Expr::DictComp(dc) => self.lower_comprehension(
                 "<dictcomp>",
-                BuiltinKind::Dict,
+                CompKind::Dict,
                 &dc.generators,
                 &dc.value,
                 dc.key.as_deref(),
@@ -2324,7 +2246,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 }
                 self.emit_const(ConstLiteral::Other, span)
             }
-            Expr::IpyEscapeCommand(_) => self.emit_const(ConstLiteral::None, span),
         }
     }
 
@@ -2413,10 +2334,60 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
+    /// One element of a list / set / dict comprehension into its accumulator `acc`:
+    /// `acc.append(elt)`, `acc.add(elt)`, or `acc[key] = elt` (`{**d for d in ds}` has no key).
+    fn emit_comp_element(
+        &mut self,
+        kind: CompKind,
+        acc: VarId,
+        elt: &'a Expr,
+        key: Option<&'a Expr>,
+        span: Span,
+    ) {
+        let elt_span = Span::from(elt.range());
+        match kind {
+            CompKind::List | CompKind::Set => {
+                let v = self.lower_expr(elt);
+                let dst = self.fresh_var(None);
+                let method = match kind {
+                    CompKind::List => "append",
+                    _ => "add",
+                };
+                self.emit(
+                    InstKind::MethodCall {
+                        dst,
+                        recv: acc,
+                        method: method.to_string(),
+                        args: vec![v],
+                        kwargs: Vec::new(),
+                        is_awaited: false,
+                    },
+                    elt_span,
+                );
+            }
+            CompKind::Dict => {
+                let k = key
+                    .map(|ke| self.lower_expr(ke))
+                    .unwrap_or_else(|| self.emit_const(ConstLiteral::None, span));
+                let key_const = key.and_then(extract_const_str);
+                let v = self.lower_expr(elt);
+                self.emit(
+                    InstKind::SubscriptStore {
+                        obj: acc,
+                        index: k,
+                        key_const,
+                        value: v,
+                    },
+                    elt_span,
+                );
+            }
+        }
+    }
+
     fn lower_comprehension(
         &mut self,
         comp_name: &str,
-        kind: BuiltinKind,
+        kind: CompKind,
         generators: &'a [ast::Comprehension],
         elt: &'a Expr,
         key: Option<&'a Expr>,
@@ -2427,67 +2398,19 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             self.emit(
                 InstKind::AllocBuiltin {
                     dst: acc,
-                    kind,
+                    kind: kind.builtin(),
                     elems: Vec::new(),
                 },
                 span,
             );
-            self.lower_comprehension_generators(generators, None, true, |b| match kind {
-                BuiltinKind::List => {
-                    let v = b.lower_expr(elt);
-                    let dst = b.fresh_var(None);
-                    b.emit(
-                        InstKind::MethodCall {
-                            dst,
-                            recv: acc,
-                            method: "append".to_string(),
-                            args: vec![v],
-                            kwargs: Vec::new(),
-                            is_awaited: false,
-                        },
-                        Span::from(elt.range()),
-                    );
-                }
-                BuiltinKind::Set => {
-                    let v = b.lower_expr(elt);
-                    let dst = b.fresh_var(None);
-                    b.emit(
-                        InstKind::MethodCall {
-                            dst,
-                            recv: acc,
-                            method: "add".to_string(),
-                            args: vec![v],
-                            kwargs: Vec::new(),
-                            is_awaited: false,
-                        },
-                        Span::from(elt.range()),
-                    );
-                }
-                BuiltinKind::Dict => {
-                    let k = key
-                        .map(|ke| b.lower_expr(ke))
-                        .unwrap_or_else(|| b.emit_const(ConstLiteral::None, span));
-                    let key_const = key.and_then(extract_const_str);
-                    let v = b.lower_expr(elt);
-                    b.emit(
-                        InstKind::SubscriptStore {
-                            obj: acc,
-                            index: k,
-                            key_const,
-                            value: v,
-                        },
-                        Span::from(elt.range()),
-                    );
-                }
-                _ => {}
+            self.lower_comprehension_generators(generators, None, true, &|b| {
+                b.emit_comp_element(kind, acc, elt, key, span);
             });
             acc
         } else {
-            // Python 3.11: non-inlined comprehension frame with eager outer iter.
-            let outer_iter = generators
-                .first()
-                .map(|g| self.lower_expr(&g.iter))
-                .unwrap_or_else(|| self.emit_const(ConstLiteral::None, span));
+            // Python 3.11: non-inlined comprehension frame with eager outer iter (the grammar
+            // requires at least one `for` clause).
+            let outer_iter = self.lower_expr(&generators[0].iter);
             let mut child_outer = self.outer_locals.clone();
             if !self.is_module_body && !self.is_class_body {
                 child_outer.extend(self.scope.locals.iter().cloned());
@@ -2532,12 +2455,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
+    /// Lower the `for` / `if` clauses of a comprehension as nested loops around `emit_leaf`.
+    /// The leaf is a trait object, so one instance serves generator expressions and inlined /
+    /// non-inlined comprehensions alike.
     fn lower_comprehension_generators(
         &mut self,
         generators: &'a [ast::Comprehension],
         first_iter_override: Option<VarId>,
         isolate_targets: bool,
-        emit_leaf: impl FnOnce(&mut Self),
+        emit_leaf: &dyn Fn(&mut Self),
     ) {
         if generators.is_empty() {
             emit_leaf(self);
@@ -2629,13 +2555,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             self.comp_target_renames.pop();
         }
 
-        if !self.is_terminated(self.cur_bb) {
-            let tail = self.cur_bb;
-            if let Some(top) = self.loop_stack.last_mut() {
-                top.back_edges.push(tail);
-            }
-            self.terminate(Terminator::Jump(header_bb));
+        // Expressions never terminate their block, so the element always loops back.
+        let tail = self.cur_bb;
+        if let Some(top) = self.loop_stack.last_mut() {
+            top.back_edges.push(tail);
         }
+        self.terminate(Terminator::Jump(header_bb));
 
         let finished = self.loop_stack.pop().unwrap();
         self.seal_block(header_bb);
@@ -2728,17 +2653,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         // Apply canonical variable replacements across all blocks.
         if !self.var_replacements.is_empty() {
             let map = self.var_replacements.clone();
-            let resolve = |mut v: VarId| -> VarId {
-                let mut steps = 0usize;
-                while let Some(&n) = map.get(&v) {
-                    if n == v || steps > 64 {
-                        break;
-                    }
-                    v = n;
-                    steps += 1;
-                }
-                v
-            };
+            let resolve = |v: VarId| resolve_replacement(&map, v);
             for bb in &mut self.blocks {
                 for phi in &mut bb.phis {
                     for (_, v) in &mut phi.incoming {
@@ -2845,30 +2760,36 @@ fn compute_loop_carried(
     out
 }
 
+/// Whether `target` is one of `starts` or reachable from them through `deps` (breadth-first).
 fn reaches_var(starts: &[VarId], target: VarId, deps: &FxHashMap<VarId, Vec<VarId>>) -> bool {
-    let mut visited = FxHashSet::default();
-    let mut queue = VecDeque::new();
-    for &s in starts {
-        if s == target {
+    let mut visited: FxHashSet<VarId> = starts.iter().copied().collect();
+    let mut queue: VecDeque<VarId> = starts.iter().copied().collect();
+    while let Some(cur) = queue.pop_front() {
+        if cur == target {
             return true;
         }
-        if visited.insert(s) {
-            queue.push_back(s);
-        }
-    }
-    while let Some(cur) = queue.pop_front() {
-        if let Some(nexts) = deps.get(&cur) {
-            for &n in nexts {
-                if n == target {
-                    return true;
-                }
-                if visited.insert(n) {
-                    queue.push_back(n);
-                }
+        for &n in deps.get(&cur).into_iter().flatten() {
+            if visited.insert(n) {
+                queue.push_back(n);
             }
         }
     }
     false
+}
+
+/// Follow trivial-phi replacements (`phi -> value`) to the surviving SSA value. The chains are
+/// acyclic by construction (a phi is only replaced by a value that is not itself replaced at
+/// that point); the step bound only guards against a corrupted map.
+fn resolve_replacement(map: &FxHashMap<VarId, VarId>, mut v: VarId) -> VarId {
+    let mut steps = 0usize;
+    while let Some(&next) = map.get(&v) {
+        if next == v || steps > 64 {
+            break;
+        }
+        v = next;
+        steps += 1;
+    }
+    v
 }
 
 // =============================================================================
@@ -3573,5 +3494,24 @@ fn rewrite_inst_vars(kind: &mut InstKind, resolve: impl Fn(VarId) -> VarId) {
         | InstKind::Yield { value: None, .. }
         | InstKind::CatchException { .. }
         | InstKind::Import { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Invariant guard: replacement chains are acyclic by construction, but a corrupted map
+    /// (a self-loop or a cycle) must still terminate instead of hanging the build.
+    #[test]
+    fn resolve_replacement_terminates_on_corrupted_maps() {
+        let self_loop: FxHashMap<VarId, VarId> = [(VarId(1), VarId(1))].into_iter().collect();
+        assert_eq!(resolve_replacement(&self_loop, VarId(1)), VarId(1));
+
+        let cycle: FxHashMap<VarId, VarId> = [(VarId(1), VarId(2)), (VarId(2), VarId(1))]
+            .into_iter()
+            .collect();
+        let end = resolve_replacement(&cycle, VarId(1));
+        assert!(end == VarId(1) || end == VarId(2), "{end:?}");
     }
 }

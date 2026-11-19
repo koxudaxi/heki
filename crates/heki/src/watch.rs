@@ -12,7 +12,6 @@ use heki_lsp::{Selectors, Workspace};
 use heki_profile::ProfileData;
 use heki_rules::SNAPSHOT_FILE;
 use heki_rules::project::{ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set};
-use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -59,15 +58,11 @@ impl Watcher<'_> {
     }
 
     /// Python files with their modification times, plus the configuration files.
+    /// (`paths` is never empty: the CLI defaults it to `.`.)
     fn scan(&self, env: &ProjectEnv) -> Result<Stamps> {
         let ws_env = env;
         let exclude = exclude_set(&ws_env.cfg)?;
-        let paths = if self.args.paths.is_empty() {
-            vec![PathBuf::from(".")]
-        } else {
-            self.args.paths.clone()
-        };
-        let files = collect_files(&paths, &ws_env.root, &exclude)?
+        let files = collect_files(&self.args.paths, &ws_env.root, &exclude)?
             .into_iter()
             .filter_map(|p| Some((display_path(&p), mtime(&p)?)))
             .collect();
@@ -128,7 +123,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         .ok()
         .and_then(|v| v.parse().ok());
     let (mut ws, mut errors, (mut files, mut config)) = w.load()?;
-    let (mut diags, more) = ws.diagnose_all(&FxHashMap::default());
+    let (mut diags, more) = ws.diagnose_all();
     errors.extend(more);
     let mut dirty = w.print(&diags, &errors);
     let mut runs = 0;
@@ -138,7 +133,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         if now_config != config {
             let (fresh, errs, stamps) = w.load()?;
             ws = fresh;
-            let (d, more) = ws.diagnose_all(&FxHashMap::default());
+            let (d, more) = ws.diagnose_all();
             diags = d;
             errors = errs;
             errors.extend(more);

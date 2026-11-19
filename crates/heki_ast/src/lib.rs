@@ -181,10 +181,15 @@ import os
 lazy import json
 from pathlib import Path
 lazy from collections.abc import Iterable as Iter
+import os.path as osp
+
+def nested():
+    import sys
 ";
         let parsed = parse_module(src).expect("Python 3.15 PEP 810 lazy import must parse cleanly");
         let imports = parsed.top_level_imports();
-        assert_eq!(imports.len(), 4);
+        // Only top-level statements: the import inside `nested` is not one.
+        assert_eq!(imports.len(), 5);
         assert!(!imports[0].is_lazy);
         assert!(imports[1].is_lazy);
         assert_eq!(imports[1].names[0].0, "json");
@@ -194,6 +199,10 @@ lazy from collections.abc import Iterable as Iter
         assert_eq!(
             imports[3].names[0],
             ("Iterable".to_string(), Some("Iter".to_string()))
+        );
+        assert_eq!(
+            imports[4].names[0],
+            ("os.path".to_string(), Some("osp".to_string()))
         );
     }
 

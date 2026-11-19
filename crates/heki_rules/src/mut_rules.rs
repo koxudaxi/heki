@@ -4,8 +4,8 @@ use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, FuncKey, TypeCtx, Val, WriteKind,
-    self_aliases,
+    AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, EffectSummary, FuncKey, TypeCtx, Val,
+    WriteKind, self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -201,14 +201,12 @@ fn private_methods_called_from_init(
             .iter()
             .filter(|s| s.caller == init.key && s.recv_is_self)
         {
-            if let heki_effect::CallTarget::Project(callees) = &site.target {
-                out.extend(
-                    callees
-                        .iter()
-                        .filter(|c| is_private(&c.callee.qualname))
-                        .map(|c| c.callee.clone()),
-                );
-            }
+            out.extend(
+                site.project_callees()
+                    .iter()
+                    .filter(|c| is_private(&c.callee.qualname))
+                    .map(|c| c.callee.clone()),
+            );
         }
     }
     out
@@ -220,12 +218,13 @@ struct SelfWrite {
     memo_shaped: bool,
 }
 
-/// Writes to `self.<attr>` in `f`'s own body.
+/// Writes to `self.<attr>` in `f`'s own body (none without a `self` parameter).
 fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
-    let Some(self_param) = f.params.first() else {
-        return Vec::new();
-    };
-    let self_vars = self_aliases(f, self_param.var);
+    let self_vars = f
+        .params
+        .first()
+        .map(|p| self_aliases(f, p.var))
+        .unwrap_or_default();
     let mut alias: FxHashSet<VarId> = FxHashSet::default();
     let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
     for inst in f.blocks.iter().flat_map(|b| &b.insts) {
@@ -376,9 +375,6 @@ pub(crate) fn mut201(
         });
     }
 
-    if rules.is_empty() {
-        return Ok(());
-    }
     let mut keys_by_fqn: FxHashMap<String, FuncKey> = FxHashMap::default();
     for file in cx.index.files.values() {
         for k in file.local_functions.keys() {
@@ -550,6 +546,15 @@ struct Ro {
     shallow_copy: bool,
 }
 
+/// One call instruction with its resolved callee.
+struct CallParts<'i> {
+    /// `recv.method(...)`: the receiver and the method name.
+    recv: Option<(VarId, &'i str)>,
+    args: &'i [VarId],
+    kwargs: &'i [(Option<String>, VarId)],
+    callee: Callee,
+}
+
 /// Methods returning (views of) a container's elements.
 const ELEMENT_ACCESSORS: &[&str] = &["get", "__getitem__", "values", "items"];
 /// Methods returning a copy of their receiver.
@@ -618,15 +623,34 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
-    fn callee_of(&self, kind: &InstKind) -> Option<Callee> {
+    /// The parts of a call instruction (`None` for any other instruction).
+    fn call_of<'i>(&self, kind: &'i InstKind) -> Option<CallParts<'i>> {
         match kind {
-            InstKind::Call { callee_var, .. } => Some(
-                self.tcx
+            InstKind::Call {
+                callee_var,
+                args,
+                kwargs,
+                ..
+            } => Some(CallParts {
+                recv: None,
+                args,
+                kwargs,
+                callee: self
+                    .tcx
                     .resolve_call(callee_var.and_then(|v| self.types.get(&v))),
-            ),
-            InstKind::MethodCall { recv, method, .. } => {
-                Some(self.tcx.resolve_method(self.types.get(recv), method))
-            }
+            }),
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            } => Some(CallParts {
+                recv: Some((*recv, method)),
+                args,
+                kwargs,
+                callee: self.tcx.resolve_method(self.types.get(recv), method),
+            }),
             _ => None,
         }
     }
@@ -671,16 +695,16 @@ impl<'a> Mut202Fn<'a> {
                 let r = self.ro.get(obj)?;
                 // Tuple / list unpacking (`a, b = producer()`) lowers to a constant-index
                 // load spanning the target itself.
-                let unpack = self.defs.get(index).is_some_and(|d| {
-                    d.span == inst.span
-                        && matches!(
-                            d.kind,
-                            InstKind::Const {
-                                literal: ConstLiteral::Int(_),
-                                ..
-                            }
-                        )
-                });
+                let unpack = matches!(
+                    self.defs.get(index),
+                    Some(Inst {
+                        kind: InstKind::Const {
+                            literal: ConstLiteral::Int(_),
+                            ..
+                        },
+                        span,
+                    }) if *span == inst.span
+                );
                 if unpack && !r.shallow_copy {
                     return Some(Ro {
                         shallow_copy: false,
@@ -706,22 +730,25 @@ impl<'a> Mut202Fn<'a> {
             }
             InstKind::MakeIter { iterable, .. } => self.ro.get(iterable).cloned(),
             InstKind::IterNext { iter, .. } => self.ro.get(iter).and_then(elem),
-            InstKind::Call { args, kwargs, .. } | InstKind::MethodCall { args, kwargs, .. } => {
-                let callee = self.callee_of(&inst.kind)?;
-                if let Some(r) = self.producer(&callee) {
+            kind => {
+                let call = self.call_of(kind)?;
+                if let Some(r) = self.producer(&call.callee) {
                     return Some(r);
                 }
-                let (operand, method) = match &inst.kind {
-                    InstKind::MethodCall { recv, method, .. } if self.ro.contains_key(recv) => {
-                        (Some(*recv), Some(method.as_str()))
+                let (operand, method) = match call.recv {
+                    Some((recv, method)) if self.ro.contains_key(&recv) => {
+                        (Some(recv), Some(method))
                     }
                     _ => (
-                        args.first().copied().filter(|a| self.ro.contains_key(a)),
+                        call.args
+                            .first()
+                            .copied()
+                            .filter(|a| self.ro.contains_key(a)),
                         None,
                     ),
                 };
                 let r = self.ro.get(&operand?)?;
-                let symbol = match &callee {
+                let symbol = match &call.callee {
                     Callee::External(s) => s.as_str(),
                     _ => "",
                 };
@@ -731,7 +758,7 @@ impl<'a> Mut202Fn<'a> {
                     let deep_copy = symbol.ends_with("deepcopy")
                         || method == Some("__deepcopy__")
                         || (method == Some("model_copy") || symbol.ends_with(".model_copy"))
-                            && self.kwarg_true(kwargs, "deep");
+                            && self.kwarg_true(call.kwargs, "deep");
                     if deep_copy || !(r.deep || r.shallow_copy) {
                         return None;
                     }
@@ -746,7 +773,6 @@ impl<'a> Mut202Fn<'a> {
                     _ => None,
                 }
             }
-            _ => None,
         }
     }
 
@@ -844,20 +870,17 @@ impl<'a> Mut202Fn<'a> {
             return (direct.cloned(), Vec::new());
         }
         // Passing a read-only value to a project function that mutates that parameter.
-        let Some(Callee::Project(keys, binds_recv)) = self.callee_of(&inst.kind) else {
+        let Some(CallParts {
+            recv,
+            args,
+            kwargs,
+            callee: Callee::Project(keys, binds_recv),
+        }) = self.call_of(&inst.kind)
+        else {
             return (None, Vec::new());
         };
-        let (recv, args, kwargs) = match &inst.kind {
-            InstKind::MethodCall {
-                recv, args, kwargs, ..
-            } => (Some(*recv), args, kwargs),
-            InstKind::Call { args, kwargs, .. } => (None, args, kwargs),
-            _ => return (None, Vec::new()),
-        };
-        for key in &keys {
-            let Some(callee) = self.cx.index.summary(key) else {
-                continue;
-            };
+        let recv = recv.map(|(var, _)| var);
+        for (key, callee) in self.summarized(&keys) {
             let decl = self
                 .cx
                 .decls
@@ -885,10 +908,10 @@ impl<'a> Mut202Fn<'a> {
                 let Some(r) = self.ro.get(&var) else {
                     continue;
                 };
-                let Ok(pos8) = u8::try_from(pos) else {
-                    continue;
-                };
-                let paths = callee.mutated_param_paths.get(&pos8);
+                // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
+                let paths = u8::try_from(pos)
+                    .ok()
+                    .and_then(|p| callee.mutated_param_paths.get(&p));
                 let mutates = if r.shallow_copy {
                     paths.is_some_and(|p| p.iter().any(|path| !path.is_empty()))
                 } else {
@@ -906,5 +929,18 @@ impl<'a> Mut202Fn<'a> {
             }
         }
         (None, Vec::new())
+    }
+
+    /// The callees the index summarizes. One it does not (an index older than the
+    /// declarations the callee was resolved through) is skipped, never assumed.
+    fn summarized<'k>(&self, keys: &'k [FuncKey]) -> Vec<(&'k FuncKey, &'a EffectSummary)> {
+        let mut out = Vec::new();
+        for key in keys {
+            let Some(summary) = self.cx.index.summary(key) else {
+                continue;
+            };
+            out.push((key, summary));
+        }
+        out
     }
 }

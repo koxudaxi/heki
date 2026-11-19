@@ -10,7 +10,7 @@
 
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
-use heki_ir::{BuiltinKind, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, VarId};
+use heki_ir::{FunctionKind, Inst, InstKind, IrFunction, ModuleIr, VarId};
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -53,15 +53,14 @@ pub fn detect_src_layout(root: &Path) -> bool {
         .any(|e| e.path().join("__init__.py").is_file())
 }
 
-/// Module name of `rel` (relative to the project root): `pkg/mod.py` -> `pkg.mod`,
-/// `pkg/__init__.py` -> `pkg` (package). With `src_layout`, a leading `src/` is stripped.
-/// Returns `(module_name, is_package)`.
+/// Module name of `rel` (the normalized project-relative path `rel_posix` produces):
+/// `pkg/mod.py` -> `pkg.mod`, `pkg/__init__.py` -> `pkg` (package). With `src_layout`, a
+/// leading `src/` is stripped. Returns `(module_name, is_package)`.
 pub fn module_name_for_path(rel: &Path, src_layout: bool) -> Option<(String, bool)> {
     let mut parts: Vec<String> = Vec::new();
     for c in rel.components() {
         match c {
             Component::Normal(s) => parts.push(s.to_str()?.to_owned()),
-            Component::CurDir => {}
             _ => return None,
         }
     }
@@ -668,17 +667,19 @@ fn complete_decls(
     kb: &EffectiveEcosystemKb,
 ) -> ModuleDecls {
     let cx = TypeCtx::new(input, project, kb);
+    // Classes come from the semantic model, IR classes and methods from the IR of the same
+    // AST, so every IR class is declared; one that is not gets no attribute types.
     for f in &input.ir.functions {
         if f.is_class_body {
             // Class-body annotations (`fields: list[Field]`, dataclass / pydantic fields).
-            if let Some(class) = decls.classes.get_mut(&f.qualname) {
-                for ann in &f.local_annotations {
-                    if ann.target.contains('.') {
-                        continue;
-                    }
-                    if let Some(t) = cx.module.resolve_annotation(&ann.annotation) {
-                        class.attr_types.entry(ann.target.clone()).or_insert(t);
-                    }
+            for ann in &f.local_annotations {
+                if ann.target.contains('.') {
+                    continue;
+                }
+                if let Some(t) = cx.module.resolve_annotation(&ann.annotation)
+                    && let Some(class) = decls.classes.get_mut(&f.qualname)
+                {
+                    class.attr_types.entry(ann.target.clone()).or_insert(t);
                 }
             }
             continue;
@@ -694,15 +695,17 @@ fn complete_decls(
             }
             continue;
         }
-        let (Some(owner), Some(self_param)) = (&f.owner_class_qualname, f.params.first()) else {
+        let (Some(class), Some(self_param)) = (
+            f.owner_class_qualname
+                .as_ref()
+                .and_then(|owner| decls.classes.get_mut(owner)),
+            f.params.first(),
+        ) else {
             continue;
         };
         if f.has_decorator(&["staticmethod", "classmethod"]) {
             continue;
         }
-        let Some(class) = decls.classes.get_mut(owner) else {
-            continue;
-        };
         let prefix = format!("{}.", self_param.name);
         for ann in &f.local_annotations {
             if let Some(attr) = ann.target.strip_prefix(&prefix)
@@ -1054,18 +1057,7 @@ impl<'a> TypeCtx<'a> {
     ) -> Option<Val> {
         match &inst.kind {
             InstKind::AllocBuiltin { kind, .. } => {
-                let name = match kind {
-                    BuiltinKind::List => "list",
-                    BuiltinKind::Dict => "dict",
-                    BuiltinKind::Set => "set",
-                    BuiltinKind::Tuple => "tuple",
-                    BuiltinKind::Str => "str",
-                    BuiltinKind::Bytes => "bytes",
-                    BuiltinKind::Int => "int",
-                    BuiltinKind::Float => "float",
-                    BuiltinKind::Bool => "bool",
-                };
-                Some(Val::Inst(format!("builtins.{name}")))
+                Some(Val::Inst(format!("builtins.{}", kind.name())))
             }
             InstKind::DictLiteral { .. } => Some(Val::Inst("builtins.dict".to_owned())),
             InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {

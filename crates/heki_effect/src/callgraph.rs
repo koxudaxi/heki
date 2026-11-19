@@ -8,8 +8,8 @@
 
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, EffectSummary, FuncKey,
-    ProjectIndex, TypedFieldWriteSite, WriteKind,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ProjectIndex,
+    TypedFieldWriteSite, WriteKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
@@ -36,12 +36,10 @@ const ROUTE_DECORATORS: &[&str] = &[
 type OutSites = FxHashMap<FuncKey, Vec<(PathBuf, usize)>>;
 
 /// Add the outgoing call sites of every function of `path` (`caller -> [(file, index)]`; a
-/// function's call sites all live in its own file).
+/// function's call sites all live in its own file). `path` is a defining file of
+/// `func_files`, so it is indexed.
 fn load_out_sites(index: &ProjectIndex, path: &Path, out: &mut OutSites) {
-    let Some(file) = index.files.get(path) else {
-        return;
-    };
-    for (i, site) in file.call_sites.iter().enumerate() {
+    for (i, site) in index.files[path].call_sites.iter().enumerate() {
         out.entry(site.caller.clone())
             .or_default()
             .push((path.to_path_buf(), i));
@@ -66,13 +64,6 @@ fn out_sites_of<'f>(
         sites.sort();
     }
     out
-}
-
-fn project_callees(site: &CallSite) -> &[BoundCallee] {
-    match &site.target {
-        CallTarget::Project(callees) => callees,
-        CallTarget::Layer2 { .. } => &[],
-    }
 }
 
 /// Reset the final summaries of `region` to their local facts.
@@ -115,7 +106,7 @@ pub(crate) fn scc_closure(index: &ProjectIndex, own: &FxHashSet<FuncKey>) -> FxH
             load_out_sites(index, path, &mut out);
         }
         for (path, i) in out.get(&f).cloned().into_iter().flatten() {
-            for c in project_callees(&index.files[&path].call_sites[i]) {
+            for c in index.files[&path].call_sites[i].project_callees() {
                 if backward.contains(&c.callee) && forward.insert(c.callee.clone()) {
                     stack.push(c.callee.clone());
                 }
@@ -144,7 +135,7 @@ pub(crate) fn propagate(index: &mut ProjectIndex, region: &FxHashSet<FuncKey>) {
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     for (i, f) in nodes.iter().enumerate() {
         for (path, si) in out.get(f).into_iter().flatten() {
-            for c in project_callees(&index.files[path].call_sites[*si]) {
+            for c in index.files[path].call_sites[*si].project_callees() {
                 if let Some(&j) = pos.get(&c.callee) {
                     succ[i].push(j);
                     preds[j].push(i);
@@ -217,7 +208,7 @@ fn recompute(
         .is_some_and(|cur| cur.sync_driven_only);
     for (site_path, i) in out.get(func).into_iter().flatten() {
         let site = &index.files[site_path].call_sites[*i];
-        for bc in project_callees(site) {
+        for bc in site.project_callees() {
             if let Some(callee) = index.summary(&bc.callee) {
                 apply_edge(&mut s, func, site, bc, callee, site_path);
             }
@@ -247,15 +238,7 @@ fn apply_edge(
     // a. Offload wrappers: a callee offloading its parameter k offloads the caller's
     //    parameter p when argument k is p. The offloaded callable is never called here,
     //    so its blocking effects never reach the caller.
-    for k in bits(callee.offloads_blocking_params) {
-        if let Some(ArgOrigin {
-            param: Some((p, None)),
-            ..
-        }) = origin(k)
-        {
-            s.offloads_blocking_params |= 1u64 << p;
-        }
-    }
+    s.offloads_blocking_params |= caller_params(callee.offloads_blocking_params, bc);
 
     // b. Execution effects. Calling an `async def` without awaiting or driving it only
     //    creates a coroutine: its body runs later on the event loop, where its own boundary
@@ -345,15 +328,7 @@ fn apply_edge(
             }
         }
     }
-    for k in bits(callee.escapes_params) {
-        if let Some(ArgOrigin {
-            param: Some((p, None)),
-            ..
-        }) = origin(k)
-        {
-            s.escapes_params |= 1u64 << p;
-        }
-    }
+    s.escapes_params |= caller_params(callee.escapes_params, bc);
     for t in &callee.typed_field_write_sites {
         let mut site = t.clone();
         site.via_chain.insert(0, hop.clone());
@@ -369,6 +344,22 @@ pub(crate) fn runs_at_call(callee: &EffectSummary, site: &CallSite) -> bool {
 
 fn bits(mask: u64) -> impl Iterator<Item = usize> {
     (0..64).filter(move |k| mask & (1u64 << k) != 0)
+}
+
+/// The caller's parameters passed as themselves for the callee parameters in `mask` (the
+/// callee's offloaded or escaping parameters become the caller's).
+fn caller_params(mask: u64, bc: &BoundCallee) -> u64 {
+    let mut out = 0;
+    for k in bits(mask) {
+        if let Some(ArgOrigin {
+            param: Some((p, None)),
+            ..
+        }) = bc.params.get(k)
+        {
+            out |= 1u64 << p;
+        }
+    }
+    out
 }
 
 /// Function holding the original write of `site` (`None` = the summary owner itself).
@@ -439,7 +430,7 @@ pub(crate) fn recompute_sync_driven_for(
                 continue;
             };
             for site in file.call_sites.iter().filter(|site| &site.caller == caller) {
-                if project_callees(site).iter().any(|bc| &bc.callee == func) {
+                if site.project_callees().iter().any(|bc| &bc.callee == func) {
                     any = true;
                     all_ok &= !caller_async && !site.is_awaited && site.drives_coroutine_manually;
                 }
@@ -475,7 +466,7 @@ pub(crate) fn recompute_sync_driven(index: &mut ProjectIndex) -> Vec<FuncKey> {
         for site in &file.call_sites {
             let caller_async = index.summary(&site.caller).is_some_and(|s| s.is_async);
             let ok = !caller_async && !site.is_awaited && site.drives_coroutine_manually;
-            for bc in project_callees(site) {
+            for bc in site.project_callees() {
                 let all = incoming.entry(bc.callee.clone()).or_insert(true);
                 *all &= ok;
             }

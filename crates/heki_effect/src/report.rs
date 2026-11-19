@@ -66,10 +66,10 @@ pub fn boundary_reports_in<'p>(
         .filter_map(|p| index.files.get_key_value(p))
     {
         for site in &file.call_sites {
-            let Some(caller) = index.summary(&site.caller) else {
-                continue;
-            };
-            if !caller.is_async || caller.sync_driven_only {
+            let reported_caller = index
+                .summary(&site.caller)
+                .is_some_and(|caller| caller.is_async && !caller.sync_driven_only);
+            if !reported_caller {
                 continue;
             }
             // Awaiting another `async def` never fires: its own boundary does.

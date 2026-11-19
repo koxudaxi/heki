@@ -109,6 +109,41 @@ pub enum BuiltinKind {
     Bool,
 }
 
+impl BuiltinKind {
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 9] = [
+        Self::List,
+        Self::Dict,
+        Self::Set,
+        Self::Tuple,
+        Self::Str,
+        Self::Bytes,
+        Self::Int,
+        Self::Float,
+        Self::Bool,
+    ];
+
+    /// The builtin type's name (`list`, `dict`, ...).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Dict => "dict",
+            Self::Set => "set",
+            Self::Tuple => "tuple",
+            Self::Str => "str",
+            Self::Bytes => "bytes",
+            Self::Int => "int",
+            Self::Float => "float",
+            Self::Bool => "bool",
+        }
+    }
+
+    /// The kind a builtin type's name denotes (the inverse of [`Self::name`]).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.name() == name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstLiteral {
@@ -493,18 +528,14 @@ pub enum Terminator {
 }
 
 impl Terminator {
+    /// Normal-flow successors (`exc_target` edges are separate). The builder always gives a
+    /// `Branch` two distinct targets.
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
             Self::Jump(t) => vec![*t],
             Self::Branch {
                 then_bb, else_bb, ..
-            } => {
-                if then_bb == else_bb {
-                    vec![*then_bb]
-                } else {
-                    vec![*then_bb, *else_bb]
-                }
-            }
+            } => vec![*then_bb, *else_bb],
             Self::Return(_) | Self::Raise(_) | Self::Unreachable => Vec::new(),
         }
     }
@@ -662,12 +693,15 @@ impl IrFunction {
     /// Reverse Postorder (RPO) over reachable blocks starting from `BlockId(0)`.
     /// Consumed by `heki_soundness`'s RPO Worklist abstract interpreter.
     pub fn rpo_blocks(&self) -> Vec<BlockId> {
-        if self.blocks.is_empty() {
-            return Vec::new();
-        }
         let mut visited = FxHashSet::default();
         let mut postorder = Vec::with_capacity(self.blocks.len());
-        let mut stack: Vec<(BlockId, bool)> = vec![(BlockId(0), false)];
+        // Start from the entry block (every built function has one).
+        let mut stack: Vec<(BlockId, bool)> = self
+            .blocks
+            .first()
+            .map(|entry| (entry.id, false))
+            .into_iter()
+            .collect();
 
         while let Some((bb_id, expanded)) = stack.pop() {
             if expanded {
@@ -820,11 +854,8 @@ def good_oneshot(pairs):
             .find(|f| f.name == "good_oneshot")
             .unwrap();
         assert!(
-            !good
-                .loop_carried
-                .iter()
-                .any(|lc| lc.var_name.as_deref() == Some("combined") && lc.self_accumulating),
-            "one-shot `combined = pd.concat([a, b])` must NOT be self-accumulating: {:?}",
+            good.loop_carried.is_empty(),
+            "one-shot `combined = pd.concat([a, b])` must NOT be loop-carried: {:?}",
             good.loop_carried
         );
     }
@@ -876,14 +907,14 @@ def right_accum(items, other):
                 _ => None,
             })
             .unwrap();
-        assert_eq!(right_dict.len(), 2);
-        match (&right_dict[0], &right_dict[1]) {
-            (DictEntry::Unpack { dict: first }, DictEntry::Unpack { dict: second }) => {
-                assert_eq!(right.var_name(*first), Some("other"));
-                assert_eq!(right.var_name(*second), Some("d"));
-            }
-            other => panic!("expected two unpacks, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                right_dict.as_slice(),
+                [DictEntry::Unpack { dict: first }, DictEntry::Unpack { dict: second }]
+                    if right.var_name(*first) == Some("other") && right.var_name(*second) == Some("d")
+            ),
+            "expected `{{**other, **d}}`, got {right_dict:?}"
+        );
     }
 
     #[test]
@@ -1085,11 +1116,9 @@ def outer(xs):
         // Inlined PEP 709 listcomp creates a depth-1 loop while keeping outer `x` isolated.
         assert_eq!(outer.loops.len(), 1);
         assert!(
-            !outer
-                .loop_carried
-                .iter()
-                .any(|lc| lc.var_name.as_deref() == Some("x")),
-            "outer `x` must remain lexically isolated from comprehension target `x`"
+            outer.loop_carried.is_empty(),
+            "outer `x` must remain lexically isolated from comprehension target `x`: {:?}",
+            outer.loop_carried
         );
     }
 

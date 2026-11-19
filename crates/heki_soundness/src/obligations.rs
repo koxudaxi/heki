@@ -6,7 +6,7 @@
 //! established; it exists only for the obligation-stripping tests, which prove that each
 //! obligation is what stops its counterexample.
 
-use crate::interpreter::{Allocs, Analysis, Def, FnCtx, kind_name};
+use crate::interpreter::{Allocs, Analysis, Def, FnCtx};
 use crate::liveness::Liveness;
 use crate::{ExactTypeVal, FrameState, KindMask, ObligationStatus, SafetyTier, UniqueState};
 use heki_ast::Span;
@@ -238,13 +238,13 @@ impl<'a, 'c> Checker<'a, 'c> {
                 ObligationStatus::Established {
                     evidence: format!(
                         "exact builtin `{}` created at offset {}",
-                        kind_name(*ty),
+                        ty.name(),
                         origin.start
                     ),
                 }
             }
             Some(ExactTypeVal::Exact { ty, .. }) => ObligationStatus::Blocked {
-                blocker: format!("it is a `{}`", kind_name(*ty)),
+                blocker: format!("it is a `{}`", ty.name()),
             },
             Some(ExactTypeVal::Unknown { reason }) => ObligationStatus::Blocked {
                 blocker: format!(
@@ -443,21 +443,26 @@ impl<'a, 'c> Checker<'a, 'c> {
             }
             match self.cx.def(x) {
                 Def::Param => {}
-                Def::Undefined => return false,
-                Def::Inst(_, _) => {
-                    if let Some((_, _, inst)) = self.cx.def_inst(x) {
-                        match &inst.kind {
+                Def::Phi(b) => stack.extend(
+                    self.cx
+                        .f
+                        .block(b)
+                        .phis
+                        .iter()
+                        .filter(|p| p.dst == x)
+                        .flat_map(|p| p.incoming.iter().map(|&(_, v)| v)),
+                ),
+                // An instruction's result, or no definition at all (`def_inst` is `None`).
+                Def::Inst(..) | Def::Undefined => {
+                    match self.cx.def_inst(x).map(|(_, _, inst)| &inst.kind) {
+                        Some(
                             InstKind::LoadName { .. }
                             | InstKind::LoadGlobal { .. }
-                            | InstKind::LoadDeref { .. } => return false,
-                            InstKind::Copy { src, .. } => stack.push(*src),
-                            _ => {}
-                        }
-                    }
-                }
-                Def::Phi(b) => {
-                    if let Some(phi) = self.cx.f.block(b).phis.iter().find(|p| p.dst == x) {
-                        stack.extend(phi.incoming.iter().map(|(_, v)| *v));
+                            | InstKind::LoadDeref { .. },
+                        )
+                        | None => return false,
+                        Some(InstKind::Copy { src, .. }) => stack.push(*src),
+                        Some(_) => {}
                     }
                 }
             }
@@ -465,27 +470,65 @@ impl<'a, 'c> Checker<'a, 'c> {
         true
     }
 
-    /// `ValueLoopInvariant(v, loop)` (spec section 4.4), checked from `hoist_from` (the start of
-    /// the loop statement, when hoisting) to the end of the loop.
+    /// Where `v` is (re)bound after the point a hoisted statement would run: inside the loop,
+    /// or in `region`, the loop statement's iterable (`for p in (lst := ...):`), which runs
+    /// after a statement hoisted before the loop.
+    pub fn rebinding(
+        &self,
+        v: VarId,
+        lp: &NaturalLoop,
+        region: Option<Span>,
+    ) -> Option<&'static str> {
+        if let Def::Phi(b) | Def::Inst(b, _) = self.cx.def(v)
+            && lp.body.contains(&b)
+        {
+            return Some("inside the loop");
+        }
+        region
+            .is_some_and(|r| self.defined_in(v, r, &mut FxHashSet::default()))
+            .then_some(
+                "in the loop statement's iterable, after the point the hoisted value is built",
+            )
+    }
+
+    /// `v`'s value is produced inside `region`: by an instruction there, or by a phi merging
+    /// such a value (`(lst := a) if c else (lst := b)`).
+    fn defined_in(&self, v: VarId, region: Span, seen: &mut FxHashSet<VarId>) -> bool {
+        if !seen.insert(v) {
+            return false;
+        }
+        match self.cx.def(v) {
+            Def::Inst(b, i) => within(self.cx.f.block(b).insts[i].span, region),
+            Def::Phi(b) => self
+                .cx
+                .f
+                .block(b)
+                .phis
+                .iter()
+                .filter(|p| p.dst == v)
+                .flat_map(|p| &p.incoming)
+                .any(|&(_, w)| self.defined_in(w, region, seen)),
+            Def::Param | Def::Undefined => false,
+        }
+    }
+
+    /// `ValueLoopInvariant(v, loop)` (spec section 4.4), checked over the loop and `region` (the
+    /// loop statement's iterable, which runs after a statement hoisted before the loop).
     pub fn value_loop_invariant(
         &self,
         subject: &str,
         st: &FrameState,
         v: VarId,
         lp: &NaturalLoop,
-        hoist_from: Option<u32>,
+        region: Option<Span>,
     ) -> ProofObligation {
         let kind = ObligationKind::ValueLoopInvariant;
-        let rebound = match self.cx.def(v) {
-            Def::Param | Def::Undefined => false,
-            Def::Phi(b) | Def::Inst(b, _) => lp.body.contains(&b),
-        };
-        if rebound {
+        if let Some(wh) = self.rebinding(v, lp, region) {
             return self.ob(
                 kind,
                 subject,
                 ObligationStatus::Disproved {
-                    counterexample: format!("{} is rebound inside the loop", self.name(v)),
+                    counterexample: format!("{} is rebound {wh}", self.name(v)),
                 },
             );
         }
@@ -510,18 +553,8 @@ impl<'a, 'c> Checker<'a, 'c> {
             );
         }
         let allocs = st.allocs_of(v);
-        // A mutation anywhere in the loop (or between the hoist point and the loop entry).
-        let in_scope = |b: BlockId, i: usize| {
-            if lp.body.contains(&b) {
-                return true;
-            }
-            match (hoist_from, lp.preheader) {
-                (Some(start), Some(pre)) if b == pre => {
-                    self.cx.f.block(b).insts[i].span.start >= start
-                }
-                _ => false,
-            }
-        };
+        // A mutation anywhere in the loop or in its iterable (whatever blocks it spans).
+        let in_scope = |b: BlockId, i: usize| self.in_loop_or(lp, region, b, i);
         let mut mutated_at = None;
         for (&(b, i), m) in self.mutations {
             if in_scope(b, i) && m.iter().any(|a| allocs.contains(a)) {
@@ -620,6 +653,11 @@ impl<'a, 'c> Checker<'a, 'c> {
         self.ob(ObligationKind::HashConsistentProbe, subject, status)
     }
 
+    /// Instruction `i` of block `b` runs inside `lp` or inside `region`.
+    pub fn in_loop_or(&self, lp: &NaturalLoop, region: Option<Span>, b: BlockId, i: usize) -> bool {
+        lp.body.contains(&b) || region.is_some_and(|r| within(self.cx.f.block(b).insts[i].span, r))
+    }
+
     /// The span of the first mutation of `allocs` among `blocks`, if any.
     pub fn first_mutation_in(
         &self,
@@ -639,25 +677,18 @@ impl<'a, 'c> Checker<'a, 'c> {
     }
 }
 
+/// `inner` lies inside `outer`.
+fn within(inner: Span, outer: Span) -> bool {
+    inner.start >= outer.start && inner.end <= outer.end
+}
+
+/// `str / int`: the kinds of a non-empty mask (both callers handle the empty mask, which never
+/// holds a value, before describing one).
 pub(crate) fn describe_mask(m: KindMask) -> String {
-    let names: Vec<&str> = [
-        BuiltinKind::List,
-        BuiltinKind::Dict,
-        BuiltinKind::Set,
-        BuiltinKind::Tuple,
-        BuiltinKind::Str,
-        BuiltinKind::Bytes,
-        BuiltinKind::Int,
-        BuiltinKind::Float,
-        BuiltinKind::Bool,
-    ]
-    .into_iter()
-    .filter(|k| m.contains(*k))
-    .map(kind_name)
-    .collect();
-    if names.is_empty() {
-        "no values".into()
-    } else {
-        names.join(" / ")
-    }
+    let names: Vec<&str> = BuiltinKind::ALL
+        .into_iter()
+        .filter(|k| m.contains(*k))
+        .map(BuiltinKind::name)
+        .collect();
+    names.join(" / ")
 }

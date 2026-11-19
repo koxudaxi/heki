@@ -17,11 +17,10 @@ use thiserror::Error;
 pub enum SelectionError {
     #[error("unknown rule selector `{0}`")]
     UnknownRule(String),
-    #[error("invalid per-file-ignores glob `{pattern}`: {source}")]
+    #[error("invalid per-file-ignores glob `{pattern}`: {cause}")]
     Glob {
         pattern: String,
-        #[source]
-        source: globset::Error,
+        cause: globset::Error,
     },
 }
 
@@ -95,9 +94,9 @@ impl RuleSelection {
         let mut per_file = Vec::new();
         for (pattern, rules) in &lint.per_file_ignores {
             let glob = Glob::new(pattern)
-                .map_err(|source| SelectionError::Glob {
+                .map_err(|cause| SelectionError::Glob {
                     pattern: pattern.clone(),
-                    source,
+                    cause,
                 })?
                 .compile_matcher();
             per_file.push((glob, codes(rules, false)?));
@@ -116,10 +115,6 @@ impl RuleSelection {
                 .per_file
                 .iter()
                 .any(|(g, rules)| rules.contains(code) && g.is_match(rel_path))
-    }
-
-    pub fn enabled_codes(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.enabled.iter().copied()
     }
 }
 

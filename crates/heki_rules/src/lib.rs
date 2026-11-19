@@ -208,12 +208,11 @@ pub struct ModuleUnit<'a> {
 pub enum RuleConfigError {
     #[error("invalid write-owners target `{0}` (expected `Class.attr`)")]
     InvalidTarget(String),
-    #[error("invalid glob `{pattern}` in {context}: {source}")]
+    #[error("invalid glob `{pattern}` in {context}: {cause}")]
     Glob {
         pattern: String,
         context: &'static str,
-        #[source]
-        source: globset::Error,
+        cause: globset::Error,
     },
 }
 
@@ -359,11 +358,12 @@ impl<'a> CheckContext<'a> {
             .collect()
     }
 
-    /// Build a diagnostic (severity from `lint.severity`, default `error`).
+    /// Build a diagnostic (severity from `lint.severity`, default `error`); `None` when `code`
+    /// does not run on `unit`.
     #[allow(clippy::too_many_arguments)]
-    pub fn emit(
+    pub fn emit<'o>(
         &self,
-        out: &mut Vec<Diagnostic>,
+        out: &'o mut Vec<Diagnostic>,
         code: &'static str,
         unit: &ModuleUnit<'_>,
         span: Span,
@@ -371,9 +371,9 @@ impl<'a> CheckContext<'a> {
         target: String,
         message: String,
         chain: &[CallHop],
-    ) {
+    ) -> Option<&'o mut Diagnostic> {
         if !self.enabled(code, unit) {
-            return;
+            return None;
         }
         let meta = find_rule(code).expect("emitted rules are registered");
         let severity = self
@@ -401,6 +401,7 @@ impl<'a> CheckContext<'a> {
             related: self.related(chain),
             fix: None,
         });
+        out.last_mut()
     }
 }
 
@@ -414,10 +415,10 @@ pub(crate) struct DottedPattern {
 impl DottedPattern {
     pub fn new(text: &str, context: &'static str) -> Result<Self, RuleConfigError> {
         let glob = Glob::new(text)
-            .map_err(|source| RuleConfigError::Glob {
+            .map_err(|cause| RuleConfigError::Glob {
                 pattern: text.to_owned(),
                 context,
-                source,
+                cause,
             })?
             .compile_matcher();
         Ok(Self {

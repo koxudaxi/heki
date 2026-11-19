@@ -33,45 +33,52 @@ const MAX_PASSES: usize = 64;
 #[derive(Debug, Clone, Default)]
 pub struct BuiltinScope {
     all_shadowed: bool,
+    /// Module globals may be bound behind the IR (`from m import *`, `exec(...)` at module
+    /// level, `globals()`), so not even an imported name keeps its binding.
+    dynamic_globals: bool,
     shadowed: FxHashSet<String>,
 }
 
 impl BuiltinScope {
     /// `project_patches_builtins`: some module of the project rebinds attributes of `builtins`.
     pub fn for_module(ir: &ModuleIr, project_patches_builtins: bool) -> Self {
-        let mut scope = Self {
-            all_shadowed: project_patches_builtins
-                || ir.has_star_import
-                || crate::module_patches_builtins(ir),
-            shadowed: FxHashSet::default(),
-        };
         let module_fn = ir.function(ir.module_fn);
-        if !module_fn.a1_hazards.is_empty() {
-            // `exec(...)` / `globals()[...]` at module level may bind any name.
-            scope.all_shadowed = true;
-        }
+        // `exec(...)` / `globals()[...]` at module level may bind any name.
+        let mut dynamic_globals = ir.has_star_import || !module_fn.a1_hazards.is_empty();
+        let mut shadowed = FxHashSet::default();
         for f in &ir.functions {
             for bb in &f.blocks {
                 for inst in &bb.insts {
                     match &inst.kind {
                         InstKind::StoreGlobal { name, .. } => {
-                            scope.shadowed.insert(name.clone());
+                            shadowed.insert(name.clone());
                         }
                         InstKind::Call {
                             callee,
                             callee_var: Some(_),
                             ..
-                        } if callee == "globals" => scope.all_shadowed = true,
+                        } if callee == "globals" => dynamic_globals = true,
                         _ => {}
                     }
                 }
             }
         }
-        scope
+        Self {
+            all_shadowed: dynamic_globals
+                || project_patches_builtins
+                || crate::module_patches_builtins(ir),
+            dynamic_globals,
+            shadowed,
+        }
     }
 
     pub fn resolves(&self, name: &str) -> bool {
         !self.all_shadowed && !self.shadowed.contains(name)
+    }
+
+    /// Module globals may be rebound dynamically (see `dynamic_globals`).
+    pub fn dynamic_globals(&self) -> bool {
+        self.dynamic_globals
     }
 }
 
@@ -346,35 +353,6 @@ impl FrameState {
     }
 }
 
-fn kind_from_name(name: &str) -> Option<BuiltinKind> {
-    Some(match name {
-        "list" => BuiltinKind::List,
-        "dict" => BuiltinKind::Dict,
-        "set" => BuiltinKind::Set,
-        "tuple" => BuiltinKind::Tuple,
-        "str" => BuiltinKind::Str,
-        "bytes" => BuiltinKind::Bytes,
-        "int" => BuiltinKind::Int,
-        "float" => BuiltinKind::Float,
-        "bool" => BuiltinKind::Bool,
-        _ => return None,
-    })
-}
-
-pub(crate) fn kind_name(kind: BuiltinKind) -> &'static str {
-    match kind {
-        BuiltinKind::List => "list",
-        BuiltinKind::Dict => "dict",
-        BuiltinKind::Set => "set",
-        BuiltinKind::Tuple => "tuple",
-        BuiltinKind::Str => "str",
-        BuiltinKind::Bytes => "bytes",
-        BuiltinKind::Int => "int",
-        BuiltinKind::Float => "float",
-        BuiltinKind::Bool => "bool",
-    }
-}
-
 /// Containers whose element kinds are tracked.
 fn tracks_elems(kind: BuiltinKind) -> bool {
     matches!(
@@ -518,6 +496,14 @@ impl<'a> FnCtx<'a> {
 
     fn site(&self, bb: BlockId, idx: usize) -> AllocId {
         AllocId(self.site_base[bb.0 as usize] + idx as u32)
+    }
+
+    /// Position of the instruction that owns allocation site `a` (the inverse of `site`).
+    pub fn site_location(&self, a: AllocId) -> (BlockId, usize) {
+        // An empty block shares its base with the next block, so the instruction is in the
+        // last block whose base is at most `a` (`site_base[0] == 0`: there is one).
+        let bi = self.site_base.partition_point(|&base| base <= a.0) - 1;
+        (BlockId(bi as u32), (a.0 - self.site_base[bi]) as usize)
     }
 
     /// Builtin function called by `Call { callee_var, callee }`, if it is the real builtin.
@@ -1214,7 +1200,10 @@ impl<'a> FnCtx<'a> {
         let mut retained = Vec::new();
         let indexed: Vec<(usize, VarId)> = args.iter().copied().enumerate().collect();
         Self::apply_param_effects(st, &entry.param_effects, &indexed, span, eff, &mut retained);
-        let ret_kind = entry.return_exact_type.as_deref().and_then(kind_from_name);
+        let ret_kind = entry
+            .return_exact_type
+            .as_deref()
+            .and_then(BuiltinKind::from_name);
         if let Some(kind) = ret_kind {
             let elems = match (kind, args.first()) {
                 (BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Set, Some(&a))
@@ -1261,10 +1250,9 @@ impl<'a> FnCtx<'a> {
         span: Span,
         eff: &mut InstEffects,
     ) {
-        let entry = st.exact_type(recv).and_then(|k| {
-            self.kb
-                .lookup(&format!("builtins.{}.{method}", kind_name(k)))
-        });
+        let entry = st
+            .exact_type(recv)
+            .and_then(|k| self.kb.lookup(&format!("builtins.{}.{method}", k.name())));
         let Some(entry) = entry else {
             Self::escape_all(
                 st,
@@ -1296,7 +1284,11 @@ impl<'a> FnCtx<'a> {
         if let Some(kinds) = added {
             Self::add_elems(st, recv, kinds);
         }
-        match entry.return_exact_type.as_deref().and_then(kind_from_name) {
+        match entry
+            .return_exact_type
+            .as_deref()
+            .and_then(BuiltinKind::from_name)
+        {
             Some(kind) => {
                 let elems = if tracks_elems(kind) {
                     self.elems_of_bases(st, &st.allocs_of(recv))
@@ -1367,14 +1359,13 @@ impl<'a> FnCtx<'a> {
             let mut joined = st.value(present[0]);
             for &v in &present[1..] {
                 let other = st.value(v);
-                joined.ty = match (&joined.ty, &other.ty) {
-                    (Some(a), Some(b)) => Some(join_type(a, b)),
-                    (a, b) => a.clone().or_else(|| b.clone()),
-                };
-                joined.unique = match (&joined.unique, &other.unique) {
-                    (Some(a), Some(b)) => Some(join_unique(a, b)),
-                    (a, b) => a.clone().or_else(|| b.clone()),
-                };
+                // `var_type` and `var_unique` always have the same keys, so a present version
+                // has both (were one missing, the joined value would be untracked).
+                joined.ty = joined.ty.zip(other.ty).map(|(a, b)| join_type(&a, &b));
+                joined.unique = joined
+                    .unique
+                    .zip(other.unique)
+                    .map(|(a, b)| join_unique(&a, &b));
                 allocs_union(&mut joined.points_to, &other.points_to);
                 allocs_union(&mut joined.derives_from, &other.derives_from);
             }
@@ -1448,9 +1439,8 @@ impl<'a> FnCtx<'a> {
                         }
                     }
                 }
-                let Some(new_in) = new_in else {
-                    continue;
-                };
+                // Every block in RPO has a predecessor earlier in RPO (its DFS parent).
+                let Some(new_in) = new_in else { continue };
                 if block_in[bi].as_ref() == Some(&new_in) && out[bi].is_some() {
                     continue;
                 }
@@ -1476,10 +1466,12 @@ impl<'a> FnCtx<'a> {
     /// Replay every reachable block once and collect each instruction's mutations.
     pub(crate) fn mutations(&self, an: &Analysis) -> FxHashMap<(BlockId, usize), Allocs> {
         let mut out = FxHashMap::default();
-        for &b in &self.rpo {
-            let Some(st) = an.block_in[b.0 as usize].clone() else {
-                continue;
-            };
+        // `run` gave every block in RPO an entry state on its first pass.
+        let entered = self
+            .rpo
+            .iter()
+            .filter_map(|&b| Some((b, an.block_in[b.0 as usize].clone()?)));
+        for (b, st) in entered {
             self.transfer_block(b, st, |i, _, eff| {
                 if !eff.mutated.is_empty() {
                     out.insert((b, i), eff.mutated.clone());

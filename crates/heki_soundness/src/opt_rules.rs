@@ -10,14 +10,14 @@ use crate::edits::{
     ends_statement, indentation, is_identifier, is_plain_assign, line_start, slice, squash,
     starts_statement, strip_token,
 };
-use crate::interpreter::{Analysis, BuiltinScope, Def, FnCtx, UseSite, kind_name};
+use crate::interpreter::{Analysis, BuiltinScope, FnCtx, UseSite};
 use crate::liveness::Liveness;
 use crate::obligations::{Checker, ObligationKind, ProofObligation, SafetyVerdict};
 use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTier};
 use heki_ast::Span;
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, Inst, InstKind, IrFunction,
-    LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind,
+    IrFunction, LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
 };
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::FxHashSet;
@@ -153,6 +153,9 @@ struct ModuleCtx<'a> {
     source: &'a str,
     builtins: BuiltinScope,
     used_names: FxHashSet<String>,
+    /// Per function (by its span): the names it binds itself (parameters, assignments,
+    /// imports, handler names, free variables), i.e. every name but the module globals it reads.
+    local_names: Vec<(Span, FxHashSet<&'a str>)>,
     /// How to spell `collections.deque` (`None`: no safe way to import it).
     deque: Option<DequeRef>,
 }
@@ -228,18 +231,69 @@ impl<'a> ModuleCtx<'a> {
                 first_import = Some(ls);
             }
         }
+        // Module code before the new import runs first and could call the rewritten function:
+        // only a docstring and `__future__` imports may precede it.
+        let nothing_runs_before = |at: u32| {
+            module_fn.blocks.iter().flat_map(|b| &b.insts).all(|i| {
+                i.span.start >= at
+                    || match &i.kind {
+                        InstKind::Import { module, .. } => module.as_deref() == Some("__future__"),
+                        InstKind::StoreGlobal { .. } => true,
+                        InstKind::Const { literal, .. } => matches!(literal, ConstLiteral::Str(_)),
+                        _ => false,
+                    }
+            })
+        };
         if deque.is_none() && !used_names.contains("collections") {
-            deque = first_import.map(|at| DequeRef {
-                spelling: "collections.deque".into(),
-                import_at: Some(at),
-            });
+            deque = first_import
+                .filter(|&at| nothing_runs_before(at))
+                .map(|at| DequeRef {
+                    spelling: "collections.deque".into(),
+                    import_at: Some(at),
+                });
         }
+        let local_names = ir
+            .functions
+            .iter()
+            .filter(|f| !f.is_module_body && !f.is_class_body)
+            .map(|f| {
+                let global_reads: FxHashSet<VarId> = f
+                    .blocks
+                    .iter()
+                    .flat_map(|b| &b.insts)
+                    .filter(|i| matches!(i.kind, InstKind::LoadGlobal { .. }))
+                    .filter_map(|i| i.kind.dst())
+                    .collect();
+                let names = f
+                    .var_names
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !global_reads.contains(&VarId(*i as u32)))
+                    .filter_map(|(_, n)| n.as_deref())
+                    .collect();
+                (f.span, names)
+            })
+            .collect();
+        // An import heki sees may be rebound behind the IR (star import, `exec`, `globals()`),
+        // and so may a new one: no spelling of `deque` is trusted then.
+        let deque = deque.filter(|_| !builtins.dynamic_globals());
         Self {
             source,
             builtins,
             used_names,
+            local_names,
             deque,
         }
+    }
+
+    /// `f` or a function enclosing it binds `name`, so a reference to `name` added inside `f`
+    /// would not reach the module global or the builtin. Enclosing functions are the ones whose
+    /// span contains `f`'s (class bodies in between are not scopes `f` sees, and qualnames do
+    /// not always name the functions around a class).
+    fn binds_locally(&self, f: &IrFunction, name: &str) -> bool {
+        self.local_names.iter().any(|(span, names)| {
+            span.start <= f.span.start && f.span.end <= span.end && names.contains(name)
+        })
     }
 
     fn text(&self, span: Span) -> Option<&'a str> {
@@ -252,10 +306,10 @@ impl<'a> ModuleCtx<'a> {
         if !self.used_names.contains(base) {
             return base.to_owned();
         }
-        (1..)
+        (1u64..)
             .map(|i| format!("{base}_{i}"))
             .find(|n| !self.used_names.contains(n))
-            .unwrap_or_else(|| format!("{base}_hoisted"))
+            .expect("a module uses finitely many names")
     }
 }
 
@@ -296,11 +350,15 @@ pub fn analyze_module(
 // ================================================================================ patterns
 
 #[derive(Debug, Clone, Copy)]
-enum Membership {
+enum Membership<'a> {
     /// `e in lst` (`OPT110`).
     Plain,
-    /// `e in set(keys)`: the container is rebuilt by the call at `(block, index)` (`OPT130`).
-    Rebuild(BlockId, usize),
+    /// `e in set(keys)`: the container is rebuilt by the call at `at` (`OPT130`).
+    Rebuild {
+        at: (BlockId, usize),
+        callee: &'a str,
+        args: &'a [VarId],
+    },
     /// `if v not in seen: seen.append(v)`: the append at `(block, index)` (`OPT111`).
     Dedup(BlockId, usize),
 }
@@ -316,7 +374,7 @@ enum FrontForm {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Site {
+enum Site<'a> {
     /// `x = x + [e, ...]`: `BinOp` at `at`, list display `list`, `Copy` at `copy`.
     ListConcat {
         at: (BlockId, usize),
@@ -324,10 +382,12 @@ enum Site {
         list: VarId,
         copy: (BlockId, usize),
     },
-    /// `d = {**d, ...}`: `DictLiteral` at `at`.
+    /// `d = {**d, ...}`: `DictLiteral` at `at` defining `dst`.
     DictMerge {
         at: (BlockId, usize),
         acc: VarId,
+        dst: VarId,
+        entries: &'a [DictEntry],
         copy: (BlockId, usize),
     },
     /// `s = s | rhs`
@@ -348,13 +408,14 @@ enum Site {
     AttrConcat {
         at: (BlockId, usize),
         obj: VarId,
+        attr: &'a str,
         rhs: VarId,
     },
     Membership {
         at: (BlockId, usize),
         probe: VarId,
         container: VarId,
-        kind: Membership,
+        kind: Membership<'a>,
     },
     FrontPop {
         at: (BlockId, usize),
@@ -399,7 +460,7 @@ fn loop_carried_phi(f: &IrFunction, v: VarId, b: BlockId) -> bool {
     })
 }
 
-fn find_sites(cx: &FnCtx<'_>) -> Vec<Site> {
+fn find_sites<'a>(cx: &FnCtx<'a>) -> Vec<Site<'a>> {
     let f = cx.f;
     let mut sites = Vec::new();
     let mut dedup_compares: FxHashSet<(BlockId, usize)> = FxHashSet::default();
@@ -470,6 +531,7 @@ fn find_sites(cx: &FnCtx<'_>) -> Vec<Site> {
                         sites.push(Site::AttrConcat {
                             at,
                             obj: *obj,
+                            attr,
                             rhs: *rhs,
                         });
                     }
@@ -486,7 +548,13 @@ fn find_sites(cx: &FnCtx<'_>) -> Vec<Site> {
                     if let Some(acc) = acc
                         && let Some(copy) = sole_copy_to(cx, *dst, f.var_name(acc).unwrap_or(""))
                     {
-                        sites.push(Site::DictMerge { at, acc, copy });
+                        sites.push(Site::DictMerge {
+                            at,
+                            acc,
+                            dst: *dst,
+                            entries,
+                            copy,
+                        });
                     }
                 }
                 InstKind::Compare {
@@ -501,12 +569,19 @@ fn find_sites(cx: &FnCtx<'_>) -> Vec<Site> {
                     let kind = match defined_inside {
                         Some((db, di, d)) => match &d.kind {
                             InstKind::Call {
-                                callee_var, callee, ..
+                                callee_var,
+                                callee,
+                                args,
+                                ..
                             } if cx.builtin_callee(*callee_var, callee).is_some_and(|n| {
                                 matches!(n, "set" | "list" | "tuple" | "dict" | "frozenset")
                             }) =>
                             {
-                                Some(Membership::Rebuild(db, di))
+                                Some(Membership::Rebuild {
+                                    at: (db, di),
+                                    callee,
+                                    args,
+                                })
                             }
                             _ => None,
                         },
@@ -629,6 +704,15 @@ fn disproved(counterexample: impl Into<String>) -> ObligationStatus {
     }
 }
 
+/// A Layer 1 parameter effect that neither changes nor stores the argument (it is only read,
+/// or kept alive by the result).
+fn reads_only(effect: &SoundnessParamEffect) -> bool {
+    matches!(
+        effect,
+        SoundnessParamEffect::ReadOnly | SoundnessParamEffect::RetainedInReturn
+    )
+}
+
 /// Bounded loops do not pay for size-dependent rewrites.
 fn loop_bound_note(lp: &NaturalLoop) -> Option<String> {
     match lp.bound {
@@ -702,16 +786,19 @@ impl<'a, 'c> Rules<'a, 'c> {
         allowed: &[BuiltinKind],
     ) -> Option<BuiltinKind> {
         let lc = self.f().loop_carried.iter().find(|lc| lc.phi_var == phi)?;
-        let mut kinds = lc.init_vars.iter().map(|v| st.exact_type(*v));
-        let first = kinds.next()??;
-        (allowed.contains(&first) && kinds.all(|k| k == Some(first))).then_some(first)
+        let first = st.exact_type(*lc.init_vars.first()?)?;
+        let all_first = lc
+            .init_vars
+            .iter()
+            .all(|v| st.exact_type(*v) == Some(first));
+        (allowed.contains(&first) && all_first).then_some(first)
     }
 
     /// Cost evidence: `v`'s exact type at the site is one of `allowed`.
     fn exact_evidence(&self, st: &FrameState, v: VarId, allowed: &[BuiltinKind]) -> Option<String> {
         st.exact_type(v)
             .filter(|k| allowed.contains(k))
-            .map(|k| format!("`{}` is an exact `{}`", self.var(v), kind_name(k)))
+            .map(|k| format!("`{}` is an exact `{}`", self.var(v), k.name()))
     }
 
     /// Cost evidence of an accumulation: it starts as an exact `allowed` container.
@@ -722,10 +809,10 @@ impl<'a, 'c> Rules<'a, 'c> {
         allowed: &[BuiltinKind],
     ) -> Option<String> {
         self.init_kind(st, phi, allowed)
-            .map(|k| format!("`{}` starts as an exact `{}`", self.var(phi), kind_name(k)))
+            .map(|k| format!("`{}` starts as an exact `{}`", self.var(phi), k.name()))
     }
 
-    fn evaluate(&self, site: &Site) -> Option<OptCandidate> {
+    fn evaluate(&self, site: &Site<'a>) -> Option<OptCandidate> {
         match *site {
             Site::ListConcat {
                 at,
@@ -733,12 +820,18 @@ impl<'a, 'c> Rules<'a, 'c> {
                 list,
                 copy,
             } => self.list_concat(at, acc, list, copy),
-            Site::DictMerge { at, acc, copy } => self.dict_merge(at, acc, copy),
+            Site::DictMerge {
+                at,
+                acc,
+                dst,
+                entries,
+                copy,
+            } => self.dict_merge(at, acc, dst, entries, copy),
             Site::SetOr { at, acc, rhs, copy } => self.set_or(at, acc, rhs, copy),
             Site::ImmutableConcat { at, acc, rhs, copy } => {
                 self.immutable_concat(at, acc, rhs, copy)
             }
-            Site::AttrConcat { at, obj, rhs } => self.attr_concat(at, obj, rhs),
+            Site::AttrConcat { at, obj, attr, rhs } => self.attr_concat(at, obj, attr, rhs),
             Site::Membership {
                 at,
                 probe,
@@ -746,7 +839,11 @@ impl<'a, 'c> Rules<'a, 'c> {
                 kind,
             } => match kind {
                 Membership::Plain => self.membership(at, probe, container),
-                Membership::Rebuild(b, i) => self.rebuild(at, (b, i), container),
+                Membership::Rebuild {
+                    at: call_at,
+                    callee,
+                    args,
+                } => self.rebuild(at, call_at, container, callee, args),
                 Membership::Dedup(b, i) => self.dedup(at, probe, container, (b, i)),
             },
             Site::FrontPop { at, q, form } => self.front(OptRule::Opt120, at, q, Some(form)),
@@ -860,16 +957,14 @@ impl<'a, 'c> Rules<'a, 'c> {
             && list_inst.span.end == binop.span.end
             && let Some(display) = self.m.text(list_inst.span)
         {
-            let elems = match &list_inst.kind {
-                InstKind::AllocBuiltin { elems, .. } => elems.len(),
-                _ => 0,
-            };
+            let single =
+                matches!(&list_inst.kind, InstKind::AllocBuiltin { elems, .. } if elems.len() == 1);
             let inner = display
                 .strip_prefix('[')
                 .and_then(|d| d.strip_suffix(']'))
                 .map(str::trim);
             let replacement = match inner {
-                Some(e) if elems == 1 && !e.starts_with('*') => {
+                Some(e) if single && !e.starts_with('*') => {
                     let e = e.strip_suffix(',').map_or(e, str::trim_end);
                     format!("{name}.append({e})")
                 }
@@ -898,15 +993,14 @@ impl<'a, 'c> Rules<'a, 'c> {
         &self,
         at: (BlockId, usize),
         acc: VarId,
+        dst: VarId,
+        entries: &[DictEntry],
         copy: (BlockId, usize),
     ) -> Option<OptCandidate> {
         let f = self.f();
         let st = self.state(at)?;
         let name = self.var(acc);
         let lit = inst_at(f, at);
-        let InstKind::DictLiteral { dst, entries } = &lit.kind else {
-            return None;
-        };
         let leading = matches!(entries.first(), Some(DictEntry::Unpack { dict }) if *dict == acc);
         let unpacked_again = entries
             .iter()
@@ -914,8 +1008,11 @@ impl<'a, 'c> Rules<'a, 'c> {
             .any(|e| matches!(e, DictEntry::Unpack { dict } if *dict == acc));
         let mut obs = self.base();
         obs.push(self.ck.exact_type(&name, &st, acc, &[Dict]));
-        obs.push(self.ck.unique(&name, &st, acc));
-        obs.push(self.ck.exclusive_access(&name, &st, acc, at, &[*dst], true));
+        // After the display: its own entries may store the accumulator, or an iterator or view
+        // of it, in the new dict (`{**d, k: d}`), which updating in place would make cyclic.
+        let after = self.state((at.0, at.1 + 1))?;
+        obs.push(self.ck.unique(&name, &after, acc));
+        obs.push(self.ck.exclusive_access(&name, &st, acc, at, &[dst], true));
         obs.push(self.ck.ob(
             K::DictUnpackLeading,
             &name,
@@ -932,7 +1029,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         obs.push(self.eval_order(&name, lit.span, &name, &st, acc));
         obs.push(
             self.ck
-                .exception_state_safe(&name, &st, acc, at.0, &name, &[*dst]),
+                .exception_state_safe(&name, &st, acc, at.0, &name, &[dst]),
         );
         let stmt = self.assignment_span(copy, lit.span);
         let span = stmt.unwrap_or(lit.span);
@@ -969,14 +1066,12 @@ impl<'a, 'c> Rules<'a, 'c> {
         let inner = display.strip_prefix('{')?.strip_suffix('}')?;
         let rest = strip_token(inner, "**")?;
         let rest = strip_token(rest, name)?;
-        // Keep a multi-line display's layout; drop the space after `**d,` on one line.
+        // Keep a multi-line display's layout; drop the space after `**d,` on one line. The
+        // display has a second entry (`find_sites`), so `rest` is never empty.
         let rest = strip_token(rest, ",")?.trim_start_matches([' ', '\t']);
         let rest_trim = rest.trim();
-        if rest_trim.is_empty() {
-            return None;
-        }
         if let [_, DictEntry::KeyValue { key, value }] = entries
-            && let (Some(k), Some(v)) = (self.simple_text(st, *key), self.simple_text(st, *value))
+            && let (Some(k), Some(v)) = (self.simple_text(*key), self.simple_text(*value))
         {
             let squashed = squash(rest_trim);
             let expect = squash(&format!("{k}:{v}"));
@@ -995,20 +1090,14 @@ impl<'a, 'c> Rules<'a, 'c> {
     }
 
     /// Source text of a side-effect-free, non-raising operand (constant or bound local).
-    fn simple_text(&self, st: &FrameState, v: VarId) -> Option<String> {
-        match self.cx().def(v) {
-            Def::Inst(b, i) => {
-                let inst = &self.f().block(b).insts[i];
-                match &inst.kind {
-                    InstKind::Const { .. } if st.exact_type(v).is_some() => {
-                        self.m.text(inst.span).map(str::to_owned)
-                    }
-                    InstKind::Const { .. } => self.m.text(inst.span).map(str::to_owned),
-                    _ => self.bound_local_name(v),
-                }
+    fn simple_text(&self, v: VarId) -> Option<String> {
+        match self.cx().def_inst(v) {
+            Some((_, _, inst)) if matches!(inst.kind, InstKind::Const { .. }) => {
+                self.m.text(inst.span).map(str::to_owned)
             }
-            Def::Param | Def::Phi(_) => self.bound_local_name(v),
-            Def::Undefined => None,
+            // Any other value: a local name bound on every path (`definitely_bound` is false
+            // for a variable without a definition).
+            _ => self.bound_local_name(v),
         }
     }
 
@@ -1171,7 +1260,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let span = copy
             .and_then(|c| self.assignment_span(c, binop.span))
             .unwrap_or(binop.span);
-        let what = kind.map_or("immutable value", kind_name);
+        let what = kind.map_or("immutable value", BuiltinKind::name);
         Some(self.candidate(
             OptRule::Opt103,
             span,
@@ -1184,18 +1273,17 @@ impl<'a, 'c> Rules<'a, 'c> {
         ))
     }
 
-    fn attr_concat(&self, at: (BlockId, usize), obj: VarId, rhs: VarId) -> Option<OptCandidate> {
+    fn attr_concat(
+        &self,
+        at: (BlockId, usize),
+        obj: VarId,
+        attr: &str,
+        rhs: VarId,
+    ) -> Option<OptCandidate> {
         let f = self.f();
         let st = self.state(at)?;
         let lp = innermost_loop(f, at.0)?;
         let binop = inst_at(f, at);
-        let InstKind::BinOp { lhs, .. } = &binop.kind else {
-            return None;
-        };
-        let (_, _, load) = self.cx().def_inst(*lhs)?;
-        let InstKind::AttrLoad { attr, .. } = &load.kind else {
-            return None;
-        };
         let target = format!("{}.{attr}", self.var(obj));
         let mut obs = self.base();
         // The attribute's own type is not tracked; the right operand shows what it holds.
@@ -1215,12 +1303,39 @@ impl<'a, 'c> Rules<'a, 'c> {
             format!("`{target} += ...` re-copies the attribute on every iteration (quadratic); accumulate in a local list and assign the joined result once"),
             obs,
             loop_bound_note(lp),
-            st.exact_type(rhs).filter(|k| matches!(k, Str | Bytes | Tuple)).map(|k| format!("the right operand is an exact `{}`", kind_name(k))),
+            st.exact_type(rhs).filter(|k| matches!(k, Str | Bytes | Tuple)).map(|k| format!("the right operand is an exact `{}`", k.name())),
             Vec::new(),
         ))
     }
 
     // ------------------------------------------------------------------- hoisting helpers
+
+    /// `SideEffectFree(set)` is blocked when the `set(...)` a hoisting edit writes would not be
+    /// the builtin: rebound in the module, or a local name of this function or an enclosing one
+    /// (`def f(items, set=...)`).
+    fn set_not_builtin(&self) -> Option<ProofObligation> {
+        let why = if !self.m.builtins.resolves("set") {
+            "`set` is rebound in this module"
+        } else if self.m.binds_locally(self.f(), "set") {
+            "`set` is a local name of this function or an enclosing one"
+        } else {
+            return None;
+        };
+        Some(self.ck.ob(K::SideEffectFree, "set", blocked(why)))
+    }
+
+    /// The loop statement's iterable (`for p in <region>:`), whatever blocks it spans: it runs
+    /// after a statement hoisted before the loop (`None`: a `while` loop, whose test is part of
+    /// the loop).
+    fn hoist_region(&self, lp: &NaturalLoop) -> Option<Span> {
+        let first = self.f().block(lp.header).insts.first()?;
+        let InstKind::IterNext { iter, .. } = first.kind else {
+            return None;
+        };
+        self.cx()
+            .def_inst(iter)
+            .map(|(_, _, make_iter)| make_iter.span)
+    }
 
     /// Line start and indentation of the `for` statement of `lp`.
     fn for_stmt(&self, lp: &NaturalLoop) -> Option<(u32, String)> {
@@ -1281,7 +1396,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             return false;
         }
         allocs.iter().all(|a| {
-            let small = self.alloc_inst(*a).is_some_and(|inst| match &inst.kind {
+            let small = match &inst_at(self.f(), self.cx().site_location(*a)).kind {
                 InstKind::AllocBuiltin { elems, .. } => {
                     elems.len() <= 8
                         && elems.iter().all(|e| {
@@ -1292,33 +1407,9 @@ impl<'a, 'c> Rules<'a, 'c> {
                         })
                 }
                 _ => false,
-            });
+            };
             small && !self.ck.mutations.values().any(|m| m.contains(a))
         })
-    }
-
-    fn alloc_inst(&self, a: crate::AllocId) -> Option<&'a Inst> {
-        let mut base = 0u32;
-        for bb in &self.f().blocks {
-            let n = bb.insts.len() as u32;
-            if a.0 < base + n {
-                return bb.insts.get((a.0 - base) as usize);
-            }
-            base += n;
-        }
-        None
-    }
-
-    fn alloc_location(&self, a: crate::AllocId) -> Option<(BlockId, usize)> {
-        let mut base = 0u32;
-        for bb in &self.f().blocks {
-            let n = bb.insts.len() as u32;
-            if a.0 < base + n {
-                return Some((bb.id, (a.0 - base) as usize));
-            }
-            base += n;
-        }
-        None
     }
 
     // ------------------------------------------------------------------------ OPT110
@@ -1336,19 +1427,15 @@ impl<'a, 'c> Rules<'a, 'c> {
         let lp = innermost_loop(f, at.0)?;
         let cmp = inst_at(f, at);
         let name = self.var(lst);
-        let hoist = self.for_stmt(lp).map(|(ls, _)| ls);
         let mut obs = self.base();
         obs.push(self.ck.exact_type(&name, &st, lst, &[List, Tuple]));
-        obs.push(self.ck.value_loop_invariant(&name, &st, lst, lp, hoist));
+        obs.push(
+            self.ck
+                .value_loop_invariant(&name, &st, lst, lp, self.hoist_region(lp)),
+        );
         obs.push(self.ck.zero_trip_safe(&name, &st, lst));
         obs.push(self.ck.hash_consistent_probe(&self.var(probe), &st, probe));
-        if !self.m.builtins.resolves("set") {
-            obs.push(self.ck.ob(
-                K::SideEffectFree,
-                "set",
-                blocked("`set` is rebound in this module"),
-            ));
-        }
+        obs.extend(self.set_not_builtin());
         let not_profitable = self
             .const_small(&st, lst)
             .then(|| format!("`{name}` is a small constant display"));
@@ -1378,21 +1465,14 @@ impl<'a, 'c> Rules<'a, 'c> {
         at: (BlockId, usize),
         call_at: (BlockId, usize),
         rebuilt: VarId,
+        callee: &str,
+        args: &[VarId],
     ) -> Option<OptCandidate> {
         let f = self.f();
         let st = self.state(at)?;
         let lp = innermost_loop(f, at.0)?;
         let cmp = inst_at(f, at);
         let call = inst_at(f, call_at);
-        let InstKind::Call {
-            callee,
-            args,
-            kwargs,
-            ..
-        } = &call.kind
-        else {
-            return None;
-        };
         let target = format!("{callee}(...)");
         let mut obs = self.base();
         obs.push(
@@ -1416,7 +1496,8 @@ impl<'a, 'c> Rules<'a, 'c> {
                     inside.insert(d);
                 }
                 let pre = self.state((bb.id, i));
-                if let Some(why) = pre.as_ref().and_then(|p| self.impure_step(p, inst)) {
+                let outer = (bb.id, i) == call_at;
+                if let Some(why) = pre.as_ref().and_then(|p| self.impure_step(p, inst, outer)) {
                     impure.get_or_insert(why);
                 }
                 free.extend(inst.kind.operands());
@@ -1430,25 +1511,33 @@ impl<'a, 'c> Rules<'a, 'c> {
             &target,
             match &impure {
                 Some(why) => blocked(why.clone()),
-                None if !kwargs.is_empty() => blocked("keyword arguments are not modelled"),
                 None => established("only builtin constructors and reads of loop-invariant values"),
             },
         ));
+        let region = self.hoist_region(lp);
         for &v in &free {
-            obs.push(self.ck.value_loop_invariant(
-                &self.var(v),
-                &st,
-                v,
-                lp,
-                self.for_stmt(lp).map(|(ls, _)| ls),
-            ));
+            obs.push(
+                self.ck
+                    .value_loop_invariant(&self.var(v), &st, v, lp, region),
+            );
         }
-        let raises = match (callee.as_str(), args.as_slice()) {
+        let raises = match (callee, args) {
             ("list" | "tuple", []) | ("set" | "frozenset" | "dict", []) => None,
-            ("list" | "tuple", [a]) if st.exact_type(*a).is_some() => None,
-            ("set" | "frozenset", [a])
-                if matches!(st.exact_type(*a), Some(Set | Dict | Str | Bytes)) =>
+            // Iterating a builtin container runs no user code (a number is not iterable).
+            ("list" | "tuple", [a])
+                if matches!(
+                    st.exact_type(*a),
+                    Some(List | Tuple | Set | Dict | Str | Bytes)
+                ) =>
             {
+                None
+            }
+            // Building a set or dict from a dict compares keys with equal hashes: a key's own
+            // `__eq__` would run (or raise) even when the loop runs zero times.
+            ("set" | "frozenset" | "dict", [a]) if st.exact_type(*a) == Some(Dict) => Some(
+                "its keys may run their own `__eq__` while the copy is built, even when the loop runs zero times",
+            ),
+            ("set" | "frozenset", [a]) if matches!(st.exact_type(*a), Some(Set | Str | Bytes)) => {
                 None
             }
             ("set" | "frozenset", [a]) => match self.cx().elems_of_bases(&st, &st.allocs_of(*a)) {
@@ -1457,7 +1546,6 @@ impl<'a, 'c> Rules<'a, 'c> {
                     "its elements may be unhashable: hoisting raises `TypeError` even when the loop runs zero times",
                 ),
             },
-            ("dict", [a]) if st.exact_type(*a) == Some(Dict) => None,
             _ => Some(
                 "the argument may not be a builtin container: hoisting could raise even when the loop runs zero times",
             ),
@@ -1470,22 +1558,21 @@ impl<'a, 'c> Rules<'a, 'c> {
                 None => established("the constructor cannot raise for these arguments"),
             },
         ));
-        let not_profitable = match args.as_slice() {
+        let not_profitable = match args {
             [a] if self.const_small(&st, *a) => {
                 Some("the argument is a small constant display".into())
             }
             [] => Some("the container is empty".into()),
             _ => None,
         };
-        let mut edits = Vec::new();
-        if let Some(text) = self.m.text(call.span) {
-            let base = match args.as_slice() {
+        let edits = self.m.text(call.span).map_or_else(Vec::new, |text| {
+            let base = match args {
                 [a] => format!("{}_{callee}", self.var(*a)),
                 _ => format!("hoisted_{callee}"),
             };
             let h = self.m.fresh_name(&base);
-            edits = self.hoist_edits(lp, &h, text, call.span);
-        }
+            self.hoist_edits(lp, &h, text, call.span)
+        });
         Some(self.candidate(
             OptRule::Opt130,
             cmp.span,
@@ -1498,17 +1585,10 @@ impl<'a, 'c> Rules<'a, 'c> {
         ))
     }
 
-    /// Why one instruction of a hoisted expression is not a pure builtin step.
-    fn impure_step(&self, st: &FrameState, inst: &Inst) -> Option<String> {
+    /// Why one instruction of a hoisted expression is not a pure builtin step (`outer`: it is
+    /// the rebuilding constructor call itself).
+    fn impure_step(&self, st: &FrameState, inst: &Inst, outer: bool) -> Option<String> {
         let cx = self.cx();
-        let pure_effects = |effects: &[SoundnessParamEffect]| {
-            effects.iter().all(|e| {
-                matches!(
-                    e,
-                    SoundnessParamEffect::ReadOnly | SoundnessParamEffect::RetainedInReturn
-                )
-            })
-        };
         match &inst.kind {
             InstKind::Const { .. } | InstKind::Copy { .. } => None,
             InstKind::LoadGlobal {
@@ -1516,18 +1596,26 @@ impl<'a, 'c> Rules<'a, 'c> {
                 is_lazy_import: false,
                 ..
             } if self.m.builtins.resolves(name) => None,
+            InstKind::Call { kwargs, .. } if outer && !kwargs.is_empty() => {
+                Some("keyword arguments are not modelled".into())
+            }
             InstKind::Call {
-                callee_var,
-                callee,
-                kwargs,
-                ..
-            } if kwargs.is_empty() => match cx
+                callee_var, callee, ..
+            } if outer => match cx
                 .builtin_callee(*callee_var, callee)
                 .and_then(|n| cx.kb.lookup(&format!("builtins.{n}")))
             {
-                Some(e) if pure_effects(&e.param_effects) => None,
+                Some(e) if e.param_effects.iter().all(reads_only) => None,
                 _ => Some(format!("`{callee}(...)` may have side effects")),
             },
+            // Even a builtin may raise for its argument (`int("x")`, `range(0.5)`) or run user
+            // code through it (`map(repr, objs)`), which hoisting would do although the loop
+            // runs zero times.
+            InstKind::Call { callee, .. } => Some(format!(
+                "`{callee}(...)` inside it may raise or run user code before the loop"
+            )),
+            // A list or set method that only reads its receiver; not a dict's (copying a dict
+            // may compare its keys, running their `__eq__`, like `dict(d)`).
             InstKind::MethodCall {
                 recv,
                 method,
@@ -1535,9 +1623,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                 ..
             } if kwargs.is_empty() => match st
                 .exact_type(*recv)
-                .and_then(|k| cx.kb.lookup(&format!("builtins.{}.{method}", kind_name(k))))
+                .filter(|k| *k != Dict)
+                .and_then(|k| cx.kb.lookup(&format!("builtins.{}.{method}", k.name())))
             {
-                Some(e) if pure_effects(&e.param_effects) => None,
+                Some(e) if e.param_effects.iter().all(reads_only) => None,
                 _ => Some(format!("`.{method}()` may have side effects")),
             },
             _ => Some(format!(
@@ -1565,26 +1654,20 @@ impl<'a, 'c> Rules<'a, 'c> {
         let cmp = inst_at(f, at);
         let app = inst_at(f, append);
         let name = self.var(seen);
-        let hoist = self.for_stmt(lp).map(|(ls, _)| ls);
+        let region = self.hoist_region(lp);
         let mut obs = self.base();
         obs.push(self.ck.exact_type(&name, &st, seen, &[List]));
         obs.push(self.ck.unique(&name, &st, seen));
-        let rebound = match self.cx().def(seen) {
-            Def::Phi(b) | Def::Inst(b, _) => lp.body.contains(&b),
-            _ => false,
-        };
+        let rebound = self.ck.rebinding(seen, lp, region);
         let allocs = st.allocs_of(seen);
         let other = self.ck.first_mutation_in(&allocs, |b, i| {
-            (b, i) != append
-                && (lp.body.contains(&b)
-                    || (Some(b) == lp.preheader
-                        && hoist.is_some_and(|h| f.block(b).insts[i].span.start >= h)))
+            (b, i) != append && self.ck.in_loop_or(lp, region, b, i)
         });
         obs.push(self.ck.ob(
             K::OnlyPairedAppends,
             &name,
-            if rebound {
-                disproved(format!("`{name}` is rebound inside the loop"))
+            if let Some(wh) = rebound {
+                disproved(format!("`{name}` is rebound {wh}"))
             } else if let Some((_, _, s)) = other {
                 disproved(format!(
                     "`{name}` is also changed at offset {}: the auxiliary set would go stale",
@@ -1605,13 +1688,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         obs.push(eaaw);
         obs.push(self.ck.zero_trip_safe(&name, &st, seen));
         obs.push(self.ck.hash_consistent_probe(&self.var(probe), &st, probe));
-        if !self.m.builtins.resolves("set") {
-            obs.push(self.ck.ob(
-                K::SideEffectFree,
-                "set",
-                blocked("`set` is rebound in this module"),
-            ));
-        }
+        obs.extend(self.set_not_builtin());
         let mut edits = Vec::new();
         let probe_name = f.var_name(probe).filter(|n| is_identifier(n));
         if let (Some(pn), Some(rspan)) = (probe_name, self.container_name_span(cmp.span, &name))
@@ -1738,11 +1815,12 @@ impl<'a, 'c> Rules<'a, 'c> {
                         kwargs,
                         ..
                     } if *recv == u && kwargs.is_empty() && !args.contains(&u) => {
+                        // `deque.pop()` takes no index: another `q.pop(0)` stays a `TypeError`
+                        // unless its own fix is applied, which overlaps this one's.
                         let ok = match (method.as_str(), args.as_slice()) {
                             ("append" | "extend" | "count" | "index" | "remove", [_, ..]) => true,
                             ("clear" | "reverse", []) => true,
                             ("pop", []) => true,
-                            ("pop", [c]) => f.const_int(*c) == Some(0),
                             ("insert", [c, _]) => f.const_int(*c) == Some(0),
                             _ => false,
                         };
@@ -1767,13 +1845,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                                 .enumerate()
                                 .filter(|(_, a)| **a == u)
                                 .all(|(k, _)| {
-                                    matches!(
-                                        e.param_effects.get(k).or(e.param_effects.last()),
-                                        Some(
-                                            SoundnessParamEffect::ReadOnly
-                                                | SoundnessParamEffect::RetainedInReturn
-                                        )
-                                    )
+                                    e.param_effects
+                                        .get(k)
+                                        .or(e.param_effects.last())
+                                        .is_some_and(reads_only)
                                 })
                                 && matches!(
                                     callee.as_str(),
@@ -1814,6 +1889,49 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
     }
 
+    /// A derived reference (a `for` loop's iterator, `iter(q)`, ...) of `allocs` that is still
+    /// live after one of their changes: a deque's iterators raise `RuntimeError` once it
+    /// changes, a list's keep going.
+    fn iterated_while_changed(&self, allocs: &[crate::AllocId]) -> Option<String> {
+        let f = self.f();
+        let mut changes: Vec<(BlockId, usize)> = self
+            .ck
+            .mutations
+            .iter()
+            .filter(|(_, m)| m.iter().any(|a| allocs.contains(a)))
+            .map(|(&at, _)| at)
+            .collect();
+        changes.sort_unstable();
+        changes.into_iter().find_map(|(b, i)| {
+            let st = self.state((b, i))?;
+            let live = self.ck.live.live_after(f, b, i);
+            let d = allocs.iter()
+                .flat_map(|a| st.derived_refs.get(a).into_iter().flatten())
+                .find(|d| live.contains(**d))?;
+            Some(format!(
+                "{} still iterates it when it changes at offset {} (a `deque` raises `RuntimeError` there)",
+                self.ck.name(*d),
+                f.block(b).insts[i].span.start
+            ))
+        })
+    }
+
+    /// `q` is a non-empty list at `at`: `at` is in the body of a `while q:` loop that tests this
+    /// very `q`, and nothing before `at` in that block changes it.
+    fn non_empty_at(&self, at: (BlockId, usize), q: VarId, allocs: &[crate::AllocId]) -> bool {
+        let f = self.f();
+        let tested = innermost_loop(f, at.0).is_some_and(|lp| {
+            matches!(&f.block(lp.header).terminator,
+                Terminator::Branch { cond, then_bb, .. } if *cond == q && *then_bb == at.0)
+        });
+        tested
+            && !self
+                .ck
+                .mutations
+                .iter()
+                .any(|(&(b, i), m)| b == at.0 && i < at.1 && m.iter().any(|a| allocs.contains(a)))
+    }
+
     fn front(
         &self,
         rule: OptRule,
@@ -1838,10 +1956,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let mut init_sites = Vec::new();
         let mut bad_alloc = None;
         for a in &allocs {
-            let Some(loc) = self.alloc_location(*a) else {
-                bad_alloc = Some("its allocation is not tracked".to_owned());
-                continue;
-            };
+            let loc = self.cx().site_location(*a);
             let ai = inst_at(f, loc);
             let rewritten_slice = matches!(form, Some(FrontForm::SliceRebind { .. })) && loc == at;
             let init = !lp.body.contains(&loc.0)
@@ -1879,6 +1994,17 @@ impl<'a, 'c> Rules<'a, 'c> {
                 }
             }
         }
+        if bad_use.is_none() {
+            bad_use = self.iterated_while_changed(&allocs);
+        }
+        if bad_use.is_none()
+            && matches!(form, Some(FrontForm::SliceRebind { .. }))
+            && !self.non_empty_at(at, q, &allocs)
+        {
+            bad_use = Some(format!(
+                "`{name}[1:]` of an empty list is `[]`, but `{name}.popleft()` raises `IndexError`: only `while {name}:` right before it proves `{name}` non-empty"
+            ));
+        }
         obs.push(self.ck.ob(
             K::DequeEquivalentOps,
             &name,
@@ -1890,7 +2016,6 @@ impl<'a, 'c> Rules<'a, 'c> {
                 None => established("every use has a `collections.deque` equivalent"),
             },
         ));
-        let mut extra = None;
         if let Some(FrontForm::SliceRebind { .. }) = form {
             let dst = inst.kind.dst()?;
             obs.push(self.ck.exclusive_access(&name, &st, q, at, &[dst], true));
@@ -1898,9 +2023,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                 self.ck
                     .exception_state_safe(&name, &st, q, at.0, &name, &[dst]),
             );
-            extra = Some(dst);
         }
-        let _ = extra;
         let edits = self
             .front_edits(at, &name, form, &init_sites)
             .unwrap_or_default();
@@ -1952,13 +2075,14 @@ impl<'a, 'c> Rules<'a, 'c> {
     ) -> Option<Vec<TextEdit>> {
         let f = self.f();
         let deque = self.m.deque.as_ref()?;
-        if !self.m.builtins.resolves("list")
-            && init_sites
-                .iter()
-                .any(|s| matches!(inst_at(f, *s).kind, InstKind::Call { .. }))
+        // The spelling must reach the module's import from inside this function.
+        if self
+            .m
+            .binds_locally(f, deque.spelling.split('.').next().unwrap_or_default())
         {
             return None;
         }
+        // A `list(...)` call is an init site only when `list` is the real builtin (`front`).
         let inst = inst_at(f, at);
         let mut edits = Vec::new();
         if let Some(pos) = deque.import_at {

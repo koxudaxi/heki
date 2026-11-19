@@ -62,10 +62,8 @@ pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&ProfileData>) 
                 "profile: `{}` is on the stack in {pct:.1}% of samples",
                 d.qualname
             );
-            d.evidence = Some(match d.evidence.take() {
-                Some(e) => format!("{e}; {note}"),
-                None => note,
-            });
+            let parts: Vec<String> = d.evidence.take().into_iter().chain([note]).collect();
+            d.evidence = Some(parts.join("; "));
         }
     }
 }
@@ -231,10 +229,13 @@ pub(crate) fn report(
         .iter()
         .map(|p| (p.path.as_path(), p))
         .collect();
+    // Every diagnostic is emitted for one of the project's files (`CheckContext::emit` takes
+    // the path of the unit it reports on), so its key path is that file's relative path.
     let key_path = |p: &Path| {
         by_path
             .get(p)
-            .map_or_else(|| p.to_string_lossy().replace('\\', "/"), |f| f.rel.clone())
+            .map(|f| f.rel.clone())
+            .expect("diagnostics are emitted for the project's files")
     };
     let baseline_path = args
         .baseline

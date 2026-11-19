@@ -21,25 +21,21 @@ pub(crate) fn line_end(source: &str, pos: u32) -> u32 {
 }
 
 /// A simple statement can start at `start`: only indentation, a `;`, or a one-line compound
-/// header ending in `:` precede it on its line.
+/// header ending in `:` precede it on its line. (Not a character boundary: `false`.)
 pub(crate) fn starts_statement(source: &str, start: u32) -> bool {
-    let ls = line_start(source, start);
-    let Some(before) = slice(source, ls, start) else {
-        return false;
-    };
-    let t = before.trim_end();
-    t.is_empty() || t.ends_with(';') || t.ends_with(':')
+    slice(source, line_start(source, start), start).is_some_and(|before| {
+        let t = before.trim_end();
+        t.is_empty() || t.ends_with(';') || t.ends_with(':')
+    })
 }
 
 /// A simple statement ends at `end`: only whitespace, then the end of the line, a `;`, or a
-/// comment follow it.
+/// comment follow it. (Not a character boundary: `false`.)
 pub(crate) fn ends_statement(source: &str, end: u32) -> bool {
-    let le = line_end(source, end);
-    let Some(after) = slice(source, end, le) else {
-        return false;
-    };
-    let t = after.trim_start();
-    t.is_empty() || t.starts_with('#') || t.starts_with(';')
+    slice(source, end, line_end(source, end)).is_some_and(|after| {
+        let t = after.trim_start();
+        t.is_empty() || t.starts_with('#') || t.starts_with(';')
+    })
 }
 
 pub(crate) fn is_identifier(s: &str) -> bool {

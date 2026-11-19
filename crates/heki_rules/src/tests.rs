@@ -815,3 +815,121 @@ fn per_file_ignores_and_severity() {
     assert_eq!(diags[0].severity, Severity::Warning);
     assert_eq!((diags[0].line, diags[0].column), (4, 5));
 }
+
+// ============================================================================ stale indexes
+
+fn unit_of(b: &Built) -> ModuleUnit<'_> {
+    ModuleUnit {
+        input: ModuleInput {
+            path: PathBuf::from(&b.rel),
+            module_name: b.module_name.clone(),
+            is_package: b.is_package,
+            content_hash: String::new(),
+            semantic: &b.semantic,
+            ir: &b.ir,
+        },
+        source: &b.src,
+        rel_path: b.rel.clone(),
+        lines: LineIndex::from_source(&b.src),
+    }
+}
+
+/// Check `checked` against an index of `indexed` while resolving names with the
+/// declarations of `checked` itself: the LSP engine's situation when its index does not have
+/// a document in this form yet (declarations are kept up to date separately). Every
+/// summary the rules miss must be skipped, never assumed.
+fn check_against(checked: &[Built], indexed: &[Built], select: &[&str]) -> Vec<Diagnostic> {
+    let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+    let units: Vec<ModuleUnit<'_>> = checked.iter().map(unit_of).collect();
+    let index = analyze_project(
+        &indexed.iter().map(|b| unit_of(b).input).collect::<Vec<_>>(),
+        &kb,
+    );
+    let decls = analyze_project(
+        &units.iter().map(|u| unit_of_input(u)).collect::<Vec<_>>(),
+        &kb,
+    )
+    .project_decls();
+    let select: Vec<String> = select.iter().map(|s| (*s).to_owned()).collect();
+    let config = HekiConfig::default();
+    let selection = RuleSelection::resolve(&config.lint, &select, &[], &[]).unwrap();
+    let soundness_kb = EffectiveSoundnessKb::load_builtin(PythonVersion::PY315).unwrap();
+    let extras = CheckExtras {
+        soundness_kb: &soundness_kb,
+        snapshot: None,
+        decls: Some(&decls),
+    };
+    check_project(&units, &config, &kb, &index, &selection, &extras).unwrap()
+}
+
+fn unit_of_input<'a>(u: &ModuleUnit<'a>) -> ModuleInput<'a> {
+    ModuleInput {
+        path: u.input.path.clone(),
+        module_name: u.input.module_name.clone(),
+        is_package: u.input.is_package,
+        content_hash: String::new(),
+        semantic: u.input.semantic,
+        ir: u.input.ir,
+    }
+}
+
+#[test]
+fn mut101_skips_methods_a_stale_index_does_not_summarize() {
+    let edited = "from functools import cached_property\n\nclass C:\n    @cached_property\n    def total(self):\n        return len(self.items)\n\n    def add(self, x):\n        self.items.append(x)\n\n    def extend(self, xs):\n        self.items.extend(xs)\n\n    def drop(self):\n        self.items.clear()\n";
+    // The index knows `C.total` from the old `app.py` and `C.add` only from a stub of the
+    // same module; `C.extend` and `C.drop` are new.
+    let old = "from functools import cached_property\n\nclass C:\n    @cached_property\n    def total(self):\n        return len(self.items)\n";
+    let stub = "class C:\n    def add(self, x): ...\n";
+    let diags = check_against(
+        &[build("app.py", edited)],
+        &[build("app.py", old), build("app.pyi", stub)],
+        &["MUT101"],
+    );
+    assert!(diags.is_empty(), "{diags:#?}");
+    // Once indexed, the same check reports all three writes.
+    let diags = check_against(
+        &[build("app.py", edited)],
+        &[build("app.py", edited)],
+        &["MUT101"],
+    );
+    assert_eq!(
+        diags.iter().map(|d| d.line).collect::<Vec<_>>(),
+        vec![9, 12, 15]
+    );
+}
+
+#[test]
+fn mut202_skips_callees_a_stale_index_does_not_summarize() {
+    let edited = "from functools import lru_cache\n\n@lru_cache\ndef load():\n    return []\n\ndef mutate(items):\n    items.append(1)\n\ndef use():\n    mutate(load())\n";
+    let old = "from functools import lru_cache\n\n@lru_cache\ndef load():\n    return []\n";
+    let diags = check_against(
+        &[build("app.py", edited)],
+        &[build("app.py", old)],
+        &["MUT202"],
+    );
+    assert!(diags.is_empty(), "{diags:#?}");
+    let diags = check_against(
+        &[build("app.py", edited)],
+        &[build("app.py", edited)],
+        &["MUT202"],
+    );
+    assert_eq!(codes(&diags), vec!["MUT202"]);
+}
+
+#[test]
+fn data101_skips_loop_facts_without_their_loop() {
+    // `loop_carried` entries name loops of the same function; one without its loop (an IR
+    // inconsistency) is skipped instead of being matched against another loop.
+    let src = "import pandas as pd\n\ndef bad(chunks):\n    df = pd.DataFrame()\n    for c in chunks:\n        df = pd.concat([df, c])\n    return df\n";
+    let mut b = build("app.py", src);
+    let checked = [build("app.py", src)];
+    assert_eq!(
+        codes(&check_against(&checked, &checked, &["DATA101"])),
+        vec!["DATA101"]
+    );
+    for f in &mut b.ir.functions {
+        f.loops.clear();
+    }
+    let indexed = [build("app.py", src)];
+    assert!(check_against(&[b], &indexed, &["DATA101"]).is_empty());
+}

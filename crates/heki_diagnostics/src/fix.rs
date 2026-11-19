@@ -178,27 +178,14 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> String {
                 }
             }
         }
-        let a_pos = |len: usize, s: Option<usize>, fallback: usize| {
-            if len == 0 {
-                fallback
-            } else {
-                s.unwrap_or(0) + 1
-            }
-        };
-        // A side with no lines is reported at the line before the hunk.
-        let before_a = hunk.iter().find_map(|o| match o {
-            Op::Equal(x, _) | Op::Delete(x) => Some(*x),
-            Op::Insert(_) => None,
-        });
-        let before_b = hunk.iter().find_map(|o| match o {
-            Op::Equal(_, y) | Op::Insert(y) => Some(*y),
-            Op::Delete(_) => None,
-        });
+        // 1-based start lines. Hunks carry their context lines, so a side without lines in a
+        // hunk is an empty file, reported at line 0.
+        let start = |s: Option<usize>| s.map_or(0, |s| s + 1);
         let _ = writeln!(
             out,
             "@@ -{},{a_len} +{},{b_len} @@",
-            a_pos(a_len, a_start, before_a.unwrap_or(0)),
-            a_pos(b_len, b_start, before_b.unwrap_or(0)),
+            start(a_start),
+            start(b_start),
         );
         for op in hunk {
             match *op {

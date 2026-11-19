@@ -50,21 +50,16 @@ pub enum ProjectError {
     Kb(#[from] KbError),
     #[error("unknown target version `{0}` (expected py311..py315)")]
     TargetVersion(String),
-    #[error("invalid {what} glob `{pattern}`: {source}")]
+    #[error("invalid {what} glob `{pattern}`: {cause}")]
     Glob {
         pattern: String,
         what: &'static str,
-        #[source]
-        source: globset::Error,
+        cause: globset::Error,
     },
     #[error("path `{0}` does not exist")]
     MissingPath(PathBuf),
-    #[error("failed to walk `{path}`: {source}")]
-    Walk {
-        path: PathBuf,
-        #[source]
-        source: ignore::Error,
-    },
+    #[error("failed to walk `{path}`: {cause}")]
+    Walk { path: PathBuf, cause: ignore::Error },
 }
 
 /// One parsed module (IR included: callers drop it once summarized when it must not stay
@@ -104,9 +99,15 @@ impl ParsedFile {
     }
 }
 
+/// The canonical form of `path`, or `path` itself when it cannot be resolved (it does not exist,
+/// e.g. an unsaved document, or no longer exists).
+fn canonical_or_given(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Project-relative POSIX path (falls back to the display path outside the root).
 pub fn rel_posix(path: &Path, root: &Path) -> String {
-    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let abs = canonical_or_given(path);
     let rel = abs.strip_prefix(root).unwrap_or(path);
     rel.components()
         .filter_map(|c| match c {
@@ -126,7 +127,7 @@ pub fn display_path(path: &Path) -> PathBuf {
 
 /// Nearest ancestor of `start` holding a root marker (`heki.toml`, `pyproject.toml`, `.git`).
 pub fn find_root(start: &Path) -> PathBuf {
-    let start = std::fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+    let start = canonical_or_given(start);
     let dir = if start.is_dir() {
         start.clone()
     } else {
@@ -143,17 +144,17 @@ fn glob_set(patterns: &[String], what: &'static str) -> Result<GlobSet, ProjectE
     for p in patterns {
         // `generated` also excludes everything below it.
         for pat in [p.clone(), format!("{p}/**")] {
-            b.add(Glob::new(&pat).map_err(|source| ProjectError::Glob {
+            b.add(Glob::new(&pat).map_err(|cause| ProjectError::Glob {
                 pattern: p.clone(),
                 what,
-                source,
+                cause,
             })?);
         }
     }
-    b.build().map_err(|source| ProjectError::Glob {
+    b.build().map_err(|cause| ProjectError::Glob {
         pattern: patterns.join(", "),
         what,
-        source,
+        cause,
     })
 }
 
@@ -190,9 +191,9 @@ pub fn collect_files(
         let mut builder = ignore::WalkBuilder::new(p);
         builder.add_custom_ignore_filename(".hekiignore");
         for entry in builder.build() {
-            let entry = entry.map_err(|source| ProjectError::Walk {
+            let entry = entry.map_err(|cause| ProjectError::Walk {
                 path: p.clone(),
-                source,
+                cause,
             })?;
             let ep = entry.path();
             if ep.is_file()
@@ -204,7 +205,7 @@ pub fn collect_files(
         }
     }
     let mut seen = FxHashSet::default();
-    files.retain(|f| seen.insert(std::fs::canonicalize(f).unwrap_or_else(|_| f.clone())));
+    files.retain(|f| seen.insert(canonical_or_given(f)));
     files.sort();
     Ok(files)
 }

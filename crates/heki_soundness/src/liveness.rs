@@ -47,7 +47,6 @@ impl VarSet {
 }
 
 pub(crate) struct Liveness {
-    nvars: usize,
     live_out: Vec<VarSet>,
 }
 
@@ -114,17 +113,14 @@ impl Liveness {
                 break;
             }
         }
-        Self { nvars, live_out }
+        Self { live_out }
     }
 
     /// Variables live immediately after instruction `idx` of block `b`.
     pub fn live_after(&self, f: &IrFunction, b: BlockId, idx: usize) -> VarSet {
         let bb = f.block(b);
-        let mut live = self
-            .live_out
-            .get(b.0 as usize)
-            .cloned()
-            .unwrap_or_else(|| VarSet::new(self.nvars));
+        // `live_out` has one set per block of `f` (`f.block(b)` above already checked `b`).
+        let mut live = self.live_out[b.0 as usize].clone();
         if let Some(v) = term_use(&bb.terminator) {
             live.insert(v);
         }

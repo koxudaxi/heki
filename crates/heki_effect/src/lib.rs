@@ -255,6 +255,16 @@ pub struct CallSite {
     pub drives_coroutine_manually: bool,
 }
 
+impl CallSite {
+    /// The resolved project callees (none for a Layer 2 API).
+    pub fn project_callees(&self) -> &[BoundCallee] {
+        match &self.target {
+            CallTarget::Project(callees) => callees,
+            CallTarget::Layer2 { .. } => &[],
+        }
+    }
+}
+
 /// Lightweight per-file summary retained in `ProjectIndex` (IR bodies are dropped).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileSummary {
@@ -363,12 +373,12 @@ impl ProjectIndex {
             }
             CallTarget::Project(callees) => {
                 for bc in callees {
-                    let Some(callee) = self.summary(&bc.callee) else {
+                    let Some(callee) = self
+                        .summary(&bc.callee)
+                        .filter(|callee| callgraph::runs_at_call(callee, site))
+                    else {
                         continue;
                     };
-                    if !callgraph::runs_at_call(callee, site) {
-                        continue;
-                    }
                     let effects: BTreeSet<ExecEffectKind> = callee
                         .direct_exec_effects
                         .iter()
@@ -536,17 +546,11 @@ impl ProjectIndex {
     }
 
     /// Drop a deleted file: its functions disappear and their callers are re-propagated (the
-    /// update of an empty module, so Early Cutoff and `affected_callers` work as for edits).
+    /// update of an empty module, so Early Cutoff and `affected_callers` work as for edits;
+    /// an unknown path changes nothing).
     pub fn remove_file(&mut self, path: &Path) -> IncrementalUpdate {
-        let Some(old) = self.files.get(path) else {
-            return IncrementalUpdate {
-                summary_changed: false,
-                affected_callers: Vec::new(),
-            };
-        };
         let empty = FileSummary {
             path: path.to_path_buf(),
-            module_name: old.module_name.clone(),
             ..FileSummary::default()
         };
         let update = self.update_file(empty);

@@ -5,7 +5,7 @@ use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     BoundaryReport, CallHop, EffectSummary, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect,
-    boundary_reports, boundary_reports_in, group_by_root_cause,
+    boundary_reports_in, group_by_root_cause,
 };
 use heki_ir::{InstKind, LoopBound};
 use heki_kb::ExecEffectKind;
@@ -13,6 +13,8 @@ use heki_kb::ExecEffectKind;
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
 const DDL_PREFIXES: &[&str] = &["CREATE", "ALTER", "DROP", "PRAGMA"];
+/// `boundary_reports_in` only reports call sites of the files it is given.
+const REPORTS_OF_UNITS: &str = "boundary reports come from the checked files";
 
 fn has_decorator(s: &EffectSummary, name: &str) -> bool {
     s.decorators.iter().any(|d| {
@@ -40,22 +42,21 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     let relax_tests = cx.config.lint.relax_async_in_tests.unwrap_or(true);
     let mut eff101: Vec<BoundaryReport> = Vec::new();
     let mut eff105: Vec<BoundaryReport> = Vec::new();
-    // A check of some files (the LSP engine) only needs their own boundaries.
-    let reports = if cx.units.len() < cx.index.files.len() {
-        boundary_reports_in(cx.index, cx.units.iter().map(|u| u.input.path.as_path()))
-    } else {
-        boundary_reports(cx.index)
-    };
+    // The boundaries of the checked files: all of them for `heki check`, the edited one for
+    // the LSP engine.
+    let reports = boundary_reports_in(cx.index, cx.units.iter().map(|u| u.input.path.as_path()));
     for r in reports {
         let code = if r.effect == ExecEffectKind::BlockingFs {
             "EFF105"
         } else {
             "EFF101"
         };
-        let (Some(unit), Some(s)) = (cx.unit(&r.path), cx.index.summary(&r.function)) else {
-            continue;
-        };
-        if !cx.enabled(code, unit) || relaxed(s, &r.function, unit, relax_tests) {
+        let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
+        let relaxed_here = cx
+            .index
+            .summary(&r.function)
+            .is_some_and(|s| relaxed(s, &r.function, unit, relax_tests));
+        if !cx.enabled(code, unit) || relaxed_here {
             continue;
         }
         if code == "EFF105" {
@@ -67,9 +68,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     for (code, reports) in [("EFF101", eff101), ("EFF105", eff105)] {
         for g in group_by_root_cause(&reports, ROOT_CAUSE_GROUP_THRESHOLD) {
             let r = &g.representative;
-            let Some(unit) = cx.unit(&r.path) else {
-                continue;
-            };
+            let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
             let first = r
                 .chain
                 .first()
@@ -185,11 +184,14 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                             chain,
                         );
                 }
+                // Compared as bytes: the prefixes are ASCII, and slicing the constant could
+                // split a multi-byte character.
                 let ddl = args.first().and_then(|a| f.const_str(*a)).is_some_and(|q| {
-                    let q = q.trim_start();
-                    DDL_PREFIXES
-                        .iter()
-                        .any(|p| q.len() >= p.len() && q[..p.len()].eq_ignore_ascii_case(p))
+                    let q = q.trim_start().as_bytes();
+                    DDL_PREFIXES.iter().any(|p| {
+                        q.get(..p.len())
+                            .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
+                    })
                 });
                 if want103
                     && !migration_fn

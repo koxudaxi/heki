@@ -399,14 +399,12 @@ impl<'a> Extractor<'a> {
             } => {
                 let target = match callee_var {
                     Some(v) => self.cx.resolve_call(self.types.get(v)),
-                    // Non-inlined comprehension (Python 3.11) runs immediately.
-                    None => match callee
+                    // Non-inlined comprehension (Python 3.11, `__comp_<function id>`) runs
+                    // immediately.
+                    None => callee
                         .strip_prefix("__comp_")
                         .and_then(|n| n.parse::<u32>().ok())
-                    {
-                        Some(id) => self.child_callee(FunctionId(id)),
-                        None => Callee::Unresolved,
-                    },
+                        .map_or(Callee::Unresolved, |id| self.child_callee(FunctionId(id))),
                 };
                 self.call(
                     bb,
@@ -591,14 +589,11 @@ impl<'a> Extractor<'a> {
     }
 
     /// `drives_coroutine_manually`: the call result is `.send(...)`-driven or handed to a
-    /// `run_sync`-style driver.
+    /// `run_sync`-style driver. Copies of an SSA variable form a tree (every variable has one
+    /// definition), so the walk visits each copy once.
     fn drives_manually(&self, dst: VarId) -> bool {
         let mut vars = vec![dst];
-        let mut seen = FxHashSet::default();
         while let Some(v) = vars.pop() {
-            if !seen.insert(v) {
-                continue;
-            }
             for u in self.uses.get(&v).into_iter().flatten() {
                 match u {
                     InstKind::Copy { dst, .. } => vars.push(*dst),

@@ -4,7 +4,7 @@ use crate::eff_rules::shortest;
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
 use heki_effect::SiteEffect;
-use heki_ir::{BlockId, Inst, InstKind, VarId};
+use heki_ir::{BlockId, Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -27,10 +27,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 defs.insert(d, inst);
             }
         }
-        for lc in f.loop_carried.iter().filter(|lc| lc.self_accumulating) {
-            let Some(lp) = f.loops.iter().find(|l| l.header == lc.loop_header) else {
-                continue;
-            };
+        for (lc, lp) in accumulating_loops(f) {
             let in_loop: FxHashSet<BlockId> = lp.body.iter().copied().chain([lp.header]).collect();
             let phis: FxHashMap<VarId, Vec<VarId>> = f
                 .blocks
@@ -74,7 +71,12 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             let Some((span, chain)) = hit else {
                 continue;
             };
-            let var = lc.var_name.clone().unwrap_or_else(|| "<value>".into());
+            // Loop-carried values are header phis, which the IR builder only creates for
+            // named locals (`read_local_recursive`).
+            let var = lc
+                .var_name
+                .clone()
+                .expect("loop-carried values are named locals");
             let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
             cx.emit(
                 out,
@@ -90,4 +92,18 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             );
         }
     }
+}
+
+/// Self-accumulating loop-carried values of `f` with their natural loop. `loop_carried`
+/// entries name loops of the same function; one without its loop (an IR inconsistency) is
+/// skipped instead of being matched against another loop.
+fn accumulating_loops(f: &IrFunction) -> Vec<(&LoopCarriedInfo, &NaturalLoop)> {
+    let mut out = Vec::new();
+    for lc in f.loop_carried.iter().filter(|lc| lc.self_accumulating) {
+        let Some(lp) = f.loops.iter().find(|l| l.header == lc.loop_header) else {
+            continue;
+        };
+        out.push((lc, lp));
+    }
+    out
 }

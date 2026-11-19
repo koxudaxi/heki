@@ -944,7 +944,10 @@ fn module_names_and_relative_imports() {
         Some(("src.pkg.mod".into(), false))
     );
     assert_eq!(name("pkg/data.txt", false), None);
+    // `heki_rules::project::rel_posix` keeps normal components only; others are refused.
     assert_eq!(name("../escape.py", false), None);
+    // A root `__init__.py` names no module.
+    assert_eq!(name("__init__.py", false), None);
 
     let rel = resolve_relative_module;
     assert_eq!(rel("pkg.a", false, 1, Some("sub")), Some("pkg.sub".into()));
@@ -1013,4 +1016,119 @@ fn annotation_normalization() {
     assert_eq!(r("Repo").as_deref(), Some("pkg.repo.Repo"));
     assert_eq!(r("Client | int"), None);
     assert_eq!(r("Unknown"), None);
+}
+
+// =================================================================== limits and invariant guards
+
+/// A cycle of `n` methods, each writing its own `self` attribute and calling the next.
+fn method_cycle(n: usize) -> String {
+    let mut src = String::from("class C:\n");
+    for i in 0..n {
+        src.push_str(&format!(
+            "    def m{i}(self):\n        self.a{i} = 1\n        self.m{}()\n\n",
+            (i + 1) % n
+        ));
+    }
+    src
+}
+
+#[test]
+fn non_converged_sccs_are_marked_unknown() {
+    // A small cycle converges: every method sees every attribute.
+    let index = project(&[("small.py", &method_cycle(4))]);
+    for i in 0..4 {
+        let s = summary(&index, "small", &format!("C.m{i}"));
+        assert!(!s.unknown_calls);
+        assert_eq!(s.mutates_self_attrs.len(), 4);
+    }
+    // A long one exceeds `MAX_ITERATIONS_PER_SCC_MEMBER` recomputations per member: the
+    // propagation stops and every member is marked as not fully known.
+    let index = project(&[("big.py", &method_cycle(24))]);
+    for i in 0..24 {
+        assert!(
+            summary(&index, "big", &format!("C.m{i}")).unknown_calls,
+            "C.m{i}"
+        );
+    }
+}
+
+#[test]
+fn callers_left_without_a_defining_file_are_skipped() {
+    // Two files of one module (`b.py` and its stub `b.pyi`) both define `b.caller`; the
+    // stub wins `func_files`. When the stub drops `caller`, the call edges of `b.py` still
+    // name it as a caller of `a.helper` although no file defines it any more.
+    let helper = key("a", "helper");
+    let caller = key("b", "caller");
+    let span = Span { start: 0, end: 1 };
+    let file = |path: &str, module: &str, funcs: &[&FuncKey]| {
+        let mut f = FileSummary {
+            path: PathBuf::from(path),
+            module_name: module.into(),
+            ..Default::default()
+        };
+        for k in funcs {
+            f.local_functions
+                .insert((*k).clone(), EffectSummary::default());
+        }
+        f
+    };
+    let file_a = file("a.py", "a", &[&helper]);
+    let mut file_b = file("b.py", "b", &[&caller]);
+    file_b
+        .call_edges
+        .push((caller.clone(), helper.clone(), span));
+    file_b.call_sites.push(CallSite {
+        caller: caller.clone(),
+        target: CallTarget::Project(vec![BoundCallee {
+            callee: helper.clone(),
+            params: Vec::new(),
+        }]),
+        is_awaited: false,
+        span,
+        loop_depth: 0,
+        recv_is_self: false,
+        drives_coroutine_manually: false,
+    });
+    let stub = file("b.pyi", "b", &[&caller]);
+    let mut index = ProjectIndex::build(vec![file_a.clone(), file_b, stub]);
+    assert_eq!(index.file_of(&caller), Some(Path::new("b.pyi")));
+    index.update_file(file("b.pyi", "b", &[]));
+    assert_eq!(index.file_of(&caller), None);
+
+    // `helper` starts blocking: the stale caller is reported as affected, but propagation
+    // and the `sync_driven_only` pass skip it (it has no summary to update).
+    let mut blocking = file_a;
+    let mut s = EffectSummary::default();
+    s.direct_exec_effects.insert(BlockingNet);
+    blocking.local_functions.insert(helper.clone(), s);
+    let res = index.update_file(blocking);
+    assert!(res.summary_changed);
+    assert_eq!(res.affected_callers, vec![caller.clone()]);
+    assert!(index.summary(&caller).is_none());
+    assert!(
+        index
+            .summary(&helper)
+            .unwrap()
+            .direct_exec_effects
+            .contains(&BlockingNet)
+    );
+}
+
+#[test]
+fn classes_missing_from_the_semantic_model_keep_their_methods_summarized() {
+    // The semantic model and the IR come from one AST, so every IR class body has a
+    // semantic class. Without one, the class gets no declaration (no attribute types), but
+    // its methods are still summarized.
+    let mut b = build(
+        "m.py",
+        "import time\n\n\nclass Late:\n    field: int\n\n    def __init__(self):\n        self.x = 1\n\n    def run(self):\n        time.sleep(1)\n",
+    );
+    b.semantic.classes.clear();
+    let index = analyze_project(&[input(&b)], &kb());
+    assert!(index.files[Path::new("m.py")].decls.classes.is_empty());
+    assert!(
+        summary(&index, "m", "Late.run")
+            .direct_exec_effects
+            .contains(&Sleep)
+    );
 }

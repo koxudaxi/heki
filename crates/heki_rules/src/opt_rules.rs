@@ -21,10 +21,12 @@ fn fix_note(c: &OptCandidate) -> String {
             " [proven-safe suggestion: `heki check --fix --include-size-dependent`]".into()
         }
         (SafetyTier::Safe, false, _) => " [proven safe; rewrite it by hand]".into(),
-        _ => match c.verdict.blocker() {
-            Some(b) => format!(" [not auto-fixable: {}]", b.describe()),
-            None => String::new(),
-        },
+        // Reported candidates that are not safe are `Blocked`, which names its obligation.
+        _ => c
+            .verdict
+            .blocker()
+            .map(|b| format!(" [not auto-fixable: {}]", b.describe()))
+            .unwrap_or_default(),
     }
 }
 
@@ -41,12 +43,11 @@ pub(crate) fn opt(
         return;
     }
     for c in analyze_module(unit.input.ir, unit.source, cx.soundness, opts) {
-        if !c.is_reportable() || !cx.enabled(c.rule.code(), unit) {
+        if !c.is_reportable() {
             continue;
         }
         let message = format!("{}{}", c.message, fix_note(&c));
-        let before = out.len();
-        cx.emit(
+        let Some(d) = cx.emit(
             out,
             c.rule.code(),
             unit,
@@ -55,22 +56,23 @@ pub(crate) fn opt(
             c.target.clone(),
             message,
             &[],
-        );
-        if let Some(d) = out.get_mut(before) {
-            d.evidence = c.cost_evidence.clone().map(|cost| match c.verdict.tier {
-                SafetyTier::Safe => format!("{cost}; established: {}", c.verdict.evidence()),
-                _ => cost,
-            });
-            d.blocker = c.verdict.blocker().map(|b| b.describe());
-            d.fix = c.fix().map(|edits| {
-                edits
-                    .iter()
-                    .map(|e| TextEdit {
-                        span: e.span,
-                        replacement: e.replacement.clone(),
-                    })
-                    .collect()
-            });
-        }
+        ) else {
+            // This `OPT` rule is not selected for the file.
+            continue;
+        };
+        d.evidence = c.cost_evidence.clone().map(|cost| match c.verdict.tier {
+            SafetyTier::Safe => format!("{cost}; established: {}", c.verdict.evidence()),
+            _ => cost,
+        });
+        d.blocker = c.verdict.blocker().map(|b| b.describe());
+        d.fix = c.fix().map(|edits| {
+            edits
+                .iter()
+                .map(|e| TextEdit {
+                    span: e.span,
+                    replacement: e.replacement.clone(),
+                })
+                .collect()
+        });
     }
 }

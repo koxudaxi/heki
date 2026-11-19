@@ -43,23 +43,20 @@ pub struct SummarySnapshot {
 
 #[derive(Debug, Error)]
 pub enum SnapshotError {
-    #[error("failed to read summary snapshot `{path}`: {source}")]
+    #[error("failed to read summary snapshot `{path}`: {cause}")]
     Read {
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        cause: std::io::Error,
     },
-    #[error("failed to write summary snapshot `{path}`: {source}")]
+    #[error("failed to write summary snapshot `{path}`: {cause}")]
     Write {
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        cause: std::io::Error,
     },
-    #[error("invalid summary snapshot `{path}`: {source}")]
+    #[error("invalid summary snapshot `{path}`: {cause}")]
     Parse {
         path: PathBuf,
-        #[source]
-        source: serde_json::Error,
+        cause: serde_json::Error,
     },
     #[error(
         "summary snapshot `{path}` has version {found}; this heki writes version {SNAPSHOT_VERSION} (run `heki snapshot --write`)"
@@ -118,17 +115,33 @@ fn key_of(unit: &ModuleUnit<'_>, f: &IrFunction) -> String {
     format!("{}:{}", unit.input.module_name, func_qualname(f))
 }
 
+/// The public functions of `unit` by snapshot key with their summary key. A name defined more
+/// than once (`if sys.version_info ...: def f(a, b) else: def f(a)`) has one merged summary;
+/// its last definition names the parameters, both when the snapshot is written and when it is
+/// compared, so the two sides always agree.
+fn public_functions<'u>(unit: &'u ModuleUnit<'_>) -> BTreeMap<String, (FuncKey, &'u IrFunction)> {
+    unit.input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| is_public(f))
+        .map(|f| {
+            let key = FuncKey {
+                module: unit.input.module_name.clone(),
+                qualname: func_qualname(f).to_owned(),
+            };
+            (key_of(unit, f), (key, f))
+        })
+        .collect()
+}
+
 impl SummarySnapshot {
     pub fn build(units: &[ModuleUnit<'_>], index: &ProjectIndex) -> Self {
         let mut functions = BTreeMap::new();
         for unit in units {
-            for f in unit.input.ir.functions.iter().filter(|f| is_public(f)) {
-                let key = FuncKey {
-                    module: unit.input.module_name.clone(),
-                    qualname: func_qualname(f).to_owned(),
-                };
+            for (name, (key, f)) in public_functions(unit) {
                 if let Some(s) = index.summary(&key) {
-                    functions.insert(key_of(unit, f), entry(s, f));
+                    functions.insert(name, entry(s, f));
                 }
             }
         }
@@ -145,13 +158,13 @@ impl SummarySnapshot {
     }
 
     pub fn load(path: &Path) -> Result<Self, SnapshotError> {
-        let text = std::fs::read_to_string(path).map_err(|source| SnapshotError::Read {
+        let text = std::fs::read_to_string(path).map_err(|cause| SnapshotError::Read {
             path: path.to_path_buf(),
-            source,
+            cause,
         })?;
-        let snap: Self = serde_json::from_str(&text).map_err(|source| SnapshotError::Parse {
+        let snap: Self = serde_json::from_str(&text).map_err(|cause| SnapshotError::Parse {
             path: path.to_path_buf(),
-            source,
+            cause,
         })?;
         if snap.version != SNAPSHOT_VERSION {
             return Err(SnapshotError::Version {
@@ -163,9 +176,9 @@ impl SummarySnapshot {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), SnapshotError> {
-        std::fs::write(path, self.to_json()).map_err(|source| SnapshotError::Write {
+        std::fs::write(path, self.to_json()).map_err(|cause| SnapshotError::Write {
             path: path.to_path_buf(),
-            source,
+            cause,
         })
     }
 }
@@ -180,15 +193,9 @@ pub(crate) fn mut103(cx: &CheckContext<'_>, snapshot: &SummarySnapshot, out: &mu
         if !cx.enabled("MUT103", unit) {
             continue;
         }
-        for f in unit.input.ir.functions.iter().filter(|f| is_public(f)) {
-            let key = FuncKey {
-                module: unit.input.module_name.clone(),
-                qualname: func_qualname(f).to_owned(),
-            };
-            let (Some(before), Some(now)) = (
-                snapshot.functions.get(&key_of(unit, f)),
-                cx.index.summary(&key),
-            ) else {
+        for (name, (key, f)) in public_functions(unit) {
+            let (Some(before), Some(now)) = (snapshot.functions.get(&name), cx.index.summary(&key))
+            else {
                 continue;
             };
             let now = entry(now, f);

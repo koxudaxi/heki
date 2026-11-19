@@ -38,11 +38,10 @@ const ECOSYSTEM_KB_FILES: &[(&str, &str)] = &[
 
 #[derive(Debug, Error)]
 pub enum KbError {
-    #[error("failed to parse embedded KB TOML `{file}`: {source}")]
+    #[error("failed to parse embedded KB TOML `{file}`: {cause}")]
     Toml {
         file: &'static str,
-        #[source]
-        source: toml::de::Error,
+        cause: toml::de::Error,
     },
     #[error("invalid effect kind `{0}` in user ecosystem override")]
     InvalidEffect(String),
@@ -80,7 +79,7 @@ struct SoundnessKbFile {
 fn parse_soundness_file(file: &'static str, text: &str) -> Result<Vec<SoundnessEntry>, KbError> {
     toml::from_str::<SoundnessKbFile>(text)
         .map(|parsed| parsed.entries)
-        .map_err(|source| KbError::Toml { file, source })
+        .map_err(|cause| KbError::Toml { file, cause })
 }
 
 /// Materialized Layer 1 KB exposed exclusively to `heki_soundness`.
@@ -194,7 +193,7 @@ struct EcosystemKbFile {
 }
 
 fn parse_ecosystem_file(file: &'static str, text: &str) -> Result<EcosystemKbFile, KbError> {
-    toml::from_str(text).map_err(|source| KbError::Toml { file, source })
+    toml::from_str(text).map_err(|cause| KbError::Toml { file, cause })
 }
 
 /// Top-level package of a dotted symbol (`"requests.Session.get"` -> `"requests"`).
@@ -869,10 +868,11 @@ mod tests {
                 effects: vec!["sleep".into(), bad.into()],
                 ..EcosystemOverride::default()
             };
-            match EcosystemEntry::try_from(&cfg) {
-                Err(KbError::InvalidEffect(name)) => assert_eq!(name, bad),
-                other => panic!("{bad}: {other:?}"),
-            }
+            let result = EcosystemEntry::try_from(&cfg);
+            assert!(
+                matches!(&result, Err(KbError::InvalidEffect(name)) if name == bad),
+                "{bad}: {result:?}"
+            );
         }
     }
 }

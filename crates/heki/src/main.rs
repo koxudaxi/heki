@@ -244,13 +244,10 @@ struct AssumptionRecord {
 }
 
 fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
-    let root = args
-        .paths
-        .first()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("."));
+    // `paths` defaults to `.`.
+    let root = args.paths.first().map_or(Path::new("."), PathBuf::as_path);
     let cfg = HekiConfig::load_from_dir(if root.is_dir() {
-        &root
+        root
     } else {
         root.parent().unwrap_or(Path::new("."))
     })?;

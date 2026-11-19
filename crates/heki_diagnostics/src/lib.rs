@@ -13,9 +13,16 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+/// Paths are written as text; one that is not valid UTF-8 (possible on Linux) is written
+/// lossily instead of failing the whole report.
+fn lossy_path<S: serde::Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path.to_string_lossy())
+}
+
 /// Related jump location (e.g., each hop in an `EFF101` or `MUT201` call chain for LSP).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelatedLocation {
+    #[serde(serialize_with = "lossy_path")]
     pub path: PathBuf,
     pub line: u32,
     pub column: u32,
@@ -33,6 +40,7 @@ pub struct TextEdit {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
+    #[serde(serialize_with = "lossy_path")]
     pub path: PathBuf,
     pub line: u32,
     pub column: u32,
@@ -101,13 +109,15 @@ pub fn render(
         OutputFormat::Full => render_full(diags, source_line),
         OutputFormat::Concise => render_concise(diags),
         OutputFormat::Json => {
-            let mut s = serde_json::to_string_pretty(diags).unwrap_or_else(|_| "[]".into());
+            // Diagnostics hold strings, numbers, and paths (written lossily by `lossy_path`).
+            let mut s = serde_json::to_string_pretty(diags).expect("diagnostics serialize");
             s.push('\n');
             s
         }
         OutputFormat::Github => render_github(diags),
         OutputFormat::Sarif => {
-            let mut s = serde_json::to_string_pretty(&sarif(diags)).unwrap_or_else(|_| "{}".into());
+            let mut s = serde_json::to_string_pretty(&sarif(diags))
+                .expect("a `serde_json::Value` always serializes");
             s.push('\n');
             s
         }
@@ -338,10 +348,6 @@ impl InlineIgnores {
                 .any(|r| r == "*" || r.eq_ignore_ascii_case(code) || r.eq_ignore_ascii_case(slug))
         })
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
 }
 
 // ------------------------------------------------------------------------------ ratchet
@@ -368,17 +374,20 @@ pub struct RatchetComparison {
 
 #[derive(Debug, Error)]
 pub enum BaselineError {
-    #[error("failed to read baseline {path}: {source}")]
-    Io {
+    #[error("failed to read baseline {path}: {cause}")]
+    Read {
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        cause: std::io::Error,
     },
-    #[error("failed to parse baseline {path}: {source}")]
+    #[error("failed to write baseline {path}: {cause}")]
+    Write {
+        path: PathBuf,
+        cause: std::io::Error,
+    },
+    #[error("failed to parse baseline {path}: {cause}")]
     Toml {
         path: PathBuf,
-        #[source]
-        source: toml::de::Error,
+        cause: toml::de::Error,
     },
 }
 
@@ -426,9 +435,9 @@ impl RatchetBaseline {
     }
 
     pub fn from_toml_str(text: &str, path: &Path) -> Result<Self, BaselineError> {
-        let file: BaselineFile = toml::from_str(text).map_err(|source| BaselineError::Toml {
+        let file: BaselineFile = toml::from_str(text).map_err(|cause| BaselineError::Toml {
             path: path.to_path_buf(),
-            source,
+            cause,
         })?;
         let mut counts = BTreeMap::new();
         for e in file.entries {
@@ -464,17 +473,17 @@ impl RatchetBaseline {
     }
 
     pub fn load(path: &Path) -> Result<Self, BaselineError> {
-        let text = std::fs::read_to_string(path).map_err(|source| BaselineError::Io {
+        let text = std::fs::read_to_string(path).map_err(|cause| BaselineError::Read {
             path: path.to_path_buf(),
-            source,
+            cause,
         })?;
         Self::from_toml_str(&text, path)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), BaselineError> {
-        std::fs::write(path, self.to_toml_string()).map_err(|source| BaselineError::Io {
+        std::fs::write(path, self.to_toml_string()).map_err(|cause| BaselineError::Write {
             path: path.to_path_buf(),
-            source,
+            cause,
         })
     }
 }
@@ -612,6 +621,31 @@ mod tests {
         assert!(ign.is_suppressed(2, "EFF101", "ASYNC-BLOCKING-CALL"));
         assert!(ign.is_suppressed(3, "DATA101", "loop-carried-concat"));
         assert!(!ign.is_suppressed(4, "DATA101", "loop-carried-concat"));
+    }
+
+    #[test]
+    fn comment_spans_outside_the_source_are_ignored() {
+        // Spans come from the parser of the same source; one that does not fit it (out of
+        // range, reversed) suppresses nothing instead of panicking.
+        let src = "a = 1  # heki: ignore\n";
+        let spans = [Span { start: 7, end: 400 }, Span { start: 9, end: 8 }];
+        let ign = InlineIgnores::from_comments(src, &spans);
+        assert!(!ign.is_suppressed(1, "EFF101", "async-blocking-call"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_reports_write_non_utf8_paths_lossily() {
+        // Linux file names may be any bytes (APFS rejects them, so no end-to-end test on
+        // macOS): such a path is written lossily instead of the report degrading to `[]`.
+        use std::os::unix::ffi::OsStrExt;
+        let mut d = diag(1, "MUT201", "m");
+        d.path = PathBuf::from(std::ffi::OsStr::from_bytes(b"src/\xff.py"));
+        d.related[0].path = d.path.clone();
+        let out = render(&[d], OutputFormat::Json, &|_, _| None);
+        let json: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(json[0]["path"], "src/\u{FFFD}.py");
+        assert_eq!(json[0]["related"][0]["path"], "src/\u{FFFD}.py");
     }
 
     #[test]

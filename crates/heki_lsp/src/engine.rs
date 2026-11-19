@@ -15,7 +15,7 @@ use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError, SnapshotError, SummarySnapshot,
     check_project, find_rule,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -149,15 +149,6 @@ impl Workspace {
 
     pub fn stats(&self) -> &EngineStats {
         &self.stats
-    }
-
-    pub fn index(&self) -> &ProjectIndex {
-        &self.index
-    }
-
-    /// Indexed file paths.
-    pub fn paths(&self) -> impl Iterator<Item = &Path> {
-        self.files.keys().map(PathBuf::as_path)
     }
 
     /// A Python file the project would index (inside the root, not excluded).
@@ -300,23 +291,17 @@ impl Workspace {
         v
     }
 
-    /// Diagnostics of every indexed file, reading `texts` first and the disk otherwise.
-    pub fn diagnose_all(
-        &self,
-        texts: &FxHashMap<PathBuf, String>,
-    ) -> (BTreeMap<PathBuf, Vec<Diagnostic>>, Vec<String>) {
+    /// Diagnostics of every indexed file, read from the disk.
+    pub fn diagnose_all(&self) -> (BTreeMap<PathBuf, Vec<Diagnostic>>, Vec<String>) {
         let mut out = BTreeMap::new();
         let mut errors = Vec::new();
         for path in self.files.keys() {
-            let text = match texts.get(path) {
-                Some(t) => t.clone(),
-                None => match std::fs::read_to_string(path) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        errors.push(format!("{}: {e}", path.display()));
-                        continue;
-                    }
-                },
+            let text = match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    errors.push(format!("{}: {e}", path.display()));
+                    continue;
+                }
             };
             match self.diagnose(path, &text) {
                 Ok(d) => {
@@ -326,5 +311,48 @@ impl Workspace {
             }
         }
         (out, errors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnose_all_reports_indexed_files_that_can_no_longer_be_read() {
+        let dir = std::env::temp_dir().join(format!("heki_lsp_engine_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "[project]\nname = \"t\"\n").unwrap();
+        std::fs::write(dir.join("a.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.join("b.py"), "y = 2\n").unwrap();
+        std::fs::write(dir.join("c.py"), "z = 3\n").unwrap();
+        let paths = [dir.clone()];
+        let opts = ProjectOptions {
+            paths: &paths,
+            ..ProjectOptions::default()
+        };
+        let (ws, errors) = Workspace::load(&opts, &Selectors::default()).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        // After indexing (a race a process cannot set up portably), `b.py` stops being UTF-8
+        // and `c.py` stops parsing: both errors are reported, `a.py` is still checked.
+        std::fs::write(dir.join("b.py"), b"\xff\xfe").unwrap();
+        std::fs::write(dir.join("c.py"), "def f(:\n").unwrap();
+        let (diags, errors) = ws.diagnose_all();
+        assert_eq!(
+            diags.keys().cloned().collect::<Vec<_>>(),
+            vec![dir.join("a.py")]
+        );
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(
+            errors[0].starts_with(&format!("{}: ", dir.join("b.py").display()))
+                && errors[0].contains("valid UTF-8"),
+            "{errors:?}"
+        );
+        assert!(
+            errors[1].starts_with(&format!("{}:1:", dir.join("c.py").display()))
+                && errors[1].contains("syntax error"),
+            "{errors:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
