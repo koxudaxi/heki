@@ -9,7 +9,7 @@
 use crate::interpreter::{Allocs, Analysis, Def, FnCtx};
 use crate::liveness::Liveness;
 use crate::{ExactTypeVal, FrameState, KindMask, ObligationStatus, SafetyTier, UniqueState};
-use heki_ast::Span;
+use heki_ast::{LineIndex, Span};
 use heki_ir::{BlockId, BuiltinKind, InstKind, NaturalLoop, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -139,6 +139,8 @@ pub(crate) struct Checker<'a, 'c> {
     pub live: &'c Liveness,
     pub mutations: &'c FxHashMap<(BlockId, usize), Allocs>,
     pub disabled: &'c [ObligationKind],
+    /// Lines of the module, for the positions the messages name.
+    pub lines: &'c LineIndex,
     handler_names: RefCell<FxHashMap<BlockId, FxHashSet<String>>>,
 }
 
@@ -149,6 +151,7 @@ impl<'a, 'c> Checker<'a, 'c> {
         live: &'c Liveness,
         mutations: &'c FxHashMap<(BlockId, usize), Allocs>,
         disabled: &'c [ObligationKind],
+        lines: &'c LineIndex,
     ) -> Self {
         Self {
             cx,
@@ -156,8 +159,14 @@ impl<'a, 'c> Checker<'a, 'c> {
             live,
             mutations,
             disabled,
+            lines,
             handler_names: RefCell::new(FxHashMap::default()),
         }
+    }
+
+    /// The 1-based line of a source offset.
+    pub fn line(&self, offset: u32) -> u32 {
+        self.lines.line(offset)
     }
 
     pub fn ob(
@@ -202,8 +211,9 @@ impl<'a, 'c> Checker<'a, 'c> {
         let status = match self.cx.f.a1_hazards.first() {
             Some(h) => ObligationStatus::Blocked {
                 blocker: format!(
-                    "A1 hazard: `{}` (offset {}) can read or rebind locals behind the analysis",
-                    h.kind, h.span.start
+                    "A1 hazard: `{}` (line {}) can read or rebind locals behind the analysis",
+                    h.kind,
+                    self.line(h.span.start)
                 ),
             },
             None => ObligationStatus::Established {
@@ -237,9 +247,9 @@ impl<'a, 'c> Checker<'a, 'c> {
             Some(ExactTypeVal::Exact { ty, origin }) if allowed.contains(ty) => {
                 ObligationStatus::Established {
                     evidence: format!(
-                        "exact builtin `{}` created at offset {}",
+                        "exact builtin `{}` created at line {}",
                         ty.name(),
-                        origin.start
+                        self.line(origin.start)
                     ),
                 }
             }
@@ -264,7 +274,7 @@ impl<'a, 'c> Checker<'a, 'c> {
                 evidence: "only local, tracked references exist".into(),
             },
             Some(UniqueState::Shared { witness }) => ObligationStatus::Blocked {
-                blocker: format!("it may be shared: {}", witness.describe()),
+                blocker: format!("it may be shared: {}", witness.describe(self.lines)),
             },
             None => ObligationStatus::Blocked {
                 blocker: "its value is not tracked here".into(),
@@ -570,8 +580,9 @@ impl<'a, 'c> Checker<'a, 'c> {
                 subject,
                 ObligationStatus::Disproved {
                     counterexample: format!(
-                        "{} is mutated inside the loop (offset {off})",
-                        self.name(v)
+                        "{} is mutated inside the loop (line {})",
+                        self.name(v),
+                        self.line(off)
                     ),
                 },
             );
@@ -585,7 +596,7 @@ impl<'a, 'c> Checker<'a, 'c> {
             }
         } else {
             let why = match st.var_unique.get(&v) {
-                Some(UniqueState::Shared { witness }) => witness.describe(),
+                Some(UniqueState::Shared { witness }) => witness.describe(self.lines),
                 _ => "its contents are not tracked".into(),
             };
             ObligationStatus::Blocked {

@@ -14,7 +14,7 @@ use crate::interpreter::{Analysis, BuiltinScope, FnCtx, UseSite};
 use crate::liveness::Liveness;
 use crate::obligations::{Checker, ObligationKind, ProofObligation, SafetyVerdict};
 use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTier};
-use heki_ast::Span;
+use heki_ast::{LineIndex, Span};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind,
     IrFunction, LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
@@ -151,6 +151,7 @@ pub fn module_patches_builtins(ir: &ModuleIr) -> bool {
 /// Module-level facts for edits.
 struct ModuleCtx<'a> {
     source: &'a str,
+    lines: LineIndex,
     builtins: BuiltinScope,
     used_names: FxHashSet<String>,
     /// Per function (by its span): the names it binds itself (parameters, assignments,
@@ -279,6 +280,7 @@ impl<'a> ModuleCtx<'a> {
         let deque = deque.filter(|_| !builtins.dynamic_globals());
         Self {
             source,
+            lines: LineIndex::from_source(source),
             builtins,
             used_names,
             local_names,
@@ -335,7 +337,14 @@ pub fn analyze_module(
         let an = cx.run();
         let live = Liveness::compute(f);
         let mutations = cx.mutations(&an);
-        let ck = Checker::new(&cx, &an, &live, &mutations, &opts.disabled_obligations);
+        let ck = Checker::new(
+            &cx,
+            &an,
+            &live,
+            &mutations,
+            &opts.disabled_obligations,
+            &m.lines,
+        );
         let rules = Rules { m: &m, ck: &ck };
         for site in &sites {
             if let Some(c) = rules.evaluate(site) {
@@ -723,6 +732,11 @@ fn loop_bound_note(lp: &NaturalLoop) -> Option<String> {
 }
 
 impl<'a, 'c> Rules<'a, 'c> {
+    /// The 1-based line of a source offset.
+    fn line(&self, offset: u32) -> u32 {
+        self.m.lines.line(offset)
+    }
+
     fn f(&self) -> &'a IrFunction {
         self.ck.cx.f
     }
@@ -873,8 +887,8 @@ impl<'a, 'c> Rules<'a, 'c> {
                     && f.var_name(d) == Some(name)
                 {
                     status = disproved(format!(
-                        "the right-hand side rebinds `{name}` (offset {})",
-                        inst.span.start
+                        "the right-hand side rebinds `{name}` (line {})",
+                        self.line(inst.span.start)
                     ));
                     break;
                 }
@@ -885,8 +899,8 @@ impl<'a, 'c> Rules<'a, 'c> {
                     .is_some_and(|m| m.iter().any(|a| allocs.contains(a)))
                 {
                     status = disproved(format!(
-                        "the right-hand side changes `{name}` before the original reads it (offset {})",
-                        inst.span.start
+                        "the right-hand side changes `{name}` before the original reads it (line {})",
+                        self.line(inst.span.start)
                     ));
                     break;
                 }
@@ -1241,7 +1255,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             K::NoIntermediateReads,
             &name,
             match self.intermediate_read(&name, lp, &allowed) {
-                Some(off) => blocked(format!("`{name}` is read inside the loop (offset {off}); a buffer would have to be joined there")),
+                Some(off) => blocked(format!("`{name}` is read inside the loop (line {}); a buffer would have to be joined there", self.line(off))),
                 None => established("only the accumulation reads it inside the loop"),
             },
         ));
@@ -1630,8 +1644,8 @@ impl<'a, 'c> Rules<'a, 'c> {
                 _ => Some(format!("`.{method}()` may have side effects")),
             },
             _ => Some(format!(
-                "the expression evaluates more than builtin calls (offset {})",
-                inst.span.start
+                "the expression evaluates more than builtin calls (line {})",
+                self.line(inst.span.start)
             )),
         }
     }
@@ -1670,8 +1684,8 @@ impl<'a, 'c> Rules<'a, 'c> {
                 disproved(format!("`{name}` is rebound {wh}"))
             } else if let Some((_, _, s)) = other {
                 disproved(format!(
-                    "`{name}` is also changed at offset {}: the auxiliary set would go stale",
-                    s.start
+                    "`{name}` is also changed at line {}: the auxiliary set would go stale",
+                    self.line(s.start)
                 ))
             } else {
                 established("the paired append is the only change inside the loop")
@@ -1826,7 +1840,8 @@ impl<'a, 'c> Rules<'a, 'c> {
                         };
                         (!ok).then(|| {
                             format!(
-                                "`.{method}(...)` has no `deque` equivalent here (offset {off})"
+                                "`.{method}(...)` has no `deque` equivalent here (line {})",
+                                self.line(off)
                             )
                         })
                     }
@@ -1862,7 +1877,9 @@ impl<'a, 'c> Rules<'a, 'c> {
                                         | "bool"
                                 )
                         });
-                        (!ok).then(|| format!("it is passed to `{callee}(...)` (offset {off})"))
+                        (!ok).then(|| {
+                            format!("it is passed to `{callee}(...)` (line {})", self.line(off))
+                        })
                     }
                     InstKind::SubscriptLoad {
                         obj,
@@ -1883,7 +1900,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                         in_place: true,
                         ..
                     } if *lhs == u && *rhs != u => None,
-                    _ => Some(format!("this use has no `deque` equivalent (offset {off})")),
+                    _ => Some(format!(
+                        "this use has no `deque` equivalent (line {})",
+                        self.line(off)
+                    )),
                 }
             }
         }
@@ -1909,9 +1929,9 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .flat_map(|a| st.derived_refs.get(a).into_iter().flatten())
                 .find(|d| live.contains(**d))?;
             Some(format!(
-                "{} still iterates it when it changes at offset {} (a `deque` raises `RuntimeError` there)",
+                "{} still iterates it when it changes at line {} (a `deque` raises `RuntimeError` there)",
                 self.ck.name(*d),
-                f.block(b).insts[i].span.start
+                self.line(f.block(b).insts[i].span.start)
             ))
         })
     }
@@ -1970,7 +1990,10 @@ impl<'a, 'c> Rules<'a, 'c> {
             if init {
                 init_sites.push(loc);
             } else if !rewritten_slice {
-                bad_alloc = Some(format!("it is also created at offset {}", ai.span.start));
+                bad_alloc = Some(format!(
+                    "it is also created at line {}",
+                    self.line(ai.span.start)
+                ));
             }
         }
         let aliases = self.alias_closure(&st, q);

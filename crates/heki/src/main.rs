@@ -113,6 +113,15 @@ struct RuleArgs {
     rule: Option<String>,
     #[arg(long)]
     all: bool,
+    /// `text`, or `json` with each rule's metadata and documentation.
+    #[arg(long, value_enum, default_value_t = RuleFormat::Text)]
+    output_format: RuleFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RuleFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Args)]
@@ -159,26 +168,31 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::Rule(args) => {
-            if args.all || args.rule.is_none() {
-                for r in CORE_RULES {
-                    println!(
-                        "{:<8} {:<34} [default={:<5} fix={:<5}] {}",
-                        r.code, r.slug, r.default_enabled, r.auto_fix_default, r.summary
-                    );
+            let json = args.output_format == RuleFormat::Json;
+            let Some(q) = args.rule.as_deref().filter(|_| !args.all) else {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(CORE_RULES)?);
+                } else {
+                    for r in CORE_RULES {
+                        println!(
+                            "{:<8} {:<34} [default={:<5} fix={:<5}] {}",
+                            r.code, r.slug, r.default_enabled, r.auto_fix_default, r.summary
+                        );
+                    }
                 }
                 return Ok(ExitCode::SUCCESS);
+            };
+            let Some(r) = find_rule(q) else {
+                eprintln!("unknown rule: {q}");
+                return Ok(ExitCode::from(2));
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(r)?);
+            } else {
+                // `ruff rule` layout: the rule's Markdown page.
+                print!("# {} ({})\n\n{}\n\n{}", r.slug, r.code, r.summary, r.doc);
             }
-            let q = args.rule.unwrap();
-            match find_rule(&q) {
-                Some(r) => {
-                    println!("{} ({})\n{}", r.code, r.slug, r.summary);
-                    Ok(ExitCode::SUCCESS)
-                }
-                None => {
-                    eprintln!("unknown rule: {q}");
-                    Ok(ExitCode::from(2))
-                }
-            }
+            Ok(ExitCode::SUCCESS)
         }
         Commands::Snapshot(args) => check::run_snapshot(&args),
         Commands::Assumptions(args) => run_assumptions(args),

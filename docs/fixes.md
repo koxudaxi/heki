@@ -1,0 +1,67 @@
+# Fixes and Safety
+
+Every `OPT` rule detects a quadratic or linear-per-iteration pattern and knows a faster
+equivalent. Whether the rewrite is **offered** depends on two independent questions:
+
+1. **Safety** — does the rewrite keep the program's behavior? heki answers with a set of proof
+   obligations, each `Established`, `Blocked` (cannot be proven here), or `Disproved` (a
+   concrete counterexample shape exists).
+2. **Profitability** — is the rewrite faster for every input, or only for large ones?
+
+| Safety | What you get |
+| ------ | ------------ |
+| Safe (every obligation established) | A diagnostic with a fix. |
+| Blocked | A diagnostic naming the first blocking obligation, no fix. |
+| Disproved | Nothing: the pattern only looks like a quadratic; rewriting it would be a bug. |
+
+| Profitability | Rules | Applied by |
+| ------------- | ----- | ---------- |
+| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | `heki check --fix` |
+| Size-dependent (can be slower for tiny inputs or loops that run zero times) | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` for hot functions |
+| — | `OPT103` | suggestion only |
+
+## What the analysis proves
+
+The analysis behind the `OPT` rules is separate from the one behind the other rules and is
+deliberately conservative:
+
+- It **never trusts type annotations**: `x: list[int] = WeirdList(...)` is not a list for heki,
+  because a subclass can override `__contains__` or `__add__`.
+- Anything it cannot see is shared: parameters, globals, attributes, values passed to unknown
+  functions, names captured by closures. A rewrite that mutates in place needs the object to be
+  created in the function and never to escape.
+- In-place updates need **exclusive access**: no other variable, iterator, or view may still
+  refer to the old object after the statement. `for v in x: x = x + [v]` terminates, but
+  `x.append(v)` would loop forever, so heki reports nothing there.
+- The evaluation order and exception behavior must be preserved: `{**d, f(): g()}` becomes
+  `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first.
+- Builtin names are trusted only while they are not rebound in the module (an assignment, a
+  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`).
+- Functions using `eval`, `exec`, `locals()`, `sys._getframe`, or frame attributes can change
+  locals behind any analysis: their candidates are always blocked. `heki assumptions` lists such
+  places in a project.
+
+## Fix commands
+
+```console
+$ heki check --diff                              # preview (exit code 1 when something would change)
+$ heki check --fix                               # apply safe, unconditional fixes
+$ heki check --fix --include-size-dependent      # also the proven-safe size-dependent rewrites
+$ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
+```
+
+`--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
+(at most ten passes), so a fix that becomes provable after another one is applied too. Then it
+reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed.
+
+## Profiles
+
+`--profile` reads a sampling profile taken offline:
+
+- CPython 3.15's sampling profiler (`python -m profiling.sampling run --collapsed -o
+  stacks.txt app.py`, or `--gecko -o profile.json`);
+- py-spy (`py-spy record --format raw -o stacks.txt -- python app.py`).
+
+A function on the stack in at least 1 % of the samples is hot. The profile is used to promote
+size-dependent fixes in hot functions and adds the sample share to the diagnostics' evidence; it
+never makes an unsafe rewrite safe.

@@ -706,7 +706,7 @@ const DEQUE: &[Expect] = &[
         "copied_queue",
         &[(
             "OPT120",
-            V::Blocked("DequeEquivalentOps(q): it is also created at offset"),
+            V::Blocked("DequeEquivalentOps(q): it is also created at line 106"),
         )],
     ),
     ("parameter_queue", &[]),
@@ -1092,7 +1092,7 @@ fn frame_introspection_blocks_the_function() {
             "f",
             &[(
                 "OPT101",
-                V::Blocked("A1HazardFree: A1 hazard: `eval` (offset"),
+                V::Blocked("A1HazardFree: A1 hazard: `eval` (line 5) can read or rebind locals"),
             )],
         )],
         false,

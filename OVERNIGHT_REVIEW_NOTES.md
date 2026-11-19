@@ -336,3 +336,57 @@ implementation detail (CPython does not specify probe counts). Blocking it would
     missed line even when its line ran. The suite is arranged so that one build covers each
     function completely: end to end for the analysis, and unit tests only for small guard
     functions. That rule also exposed the untested error closures fixed above.
+
+## M9 — CI/CD and user documentation
+
+1. **Site layout.** The user documentation is a Zensical site (`zensical.toml`, pages in `docs/`),
+   laid out after dcg and t-linter. The five design documents already in `docs/` (Japanese,
+   developer material) stay where they are and are excluded from the site with `exclude_docs`;
+   the Development page links to them on GitHub.
+2. **Rules reference in Ruff's layout.** One table per family (code, name linking to the rule page,
+   message, legend marks: 🛠️ safe fix, 🔧 proven-safe size-dependent rewrite, 🔌 opt-in) and one page
+   per rule with "What it does / Why is this bad? / Example / Use instead / Fix safety / Options".
+   The rule text has a single source, `crates/heki_rules/rule-docs/<CODE>.md`: `heki rule <CODE>`
+   prints it and `scripts/build_docs.py` copies it into `docs/rules/<slug>.md`.
+3. **Generated pages are checked in CI** (`docs.yml`): `scripts/build_docs.py --check` (rules and
+   CLI reference from the binary's `--help`), `scripts/build_llms_txt.py --check` (`llms.txt`,
+   `llms-full.txt` from the navigation), then `zensical build --clean`. No deployment step:
+   hosting is configured later. `site_url` is set to `https://heki.koxudaxi.dev` following the
+   owner's other projects; it is used only for the absolute links in `llms.txt` and can be changed
+   in one place.
+4. **CI (`ci.yml`)**: rustfmt, clippy `-D warnings`, the architecture invariants as shell checks
+   (`heki_soundness` without `heki_effect`; `ruff_*` used by `heki_ast` only), tests on Linux
+   and macOS with CPython 3.15 for the `--fix` differential tests, `cargo llvm-cov
+   --fail-uncovered-lines 3` (item 10), and a CPython 3.11–3.15 matrix for the symtable,
+   sentinel, and counterexample scripts. Windows is built and packaged by the release workflow
+   but not tested (the LSP and watch tests use POSIX paths).
+5. **Release (`release.yml`)**: maturin wheels (`bindings = "bin"`) for Linux x86-64 / AArch64
+   (manylinux 2_28) and musl, macOS arm64 / x86-64, Windows x86-64; sdist; a smoke test of the
+   installed wheel; PyPI trusted publishing. Publishing to crates.io is wired but off: the parser
+   crates come from a pinned ruff git tag, which crates.io rejects. It runs only when the repository
+   variable `PUBLISH_CRATES` is `true` (after the ruff crates are published or vendored) and uses
+   crates.io trusted publishing.
+6. **Workflow hygiene**: every action is pinned to a commit SHA with its version in a comment
+   (dcg's convention); `actionlint` and `zizmor --offline` report nothing.
+7. **Package metadata**: `pyproject.toml` now uses `README.md` as the readme (it pointed to
+   `ARCHITECTURE.md`) and lists the documentation URL.
+8. **`heki rule`.** `heki rule <CODE>` prints the rule's page in `ruff rule`'s layout (title,
+   summary, documentation); `--output-format json` prints the metadata and documentation of one
+   rule or, with `--all`, of every rule. `scripts/build_docs.py` builds the site's rule pages from
+   that JSON, so the binary is the single source and the docs check fails when they drift. An
+   end-to-end test requires every page to have Ruff's "What it does / Why is this bad? /
+   Example" sections in that order.
+9. **The CPython job also checks `tests/corpus/`** (the M8 syntax tour) against `symtable`; it
+   agrees on 3.11–3.15 locally (3.13 checked with a uv-managed 3.13.2). `site/` (Zensical
+   output) is git-ignored.
+10. **Coverage gate.** CI runs `cargo llvm-cov --fail-uncovered-lines 3`: the three
+    parser-rejected arms of M8 item 25 are the only uncovered lines allowed. The limit is a
+    ratchet, to be lowered when one of them goes away; `--fail-under-lines 100` cannot pass while
+    they exist.
+11. **Positions in messages.** The soundness lane's blockers and evidence named byte offsets
+    (`passed to code heki cannot see (offset 123)`); they now name lines (`(line 5)`), counted
+    with `heki_ast::LineIndex` over the module source.
+12. **Examples in the documentation are real output.** The README, the overview and Getting
+    Started show `heki check`, `--diff`, `--fix` and `--output-format concise` exactly as the
+    binary prints them for the sample project they describe (`app/api.py`, `app/users.py`,
+    `app/report.py`, `app/shared.py`).

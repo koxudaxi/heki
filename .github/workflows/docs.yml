@@ -1,0 +1,42 @@
+name: Docs
+
+# Builds the documentation site and checks that the generated pages (rules reference, CLI
+# reference, llms.txt) match the sources. Deployment is configured separately.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: cargo build --release -p heki
+      - name: Generated pages are up to date (rules, CLI reference)
+        run: python scripts/build_docs.py --heki target/release/heki --check
+      - name: llms.txt is up to date
+        run: python scripts/build_llms_txt.py --check
+      - name: Build the site
+        run: uvx --from "zensical==0.1.2" zensical build --clean
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site
+          path: site

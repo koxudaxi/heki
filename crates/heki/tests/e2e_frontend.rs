@@ -1601,8 +1601,10 @@ fn rule_and_explain_commands() {
 
     let (code, by_code, _) = heki(&["rule", "EFF101"]);
     assert_eq!(code, 0);
+    // `ruff rule` layout: title, summary, then the rule's documentation.
     assert!(
-        by_code.starts_with("EFF101 (async-blocking-call)\n"),
+        by_code.starts_with("# async-blocking-call (EFF101)\n\n")
+            && by_code.contains("\n\n## What it does\n"),
         "{by_code}"
     );
     assert_eq!(heki(&["explain", "async-blocking-call"]).1, by_code);
@@ -1612,6 +1614,39 @@ fn rule_and_explain_commands() {
     assert_eq!(code, 2);
     assert!(stdout.is_empty());
     assert_eq!(stderr, "unknown rule: NOPE999\n");
+
+    // JSON: the catalog the documentation site is generated from.
+    let (code, stdout, _) = heki(&["rule", "--all", "--output-format", "json"]);
+    assert_eq!(code, 0);
+    let rules: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(rules.len(), 17);
+    for r in &rules {
+        let doc = r["doc"].as_str().unwrap();
+        // Every page has Ruff's sections, in order.
+        let at = |h: &str| {
+            doc.find(h)
+                .unwrap_or_else(|| panic!("{}: no {h}", r["code"]))
+        };
+        assert!(
+            at("## What it does\n") < at("## Why is this bad?\n")
+                && at("## Why is this bad?\n") < at("## Example\n"),
+            "{}",
+            r["code"]
+        );
+        assert!(["Mut", "Eff", "Data", "Opt"].contains(&r["family"].as_str().unwrap()));
+    }
+    assert_eq!(heki(&["rule", "--output-format", "json"]).1, stdout);
+    let (code, one, _) = heki(&["rule", "opt101", "--output-format", "json"]);
+    assert_eq!(code, 0);
+    let one: Value = serde_json::from_str(&one).unwrap();
+    assert_eq!(
+        (&one["code"], &one["slug"], &one["auto_fix_default"]),
+        (
+            &json!("OPT101"),
+            &json!("list-quadratic-concat"),
+            &json!(true)
+        )
+    );
 }
 
 // ======================================================================== dump error paths

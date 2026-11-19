@@ -1,0 +1,50 @@
+# heki
+
+> Effect & Alias semantic checker for Python: shared-state, async-blocking, N+1 and quadratic-loop bugs that Ruff and type checkers do not see.
+
+
+## Docs
+
+- [Overview](https://heki.koxudaxi.dev/): heki (壁, "wall") is an effect and alias checker for Python, written in Rust
+- [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable
+- [Getting Started](https://heki.koxudaxi.dev/getting-started/): From the root of a project (the directory with pyproject.toml):
+
+## Usage
+
+- [Configuration](https://heki.koxudaxi.dev/configuration/): heki reads [tool.heki] from pyproject.toml, or a heki.toml / .heki.toml file (same keys
+- [Fixes and Safety](https://heki.koxudaxi.dev/fixes/): Every OPT rule detects a quadratic or linear-per-iteration pattern and knows a faster
+- [Adopting heki in a Code Base](https://heki.koxudaxi.dev/adoption/): An existing code base usually has findings you cannot fix at once
+- [CLI Reference](https://heki.koxudaxi.dev/cli-reference/): Exit codes: 0 no diagnostics, 1 diagnostics (or Ratchet regressions, or pending --diff changes), 2 configuration / I/O / syntax errors
+
+## Docs
+
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 17 rules in four families
+
+## Integrations
+
+- [Editors (LSP)](https://heki.koxudaxi.dev/lsp/): heki server (alias heki lsp) is a Language Server Protocol server on stdin / stdout
+- [Coding Agents](https://heki.koxudaxi.dev/coding-agents/): heki's output is designed to be acted on by people and by coding agents (Claude Code, Codex,
+
+## Docs
+
+- [Development](https://heki.koxudaxi.dev/development/): $ cargo build
+
+## Rules
+
+- [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix
+- [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Opt-in · No automatic fix
+- [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+- [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
+- [list-front-insert (OPT121)](https://heki.koxudaxi.dev/rules/list-front-insert/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
+- [list-front-pop (OPT120)](https://heki.koxudaxi.dev/rules/list-front-pop/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
+- [list-quadratic-concat (OPT101)](https://heki.koxudaxi.dev/rules/list-quadratic-concat/): Family: Complexity Rewrites (OPT) · Enabled by default · Safe fix (--fix)
+- [loop-carried-concat (DATA101)](https://heki.koxudaxi.dev/rules/loop-carried-concat/): Family: Data Pipelines (DATA) · Enabled by default · No automatic fix
+- [loop-db-query (EFF103)](https://heki.koxudaxi.dev/rules/loop-db-query/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix
+- [loop-invariant-container-rebuild (OPT130)](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
+- [loop-linear-dedup (OPT111)](https://heki.koxudaxi.dev/rules/loop-linear-dedup/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
+- [loop-linear-membership (OPT110)](https://heki.koxudaxi.dev/rules/loop-linear-membership/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
+- [loop-unpooled-client (EFF102)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix
+- [readonly-return-mutation (MUT202)](https://heki.koxudaxi.dev/rules/readonly-return-mutation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+- [set-dict-quadratic-merge (OPT102)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/): Family: Complexity Rewrites (OPT) · Enabled by default · Safe fix (--fix)
+- [summary-effect-regression (MUT103)](https://heki.koxudaxi.dev/rules/summary-effect-regression/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
+- [write-owner-violation (MUT201)](https://heki.koxudaxi.dev/rules/write-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix

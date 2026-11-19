@@ -32,3 +32,6 @@ __pycache__/
 *.profraw
 *.profdata
 .DS_Store
+
+# Zensical build output
+/site/

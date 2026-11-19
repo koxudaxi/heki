@@ -1,0 +1,94 @@
+[project]
+site_name = "heki"
+site_description = "Effect & Alias semantic checker for Python: shared-state, async-blocking, N+1 and quadratic-loop bugs that Ruff and type checkers do not see."
+site_url = "https://heki.koxudaxi.dev"
+repo_name = "koxudaxi/heki"
+repo_url = "https://github.com/koxudaxi/heki"
+
+nav = [
+  { "Overview" = "index.md" },
+  { "Installation" = "installation.md" },
+  { "Getting Started" = "getting-started.md" },
+  { "Usage" = [
+    { "Configuration" = "configuration.md" },
+    { "Fixes and Safety" = "fixes.md" },
+    { "Adopting heki in a Code Base" = "adoption.md" },
+    { "CLI Reference" = "cli-reference.md" },
+  ]},
+  { "Rules" = "rules/index.md" },
+  { "Integrations" = [
+    { "Editors (LSP)" = "lsp.md" },
+    { "Coding Agents" = "coding-agents.md" },
+  ]},
+  { "Development" = "development.md" },
+]
+
+# The design documents in `docs/` are developer material (in Japanese); they stay in the
+# repository and are not part of the site.
+exclude_docs = """
+ANALYSIS_AND_KB_SPEC.md
+DESIGN_HISTORY_AND_ADR.md
+DETAILED_SPEC_M3_M7.md
+HANDOFF_PROMPTS.md
+IMPLEMENTATION_PLAN.md
+"""
+
+[project.theme]
+features = [
+  "content.code.copy",
+  "content.code.annotate",
+  "content.tabs.link",
+  "navigation.instant",
+  "navigation.tracking",
+  "navigation.sections",
+  "navigation.expand",
+  "search.highlight",
+  "search.share",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "deep orange"
+accent = "deep orange"
+toggle.icon = "material/brightness-4"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "deep orange"
+accent = "deep orange"
+toggle.icon = "material/brightness-7"
+toggle.name = "Switch to dark mode"
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+
+[project.markdown_extensions.pymdownx.inlinehilite]
+
+[project.markdown_extensions.pymdownx.snippets]
+base_path = "."
+
+[project.markdown_extensions.pymdownx.superfences]
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+
+[project.markdown_extensions.pymdownx.details]
+
+[project.markdown_extensions.pymdownx.emoji]
+emoji_index = "zensical.extensions.emoji.twemoji"
+emoji_generator = "zensical.extensions.emoji.to_svg"
+
+[project.markdown_extensions.admonition]
+
+[project.markdown_extensions.attr_list]
+
+[project.markdown_extensions.md_in_html]
+
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.plugins.search]

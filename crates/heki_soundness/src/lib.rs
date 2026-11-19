@@ -25,7 +25,7 @@ pub use opt_rules::{
     AnalysisOptions, OptCandidate, OptRule, TextEdit, analyze_module, module_patches_builtins,
 };
 
-use heki_ast::Span;
+use heki_ast::{LineIndex, Span};
 use heki_ir::{BuiltinKind, VarId};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -60,20 +60,26 @@ pub enum EscapeWitness {
 }
 
 impl EscapeWitness {
-    /// Human-readable reason, with the byte offset of the escaping operation when known.
-    pub fn describe(&self) -> String {
+    /// Human-readable reason, with the line of the escaping operation when known.
+    pub fn describe(&self, lines: &LineIndex) -> String {
         match self {
             Self::PassedToUnknownCall(s) => {
-                format!("passed to code heki cannot see (offset {})", s.start)
+                format!(
+                    "passed to code heki cannot see (line {})",
+                    lines.line(s.start)
+                )
             }
             Self::StoredInContainerOrAttr(s) => {
                 format!(
-                    "stored in a container, attribute, or global (offset {})",
-                    s.start
+                    "stored in a container, attribute, or global (line {})",
+                    lines.line(s.start)
                 )
             }
             Self::DerivedRefEscapedAt(s) => {
-                format!("an iterator or view of it escapes (offset {})", s.start)
+                format!(
+                    "an iterator or view of it escapes (line {})",
+                    lines.line(s.start)
+                )
             }
             Self::JoinAllocOverflow => {
                 format!("it may hold objects from more than {MAX_JOIN_ALLOC_IDS} allocation sites")
@@ -81,10 +87,12 @@ impl EscapeWitness {
             Self::ParameterInput => "it is a parameter: the caller may hold a reference".into(),
             Self::CapturedByClosure => "its name is captured by a nested function".into(),
             Self::ExternalValue(s) => format!(
-                "it comes from outside the function (global, attribute, element, or call result; offset {})",
-                s.start
+                "it comes from outside the function (global, attribute, element, or call result; line {})",
+                lines.line(s.start)
             ),
-            Self::ReturnedOrRaised(s) => format!("it is returned or raised (offset {})", s.start),
+            Self::ReturnedOrRaised(s) => {
+                format!("it is returned or raised (line {})", lines.line(s.start))
+            }
         }
     }
 }

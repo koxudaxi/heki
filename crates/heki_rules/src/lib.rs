@@ -44,6 +44,9 @@ pub struct RuleMeta {
     pub default_enabled: bool,
     pub auto_fix_default: bool,
     pub summary: &'static str,
+    /// Ruff-style documentation (`crates/heki_rules/rule-docs/<CODE>.md`): printed by
+    /// `heki rule <CODE>` and published as the rule's page.
+    pub doc: &'static str,
 }
 
 /// Core v1.0 rule catalog (empirically validated in Stage 0-A + `dcg` study).
@@ -55,6 +58,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Mutating an attribute read by `@cached_property` without invalidating the cache.",
+        doc: include_str!("../rule-docs/MUT101.md"),
     },
     RuleMeta {
         code: "MUT103",
@@ -63,6 +67,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: false,
         auto_fix_default: false,
         summary: "Interprocedural mutation/escape/effect regression against saved summary snapshot.",
+        doc: include_str!("../rule-docs/MUT103.md"),
     },
     RuleMeta {
         code: "MUT201",
@@ -71,6 +76,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.",
+        doc: include_str!("../rule-docs/MUT201.md"),
     },
     RuleMeta {
         code: "MUT202",
@@ -79,6 +85,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`.",
+        doc: include_str!("../rule-docs/MUT202.md"),
     },
     RuleMeta {
         code: "EFF101",
@@ -87,6 +94,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.",
+        doc: include_str!("../rule-docs/EFF101.md"),
     },
     RuleMeta {
         code: "EFF102",
@@ -95,6 +103,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.",
+        doc: include_str!("../rule-docs/EFF102.md"),
     },
     RuleMeta {
         code: "EFF103",
@@ -103,6 +112,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Explicit DB query / external RPC executed inside a loop (N+1).",
+        doc: include_str!("../rule-docs/EFF103.md"),
     },
     RuleMeta {
         code: "EFF105",
@@ -111,6 +121,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: false,
         auto_fix_default: false,
         summary: "Opt-in: blocking local filesystem I/O reachable from `async def`.",
+        doc: include_str!("../rule-docs/EFF105.md"),
     },
     RuleMeta {
         code: "DATA101",
@@ -119,6 +130,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.",
+        doc: include_str!("../rule-docs/DATA101.md"),
     },
     RuleMeta {
         code: "OPT101",
@@ -127,6 +139,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: true,
         summary: "Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).",
+        doc: include_str!("../rule-docs/OPT101.md"),
     },
     RuleMeta {
         code: "OPT102",
@@ -135,6 +148,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: true,
         summary: "Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).",
+        doc: include_str!("../rule-docs/OPT102.md"),
     },
     RuleMeta {
         code: "OPT103",
@@ -143,6 +157,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
+        doc: include_str!("../rule-docs/OPT103.md"),
     },
     RuleMeta {
         code: "OPT110",
@@ -151,6 +166,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
+        doc: include_str!("../rule-docs/OPT110.md"),
     },
     RuleMeta {
         code: "OPT111",
@@ -159,6 +175,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
+        doc: include_str!("../rule-docs/OPT111.md"),
     },
     RuleMeta {
         code: "OPT120",
@@ -167,6 +184,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
+        doc: include_str!("../rule-docs/OPT120.md"),
     },
     RuleMeta {
         code: "OPT121",
@@ -175,6 +193,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Size-dependent `q.insert(0, v)` -> `collections.deque`.",
+        doc: include_str!("../rule-docs/OPT121.md"),
     },
     RuleMeta {
         code: "OPT130",
@@ -183,6 +202,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         auto_fix_default: false,
         summary: "Size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
+        doc: include_str!("../rule-docs/OPT130.md"),
     },
 ];
 

@@ -1,0 +1,1817 @@
+# heki
+
+> Effect & Alias semantic checker for Python: shared-state, async-blocking, N+1 and quadratic-loop bugs that Ruff and type checkers do not see.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/
+
+# heki
+
+heki (壁, "wall") is an effect and alias checker for Python, written in Rust. It is the third
+layer of static analysis next to a linter such as [Ruff](https://docs.astral.sh/ruff/) and a
+type checker such as [ty](https://github.com/astral-sh/ty): instead of style or types, it
+follows **what code does** across functions and modules — which objects it mutates, which
+references it shares, and which blocking, network, or database work it reaches.
+
+```console
+$ heki check
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def handler` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
+  |
+5 |     user = load_user(user_id)
+  |            ^
+  = related: app/api.py:5:12: `handler` calls `app.users.load_user`
+  = related: app/users.py:5:12: `load_user` calls `requests.get`
+
+app/report.py:4:9: OPT101 (list-quadratic-concat) [error] `rows = rows + [...]` copies the whole list on every iteration (quadratic); append in place with `rows.append(...)` / `rows.extend(...)` [safe fix: `heki check --fix`]
+  |
+4 |         rows = rows + [item]
+  |         ^
+
+Found 2 diagnostic(s) in 4 file(s).
+```
+
+## What it finds
+
+- **Shared state** (`MUT`): a `@cached_property` left stale after the attribute it reads
+  changes, writes to state another component owns (declared once in configuration), mutation
+  of objects returned by `@lru_cache`, and side effects a public function gained since a saved
+  snapshot.
+- **Execution effects** (`EFF`, `DATA`): blocking calls reachable from `async def` through any
+  number of helpers, HTTP / database clients created inside loops, N+1 queries, and quadratic
+  DataFrame / array accumulation.
+- **Complexity rewrites** (`OPT`): quadratic list, dict, set, bytes, and queue patterns. heki
+  rewrites them only when its alias analysis **proves** the rewrite preserves behavior; when it
+  cannot, the diagnostic names the proof obligation that failed.
+
+See the [rules reference](rules/index.md) for all 17 rules.
+
+## Why another tool
+
+These bugs cross function and module boundaries: the blocking call is three helpers away from
+the `async def`, the cache is invalidated in a different file than the one that writes the
+attribute. heki builds an SSA intermediate representation for every function, summarizes each
+function's effects, and propagates the summaries over the project's call graph until they reach
+a fixpoint. The summaries are small, so the whole of a 200,000-line project is checked in
+about a second, and the editor integration re-checks only the file you edit.
+
+The rewriting rules use a second, independent analysis that never trusts type annotations and
+treats everything it cannot see as shared: a rewrite is offered only with a proof, so
+`heki check --fix` does not change what your program does.
+
+## Next steps
+
+- [Install heki](installation.md) and [run it on a project](getting-started.md).
+- [Configure](configuration.md) rule selection, ownership contracts, and the Python version.
+- Read how [fixes are proven safe](fixes.md).
+- [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
+- Use it from [your editor](lsp.md) or [a coding agent](coding-agents.md).
+
+
+---
+
+Source: https://heki.koxudaxi.dev/installation/
+
+# Installation
+
+heki is a single executable. The Python package only ships that executable (no Python
+dependencies are installed into your environment).
+
+## With uv, pipx, or pip
+
+=== "uv"
+
+    ```console
+    $ uv tool install heki
+    ```
+
+    Or run it without installing:
+
+    ```console
+    $ uvx heki check
+    ```
+
+=== "pipx"
+
+    ```console
+    $ pipx install heki
+    ```
+
+=== "pip"
+
+    ```console
+    $ pip install heki
+    ```
+
+As a development dependency of a project:
+
+```console
+$ uv add --dev heki
+```
+
+Wheels are published for Linux (x86-64, AArch64, musl), macOS (Apple silicon and Intel), and
+Windows (x86-64).
+
+## From source
+
+heki needs Rust 1.99 or newer.
+
+```console
+$ git clone https://github.com/koxudaxi/heki
+$ cd heki
+$ cargo install --path crates/heki
+```
+
+## Check the installation
+
+```console
+$ heki --version
+$ heki rule --all
+```
+
+## Supported Python versions
+
+heki analyzes code written for Python 3.11 to 3.15. It reads the target version from
+`target-version` in the configuration, or from `requires-python` in `pyproject.toml`; the
+version decides language details such as comprehension inlining (PEP 709), deferred
+annotations (PEP 649), and `lazy import` (PEP 810). heki itself does not need a Python
+interpreter to run.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/getting-started/
+
+# Getting Started
+
+## Run it
+
+From the root of a project (the directory with `pyproject.toml`):
+
+```console
+$ heki check
+```
+
+With no arguments heki checks every Python file under the current directory, honoring
+`.gitignore`, `.hekiignore`, and the `exclude` setting. Pass files or directories to narrow it:
+
+```console
+$ heki check src/ tests/test_api.py
+```
+
+## Read a diagnostic
+
+```console
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def handler` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
+  |
+5 |     user = load_user(user_id)
+  |            ^
+  = related: app/api.py:5:12: `handler` calls `app.users.load_user`
+  = related: app/users.py:5:12: `load_user` calls `requests.get`
+```
+
+- `app/api.py:5:12` is where to look; `EFF101` / `async-blocking-call` the rule, with its
+  severity.
+- The message says what heki proved: here, a chain of calls from an `async def` to a blocking
+  network call. The `related` lines are the hops of that chain, so you can follow it across
+  files (editors show them as clickable related information).
+- `heki rule EFF101` explains the rule, its exclusions, and what to do instead. The
+  [rules reference](rules/index.md) has the same text for every rule.
+
+## Fix what heki can prove
+
+Rules in the `OPT` family come with rewrites. The safe, always-profitable ones (`OPT101`,
+`OPT102`) are applied with `--fix`; `--diff` shows them first:
+
+```console
+$ heki check --diff
+--- a/app/report.py
++++ b/app/report.py
+@@ -1,5 +1,5 @@
+ def rows_of(items):
+     rows = []
+     for item in items:
+-        rows = rows + [item]
++        rows.append(item)
+     return rows
+Would fix 1 issue(s) in 1 file(s).
+$ heki check --fix
+Fixed 1 issue(s) in 1 file(s).
+```
+
+`--fix` then reports what is left (here the `EFF101` above, which has no automatic fix).
+
+A fix is applied only when heki proved it does not change what the program does. When it cannot,
+the diagnostic says why and nothing is rewritten, for example when the list is also handed to
+other code inside the loop:
+
+```console
+$ heki check app/shared.py --output-format concise
+app/shared.py:4:9: OPT101 `rows = rows + [...]` copies the whole list on every iteration (quadratic); append in place with `rows.append(...)` / `rows.extend(...)` [not auto-fixable: Unique(rows): it may be shared: passed to code heki cannot see (line 5)]
+Found 1 diagnostic(s) in 1 file(s).
+```
+
+See [Fixes and Safety](fixes.md).
+
+## Silence a diagnostic
+
+Append a suppression comment to the reported line:
+
+```python
+user = load_user(user_id)  # heki: ignore[EFF101]
+```
+
+`# heki: ignore` without codes silences every rule on the line; `# noqa: EFF101` works too.
+To keep a rule away from whole files, use `per-file-ignores` in the
+[configuration](configuration.md).
+
+## Choose the rules
+
+```console
+$ heki check --select EFF,MUT        # only these families
+$ heki check --extend-select EFF105  # add an opt-in rule
+$ heki check --ignore OPT110         # everything except one rule
+```
+
+Codes, code prefixes, and rule names (`async-blocking-call`) are all accepted. Opt-in rules
+(`EFF105`, `MUT103`) are enabled only by their exact code or name.
+
+## Machine-readable output
+
+```console
+$ heki check --output-format json    # also: full (default), concise, github, sarif
+```
+
+`json` includes the evidence behind each diagnostic, the blocker that stops a fix, the call chain,
+and the fix edits. `github` prints GitHub Actions annotations; `sarif` feeds code-scanning
+dashboards.
+
+## Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | no diagnostics |
+| `1` | diagnostics found (or Ratchet regressions, or `--diff` would change files) |
+| `2` | configuration error, unreadable file, unknown rule, or syntax error |
+
+
+---
+
+Source: https://heki.koxudaxi.dev/configuration/
+
+# Configuration
+
+heki reads `[tool.heki]` from `pyproject.toml`, or a `heki.toml` / `.heki.toml` file (same keys
+without the `tool.heki` prefix). The nearest file at or above the checked path wins; `--config
+<path>` points at one explicitly. Keys are kebab-case, as in Ruff.
+
+```toml
+[tool.heki]
+target-version = "py312"            # default: inferred from project.requires-python
+extend-exclude = ["generated"]      # added to the default excludes
+baseline = "heki-baseline.toml"     # Ratchet baseline used by `heki check`
+
+[tool.heki.lint]
+select = ["MUT", "EFF", "DATA", "OPT"]
+extend-select = ["EFF105"]
+ignore = ["OPT110"]
+per-file-ignores = { "tests/**" = ["EFF"], "scripts/*.py" = ["OPT"] }
+relax-async-in-tests = true
+
+[tool.heki.lint.severity]
+OPT103 = "warning"
+```
+
+## Top-level settings
+
+| Key | Default | Meaning |
+| --- | ------- | ------- |
+| `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes its oldest admitted version, clamped to 3.11–3.15 (`>=3.9` → `py311`). `--target-version` overrides both. |
+| `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths (globs, matched against paths and path components). |
+| `extend-exclude` | `[]` | Adds excluded paths. |
+| `baseline` | none | Ratchet baseline file used when `--baseline` is not given. |
+
+`.gitignore` and `.hekiignore` files are honored during discovery. Files named explicitly on the
+command line are always checked.
+
+## `[tool.heki.lint]`
+
+| Key | Meaning |
+| --- | ------- |
+| `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). |
+| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `MUT103`) need their exact code or name. |
+| `ignore` | Rules to disable (prefixes match every rule they cover). |
+| `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
+| `severity` | Rule → `"error"` or `"warning"` (affects output and SARIF level; both make `heki check` fail). |
+| `relax-async-in-tests` | `true` (default) skips `EFF101` / `EFF105` in `test_*` functions and files under `tests/`. |
+
+The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
+configured lists.
+
+## Ownership contracts: `[[tool.heki.write-owners]]` (`MUT201`)
+
+```toml
+[[tool.heki.write-owners]]
+name = "generation-store"
+targets = ["pkg.model.DataModel.fields", "DataType.data_types"]
+allowed-writers = ["pkg.parser.generation.*", "Store.*"]
+forbid-cached-property-on = ["DataModel"]
+```
+
+- `targets`: `Class.attr` names. A target matches the fully qualified name or any dotted suffix
+  (`DataModel.fields` matches `pkg.model.DataModel.fields`), and globs are allowed. Subclasses of
+  a target class are covered too.
+- `allowed-writers`: functions allowed to write (fully qualified or qualname, globs allowed).
+- `forbid-cached-property-on`: classes on which defining a `@cached_property` is itself reported.
+
+## Shared return values: `[[tool.heki.readonly-returns]]` (`MUT202`)
+
+```toml
+[[tool.heki.readonly-returns]]
+name = "schema-graph"
+producers = ["pkg.parser.SchemaGraphBuilder.schema"]
+deep = true
+```
+
+Functions decorated with `@lru_cache` / `@cache` are protected without configuration.
+
+## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
+
+heki ships a catalog of blocking, async-safe, and offloading APIs of the standard library and
+common packages (`requests`, `httpx`, `aiohttp`, `sqlalchemy`, `django`, `redis`, `pandas`, …).
+Add your own or override an entry:
+
+```toml
+[[tool.heki.ecosystem]]
+symbol = "mypkg.db.run_query"
+effects = ["blocking_db", "db_query"]
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.workers.in_thread"
+offloads-blocking-arg = 0     # calls its first argument on a thread
+async-safe = true
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.logging.emit"
+excluded = true               # never reported
+```
+
+| Key | Meaning |
+| --- | ------- |
+| `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
+| `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
+| `async-safe` | Safe to call from `async def`. |
+| `offloads-blocking-arg` | Index of the callable argument this function runs on another thread. |
+| `excluded` | Never reported (logging and similar). |
+| `copy-sanitizer` | Returns a copy (ends `MUT202` protection). |
+
+An override replaces the built-in entry for the same symbol as a whole.
+
+## Inline suppressions
+
+```python
+x = load()            # heki: ignore[EFF101]
+y = load()            # heki: ignore[EFF101, async-blocking-call]
+z = load()            # heki: ignore
+w = load()            # noqa: EFF101
+```
+
+A suppression applies to the line of the diagnostic. Codes and rule names are accepted; a
+comment without codes silences every rule on that line.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/fixes/
+
+# Fixes and Safety
+
+Every `OPT` rule detects a quadratic or linear-per-iteration pattern and knows a faster
+equivalent. Whether the rewrite is **offered** depends on two independent questions:
+
+1. **Safety** — does the rewrite keep the program's behavior? heki answers with a set of proof
+   obligations, each `Established`, `Blocked` (cannot be proven here), or `Disproved` (a
+   concrete counterexample shape exists).
+2. **Profitability** — is the rewrite faster for every input, or only for large ones?
+
+| Safety | What you get |
+| ------ | ------------ |
+| Safe (every obligation established) | A diagnostic with a fix. |
+| Blocked | A diagnostic naming the first blocking obligation, no fix. |
+| Disproved | Nothing: the pattern only looks like a quadratic; rewriting it would be a bug. |
+
+| Profitability | Rules | Applied by |
+| ------------- | ----- | ---------- |
+| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | `heki check --fix` |
+| Size-dependent (can be slower for tiny inputs or loops that run zero times) | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` for hot functions |
+| — | `OPT103` | suggestion only |
+
+## What the analysis proves
+
+The analysis behind the `OPT` rules is separate from the one behind the other rules and is
+deliberately conservative:
+
+- It **never trusts type annotations**: `x: list[int] = WeirdList(...)` is not a list for heki,
+  because a subclass can override `__contains__` or `__add__`.
+- Anything it cannot see is shared: parameters, globals, attributes, values passed to unknown
+  functions, names captured by closures. A rewrite that mutates in place needs the object to be
+  created in the function and never to escape.
+- In-place updates need **exclusive access**: no other variable, iterator, or view may still
+  refer to the old object after the statement. `for v in x: x = x + [v]` terminates, but
+  `x.append(v)` would loop forever, so heki reports nothing there.
+- The evaluation order and exception behavior must be preserved: `{**d, f(): g()}` becomes
+  `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first.
+- Builtin names are trusted only while they are not rebound in the module (an assignment, a
+  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`).
+- Functions using `eval`, `exec`, `locals()`, `sys._getframe`, or frame attributes can change
+  locals behind any analysis: their candidates are always blocked. `heki assumptions` lists such
+  places in a project.
+
+## Fix commands
+
+```console
+$ heki check --diff                              # preview (exit code 1 when something would change)
+$ heki check --fix                               # apply safe, unconditional fixes
+$ heki check --fix --include-size-dependent      # also the proven-safe size-dependent rewrites
+$ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
+```
+
+`--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
+(at most ten passes), so a fix that becomes provable after another one is applied too. Then it
+reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed.
+
+## Profiles
+
+`--profile` reads a sampling profile taken offline:
+
+- CPython 3.15's sampling profiler (`python -m profiling.sampling run --collapsed -o
+  stacks.txt app.py`, or `--gecko -o profile.json`);
+- py-spy (`py-spy record --format raw -o stacks.txt -- python app.py`).
+
+A function on the stack in at least 1 % of the samples is hot. The profile is used to promote
+size-dependent fixes in hot functions and adds the sample share to the diagnostics' evidence; it
+never makes an unsafe rewrite safe.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/adoption/
+
+# Adopting heki in a Code Base
+
+## Ratchet baselines
+
+An existing code base usually has findings you cannot fix at once. A Ratchet baseline records
+them, fails CI only for **new** ones, and lets the recorded set only shrink:
+
+```console
+$ heki check --baseline heki-baseline.toml --update-baseline   # record today's findings
+$ heki check --baseline heki-baseline.toml                     # fail on regressions only
+```
+
+Entries are keyed by file, function, rule, and target (not by line number), so unrelated
+edits and reformatting do not break the baseline. When findings are fixed, `heki check` prints a
+note that the entry can shrink; run `--update-baseline` again to lock in the progress. Set
+`baseline = "heki-baseline.toml"` in the configuration to use it without the flag.
+
+## Effect snapshots (`MUT103`)
+
+For libraries, a regression in what a public function *does* — it starts mutating an argument or
+doing network I/O — is worth reviewing even when no rule fires. Save the effect summaries of all
+public functions and check against them:
+
+```console
+$ heki snapshot --write                        # writes .heki-summary-snapshot.json
+$ heki check --extend-select MUT103            # reports functions that gained effects
+```
+
+Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
+same pull request; the diff of the JSON file shows reviewers what changed.
+
+## Continuous integration
+
+GitHub Actions annotations:
+
+```yaml
+- run: uvx heki check --output-format github
+```
+
+Code scanning (SARIF):
+
+```yaml
+- run: uvx heki check --output-format sarif > heki.sarif || true
+- uses: github/codeql-action/upload-sarif@v3
+  with:
+    sarif_file: heki.sarif
+```
+
+`--output-format json` gives every field (evidence, blocker, related call chain, fix edits) for
+custom tooling.
+
+## Rolling out rules
+
+- Start with the default rules and a baseline, or `--select` one family at a time.
+- Declare ownership contracts (`write-owners`) for the shared state you care about; `MUT201`
+  reports nothing until a contract exists.
+- Keep the opt-in rules (`EFF105`, `MUT103`) for code where they matter: async services and
+  library APIs.
+- Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/cli-reference/
+
+# CLI Reference
+
+Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
+
+## `heki`
+
+```text
+Effect & Alias semantic checker for Python (the 3rd layer alongside Ruff and ty)
+
+Usage: heki <COMMAND>
+
+Commands:
+  check        Run semantic checks across Python files or directories (Ruff-aligned)
+  server       Start the incremental Language Server Protocol (LSP) server [alias: lsp]
+  rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
+  snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
+  assumptions  List Assumption A1/A2 violations across a project
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## `heki check`
+
+```text
+Run semantic checks across Python files or directories (Ruff-aligned)
+
+Usage: heki check [OPTIONS] [PATHS]...
+
+Arguments:
+  [PATHS]...  Files or directories to check [default: .]
+
+Options:
+      --fix
+          Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`)
+      --include-size-dependent
+          Also allow `size-dependent` `safe` fixes (or combine with `--profile`)
+      --diff
+          Preview fixes as a unified diff without writing files
+      --select <SELECT>
+          Comma-separated rule codes, prefixes, or slugs to enable
+      --extend-select <EXTEND_SELECT>
+          Additional rules to enable on top of defaults/config
+      --ignore <IGNORE>
+          Comma-separated rule codes or slugs to ignore
+      --output-format <OUTPUT_FORMAT>
+          Output format [default: full] [possible values: full, concise, json, github, sarif]
+      --config <CONFIG>
+          Explicit configuration file (`heki.toml` or `pyproject.toml`)
+      --target-version <TARGET_VERSION>
+          Target Python version (`py312`, `py313`, `py314`, `py315`)
+      --baseline <BASELINE>
+          Ratchet baseline TOML file (line-number-independent)
+      --update-baseline
+          Generate or shrink-update the Ratchet baseline file
+      --profile <PROFILE>
+          Optional offline profile dump (`py-spy --collapsed` / Tachyon `--gecko`)
+      --watch
+          Watch for file changes and re-run incrementally
+  -h, --help
+          Print help
+```
+
+## `heki server`
+
+```text
+Start the incremental Language Server Protocol (LSP) server
+
+Usage: heki server [OPTIONS]
+
+Options:
+      --stdio  Use stdio transport (default LSP mode)
+  -h, --help   Print help
+```
+
+## `heki rule`
+
+```text
+Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style)
+
+Usage: heki rule [OPTIONS] [RULE]
+
+Arguments:
+  [RULE]  Rule code (`EFF101`) or slug (`async-blocking-call`), or `--all` to list all rules
+
+Options:
+      --all                            
+      --output-format <OUTPUT_FORMAT>  `text`, or `json` with each rule's metadata and documentation [default: text] [possible values: text, json]
+  -h, --help                           Print help
+```
+
+## `heki snapshot`
+
+```text
+Manage interprocedural effect summary snapshots (`MUT103`)
+
+Usage: heki snapshot [OPTIONS] [PATHS]...
+
+Arguments:
+  [PATHS]...  Files or directories to summarize [default: .]
+
+Options:
+      --write
+          Write `.heki-summary-snapshot.json` at the project root (default: print it)
+      --config <CONFIG>
+          Explicit configuration file (`heki.toml` or `pyproject.toml`)
+      --target-version <TARGET_VERSION>
+          Target Python version (`py311`..`py315`)
+  -h, --help
+          Print help
+```
+
+## `heki assumptions`
+
+```text
+List Assumption A1/A2 violations across a project
+
+Usage: heki assumptions [OPTIONS] [PATHS]...
+
+Arguments:
+  [PATHS]...  [default: .]
+
+Options:
+      --target-version <TARGET_VERSION>
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+      --json
+          Output machine-readable JSON
+  -h, --help
+          Print help
+```
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/
+
+# Rules
+
+heki has 17 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+
+## Legend
+
+- 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
+- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
+- 🔌 Opt-in rule.
+
+## Mutation & State (MUT)
+
+Shared state written behind its owner's back: stale caches, write-ownership contracts, shared return values, and effect regressions against a saved snapshot.
+
+| Code | Name | Message | |
+| ---- | ---- | ------- | ------: |
+| MUT101 | [cached-property-stale-mutation](cached-property-stale-mutation.md) | Mutating an attribute read by `@cached_property` without invalidating the cache. |  |
+| MUT103 | [summary-effect-regression](summary-effect-regression.md) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
+| MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
+| MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`. |  |
+
+## Execution Effects (EFF)
+
+Work that runs where it should not: blocking calls on the event loop, clients and queries inside loops.
+
+| Code | Name | Message | |
+| ---- | ---- | ------- | ------: |
+| EFF101 | [async-blocking-call](async-blocking-call.md) | Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`. |  |
+| EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. |  |
+| EFF103 | [loop-db-query](loop-db-query.md) | Explicit DB query / external RPC executed inside a loop (N+1). |  |
+| EFF105 | [async-blocking-fs](async-blocking-fs.md) | Opt-in: blocking local filesystem I/O reachable from `async def`. | 🔌 |
+
+## Data Pipelines (DATA)
+
+Quadratic re-allocation of DataFrames and arrays across loop iterations.
+
+| Code | Name | Message | |
+| ---- | ---- | ------- | ------: |
+| DATA101 | [loop-carried-concat](loop-carried-concat.md) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. |  |
+
+## Complexity Rewrites (OPT)
+
+Quadratic patterns heki can rewrite, each proven safe by the alias analysis before a fix is offered.
+
+| Code | Name | Message | |
+| ---- | ---- | ------- | ------: |
+| OPT101 | [list-quadratic-concat](list-quadratic-concat.md) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
+| OPT102 | [set-dict-quadratic-merge](set-dict-quadratic-merge.md) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
+| OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
+| OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
+| OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
+| OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
+| OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
+| OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
+
+
+---
+
+Source: https://heki.koxudaxi.dev/lsp/
+
+# Editors (LSP)
+
+`heki server` (alias `heki lsp`) is a Language Server Protocol server on stdin / stdout. It
+indexes the workspace in the background, then keeps only the per-function effect summaries in
+memory. Editing a file re-analyzes that file alone (250 ms after the last keystroke); when the
+edit changes what a function does, the files calling it are re-analyzed on save. Edits that do not
+change any summary, such as comments, stop at the edited file.
+
+The server provides:
+
+- diagnostics for open files, with every hop of a call chain (for example the path from an
+  `async def` to `time.sleep`) as related information you can jump to;
+- quick fixes for the safe `OPT101` / `OPT102` rewrites;
+- `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites;
+- a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic.
+
+It reads the same configuration as `heki check`.
+
+## VS Code
+
+heki does not ship its own extension yet. Any generic LSP client extension that starts a
+command for a language works; configure it to run `heki server` for `python` documents, for
+example:
+
+```json
+{
+  "command": "heki",
+  "args": ["server"],
+  "languages": ["python"]
+}
+```
+
+## Neovim
+
+```lua
+vim.lsp.config("heki", {
+  cmd = { "heki", "server" },
+  filetypes = { "python" },
+  root_markers = { "pyproject.toml", "heki.toml", ".git" },
+})
+vim.lsp.enable("heki")
+```
+
+## Helix
+
+```toml
+# languages.toml
+[language-server.heki]
+command = "heki"
+args = ["server"]
+
+[[language]]
+name = "python"
+language-servers = ["pyright", "heki"]
+```
+
+## Zed
+
+```json
+{
+  "lsp": {
+    "heki": {
+      "binary": { "path": "heki", "arguments": ["server"] }
+    }
+  },
+  "languages": {
+    "Python": { "language_servers": ["...", "heki"] }
+  }
+}
+```
+
+## Without an editor: `--watch`
+
+```console
+$ heki check --watch
+```
+
+re-checks changed files and the files affected by them, using the same incremental engine, and
+prints the full list of diagnostics after every change. A change to `pyproject.toml`,
+`heki.toml`, or the summary snapshot reloads everything.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/coding-agents/
+
+# Coding Agents
+
+heki's output is designed to be acted on by people and by coding agents (Claude Code, Codex,
+Cursor, and similar): every diagnostic says what was proven, where the evidence is, and what
+blocks a fix.
+
+## Use the CLI in the agent's loop
+
+Ask the agent to run heki after editing and to read the JSON output:
+
+```console
+$ heki check --output-format json
+```
+
+Each diagnostic has:
+
+| Field | Content |
+| ----- | ------- |
+| `path`, `line`, `column`, `span` | location (byte span in the file) |
+| `rule_code`, `rule_slug`, `severity`, `message` | the finding |
+| `qualname`, `target` | the function and the object involved |
+| `related` | every hop of the call chain behind the finding |
+| `evidence` | what was established (for `OPT` rules: the proof obligations) |
+| `blocker` | the obligation that blocks an automatic fix, if any |
+| `fix` | byte-span edits for proven-safe rewrites |
+
+`heki rule <CODE>` prints a rule's documentation (what it does, why it matters, what to do
+instead), which is a good prompt for the fix.
+
+A typical instruction for the agent:
+
+> After changing Python files, run `heki check --output-format json`. For each diagnostic,
+> read `heki rule <rule_code>`, follow `related` to the root cause, and fix it there. Apply
+> `heki check --fix` for the safe rewrites. Never silence a diagnostic with `# heki: ignore`
+> unless the rule's documentation describes the case as intended.
+
+## Use the LSP server
+
+Agents that talk LSP (for example through an editor or an MCP bridge) can start
+`heki server` and use diagnostics, related information, and code actions directly, as editors
+do. See [Editors (LSP)](lsp.md).
+
+## Documentation for models
+
+The documentation is published in [llms.txt](llms.txt) form, an index of every page with a
+one-line description, and [llms-full.txt](llms-full.txt) with the full text of every page
+including all rules.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/development/
+
+# Development
+
+## Build and test
+
+```console
+$ cargo build
+$ cargo test --workspace
+$ cargo clippy --workspace --all-targets -- -D warnings
+$ cargo fmt --all -- --check
+```
+
+The tests are end to end first: they run the real `heki` binary and the real LSP server
+(`heki server --stdio`) on small projects. The `--fix` tests run the original and the rewritten
+programs on CPython and require identical output; they use `python3.15`, or the interpreter in
+`HEKI_TEST_PYTHON`.
+
+Every line is covered except three that cannot run (the `_ => {}` arms for assignment,
+augmented-assignment and `del` targets in `crates/heki_ir/src/builder.rs`, which the parser
+rejects); CI fails on any other uncovered line:
+
+```console
+$ cargo llvm-cov --workspace --show-missing-lines --fail-uncovered-lines 3
+```
+
+The summary table counts the unit-test build and the normal build of a function separately and
+keeps the better one, and it counts a closure that never runs as missed. Cover each function
+completely from one side: end to end for analysis code, unit tests only for small guard functions.
+
+## Checks against CPython
+
+```console
+$ cargo build
+$ python3 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/ tests/corpus/
+$ python3 tests/sentinel/verify_soundness_kb.py
+$ python3 tests/difftest/counterexamples.py
+```
+
+- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15).
+- `verify_soundness_kb.py` checks every claim of the Layer 1 knowledge base
+  (`kb/soundness/builtins.toml`) on the running interpreter.
+- `counterexamples.py` shows that the naive rewrites heki refuses really change behavior.
+
+## Documentation
+
+```console
+$ cargo build --release
+$ python scripts/build_docs.py --heki target/release/heki   # rules and CLI reference pages
+$ python scripts/build_llms_txt.py                          # llms.txt / llms-full.txt
+$ uvx --from "zensical==0.1.2" zensical serve
+```
+
+Rule documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`; `heki rule <CODE>` prints it
+and the generator copies it into `docs/rules/`. CI fails when the generated pages are stale.
+
+## Architecture
+
+The workspace is split by responsibility (`crates/`):
+
+| Crate | Role |
+| ----- | ---- |
+| `heki_ast` | the only crate that depends on the parser (`ruff_python_parser`, pinned) |
+| `heki_semantic` | scopes and bindings, checked against CPython's `symtable` |
+| `heki_ir` | SSA control-flow-graph IR with explicit exception edges and loop information |
+| `heki_kb` | the knowledge bases: Layer 1 (builtins semantics for the soundness lane) and Layer 2 (ecosystem effects) |
+| `heki_effect` | call graph, per-function effect summaries, incremental project index |
+| `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
+| `heki_rules` | the 17 rules, rule selection, project discovery |
+| `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
+| `heki_profile` | offline profile dumps |
+| `heki_lsp` | the incremental LSP server and the `--watch` engine |
+| `heki` | the command-line interface |
+
+The design documents (architecture, decisions, specifications; in Japanese) are in the
+repository: [`ARCHITECTURE.md`](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md) and
+[`docs/`](https://github.com/koxudaxi/heki/tree/main/docs). `AGENTS.md` lists the invariants every
+change must keep.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/async-blocking-call/
+
+# async-blocking-call (EFF101)
+
+Family: Execution Effects (EFF) · Enabled by default · No automatic fix
+
+Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.
+
+## What it does
+Checks `async def` functions that reach a blocking call on the event loop, directly or through
+synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), database drivers
+(`sqlite3`, `psycopg`, `pymongo`, ...), subprocesses waiting for completion, `time.sleep`, and
+other blocking synchronization.
+
+The rule reports the boundary: the call inside the `async def` that leads to the blocking
+operation, with the call chain as related information. Several boundaries reaching the same
+blocking call are grouped once ten or more of them exist.
+
+It does not report:
+
+- calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
+  `anyio.to_thread.run_sync`, and project wrappers that forward their callable to them);
+- `async` APIs (`await client.get(...)` on `httpx.AsyncClient`, `aiohttp`, ...);
+- spawning a process without waiting (`subprocess.Popen(...)`);
+- coroutine functions that only run through a synchronous driver (`asyncio.run`, ...);
+- CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests
+  (`test_*` functions and files under `tests/`, see the option below).
+
+## Why is this bad?
+A blocking call inside a coroutine stops the whole event loop: every other request, timer, and
+task waits until it returns.
+
+## Example
+```python
+import time
+
+
+def load() -> bytes:
+    time.sleep(1)
+    return b""
+
+
+async def handler() -> bytes:
+    return load()  # EFF101: reaches `time.sleep`
+```
+
+Use instead:
+```python
+import asyncio
+
+
+async def handler() -> bytes:
+    return await asyncio.to_thread(load)
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.relax-async-in-tests` (default `true`): skip test code.
+- `[[tool.heki.ecosystem]]` declares project functions as blocking (`effects`), as offload
+  wrappers (`offloads-blocking-arg`), or as async-safe (`async-safe`).
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/async-blocking-fs/
+
+# async-blocking-fs (EFF105)
+
+Family: Execution Effects (EFF) · Opt-in · No automatic fix
+
+Opt-in: blocking local filesystem I/O reachable from `async def`.
+
+## What it does
+Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
+`pathlib.Path.read_text` / `write_text` / `read_bytes` / `write_bytes` / `open`, `os.listdir`,
+`os.scandir`, `os.walk`, and `shutil` copies and removals. It follows the same boundary and
+offload rules as `EFF101`.
+
+This rule is opt-in: enable it with `--extend-select EFF105` or `extend-select = ["EFF105"]`.
+Selecting the `EFF` prefix does not enable it.
+
+## Why is this bad?
+Local file I/O is usually fast, which is why it is opt-in, but on network file systems, large
+files, or busy disks it blocks the event loop like any other blocking call.
+
+## Example
+```python
+async def read_config(path: str) -> str:
+    with open(path) as f:  # EFF105
+        return f.read()
+```
+
+Use instead:
+```python
+import asyncio
+from pathlib import Path
+
+
+async def read_config(path: str) -> str:
+    return await asyncio.to_thread(Path(path).read_text)
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["EFF105"]` enables the rule.
+- `lint.relax-async-in-tests` applies as for `EFF101`.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/
+
+# cached-property-stale-mutation (MUT101)
+
+Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+
+Mutating an attribute read by `@cached_property` without invalidating the cache.
+
+## What it does
+Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
+of the same class (or of a subclass) reads, without invalidating the cached value.
+
+## Why is this bad?
+A `cached_property` computes its value once and stores it in the instance `__dict__`. Once the
+attribute it was computed from changes, the property keeps returning the old value until the
+cache entry is deleted. The stale value is usually noticed far away from the write.
+
+The rule follows `self.helper()` calls in both directions (a property that reads through a
+helper, a method that writes through a helper) and reports the write itself, once per property.
+It does not report:
+
+- two-phase initialization: `__init__`, `__post_init__`, `model_post_init`, `__setstate__`,
+  `__enter__`, `setup`, `_init_*` / `_configure_*` methods, and private helpers called from
+  `__init__`;
+- memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
+  `if key not in self._memo:` pattern);
+- constant dictionary keys the property never reads (`self.params["proxy"]` while the property
+  reads `self.params["outtmpl"]`);
+- private helpers whose every caller invalidates the property.
+
+## Example
+```python
+from functools import cached_property
+
+
+class Settings:
+    def __init__(self, raw: dict[str, str]) -> None:
+        self.raw = raw
+
+    @cached_property
+    def keys(self) -> tuple[str, ...]:
+        return tuple(self.raw)
+
+    def replace(self, raw: dict[str, str]) -> None:
+        self.raw = raw  # `self.keys` still returns the old keys
+```
+
+Use instead:
+```python
+    def replace(self, raw: dict[str, str]) -> None:
+        self.raw = raw
+        self.__dict__.pop("keys", None)  # or `del self.keys` when it was computed
+```
+
+## Fix safety
+No automatic fix: whether to invalidate, recompute, or make the attribute read-only is a design
+decision.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/
+
+# immutable-quadratic-concat (OPT103)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
+
+Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
+
+## What it does
+Checks quadratic accumulation of immutable values in a loop:
+
+- `acc = acc + chunk` / `acc += chunk` where `acc` is a `bytes` or `tuple`;
+- `self.text += piece` on an attribute (string, bytes, or tuple pieces).
+
+Local `str` accumulation is not reported: CPython already appends in place when the string has
+no other reference.
+
+## Why is this bad?
+Each concatenation copies everything accumulated so far.
+
+## Example
+```python
+def encode(parts: list[bytes]) -> bytes:
+    out = b""
+    for p in parts:
+        out = out + p
+    return out
+```
+
+Use instead:
+```python
+def encode(parts: list[bytes]) -> bytes:
+    return b"".join(parts)
+```
+
+## Fix safety
+No automatic fix (the rewrite needs a buffer before the loop and a join after it). The
+diagnostic still lists the proof obligations: the accumulator must not be read inside the loop
+or by an exception handler, and its intermediate values must not escape.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/list-front-insert/
+
+# list-front-insert (OPT121)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (`--fix --include-size-dependent`)
+
+Size-dependent `q.insert(0, v)` -> `collections.deque`.
+
+## What it does
+Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
+`collections.deque` with `appendleft(v)`.
+
+Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
+functions.
+
+## Why is this bad?
+Inserting at the front shifts every element, so building a list this way is quadratic.
+
+## Example
+```python
+def reverse(items: list[int]) -> list[int]:
+    out = []
+    for i in items:
+        out.insert(0, i)
+    return list(out)
+```
+
+Use instead:
+```python
+import collections
+
+
+def reverse(items: list[int]) -> list[int]:
+    out = collections.deque()
+    for i in items:
+        out.appendleft(i)
+    return list(out)
+```
+
+## Fix safety
+The same obligations as `OPT120`.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/list-front-pop/
+
+# list-front-pop (OPT120)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (`--fix --include-size-dependent`)
+
+Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
+
+## What it does
+Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
+`q = q[1:]`, and suggests a `collections.deque` with `popleft()`.
+
+Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
+functions. The rewrite changes the list's creation to `collections.deque(...)` and adds
+`import collections` when needed.
+
+## Why is this bad?
+Removing the first element shifts every remaining element, so a queue drained this way is
+quadratic. `deque.popleft()` is constant time.
+
+## Example
+```python
+def bfs(start: int) -> list[int]:
+    queue = [start]
+    order = []
+    while queue:
+        node = queue.pop(0)
+        order.append(node)
+    return order
+```
+
+Use instead:
+```python
+import collections
+
+
+def bfs(start: int) -> list[int]:
+    queue = collections.deque([start])
+    order = []
+    while queue:
+        node = queue.popleft()
+        order.append(node)
+    return order
+```
+
+## Fix safety
+Proven safe only when the list is created in the function, never leaves it (not returned,
+stored, or passed to other code except read-only builtins such as `len`), and every use has a
+`deque` equivalent: no sorting, no slicing, no indexes other than `0` and `-1`, no `==`
+against lists.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/list-quadratic-concat/
+
+# list-quadratic-concat (OPT101)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · Safe fix (`--fix`)
+
+Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).
+
+## What it does
+Checks loops that grow a list by building a new one every iteration, `x = x + [e]`, and
+rewrites it to `x.append(e)` (`x.extend([...])` for several elements).
+
+## Why is this bad?
+`x + [e]` copies the whole list, so the loop is quadratic. `append` is amortized constant time
+and is never slower, even for one iteration.
+
+## Example
+```python
+def squares(n: int) -> list[int]:
+    out = []
+    for i in range(n):
+        out = out + [i * i]
+    return out
+```
+
+Use instead:
+```python
+def squares(n: int) -> list[int]:
+    out = []
+    for i in range(n):
+        out.append(i * i)
+    return out
+```
+
+## Fix safety
+The fix is applied by `heki check --fix` only when heki proves it safe:
+
+- the list is an exact builtin `list` created in the function, not shared (not a parameter,
+  not stored in another object, not captured by a closure, not passed to unknown code);
+- no other reference to the old list is live after the statement: no alias, no `for` loop
+  iterating it, no `iter(x)` or view;
+- evaluating the right-hand side does not rebind or mutate the list;
+- no exception handler can observe an older binding of another name aliasing it.
+
+Otherwise the diagnostic explains which proof obligation blocks the fix, and nothing is
+rewritten. For example `for v in x: x = x + [v]` terminates, but `x.append(v)` would loop
+forever: heki reports it as disproved and never touches it. Type annotations are never trusted.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/loop-carried-concat/
+
+# loop-carried-concat (DATA101)
+
+Family: Data Pipelines (DATA) · Enabled by default · No automatic fix
+
+Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.
+
+## What it does
+Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
+`df = pd.concat([df, chunk])`, `arr = np.vstack([arr, row])`, `arr = np.append(arr, x)`, and
+the other quadratic reallocations of the ecosystem knowledge base. Only loop-carried
+accumulation is reported (the result feeds the next iteration); one-off concatenations inside a
+loop are not.
+
+## Why is this bad?
+Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
+size.
+
+## Example
+```python
+import pandas as pd
+
+
+def load(chunks: list[pd.DataFrame]) -> pd.DataFrame:
+    df = pd.DataFrame()
+    for chunk in chunks:
+        df = pd.concat([df, chunk])  # DATA101
+    return df
+```
+
+Use instead:
+```python
+def load(chunks: list[pd.DataFrame]) -> pd.DataFrame:
+    return pd.concat(chunks)
+```
+
+## Fix safety
+No automatic fix.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/loop-db-query/
+
+# loop-db-query (EFF103)
+
+Family: Execution Effects (EFF) · Enabled by default · No automatic fix
+
+Explicit DB query / external RPC executed inside a loop (N+1).
+
+## What it does
+Checks loops that run a database query on every iteration (the "N+1 queries" problem):
+`cursor.execute(...)`, `session.execute(...)`, Django `QuerySet` methods, `pymongo` and `redis`
+commands, and project functions that reach them.
+
+It does not report DDL statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
+(`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
+own implementation, or bounded loops.
+
+## Why is this bad?
+One round trip per item makes the run time grow with the number of rows and with the network
+latency to the database. A single batched query is usually orders of magnitude faster.
+
+## Example
+```python
+def names(cursor, ids: list[int]) -> list[str]:
+    out = []
+    for i in ids:
+        cursor.execute("SELECT name FROM users WHERE id = ?", (i,))  # EFF103
+        out.append(cursor.fetchone()[0])
+    return out
+```
+
+Use instead:
+```python
+def names(cursor, ids: list[int]) -> list[str]:
+    marks = ",".join("?" * len(ids))
+    cursor.execute(f"SELECT name FROM users WHERE id IN ({marks})", ids)
+    return [row[0] for row in cursor.fetchall()]
+```
+
+## Fix safety
+No automatic fix.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/
+
+# loop-invariant-container-rebuild (OPT130)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (`--fix --include-size-dependent`)
+
+Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
+
+## What it does
+Checks loops that rebuild the same container on every iteration just to test membership,
+`e in set(keys)` (also `list(...)`, `tuple(...)`, `dict(...)`), and suggests building it once
+before the loop.
+
+Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
+functions.
+
+## Why is this bad?
+The container is rebuilt from scratch on every iteration, which costs as much as the scan it
+was meant to avoid.
+
+## Example
+```python
+def matches(items: list[int], keys: list[int]) -> int:
+    hits = 0
+    for i in items:
+        if i in set(keys):
+            hits += 1
+    return hits
+```
+
+Use instead:
+```python
+def matches(items: list[int], keys: list[int]) -> int:
+    keys_set = set(keys)
+    hits = 0
+    for i in items:
+        if i in keys_set:
+            hits += 1
+    return hits
+```
+
+## Fix safety
+Proven safe only when the rebuilt expression is a builtin constructor without side effects,
+every value it reads is bound outside the loop and not changed inside it, and building it before
+the loop cannot raise even when the loop runs zero times (hashable builtin elements).
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/loop-linear-dedup/
+
+# loop-linear-dedup (OPT111)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (`--fix --include-size-dependent`)
+
+Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
+
+## What it does
+Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
+keeping an auxiliary `set` next to the list.
+
+Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
+functions.
+
+## Why is this bad?
+The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.
+
+## Example
+```python
+def unique(values: list[int]) -> list[int]:
+    seen = []
+    for v in values:
+        if v not in seen:
+            seen.append(v)
+    return seen
+```
+
+Use instead:
+```python
+def unique(values: list[int]) -> list[int]:
+    seen = []
+    seen_set = set()
+    for v in values:
+        if v not in seen_set:
+            seen.append(v)
+            seen_set.add(v)
+    return seen
+```
+
+## Fix safety
+Proven safe only when the list is an exact builtin list owned by the function, the paired
+`append` is its only change inside the loop (a removal would make the set stale), no other live
+reference could change it, and every element and probe is a hashable builtin scalar.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/loop-linear-membership/
+
+# loop-linear-membership (OPT110)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (`--fix --include-size-dependent`)
+
+Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
+
+## What it does
+Checks membership tests against a list or tuple inside a loop, `e in lst`, where the list does
+not change during the loop, and suggests building a `set` once before the loop.
+
+This is a size-dependent rewrite: it is reported as a suggestion and applied only with
+`heki check --fix --include-size-dependent`, or for functions that a `--profile` dump shows
+hot. Small constant displays (`x in ("a", "b")`) are not reported.
+
+## Why is this bad?
+`e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is
+constant time once the set exists.
+
+## Example
+```python
+def allowed(items: list[int]) -> list[int]:
+    ok = list(range(0, 1000, 3))
+    return [i for i in items if i in ok]
+```
+
+Use instead:
+```python
+def allowed(items: list[int]) -> list[int]:
+    ok = set(range(0, 1000, 3))
+    return [i for i in items if i in ok]
+```
+
+## Fix safety
+Proven safe only when:
+
+- the container is an exact `list` / `tuple` bound outside the loop and not changed inside it
+  (a list mutated in the loop would make the hoisted set stale);
+- every element is an `int`, `str`, `bytes`, `bool`, or `float`: building the set cannot raise
+  even when the loop runs zero times, and hashing agrees with `==`;
+- the probe value is of those types too (an object with a custom `__eq__` could match list
+  elements a set lookup never compares with).
+
+A `list[int]` annotation is never trusted: a list subclass can override `__contains__`.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/loop-unpooled-client/
+
+# loop-unpooled-client (EFF102)
+
+Family: Execution Effects (EFF) · Enabled by default · No automatic fix
+
+Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
+
+## What it does
+Checks loops that allocate a network or database client on every iteration: module-level
+request helpers that open a new connection per call (`requests.get`, `httpx.get`), client
+constructors (`requests.Session()`, `httpx.Client()`, `boto3.client(...)`), and connection
+factories (`sqlite3.connect`, `redis.Redis`, ...).
+
+The iterable of a `for` loop is evaluated once and is not reported; bounded loops (small
+constant ranges, retry loops, daemon polling loops) are not reported either.
+
+## Why is this bad?
+Each new client pays for DNS, TCP, and TLS setup again and throws its connection pool away.
+In a loop this dominates the run time and exhausts sockets.
+
+## Example
+```python
+import requests
+
+
+def fetch_all(urls: list[str]) -> list[str]:
+    out = []
+    for url in urls:
+        out.append(requests.get(url).text)  # EFF102: a new connection per iteration
+    return out
+```
+
+Use instead:
+```python
+def fetch_all(urls: list[str]) -> list[str]:
+    with requests.Session() as session:
+        return [session.get(url).text for url in urls]
+```
+
+## Fix safety
+No automatic fix.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/readonly-return-mutation/
+
+# readonly-return-mutation (MUT202)
+
+Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+
+Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`.
+
+## What it does
+Checks mutations of objects returned by a shared producer:
+
+- functions decorated with `@functools.lru_cache` / `@functools.cache` (every caller receives
+  the same object);
+- producers declared in `[[tool.heki.readonly-returns]]`.
+
+Mutations through attributes, subscripts, container methods, in-place operators, and helpers
+that mutate their argument are followed. Copies end the protection: `copy.deepcopy(...)`,
+`model.model_copy(deep=True)`, and the copy sanitizers of the ecosystem knowledge base clear it,
+shallow copies (`copy.copy`, `.copy()`) protect the top level only.
+
+## Why is this bad?
+A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
+else, usually long after the mutation happened.
+
+## Example
+```python
+from functools import lru_cache
+
+
+@lru_cache(maxsize=32)
+def schema(name: str) -> dict[str, list[str]]:
+    return {"fields": [name]}
+
+
+def extend(name: str) -> None:
+    s = schema(name)
+    s["fields"].append("extra")  # MUT202: mutates the cached object
+```
+
+Use instead:
+```python
+import copy
+
+
+def extend(name: str) -> dict[str, list[str]]:
+    s = copy.deepcopy(schema(name))
+    s["fields"].append("extra")
+    return s
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.readonly-returns]]`: `name`, `producers` (function names or globs), `deep`
+  (protect nested values too).
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/
+
+# set-dict-quadratic-merge (OPT102)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · Safe fix (`--fix`)
+
+Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).
+
+## What it does
+Checks loops that rebuild a dict or set every iteration and rewrites them in place:
+
+- `d = {**d, k: v}` → `d[k] = v`, or `d.update({...})` when the remaining entries have side
+  effects;
+- `d = {**d, **other}` → `d.update(other)`;
+- `s = s | {e}` → `s |= {e}` (also `d = d | other` for dicts).
+
+## Why is this bad?
+Each rebuild copies the whole container, so the loop is quadratic. The in-place update is never
+slower.
+
+## Example
+```python
+def index(items: list[tuple[str, int]]) -> dict[str, int]:
+    d = {}
+    for k, v in items:
+        d = {**d, k: v}
+    return d
+```
+
+Use instead:
+```python
+def index(items: list[tuple[str, int]]) -> dict[str, int]:
+    d = {}
+    for k, v in items:
+        d[k] = v
+    return d
+```
+
+## Fix safety
+Applied by `heki check --fix` only when proven safe, with the same obligations as `OPT101`
+(exact builtin, unique, no live alias / iterator / view, evaluation order preserved), plus:
+
+- the accumulator must be the leading `**` entry. `found = {**site, **found}` keeps the keys
+  already in `found`, while `found.update(site)` would overwrite them, so it is never rewritten;
+- for `|`, the right operand must be an exact `set` / `dict` (a subclass could make
+  `__ror__` and `__ior__` disagree).
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/summary-effect-regression/
+
+# summary-effect-regression (MUT103)
+
+Family: Mutation & State (MUT) · Opt-in · No automatic fix
+
+Interprocedural mutation/escape/effect regression against saved summary snapshot.
+
+## What it does
+Compares the interprocedural side effects of every public function with the summary snapshot
+saved by `heki snapshot --write` (`.heki-summary-snapshot.json` at the project root), and reports
+functions that gained one of:
+
+- a mutated parameter (the function now changes an argument it receives);
+- an escaping parameter (an argument is now stored in an attribute, a container, or a global);
+- a mutated `self` attribute;
+- an execution effect (blocking network / database / subprocess / filesystem I/O, sleeping,
+  client allocation, database queries), including effects reached through callees.
+
+This rule is opt-in: enable it with `--extend-select MUT103` or `extend-select = ["MUT103"]`.
+
+## Why is this bad?
+A pull request that makes a widely used helper start mutating its argument, or start doing
+network I/O, often looks harmless in the diff of the helper and breaks callers far away. The
+snapshot makes such effect regressions visible in review, the way a lock file makes dependency
+changes visible.
+
+## Example
+```python
+# snapshot taken while `add` was pure
+def add(items: list[int], x: int) -> list[int]:
+    return items + [x]
+```
+
+After an edit:
+```python
+def add(items: list[int], x: int) -> list[int]:
+    items.append(x)  # MUT103: `add` now mutates parameter `items`
+    return items
+```
+
+If the new effect is intended, refresh the snapshot with `heki snapshot --write` and commit it.
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["MUT103"]` enables the rule.
+- The snapshot lives at `.heki-summary-snapshot.json`; `heki snapshot` prints it without writing.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/write-owner-violation/
+
+# write-owner-violation (MUT201)
+
+Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+
+Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.
+
+## What it does
+Checks writes to attributes and containers that a `[[tool.heki.write-owners]]` contract
+reserves for a set of allowed writer functions. A write is reported when it happens outside the
+allowed writers:
+
+- directly (`model.fields = [...]`, `model.fields.append(...)`);
+- through a local alias (`fields = model.fields; fields.append(...)`);
+- through a helper that mutates the container it receives (`helper(model.fields)`), reported
+  once at the outermost call site.
+
+Writes in the owning class's own initializers (`__init__`, `__post_init__`, `__new__`,
+`model_post_init`, `__setstate__`) are allowed. A private helper with project callers hands the
+responsibility to its callers.
+
+## Why is this bad?
+Large code bases often have one component that owns a piece of shared state (a store, a
+registry, a cache). Writes from anywhere else bypass its invariants and make bugs that depend
+on call order. The contract states the ownership once in configuration, with no runtime cost
+and no decorators.
+
+## Example
+```toml
+[[tool.heki.write-owners]]
+name = "model-store"
+targets = ["Model.fields"]
+allowed-writers = ["Store.*"]
+```
+
+```python
+class Model:
+    def __init__(self) -> None:
+        self.fields: list[str] = []  # allowed: the class initializer
+
+
+class Store:
+    def add_field(self, model: Model, name: str) -> None:
+        model.fields.append(name)  # allowed writer
+
+
+def parse(model: Model) -> None:
+    model.fields.append("id")  # MUT201: outside `Store.*`
+```
+
+Use instead:
+```python
+def parse(model: Model, store: Store) -> None:
+    store.add_field(model, "id")
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.write-owners]]`: `name`, `targets` (`Class.attr`; globs and dotted suffixes match),
+  `allowed-writers` (function names or globs), `forbid-cached-property-on` (classes on which a
+  `@cached_property` is itself reported).
