@@ -1,0 +1,907 @@
+//! Family 1 rules: `MUT101`, `MUT201`, `MUT202` (docs/DETAILED_SPEC_M3_M7.md section 3.2).
+
+use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError};
+use heki_ast::Span;
+use heki_diagnostics::Diagnostic;
+use heki_effect::{
+    AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, FuncKey, TypeCtx, Val, WriteKind,
+    self_aliases,
+};
+use heki_env::HekiConfig;
+use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
+
+// ==================================================================================== MUT101
+
+/// Filter 1: initialization / two-phase initialization methods.
+const INIT_METHODS: &[&str] = &[
+    "__init__",
+    "__post_init__",
+    "model_post_init",
+    "__setstate__",
+    "__enter__",
+    "__new__",
+    "setup",
+    "setUp",
+    "postinit",
+    "_open",
+    "_setup",
+];
+
+struct Method<'a> {
+    unit: &'a ModuleUnit<'a>,
+    f: &'a IrFunction,
+    key: FuncKey,
+}
+
+fn is_private(name: &str) -> bool {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    last.starts_with('_') && !(last.starts_with("__") && last.ends_with("__"))
+}
+
+pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
+    if !cx.selection.is_enabled("MUT101") {
+        return;
+    }
+    // Methods grouped by owner class fqn; nested classes keep their own qualname.
+    let mut by_class: BTreeMap<String, Vec<Method<'_>>> = BTreeMap::new();
+    for unit in cx.units {
+        for f in &unit.input.ir.functions {
+            if f.is_class_body || f.is_module_body {
+                continue;
+            }
+            let Some(owner) = &f.owner_class_qualname else {
+                continue;
+            };
+            by_class
+                .entry(format!("{}.{owner}", unit.input.module_name))
+                .or_default()
+                .push(Method {
+                    unit,
+                    f,
+                    key: CheckContext::key(unit, f),
+                });
+        }
+    }
+    let mut seen = FxHashSet::default();
+    for (class, methods) in &by_class {
+        let mut family: Vec<&Method<'_>> = methods.iter().collect();
+        for sub in cx.decls.subclasses_of(class) {
+            family.extend(by_class.get(&sub).into_iter().flatten());
+        }
+        let init_called = private_methods_called_from_init(cx, &family);
+        for p in methods {
+            let Some(ps) = cx.index.summary(&p.key) else {
+                continue;
+            };
+            if !ps.is_cached_property {
+                continue;
+            }
+            let mut reads: BTreeMap<&str, Vec<&Option<String>>> = BTreeMap::new();
+            for r in &ps.reads_self_attrs {
+                if r.attr != p.f.name {
+                    reads.entry(&r.attr).or_default().push(&r.const_key);
+                }
+            }
+            for m in &family {
+                if m.key == p.key || filter1_init(m, &init_called) {
+                    continue;
+                }
+                let Some(ms) = cx.index.summary(&m.key) else {
+                    continue;
+                };
+                // Filter 4: the method invalidates the cache.
+                if ms.invalidates_cached.contains(&p.f.name) || ms.invalidates_cached.contains("*")
+                {
+                    continue;
+                }
+                // One write is one report, where it happens: only the method's own writes
+                // count (its local summary), not those merged up from the helpers it calls.
+                let Some(local) = cx
+                    .index
+                    .files
+                    .get(&m.unit.input.path)
+                    .and_then(|f| f.local_functions.get(&m.key))
+                else {
+                    continue;
+                };
+                // A private helper whose every caller invalidates the property is covered.
+                let covered_by_callers = is_private(&m.f.name)
+                    && cx
+                        .index
+                        .reverse_call_graph
+                        .get(&m.key)
+                        .is_some_and(|callers| {
+                            !callers.is_empty()
+                                && callers.iter().all(|c| {
+                                    cx.index.summary(c).is_some_and(|cs| {
+                                        cs.invalidates_cached.contains(&p.f.name)
+                                            || cs.invalidates_cached.contains("*")
+                                    })
+                                })
+                        });
+                if covered_by_callers {
+                    continue;
+                }
+                for (attr, read_keys) in &reads {
+                    let writes: Vec<&AttrKeyPath> = local
+                        .mutates_self_attrs
+                        .iter()
+                        .filter(|w| w.attr == *attr)
+                        .collect();
+                    if writes.is_empty() {
+                        continue;
+                    }
+                    // Filter 2: memo / cache dictionaries.
+                    let lower = attr.to_ascii_lowercase();
+                    if lower.contains("cache") || lower.contains("memo") {
+                        continue;
+                    }
+                    let own = self_attr_writes(m.f, attr);
+                    if own.is_empty() || own.iter().all(|w| w.memo_shaped) {
+                        continue;
+                    }
+                    // Filter 3: disjoint constant dict keys.
+                    let k_read: Option<BTreeSet<&String>> =
+                        read_keys.iter().map(|k| k.as_ref()).collect();
+                    let k_write: Option<BTreeSet<&String>> =
+                        writes.iter().map(|w| w.const_key.as_ref()).collect();
+                    if let (Some(kr), Some(kw)) = (&k_read, &k_write)
+                        && kr.is_disjoint(kw)
+                    {
+                        continue;
+                    }
+                    // An overriding `@cached_property` shares the instance `__dict__` slot:
+                    // one report per property name.
+                    if !seen.insert((m.key.clone(), attr.to_string(), p.f.name.clone())) {
+                        continue;
+                    }
+                    let span = own[0].span;
+                    let class_qualname = p.f.owner_class_qualname.as_deref().unwrap_or_default();
+                    cx.emit(
+                        out,
+                        "MUT101",
+                        m.unit,
+                        span,
+                        &m.key.qualname,
+                        format!("{class_qualname}.{attr}->{}", p.f.name),
+                        format!(
+                            "`{}` mutates `self.{attr}`, read by `@cached_property` `{}`, without invalidating it (`del self.{}`)",
+                            m.key.qualname, p.f.name, p.f.name
+                        ),
+                        &[],
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
+    let name = m.f.name.as_str();
+    INIT_METHODS.contains(&name)
+        || name.starts_with("_init_")
+        || name.starts_with("_configure_")
+        || (is_private(name) && init_called.contains(&m.key))
+}
+
+/// Private methods `__init__` of the class family calls on `self` directly.
+fn private_methods_called_from_init(
+    cx: &CheckContext<'_>,
+    family: &[&Method<'_>],
+) -> FxHashSet<FuncKey> {
+    let mut out = FxHashSet::default();
+    for init in family.iter().filter(|m| m.f.name == "__init__") {
+        let Some(file) = cx.index.files.get(&init.unit.input.path) else {
+            continue;
+        };
+        for site in file
+            .call_sites
+            .iter()
+            .filter(|s| s.caller == init.key && s.recv_is_self)
+        {
+            if let heki_effect::CallTarget::Project(callees) = &site.target {
+                out.extend(
+                    callees
+                        .iter()
+                        .filter(|c| is_private(&c.callee.qualname))
+                        .map(|c| c.callee.clone()),
+                );
+            }
+        }
+    }
+    out
+}
+
+struct SelfWrite {
+    span: Span,
+    /// `setdefault`, or a subscript store guarded by `if k not in self.<attr>:`.
+    memo_shaped: bool,
+}
+
+/// Writes to `self.<attr>` in `f`'s own body.
+fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
+    let Some(self_param) = f.params.first() else {
+        return Vec::new();
+    };
+    let self_vars = self_aliases(f, self_param.var);
+    let mut alias: FxHashSet<VarId> = FxHashSet::default();
+    let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        if let Some(d) = inst.kind.dst() {
+            defs.insert(d, &inst.kind);
+        }
+        if let InstKind::AttrLoad { dst, obj, attr: a } = &inst.kind
+            && self_vars.contains(obj)
+            && a == attr
+        {
+            alias.insert(*dst);
+        }
+    }
+    loop {
+        let before = alias.len();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::Copy { dst, src } = &inst.kind
+                && alias.contains(src)
+            {
+                alias.insert(*dst);
+            }
+        }
+        if alias.len() == before {
+            break;
+        }
+    }
+    let guarded = |bb: heki_ir::BlockId| {
+        f.blocks.iter().any(|p| match &p.terminator {
+            Terminator::Branch { cond, then_bb, .. } if *then_bb == bb => matches!(
+                defs.get(cond),
+                Some(InstKind::Compare { op: CompareOpKind::NotIn, rhs, .. }) if alias.contains(rhs)
+            ),
+            _ => false,
+        })
+    };
+    let mut out = Vec::new();
+    for bb in &f.blocks {
+        for inst in &bb.insts {
+            let w = match &inst.kind {
+                InstKind::AttrStore { obj, attr: a, .. }
+                | InstKind::AttrDelete { obj, attr: a }
+                    if self_vars.contains(obj) && a == attr =>
+                {
+                    Some(false)
+                }
+                InstKind::SubscriptStore { obj, .. } if alias.contains(obj) => Some(guarded(bb.id)),
+                InstKind::SubscriptDelete { obj, .. } if alias.contains(obj) => Some(false),
+                InstKind::MethodCall { recv, method, .. }
+                    if alias.contains(recv) && CONTAINER_MUTATORS.contains(&method.as_str()) =>
+                {
+                    Some(method == "setdefault")
+                }
+                _ => None,
+            };
+            if let Some(memo_shaped) = w {
+                out.push(SelfWrite {
+                    span: inst.span,
+                    memo_shaped,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|w| w.span);
+    out
+}
+
+// ==================================================================================== MUT201
+
+const INITIALIZERS: &[&str] = &[
+    "__init__",
+    "__post_init__",
+    "__new__",
+    "model_post_init",
+    "__setstate__",
+];
+
+struct OwnerTarget {
+    text: String,
+    attr: DottedPattern,
+    /// Project classes (fqn) the class pattern names, plus all their subclasses.
+    classes: FxHashSet<String>,
+}
+
+struct OwnerRule<'r> {
+    name: &'r str,
+    targets: Vec<OwnerTarget>,
+    allowed: Vec<DottedPattern>,
+    forbid_cached: FxHashSet<String>,
+}
+
+fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> FxHashSet<String> {
+    let mut out = FxHashSet::default();
+    for c in all.iter().filter(|c| pattern.matches(c)) {
+        out.insert(c.clone());
+        out.extend(cx.decls.subclasses_of(c));
+    }
+    out
+}
+
+pub(crate) fn mut201(
+    cx: &CheckContext<'_>,
+    out: &mut Vec<Diagnostic>,
+) -> Result<(), RuleConfigError> {
+    if !cx.selection.is_enabled("MUT201") || cx.config.write_owners.is_empty() {
+        return Ok(());
+    }
+    let mut all_classes: Vec<String> = cx
+        .index
+        .files
+        .values()
+        .flat_map(|f| {
+            f.decls
+                .classes
+                .keys()
+                .map(move |q| format!("{}.{q}", f.module_name))
+        })
+        .collect();
+    all_classes.sort();
+    let mut rules = Vec::new();
+    for rule in &cx.config.write_owners {
+        let mut targets = Vec::new();
+        for t in &rule.targets {
+            let Some((class, attr)) = t.rsplit_once('.') else {
+                return Err(RuleConfigError::InvalidTarget(t.clone()));
+            };
+            let class = DottedPattern::new(class, "write-owners.targets")?;
+            targets.push(OwnerTarget {
+                text: t.clone(),
+                attr: DottedPattern::new(attr, "write-owners.targets")?,
+                classes: class_set(cx, &class, &all_classes),
+            });
+        }
+        let allowed = rule
+            .allowed_writers
+            .iter()
+            .map(|p| DottedPattern::new(p, "write-owners.allowed-writers"))
+            .collect::<Result<_, _>>()?;
+        let mut forbid_cached = FxHashSet::default();
+        for p in &rule.forbid_cached_property_on {
+            let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;
+            forbid_cached.extend(class_set(cx, &p, &all_classes));
+        }
+        rules.push(OwnerRule {
+            name: &rule.name,
+            targets,
+            allowed,
+            forbid_cached,
+        });
+    }
+
+    let mut keys_by_fqn: FxHashMap<String, FuncKey> = FxHashMap::default();
+    for file in cx.index.files.values() {
+        for k in file.local_functions.keys() {
+            keys_by_fqn.insert(k.fqn(), k.clone());
+        }
+    }
+    let is_allowed = |rule: &OwnerRule<'_>, key: &FuncKey| {
+        let fqn = key.fqn();
+        rule.allowed
+            .iter()
+            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+    };
+    // A private helper with project callers delegates responsibility to its callers.
+    let delegates = |key: &FuncKey| {
+        is_private(&key.qualname)
+            && cx
+                .index
+                .reverse_call_graph
+                .get(key)
+                .is_some_and(|c| !c.is_empty())
+    };
+    let is_initializer_of = |key: &FuncKey, class: &str| {
+        let Some((owner, name)) = key.qualname.rsplit_once('.') else {
+            return false;
+        };
+        INITIALIZERS.contains(&name) && format!("{}.{owner}", key.module) == class
+    };
+
+    let mut paths: Vec<_> = cx.index.files.keys().collect();
+    paths.sort();
+    let mut seen = FxHashSet::default();
+    for path in paths {
+        let file = &cx.index.files[path];
+        let Some(unit) = cx.unit(path) else {
+            continue;
+        };
+        let mut funcs: Vec<_> = file.functions.iter().collect();
+        funcs.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, s) in funcs {
+            for site in &s.typed_field_write_sites {
+                for rule in &rules {
+                    for t in &rule.targets {
+                        if !t.classes.contains(&site.class_qualname) || !t.attr.matches(&site.attr)
+                        {
+                            continue;
+                        }
+                        let mut chain: Vec<FuncKey> = vec![key.clone()];
+                        chain.extend(
+                            site.via_chain
+                                .iter()
+                                .filter_map(|h| keys_by_fqn.get(&h.callee).cloned()),
+                        );
+                        if chain.iter().any(|k| is_allowed(rule, k)) {
+                            continue;
+                        }
+                        let origin = if site.kind == WriteKind::IndirectHelper && chain.len() >= 2 {
+                            chain.len() - 2
+                        } else {
+                            chain.len() - 1
+                        };
+                        // A class's own initializer establishes its fields.
+                        if is_initializer_of(&chain[origin], &site.class_qualname) {
+                            continue;
+                        }
+                        // Report at the outermost function: helpers in between must be private
+                        // (they delegate), and a delegating function leaves it to its callers.
+                        if !chain[1..=origin].iter().all(|k| is_private(&k.qualname))
+                            || delegates(key)
+                        {
+                            continue;
+                        }
+                        let span = site.via_chain.first().map_or(site.span, |h| h.span);
+                        if !seen.insert((key.clone(), span, t.text.clone())) {
+                            continue;
+                        }
+                        let via = site
+                            .via_chain
+                            .last()
+                            .map(|h| format!(" via `{}`", h.callee))
+                            .unwrap_or_default();
+                        cx.emit(
+                            out,
+                            "MUT201",
+                            unit,
+                            span,
+                            &key.qualname,
+                            t.text.clone(),
+                            format!(
+                                "`{}` writes `{}` ({}){via} outside the write owners of `{}`",
+                                key.qualname,
+                                t.text,
+                                site.kind.as_str(),
+                                rule.name
+                            ),
+                            &site.via_chain,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // `forbid-cached-property-on`: a `@cached_property` defined on a guarded class.
+    for unit in cx.units {
+        for f in &unit.input.ir.functions {
+            let Some(owner) = &f.owner_class_qualname else {
+                continue;
+            };
+            if f.is_class_body || !f.has_decorator(&["cached_property"]) {
+                continue;
+            }
+            let class = format!("{}.{owner}", unit.input.module_name);
+            for rule in rules.iter().filter(|r| r.forbid_cached.contains(&class)) {
+                cx.emit(
+                    out,
+                    "MUT201",
+                    unit,
+                    f.span,
+                    &f.qualname,
+                    format!("{owner}.{}", f.name),
+                    format!(
+                        "`@cached_property` `{}` is defined on `{owner}`, which `{}` forbids caching on",
+                        f.name, rule.name
+                    ),
+                    &[],
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// ==================================================================================== MUT202
+
+/// `readonly-returns` producers from the configuration.
+pub(crate) struct ReadOnlyProducers {
+    rules: Vec<(DottedPattern, bool)>,
+}
+
+impl ReadOnlyProducers {
+    pub fn new(config: &HekiConfig) -> Result<Self, RuleConfigError> {
+        let mut rules = Vec::new();
+        for r in &config.readonly_returns {
+            for p in &r.producers {
+                rules.push((DottedPattern::new(p, "readonly-returns.producers")?, r.deep));
+            }
+        }
+        Ok(Self { rules })
+    }
+
+    fn deep_for(&self, fqn: &str) -> Option<bool> {
+        let mut found = None;
+        for (p, deep) in &self.rules {
+            if p.matches(fqn) {
+                found = Some(found.unwrap_or(false) || *deep);
+            }
+        }
+        found
+    }
+}
+
+/// Read-only origin of a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ro {
+    producer: String,
+    deep: bool,
+    /// A shallow copy of a deep read-only value: its own top level may change, its
+    /// elements / attributes are still shared.
+    shallow_copy: bool,
+}
+
+/// Methods returning (views of) a container's elements.
+const ELEMENT_ACCESSORS: &[&str] = &["get", "__getitem__", "values", "items"];
+/// Methods returning a copy of their receiver.
+const COPY_METHODS: &[&str] = &["copy", "model_copy", "__copy__", "__deepcopy__"];
+const MUTABLE_BUILTINS: &[&str] = &[
+    "builtins.list",
+    "builtins.dict",
+    "builtins.set",
+    "builtins.bytearray",
+];
+
+pub(crate) fn mut202(
+    cx: &CheckContext<'_>,
+    unit: &ModuleUnit<'_>,
+    producers: &ReadOnlyProducers,
+    out: &mut Vec<Diagnostic>,
+) {
+    if !cx.enabled("MUT202", unit) {
+        return;
+    }
+    let tcx = TypeCtx::new(&unit.input, &cx.decls, cx.kb);
+    for f in &unit.input.ir.functions {
+        if f.is_class_body {
+            continue;
+        }
+        Mut202Fn::new(cx, unit, &tcx, producers, f).run(out);
+    }
+}
+
+struct Mut202Fn<'a> {
+    cx: &'a CheckContext<'a>,
+    unit: &'a ModuleUnit<'a>,
+    tcx: &'a TypeCtx<'a>,
+    producers: &'a ReadOnlyProducers,
+    f: &'a IrFunction,
+    key: FuncKey,
+    types: FxHashMap<VarId, Val>,
+    defs: FxHashMap<VarId, &'a Inst>,
+    ro: FxHashMap<VarId, Ro>,
+}
+
+impl<'a> Mut202Fn<'a> {
+    fn new(
+        cx: &'a CheckContext<'a>,
+        unit: &'a ModuleUnit<'a>,
+        tcx: &'a TypeCtx<'a>,
+        producers: &'a ReadOnlyProducers,
+        f: &'a IrFunction,
+    ) -> Self {
+        let mut defs = FxHashMap::default();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let Some(d) = inst.kind.dst() {
+                defs.insert(d, inst);
+            }
+        }
+        Self {
+            cx,
+            unit,
+            tcx,
+            producers,
+            f,
+            key: CheckContext::key(unit, f),
+            types: tcx.infer(f),
+            defs,
+            ro: FxHashMap::default(),
+        }
+    }
+
+    fn callee_of(&self, kind: &InstKind) -> Option<Callee> {
+        match kind {
+            InstKind::Call { callee_var, .. } => Some(
+                self.tcx
+                    .resolve_call(callee_var.and_then(|v| self.types.get(&v))),
+            ),
+            InstKind::MethodCall { recv, method, .. } => {
+                Some(self.tcx.resolve_method(self.types.get(recv), method))
+            }
+            _ => None,
+        }
+    }
+
+    fn producer(&self, callee: &Callee) -> Option<Ro> {
+        let make = |producer: String, deep: bool| Ro {
+            producer,
+            deep,
+            shallow_copy: false,
+        };
+        match callee {
+            Callee::Project(keys, _) => keys.iter().find_map(|k| {
+                let fqn = k.fqn();
+                if self.cx.index.summary(k).is_some_and(|s| s.is_lru_cache) {
+                    return Some(make(fqn, true));
+                }
+                self.producers.deep_for(&fqn).map(|d| make(fqn, d))
+            }),
+            Callee::External(sym) => self.producers.deep_for(sym).map(|d| make(sym.clone(), d)),
+            Callee::TooMany | Callee::Unresolved => None,
+        }
+    }
+
+    fn kwarg_true(&self, kwargs: &[(Option<String>, VarId)], name: &str) -> bool {
+        kwargs
+            .iter()
+            .any(|(k, v)| k.as_deref() == Some(name) && self.f.const_bool(*v) == Some(true))
+    }
+
+    /// Value produced by one instruction from read-only operands.
+    fn transfer(&self, inst: &Inst) -> Option<Ro> {
+        let elem = |r: &Ro| {
+            (r.deep || r.shallow_copy).then(|| Ro {
+                producer: r.producer.clone(),
+                deep: true,
+                shallow_copy: false,
+            })
+        };
+        match &inst.kind {
+            InstKind::Copy { src, .. } => self.ro.get(src).cloned(),
+            InstKind::SubscriptLoad { obj, index, .. } => {
+                let r = self.ro.get(obj)?;
+                // Tuple / list unpacking (`a, b = producer()`) lowers to a constant-index
+                // load spanning the target itself.
+                let unpack = self.defs.get(index).is_some_and(|d| {
+                    d.span == inst.span
+                        && matches!(
+                            d.kind,
+                            InstKind::Const {
+                                literal: ConstLiteral::Int(_),
+                                ..
+                            }
+                        )
+                });
+                if unpack && !r.shallow_copy {
+                    return Some(Ro {
+                        shallow_copy: false,
+                        ..r.clone()
+                    });
+                }
+                elem(r)
+            }
+            InstKind::AttrLoad { obj, attr, .. } => {
+                if let Some(r) = self.ro.get(obj) {
+                    return elem(r);
+                }
+                // `readonly-returns` may name a property: `obj.schema`.
+                if let Some(Val::Inst(class)) = self.types.get(obj) {
+                    let fqn = format!("{class}.{attr}");
+                    return self.producers.deep_for(&fqn).map(|deep| Ro {
+                        producer: fqn,
+                        deep,
+                        shallow_copy: false,
+                    });
+                }
+                None
+            }
+            InstKind::MakeIter { iterable, .. } => self.ro.get(iterable).cloned(),
+            InstKind::IterNext { iter, .. } => self.ro.get(iter).and_then(elem),
+            InstKind::Call { args, kwargs, .. } | InstKind::MethodCall { args, kwargs, .. } => {
+                let callee = self.callee_of(&inst.kind)?;
+                if let Some(r) = self.producer(&callee) {
+                    return Some(r);
+                }
+                let (operand, method) = match &inst.kind {
+                    InstKind::MethodCall { recv, method, .. } if self.ro.contains_key(recv) => {
+                        (Some(*recv), Some(method.as_str()))
+                    }
+                    _ => (
+                        args.first().copied().filter(|a| self.ro.contains_key(a)),
+                        None,
+                    ),
+                };
+                let r = self.ro.get(&operand?)?;
+                let symbol = match &callee {
+                    Callee::External(s) => s.as_str(),
+                    _ => "",
+                };
+                let sanitizer = self.cx.kb.lookup(symbol).is_some_and(|e| e.copy_sanitizer)
+                    || method.is_some_and(|m| COPY_METHODS.contains(&m));
+                if sanitizer {
+                    let deep_copy = symbol.ends_with("deepcopy")
+                        || method == Some("__deepcopy__")
+                        || (method == Some("model_copy") || symbol.ends_with(".model_copy"))
+                            && self.kwarg_true(kwargs, "deep");
+                    if deep_copy || !(r.deep || r.shallow_copy) {
+                        return None;
+                    }
+                    return Some(Ro {
+                        producer: r.producer.clone(),
+                        deep: true,
+                        shallow_copy: true,
+                    });
+                }
+                match method {
+                    Some(m) if ELEMENT_ACCESSORS.contains(&m) => elem(r),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn propagate(&mut self) {
+        let rpo = self.f.rpo_blocks();
+        for _ in 0..4 {
+            let before = self.ro.len();
+            for &bb in &rpo {
+                let block = self.f.block(bb);
+                for phi in &block.phis {
+                    if self.ro.contains_key(&phi.dst) {
+                        continue;
+                    }
+                    if let Some(r) = phi
+                        .incoming
+                        .iter()
+                        .find_map(|(_, v)| self.ro.get(v))
+                        .cloned()
+                    {
+                        self.ro.insert(phi.dst, r);
+                    }
+                }
+                for inst in &block.insts {
+                    let Some(dst) = inst.kind.dst() else {
+                        continue;
+                    };
+                    if self.ro.contains_key(&dst) {
+                        continue;
+                    }
+                    if let Some(r) = self.transfer(inst) {
+                        self.ro.insert(dst, r);
+                    }
+                }
+            }
+            if self.ro.len() == before {
+                break;
+            }
+        }
+    }
+
+    /// Read-only origin of `var` when mutating its own top level is a violation.
+    fn guarded(&self, var: VarId) -> Option<&Ro> {
+        self.ro.get(&var).filter(|r| !r.shallow_copy)
+    }
+
+    fn run(mut self, out: &mut Vec<Diagnostic>) {
+        self.propagate();
+        if self.ro.is_empty() {
+            return;
+        }
+        let mut reported: BTreeSet<Span> = BTreeSet::new();
+        for bb in &self.f.blocks {
+            for inst in &bb.insts {
+                let (hit, chain) = self.violation(inst);
+                if let Some(r) = hit
+                    && reported.insert(inst.span)
+                {
+                    self.cx.emit(
+                        out,
+                        "MUT202",
+                        self.unit,
+                        inst.span,
+                        &self.key.qualname,
+                        r.producer.clone(),
+                        format!(
+                            "`{}` mutates the shared object returned by read-only producer `{}`",
+                            self.key.qualname, r.producer
+                        ),
+                        &chain,
+                    );
+                }
+            }
+        }
+    }
+
+    fn violation(&self, inst: &Inst) -> (Option<Ro>, Vec<CallHop>) {
+        let direct = match &inst.kind {
+            InstKind::AttrStore { obj, .. }
+            | InstKind::AttrDelete { obj, .. }
+            | InstKind::SubscriptStore { obj, .. }
+            | InstKind::SubscriptDelete { obj, .. } => self.guarded(*obj),
+            InstKind::MethodCall { recv, method, .. }
+                if CONTAINER_MUTATORS.contains(&method.as_str()) =>
+            {
+                self.guarded(*recv)
+            }
+            InstKind::BinOp {
+                lhs, in_place: true, ..
+            } => self.guarded(*lhs).filter(|_| {
+                matches!(self.types.get(lhs), Some(Val::Inst(t)) if MUTABLE_BUILTINS.contains(&t.as_str()))
+            }),
+            _ => None,
+        };
+        if direct.is_some() {
+            return (direct.cloned(), Vec::new());
+        }
+        // Passing a read-only value to a project function that mutates that parameter.
+        let Some(Callee::Project(keys, binds_recv)) = self.callee_of(&inst.kind) else {
+            return (None, Vec::new());
+        };
+        let (recv, args, kwargs) = match &inst.kind {
+            InstKind::MethodCall {
+                recv, args, kwargs, ..
+            } => (Some(*recv), args, kwargs),
+            InstKind::Call { args, kwargs, .. } => (None, args, kwargs),
+            _ => return (None, Vec::new()),
+        };
+        for key in &keys {
+            let Some(callee) = self.cx.index.summary(key) else {
+                continue;
+            };
+            let decl = self
+                .cx
+                .decls
+                .function_decl(key)
+                .cloned()
+                .unwrap_or_default();
+            let offset = usize::from(binds_recv && !decl.is_staticmethod);
+            let mut bound: Vec<(usize, VarId)> = Vec::new();
+            if offset == 1
+                && !decl.is_classmethod
+                && let Some(r) = recv
+            {
+                bound.push((0, r));
+            }
+            bound.extend(args.iter().enumerate().map(|(i, v)| (i + offset, *v)));
+            for (name, v) in kwargs {
+                if let Some(pos) = name
+                    .as_ref()
+                    .and_then(|n| decl.param_names.iter().position(|p| p == n))
+                {
+                    bound.push((pos, *v));
+                }
+            }
+            for (pos, var) in bound {
+                let Some(r) = self.ro.get(&var) else {
+                    continue;
+                };
+                let Ok(pos8) = u8::try_from(pos) else {
+                    continue;
+                };
+                let paths = callee.mutated_param_paths.get(&pos8);
+                let mutates = if r.shallow_copy {
+                    paths.is_some_and(|p| p.iter().any(|path| !path.is_empty()))
+                } else {
+                    pos < 64 && callee.mutates_params & (1u64 << pos) != 0
+                };
+                if mutates {
+                    let hop = CallHop {
+                        caller: self.key.clone(),
+                        callee: key.fqn(),
+                        span: inst.span,
+                        path: self.unit.input.path.clone(),
+                    };
+                    return (Some(r.clone()), vec![hop]);
+                }
+            }
+        }
+        (None, Vec::new())
+    }
+}

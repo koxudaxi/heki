@@ -1,0 +1,18 @@
+[package]
+name = "heki_lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+heki_ast.workspace = true
+heki_diagnostics.workspace = true
+heki_effect.workspace = true
+heki_env.workspace = true
+heki_rules.workspace = true
+heki_soundness.workspace = true
+serde.workspace = true

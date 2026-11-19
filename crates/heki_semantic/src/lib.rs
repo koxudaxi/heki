@@ -1,0 +1,1463 @@
+//! Python scope tree, bindings, LEGB resolution, PEP 709/649/695/810 semantics,
+//! module imports, and lightweight Class Hierarchy Analysis (CHA).
+//!
+//! Verified bidirectionally against CPython 3.11-3.15 `symtable` via `tests/symtable_verify/`.
+
+use heki_ast::raw_ast::{self as ast, Expr, ExprContext, Pattern, Stmt, TypeParam};
+use heki_ast::{LineIndex, ParsedModule, Ranged, Span};
+use heki_env::RuntimeProfile;
+use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ScopeId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SymbolId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClassId(pub u32);
+
+/// Python lexical scope kind (aligned with CPython `symtable`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeKind {
+    Module,
+    Function,
+    Class,
+    Comprehension,
+    TypeParameters,
+    Annotation,
+}
+
+/// Resolution category of a name read (verified against CPython `symtable`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NameResolution {
+    Local,
+    Enclosing,
+    Global,
+    Builtin,
+}
+
+/// Binding metadata for a symbol within a scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Binding {
+    pub name: String,
+    pub span: Span,
+    pub is_parameter: bool,
+    pub is_global_decl: bool,
+    pub is_nonlocal_decl: bool,
+    /// True when bound by Python 3.15 PEP 810 `lazy import` / `lazy from ... import ...`.
+    pub is_lazy_import: bool,
+}
+
+/// Extracted module import entry (used by `heki_effect` and `heki_ir`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleImport {
+    pub scope: ScopeId,
+    pub module: Option<String>,
+    pub imported_name: String,
+    pub bound_name: String,
+    pub level: u32,
+    pub is_from: bool,
+    pub is_lazy: bool,
+    pub in_type_checking: bool,
+    pub span: Span,
+}
+
+/// Lightweight class metadata for CHA and strict nested-class isolation (`owner_class`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassInfo {
+    pub id: ClassId,
+    pub scope: ScopeId,
+    pub name: String,
+    pub qualname: String,
+    pub parent_class: Option<ClassId>,
+    pub bases: Vec<String>,
+    pub methods: Vec<String>,
+    pub span: Span,
+}
+
+/// Lexical scope node matching CPython `symtable` structure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Scope {
+    pub id: ScopeId,
+    pub parent: Option<ScopeId>,
+    pub kind: ScopeKind,
+    pub name: String,
+    pub line: u32,
+    pub bindings: Vec<Binding>,
+    pub reads: Vec<(String, NameResolution)>,
+    /// Reads occurring exclusively inside a PEP 709 inlined comprehension
+    /// (CPython 3.12+ `symtable` drops `is_referenced()` on outer symbols read only there).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inlined_comp_only_reads: Vec<String>,
+}
+
+/// Per-module semantic analysis result (JSON-serializable for `symtable` differential verification).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticModel {
+    pub has_future_annotations: bool,
+    pub scopes: Vec<Scope>,
+    pub imports: Vec<ModuleImport>,
+    pub classes: Vec<ClassInfo>,
+}
+
+struct ScopeBuilder {
+    id: ScopeId,
+    parent: Option<ScopeId>,
+    kind: ScopeKind,
+    name: String,
+    line: u32,
+    /// Enclosing class name for Python private name mangling (`__x` -> `_Cls__x`).
+    enclosing_class_name: Option<String>,
+    bindings: Vec<Binding>,
+    bound_names: FxHashSet<String>,
+    /// Names bound exclusively as PEP 709 inlined comprehension targets (lexically isolated).
+    comp_target_bindings: Vec<(String, Span)>,
+    comp_target_names: FxHashSet<String>,
+    /// Names assigned via walrus (`:=`) inside a module-level inlined comprehension.
+    module_walrus_globals: FxHashSet<String>,
+    global_decls: FxHashSet<String>,
+    nonlocal_decls: FxHashSet<String>,
+    raw_reads: Vec<String>,
+    raw_read_set: FxHashSet<String>,
+    /// Reads that occurred OUTSIDE any PEP 709 inlined comprehension.
+    non_comp_reads: FxHashSet<String>,
+    /// Reads that occurred INSIDE a PEP 709 inlined comprehension.
+    in_comp_reads: FxHashSet<String>,
+    /// True for reads occurring inside an inlined class-body comprehension
+    /// (which in Python 3.12+ PEP 709 cannot read the enclosing class namespace).
+    class_comp_reads: FxHashSet<String>,
+    /// Names bound by an inlined class-body comprehension itself (which ARE visible in it).
+    class_comp_bindings: FxHashSet<String>,
+}
+
+impl ScopeBuilder {
+    fn new(
+        id: ScopeId,
+        parent: Option<ScopeId>,
+        kind: ScopeKind,
+        name: String,
+        line: u32,
+        enclosing_class_name: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            parent,
+            kind,
+            name,
+            line,
+            enclosing_class_name,
+            bindings: Vec::new(),
+            bound_names: FxHashSet::default(),
+            comp_target_bindings: Vec::new(),
+            comp_target_names: FxHashSet::default(),
+            module_walrus_globals: FxHashSet::default(),
+            global_decls: FxHashSet::default(),
+            nonlocal_decls: FxHashSet::default(),
+            raw_reads: Vec::new(),
+            raw_read_set: FxHashSet::default(),
+            non_comp_reads: FxHashSet::default(),
+            in_comp_reads: FxHashSet::default(),
+            class_comp_reads: FxHashSet::default(),
+            class_comp_bindings: FxHashSet::default(),
+        }
+    }
+
+    fn mangle(&self, name: &str) -> String {
+        if name.starts_with("__")
+            && !name.ends_with("__")
+            && let Some(cls) = &self.enclosing_class_name
+        {
+            let stripped = cls.trim_start_matches('_');
+            if !stripped.is_empty() {
+                return format!("_{stripped}{name}");
+            }
+        }
+        name.to_string()
+    }
+
+    fn add_binding(
+        &mut self,
+        raw_name: &str,
+        span: Span,
+        is_parameter: bool,
+        is_lazy_import: bool,
+    ) {
+        let name = self.mangle(raw_name);
+        if self.bound_names.insert(name.clone()) {
+            self.bindings.push(Binding {
+                name,
+                span,
+                is_parameter,
+                is_global_decl: false,
+                is_nonlocal_decl: false,
+                is_lazy_import,
+            });
+        }
+    }
+
+    fn add_global(&mut self, raw_name: &str, span: Span) {
+        let name = self.mangle(raw_name);
+        self.global_decls.insert(name.clone());
+        if self.bound_names.insert(name.clone()) {
+            self.bindings.push(Binding {
+                name,
+                span,
+                is_parameter: false,
+                is_global_decl: true,
+                is_nonlocal_decl: false,
+                is_lazy_import: false,
+            });
+        } else if let Some(b) = self.bindings.iter_mut().find(|b| b.name == name) {
+            b.is_global_decl = true;
+        }
+    }
+
+    fn add_nonlocal(&mut self, raw_name: &str, span: Span) {
+        let name = self.mangle(raw_name);
+        self.nonlocal_decls.insert(name.clone());
+        if self.bound_names.insert(name.clone()) {
+            self.bindings.push(Binding {
+                name,
+                span,
+                is_parameter: false,
+                is_global_decl: false,
+                is_nonlocal_decl: true,
+                is_lazy_import: false,
+            });
+        } else if let Some(b) = self.bindings.iter_mut().find(|b| b.name == name) {
+            b.is_nonlocal_decl = true;
+        }
+    }
+
+    fn add_comp_target_binding(&mut self, raw_name: &str, span: Span) {
+        let name = self.mangle(raw_name);
+        if self.comp_target_names.insert(name.clone()) {
+            self.comp_target_bindings.push((name, span));
+        }
+    }
+
+    fn add_read(&mut self, raw_name: &str, in_inlined_comp: bool, in_class_comp: bool) {
+        let name = self.mangle(raw_name);
+        if in_inlined_comp {
+            self.in_comp_reads.insert(name.clone());
+        } else {
+            self.non_comp_reads.insert(name.clone());
+        }
+        if in_class_comp {
+            // In PEP 709 class-body comprehension, reading a class-local var does not see the class scope.
+            self.class_comp_reads.insert(name.clone());
+        }
+        if self.raw_read_set.insert(name.clone()) {
+            self.raw_reads.push(name);
+        }
+    }
+}
+
+struct Analyzer<'a> {
+    profile: RuntimeProfile,
+    lines: LineIndex,
+    has_future_annotations: bool,
+    scopes: Vec<ScopeBuilder>,
+    scope_stack: Vec<ScopeId>,
+    class_stack: Vec<(ClassId, String)>,
+    imports: Vec<ModuleImport>,
+    classes: Vec<ClassInfo>,
+    in_type_checking: bool,
+    inlined_comp_depth: u32,
+    in_inlined_class_comp: bool,
+    _source: &'a str,
+}
+
+impl<'a> Analyzer<'a> {
+    fn new(source: &'a str, profile: RuntimeProfile, suite: &[Stmt]) -> Self {
+        let has_future_annotations = detect_future_annotations(suite);
+        let root = ScopeBuilder::new(
+            ScopeId(0),
+            None,
+            ScopeKind::Module,
+            "top".to_string(),
+            0,
+            None,
+        );
+        Self {
+            profile,
+            lines: LineIndex::from_source(source),
+            has_future_annotations,
+            scopes: vec![root],
+            scope_stack: vec![ScopeId(0)],
+            class_stack: Vec::new(),
+            imports: Vec::new(),
+            classes: Vec::new(),
+            in_type_checking: false,
+            inlined_comp_depth: 0,
+            in_inlined_class_comp: false,
+            _source: source,
+        }
+    }
+
+    fn cur_scope_id(&self) -> ScopeId {
+        *self.scope_stack.last().expect("scope stack non-empty")
+    }
+
+    fn cur_scope_mut(&mut self) -> &mut ScopeBuilder {
+        let id = self.cur_scope_id().0 as usize;
+        &mut self.scopes[id]
+    }
+
+    fn cur_enclosing_class_name(&self) -> Option<String> {
+        self.class_stack.last().map(|(_, name)| name.clone())
+    }
+
+    fn push_scope(&mut self, kind: ScopeKind, name: String, line: u32) -> ScopeId {
+        let id = ScopeId(self.scopes.len() as u32);
+        let parent = Some(self.cur_scope_id());
+        let cls_name = self.cur_enclosing_class_name();
+        self.scopes
+            .push(ScopeBuilder::new(id, parent, kind, name, line, cls_name));
+        self.scope_stack.push(id);
+        id
+    }
+
+    fn pop_scope(&mut self) {
+        self.scope_stack.pop();
+    }
+
+    /// Find the target scope for a PEP 572 walrus (`:=`) binding:
+    /// the innermost enclosing scope that is NOT a `Comprehension`.
+    fn walrus_target_scope(&self) -> ScopeId {
+        for &sid in self.scope_stack.iter().rev() {
+            if self.scopes[sid.0 as usize].kind != ScopeKind::Comprehension {
+                return sid;
+            }
+        }
+        ScopeId(0)
+    }
+
+    fn visit_suite(&mut self, suite: &[Stmt]) {
+        // On Python 3.14+ without `from __future__ import annotations`, module/class-level
+        // variable annotations (`x: T`) are collected into a single `__annotate__` scope.
+        let cur_kind = self.scopes[self.cur_scope_id().0 as usize].kind;
+        let collect_ann_scope = self.profile.pep649_deferred_annotations
+            && !self.has_future_annotations
+            && matches!(cur_kind, ScopeKind::Module | ScopeKind::Class);
+
+        let mut deferred_anns: Vec<&Expr> = Vec::new();
+        for stmt in suite {
+            if collect_ann_scope && let Stmt::AnnAssign(aa) = stmt {
+                self.visit_ann_assign_with_deferred(aa, &mut deferred_anns);
+                continue;
+            }
+            self.visit_stmt(stmt);
+        }
+        if !deferred_anns.is_empty() {
+            let line = self.lines.line(deferred_anns[0].range().start().to_u32());
+            self.push_scope(ScopeKind::Annotation, "__annotate__".to_string(), line);
+            for ann in deferred_anns {
+                self.visit_expr(ann);
+            }
+            self.pop_scope();
+        }
+    }
+
+    fn visit_ann_assign_with_deferred<'b>(
+        &mut self,
+        aa: &'b ast::StmtAnnAssign,
+        deferred: &mut Vec<&'b Expr>,
+    ) {
+        if aa.simple {
+            if let Expr::Name(n) = aa.target.as_ref() {
+                self.cur_scope_mut()
+                    .add_binding(n.id.as_str(), Span::from(n.range), false, false);
+            }
+        } else {
+            self.visit_expr(&aa.target);
+        }
+        deferred.push(&aa.annotation);
+        if let Some(val) = &aa.value {
+            self.visit_expr(val);
+        }
+    }
+
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::FunctionDef(func) => self.visit_function_def(func),
+            Stmt::ClassDef(cls) => self.visit_class_def(cls),
+            Stmt::TypeAlias(ta) => self.visit_type_alias(ta),
+            Stmt::Return(ret) => {
+                if let Some(v) = &ret.value {
+                    self.visit_expr(v);
+                }
+            }
+            Stmt::Delete(del) => {
+                for t in &del.targets {
+                    self.visit_expr(t);
+                }
+            }
+            Stmt::Assign(assign) => {
+                for t in &assign.targets {
+                    self.visit_expr(t);
+                }
+                self.visit_expr(&assign.value);
+            }
+            Stmt::AugAssign(aug) => {
+                // CPython symtable marks `Name += ...` as assigned without adding a separate read flag.
+                if let Expr::Name(n) = aug.target.as_ref() {
+                    self.cur_scope_mut().add_binding(
+                        n.id.as_str(),
+                        Span::from(n.range),
+                        false,
+                        false,
+                    );
+                } else {
+                    self.visit_expr(&aug.target);
+                }
+                self.visit_expr(&aug.value);
+            }
+            Stmt::AnnAssign(aa) => {
+                if aa.simple {
+                    if let Expr::Name(n) = aa.target.as_ref() {
+                        self.cur_scope_mut().add_binding(
+                            n.id.as_str(),
+                            Span::from(n.range),
+                            false,
+                            false,
+                        );
+                    }
+                } else {
+                    self.visit_expr(&aa.target);
+                }
+                // In function scopes, local variable annotations are never evaluated at runtime in Python 3.
+                let cur_kind = self.scopes[self.cur_scope_id().0 as usize].kind;
+                if !self.has_future_annotations && cur_kind != ScopeKind::Function {
+                    self.visit_expr(&aa.annotation);
+                }
+                if let Some(val) = &aa.value {
+                    self.visit_expr(val);
+                }
+            }
+            Stmt::For(f) => {
+                self.visit_expr(&f.iter);
+                self.visit_expr(&f.target);
+                self.visit_suite(&f.body);
+                self.visit_suite(&f.orelse);
+            }
+            Stmt::While(w) => {
+                self.visit_expr(&w.test);
+                self.visit_suite(&w.body);
+                self.visit_suite(&w.orelse);
+            }
+            Stmt::If(if_stmt) => {
+                self.visit_expr(&if_stmt.test);
+                let prev_tc = self.in_type_checking;
+                if is_type_checking_expr(&if_stmt.test) {
+                    self.in_type_checking = true;
+                }
+                self.visit_suite(&if_stmt.body);
+                self.in_type_checking = prev_tc;
+                for clause in &if_stmt.elif_else_clauses {
+                    if let Some(test) = &clause.test {
+                        self.visit_expr(test);
+                    }
+                    self.visit_suite(&clause.body);
+                }
+            }
+            Stmt::With(w) => {
+                for item in &w.items {
+                    self.visit_expr(&item.context_expr);
+                    if let Some(opt) = &item.optional_vars {
+                        self.visit_expr(opt);
+                    }
+                }
+                self.visit_suite(&w.body);
+            }
+            Stmt::Match(m) => {
+                self.visit_expr(&m.subject);
+                for case in &m.cases {
+                    self.visit_pattern(&case.pattern);
+                    if let Some(guard) = &case.guard {
+                        self.visit_expr(guard);
+                    }
+                    self.visit_suite(&case.body);
+                }
+            }
+            Stmt::Raise(r) => {
+                if let Some(exc) = &r.exc {
+                    self.visit_expr(exc);
+                }
+                if let Some(cause) = &r.cause {
+                    self.visit_expr(cause);
+                }
+            }
+            Stmt::Try(t) => {
+                self.visit_suite(&t.body);
+                for h in &t.handlers {
+                    let ast::ExceptHandler::ExceptHandler(eh) = h;
+                    if let Some(ty) = &eh.type_ {
+                        self.visit_expr(ty);
+                    }
+                    if let Some(name) = &eh.name {
+                        self.cur_scope_mut().add_binding(
+                            name.as_str(),
+                            Span::from(name.range),
+                            false,
+                            false,
+                        );
+                    }
+                    self.visit_suite(&eh.body);
+                }
+                self.visit_suite(&t.orelse);
+                self.visit_suite(&t.finalbody);
+            }
+            Stmt::Assert(a) => {
+                self.visit_expr(&a.test);
+                if let Some(msg) = &a.msg {
+                    self.visit_expr(msg);
+                }
+            }
+            Stmt::Import(imp) => {
+                let scope = self.cur_scope_id();
+                for alias in &imp.names {
+                    let bound = alias
+                        .asname
+                        .as_ref()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| alias.name.split('.').next().unwrap_or("").to_string());
+                    self.cur_scope_mut().add_binding(
+                        &bound,
+                        Span::from(alias.range),
+                        false,
+                        imp.is_lazy,
+                    );
+                    self.imports.push(ModuleImport {
+                        scope,
+                        module: None,
+                        imported_name: alias.name.to_string(),
+                        bound_name: bound,
+                        level: 0,
+                        is_from: false,
+                        is_lazy: imp.is_lazy,
+                        in_type_checking: self.in_type_checking,
+                        span: Span::from(alias.range),
+                    });
+                }
+            }
+            Stmt::ImportFrom(imp) => {
+                let scope = self.cur_scope_id();
+                let module = imp.module.as_ref().map(|m| m.to_string());
+                for alias in &imp.names {
+                    if alias.name.as_str() == "*" {
+                        continue;
+                    }
+                    let bound = alias
+                        .asname
+                        .as_ref()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| alias.name.to_string());
+                    self.cur_scope_mut().add_binding(
+                        &bound,
+                        Span::from(alias.range),
+                        false,
+                        imp.is_lazy,
+                    );
+                    self.imports.push(ModuleImport {
+                        scope,
+                        module: module.clone(),
+                        imported_name: alias.name.to_string(),
+                        bound_name: bound,
+                        level: imp.level,
+                        is_from: true,
+                        is_lazy: imp.is_lazy,
+                        in_type_checking: self.in_type_checking,
+                        span: Span::from(alias.range),
+                    });
+                }
+            }
+            Stmt::Global(g) => {
+                for name in &g.names {
+                    self.cur_scope_mut()
+                        .add_global(name.as_str(), Span::from(name.range));
+                }
+            }
+            Stmt::Nonlocal(nl) => {
+                for name in &nl.names {
+                    self.cur_scope_mut()
+                        .add_nonlocal(name.as_str(), Span::from(name.range));
+                }
+            }
+            Stmt::Expr(e) => self.visit_expr(&e.value),
+            Stmt::Pass(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::IpyEscapeCommand(_) => {}
+        }
+    }
+
+    fn visit_function_def(&mut self, func: &ast::StmtFunctionDef) {
+        let line = self.lines.line(func.range.start().to_u32());
+        // Decorators and defaults are evaluated in the enclosing scope.
+        for dec in &func.decorator_list {
+            self.visit_expr(&dec.expression);
+        }
+        self.visit_param_defaults(&func.parameters);
+
+        // Bind function name in enclosing scope (and record method on enclosing class for CHA).
+        self.cur_scope_mut().add_binding(
+            func.name.as_str(),
+            Span::from(func.name.range),
+            false,
+            false,
+        );
+        if let Some((cid, _)) = self.class_stack.last()
+            && let Some(ci) = self.classes.get_mut(cid.0 as usize)
+        {
+            ci.methods.push(func.name.to_string());
+        }
+
+        // Optional PEP 695 type parameters scope.
+        let has_type_params = func
+            .type_params
+            .as_ref()
+            .is_some_and(|tp| !tp.type_params.is_empty());
+        if let Some(tp) = &func.type_params
+            && !tp.type_params.is_empty()
+        {
+            self.push_scope(ScopeKind::TypeParameters, func.name.to_string(), line);
+            self.bind_type_params(tp);
+        }
+
+        // Parameter and return annotations.
+        let func_anns = collect_func_annotations(func);
+        if !self.has_future_annotations {
+            if self.profile.pep649_deferred_annotations {
+                // CPython 3.14+ (PEP 649) always opens a sibling `__annotate__` scope for `def`
+                // whenever `from __future__ import annotations` is not active.
+                self.push_scope(ScopeKind::Annotation, "__annotate__".to_string(), line);
+                for ann in func_anns {
+                    self.visit_expr(ann);
+                }
+                self.pop_scope();
+            } else {
+                for ann in func_anns {
+                    self.visit_expr(ann);
+                }
+            }
+        }
+
+        // Function body scope.
+        self.push_scope(ScopeKind::Function, func.name.to_string(), line);
+        self.bind_parameters(&func.parameters);
+        self.visit_suite(&func.body);
+        self.pop_scope();
+
+        if has_type_params {
+            self.pop_scope();
+        }
+    }
+
+    fn visit_class_def(&mut self, cls: &ast::StmtClassDef) {
+        let line = self.lines.line(cls.range.start().to_u32());
+        for dec in &cls.decorator_list {
+            self.visit_expr(&dec.expression);
+        }
+        self.cur_scope_mut().add_binding(
+            cls.name.as_str(),
+            Span::from(cls.name.range),
+            false,
+            false,
+        );
+
+        let has_type_params = cls
+            .type_params
+            .as_ref()
+            .is_some_and(|tp| !tp.type_params.is_empty());
+        if let Some(tp) = &cls.type_params
+            && !tp.type_params.is_empty()
+        {
+            self.push_scope(ScopeKind::TypeParameters, cls.name.to_string(), line);
+            self.bind_type_params(tp);
+        }
+
+        let mut bases = Vec::new();
+        if let Some(args) = &cls.arguments {
+            for arg in &args.args {
+                if let Some(b) = expr_dotted_name(arg) {
+                    bases.push(b);
+                }
+                self.visit_expr(arg);
+            }
+            for kw in &args.keywords {
+                self.visit_expr(&kw.value);
+            }
+        }
+
+        let parent_class = self.class_stack.last().map(|(cid, _)| *cid);
+        let qualname = if self.class_stack.is_empty() {
+            cls.name.to_string()
+        } else {
+            let prefix: Vec<&str> = self.class_stack.iter().map(|(_, n)| n.as_str()).collect();
+            format!("{}.{}", prefix.join("."), cls.name)
+        };
+        let class_id = ClassId(self.classes.len() as u32);
+
+        self.class_stack.push((class_id, cls.name.to_string()));
+        let scope = self.push_scope(ScopeKind::Class, cls.name.to_string(), line);
+        self.classes.push(ClassInfo {
+            id: class_id,
+            scope,
+            name: cls.name.to_string(),
+            qualname,
+            parent_class,
+            bases,
+            methods: Vec::new(),
+            span: Span::from(cls.range),
+        });
+        self.visit_suite(&cls.body);
+        self.pop_scope();
+        self.class_stack.pop();
+
+        if has_type_params {
+            self.pop_scope();
+        }
+    }
+
+    fn visit_type_alias(&mut self, ta: &ast::StmtTypeAlias) {
+        let line = self.lines.line(ta.range.start().to_u32());
+        let alias_name = if let Expr::Name(n) = ta.name.as_ref() {
+            self.cur_scope_mut()
+                .add_binding(n.id.as_str(), Span::from(n.range), false, false);
+            n.id.to_string()
+        } else {
+            "<type_alias>".to_string()
+        };
+
+        let has_type_params = ta
+            .type_params
+            .as_ref()
+            .is_some_and(|tp| !tp.type_params.is_empty());
+        if let Some(tp) = &ta.type_params
+            && !tp.type_params.is_empty()
+        {
+            self.push_scope(ScopeKind::TypeParameters, alias_name.clone(), line);
+            self.bind_type_params(tp);
+        }
+        self.push_scope(ScopeKind::Function, alias_name, line);
+        self.visit_expr(&ta.value);
+        self.pop_scope();
+        if has_type_params {
+            self.pop_scope();
+        }
+    }
+
+    fn bind_type_params(&mut self, tp: &ast::TypeParams) {
+        for param in &tp.type_params {
+            match param {
+                TypeParam::TypeVar(tv) => {
+                    self.cur_scope_mut().add_binding(
+                        tv.name.as_str(),
+                        Span::from(tv.name.range),
+                        false,
+                        false,
+                    );
+                    if let Some(bound) = &tv.bound {
+                        self.visit_expr(bound);
+                    }
+                    if let Some(def) = &tv.default {
+                        self.visit_expr(def);
+                    }
+                }
+                TypeParam::TypeVarTuple(tvt) => {
+                    self.cur_scope_mut().add_binding(
+                        tvt.name.as_str(),
+                        Span::from(tvt.name.range),
+                        false,
+                        false,
+                    );
+                    if let Some(def) = &tvt.default {
+                        self.visit_expr(def);
+                    }
+                }
+                TypeParam::ParamSpec(ps) => {
+                    self.cur_scope_mut().add_binding(
+                        ps.name.as_str(),
+                        Span::from(ps.name.range),
+                        false,
+                        false,
+                    );
+                    if let Some(def) = &ps.default {
+                        self.visit_expr(def);
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_param_defaults(&mut self, params: &ast::Parameters) {
+        for p in params
+            .posonlyargs
+            .iter()
+            .chain(params.args.iter())
+            .chain(params.kwonlyargs.iter())
+        {
+            if let Some(def) = &p.default {
+                self.visit_expr(def);
+            }
+        }
+    }
+
+    fn bind_parameters(&mut self, params: &ast::Parameters) {
+        for p in params
+            .posonlyargs
+            .iter()
+            .chain(params.args.iter())
+            .chain(params.kwonlyargs.iter())
+        {
+            self.cur_scope_mut().add_binding(
+                p.parameter.name.as_str(),
+                Span::from(p.parameter.name.range),
+                true,
+                false,
+            );
+        }
+        if let Some(v) = &params.vararg {
+            self.cur_scope_mut().add_binding(
+                v.name.as_str(),
+                Span::from(v.name.range),
+                true,
+                false,
+            );
+        }
+        if let Some(k) = &params.kwarg {
+            self.cur_scope_mut().add_binding(
+                k.name.as_str(),
+                Span::from(k.name.range),
+                true,
+                false,
+            );
+        }
+    }
+
+    fn visit_comprehension(
+        &mut self,
+        name: &str,
+        range: heki_ast::TextRange,
+        generators: &[ast::Comprehension],
+        inlined: bool,
+        visit_elts: impl FnOnce(&mut Self),
+    ) {
+        if let Some(first) = generators.first() {
+            self.visit_expr(&first.iter);
+        }
+        if inlined {
+            let prev_in_cc = self.in_inlined_class_comp;
+            if self.scopes[self.cur_scope_id().0 as usize].kind == ScopeKind::Class {
+                self.in_inlined_class_comp = true;
+            }
+            self.inlined_comp_depth += 1;
+            for (idx, g) in generators.iter().enumerate() {
+                if idx > 0 {
+                    self.visit_expr(&g.iter);
+                }
+                self.visit_expr(&g.target);
+                for cond in &g.ifs {
+                    self.visit_expr(cond);
+                }
+            }
+            visit_elts(self);
+            self.inlined_comp_depth -= 1;
+            self.in_inlined_class_comp = prev_in_cc;
+        } else {
+            let line = self.lines.line(range.start().to_u32());
+            self.push_scope(ScopeKind::Comprehension, name.to_string(), line);
+            for (idx, g) in generators.iter().enumerate() {
+                if idx > 0 {
+                    self.visit_expr(&g.iter);
+                }
+                self.visit_expr(&g.target);
+                for cond in &g.ifs {
+                    self.visit_expr(cond);
+                }
+            }
+            visit_elts(self);
+            self.pop_scope();
+        }
+    }
+
+    fn visit_pattern(&mut self, pat: &Pattern) {
+        match pat {
+            Pattern::MatchValue(mv) => self.visit_expr(&mv.value),
+            Pattern::MatchSingleton(_) => {}
+            Pattern::MatchSequence(ms) => {
+                for p in &ms.patterns {
+                    self.visit_pattern(p);
+                }
+            }
+            Pattern::MatchMapping(mm) => {
+                for k in &mm.keys {
+                    self.visit_expr(k);
+                }
+                for p in &mm.patterns {
+                    self.visit_pattern(p);
+                }
+                if let Some(rest) = &mm.rest {
+                    self.cur_scope_mut().add_binding(
+                        rest.as_str(),
+                        Span::from(rest.range),
+                        false,
+                        false,
+                    );
+                }
+            }
+            Pattern::MatchClass(mc) => {
+                self.visit_expr(&mc.cls);
+                for p in &mc.arguments.patterns {
+                    self.visit_pattern(p);
+                }
+                for kw in &mc.arguments.keywords {
+                    self.visit_pattern(&kw.pattern);
+                }
+            }
+            Pattern::MatchStar(ms) => {
+                if let Some(name) = &ms.name {
+                    self.cur_scope_mut().add_binding(
+                        name.as_str(),
+                        Span::from(name.range),
+                        false,
+                        false,
+                    );
+                }
+            }
+            Pattern::MatchAs(ma) => {
+                if let Some(p) = &ma.pattern {
+                    self.visit_pattern(p);
+                }
+                if let Some(name) = &ma.name {
+                    self.cur_scope_mut().add_binding(
+                        name.as_str(),
+                        Span::from(name.range),
+                        false,
+                        false,
+                    );
+                }
+            }
+            Pattern::MatchOr(mo) => {
+                for p in &mo.patterns {
+                    self.visit_pattern(p);
+                }
+            }
+        }
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Name(n) => match n.ctx {
+                ExprContext::Store | ExprContext::Del => {
+                    let in_ic = self.inlined_comp_depth > 0;
+                    let in_cc = self.in_inlined_class_comp;
+                    let sc = self.cur_scope_mut();
+                    if in_ic {
+                        sc.add_comp_target_binding(n.id.as_str(), Span::from(n.range));
+                    } else {
+                        sc.add_binding(n.id.as_str(), Span::from(n.range), false, false);
+                    }
+                    if in_cc {
+                        let mangled = sc.mangle(n.id.as_str());
+                        sc.class_comp_bindings.insert(mangled);
+                    }
+                }
+                ExprContext::Load | ExprContext::Invalid => {
+                    let in_ic = self.inlined_comp_depth > 0;
+                    let in_cc = self.in_inlined_class_comp;
+                    self.cur_scope_mut().add_read(n.id.as_str(), in_ic, in_cc);
+                }
+            },
+            Expr::Named(named) => {
+                self.visit_expr(&named.value);
+                if let Expr::Name(n) = named.target.as_ref() {
+                    let cur_sid = self.cur_scope_id();
+                    let target_sid = self.walrus_target_scope();
+                    if self.scopes[target_sid.0 as usize].kind == ScopeKind::Module
+                        && (cur_sid != target_sid || self.inlined_comp_depth > 0)
+                    {
+                        // PEP 572 + PEP 709: walrus inside a module-level generator or inlined
+                        // comprehension writes a global dynamically without binding a static module local.
+                        if cur_sid != target_sid {
+                            self.scopes[cur_sid.0 as usize]
+                                .add_global(n.id.as_str(), Span::from(n.range));
+                        } else {
+                            let mangled = self.scopes[cur_sid.0 as usize].mangle(n.id.as_str());
+                            self.scopes[cur_sid.0 as usize]
+                                .module_walrus_globals
+                                .insert(mangled);
+                        }
+                    } else if target_sid == cur_sid {
+                        self.scopes[cur_sid.0 as usize].add_binding(
+                            n.id.as_str(),
+                            Span::from(n.range),
+                            false,
+                            false,
+                        );
+                    } else {
+                        self.scopes[target_sid.0 as usize].add_binding(
+                            n.id.as_str(),
+                            Span::from(n.range),
+                            false,
+                            false,
+                        );
+                        self.scopes[cur_sid.0 as usize]
+                            .add_nonlocal(n.id.as_str(), Span::from(n.range));
+                    }
+                }
+            }
+            Expr::Lambda(lam) => {
+                if let Some(params) = &lam.parameters {
+                    self.visit_param_defaults(params);
+                }
+                let line = self.lines.line(lam.range.start().to_u32());
+                self.push_scope(ScopeKind::Function, "<lambda>".to_string(), line);
+                if let Some(params) = &lam.parameters {
+                    self.bind_parameters(params);
+                }
+                self.visit_expr(&lam.body);
+                self.pop_scope();
+            }
+            Expr::ListComp(lc) => {
+                let inlined = self.profile.pep709_inlined_comprehensions;
+                self.visit_comprehension("<listcomp>", lc.range, &lc.generators, inlined, |a| {
+                    a.visit_expr(&lc.elt);
+                });
+            }
+            Expr::SetComp(sc) => {
+                let inlined = self.profile.pep709_inlined_comprehensions;
+                self.visit_comprehension("<setcomp>", sc.range, &sc.generators, inlined, |a| {
+                    a.visit_expr(&sc.elt);
+                });
+            }
+            Expr::DictComp(dc) => {
+                let inlined = self.profile.pep709_inlined_comprehensions;
+                self.visit_comprehension("<dictcomp>", dc.range, &dc.generators, inlined, |a| {
+                    if let Some(k) = &dc.key {
+                        a.visit_expr(k);
+                    }
+                    a.visit_expr(&dc.value);
+                });
+            }
+            Expr::Generator(gen_expr) => {
+                // Generator expressions ALWAYS create their own scope (even on 3.12+ PEP 709).
+                self.visit_comprehension(
+                    "<genexpr>",
+                    gen_expr.range,
+                    &gen_expr.generators,
+                    false,
+                    |a| {
+                        a.visit_expr(&gen_expr.elt);
+                    },
+                );
+            }
+            Expr::BoolOp(b) => {
+                for v in &b.values {
+                    self.visit_expr(v);
+                }
+            }
+            Expr::BinOp(b) => {
+                self.visit_expr(&b.left);
+                self.visit_expr(&b.right);
+            }
+            Expr::UnaryOp(u) => self.visit_expr(&u.operand),
+            Expr::If(i) => {
+                self.visit_expr(&i.test);
+                self.visit_expr(&i.body);
+                self.visit_expr(&i.orelse);
+            }
+            Expr::Dict(d) => {
+                for item in &d.items {
+                    if let Some(k) = &item.key {
+                        self.visit_expr(k);
+                    }
+                    self.visit_expr(&item.value);
+                }
+            }
+            Expr::Set(s) => {
+                for e in &s.elts {
+                    self.visit_expr(e);
+                }
+            }
+            Expr::List(l) => {
+                for e in &l.elts {
+                    self.visit_expr(e);
+                }
+            }
+            Expr::Tuple(t) => {
+                for e in &t.elts {
+                    self.visit_expr(e);
+                }
+            }
+            Expr::Await(a) => self.visit_expr(&a.value),
+            Expr::Yield(y) => {
+                if let Some(v) = &y.value {
+                    self.visit_expr(v);
+                }
+            }
+            Expr::YieldFrom(y) => self.visit_expr(&y.value),
+            Expr::Compare(c) => {
+                for operand in &c.operands {
+                    self.visit_expr(operand);
+                }
+            }
+            Expr::Call(c) => {
+                self.visit_expr(&c.func);
+                for arg in &c.arguments.args {
+                    self.visit_expr(arg);
+                }
+                for kw in &c.arguments.keywords {
+                    self.visit_expr(&kw.value);
+                }
+            }
+            Expr::FString(fs) => {
+                for part in fs.value.iter() {
+                    if let ast::FStringPartRef::FString(fstr) = part {
+                        for elem in &fstr.elements {
+                            if let ast::InterpolatedStringElement::Interpolation(interp) = elem {
+                                self.visit_expr(&interp.expression);
+                                if let Some(spec) = &interp.format_spec {
+                                    for se in &spec.elements {
+                                        if let ast::InterpolatedStringElement::Interpolation(si) =
+                                            se
+                                        {
+                                            self.visit_expr(&si.expression);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::TString(ts) => {
+                for part in ts.value.iter() {
+                    for elem in &part.elements {
+                        if let ast::InterpolatedStringElement::Interpolation(interp) = elem {
+                            self.visit_expr(&interp.expression);
+                            if let Some(spec) = &interp.format_spec {
+                                for se in &spec.elements {
+                                    if let ast::InterpolatedStringElement::Interpolation(si) = se {
+                                        self.visit_expr(&si.expression);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::Attribute(a) => self.visit_expr(&a.value),
+            Expr::Subscript(s) => {
+                self.visit_expr(&s.value);
+                self.visit_expr(&s.slice);
+            }
+            Expr::Starred(s) => self.visit_expr(&s.value),
+            Expr::Slice(s) => {
+                if let Some(l) = &s.lower {
+                    self.visit_expr(l);
+                }
+                if let Some(u) = &s.upper {
+                    self.visit_expr(u);
+                }
+                if let Some(st) = &s.step {
+                    self.visit_expr(st);
+                }
+            }
+            Expr::StringLiteral(_)
+            | Expr::BytesLiteral(_)
+            | Expr::NumberLiteral(_)
+            | Expr::BooleanLiteral(_)
+            | Expr::NoneLiteral(_)
+            | Expr::EllipsisLiteral(_)
+            | Expr::IpyEscapeCommand(_) => {}
+        }
+    }
+
+    fn resolve_all(self) -> SemanticModel {
+        let module_bindings: FxHashSet<String> = self.scopes[0].bound_names.clone();
+        let parent_map: FxHashMap<ScopeId, Option<ScopeId>> =
+            self.scopes.iter().map(|s| (s.id, s.parent)).collect();
+
+        let scopes = self
+            .scopes
+            .iter()
+            .map(|sc| {
+                // Determine which PEP 709 inlined comprehension targets materialize as scope locals
+                // vs stay isolated because the outer scope references a global/enclosing name of the same identifier.
+                let mut effective_bindings = sc.bindings.clone();
+                let mut effective_comp_locals = FxHashSet::default();
+                for (cname, cspan) in &sc.comp_target_bindings {
+                    if sc.bound_names.contains(cname) {
+                        continue;
+                    }
+                    // If the enclosing scope itself reads `cname` OUTSIDE the comprehension
+                    // (or assigns it via module-level comprehension walrus), preserve outer global/enclosing resolution.
+                    if sc.non_comp_reads.contains(cname) || sc.module_walrus_globals.contains(cname)
+                    {
+                        continue;
+                    }
+                    effective_comp_locals.insert(cname.clone());
+                    effective_bindings.push(Binding {
+                        name: cname.clone(),
+                        span: *cspan,
+                        is_parameter: false,
+                        is_global_decl: false,
+                        is_nonlocal_decl: false,
+                        is_lazy_import: false,
+                    });
+                }
+
+                let mut reads = Vec::new();
+                let mut inlined_comp_only_reads = Vec::new();
+                for name in &sc.raw_reads {
+                    let comp_only =
+                        sc.in_comp_reads.contains(name) && !sc.non_comp_reads.contains(name);
+                    // CPython 3.12+ PEP 709: class-body comprehension reads of class-bound names
+                    // (not bound by the comprehension itself) do not resolve to the class scope.
+                    let skip_self_class = sc.kind == ScopeKind::Class
+                        && sc.class_comp_reads.contains(name)
+                        && !sc.class_comp_bindings.contains(name);
+                    if skip_self_class && sc.bound_names.contains(name) {
+                        continue;
+                    }
+                    let res = if effective_comp_locals.contains(name) {
+                        if sc.kind == ScopeKind::Module {
+                            NameResolution::Global
+                        } else {
+                            NameResolution::Local
+                        }
+                    } else {
+                        resolve_name(sc.id, name, &self.scopes, &parent_map, &module_bindings)
+                    };
+                    if comp_only {
+                        inlined_comp_only_reads.push(name.clone());
+                    }
+                    reads.push((name.clone(), res));
+                }
+                reads.sort_by(|a, b| a.0.cmp(&b.0));
+                inlined_comp_only_reads.sort();
+                effective_bindings.sort_by(|a, b| a.name.cmp(&b.name));
+
+                Scope {
+                    id: sc.id,
+                    parent: sc.parent,
+                    kind: sc.kind,
+                    name: sc.name.clone(),
+                    line: sc.line,
+                    bindings: effective_bindings,
+                    reads,
+                    inlined_comp_only_reads,
+                }
+            })
+            .collect();
+
+        SemanticModel {
+            has_future_annotations: self.has_future_annotations,
+            scopes,
+            imports: self.imports,
+            classes: self.classes,
+        }
+    }
+}
+
+fn resolve_name(
+    scope_id: ScopeId,
+    name: &str,
+    scopes: &[ScopeBuilder],
+    parent_map: &FxHashMap<ScopeId, Option<ScopeId>>,
+    module_bindings: &FxHashSet<String>,
+) -> NameResolution {
+    let sc = &scopes[scope_id.0 as usize];
+    if sc.global_decls.contains(name) {
+        return if module_bindings.contains(name) {
+            NameResolution::Global
+        } else {
+            NameResolution::Builtin
+        };
+    }
+    if sc.nonlocal_decls.contains(name) {
+        return NameResolution::Enclosing;
+    }
+    if sc.kind == ScopeKind::Module {
+        return if module_bindings.contains(name) {
+            NameResolution::Global
+        } else {
+            NameResolution::Builtin
+        };
+    }
+    if sc.bound_names.contains(name) {
+        return NameResolution::Local;
+    }
+
+    // Walk enclosing scopes (Python LEGB rule: skip Class scopes!).
+    let mut cursor = parent_map.get(&scope_id).copied().flatten();
+    while let Some(pid) = cursor {
+        let p = &scopes[pid.0 as usize];
+        match p.kind {
+            ScopeKind::Module => break,
+            ScopeKind::Class => {}
+            ScopeKind::Function
+            | ScopeKind::Comprehension
+            | ScopeKind::TypeParameters
+            | ScopeKind::Annotation => {
+                if p.global_decls.contains(name) {
+                    return if module_bindings.contains(name) {
+                        NameResolution::Global
+                    } else {
+                        NameResolution::Builtin
+                    };
+                }
+                if p.nonlocal_decls.contains(name)
+                    || p.bound_names.contains(name)
+                    || p.comp_target_names.contains(name)
+                {
+                    return NameResolution::Enclosing;
+                }
+            }
+        }
+        cursor = parent_map.get(&pid).copied().flatten();
+    }
+
+    if module_bindings.contains(name) {
+        NameResolution::Global
+    } else {
+        NameResolution::Builtin
+    }
+}
+
+fn detect_future_annotations(suite: &[Stmt]) -> bool {
+    for stmt in suite {
+        match stmt {
+            Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_)) => continue,
+            Stmt::ImportFrom(imp) if imp.module.as_deref() == Some("__future__") => {
+                if imp.names.iter().any(|a| a.name.as_str() == "annotations") {
+                    return true;
+                }
+            }
+            _ => break,
+        }
+    }
+    false
+}
+
+fn collect_func_annotations(func: &ast::StmtFunctionDef) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    let p = &func.parameters;
+    for arg in p
+        .posonlyargs
+        .iter()
+        .chain(p.args.iter())
+        .chain(p.kwonlyargs.iter())
+    {
+        if let Some(ann) = &arg.parameter.annotation {
+            out.push(ann.as_ref());
+        }
+    }
+    if let Some(v) = &p.vararg
+        && let Some(ann) = &v.annotation
+    {
+        out.push(ann.as_ref());
+    }
+    if let Some(k) = &p.kwarg
+        && let Some(ann) = &k.annotation
+    {
+        out.push(ann.as_ref());
+    }
+    if let Some(ret) = &func.returns {
+        out.push(ret.as_ref());
+    }
+    out
+}
+
+fn is_type_checking_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
+        Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
+        _ => false,
+    }
+}
+
+fn expr_dotted_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::Attribute(a) => Some(format!("{}.{}", expr_dotted_name(&a.value)?, a.attr)),
+        Expr::Subscript(s) => expr_dotted_name(&s.value),
+        _ => None,
+    }
+}
+
+/// Build the lexical scope, binding, import, and CHA model for a parsed Python module.
+pub fn analyze_module(
+    module: &ParsedModule,
+    source: &str,
+    profile: RuntimeProfile,
+) -> SemanticModel {
+    let mut analyzer = Analyzer::new(source, profile, module.suite());
+    analyzer.visit_suite(module.suite());
+    analyzer.resolve_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use heki_ast::parse_module;
+    use heki_env::PythonVersion;
+
+    #[test]
+    fn resolves_closures_pep709_pep649_pep810_and_cha() {
+        let src = "\
+import os
+lazy import json
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    import collections
+
+class Base:
+    pass
+
+class Child(Base):
+    class Nested:
+        def f(self): pass
+    def method(self, x: int) -> int:
+        y = [i for i in range(x)]
+        return len(y)
+";
+        let parsed = parse_module(src).unwrap();
+        let m315 = analyze_module(&parsed, src, RuntimeProfile::from(PythonVersion::PY315));
+        // PEP 810 lazy import tracked
+        assert!(
+            m315.imports
+                .iter()
+                .any(|i| i.bound_name == "json" && i.is_lazy)
+        );
+        // TYPE_CHECKING tracked
+        assert!(
+            m315.imports
+                .iter()
+                .any(|i| i.bound_name == "collections" && i.in_type_checking)
+        );
+        // Nested class isolated from Child
+        assert_eq!(m315.classes.len(), 3);
+        let child = m315.classes.iter().find(|c| c.name == "Child").unwrap();
+        let nested = m315.classes.iter().find(|c| c.name == "Nested").unwrap();
+        assert_eq!(child.bases, vec!["Base"]);
+        assert_eq!(nested.parent_class, Some(child.id));
+        assert_eq!(nested.qualname, "Child.Nested");
+        // Python 3.11 vs 3.12 PEP 709 comprehension scope difference
+        let m311 = analyze_module(&parsed, src, RuntimeProfile::from(PythonVersion::PY311));
+        assert!(
+            m311.scopes
+                .iter()
+                .any(|s| s.kind == ScopeKind::Comprehension)
+        );
+        assert!(
+            !m315
+                .scopes
+                .iter()
+                .any(|s| s.kind == ScopeKind::Comprehension)
+        );
+    }
+}

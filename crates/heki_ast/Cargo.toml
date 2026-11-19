@@ -1,0 +1,17 @@
+[package]
+name = "heki_ast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# ADR-009 / ADR-016: ruff_python_* dependencies are STRICTLY isolated inside heki_ast.
+ruff_python_ast.workspace = true
+ruff_python_parser.workspace = true
+ruff_text_size.workspace = true
+serde.workspace = true
+thiserror.workspace = true

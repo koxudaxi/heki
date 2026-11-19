@@ -1,0 +1,546 @@
+//! Advisory / Effect lane (`Family 1: MUT1xx/MUT2xx` & `Family 2: EFF/DATA`).
+//!
+//! Designed from Day 1 for **incremental LSP execution** (ADR-017):
+//! - Per-file `FileSummary` is stored in memory; `IrFunction` bodies are NOT retained
+//!   after summarization. A `FileSummary` keeps the function's *local* facts
+//!   (`local_functions` + `call_sites`), so interprocedural propagation can be recomputed
+//!   for any region of the project without IR.
+//! - On file edits, `ProjectIndex::update_file` compares old vs new `EffectSummary`
+//!   (**Early Cutoff**): if summaries did not change (>95% of edits), reverse call-graph
+//!   propagation is skipped completely.
+//!
+//! Pipeline (docs/DETAILED_SPEC_M3_M7.md section 2):
+//! 1. `resolver`: module names, import maps, project declarations, 4-priority receiver types, CHA.
+//! 2. `summary`: local (one function) effect extraction into `EffectSummary` + `CallSite`s.
+//! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint.
+//! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
+
+mod callgraph;
+mod report;
+pub mod resolver;
+mod scc;
+mod summary;
+
+pub use report::{
+    BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
+    group_by_root_cause,
+};
+pub use resolver::{
+    Callee, ClassDecl, FunctionDecl, ModuleDecls, ProjectDecls, TypeCtx, Val, detect_src_layout,
+    func_qualname, module_name_for_path, resolve_relative_module, self_aliases,
+};
+pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
+
+use heki_ast::Span;
+use heki_ir::ModuleIr;
+use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
+use heki_semantic::SemanticModel;
+use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+/// Canonical function key across files (stable across line movements).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct FuncKey {
+    pub module: String,
+    pub qualname: String,
+}
+
+impl FuncKey {
+    /// Dotted fully qualified name (`pkg.mod.Class.method`).
+    pub fn fqn(&self) -> String {
+        format!("{}.{}", self.module, self.qualname)
+    }
+}
+
+/// Attribute / constant-key access path (distinguishes disjoint dict keys for `MUT101`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AttrKeyPath {
+    pub attr: String,
+    pub const_key: Option<String>,
+}
+
+/// Typed field write site used for declarative Write Ownership (`MUT201`).
+/// Kept for compatibility; derived from `EffectSummary::typed_field_write_sites`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TypedFieldWrite {
+    pub class_qualname: String,
+    pub attr: String,
+    pub kind: String,
+}
+
+/// One hop in an interprocedural call chain (for Boundary-Only & LSP RelatedLocation).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CallHop {
+    pub caller: FuncKey,
+    /// `FuncKey::fqn()` of a project function, or a Layer 2 symbol.
+    pub callee: String,
+    pub span: Span,
+    pub path: PathBuf,
+}
+
+/// Write site detail for MUT201.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TypedFieldWriteSite {
+    /// Fully qualified class name (`pkg.model.DataModel`).
+    pub class_qualname: String,
+    pub attr: String,
+    pub kind: WriteKind,
+    /// Span of the write (or of the helper call for `IndirectHelper`) in the file of the
+    /// function that performs it: the summary owner when `via_chain` is empty, else the
+    /// last hop's callee.
+    pub span: Span,
+    pub via_chain: Vec<CallHop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WriteKind {
+    DirectAttr,
+    AttrDelete,
+    ContainerMut,
+    AliasContainerMut,
+    SetAttr,
+    DictDirect,
+    IndirectHelper,
+}
+
+impl WriteKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectAttr => "direct_attr",
+            Self::AttrDelete => "attr_delete",
+            Self::ContainerMut => "container_mut",
+            Self::AliasContainerMut => "alias_container_mut",
+            Self::SetAttr => "set_attr",
+            Self::DictDirect => "dict_direct",
+            Self::IndirectHelper => "indirect_helper",
+        }
+    }
+}
+
+/// Unified interprocedural summary propagated bottom-up over Tarjan SCCs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectSummary {
+    // Family 2: Execution Effect
+    pub direct_exec_effects: BTreeSet<ExecEffectKind>,
+    pub transitive_exec_effects: BTreeSet<ExecEffectKind>,
+    /// Shortest known call chain reaching each effect (direct or transitive).
+    pub exec_chains: BTreeMap<ExecEffectKind, Vec<CallHop>>,
+
+    // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
+    pub mutates_params: u64,
+    pub escapes_params: u64,
+    /// `param index -> paths`: `""` = container mutation of the argument itself,
+    /// `"a"` = write to / mutation of the argument's attribute `a`.
+    pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    pub reads_self_attrs: BTreeSet<AttrKeyPath>,
+    pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
+    pub invalidates_cached: BTreeSet<String>,
+    pub typed_field_writes: BTreeSet<TypedFieldWrite>,
+    pub typed_field_write_sites: BTreeSet<TypedFieldWriteSite>,
+
+    // Async offload & Sync-over-Async relaxation (dcg empirical findings)
+    pub offloads_blocking_params: u64,
+    pub sync_driven_only: bool,
+    /// A call in this function (not its callees) could not be resolved, or CHA exceeded
+    /// `resolver::CHA_CANDIDATE_LIMIT` candidates.
+    pub unknown_calls: bool,
+
+    // Function metadata
+    pub is_async: bool,
+    pub is_cached_property: bool,
+    pub is_lru_cache: bool,
+    /// Module-relative class qualname of a method (`Outer.Inner`), as in `IrFunction`.
+    pub owner_class_qualname: Option<String>,
+    pub decorators: Vec<String>,
+}
+
+impl EffectSummary {
+    /// Copy with every source location zeroed: Early Cutoff compares facts, not positions,
+    /// so an edit that only moves code does not notify callers.
+    pub fn without_locations(&self) -> Self {
+        let mut out = self.clone();
+        for chain in out.exec_chains.values_mut() {
+            for hop in chain {
+                hop.span = Span { start: 0, end: 0 };
+            }
+        }
+        out.typed_field_write_sites = out
+            .typed_field_write_sites
+            .into_iter()
+            .map(|mut site| {
+                site.span = Span { start: 0, end: 0 };
+                for hop in &mut site.via_chain {
+                    hop.span = Span { start: 0, end: 0 };
+                }
+                site
+            })
+            .collect();
+        out
+    }
+
+    /// Location-insensitive equality used by Early Cutoff.
+    pub fn same_facts(&self, other: &Self) -> bool {
+        self.without_locations() == other.without_locations()
+    }
+
+    pub(crate) fn refresh_typed_field_writes(&mut self) {
+        self.typed_field_writes = self
+            .typed_field_write_sites
+            .iter()
+            .map(|s| TypedFieldWrite {
+                class_qualname: s.class_qualname.clone(),
+                attr: s.attr.clone(),
+                kind: s.kind.as_str().to_owned(),
+            })
+            .collect();
+    }
+}
+
+/// Where a call argument comes from, as seen by the caller (used to map callee facts back).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgOrigin {
+    /// Caller parameter `i` itself (`None`) or its attribute `a` (`Some(a)`).
+    pub param: Option<(u8, Option<String>)>,
+    /// `self.<attr>` of the calling method.
+    pub self_attr: Option<String>,
+    /// `obj.<attr>` where `obj` has project class type: `(class_fqn, attr)`.
+    pub typed_field: Option<(String, String)>,
+    /// An instance of project class `class_fqn`.
+    pub typed_instance: Option<String>,
+}
+
+impl ArgOrigin {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// One resolved project callee with the caller-side origin of each callee parameter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundCallee {
+    pub callee: FuncKey,
+    /// Indexed by the callee's parameter position (receiver included for bound methods).
+    pub params: Vec<ArgOrigin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallTarget {
+    /// Project functions (1 candidate, or up to `CHA_CANDIDATE_LIMIT` CHA candidates).
+    Project(Vec<BoundCallee>),
+    /// A Layer 2 catalog API (only recorded when it carries effects or offloads).
+    Layer2 {
+        symbol: String,
+        /// Effects after the `is_awaited` filter.
+        effects: BTreeSet<ExecEffectKind>,
+        offloads_blocking_arg: Option<u8>,
+        async_safe: bool,
+    },
+}
+
+/// A call site retained in `FileSummary` (IR-free) for propagation and rule evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallSite {
+    pub caller: FuncKey,
+    pub target: CallTarget,
+    pub is_awaited: bool,
+    pub span: Span,
+    /// Natural-loop nesting depth of the call (`EFF102` / `EFF103`).
+    pub loop_depth: u16,
+    /// Receiver is the calling method's `self` (`self.helper()`, `super().m()`).
+    pub recv_is_self: bool,
+    /// The returned coroutine is driven by hand (`.send(None)` or a `run_sync` driver).
+    pub drives_coroutine_manually: bool,
+}
+
+/// Lightweight per-file summary retained in `ProjectIndex` (IR bodies are dropped).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSummary {
+    pub path: PathBuf,
+    pub module_name: String,
+    pub content_hash: String,
+    /// Final (interprocedurally propagated) summaries; filled by `ProjectIndex`.
+    pub functions: FxHashMap<FuncKey, EffectSummary>,
+    /// Project call edges `(caller, callee, span)` (reverse call graph source).
+    pub call_edges: Vec<(FuncKey, FuncKey, Span)>,
+    /// Local (one-function) summaries before propagation.
+    pub local_functions: FxHashMap<FuncKey, EffectSummary>,
+    pub call_sites: Vec<CallSite>,
+    /// Declarations other modules need for name and receiver resolution.
+    pub decls: ModuleDecls,
+}
+
+/// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncrementalUpdate {
+    /// True if any function's `EffectSummary` changed and callers need re-evaluation.
+    pub summary_changed: bool,
+    /// Functions (transitive callers) that depend on changed summaries.
+    pub affected_callers: Vec<FuncKey>,
+}
+
+/// One module handed to the analyzer. The IR is borrowed only during summarization.
+pub struct ModuleInput<'a> {
+    pub path: PathBuf,
+    pub module_name: String,
+    pub is_package: bool,
+    pub content_hash: String,
+    pub semantic: &'a SemanticModel,
+    pub ir: &'a ModuleIr,
+}
+
+/// One execution effect that runs at a call site, with the shortest chain from the site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteEffect {
+    pub effect: ExecEffectKind,
+    /// Starts with the hop of this call site; ends at the Layer 2 sink.
+    pub chain: Vec<CallHop>,
+    /// Project callee the effect comes through (`None` for a Layer 2 API).
+    pub callee: Option<FuncKey>,
+    /// The effect comes from an awaited / driven `async def` callee (its own body).
+    pub callee_is_async: bool,
+}
+
+/// Incremental project-wide summary & reverse call-graph index.
+#[derive(Debug, Default)]
+pub struct ProjectIndex {
+    pub files: FxHashMap<PathBuf, FileSummary>,
+    pub reverse_call_graph: FxHashMap<FuncKey, FxHashSet<FuncKey>>,
+    /// Defining file of every summarized function.
+    pub(crate) func_files: FxHashMap<FuncKey, PathBuf>,
+}
+
+/// Summarize every module of a project and propagate effects to a fixpoint.
+pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
+    let decls = resolver::project_decls_for(modules, kb, None);
+    let files = modules
+        .iter()
+        .map(|m| summary::summarize_module(m, &decls, kb))
+        .collect();
+    ProjectIndex::build(files)
+}
+
+impl ProjectIndex {
+    /// Build an index from local file summaries and propagate the whole project.
+    pub fn build(files: Vec<FileSummary>) -> Self {
+        let mut index = Self::default();
+        for mut file in files {
+            file.functions = file.local_functions.clone();
+            index.add_file_links(&file);
+            index.files.insert(file.path.clone(), file);
+        }
+        let all: FxHashSet<FuncKey> = index.all_functions().collect();
+        callgraph::propagate(&mut index, &all);
+        callgraph::recompute_sync_driven(&mut index);
+        index
+    }
+
+    /// Effects that run at `site` (in file `path`): the Layer 2 API's effects after the
+    /// `is_awaited` filter, or each project callee's direct and transitive effects when its
+    /// body runs there. Shared by Boundary-Only Reporting and the loop rules.
+    pub fn site_effects(&self, path: &Path, site: &CallSite) -> Vec<SiteEffect> {
+        let hop = |callee: String| CallHop {
+            caller: site.caller.clone(),
+            callee,
+            span: site.span,
+            path: path.to_path_buf(),
+        };
+        let mut out = Vec::new();
+        match &site.target {
+            CallTarget::Layer2 {
+                symbol, effects, ..
+            } => {
+                for e in effects {
+                    out.push(SiteEffect {
+                        effect: *e,
+                        chain: vec![hop(symbol.clone())],
+                        callee: None,
+                        callee_is_async: false,
+                    });
+                }
+            }
+            CallTarget::Project(callees) => {
+                for bc in callees {
+                    let Some(callee) = self.summary(&bc.callee) else {
+                        continue;
+                    };
+                    if !callgraph::runs_at_call(callee, site) {
+                        continue;
+                    }
+                    let effects: BTreeSet<ExecEffectKind> = callee
+                        .direct_exec_effects
+                        .iter()
+                        .chain(&callee.transitive_exec_effects)
+                        .copied()
+                        .collect();
+                    for e in effects {
+                        let mut chain = vec![hop(bc.callee.fqn())];
+                        chain.extend(callee.exec_chains.get(&e).cloned().unwrap_or_default());
+                        out.push(SiteEffect {
+                            effect: e,
+                            chain,
+                            callee: Some(bc.callee.clone()),
+                            callee_is_async: callee.is_async,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Final summary of `func`, if known.
+    pub fn summary(&self, func: &FuncKey) -> Option<&EffectSummary> {
+        self.files
+            .get(self.func_files.get(func)?)?
+            .functions
+            .get(func)
+    }
+
+    /// Declarations of every indexed module (for re-summarizing an edited module).
+    pub fn project_decls(&self) -> ProjectDecls {
+        ProjectDecls::new(self.files.values().map(|f| f.decls.clone()))
+    }
+
+    /// Re-summarize one edited module against the index's declarations and update it.
+    pub fn reanalyze_module(
+        &mut self,
+        input: &ModuleInput<'_>,
+        kb: &EffectiveEcosystemKb,
+    ) -> IncrementalUpdate {
+        let others: Vec<ModuleDecls> = self
+            .files
+            .values()
+            .filter(|f| f.path != input.path)
+            .map(|f| f.decls.clone())
+            .collect();
+        let decls = resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others));
+        let file = summary::summarize_module(input, &decls, kb);
+        self.update_file(file)
+    }
+
+    /// Update a single file's summary and report whether downstream callers are affected.
+    ///
+    /// `new_file` carries local facts (`local_functions`, `call_sites`, `call_edges`); its
+    /// final summaries are recomputed here. Callers are re-propagated only when a final
+    /// summary of the file changed (location-insensitively) — **Early Cutoff**.
+    pub fn update_file(&mut self, mut new_file: FileSummary) -> IncrementalUpdate {
+        let path = new_file.path.clone();
+        let old_file = self.files.remove(&path);
+        let mut previous: FxHashMap<FuncKey, EffectSummary> = FxHashMap::default();
+        if let Some(old) = &old_file {
+            self.remove_file_links(old);
+            previous.extend(old.functions.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        new_file.functions = new_file.local_functions.clone();
+        self.add_file_links(&new_file);
+        let own: FxHashSet<FuncKey> = new_file.local_functions.keys().cloned().collect();
+        self.files.insert(path, new_file);
+
+        // Region 0: the file's functions plus every function sharing a (cross-file) SCC with
+        // them, so cycles cannot keep stale effects of the old version alive.
+        let mut region = callgraph::scc_closure(self, &own);
+        for func in &region {
+            if !own.contains(func)
+                && let Some(s) = self.summary(func)
+            {
+                previous.insert(func.clone(), s.clone());
+            }
+        }
+        callgraph::reset_to_local(self, &region);
+        callgraph::propagate(self, &region);
+        let sync_changed = callgraph::recompute_sync_driven(self);
+
+        let mut changed: BTreeSet<FuncKey> = BTreeSet::new();
+        for func in &region {
+            let now = self.summary(func);
+            match (previous.get(func), now) {
+                (Some(old), Some(new)) if old.same_facts(new) => {}
+                _ => {
+                    changed.insert(func.clone());
+                }
+            }
+        }
+        if let Some(old) = &old_file {
+            for func in old.functions.keys() {
+                if !own.contains(func) {
+                    changed.insert(func.clone());
+                }
+            }
+        }
+        changed.extend(sync_changed);
+
+        if changed.is_empty() {
+            return IncrementalUpdate {
+                summary_changed: false,
+                affected_callers: Vec::new(),
+            };
+        }
+
+        // BFS over reverse call graph to find affected callers only.
+        let mut visited: FxHashSet<FuncKey> = changed.iter().cloned().collect();
+        let mut queue: std::collections::VecDeque<FuncKey> = changed.iter().cloned().collect();
+        let mut affected = Vec::new();
+        while let Some(cur) = queue.pop_front() {
+            let mut callers: Vec<&FuncKey> = self
+                .reverse_call_graph
+                .get(&cur)
+                .map(|s| s.iter().collect())
+                .unwrap_or_default();
+            callers.sort();
+            for caller in callers {
+                if visited.insert(caller.clone()) {
+                    affected.push(caller.clone());
+                    queue.push_back(caller.clone());
+                }
+            }
+        }
+        region = affected.iter().cloned().collect();
+        callgraph::reset_to_local(self, &region);
+        callgraph::propagate(self, &region);
+        callgraph::recompute_sync_driven(self);
+        IncrementalUpdate {
+            summary_changed: true,
+            affected_callers: affected,
+        }
+    }
+
+    pub(crate) fn all_functions(&self) -> impl Iterator<Item = FuncKey> + '_ {
+        self.files
+            .values()
+            .flat_map(|f| f.local_functions.keys().cloned())
+    }
+
+    fn add_file_links(&mut self, file: &FileSummary) {
+        for func in file.local_functions.keys() {
+            self.func_files.insert(func.clone(), file.path.clone());
+        }
+        for (caller, callee, _) in &file.call_edges {
+            self.reverse_call_graph
+                .entry(callee.clone())
+                .or_default()
+                .insert(caller.clone());
+        }
+    }
+
+    fn remove_file_links(&mut self, file: &FileSummary) {
+        for func in file.local_functions.keys() {
+            if self.func_files.get(func) == Some(&file.path) {
+                self.func_files.remove(func);
+            }
+        }
+        for (caller, callee, _) in &file.call_edges {
+            if let Some(set) = self.reverse_call_graph.get_mut(callee) {
+                set.remove(caller);
+                if set.is_empty() {
+                    self.reverse_call_graph.remove(callee);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,25 @@
+[package]
+name = "heki_rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+globset.workspace = true
+heki_ast.workspace = true
+heki_diagnostics.workspace = true
+heki_effect.workspace = true
+heki_env.workspace = true
+heki_ir.workspace = true
+heki_kb.workspace = true
+heki_semantic.workspace = true
+heki_soundness.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
