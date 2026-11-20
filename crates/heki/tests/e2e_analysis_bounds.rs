@@ -365,3 +365,45 @@ fn lazy_initializations_past_their_budget_are_not_recognized() {
         assert_eq!(eff102, expected, "{loops} loops");
     }
 }
+
+/// A coroutine waiting `waits` times on one future, then awaiting its completion as many times,
+/// then waiting once more.
+fn waits_then_awaits(waits: usize) -> String {
+    let mut lines = vec![
+        "import asyncio".to_owned(),
+        "from concurrent.futures import Future".to_owned(),
+        String::new(),
+        String::new(),
+        "async def drain(f: Future):".to_owned(),
+    ];
+    lines.extend((0..waits).map(|_| "    f.result()".to_owned()));
+    lines.extend((0..waits).map(|_| "    await asyncio.wrap_future(f)".to_owned()));
+    lines.push("    return f.result()".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// Each wait on a future looks up once whether an `await` before it in its block saw the future
+/// finish: only the waits before the first `await` block (reported as one root cause past ten).
+#[test]
+fn waits_on_a_future_look_up_the_awaits_before_them_once() {
+    for waits in [4, 400] {
+        let p = Project::new(&format!("bounds_waits_{waits}"));
+        p.write("m.py", &waits_then_awaits(waits));
+        let found = check_within(&p, Duration::from_secs(20));
+        let lines: Vec<u64> = found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF101")
+            .map(|d| d["line"].as_u64().unwrap())
+            .collect();
+        let expected: Vec<u64> = if waits > 10 {
+            vec![6]
+        } else {
+            (6..6 + waits as u64).collect()
+        };
+        assert_eq!(lines, expected, "{waits} waits");
+        if waits > 10 {
+            let more = format!("(+{} more async call sites", waits - 1);
+            assert!(found[0]["message"].as_str().unwrap().contains(&more));
+        }
+    }
+}

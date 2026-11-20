@@ -612,8 +612,8 @@ struct LocalFacts {
     entry: Vec<Vec<(u32, bool)>>,
     /// The atom of each future a done fact is about.
     futures: FxHashMap<FutureKey, u32>,
-    /// Where each future is seen finish: the `await`s, by block and position.
-    awaited: FxHashMap<FutureKey, Vec<(BlockId, usize)>>,
+    /// Where each future is first seen finish in a block: the position of the first `await`.
+    awaited: FxHashMap<(FutureKey, BlockId), usize>,
     /// The facts at the entry of each block, for the futures (empty without any).
     finished: Vec<FactSet>,
 }
@@ -690,8 +690,8 @@ impl LocalGuards {
         let facts = self.facts.get_or_init(|| Facts::run(cx));
         let earlier_here = facts
             .awaited
-            .get(&key)
-            .is_some_and(|at| at.iter().any(|&(b, i)| b == bb && i < index));
+            .get(&(key.clone(), bb))
+            .is_some_and(|&first| first < index);
         earlier_here
             || facts.futures.get(&key).is_some_and(|&atom| {
                 facts
@@ -1374,8 +1374,8 @@ struct Facts<'c, 'f, 'a> {
     futures: FxHashMap<FutureKey, u32>,
     /// The atom of the first future.
     first_future: u32,
-    /// Where each future is seen finish: the `await`s, by block and position.
-    awaited: FxHashMap<FutureKey, Vec<(BlockId, usize)>>,
+    /// Where each future is first seen finish in a block: the position of the first `await`.
+    awaited: FxHashMap<(FutureKey, BlockId), usize>,
     /// The `f.done()` values, with the atom of `f`.
     done_of: FxHashMap<VarId, u32>,
     /// By block: the futures its `await`s see finish, which hold on its normal edges out.
@@ -1502,7 +1502,7 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
             for (at, inst) in bb.insts.iter().enumerate() {
                 if let Some(future) = finished_by(cx, &inst.kind) {
                     let a = self.future_atom(future.clone());
-                    self.awaited.entry(future).or_default().push((bb.id, at));
+                    self.awaited.entry((future, bb.id)).or_insert(at);
                     if self.finishing.is_empty() {
                         self.finishing = vec![0; cx.f.blocks.len()];
                     }
