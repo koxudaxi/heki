@@ -812,6 +812,84 @@ fn mut112_exclusions() {
     assert_eq!(found(&diags), vec![], "{diags:#?}");
 }
 
+/// Values stored where they borrow from, and in the same attribute of another object. Each read
+/// of `self`, of a global, or of a variable of the enclosing function is the same object, and so
+/// is a copy of a reference.
+const STORED_BACK: &str = r#"CONFIG = None
+
+
+class Adopted:
+    def __init__(self, other):
+        self.items = other.items or []
+
+    def add(self, x):
+        self.items.append(x)
+
+
+class Ensured:
+    def __init__(self):
+        self.items = self.items or []
+
+    def add(self, x):
+        self.items.append(x)
+
+
+def stored_in_another(node, other):
+    current = other.overrides or []
+    node.overrides = current
+    current.append("x")
+
+
+def set_in_another(namespace, other):
+    current = getattr(other, "overrides", None) or []
+    setattr(namespace, "overrides", current)
+    current.append("x")
+
+
+def stored_back_through_alias(node):
+    alias = node
+    current = node.overrides or []
+    alias.overrides = current
+    current.append("x")
+
+
+def stored_back_in_global():
+    current = CONFIG.overrides or []
+    CONFIG.overrides = current
+    current.append("x")
+
+
+def stored_back_by_closure(node):
+    def ensure():
+        current = node.overrides or []
+        node.overrides = current
+        current.append("x")
+
+    return ensure
+"#;
+
+#[test]
+fn mut112_stored_back_only_into_the_same_object() {
+    let p = Project::new("mut112_stored_back");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/stored.py", STORED_BACK);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let s = "pkg/stored.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(s, 6, "Adopted.__init__", "self.items"),
+            d(s, 23, "stored_in_another", "current"),
+            d(s, 29, "set_in_another", "current"),
+        ],
+        "{diags:#?}"
+    );
+    assert_eq!(
+        message(at(&diags, s, 6)),
+        "`Adopted.__init__` stores in `self.items` a value that is a new object on one path and the attribute `items` on another, and `Adopted.add` changes it in place"
+    );
+}
+
 /// Callees that return borrowed state only where no run gets: after a `while True:` loop that
 /// no `break` leaves, or under `if False:`. Their callers' values are new on every path; a
 /// `break` makes the return after the loop reachable.
