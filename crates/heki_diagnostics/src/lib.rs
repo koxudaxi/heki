@@ -132,7 +132,7 @@ pub fn render(
         }
         OutputFormat::Github => render_github(diags),
         OutputFormat::Sarif => {
-            let mut s = serde_json::to_string_pretty(&sarif(diags))
+            let mut s = serde_json::to_string_pretty(&sarif(diags, source_line))
                 .expect("a `serde_json::Value` always serializes");
             s.push('\n');
             s
@@ -158,8 +158,7 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
             let gutter = d.line.to_string().len();
             let _ = writeln!(out, "{:gutter$} |", "");
             let _ = writeln!(out, "{} | {}", d.line, text.trim_end());
-            let caret_pad = usize::try_from(d.column.saturating_sub(1)).unwrap_or(0);
-            let _ = writeln!(out, "{:gutter$} | {:caret_pad$}^", "", "");
+            let _ = writeln!(out, "{:gutter$} | {}^", "", caret_padding(&text, d.column));
         }
         for r in &d.related {
             let _ = writeln!(
@@ -174,6 +173,76 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
         out.push('\n');
     }
     out
+}
+
+/// The text of `line` before 1-based byte column `column` (cut back to a character boundary).
+fn before_column(line: &str, column: u32) -> &str {
+    let mut end = usize::try_from(column.saturating_sub(1))
+        .unwrap_or(usize::MAX)
+        .min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// What puts the caret under byte column `column` of the printed `line`: a tab where the line
+/// has one (the terminal expands both alike), else as many spaces as each character is wide.
+fn caret_padding(line: &str, column: u32) -> String {
+    before_column(line, column)
+        .chars()
+        .map(|c| match c {
+            '\t' => "\t".to_owned(),
+            c => " ".repeat(display_width(c)),
+        })
+        .collect()
+}
+
+/// Terminal columns a character takes: none for combining marks and zero-width characters,
+/// two for East Asian wide and fullwidth characters and emoji, else one.
+fn display_width(c: char) -> usize {
+    const ZERO: &[(u32, u32)] = &[
+        (0x0300, 0x036F),
+        (0x0483, 0x0489),
+        (0x0591, 0x05BD),
+        (0x0610, 0x061A),
+        (0x064B, 0x065F),
+        (0x1AB0, 0x1AFF),
+        (0x1DC0, 0x1DFF),
+        (0x200B, 0x200F),
+        (0x20D0, 0x20FF),
+        (0xFE00, 0xFE0F),
+        (0xFE20, 0xFE2F),
+    ];
+    const WIDE: &[(u32, u32)] = &[
+        (0x1100, 0x115F),
+        (0x2E80, 0x303E),
+        (0x3041, 0x33FF),
+        (0x3400, 0x4DBF),
+        (0x4E00, 0x9FFF),
+        (0xA000, 0xA4CF),
+        (0xAC00, 0xD7A3),
+        (0xF900, 0xFAFF),
+        (0xFE30, 0xFE4F),
+        (0xFF00, 0xFF60),
+        (0xFFE0, 0xFFE6),
+        (0x1F300, 0x1F64F),
+        (0x1F900, 0x1F9FF),
+        (0x20000, 0x2FFFD),
+        (0x30000, 0x3FFFD),
+    ];
+    let within = |ranges: &[(u32, u32)]| {
+        ranges
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&(c as u32)))
+    };
+    if within(ZERO) {
+        0
+    } else if within(WIDE) {
+        2
+    } else {
+        1
+    }
 }
 
 fn render_concise(diags: &[Diagnostic]) -> String {
@@ -221,14 +290,22 @@ fn render_github(diags: &[Diagnostic]) -> String {
     out
 }
 
-/// SARIF 2.1.0 log with one run (`runs[0].tool.driver.name = "heki"`).
-pub fn sarif(diags: &[Diagnostic]) -> serde_json::Value {
+/// SARIF 2.1.0 log with one run (`runs[0].tool.driver.name = "heki"`). Columns are in UTF-16
+/// code units (SARIF's default `columnKind`), converted from the byte columns of diagnostics
+/// with `source_line(path, line)`.
+pub fn sarif(
+    diags: &[Diagnostic],
+    source_line: &dyn Fn(&Path, u32) -> Option<String>,
+) -> serde_json::Value {
     use serde_json::json;
     let mut rules: BTreeMap<&str, &str> = BTreeMap::new();
     for d in diags {
         rules.insert(&d.rule_code, &d.rule_slug);
     }
     let location = |path: &Path, line: u32, column: u32| {
+        let column = source_line(path, line).map_or(column, |text| {
+            u32::try_from(before_column(&text, column).encode_utf16().count() + 1).unwrap_or(column)
+        });
         json!({
             "physicalLocation": {
                 "artifactLocation": { "uri": display_path(path) },
@@ -772,6 +849,30 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(json[0]["path"], "src/\u{FFFD}.py");
         assert_eq!(json[0]["related"][0]["path"], "src/\u{FFFD}.py");
+    }
+
+    #[test]
+    fn carets_and_sarif_columns_after_multibyte_characters() {
+        // `é` takes two bytes, one terminal column, and one UTF-16 unit; `語` three bytes, two
+        // columns, one unit; `😀` four bytes, two columns, two units. A tab stays a tab.
+        let text = "\tx = \"é語😀\"; time.sleep(1)";
+        let mut d = diag(4, "EFF101", "m");
+        d.column = u32::try_from(text.find("time").unwrap()).unwrap() + 1;
+        d.related.clear();
+        let line = |_: &Path, n: u32| (n == 4).then(|| text.to_owned());
+        let full = render(std::slice::from_ref(&d), OutputFormat::Full, &line);
+        assert!(
+            full.contains(&format!("\n  | \t{}^\n", " ".repeat(13))),
+            "{full:?}"
+        );
+        let s: serde_json::Value =
+            serde_json::from_str(&render(&[d], OutputFormat::Sarif, &line)).unwrap();
+        assert_eq!(
+            s["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startColumn"],
+            14
+        );
+        assert_eq!(caret_padding("é", 99), " ", "a column past the line end");
+        assert_eq!(display_width('\u{301}'), 0);
     }
 
     #[test]

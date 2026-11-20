@@ -249,3 +249,28 @@ fn output_formats_and_config_selection() {
     let (_, stdout, _) = p.heki(&["--output-format", "concise", "--extend-select", "EFF105"]);
     assert!(stdout.contains("src/pkg/fs.py:2:12: EFF105"), "{stdout}");
 }
+
+#[test]
+fn sarif_columns_and_carets_after_non_ascii_text() {
+    let p = Project::new("non_ascii_columns");
+    p.write(
+        "a.py",
+        "import time\n\nasync def h():\n    label = \"é\"; time.sleep(1)\n",
+    );
+    let (_, full, _) = p.heki(&[]);
+    // Byte column 19 in text output; the caret sits under `time` (`é` is one column).
+    assert!(full.starts_with("a.py:4:19: EFF101"), "{full}");
+    assert!(
+        full.contains("4 |     label = \"é\"; time.sleep(1)\n  |                  ^\n"),
+        "{full}"
+    );
+    let (_, sarif, _) = p.heki(&["--output-format", "sarif"]);
+    let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    let result = &v["runs"][0]["results"][0];
+    for loc in [&result["locations"][0], &result["relatedLocations"][0]] {
+        assert_eq!(
+            loc["physicalLocation"]["region"]["startColumn"], 18,
+            "{loc}"
+        );
+    }
+}
