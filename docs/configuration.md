@@ -284,4 +284,5 @@ w = load()            # noqa: EFF101
 ```
 
 A suppression applies to the line of the diagnostic. Codes and rule names are accepted; a
-comment without codes silences every rule on that line.
+comment without codes silences every rule on that line. When `EFF101` / `EFF105` group the
+reports of one root cause, a suppressed report leaves the group before it is formed.

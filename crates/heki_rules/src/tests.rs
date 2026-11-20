@@ -54,6 +54,7 @@ fn check_with(files: &[(&str, &str)], config: &HekiConfig, select: &[&str]) -> V
             source: &b.src,
             rel_path: b.rel.clone(),
             lines: LineIndex::from_source(&b.src),
+            ignores: Default::default(),
         })
         .collect();
     let inputs: Vec<ModuleInput<'_>> = units
@@ -425,6 +426,7 @@ fn mut201_glob_writers_and_bad_targets() {
         source: &built.src,
         rel_path: "app.py".into(),
         lines: LineIndex::from_source(&built.src),
+        ignores: Default::default(),
     };
     let index = analyze_project(
         &[ModuleInput {
@@ -835,6 +837,7 @@ fn unit_of(b: &Built) -> ModuleUnit<'_> {
         source: &b.src,
         rel_path: b.rel.clone(),
         lines: LineIndex::from_source(&b.src),
+        ignores: Default::default(),
     }
 }
 

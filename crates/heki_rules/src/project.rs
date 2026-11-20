@@ -101,6 +101,7 @@ impl ParsedFile {
             source: &self.source,
             rel_path: self.rel.clone(),
             lines: LineIndex::from_source(&self.source),
+            ignores: InlineIgnores::from_comments(&self.source, &self.comments),
         }
     }
 }
