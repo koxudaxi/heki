@@ -1173,8 +1173,57 @@ class Parser:
         "{diags:#?}"
     );
     assert_eq!(
-        diags.iter().map(|x| x["rule_code"].as_str().unwrap()).collect::<Vec<_>>(),
+        diags
+            .iter()
+            .map(|x| x["rule_code"].as_str().unwrap())
+            .collect::<Vec<_>>(),
         ["MUT201", "MUT201", "MUT203", "MUT203", "MUT201"],
+        "{diags:#?}"
+    );
+}
+
+#[test]
+fn comprehension_scopes_hand_their_reports_to_their_callers() {
+    // Python 3.11 lowers a comprehension to its own scope (`_all.<locals>.<listcomp>`): it is
+    // no API of its own, so a private writer reached through it is reported at the outermost
+    // public caller (dcg `_copy_data_type`'s recursive list comprehension).
+    let p = Project::new("v1x_comprehension_scopes");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+requires-python = ">=3.11"
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["Model.bases"]
+allowed-writers = ["Store.*"]
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        r#"class Model:
+    def __init__(self):
+        self.bases = []
+
+
+def _write(m: Model):
+    m.bases = []
+
+
+def _all(models: list[Model]):
+    return [_write(m) for m in models]
+
+
+def run(models: list[Model]):
+    _all(models)
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "MUT201"]);
+    assert_eq!(
+        found(&diags),
+        vec![d("pkg/model.py", 15, "run", "Model.bases")],
         "{diags:#?}"
     );
 }

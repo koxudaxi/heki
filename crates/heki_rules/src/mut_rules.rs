@@ -36,9 +36,13 @@ struct Method<'a> {
     key: FuncKey,
 }
 
+/// A private function or method name (`_name`, not a dunder), or a synthetic scope
+/// (`<listcomp>`, `<genexpr>`, `<lambda>`, ...): neither is an API of its own, so either hands
+/// its reports to its callers.
 fn is_private(name: &str) -> bool {
     let last = name.rsplit('.').next().unwrap_or(name);
-    last.starts_with('_') && !(last.starts_with("__") && last.ends_with("__"))
+    last.starts_with('<')
+        || last.starts_with('_') && !(last.starts_with("__") && last.ends_with("__"))
 }
 
 /// Visit every class of the checked files with its own methods, its family (its methods plus
