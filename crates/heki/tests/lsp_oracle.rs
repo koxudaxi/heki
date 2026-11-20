@@ -199,6 +199,8 @@ const KEY_REBIND: &str =
     "from pkg import key_consts\n\n\ndef reset():\n    key_consts.KEY = \"other\"\n";
 const KEY_SUBCLASS: &str =
     "from pkg.key_class import Keys\n\n\nclass OtherKeys(Keys):\n    KEY = \"other\"\n";
+const KEY_CLASS_REBIND: &str =
+    "from pkg.key_class import Keys\n\n\ndef reset():\n    Keys.KEY = \"other\"\n";
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
 const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
@@ -1156,7 +1158,7 @@ fn steps_small_displays() -> Vec<Step> {
 /// Constant keys, objects under construction, and the strict modes. A key constant is a
 /// declaration another module's summary resolves names through: one without `Final` stops
 /// being one when a third module rebinds it, and a class constant when a subclass in another
-/// module defines the name again; whether a helper keeps the object its caller hands it is a
+/// module defines the name again or another module rebinds it on the class; whether a helper keeps the object its caller hands it is a
 /// summary fact of the helper; whether a parameter is typed, and with which class, is a fact of
 /// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls).
 fn steps_keys_fresh_strict() -> Vec<Step> {
@@ -1212,6 +1214,19 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         Step::new(
             "the subclass is deleted",
             vec![Action::Delete("pkg/key_subclass.py")],
+        )
+        .present(&[("pkg/key_class.py", "MUT201")]),
+        Step::new(
+            "another module rebinds the `ClassVar` constant on its class",
+            vec![Action::Create(
+                "pkg/key_class_rebind.py",
+                KEY_CLASS_REBIND.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/key_class.py", "MUT201")]),
+        Step::new(
+            "the module rebinding it is deleted",
+            vec![Action::Delete("pkg/key_class_rebind.py")],
         )
         .present(&[("pkg/key_class.py", "MUT201")]),
         Step::new(

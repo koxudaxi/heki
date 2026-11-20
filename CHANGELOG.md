@@ -18,7 +18,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - Contract keys and dynamic names follow module-level string constants bound once in their
   module, and class constants declared `ClassVar` or `Final` and bound once, read on the class,
   an instance, or `cls`; a constant without `Final` stops being one when another module rebinds
-  or deletes it.
+  or deletes it (`keys.KEY = "x"`, `Keys.KEY = "x"`), and a class constant when its own module
+  stores it on the class or an instance outside the class body.
 
 ### Changed
 

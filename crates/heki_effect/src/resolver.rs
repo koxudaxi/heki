@@ -380,8 +380,8 @@ pub struct ModuleDecls {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StrConstant {
     pub value: StrValue,
-    /// A module-level name without `Final`: another module rebinding it (`keys.KEY = "x"`,
-    /// [`ProjectDecls::rebound_elsewhere`]) makes it no constant.
+    /// A name without `Final`: another module rebinding it (`keys.KEY = "x"`,
+    /// `Keys.KEY = "x"`, [`ProjectDecls::rebound_elsewhere`]) makes it no constant.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rebindable: bool,
 }
@@ -2552,8 +2552,11 @@ fn count_u8<T>(items: impl Iterator<Item = T>) -> u8 {
 /// subscripted) bound exactly once in the class body, each to a string literal or to another
 /// name. A name stored twice (`global KEY` in a function, two branches) or deleted is no
 /// constant, and neither is a name an import statement binds: it resolves through the imports.
+/// A class attribute the module also stores or deletes outside the class body
+/// ([`class_attrs_rebound`]) is none either.
 fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, StrConstant> {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
+    let rebound = class_attrs_rebound(input, decls);
     // A module body reads an imported name as a copy of its `Import`.
     let imports: FxHashMap<Span, String> = input
         .semantic
@@ -2615,8 +2618,10 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
                 let once = module_stores.get(name) == Some(&1) && !decls.imports.contains_key(name);
                 (name.to_owned(), once, !q.is_final)
             } else {
-                let once = (q.class_var || q.is_final) && class_stores.get(name) == Some(&1);
-                (format!("{}.{name}", f.qualname), once, false)
+                let once = (q.class_var || q.is_final)
+                    && class_stores.get(name) == Some(&1)
+                    && !rebound.contains(&(f.qualname.as_str(), name));
+                (format!("{}.{name}", f.qualname), once, !q.is_final)
             };
             if !once {
                 continue;
@@ -2627,6 +2632,53 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
                 None => continue,
             };
             out.insert(key, StrConstant { value, rebindable });
+        }
+    }
+    out
+}
+
+/// The class attributes the module stores into or deletes outside their class bodies, as
+/// `(class qualname, attribute)`: on the class object (`Keys.KEY = "x"`, `cls.KEY = "x"` in a
+/// class method) or on an instance in a method of the class (`self.KEY = "x"`, which shadows the
+/// class attribute for that instance).
+fn class_attrs_rebound<'i>(
+    input: &'i ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> FxHashSet<(&'i str, &'i str)> {
+    let mut out = FxHashSet::default();
+    for f in &input.ir.functions {
+        let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        let defs: FxHashMap<VarId, &InstKind> = insts()
+            .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
+            .collect();
+        let receiver = match (&f.owner_class_qualname, f.params.first()) {
+            (Some(owner), Some(p))
+                if is_summarized_function(f) && !f.has_decorator(&["staticmethod"]) =>
+            {
+                Some((owner.as_str(), self_aliases(f, p.var)))
+            }
+            _ => None,
+        };
+        for inst in insts() {
+            let (InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr }) =
+                &inst.kind
+            else {
+                continue;
+            };
+            let class = match defs.get(obj) {
+                Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
+                    if decls.classes.contains_key(name.as_str()) =>
+                {
+                    Some(name.as_str())
+                }
+                _ => receiver
+                    .as_ref()
+                    .filter(|(_, selfs)| selfs.contains(obj))
+                    .map(|(owner, _)| *owner),
+            };
+            if let Some(class) = class {
+                out.insert((class, attr.as_str()));
+            }
         }
     }
     out

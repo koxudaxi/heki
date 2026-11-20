@@ -386,6 +386,35 @@ class Deleted:
 
     def write(self, field: DataModelFieldBase) -> None:
         field.__dict__[Deleted.KEY] = True
+
+
+class Configured:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+class Reconfigured:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    @classmethod
+    def configure(cls) -> None:
+        cls.KEY = "_other"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+class Switched:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+def switch() -> None:
+    Switched.KEY = "_other"
 "#;
 
 #[test]
@@ -413,6 +442,11 @@ unresolved = "report"
     .write(
         "pkg/reader.py",
         "from pkg.once import ONCE\n\n\ndef drop(d: dict) -> None:\n    d.pop(ONCE, None)\n",
+    )
+    // Another module rebinds a `ClassVar` constant on its class, and a `Final` one.
+    .write(
+        "pkg/settings.py",
+        "from pkg.use import Configured, Keyed\n\n\ndef configure() -> None:\n    Configured.KEY = \"_other\"\n    Keyed.FINAL_KEY = \"_other\"\n",
     )
     .write("pkg/use.py", ONCE_USE);
     let u = "pkg/use.py";
@@ -446,8 +480,13 @@ unresolved = "report"
             // A subclass defines the name again: `self` may be one, the class itself is not.
             d(u, 52, "MUT205", "Overridden.write", class),
             d(u, 53, "MUT201", "Overridden.write", forced),
-            // A class constant the class body deletes is no constant.
+            // A class constant the class body deletes is no constant, nor one stored on its
+            // class elsewhere (a `Final` one stays: line 32), also through `cls` and in its
+            // own module.
             d(u, 65, "MUT205", "Deleted.write", class),
+            d(u, 72, "MUT205", "Configured.write", class),
+            d(u, 83, "MUT205", "Reconfigured.write", class),
+            d(u, 90, "MUT205", "Switched.write", class),
         ]
     );
 }

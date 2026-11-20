@@ -342,8 +342,9 @@ unbound name by its spelling.
 String constants (`ModuleDecls::str_constants`) name attributes and keys for every rule:
 module-level names declared `Final`, or bound once and rebound by no other module
 (`StrConstant::rebindable`, checked against `ProjectDecls::rebound_elsewhere` where a constant is
-read), and class-body names declared `ClassVar` or `Final` and bound once, read through the MRO
-when no subclass defines the name again (`ProjectDecls::class_str_constant`). Contract-only facts
+read), and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
+an instance by no other code of their module (and, without `Final`, by no other module), read
+through the MRO when no subclass defines the name again (`ProjectDecls::class_str_constant`). Contract-only facts
 (container entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
