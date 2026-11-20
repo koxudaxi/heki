@@ -17,6 +17,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   returning a future (`asyncio.ensure_future(event.wait())`), or a future from
   `loop.run_in_executor`, `loop.create_future`, `asyncio.gather`, `asyncio.wrap_future`, or an
   annotation. The `coro=` and `coro_or_future=` keyword forms are checked the same way.
+- Calling an `async def` gives a coroutine: a method called on the result without `await` no
+  longer resolves on the function's return annotation, so the rules stop following it there.
+  `await` and `async with` still give the annotated type, and awaiting a future gives what it
+  holds, not the future.
 
 ## [0.1.1] - 2026-11-21
 
