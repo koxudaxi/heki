@@ -52,6 +52,7 @@ use heki_ast::Span;
 use heki_ir::ModuleIr;
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::SemanticModel;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -960,8 +961,18 @@ fn summarize(
     contracts: Option<&dyn Contracts>,
 ) -> Vec<FileSummary> {
     let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
+    if track {
+        // Every module's reads go to the one recorder of `decls`: one module at a time.
+        return modules
+            .iter()
+            .zip(own)
+            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+            .collect();
+    }
+    // A module's local summary depends on it and the declarations only (indexed collect: input
+    // order).
     modules
-        .iter()
+        .par_iter()
         .zip(own)
         .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
         .collect()
