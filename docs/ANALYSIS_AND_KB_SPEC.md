@@ -159,9 +159,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     other than `while True:`: a `while` loop, or a `for` loop whose body never reads its target,
     in which every path from the header back to it runs a call that waits
     (`facts::waits_every_iteration`): a sleep (a call or method named `sleep`) of a duration
-    other than a literal zero, or a `wait` with a `timeout=` keyword or a positive constant
-    (`stop.wait(1)`; `asyncio.wait(tasks)` may return at once). The walk leaves a waiting block
-    by its exception edge too, since an exception may skip the wait.
+    other than a literal zero, or a `wait` with a `timeout=` keyword that is not a literal zero
+    or a positive constant (`stop.wait(1)`; `asyncio.wait(tasks)` may return at once), awaited
+    in a coroutine (`asyncio.create_task(asyncio.sleep(1))` waits elsewhere). The walk leaves a
+    waiting block by its exception edge too, since an exception may skip the wait.
   - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops (the
     flag's name has the word `running`, `active`, or `alive`, or after `not` a word like `stop`
     or `shutdown`; an event's `is_set()` / `wait(...)` tests the event as the flag; and the body

@@ -374,6 +374,18 @@ def zero_timeout(stop, get):
         stop.wait(timeout=0)
 
 
+async def paced_by_awaited_sleep(get, asyncio):
+    while True:
+        get()
+        await asyncio.sleep(1)
+
+
+async def sleep_only_scheduled(get, asyncio):
+    while True:
+        get()
+        asyncio.create_task(asyncio.sleep(1))
+
+
 def paced_by_computed_delay(get, time, delay):
     while not get():
         time.sleep(delay)

@@ -16,8 +16,9 @@
 //!   [`LEN_CAP_MAX`] caps `acc` ([`crate::NaturalLoop::len_caps`]).
 
 use crate::{
-    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId, Inst,
-    InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator, UnaryOpKind, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
+    FunctionKind, Inst, InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator,
+    UnaryOpKind, VarId,
 };
 use heki_ast::Span;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1111,24 +1112,37 @@ fn waits_every_iteration(f: &IrFunction, lp: &NaturalLoop) -> bool {
 /// A call that waits before the program goes on: a sleep of a duration other than a literal
 /// zero (`time.sleep(5)`, `await asyncio.sleep(delay)`; `sleep(0)` only yields), or a wait
 /// with a timeout that is not a literal zero (`stop.wait(1)`, `event.wait(timeout=delay)`;
-/// `wait(timeout=0)` returns at once). A `wait` given anything else may wait for futures that
-/// are done already (`asyncio.wait(tasks)`).
+/// `wait(timeout=0)` returns at once), awaited in a coroutine. A `wait` given anything else
+/// may wait for futures that are done already (`asyncio.wait(tasks)`).
 fn waits_for_time(f: &IrFunction, inst: &Inst) -> bool {
-    let (name, args, kwargs) = match &inst.kind {
+    let (name, args, kwargs, is_awaited) = match &inst.kind {
         InstKind::Call {
             callee,
             args,
             kwargs,
+            is_awaited,
             ..
-        } => (callee.rsplit('.').next().unwrap_or(callee), args, kwargs),
+        } => (
+            callee.rsplit('.').next().unwrap_or(callee),
+            args,
+            kwargs,
+            *is_awaited,
+        ),
         InstKind::MethodCall {
             method,
             args,
             kwargs,
+            is_awaited,
             ..
-        } => (method.as_str(), args, kwargs),
+        } => (method.as_str(), args, kwargs, *is_awaited),
         _ => return false,
     };
+    // In a coroutine, a call it does not await may only build the coroutine of a wait that
+    // runs elsewhere (`asyncio.create_task(asyncio.sleep(1))`).
+    let coroutine = matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator);
+    if coroutine && !is_awaited {
+        return false;
+    }
     let seconds = |v: VarId| match f.def_inst(v).map(|(_, i)| &i.kind) {
         Some(InstKind::Const {
             literal: ConstLiteral::Int(n),

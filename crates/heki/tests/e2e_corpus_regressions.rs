@@ -1079,6 +1079,12 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
         ("paced_by_timed_wait", serde_json::json!("daemon_polling")),
         ("paced_by_timeout", serde_json::json!("daemon_polling")),
         ("zero_timeout", unbounded.clone()),
+        // A coroutine waits where it awaits; a sleep it only schedules waits elsewhere.
+        (
+            "paced_by_awaited_sleep",
+            serde_json::json!("daemon_polling"),
+        ),
+        ("sleep_only_scheduled", unbounded.clone()),
         (
             "paced_by_computed_delay",
             serde_json::json!("retry_pattern"),
