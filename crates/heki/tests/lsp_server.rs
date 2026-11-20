@@ -553,3 +553,39 @@ fn lsp_exit_codes_follow_the_shutdown_handshake() {
     lsp.stdin = None;
     assert_eq!(status(&mut lsp), Some(1));
 }
+
+#[test]
+fn lsp_code_actions_only_edit_the_analyzed_version() {
+    let p = Project::new("lsp_stale_actions");
+    let text =
+        "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+    p.write("a.py", text);
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"workspaceEdit": {"documentChanges": true}}}),
+    );
+    lsp.open(&a, text);
+    let diags = lsp.diagnostics(&a, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["OPT101"]);
+    // An edit inside the debounce: the published fix was computed on version 1.
+    lsp.change(&a, 2, &text.replace("x + [i]", "x + [0]"));
+    let stale = lsp.request(
+        "textDocument/codeAction",
+        json!({"textDocument": {"uri": a}, "range": diags[0]["range"], "context": {"diagnostics": diags}}),
+    );
+    assert_eq!(stale, Value::Null);
+    lsp.settle();
+    let diags = lsp.latest[&a].clone();
+    let actions = lsp.code_actions(&a, &diags[0]["range"], &diags);
+    assert_eq!(actions.len(), 2, "{actions:#?}");
+    // Versioned edits for a client that applies them: it rejects them for any other version.
+    let change = &actions[0]["edit"]["documentChanges"][0];
+    assert_eq!(change["textDocument"], json!({"uri": a, "version": 2}));
+    assert_eq!(change["edits"][0]["newText"], "x.append(0)");
+    assert_eq!(
+        actions[1]["edit"]["documentChanges"][0]["textDocument"]["version"],
+        2
+    );
+    lsp.stop(true);
+}

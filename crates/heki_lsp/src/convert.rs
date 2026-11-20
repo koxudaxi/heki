@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, DiagnosticRelatedInformation,
-    DiagnosticSeverity, Location, NumberOrString, Position, Range, TextEdit, Url, WorkspaceEdit,
+    DiagnosticSeverity, DocumentChanges, Location, NumberOrString, OneOf,
+    OptionalVersionedTextDocumentIdentifier, Position, Range, TextDocumentEdit, TextEdit, Url,
+    WorkspaceEdit,
 };
 
 /// Code action kind of size-dependent `OPT` rewrites.
@@ -107,9 +109,37 @@ fn suppression_point(
     })
 }
 
-/// Code actions for the diagnostics of `uri` touching `range`.
+/// The document code actions edit: its URI and, for a client applying versioned edits, the
+/// version the edits were computed on (the client rejects them for any other).
+pub struct EditTarget<'u> {
+    pub uri: &'u Url,
+    pub version: Option<i32>,
+}
+
+impl EditTarget<'_> {
+    fn edit(&self, edits: Vec<TextEdit>) -> WorkspaceEdit {
+        match self.version {
+            Some(version) => WorkspaceEdit {
+                document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        uri: self.uri.clone(),
+                        version: Some(version),
+                    },
+                    edits: edits.into_iter().map(OneOf::Left).collect(),
+                }])),
+                ..Default::default()
+            },
+            None => WorkspaceEdit {
+                changes: Some(HashMap::from([(self.uri.clone(), edits)])),
+                ..Default::default()
+            },
+        }
+    }
+}
+
+/// Code actions for the diagnostics of the document touching `range`.
 pub fn code_actions(
-    uri: &Url,
+    target: &EditTarget<'_>,
     text: &str,
     diags: &[Diagnostic],
     lsp_diags: &[tower_lsp::lsp_types::Diagnostic],
@@ -146,10 +176,7 @@ pub fn code_actions(
                     CodeActionKind::new(REWRITE_KIND)
                 }),
                 diagnostics: Some(vec![ld.clone()]),
-                edit: Some(WorkspaceEdit {
-                    changes: Some(HashMap::from([(uri.clone(), edits)])),
-                    ..Default::default()
-                }),
+                edit: Some(target.edit(edits)),
                 is_preferred: Some(unconditional),
                 ..Default::default()
             }));
@@ -164,16 +191,10 @@ pub fn code_actions(
             ),
             kind: Some(CodeActionKind::QUICKFIX),
             diagnostics: Some(vec![ld.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(HashMap::from([(
-                    uri.clone(),
-                    vec![TextEdit {
-                        range: Range { start: at, end: at },
-                        new_text: format!("  # heki: ignore[{}]", d.rule_code),
-                    }],
-                )])),
-                ..Default::default()
-            }),
+            edit: Some(target.edit(vec![TextEdit {
+                range: Range { start: at, end: at },
+                new_text: format!("  # heki: ignore[{}]", d.rule_code),
+            }])),
             ..Default::default()
         }));
     }

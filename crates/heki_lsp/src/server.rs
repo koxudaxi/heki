@@ -61,7 +61,9 @@ struct State {
     workspace: Option<Workspace>,
     docs: FxHashMap<PathBuf, Doc>,
     /// Last published heki diagnostics per file (code actions read them).
-    diags: FxHashMap<PathBuf, Vec<Diagnostic>>,
+    diags: FxHashMap<PathBuf, Published>,
+    /// The client applies versioned document edits (`workspaceEdit.documentChanges`).
+    versioned_edits: bool,
     /// Files to re-analyze on the next save.
     pending: BTreeSet<PathBuf>,
     /// Debounce tokens per document.
@@ -70,6 +72,14 @@ struct State {
     /// not gone out yet is dropped, so the client ends with the newest diagnostics.
     latest_publication: FxHashMap<PathBuf, u64>,
     publications: u64,
+}
+
+/// The diagnostics last published for a file, and the version of the document they were
+/// computed on (`None`: the file on the disk). Their fixes and suppressions are edits of that
+/// text only.
+struct Published {
+    version: Option<i32>,
+    diags: Vec<Diagnostic>,
 }
 
 /// Work the server has accepted but not finished (`heki/stats`: `in_flight`, `published`).
@@ -170,13 +180,17 @@ impl State {
             .iter()
             .map(|d| convert::diagnostic(d, &text, &|p| self.text_of(p)))
             .collect();
-        self.diags.insert(path.to_path_buf(), diags);
+        // Analyses run on the documents as they are under the state lock, so the version now
+        // is the version analyzed.
+        let version = self.docs.get(path).map(|d| d.version);
+        self.diags
+            .insert(path.to_path_buf(), Published { version, diags });
         Some(Publish {
             path: path.to_path_buf(),
             seq: self.stamp(path),
             uri,
             diagnostics: lsp,
-            version: self.docs.get(path).map(|d| d.version),
+            version,
         })
     }
 
@@ -436,15 +450,20 @@ impl LanguageServer for Backend {
             .or(params.root_uri)
             .and_then(|u| path_of(&u))
             .or_else(|| std::env::current_dir().ok());
-        let watch_files = params
-            .capabilities
-            .workspace
+        let workspace = params.capabilities.workspace;
+        let watch_files = workspace
+            .as_ref()
             .and_then(|w| w.did_change_watched_files)
             .and_then(|w| w.dynamic_registration)
+            .unwrap_or(false);
+        let versioned_edits = workspace
+            .and_then(|w| w.workspace_edit)
+            .and_then(|e| e.document_changes)
             .unwrap_or(false);
         let mut st = lock(&self.state);
         st.root = root;
         st.watch_files = watch_files;
+        st.versioned_edits = versioned_edits;
         drop(st);
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -636,17 +655,27 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let st = lock(&self.state);
-        let (Some(doc), Some(diags)) = (st.docs.get(&path), st.diags.get(&path)) else {
+        let (Some(doc), Some(published)) = (st.docs.get(&path), st.diags.get(&path)) else {
             return Ok(None);
         };
-        let lsp: Vec<_> = diags
+        // Edits computed on another version of the document (an edit is waiting for its
+        // debounced analysis) would land on the wrong text.
+        if published.version != Some(doc.version) {
+            return Ok(None);
+        }
+        let lsp: Vec<_> = published
+            .diags
             .iter()
             .map(|d| convert::diagnostic(d, &doc.text, &|p| st.text_of(p)))
             .collect();
+        let target = convert::EditTarget {
+            uri: &doc.uri,
+            version: st.versioned_edits.then_some(doc.version),
+        };
         Ok(Some(convert::code_actions(
-            &doc.uri,
+            &target,
             &doc.text,
-            diags,
+            &published.diags,
             &lsp,
             &params.range,
         )))

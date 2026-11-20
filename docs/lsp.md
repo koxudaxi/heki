@@ -35,6 +35,11 @@ The server provides:
 - a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a
   comment cannot go there (the line ends inside a string or with a `\` continuation).
 
+Code actions edit the version of the document their diagnostics were computed on: while an edit
+waits for its analysis, none are offered, and a client that applies versioned workspace edits
+(`workspaceEdit.documentChanges`) gets them with that version, so it rejects them if the
+document changed meanwhile.
+
 It reads the same configuration as `heki check`. One difference is deliberate: `heki check`
 reports ten or more `async def` boundaries that reach the same blocking call once, with a count,
 while the server groups them per file, so the file you edit always shows its own boundary.
