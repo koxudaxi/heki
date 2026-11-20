@@ -2,7 +2,7 @@
 
 # unresolved-guarded-call (MUT207)
 
-Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
 
 Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class.
 

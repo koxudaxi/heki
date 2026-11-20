@@ -2,7 +2,7 @@
 
 # unresolved-guarded-read (MUT206)
 
-Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
 
 Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class.
 
