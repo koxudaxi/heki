@@ -1274,6 +1274,10 @@ fn iterated_containers_past_the_pass_limit_are_unknown() {
         kept_generator_over(containers, &body)
     };
     assert_eq!(iterated_mutations("bounds_rotation_3", &rotating(3)), 1);
+    // Within the pass limit, and past it within the fact budget.
+    assert_eq!(iterated_mutations("bounds_rotation_20", &rotating(20)), 1);
+    assert_eq!(iterated_mutations("bounds_rotation_30", &rotating(30)), 0);
+    // Past the fact budget too.
     assert_eq!(iterated_mutations("bounds_rotation_600", &rotating(600)), 0);
 }
 
