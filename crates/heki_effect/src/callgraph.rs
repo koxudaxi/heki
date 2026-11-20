@@ -440,17 +440,23 @@ fn transfer(
             });
         }
         let mut indirect = Vec::new();
-        if let Some((class, attr)) = &o.typed_field {
-            // `helper(obj.attr)`: the written object is `obj`, the caller's parameter `p` when
-            // the argument is `p.attr`.
+        if let Some((class, attr)) = &o.typed_field
+            && paths.contains("")
+        {
+            // `helper(obj.attr)` changing the value in place (`items.append(x)`): the written
+            // object is `obj`, the caller's parameter `p` when the argument is `p.attr`. A
+            // helper writing the value's own attributes writes those, as `obj.attr.x = v` does.
             let obj = match &o.param {
                 Some((p, Some(path))) if path == attr => 1u64 << p,
                 _ => 0,
             };
             indirect.push((class.clone(), attr.clone(), obj));
         }
-        if let Some(class) = &o.typed_instance {
-            // `helper(obj)`: the written object is the argument itself.
+        if let Some(class) = &o.typed_instance
+            && callee.typed_params >> i & 1 == 0
+        {
+            // `helper(obj)` with a parameter the helper does not type: the written object is
+            // the argument itself.
             indirect.extend(
                 paths
                     .iter()

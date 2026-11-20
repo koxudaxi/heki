@@ -772,6 +772,8 @@ mod tests {
                 s(&[
                     "copy.deepcopy",
                     "copy.copy",
+                    "copy.replace",
+                    "dataclasses.replace",
                     "pydantic.BaseModel.model_copy",
                     "builtins.dict.copy",
                     "builtins.list.copy",
@@ -1278,6 +1280,7 @@ mod tests {
         "threading",
         "multiprocessing",
         "concurrent",
+        "dataclasses",
         "requests",
         "httpx",
         "aiohttp",

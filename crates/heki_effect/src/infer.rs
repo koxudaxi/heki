@@ -17,7 +17,7 @@
 //! comprehension or generator expression with a scope of its own iterates the value its
 //! enclosing function hands it, so the enclosing function is inferred first.
 
-use crate::resolver::{TypeCtx, Val};
+use crate::resolver::{Callee, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
 use heki_ir::{
@@ -83,7 +83,7 @@ impl Inferred {
         (0u32..)
             .zip(&self.facts)
             .filter_map(|(i, f)| match f {
-                Fact::Known(t) => Some((VarId(i), t.val())),
+                Fact::Known(t) => Some((VarId(i), t.val()?)),
                 Fact::Unset | Fact::Unknown => None,
             })
             .collect()
@@ -228,6 +228,8 @@ struct Engine<'e, 'a> {
     cx: &'e TypeCtx<'a>,
     f: &'e IrFunction,
     owner: Option<String>,
+    /// The instance `Self` stands for in a method's annotations.
+    self_ty: Option<Ty>,
     /// Module and class bodies read unassigned names from the globals and builtins.
     reads_globals: bool,
     facts: Vec<Fact>,
@@ -236,6 +238,8 @@ struct Engine<'e, 'a> {
     declared: FxHashMap<VarId, Ty>,
     /// Integer constants, with the span of their literal.
     ints: FxHashMap<VarId, (i64, Span)>,
+    /// String constants (the annotations `typing.cast` takes as text).
+    strs: FxHashMap<VarId, String>,
     /// How many targets the unpacking assignments of each variable have (`a, b = pair`).
     unpacked: FxHashMap<VarId, usize>,
     /// The source of each `Copy`.
@@ -256,11 +260,13 @@ impl<'e, 'a> Engine<'e, 'a> {
             cx,
             f,
             owner: cx.owner_fqn(f),
+            self_ty: cx.owner_fqn(f).map(Ty::inst),
             reads_globals: f.is_module_body || f.is_class_body,
             facts: vec![Fact::Unset; f.var_names.len()],
             names: FxHashMap::default(),
             declared: FxHashMap::default(),
             ints: FxHashMap::default(),
+            strs: FxHashMap::default(),
             unpacked: FxHashMap::default(),
             copies: FxHashMap::default(),
             displays: FxHashMap::default(),
@@ -299,6 +305,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     .as_deref()
                     .and_then(|a| cx.module.resolve_annotation_ty(a))
                     .and_then(|t| cx.project.declared_ty(&t))
+                    .and_then(|t| t.bind_self(self.self_ty.as_ref()))
                 {
                     // `*args: T` is a tuple of `T`, `**kwargs: T` a dict of them.
                     Some(t) => Fact::Known(match t {
@@ -334,6 +341,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .module
                 .resolve_annotation_ty(&ann.annotation)
                 .and_then(|t| cx.project.declared_ty(&t))
+                .and_then(|t| t.bind_self(self.self_ty.as_ref()))
             {
                 self.names.insert(ann.target.clone(), t);
             }
@@ -355,6 +363,12 @@ impl<'e, 'a> Engine<'e, 'a> {
                     literal: ConstLiteral::Int(n),
                 } => {
                     self.ints.insert(*dst, (*n, inst.span));
+                }
+                InstKind::Const {
+                    dst,
+                    literal: ConstLiteral::Str(text),
+                } => {
+                    self.strs.insert(*dst, text.clone());
                 }
                 InstKind::Copy { dst, src } => {
                     self.copies.insert(*dst, *src);
@@ -512,11 +526,8 @@ impl<'e, 'a> Engine<'e, 'a> {
             | InstKind::Await { value: src, .. } => self.need(*src)?.cloned(),
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
                 Some(Ty::Ref(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
-                Some(Ty::Inst(o)) => cx
-                    .project
-                    .attr_type(&o.class, attr)
-                    .and_then(|t| cx.project.declared_ty(t)),
-                Some(Ty::Super(_)) | None => None,
+                Some(recv) => self.member(recv, attr),
+                None => None,
             },
             InstKind::SubscriptLoad {
                 obj,
@@ -555,7 +566,8 @@ impl<'e, 'a> Engine<'e, 'a> {
                     self.owner.clone().map(Ty::Super)
                 }
                 Some(Ty::Ref(fqn)) => return self.call_named(fqn, args),
-                other => cx.callee_result(&cx.call_targets(other.map(Ty::recv))),
+                Some(callee) => self.called(callee),
+                None => None,
             },
             // A non-inlined comprehension (Python 3.11) returns the container it builds from the
             // value it iterates.
@@ -804,6 +816,19 @@ impl<'e, 'a> Engine<'e, 'a> {
                 let default = args.get(1).map_or(Elem::Empty, |d| self.fact(*d).elem());
                 return item_ty(items(0).join(&default));
             }
+            "functools.partial" if !args.is_empty() => {
+                return Ok(self
+                    .need(args[0])?
+                    .map(|t| Ty::Partial(Box::new(t.clone()))));
+            }
+            "typing.cast" | "typing_extensions.cast" if !args.is_empty() => {
+                return Ok(self.type_form(args[0]));
+            }
+            // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
+            // type.
+            _ if !args.is_empty() && self.cx.kb.lookup(fqn).is_some_and(|e| e.copy_sanitizer) => {
+                return Ok(self.need(args[0])?.cloned());
+            }
             _ => return Ok(self.cx.call_result(fqn)),
         }))
     }
@@ -821,7 +846,86 @@ impl<'e, 'a> Engine<'e, 'a> {
         {
             return item_ty(item);
         }
-        Ok(cx.callee_result(&cx.method_call_targets(r.map(Ty::recv), method)))
+        Ok(r.and_then(|recv| self.member_call(recv, method)))
+    }
+
+    /// The class the static type of a member of `recv` comes from, whether the lookup starts
+    /// past it (`super()`), and the instance `Self` stands for there.
+    fn static_receiver<'t>(&self, recv: &'t Ty) -> Option<(&'t str, bool, Ty)> {
+        match recv {
+            Ty::Inst(o) => Some((&o.class, false, recv.clone())),
+            Ty::Super(c) => Some((c, true, Ty::inst(c.as_str()))),
+            Ty::Ref(c) if self.cx.project.is_project_class(c) => {
+                Some((c, false, Ty::inst(c.as_str())))
+            }
+            Ty::Ref(_) | Ty::SelfType | Ty::Partial(_) => None,
+        }
+    }
+
+    /// The declared type of reading `attr` on a value of type `recv`: a property getter's
+    /// return annotation or the attribute's annotation along its MRO (`Self` bound to it).
+    fn member(&self, recv: &Ty, attr: &str) -> Option<Ty> {
+        let cx = self.cx;
+        let (class, skip_self, self_ty) = self.static_receiver(recv)?;
+        cx.project
+            .member_type(class, attr, skip_self)
+            .and_then(|t| cx.project.declared_ty(t))
+            .and_then(|t| t.bind_self(Some(&self_ty)))
+    }
+
+    /// What calling method `method` on a value of type `recv` returns: the return annotation of
+    /// the definition the receiver's MRO finds first (`Self` bound to the receiver), as for a
+    /// type checker; past the project classes, what the ecosystem knowledge base says of the
+    /// method of the first external base: a copy (`model_copy`, `list.copy`) has its receiver's
+    /// type.
+    fn member_call(&self, recv: &Ty, method: &str) -> Option<Ty> {
+        let cx = self.cx;
+        let (class, skip_self, self_ty) = self.static_receiver(recv)?;
+        if let Some(key) = cx.project.mro_definition(class, method, skip_self) {
+            // Calling what a property returns is calling its value, not the getter.
+            let decl = cx
+                .project
+                .function_decl(&key)
+                .filter(|d| d.property_type.is_none())?;
+            return decl
+                .return_type
+                .as_ref()
+                .and_then(|t| cx.project.declared_ty(t))
+                .and_then(|t| t.bind_self(Some(&self_ty)));
+        }
+        match cx.method_call_targets(recv.recv(), method) {
+            Callee::External(symbol) if cx.kb.lookup(&symbol).is_some_and(|e| e.copy_sanitizer) => {
+                Some(self_ty)
+            }
+            callee => cx.callee_result(&callee),
+        }
+    }
+
+    /// What calling a value of type `callee` returns: a partial object calls what it wraps, an
+    /// instance its `__call__`.
+    fn called(&self, callee: &Ty) -> Option<Ty> {
+        match callee {
+            Ty::Ref(fqn) => self.cx.call_result(fqn),
+            Ty::Partial(inner) => self.called(inner),
+            other => self.member_call(other, "__call__"),
+        }
+    }
+
+    /// The type the type expression in `var` names (`typing.cast`'s first argument): a string
+    /// annotation, or a class object.
+    fn type_form(&self, var: VarId) -> Option<Ty> {
+        let cx = self.cx;
+        match self.strs.get(&var) {
+            Some(text) => cx
+                .module
+                .resolve_annotation_ty(text)
+                .and_then(|t| cx.project.declared_ty(&t))
+                .and_then(|t| t.bind_self(self.self_ty.as_ref())),
+            None => match self.fact(var) {
+                Fact::Known(Ty::Ref(class)) => Some(Ty::inst(class)),
+                _ => None,
+            },
+        }
     }
 
     /// What a method of a container with known arguments returns: the views and values of a

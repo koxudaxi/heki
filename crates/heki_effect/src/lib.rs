@@ -203,6 +203,10 @@ pub struct EffectSummary {
 
     // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
     pub mutates_params: u64,
+    /// Parameters the function itself types with a project class (`self` of a method, an
+    /// annotated parameter): its typed write sites, and those of its callees, already cover
+    /// every change of them, so a caller passing an instance adds no `IndirectHelper` site.
+    pub typed_params: u64,
     pub escapes_params: u64,
     /// Parameters iterated to exhaustion on every path that returns normally when the body
     /// runs at the call (`MUT106`: passing a single-pass iterator consumes it).

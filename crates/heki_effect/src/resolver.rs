@@ -238,6 +238,9 @@ pub struct FunctionDecl {
     /// `@database_sync_to_async`, `@asyncify`). `@d def f` is `f = d(f)`: calling `f` calls
     /// `d(f)`, which offloads the body, so the body does not run at the call.
     pub offloaded_by: Option<String>,
+    /// The return annotation of the getter of a property (`@property` / `cached_property`,
+    /// with or without a setter): the type reading the attribute gives.
+    pub property_type: Option<Ty>,
 }
 
 /// Per-module declarations other modules need (stored in `FileSummary`, IR-free).
@@ -366,6 +369,14 @@ impl ModuleDecls {
             return self.resolve_annotation_ty(single(&parts)?);
         }
         let Some((head, inner)) = subscript(t) else {
+            // `typing.Self` (also unimported, in a string annotation): the receiver's type.
+            if matches!(
+                self.resolve_dotted(t, true).as_deref(),
+                Some("typing.Self" | "typing_extensions.Self") | None
+            ) && t.rsplit('.').next() == Some("Self")
+            {
+                return Some(Ty::SelfType);
+            }
             return self
                 .resolve_type_head(t)
                 .filter(|c| !special_form(c))
@@ -957,7 +968,7 @@ impl ProjectDecls {
                 }
             }
             for (qualname, f) in &m.functions {
-                if f.is_property {
+                if f.is_property || f.property_type.is_some() {
                     let name = qualname.rsplit('.').next().unwrap_or(qualname);
                     property_names.insert(name.to_owned());
                 }
@@ -1273,11 +1284,39 @@ impl ProjectDecls {
         self.module(&key.module)?.functions.get(&key.qualname)
     }
 
-    /// Priority 3: instance attribute type through the MRO.
-    pub(crate) fn attr_type(&self, class: &str, attr: &str) -> Option<&Ty> {
+    /// The declared type of reading `attr` on an instance of `class`, from the first class along
+    /// the MRO (past `class` itself with `skip_self`, for `super()`) that declares it: the
+    /// return annotation of a property getter (with or without a setter; another function of a
+    /// name some project property has gives none), or the Priority 3 attribute type. Overriding
+    /// subclasses do not count, as for a type checker. The getter's module is a declaration
+    /// read like any other (`DeclKeys::modules`).
+    pub(crate) fn member_type(&self, class: &str, attr: &str, skip_self: bool) -> Option<&Ty> {
+        self.read(|k| note(&mut k.property_names, attr));
+        let property = self.property_names.contains(attr);
+        for c in self.mro(class).iter().skip(usize::from(skip_self)) {
+            if property && let Some(key) = self.own_method(c, attr) {
+                return self.function_decl(&key)?.property_type.as_ref();
+            }
+            if let Some(t) = self.class(c).and_then(|d| d.attr_types.get(attr)) {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    /// The definition of method `name` a call on an instance of `class` finds first along the
+    /// MRO (past `class` itself with `skip_self`): what a type checker takes the call's type
+    /// from, whatever subclasses override it with.
+    pub(crate) fn mro_definition(
+        &self,
+        class: &str,
+        name: &str,
+        skip_self: bool,
+    ) -> Option<FuncKey> {
         self.mro(class)
             .iter()
-            .find_map(|c| self.class(c)?.attr_types.get(attr))
+            .skip(usize::from(skip_self))
+            .find_map(|c| self.own_method(c, name))
     }
 
     /// The type a declaration names (an annotation, or a type stored in the declarations), with
@@ -1650,6 +1689,20 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         let slot = transforms.entry(&f.qualname).or_insert(None);
         *slot = (*slot).max(t);
     }
+    // The return annotation of a property's getter (its setter shares the qualname).
+    let mut getter_types: FxHashMap<&str, Ty> = FxHashMap::default();
+    for f in &input.ir.functions {
+        if is_summarized_function(f)
+            && f.owner_class_qualname.is_some()
+            && f.has_decorator(PROPERTY_DECORATORS)
+            && let Some(t) = f
+                .return_annotation
+                .as_deref()
+                .and_then(|a| decls.resolve_annotation_ty(a))
+        {
+            getter_types.entry(&f.qualname).or_insert(t);
+        }
+    }
     for f in &input.ir.functions {
         if !is_summarized_function(f) {
             continue;
@@ -1687,6 +1740,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             mutable_params,
             transform: transforms[f.qualname.as_str()],
             offloaded_by: None,
+            property_type: getter_types.get(f.qualname.as_str()).cloned(),
         };
         decls.functions.insert(f.qualname.clone(), decl);
     }
@@ -2161,20 +2215,24 @@ impl Val {
 }
 
 impl Ty {
-    pub(crate) fn recv(&self) -> Recv<'_> {
+    /// The view call resolution takes (`None` for a partial object).
+    pub(crate) fn recv(&self) -> Option<Recv<'_>> {
         match self {
-            Ty::Ref(f) => Recv::Ref(f),
-            Ty::Inst(o) => Recv::Inst(&o.class),
-            Ty::Super(c) => Recv::Super(c),
+            Ty::Ref(f) => Some(Recv::Ref(f)),
+            Ty::Inst(o) => Some(Recv::Inst(&o.class)),
+            Ty::Super(c) => Some(Recv::Super(c)),
+            Ty::SelfType | Ty::Partial(_) => None,
         }
     }
 
-    /// The value consumers see: the class of an instance, the fqn of a named object.
-    pub(crate) fn val(&self) -> Val {
+    /// The value consumers see: the class of an instance, the fqn of a named object (none for a
+    /// partial object).
+    pub(crate) fn val(&self) -> Option<Val> {
         match self {
-            Ty::Ref(f) => Val::Ref(f.clone()),
-            Ty::Inst(o) => Val::Inst(o.class.clone()),
-            Ty::Super(c) => Val::Super(c.clone()),
+            Ty::Ref(f) => Some(Val::Ref(f.clone())),
+            Ty::Inst(o) => Some(Val::Inst(o.class.clone())),
+            Ty::Super(c) => Some(Val::Super(c.clone())),
+            Ty::SelfType | Ty::Partial(_) => None,
         }
     }
 }
@@ -2291,7 +2349,8 @@ impl<'a> TypeCtx<'a> {
                 return decl
                     .return_type
                     .as_ref()
-                    .and_then(|t| self.project.declared_ty(t));
+                    .and_then(|t| self.project.declared_ty(t))
+                    .and_then(|t| t.bind_self(None));
             }
             Symbol::Module | Symbol::Global(_) => return None,
             Symbol::External => {}
@@ -2382,6 +2441,7 @@ impl<'a> TypeCtx<'a> {
                 decl.return_type
                     .as_ref()
                     .and_then(|t| self.project.declared_ty(t))
+                    .and_then(|t| t.bind_self(None))
             }
             Callee::External(fqn) => self.call_result(fqn),
             _ => None,

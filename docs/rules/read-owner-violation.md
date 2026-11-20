@@ -25,9 +25,13 @@ parameter, local, attribute, or return annotation, including the items of `list[
 from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
 `by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
 `zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
-display, the items appended to a local list, or a comprehension or generator expression. An
-object whose class heki cannot see (an unannotated parameter or return, `Any`) is not tied to
-the target.
+display, the items appended to a local list, or a comprehension or generator expression. A
+method call or a `@property` / `cached_property` read has the return annotation of the
+definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
+is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
+`model_copy`) has its original's class, calling a `functools.partial` object returns what the
+wrapped function returns, and `typing.cast` names the class. An object whose class heki cannot
+see (an unannotated parameter or return, `Any`) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the read is reported at every call

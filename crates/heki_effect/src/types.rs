@@ -19,6 +19,10 @@ pub enum Ty {
     Super(String),
     /// An instance of one class.
     Inst(Obj),
+    /// `typing.Self` in a declaration: the type of the receiver.
+    SelfType,
+    /// A `functools.partial(f, ...)` object: calling it calls `f`.
+    Partial(Box<Ty>),
 }
 
 /// An instance of a class, with the type arguments of a known generic container.
@@ -153,11 +157,36 @@ impl Ty {
         })
     }
 
-    /// The instance a value is (`None` for named objects and `super()`).
+    /// The instance a value is (`None` for named objects, `super()`, and partial objects).
     pub fn obj(&self) -> Option<&Obj> {
         match self {
             Ty::Inst(o) => Some(o),
-            Ty::Ref(_) | Ty::Super(_) => None,
+            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => None,
+        }
+    }
+
+    /// The declared type with `Self` bound to the receiver type `recv`, or `None` when it
+    /// mentions `Self` without a receiver; an item mentioning it is then unknown.
+    pub(crate) fn bind_self(&self, recv: Option<&Ty>) -> Option<Ty> {
+        match self {
+            Ty::SelfType => recv.cloned(),
+            Ty::Inst(o) => {
+                let elem = |e: &Elem| match e {
+                    Elem::Of(t) => Elem::of(t.bind_self(recv)),
+                    Elem::Empty | Elem::Unknown => e.clone(),
+                };
+                let args = match &o.args {
+                    Args::None => Args::None,
+                    Args::Items(e) => Args::Items(Box::new(elem(e))),
+                    Args::Map(k, v) => Args::Map(Box::new(elem(k)), Box::new(elem(v))),
+                    Args::Tuple(es) => Args::Tuple(es.iter().map(elem).collect()),
+                };
+                Some(Ty::Inst(Obj {
+                    class: o.class.clone(),
+                    args,
+                }))
+            }
+            Ty::Ref(_) | Ty::Super(_) | Ty::Partial(_) => Some(self.clone()),
         }
     }
 
@@ -175,7 +204,8 @@ impl Ty {
     fn depth(&self) -> usize {
         match self {
             Ty::Inst(o) => 1 + o.args.depth(),
-            Ty::Ref(_) | Ty::Super(_) => 1,
+            Ty::Partial(t) => 1 + t.depth(),
+            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType => 1,
         }
     }
 }

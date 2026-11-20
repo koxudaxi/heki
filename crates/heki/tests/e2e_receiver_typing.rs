@@ -422,17 +422,116 @@ def untyped(models) -> None:
 
 const SHELF: &str = r#"from __future__ import annotations
 
-from typing import Iterator
+from functools import cached_property
+from typing import Iterator, Self
 
 from pkg.model import Model
 
 
 class Shelf:
     models: list[Model]
+    parent: Self | None = None
+
+    @property
+    def all_models(self) -> list[Model]:
+        return list(self.models)
+
+    @cached_property
+    def first(self) -> Model:
+        return self.models[0]
+
+    @property
+    def loose(self):
+        return self.models[0]
+
+    def picked(self) -> Model:
+        return self.models[0]
+
+    def renamed(self, name: str) -> Self:
+        return self
+
+
+class Wall(Shelf):
+    def picked(self) -> Model:
+        return Model("w")
 
 
 def walk(shelf: Shelf) -> Iterator[Model]:
     yield from shelf.models
+"#;
+
+/// Return types: properties, methods along the MRO, `Self`, copies, partial objects, casts.
+const RETURNS: &str = r#"from __future__ import annotations
+
+import dataclasses
+import functools
+from dataclasses import dataclass
+from typing import Any, cast
+
+from pkg.model import Model, make_model
+from pkg.shelf import Shelf, Wall
+
+
+@dataclass
+class Box:
+    model: Model
+
+
+def property_loop(shelf: Shelf) -> None:
+    for model in shelf.all_models:
+        model.fields = []
+
+
+def cached(shelf: Shelf) -> None:
+    shelf.first.fields = []
+
+
+def overridden(shelf: Shelf) -> None:
+    shelf.picked().fields = []
+
+
+def self_chain(wall: Wall) -> None:
+    for model in wall.renamed("x").models:
+        model.fields = []
+
+
+def self_attr(shelf: Shelf) -> None:
+    parent = shelf.parent
+    if parent is not None:
+        parent.first.fields = []
+
+
+def replaced(box: Box) -> None:
+    dataclasses.replace(box).model.fields = []
+
+
+def partial_call() -> None:
+    make = functools.partial(make_model)
+    make().fields = []
+
+
+def partial_ctor() -> None:
+    functools.partial(Model, "x")().fields = []
+
+
+def cast_str(obj: object) -> None:
+    cast("Model", obj).fields = []
+
+
+def cast_class(obj: object) -> None:
+    cast(Model, obj).fields = []
+
+
+def loose(shelf: Shelf) -> None:
+    shelf.loose.fields = []
+
+
+def cast_any(obj: object) -> None:
+    cast(Any, obj).fields = []
+
+
+def bound_method(shelf: Shelf) -> None:
+    shelf.picked.fields = []
 "#;
 
 fn project(name: &str) -> Project {
@@ -443,7 +542,8 @@ fn project(name: &str) -> Project {
         .write("pkg/store.py", STORE)
         .write("pkg/cases.py", CASES)
         .write("pkg/more.py", MORE)
-        .write("pkg/shelf.py", SHELF);
+        .write("pkg/shelf.py", SHELF)
+        .write("pkg/returns.py", RETURNS);
     p
 }
 
@@ -477,6 +577,10 @@ const PROBE_REPORTED: &[&str] = &[
     "c04_return_annotation",
     "c06_method_return",
     "c07_classmethod_return",
+    "c08_property",
+    "c09_copy_copy",
+    "c10_deepcopy",
+    "c11_model_copy",
     "c12_project_copy_fn",
     "c13_for_loop",
     "c14_dict_subscript",
@@ -571,4 +675,159 @@ fn items_of_wrapping_builtins_displays_scopes_and_other_modules() {
             assert!(!found.contains(name), "{name} reported for {version}");
         }
     }
+}
+
+#[test]
+fn return_types_of_properties_methods_self_copies_partials_and_casts() {
+    let p = project("returns");
+    for version in ["py311", "py312"] {
+        let found = names(&reported(
+            &p,
+            &["--target-version", version],
+            "pkg/returns.py",
+        ));
+        for name in [
+            "property_loop",
+            "cached",
+            "overridden",
+            "self_chain",
+            "self_attr",
+            "replaced",
+            "partial_call",
+            "partial_ctor",
+            "cast_str",
+            "cast_class",
+        ] {
+            assert!(
+                found.contains(name),
+                "{name} not reported for {version}: {found:?}"
+            );
+        }
+        // A getter without a return annotation, a cast to `Any`, and a bound method read as an
+        // attribute name no class.
+        for name in ["loose", "cast_any", "bound_method"] {
+            assert!(!found.contains(name), "{name} reported for {version}");
+        }
+    }
+}
+
+const HELPERS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki]
+target-version = "py311"
+
+[tool.heki.lint]
+select = ["MUT201"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataType.alias", "DataType.items", "Field.data_type"]
+allowed-writers = ["pkg.store.*"]
+"#;
+
+const HELPERS_STORE: &str = r#"from __future__ import annotations
+
+
+class DataType:
+    def __init__(self) -> None:
+        self.alias: str | None = None
+        self.items: list[str] = []
+
+
+class BaseClassDataType(DataType):
+    pass
+
+
+class Field:
+    def __init__(self, data_type: DataType) -> None:
+        self.data_type = data_type
+
+
+class Store:
+    def name(self, data_type: DataType, alias: str) -> None:
+        data_type.alias = alias
+
+
+class Builder:
+    def __init__(self, store: Store) -> None:
+        self._store = store
+
+    def name(self, data_type: DataType, alias: str) -> None:
+        self._store.name(data_type, alias)
+"#;
+
+const HELPERS_USE: &str = r#"from __future__ import annotations
+
+from typing import Protocol
+
+from pkg.store import BaseClassDataType, Builder, DataType, Field
+
+
+class Host(Protocol):
+    @property
+    def builder(self) -> Builder: ...
+
+
+def rename(host: Host, data_type: DataType) -> None:
+    host.builder.name(data_type, "x")
+
+
+def rename_bases(host: Host, bases: list[BaseClassDataType]) -> None:
+    for base in bases:
+        rename(host, base)
+
+
+def rename_fields(host: Host, fields: list[Field]) -> None:
+    for field in fields:
+        rename(host, field.data_type)
+
+
+def set_alias(data_type: DataType) -> None:
+    data_type.alias = "y"
+
+
+def set_base_alias(base: BaseClassDataType) -> None:
+    set_alias(base)
+
+
+def _untyped(value) -> None:
+    value.alias = "z"
+
+
+def untyped_helper(base: BaseClassDataType) -> None:
+    _untyped(base)
+
+
+def _extend(items: list[str]) -> None:
+    items.append("w")
+
+
+def extend_items(data_type: DataType) -> None:
+    _extend(data_type.items)
+"#;
+
+#[test]
+fn helpers_typing_their_parameter_report_their_own_writes() {
+    let p = Project::new("typed_helpers");
+    p.write("pyproject.toml", HELPERS_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/store.py", HELPERS_STORE)
+        .write("pkg/use.py", HELPERS_USE);
+    let found = reported(&p, &[], "pkg/use.py");
+    let expected: BTreeSet<(String, String)> = [
+        // A helper typing its parameter reports its own write, which a caller passing a
+        // subclass instance does not repeat.
+        "set_alias",
+        // An untyped helper's change is its caller's, which knows the class.
+        "untyped_helper",
+        // A helper changing the value of a guarded attribute in place.
+        "extend_items",
+    ]
+    .iter()
+    .map(|q| ((*q).to_owned(), "MUT201".to_owned()))
+    .collect();
+    // A write routed through the store's operations (`rename`) stays allowed for callers passing
+    // a subclass instance or the value of a guarded attribute, whose own attributes it writes.
+    assert_eq!(found, expected);
 }

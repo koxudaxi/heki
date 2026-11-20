@@ -260,9 +260,23 @@ const RO_IMPL: &str = "def scale(values):\n    return [v * 2 for v in values]\n\
 const RO_PLOT: &str = "from collections.abc import Sequence\n\nfrom pkg.ro import scale\n\n\ndef plot(values: Sequence[float]) -> None:\n    scale(values)\n";
 // Receiver typing: the class of a loop target comes from the element type of an attribute
 // annotation in another module.
-const SHELF: &str =
-    "from pkg.model import Registry\n\n\nclass Shelf:\n    registries: list[Registry]\n";
+const SHELF: &str = r#"from typing import Self
+
+from pkg.model import Registry
+
+
+class Shelf:
+    registries: list[Registry]
+
+    @property
+    def main(self) -> Registry:
+        return self.registries[0]
+
+    def again(self) -> Self:
+        return self
+"#;
 const FILL: &str = "from pkg.shelf import Shelf\n\n\ndef fill(shelf: Shelf, x):\n    for r in shelf.registries:\n        r.entries.append(x)\n";
+const FILL_MAIN: &str = "from pkg.shelf import Shelf\n\n\ndef fill_main(shelf: Shelf, x):\n    shelf.again().main.entries.append(x)\n";
 
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
@@ -356,6 +370,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/kid_user.py", KID_USER),
         ("pkg/shelf.py", SHELF),
         ("pkg/fill.py", FILL),
+        ("pkg/fill_main.py", FILL_MAIN),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -500,6 +515,29 @@ fn steps_receiver_typing() -> Vec<Step> {
             vec![save("pkg/shelf.py", SHELF)],
         )
         .present(&[("pkg/fill.py", "MUT201")]),
+        Step::new(
+            "the property returns a string",
+            vec![save(
+                "pkg/shelf.py",
+                &SHELF.replace(") -> Registry:", ") -> str:"),
+            )],
+        )
+        .absent(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the property returns a registry again",
+            vec![save("pkg/shelf.py", SHELF)],
+        )
+        .present(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the method returns an int instead of Self",
+            vec![save("pkg/shelf.py", &SHELF.replace("-> Self:", "-> int:"))],
+        )
+        .absent(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the method returns Self again",
+            vec![save("pkg/shelf.py", SHELF)],
+        )
+        .present(&[("pkg/fill_main.py", "MUT201")]),
     ]
 }
 
@@ -904,6 +942,7 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_default_use.py", "EFF102"),
             ("pkg/guard_conn_use.py", "EFF102"),
             ("pkg/fill.py", "MUT201"),
+            ("pkg/fill_main.py", "MUT201"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(

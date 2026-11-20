@@ -602,6 +602,226 @@ class Owner:
 }
 
 #[test]
+fn properties_give_their_getters_return_annotations() {
+    let src = with_classes(
+        r#"
+import functools
+from functools import cached_property
+
+
+class Holder:
+    @property
+    def model(self) -> Model:
+        return Model()
+
+    @functools.cached_property
+    def fields(self) -> list[Field]:
+        return []
+
+    @cached_property
+    def cached(self) -> "Model":
+        return Model()
+
+    @property
+    def settable(self) -> Model:
+        return self._m
+
+    @settable.setter
+    def settable(self, value: Model) -> None:
+        self._m = value
+
+    @property
+    def untyped(self):
+        return Model()
+
+    def plain(self) -> Model:
+        return Model()
+
+
+class Child(Holder):
+    @property
+    def model(self) -> Sub:
+        return Sub()
+
+    def use(self):
+        up = super().model
+        return up
+
+
+class Other:
+    def model(self) -> Model:
+        return Model()
+
+
+def f(h: Holder, c: Child, o: Other):
+    a = h.model
+    for x in h.fields:
+        pass
+    b = h.cached
+    s = h.settable
+    u = h.untyped
+    p = h.plain
+    cm = c.model
+    inherited = c.cached
+    bound = o.model
+    called = o.model()
+    return a, b, s, u, p, cm, inherited, bound, called
+"#,
+    );
+    let t = types(&src, "f");
+    for name in ["a", "b", "s", "inherited", "called"] {
+        assert_eq!(of(&t, name), one("m.Model"), "{name}");
+    }
+    assert_eq!(of(&t, "x"), one("m.Field"));
+    assert_eq!(of(&t, "cm"), one("m.Sub"));
+    // A getter without a return annotation, a method read as an attribute, and a method of a
+    // name some property has give no type.
+    for name in ["u", "p", "bound"] {
+        assert!(of(&t, name).is_empty(), "{name}");
+    }
+    assert_eq!(of(&types(&src, "Child.use"), "up"), one("m.Model"));
+}
+
+#[test]
+fn method_results_and_self_follow_the_definition_the_mro_finds() {
+    let src = with_classes(
+        r#"
+from typing import Self
+
+
+class Base:
+    parent: Self | None = None
+    children: list[Self]
+
+    def clone(self) -> Self:
+        return self
+
+    def make(self) -> Model:
+        return Model()
+
+    @classmethod
+    def create(cls) -> "Self":
+        return cls()
+
+    def merge(self, other: Self) -> None:
+        o = other
+        mine: Self = other
+        return o, mine
+
+
+class Derived(Base):
+    def make(self) -> Sub:
+        return Sub()
+
+
+class Factory:
+    def __call__(self) -> Model:
+        return Model()
+
+
+def make_self() -> Self:
+    pass
+
+
+def g(b: Base, d: Derived, fa: Factory):
+    c1 = b.clone()
+    c2 = d.clone()
+    m1 = b.make()
+    m2 = d.make()
+    k1 = Base.create()
+    k2 = Derived.create()
+    pa = d.parent
+    for ch in d.children:
+        pass
+    made = fa()
+    lone = make_self()
+    return c1, c2, m1, m2, k1, k2, pa, made, lone
+"#,
+    );
+    let t = types(&src, "g");
+    for name in ["c1", "k1"] {
+        assert_eq!(of(&t, name), one("m.Base"), "{name}");
+    }
+    for name in ["c2", "k2", "pa", "ch"] {
+        assert_eq!(of(&t, name), one("m.Derived"), "{name}");
+    }
+    // A type checker takes the type of `b.make()` from `Base.make`, whatever overrides it.
+    assert_eq!(of(&t, "m1"), one("m.Model"));
+    assert_eq!(of(&t, "m2"), one("m.Sub"));
+    assert_eq!(of(&t, "made"), one("m.Model"));
+    // `Self` outside a class names nothing.
+    assert!(of(&t, "lone").is_empty());
+    let merge = types(&src, "Base.merge");
+    assert_eq!(of(&merge, "o"), one("m.Base"));
+    assert_eq!(of(&merge, "mine"), one("m.Base"));
+}
+
+#[test]
+fn copies_partials_and_casts_keep_or_name_the_type() {
+    let src = with_classes(
+        r#"
+import copy
+import dataclasses
+import functools
+import typing
+from dataclasses import dataclass
+from typing import TypeVar, cast
+
+from pydantic import BaseModel
+
+T = TypeVar("T")
+
+
+@dataclass
+class Rec:
+    name: str
+
+
+class PM(BaseModel):
+    name: str
+
+
+def make_model(n: int) -> Model:
+    return Model()
+
+
+def h(m: Model, r: Rec, pm: PM, x):
+    c1 = copy.copy(m)
+    c2 = copy.deepcopy(m)
+    c3 = dataclasses.replace(r, name="b")
+    c4 = pm.model_copy()
+    c5 = copy.replace(r, name="c")
+    part = functools.partial(make_model, 1)
+    pr = part()
+    pc = functools.partial(Model)()
+    k1 = typing.cast("Model", x)
+    k2 = cast(Model, x)
+    k3 = cast("list[Field]", x)
+    for kf in k3:
+        pass
+    k4 = cast("T", x)
+    k5 = cast(x, x)
+    none = copy.copy(x)
+    return c1, c2, c3, c4, c5, pr, pc, k1, k2, k4, k5, none
+"#,
+    );
+    let t = types(&src, "h");
+    for name in ["c1", "c2", "pr", "pc", "k1", "k2"] {
+        assert_eq!(of(&t, name), one("m.Model"), "{name}");
+    }
+    for name in ["c3", "c5"] {
+        assert_eq!(of(&t, name), one("m.Rec"), "{name}");
+    }
+    assert_eq!(of(&t, "c4"), one("m.PM"));
+    assert_eq!(of(&t, "kf"), one("m.Field"));
+    // A partial object is no value call resolution takes; a cast to a `TypeVar` or to an
+    // unknown type, and a copy of an untyped value, give no type.
+    for name in ["part", "k4", "k5", "none"] {
+        assert!(of(&t, name).is_empty(), "{name}");
+    }
+}
+
+#[test]
 fn edges_of_items_calls_and_annotations() {
     let src = with_classes(
         r#"

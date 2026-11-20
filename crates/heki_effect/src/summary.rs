@@ -174,6 +174,8 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         into.exec_chains.entry(k).or_insert(chain);
     }
     into.mutates_params |= other.mutates_params;
+    // Typed only where both definitions type it.
+    into.typed_params &= other.typed_params;
     into.escapes_params |= other.escapes_params;
     into.consumes_params |= other.consumes_params;
     into.iterates_params |= other.iterates_params;
@@ -397,6 +399,10 @@ impl<'a> Extractor<'a> {
         ex.build_aliases();
         let returned = readonly::returned_values(f, &ex.defs, |kind| ex.derivations(kind));
         ex.returned = returned;
+        ex.summary.typed_params = (0..64u32)
+            .zip(&f.params)
+            .filter(|(_, p)| ex.project_class(p.var).is_some())
+            .fold(0, |acc, (i, _)| acc | 1u64 << i);
         ex
     }
 
