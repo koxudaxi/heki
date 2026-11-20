@@ -10,7 +10,7 @@ equivalent. Whether the rewrite is **offered** depends on two independent questi
 
 | Safety | What you get |
 | ------ | ------------ |
-| Safe (every obligation established) | A diagnostic with a fix. |
+| Safe (every obligation established) | A diagnostic with a fix; for a statement whose shape heki does not rewrite (a parenthesized `x = (x + [i])`, an annotated `x: list = x + [i]`), a diagnostic that says the rewrite is proven safe, to be made by hand. |
 | Blocked | A diagnostic naming the first blocking obligation, no fix. |
 | Disproved | Nothing: the pattern only looks like a quadratic; rewriting it would be a bug. |
 
