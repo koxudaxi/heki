@@ -483,8 +483,13 @@ A generator's body runs where it is iterated:
 
 ### Guards
 
-- **Followed:** a test of the function's own input: truthiness, `is None`, or `isinstance` with
-  builtin classes.
+- **Followed:** a test of the function's own input: truthiness, `is None`, `isinstance` with
+  builtin classes, the `io` classes, or `os.PathLike`, or `hasattr` with a string literal, also
+  after the function rebinds the input on some paths (`if buf is None: buf = StringIO()`).
+- **Decided by:** constants, displays and comprehensions, `io.StringIO` / `io.BytesIO` objects
+  the caller constructs, and the literal defaults of omitted parameters (`hasattr` only for the
+  methods of the file protocol: `read`, `write`, `close`, ...); not by an f-string, the result of
+  another call, or an instance of a subclass.
 - **Not followed:** `a or b` (no guard on either value), and `isinstance` with project classes or
   annotated types.
 - A lazy initialization needs a direct test and the store in the function itself.
@@ -2410,13 +2415,20 @@ where its caller iterates it. `next(gen)` runs the body only up to its first `yi
 does not separate from the rest, so it is not followed.
 
 A call whose arguments switch off the callee's branch with the blocking call is not followed
-into it: `load(name, cache=False)` does not reach the request under `if cache:`. This covers
-constant arguments and the literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty
-displays), and tests the caller has already made on the same value: a call made only when
-`isinstance(self._input, PathLike)` is false does not reach the callee's branch for
-`isinstance(self._input, PathLike)`. A generator's branches are decided at the call that
-creates it. Lazy initialization does not relax this rule: a connection opened once still
-blocks the event loop that once.
+into it: `load(name, cache=False)` does not reach the request under `if cache:`. The branches
+are the callee's tests of its parameters: truthiness, `is None`, `isinstance` with builtin,
+`io`, or `os.PathLike` classes, and `hasattr` (which a value's class decides for the methods of
+the file protocol: `read`, `write`, `close`, ...), also of a parameter the callee rebinds on
+some paths (`if buf is None: buf = io.StringIO()`, then `if isinstance(buf, str): open(buf)`
+opens a file only for a path argument). The arguments that decide them are constants and the
+literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty displays), values whose
+exact class the caller knows (a display or comprehension, or an `io.StringIO` / `io.BytesIO` it
+constructs, also held in a variable: `fetch(io.BytesIO(data))` does not reach the download
+under `if not hasattr(src, "read"):`; an instance of a subclass does not count), and tests the
+caller has already made on the same value: a call made only when `isinstance(self._input,
+PathLike)` is false does not reach the callee's branch for `isinstance(self._input, PathLike)`.
+A generator's branches are decided at the call that creates it. Lazy initialization does not
+relax this rule: a connection opened once still blocks the event loop that once.
 
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several
@@ -2511,7 +2523,10 @@ Checks `async def` functions that reach blocking local filesystem I/O: `open(...
 `io.StringIO` / `io.BytesIO` buffer does no I/O). It follows the same boundary,
 offload, and guard rules as `EFF101`, generators and offloading decorators included: `await
 in_thread(self.open) if isinstance(self._input, PathLike) else self.open()` is not reported
-when `open` only opens a file under `isinstance(self._input, PathLike)`.
+when `open` only opens a file under `isinstance(self._input, PathLike)`, and neither is
+`save(text, io.StringIO())` when `save` opens its argument only where `hasattr(buf, "write")`
+is false, or `save(text)` when it opens it only where `isinstance(buf, str)` holds after
+`if buf is None: buf = io.StringIO()`.
 
 This rule is opt-in: enable it with `--extend-select EFF105` or `extend-select = ["EFF105"]`.
 Selecting the `EFF` prefix does not enable it.
@@ -2903,6 +2918,10 @@ chain is a shortest one. The search does not enter:
   returns where the object it returns is iterated);
 - functions an offloading decorator or API runs on another thread (`@sync_to_async`,
   `asyncio.to_thread(f)`, ...).
+
+Unlike `EFF101`, the search does not read the callees' guards: a reached function's effects
+count whatever its arguments are, so `__repr__` calling `save(text, io.StringIO())` reaches the
+`open` that `save` runs only for a path.
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope

@@ -36,13 +36,20 @@ where its caller iterates it. `next(gen)` runs the body only up to its first `yi
 does not separate from the rest, so it is not followed.
 
 A call whose arguments switch off the callee's branch with the blocking call is not followed
-into it: `load(name, cache=False)` does not reach the request under `if cache:`. This covers
-constant arguments and the literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty
-displays), and tests the caller has already made on the same value: a call made only when
-`isinstance(self._input, PathLike)` is false does not reach the callee's branch for
-`isinstance(self._input, PathLike)`. A generator's branches are decided at the call that
-creates it. Lazy initialization does not relax this rule: a connection opened once still
-blocks the event loop that once.
+into it: `load(name, cache=False)` does not reach the request under `if cache:`. The branches
+are the callee's tests of its parameters: truthiness, `is None`, `isinstance` with builtin,
+`io`, or `os.PathLike` classes, and `hasattr` (which a value's class decides for the methods of
+the file protocol: `read`, `write`, `close`, ...), also of a parameter the callee rebinds on
+some paths (`if buf is None: buf = io.StringIO()`, then `if isinstance(buf, str): open(buf)`
+opens a file only for a path argument). The arguments that decide them are constants and the
+literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty displays), values whose
+exact class the caller knows (a display or comprehension, or an `io.StringIO` / `io.BytesIO` it
+constructs, also held in a variable: `fetch(io.BytesIO(data))` does not reach the download
+under `if not hasattr(src, "read"):`; an instance of a subclass does not count), and tests the
+caller has already made on the same value: a call made only when `isinstance(self._input,
+PathLike)` is false does not reach the callee's branch for `isinstance(self._input, PathLike)`.
+A generator's branches are decided at the call that creates it. Lazy initialization does not
+relax this rule: a connection opened once still blocks the event loop that once.
 
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several

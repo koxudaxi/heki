@@ -315,14 +315,26 @@ they do). They are local facts, never propagated, and they let `MUT101` decide s
 index alone, for a method of any indexed file.
 
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
-`if x is None:`, `isinstance(x, T)`, also through `and` / `or` / `not`, early returns, and
-conditional expressions; on a parameter, or an attribute of one the function never assigns)
-records that test. An effect inside a lazy initialization (`MUT107`'s branch, when every way out
-of it sets the attribute) runs once per object. At each call the callee's guards are mapped to
-the caller (`through_call`, wherever a callee's facts reach a caller): a constant argument, the
-literal default of an omitted parameter, or a test the caller has made on the same value that
-decides a guard against the effect prunes it there; an undecided test of a caller input becomes
-the caller's guard. A generator's guards are decided at the call that creates it. `EFF102` /
+`if x is None:`, `isinstance(x, T)`, `hasattr(x, "write")`, also through `and` / `or` / `not`,
+early returns, and conditional expressions; on a parameter, or an attribute of one the function
+never assigns) records that test. A test of a value a phi merges (`if buf is None: buf =
+StringIO()`, then `if isinstance(buf, str): open(buf)`) is read along each edge into the phi:
+the value the edge brings decides the test, or is an input whose test it becomes, and what holds
+on that edge holds with it (facts are never killed); an edge whose value decides against the
+outcome drops out, so `open` above needs `buf is not None` and `isinstance(buf, str)`. An effect
+inside a lazy initialization (`MUT107`'s branch, when every way out of it sets the attribute)
+runs once per object. At each call the callee's guards are mapped to the caller
+(`through_call`, wherever a callee's facts reach a caller): a constant argument, a value whose
+exact class the caller knows (`ConstArg`: a display or comprehension, an `io.StringIO` /
+`io.BytesIO` it constructs, or a phi of values of one such class), the literal default of an
+omitted parameter, or a test the caller has made on the same value that decides a guard against
+the effect prunes it there; an undecided test of a caller input becomes the caller's guard. A
+known class decides `is None`; `isinstance`, true when a tested class is in its MRO and false
+when every tested class is a builtin type, one of the `io` classes, or `os.PathLike` outside it;
+and `hasattr` for the attributes of the file protocol (`read`, `write`, `close`, ...), which the
+buffers have and the builtin values lack (a buffer may gain attributes of its own, so a name
+outside the protocol, or one a buffer lacks, stays undecided). A generator's guards are decided
+at the call that creates it. `EFF201` does not read guards. `EFF102` /
 `EFF103` do not count a lazily initialized effect per iteration unless a data-sized loop around
 the call constructs the object. Anything not recognized keeps the effect.
 
@@ -663,7 +675,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
    bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
-   function returning a generator is entered as what iterating its result runs.
+   function returning a generator is entered as what iterating its result runs. The search
+   reads no guards: an argument switching off a callee's branch does not stop it.
 
 ### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
 - **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**

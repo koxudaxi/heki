@@ -123,6 +123,16 @@ const GUARD_DEFAULT_USE: &str =
 const GUARD_CONN: &str = "from urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    def send(self):\n        self._sock = urlopen(\"https://example.com\")\n";
 const GUARD_CONN_USE: &str = "from pkg.guard_conn import Conn\n\n\ndef run(c: Conn, xs):\n    for x in xs:\n        c.send()\n";
 
+// Guards a buffer decides (`EFF101`): a reader in another module gains a `hasattr` test that a
+// buffer argument decides, then tests an attribute a buffer may lack, then rebinds a missing
+// argument to a buffer (a test of the merged value), and loses its tests again.
+const BUF_READ: &str = "from io import BytesIO\nfrom urllib.request import urlopen\n\n\ndef read_any(src=None):\n    return urlopen(src).read()\n";
+const BUF_READ_HASATTR: &str = "from io import BytesIO\nfrom urllib.request import urlopen\n\n\ndef read_any(src=None):\n    if hasattr(src, \"read\"):\n        return src.read()\n    return urlopen(src).read()\n";
+const BUF_READ_REBINDING: &str = "from io import BytesIO\nfrom urllib.request import urlopen\n\n\ndef read_any(src=None):\n    if src is None:\n        src = BytesIO()\n    if isinstance(src, (str, bytes)):\n        return urlopen(src).read()\n    return src.read()\n";
+const BUF_USE: &str = "from io import BytesIO\n\nfrom pkg.buf_read import read_any\n\n\nasync def load(data):\n    return read_any(BytesIO(data))\n";
+const BUF_DEFAULT_USE: &str =
+    "from pkg.buf_read import read_any\n\n\nasync def load():\n    return read_any()\n";
+
 // Contracts: private helpers writing / reading guarded attributes report themselves without
 // callers, nothing when only allowed functions call them, and at a non-allowed caller.
 const MODEL: &str = "class Registry:\n    def __init__(self):\n        self.entries = []\n\n\nclass Vault:\n    def __init__(self):\n        self.secret = \"\"\n";
@@ -433,6 +443,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/guard_default_use.py", GUARD_DEFAULT_USE),
         ("pkg/guard_conn.py", GUARD_CONN),
         ("pkg/guard_conn_use.py", GUARD_CONN_USE),
+        ("pkg/buf_read.py", BUF_READ),
+        ("pkg/buf_use.py", BUF_USE),
+        ("pkg/buf_default_use.py", BUF_DEFAULT_USE),
         ("pkg/model.py", MODEL),
         ("pkg/ops.py", OPS),
         ("pkg/store.py", STORE),
@@ -1487,6 +1500,8 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_use.py", "EFF102"),
             ("pkg/guard_default_use.py", "EFF102"),
             ("pkg/guard_conn_use.py", "EFF102"),
+            ("pkg/buf_use.py", "EFF101"),
+            ("pkg/buf_default_use.py", "EFF101"),
             ("pkg/fill.py", "MUT201"),
             ("pkg/fill_main.py", "MUT201"),
             ("pkg/views.py", "MUT201"),
@@ -1606,6 +1621,36 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/guard_conn.py", GUARD_CONN)],
         )
         .present(&[("pkg/guard_conn_use.py", "EFF102")]),
+        Step::new(
+            "a reader in another file gains the `hasattr` test a buffer argument decides",
+            vec![save("pkg/buf_read.py", BUF_READ_HASATTR)],
+        )
+        .present(&[("pkg/buf_default_use.py", "EFF101")])
+        .absent(&[("pkg/buf_use.py", "EFF101")]),
+        Step::new(
+            "the reader tests an attribute a buffer may lack",
+            vec![save(
+                "pkg/buf_read.py",
+                &BUF_READ_HASATTR.replace("\"read\")", "\"name\")"),
+            )],
+        )
+        .present(&[("pkg/buf_use.py", "EFF101")]),
+        Step::new(
+            "the reader rebinds a missing argument to a buffer before its `isinstance` test",
+            vec![save("pkg/buf_read.py", BUF_READ_REBINDING)],
+        )
+        .absent(&[
+            ("pkg/buf_use.py", "EFF101"),
+            ("pkg/buf_default_use.py", "EFF101"),
+        ]),
+        Step::new(
+            "the reader loses its tests",
+            vec![save("pkg/buf_read.py", BUF_READ)],
+        )
+        .present(&[
+            ("pkg/buf_use.py", "EFF101"),
+            ("pkg/buf_default_use.py", "EFF101"),
+        ]),
     ];
     // 4. `MUT108`, `MUT110`, then where bodies run.
     steps.extend(steps_mut108());

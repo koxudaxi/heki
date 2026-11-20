@@ -605,6 +605,8 @@ pub enum GuardTest {
     IsNone,
     /// `isinstance(x, C)` / `isinstance(x, (C, D))`: the fully qualified classes, sorted.
     IsInstance(Vec<String>),
+    /// `hasattr(x, "name")` with a string literal.
+    HasAttr(String),
 }
 
 /// A test of an input, and the outcome (`holds`) an effect needs to run.
@@ -627,7 +629,8 @@ pub struct EffectGuards {
     pub once_per: Option<u64>,
 }
 
-/// The builtin class of a constant or display argument.
+/// The exact class of a value a function knows: a constant, a display or comprehension, or a
+/// buffer it constructs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstClass {
@@ -641,12 +644,16 @@ pub enum ConstClass {
     Tuple,
     Set,
     Dict,
+    /// `io.StringIO(...)`.
+    StringIo,
+    /// `io.BytesIO(...)`.
+    BytesIo,
     /// `...`, a complex number.
     Other,
 }
 
-/// A constant or display argument (or a literal default): its class and, where the value
-/// decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy).
+/// An argument (or a literal default) whose class the caller knows: its class and, where the
+/// value decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConstArg {
     pub class: ConstClass,

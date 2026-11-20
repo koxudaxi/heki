@@ -37,6 +37,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   quaternion product: every entry of the new array changed, so there are no unchanged parts to
   collect and combine once. A list that holds the previous value (`pd.concat([df] + parts)`)
   is still reported.
+- A helper taking a path or a buffer is no longer taken to open the file (or fetch the URL) when
+  its caller hands it a buffer or `None` (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
+  `DATA101`): `hasattr(buf, "write")` and `isinstance` with the `io` classes are guards too, an
+  `io.StringIO` / `io.BytesIO` the caller constructs, a display, or a comprehension decides
+  them, and a test of a parameter the helper rebinds on some paths (`if buf is None: buf =
+  StringIO()`) is decided per path. `EFF201` still reads no guards.
 
 ## [0.1.2] - 2026-11-21
 

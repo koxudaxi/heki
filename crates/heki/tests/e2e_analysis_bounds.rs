@@ -1,6 +1,6 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
-//! narrowing through phis, the passes of the type inference, and the size of the Soundness
-//! lane's proof state.
+//! narrowing through phis, the passes of the type inference and of the classes of merged values,
+//! and the size of the Soundness lane's proof state.
 
 mod common;
 
@@ -142,6 +142,55 @@ fn types_past_the_inference_pass_bound_are_unknown() {
     };
     assert_eq!(blocking(4), 1);
     assert_eq!(blocking(30), 0);
+}
+
+/// An `async def` handing a buffer it keeps in a loop to a reader that downloads only what has
+/// no `read` method, after the loop passes a value back through `links` assignments, one link
+/// per pass of the fixpoint of the values' classes.
+fn chain_before_buffer_read(links: usize) -> String {
+    let mut out = vec![
+        "from io import BytesIO".to_owned(),
+        "from urllib.request import urlopen".to_owned(),
+        String::new(),
+        String::new(),
+        "def fetch(src):".to_owned(),
+        "    if hasattr(src, \"read\"):".to_owned(),
+        "        return src.read()".to_owned(),
+        "    return urlopen(src).read()".to_owned(),
+        String::new(),
+        String::new(),
+        "async def chain(items):".to_owned(),
+        "    buf = BytesIO()".to_owned(),
+    ];
+    for k in 0..=links {
+        out.push(format!("    v{k} = None"));
+    }
+    out.push("    for i in items:".to_owned());
+    out.push("        if i:".to_owned());
+    out.push("            buf = BytesIO()".to_owned());
+    for k in 0..links {
+        out.push(format!("        v{k} = v{}", k + 1));
+    }
+    out.push(format!("        v{links} = 1"));
+    out.push("    fetch(buf)".to_owned());
+    out.push("    return v0".to_owned());
+    out.join("\n") + "\n"
+}
+
+/// The classes of the values a function merges take a bounded number of passes: past them no
+/// merged value has a class, so the buffer the loop keeps no longer decides the reader's test.
+#[test]
+fn classes_past_the_pass_bound_are_unknown() {
+    let blocking = |links: usize| -> usize {
+        let p = Project::new(&format!("bounds_classes_{links}"));
+        p.write("m.py", &chain_before_buffer_read(links));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF101")
+            .count()
+    };
+    assert_eq!(blocking(4), 0);
+    assert_eq!(blocking(12), 1);
 }
 
 /// A loop after a `return` has only its back edge: the names it passes around through copies

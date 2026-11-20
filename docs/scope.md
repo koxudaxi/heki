@@ -262,8 +262,13 @@ A generator's body runs where it is iterated:
 
 ### Guards
 
-- **Followed:** a test of the function's own input: truthiness, `is None`, or `isinstance` with
-  builtin classes.
+- **Followed:** a test of the function's own input: truthiness, `is None`, `isinstance` with
+  builtin classes, the `io` classes, or `os.PathLike`, or `hasattr` with a string literal, also
+  after the function rebinds the input on some paths (`if buf is None: buf = StringIO()`).
+- **Decided by:** constants, displays and comprehensions, `io.StringIO` / `io.BytesIO` objects
+  the caller constructs, and the literal defaults of omitted parameters (`hasattr` only for the
+  methods of the file protocol: `read`, `write`, `close`, ...); not by an f-string, the result of
+  another call, or an instance of a subclass.
 - **Not followed:** `a or b` (no guard on either value), and `isinstance` with project classes or
   annotated types.
 - A lazy initialization needs a direct test and the store in the function itself.
