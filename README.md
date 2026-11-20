@@ -41,33 +41,52 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `get_user` reaches the blo
 Found 1 diagnostic(s) in 2 file(s).
 ```
 
-### A helper that changes a read-only argument
+### A query one helper below a loop
 
 ```python
-# app/stats.py
-from collections.abc import Sequence
+# app/orders.py
+import sqlite3
 
-def sort_values(values):
-    values.sort()
+def customer_name(cursor: sqlite3.Cursor, customer_id: int) -> str:
+    cursor.execute("SELECT name FROM customers WHERE id = ?", (customer_id,))
+    return str(cursor.fetchone()[0])
 
-def median(values: Sequence[float]) -> float:
-    sort_values(values)
-    return values[len(values) // 2]
+def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> list[str]:
+    lines: list[str] = []
+    for order_id, customer_id in orders:
+        lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
+    return lines
 ```
 
 ```console
 $ heki check
-app/stats.py:8:5: MUT110 (readonly-param-mutation) [error] `median` passes its read-only parameter `values` to `app.stats.sort_values`, which changes it in place
-  |
-8 |     sort_values(values)
-  |     ^
-  = related: app/stats.py:8:5: `median` calls `app.stats.sort_values`
-  = help: pass a copy (`list(values)` / `dict(values)`), or annotate the helper's parameter with a mutable type
+app/orders.py:11:37: EFF103 (loop-db-query) [error] `app.orders.customer_name` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)
+   |
+11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
+   |                                     ^
+  = related: app/orders.py:11:37: `order_summaries` calls `app.orders.customer_name`
+  = related: app/orders.py:5:5: `customer_name` calls `sqlite3.Cursor.execute`
+  = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
 ```
 
 Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
+
+### Your own conventions, too
+
+The checks above need no configuration. The rules of your own project, which you keep today by
+review, by AST scripts, or by run-time guards in tests, can be added as a few lines of it:
+
+```toml
+[[tool.heki.write-owners]]
+targets = ["app.models.Order.items"]
+allowed-writers = ["app.store.*"]
+```
+
+heki follows aliases, helpers, and subclasses, with no decorators and nothing running at run
+time. The other contracts are `read-owners`, `call-owners`, `readonly-returns`, `invalidation`,
+and `effect-boundaries`.
 
 > **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
 > and output formats can change between releases without a deprecation period. Try it on your
@@ -98,21 +117,6 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: I/O while a lock or a database transaction is held | `EFF106` |
 | Opt-in: a generator consumed twice | `MUT106` |
 | Opt-in: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
-
-### Your conventions, checked
-
-Rules you keep today by review, by AST scripts, or by run-time guards in tests become a few lines
-of configuration:
-
-```toml
-[[tool.heki.write-owners]]
-targets = ["app.models.Order.items"]
-allowed-writers = ["app.store.*"]
-```
-
-heki follows aliases, helpers, and subclasses, with no decorators and nothing running at run
-time. The other contracts are `read-owners`, `call-owners`, `readonly-returns`, `invalidation`,
-and `effect-boundaries`.
 
 ### A safety net for reviews and coding agents
 
@@ -148,10 +152,10 @@ across modules. heki models effects and aliases, what code does:
 | ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
 | tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O |
 
-Their stricter settings do not close the gap. In the second example above, Ruff's annotation
-rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's `strict` preset ask for
-annotations on `sort_values`, but none of them reports that it reorders the caller's list: the
-types are right, and what the code does is wrong.
+Their stricter settings do not close the gap. The second example above is fully annotated and
+passes Ruff's annotation rules (`ANN`), `mypy --strict`, pyright's strict mode, and Pyrefly's
+`strict` preset, yet it sends one query per order: the types are right, and what the code does
+is slow.
 
 heki leaves to these tools what they cover, and keeps doing so as they grow: use it next to them.
 
