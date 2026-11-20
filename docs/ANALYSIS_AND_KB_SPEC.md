@@ -313,6 +313,8 @@ EffectSummary(f) = {
     returns_origins:          Origins,                     // what the returned object may be, path by path:
                                                            // new, held state, parameter i, or an element of
                                                            // parameter i (MUT112; propagated)
+    returns_results:          Vec<ResultOf>,               // the project calls whose results (or elements of
+                                                           // them) it may return, by span (MUT112; local)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
@@ -581,10 +583,15 @@ which module imports which.
    never leaves at its header), the blocks the forward analysis follows too. An object the
    function stores in another object there (an attribute, an item, a display, `setattr`, a
    container method) is an element of that object; one stored in a global or a closure cell is
-   held. Propagation (`returned_origins_edge`) adds what a callee returns at a call whose result
-   the caller returns as itself (`CallSite.returned`, from the same returns), mapping the
-   callee's parameters through `ArgOrigin::origins` (recorded for those calls only). The fact
-   takes part in Early Cutoff like every summary field.
+   held. A project call's result the walk reaches is one of `returns_results` (the call's
+   span, and whether the object is the result or an element of it), and each argument of such a
+   call gets `ArgOrigin::origins` from the same walk: its own origins and, in turn, the calls
+   whose results it may be. Propagation (`returned_results`) adds what those calls return: each
+   callee's `returns_origins` without its parameters, and the origins of the arguments bound to
+   the parameters it returns (or an element of them), through any number of nested calls
+   (`identity(identity(x))`); a call whose result its own argument may be (in a loop) adds
+   nothing more the second time. The facts take part in Early Cutoff like every summary
+   field.
 3. **The forward analysis** (`heki_rules`, per function, to a fixpoint) joins the kinds of a
    value at phis, maps a project call's result through its callees' `returns_origins` and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it
