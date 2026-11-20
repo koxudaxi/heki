@@ -4,8 +4,9 @@
 The project is generated deterministically and shaped after what dominates heki's memory on
 real code bases:
 
-- typed field writes reached through long call chains across modules: every caller keeps the
-  write sites of its callees with their chains (`EffectSummary::typed_field_write_sites`);
+- typed field writes reached through long chains of private helpers across modules: with an
+  ownership contract, every caller keeps the write sites its private callees hand over, with
+  their chains (`EffectSummary::typed_field_write_sites`), and the write facts of every callee;
 - a blocking call below `async def` entry points (execution-effect chains);
 - many small modules and classes: every file's check reads the declarations of the project,
   which the language-server engine remembers per file (`--watch` runs that engine).
@@ -39,28 +40,29 @@ SHAPE_MODULES = 600
 # budget when a change makes heki smaller; raise one only with the measurement that justifies it.
 BUDGETS_MIB = {
     # Peak physical footprint.
-    "darwin": {"check": 176, "watch": 181},
+    "darwin": {"check": 69, "watch": 74, "owners": 82},
     # Peak resident set size, to calibrate from the CI runner's measurements.
-    "linux": {"check": 230, "watch": 240},
+    "linux": {"check": 230, "watch": 240, "owners": 400},
 }
 RUNS = 3
 
 MODES = {
     "check": (["check", "--output-format", "json", "."], {}),
     "watch": (["check", "--watch", "--output-format", "json", "."], {"HEKI_WATCH_MAX_RUNS": "0"}),
+    "owners": (["check", "--output-format", "json", "--config", "owners.toml", "."], {}),
 }
 
 
 def layer_module(i: int) -> str:
     lines = ["import time", "", "from pkg.models import Model, Record"]
     if i > 0:
-        names = ", ".join(f"step{j} as lower{j}" for j in range(STEPS))
+        names = ", ".join(f"_step{j} as _lower{j}" for j in range(STEPS))
         lines.append(f"from pkg.layer{i - 1} import {names}")
     lines.append("")
     for j in range(STEPS):
         lines += [
             "",
-            f"def step{j}(a: Model, b: Record) -> None:",
+            f"def _step{j}(a: Model, b: Record) -> None:",
             f"    a.items.append({j})",
             f"    b.size = {j}",
             f'    a.names["k{j}"] = b',
@@ -71,15 +73,15 @@ def layer_module(i: int) -> str:
             lines.append("    time.sleep(0.01)")
         else:
             lines += [
-                f"    lower{j}(a, b)",
-                f"    lower{(j + 1) % STEPS}(a, b)",
+                f"    _lower{j}(a, b)",
+                f"    _lower{(j + 1) % STEPS}(a, b)",
             ]
         lines.append("")
     return "\n".join(lines)
 
 
 def entry_module() -> str:
-    names = ", ".join(f"step{j}" for j in range(STEPS))
+    names = ", ".join(f"_step{j}" for j in range(STEPS))
     lines = [
         "from pkg.models import Model, Record",
         f"from pkg.layer{LAYERS - 1} import {names}",
@@ -89,7 +91,7 @@ def entry_module() -> str:
         lines += [
             "",
             f"async def handle{j}(a: Model, b: Record) -> None:",
-            f"    step{j}(a, b)",
+            f"    _step{j}(a, b)",
             "",
         ]
     return "\n".join(lines)
@@ -123,6 +125,16 @@ def shape_module(k: int) -> str:
     return "\n".join(lines)
 
 
+# The `owners` mode's configuration: a write-owner contract on the fields the layers write.
+OWNERS = """\
+target-version = "py312"
+
+[[write-owners]]
+name = "models"
+targets = ["pkg.models.Model.items", "pkg.models.Record.tags"]
+allowed-writers = ["pkg.entry.*"]
+"""
+
 MODELS = """\
 class Model:
     def __init__(self):
@@ -141,6 +153,7 @@ def generate(root: Path) -> int:
     """Write the project under `root`; returns its number of lines."""
     files = {
         "pyproject.toml": '[project]\nname = "memory-gate"\nrequires-python = ">=3.12"\n',
+        "owners.toml": OWNERS,
         "pkg/__init__.py": "",
         "pkg/models.py": MODELS,
         "pkg/entry.py": entry_module(),
