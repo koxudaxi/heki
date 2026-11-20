@@ -120,11 +120,12 @@ fn severity_word(s: Severity) -> &'static str {
 /// with `\\`; elsewhere it is a character of the file name and stays.
 pub fn path_text(p: &Path) -> String {
     let text = p.to_string_lossy();
-    if std::path::MAIN_SEPARATOR == '\\' {
+    #[cfg(windows)]
+    {
         text.replace('\\', "/")
-    } else {
-        text.into_owned()
     }
+    #[cfg(not(windows))]
+    text.into_owned()
 }
 
 /// `path` as a relative URI reference (SARIF `artifactLocation.uri`): every byte but the
@@ -946,6 +947,12 @@ mod tests {
             caret_padding("\u{e9}", 99),
             " ",
             "a column past the line end"
+        );
+        // A line that changed since it was analyzed (`--watch` reads it again to print it).
+        assert_eq!(
+            caret_padding("\u{e9}x", 2),
+            "",
+            "a column inside a character"
         );
         assert_eq!(display_width('\u{301}'), 0);
     }

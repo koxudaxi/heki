@@ -485,5 +485,10 @@ mod tests {
             ),
             "{quoted}"
         );
+        let line_breaks = unified_diff("one\ntwo\r.py", "a\n", "b\n");
+        assert!(
+            line_breaks.starts_with("--- \"a/one\\ntwo\\r.py\"\n+++ \"b/one\\ntwo\\r.py\"\n"),
+            "{line_breaks}"
+        );
     }
 }
