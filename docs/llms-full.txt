@@ -1524,8 +1524,9 @@ $ uvx --from "zensical==0.1.2" zensical serve
 Rule documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`; `heki rule <CODE>` prints it
 and the generator copies it into `docs/rules/`. CI fails when the generated pages are stale.
 The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) when a release is
-published or the workflow is run by hand, so the site documents the released version; a pull
-request from this repository gets a preview deployment.
+published or the workflow is run by hand on `main`, so the site documents the released version;
+only the `docs-production` environment holds that deployment's token. A pull request from this
+repository gets a preview deployment in a separate Cloudflare account (project `heki-preview`).
 
 ## Architecture
 
