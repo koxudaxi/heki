@@ -619,8 +619,9 @@ fn reachable_blocks(flow: &CacheFlow) -> Vec<bool> {
 fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
     let name = m.name();
     INIT_METHODS.contains(&name)
-        || name.starts_with("_init_")
-        || name.starts_with("_configure_")
+        || ["_init_", "_configure_", "setup_", "_setup_"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
         || (is_private(name) && init_called.contains(&m.key))
 }
 

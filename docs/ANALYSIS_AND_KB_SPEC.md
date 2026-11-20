@@ -409,7 +409,8 @@ which module imports which.
    **except**:
    - **initialization and two-phase initialization hooks**: `__init__`, `__post_init__`,
      `model_post_init`, `__setstate__`, `__enter__`, `__new__`, `setup`, `setUp`, `postinit`,
-     `_open`, `_setup`, `_init_*`, `_configure_*`, and private helpers that an initializer calls;
+     `_open`, `_setup`, `setup_*`, `_setup_*`, `_init_*`, `_configure_*`, and private helpers that
+     an initializer calls;
    - **memo and cache dictionaries**: in-place changes of attributes with a `cache` / `memo` word
      in their name (`_cache`, `_memo`; rebinding them and `memory_*` names count), `setdefault`,
      and lazy filling under `if k not in self._xxx:`;

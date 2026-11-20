@@ -505,6 +505,39 @@ fn mut101_skips_lazy_initializations_the_cached_property_runs() {
     );
 }
 
+/// `setup_*` and `_setup_*` methods are two-phase initialization, as `setup` and `_init_*` are
+/// (here a subclass's `__init__` calls one, nothing calls the other). Another method setting the
+/// attribute is reported.
+const SETUP: &str = r#"from functools import cached_property
+
+
+class Terminal:
+    @cached_property
+    def colored(self):
+        return not self.no_color
+
+    def setup_terminal(self, no_color=False):
+        self.no_color = no_color
+
+    def _setup_streams(self, out):
+        self.no_color = not out.isatty()
+
+    def set_color(self, no_color):
+        self.no_color = no_color
+
+
+class Tool(Terminal):
+    def __init__(self, no_color=False):
+        self.setup_terminal(no_color)
+"#;
+
+#[test]
+fn mut101_counts_setup_methods_as_two_phase_initialization() {
+    let p = Project::new("regr_mut101_setup");
+    p.write("setup.py", SETUP);
+    assert_eq!(lines(&p, "MUT101"), vec![at(16, "Terminal.set_color")]);
+}
+
 // ======================================================= EFF103: `Session.query` builds a query
 
 /// R19: `sqlalchemy.orm.Session.query(...)` and the `Query` builder methods only build a lazy
