@@ -513,6 +513,75 @@ fn gate_4_mutated_param_paths_cross_function_container_mutation() {
     }));
 }
 
+const HANDS_PY: &str = r#"
+class Model:
+    def __init__(self):
+        self.fields: list[str] = []
+
+def _private_writer(model: Model):
+    model.fields = []
+
+def public_writer(model: Model):
+    model.fields = []
+
+def top(model: Model):
+    _private_writer(model)
+    public_writer(model)
+
+def untyped(model):
+    model.fields.append("x")
+
+def hands_over(model: Model):
+    untyped(model)
+
+def above(model: Model):
+    hands_over(model)
+"#;
+
+#[test]
+fn private_callees_hand_write_sites_to_callers_public_ones_keep_them() {
+    let index = project(&[("hands.py", HANDS_PY)]);
+    let sites = |q: &str| -> Vec<(WriteKind, Vec<String>)> {
+        summary(&index, "hands", q)
+            .typed_field_write_sites
+            .iter()
+            .map(|t| {
+                (
+                    t.kind,
+                    t.via_chain.iter().map(|h| h.callee.clone()).collect(),
+                )
+            })
+            .collect()
+    };
+    // The private helper's write reaches `top`; the public function reports its own.
+    assert_eq!(
+        sites("top"),
+        vec![(WriteKind::DirectAttr, vec!["hands._private_writer".into()])]
+    );
+    assert_eq!(
+        sites("public_writer"),
+        vec![(WriteKind::DirectAttr, vec![])]
+    );
+    // The facts of both writes reach `top` all the same.
+    let top = summary(&index, "hands", "top");
+    assert_eq!(top.typed_field_writes.len(), 1);
+    assert!(top.typed_field_writes.iter().all(|t| t.attr == "fields"));
+    // An untyped helper's change is the caller's `IndirectHelper` write; a caller above it
+    // knows the field is written (no second `IndirectHelper`) but gets no site from a public
+    // callee.
+    assert_eq!(
+        sites("hands_over"),
+        vec![(WriteKind::IndirectHelper, vec!["hands.untyped".into()])]
+    );
+    assert!(sites("above").is_empty());
+    assert!(
+        summary(&index, "hands", "above")
+            .typed_field_writes
+            .iter()
+            .any(|t| t.kind == WriteKind::IndirectHelper)
+    );
+}
+
 // =================================================================== gate 5: Early Cutoff
 
 const B_PY: &str = r#"
@@ -808,7 +877,7 @@ fn typed_field_write_kinds() {
         writes
             .typed_field_writes
             .iter()
-            .any(|t| t.kind == "set_attr" && t.class_qualname == "state.Model")
+            .any(|t| t.kind == WriteKind::SetAttr && t.class_qualname == "state.Model")
     );
 }
 

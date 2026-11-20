@@ -459,9 +459,10 @@ fn transfer(
             );
         }
         for (class, attr, obj_params) in indirect {
-            // A callee that already records a typed site for this field passes it up below.
+            // A callee that already records a typed write of this field (itself or through its
+            // callees) reports it: there, or here when the callee hands its sites over below.
             let known = facts
-                .typed_field_write_sites
+                .typed_field_writes
                 .iter()
                 .any(|w| w.class_qualname == class && w.attr == attr);
             if !known {
@@ -484,6 +485,17 @@ fn transfer(
     t.escapes_params |= caller_params(facts.escapes_params, bc);
     // A generator passed to a callee that iterates it runs there.
     t.iterates_params |= caller_params(facts.iterates_params, bc);
+    // Typed writes: every callee's facts reach the caller. A private callee hands its write
+    // sites to its callers too, a public one reports its own; what iterating a plain function's
+    // result runs (`rewrite`) runs nowhere in the function, so its sites go to whoever iterates.
+    for w in &facts.typed_field_writes {
+        if !t.typed_field_writes.contains(w) {
+            t.typed_field_writes.insert(w.clone());
+        }
+    }
+    if !rewrite && !crate::delegates_to_callers(&bc.callee.qualname) {
+        return;
+    }
     for w in &facts.typed_field_write_sites {
         let site = TypedFieldWriteSite {
             class_qualname: w.class_qualname.clone(),

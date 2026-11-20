@@ -76,13 +76,17 @@ pub struct AttrKeyPath {
     pub const_key: Option<String>,
 }
 
-/// Typed field write site used for declarative Write Ownership (`MUT201`).
-/// Kept for compatibility; derived from `EffectSummary::typed_field_write_sites`.
+/// A project-class attribute write a function reaches through any number of calls: the facts
+/// of a typed write site without its position, chain, and object (`EffectSummary::
+/// typed_field_writes`). A caller asks it whether a callee already sees the type of what it
+/// writes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldWrite {
     pub class_qualname: String,
     pub attr: String,
-    pub kind: String,
+    pub kind: WriteKind,
+    /// `TypedFieldWriteSite::fresh`.
+    pub fresh: bool,
 }
 
 /// One hop in an interprocedural call chain (for Boundary-Only & LSP RelatedLocation).
@@ -227,7 +231,14 @@ pub struct EffectSummary {
     pub returns_self_attrs: BTreeSet<String>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
     pub invalidates_cached: BTreeSet<String>,
+    /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
+    /// The function's own writes of project-class attributes, the `IndirectHelper` writes of
+    /// its own call sites, and the write sites of its private callees ([`delegates_to_callers`]):
+    /// a private helper hands its writes to its callers, a public function reports its own
+    /// (`MUT201` reports at the outermost function of a chain of private helpers, `EFF201`
+    /// walks the call graph itself), so a public callee's write sites are not copied into its
+    /// callers; [`Self::typed_field_writes`] still has their facts.
     pub typed_field_write_sites: BTreeSet<TypedFieldWriteSite>,
     /// The function's own reads of project-class attributes (`MUT203`; never propagated).
     pub typed_field_read_sites: BTreeSet<TypedFieldReadSite>,
@@ -425,16 +436,18 @@ impl EffectSummary {
         without_reads(self) == without_reads(other) && self.same_facts(other)
     }
 
+    /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
+    /// of the callees).
     pub(crate) fn refresh_typed_field_writes(&mut self) {
-        self.typed_field_writes = self
-            .typed_field_write_sites
-            .iter()
-            .map(|s| TypedFieldWrite {
+        for s in &self.typed_field_write_sites {
+            let fact = TypedFieldWrite {
                 class_qualname: s.class_qualname.clone(),
                 attr: s.attr.clone(),
-                kind: s.kind.as_str().to_owned(),
-            })
-            .collect();
+                kind: s.kind,
+                fresh: s.fresh,
+            };
+            self.typed_field_writes.insert(fact);
+        }
         if let Some(i) = &mut self.iterated {
             i.refresh_typed_field_writes();
         }
