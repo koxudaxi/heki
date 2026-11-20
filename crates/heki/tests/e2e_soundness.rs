@@ -315,6 +315,13 @@ const INTERP: &[Expect] = &[
     // returned list (disproved, not reported).
     ("returned_in_try", &[]),
     (
+        "raised_accumulator",
+        &[(
+            "OPT101",
+            V::Blocked("Unique(x): it may be shared: it is returned or raised"),
+        )],
+    ),
+    (
         // `check(i)` may raise after the append with `z` still the old list, which the
         // handler returns: appending would change it (disproved, not reported).
         "stale_handler_alias",

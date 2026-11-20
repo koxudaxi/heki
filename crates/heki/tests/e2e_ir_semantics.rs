@@ -147,6 +147,39 @@ async def module_function(items):
     );
 }
 
+#[test]
+fn a_comprehension_target_binds_only_in_the_comprehension() {
+    let src = "\
+import time
+
+
+def rest():
+    time.sleep(1)
+
+
+async def starred_target(pairs):
+    heads = [h for h, *rest in pairs]
+    rest()
+    return heads
+
+
+async def attribute_target(pairs, holder):
+    [0 for holder.last in pairs]
+    rest()
+";
+    // `rest` after the comprehension is the module's function in both.
+    for version in ["py311", "py315"] {
+        let p = Project::new(&format!("ir_comprehension_targets_{version}"));
+        p.write("case.py", src);
+        let got: Vec<String> =
+            diagnostics(&p, &["--select", "EFF101", "--target-version", version])
+                .iter()
+                .map(|d| d["qualname"].as_str().unwrap().to_owned())
+                .collect();
+        assert_eq!(got, ["starred_target", "attribute_target"], "{version}");
+    }
+}
+
 // =================================================================== evaluation order
 
 #[test]
@@ -222,7 +255,7 @@ fn a_refutable_case_may_not_match() {
 
 #[test]
 fn patterns_bind_the_matched_items() {
-    let src = "def items(subject):\n    match subject:\n        case [first, *middle, last]:\n            return first, middle, last\n        case {\"k\": value, **rest}:\n            return value, rest\n";
+    let src = "def items(subject):\n    match subject:\n        case [first, *middle, last]:\n            return first, middle, last\n        case {\"k\": value, **rest}:\n            return value, rest\n        case [only] | (only, 0):\n            return only\n";
     let ir = dump_ir("ir_pattern_items", src, "py315");
     let f = function(&ir, "items");
     let insts: Vec<&Value> = f["blocks"]
@@ -262,6 +295,13 @@ fn patterns_bind_the_matched_items() {
             .get("DictLiteral")
             .is_some()
     );
+    // Each alternative of an or-pattern binds `only` to its own item.
+    let only = phi_inputs(f, &copy_of("only")).expect("a phi");
+    assert_eq!(only.len(), 2);
+    assert!(
+        only.iter()
+            .all(|v| def_of(v).unwrap().get("SubscriptLoad").is_some())
+    );
     let value = def_of(&copy_of("value")).unwrap();
     assert_eq!(value["SubscriptLoad"]["key_const"], "k");
 }
@@ -271,11 +311,13 @@ fn patterns_bind_the_matched_items() {
 #[test]
 fn a_reference_to_an_introspection_function_is_an_a1_hazard() {
     let src = "\
+import gc
 import inspect as ins
 from inspect import currentframe
 from builtins import locals as snap_import
 
 snap = locals
+frame_of = currentframe
 
 
 def alias(items):
@@ -285,6 +327,14 @@ def alias(items):
 
 def module_alias():
     return snap()
+
+
+def module_import_alias():
+    return frame_of()
+
+
+def heap():
+    return gc.get_objects()
 
 
 def imported():
@@ -336,8 +386,11 @@ def unrelated_here():
         hazards,
         [
             "[<module>] A1 hazard: locals",
+            "[<module>] A1 hazard: inspect.currentframe",
             "[alias] A1 hazard: locals",
             "[module_alias] A1 hazard: locals",
+            "[module_import_alias] A1 hazard: inspect.currentframe",
+            "[heap] A1 hazard: gc.get_objects",
             "[imported] A1 hazard: inspect.currentframe",
             "[imported] A1 hazard: locals",
             "[module_attribute] A1 hazard: inspect.currentframe",
@@ -445,6 +498,25 @@ def drained_queue(inactive_users):
         httpx.Client()
 
 
+def drained_by_index(active_jobs):
+    while active_jobs:
+        del active_jobs[0]
+        httpx.Client()
+
+
+def batches(active_jobs, more):
+    while active_jobs:
+        client = httpx.Client()
+        for job in active_jobs:
+            client.send(job)
+        active_jobs = more()
+
+
+def flag(active):
+    while active:
+        httpx.Client()
+
+
 class Worker:
     def serve(self):
         while self._running:
@@ -457,6 +529,8 @@ class Worker:
             ("grown_constructor", "EFF102"),
             ("returned_alias", "EFF102"),
             ("drained_queue", "EFF102"),
+            ("drained_by_index", "EFF102"),
+            ("batches", "EFF102"),
         ])
     );
 }
@@ -881,6 +955,52 @@ def after_continue(pool: Pool, hosts):
         let phis = &function(&ir, name)["blocks"][header as usize]["phis"];
         assert_eq!(phis.as_array().unwrap().len(), 0, "{name}: {phis}");
     }
+}
+
+#[test]
+fn a_definition_in_a_finally_body_is_one_function() {
+    let src = "def run(items):\n    try:\n        if items:\n            return 1\n    finally:\n        def cleanup():\n            return 2\n        cleanup()\n";
+    let ir = dump_ir("ir_finally_definition", src, "py315");
+    let qualnames: Vec<&str> = ir["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(qualnames, ["<module>", "run", "run.<locals>.cleanup"]);
+    // Every copy of the body (return, fall-through, exception) makes the same function.
+    let made: Vec<&Value> = function(&ir, "run")["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .filter_map(|i| i["kind"].get("MakeClosure"))
+        .map(|m| &m["func_id"])
+        .collect();
+    assert_eq!(made.len(), 3, "{made:?}");
+    assert!(made.iter().all(|id| *id == made[0]), "{made:?}");
+}
+
+#[test]
+fn a_literal_default_keeps_its_sign() {
+    let src = "def defaults(a=+1, b=-2, c=1j, d=0.5):\n    return a, b, c, d\n";
+    let ir = dump_ir("ir_literal_defaults", src, "py315");
+    let defaults: Vec<Value> = function(&ir, "defaults")["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["default"].clone())
+        .collect();
+    // The IR records no complex literal.
+    assert_eq!(
+        defaults,
+        [
+            serde_json::json!({"int": 1}),
+            serde_json::json!({"int": -2}),
+            Value::Null,
+            serde_json::json!({"float": "0.5"}),
+        ]
+    );
 }
 
 #[test]
