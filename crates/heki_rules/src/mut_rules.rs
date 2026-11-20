@@ -1251,7 +1251,11 @@ pub(crate) fn mut201(
             let Some(owner) = &f.owner_class_qualname else {
                 continue;
             };
-            if f.is_class_body || !f.has_decorator(&["cached_property"]) {
+            let cached = cx
+                .index
+                .summary(&CheckContext::key(unit, f))
+                .is_some_and(|s| s.is_cached_property);
+            if f.is_class_body || !cached {
                 continue;
             }
             let class = format!("{}.{owner}", unit.input.module_name);
@@ -1325,10 +1329,11 @@ pub(crate) struct ReadOnlyReturns {
 impl ReadOnlyReturns {
     pub fn new(cx: &CheckContext<'_>) -> Result<Self, RuleConfigError> {
         let producers = ReadOnlyProducers::new(cx.config)?;
-        let property = |s: &EffectSummary| {
-            s.decorators.iter().any(|d| {
-                let last = d.rsplit('.').next().unwrap_or(d);
-                matches!(last, "property" | "cached_property")
+        let property = |k: &FuncKey, s: &EffectSummary| {
+            cx.decls.module(&k.module).is_some_and(|m| {
+                s.decorators
+                    .iter()
+                    .any(|d| m.decorator_is(d, &["property", "cached_property"]))
             })
         };
         let getters = cx
@@ -1339,7 +1344,7 @@ impl ReadOnlyReturns {
             .filter(|(k, s)| {
                 s.returns_protected.is_some()
                     || s.is_lru_cache
-                    || property(s) && producers.deep_for(&k.fqn()).is_some()
+                    || producers.deep_for(&k.fqn()).is_some() && property(k, s)
             })
             .map(|(k, _)| {
                 k.qualname

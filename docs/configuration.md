@@ -212,7 +212,8 @@ deep = true
 | `producers` | Functions, methods, external symbols, or attributes (`Class.attr`) whose result every caller shares (dotted names or globs). |
 | `deep` | Protect the values below the result too (its attributes, items, and elements). |
 
-Functions decorated with `@lru_cache` / `@cache` are protected without configuration, and so
+Functions decorated with `@lru_cache` / `@cache` (also through an import alias; not a `cache`
+decorator the module defines itself) are protected without configuration, and so
 is every function that returns a protected value, or a part of it, on some path: wrappers and
 property getters need no entry of their own.
 

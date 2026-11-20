@@ -316,6 +316,11 @@ struct ProjectCall {
     params: Vec<(FuncKey, Vec<(u8, VarId)>)>,
 }
 
+/// Whether a decorator of `f` is one of `names` ([`ModuleDecls::decorator_is`]).
+fn decorated_as(module: &ModuleDecls, f: &IrFunction, names: &[&str]) -> bool {
+    f.decorators.iter().any(|d| module.decorator_is(d, names))
+}
+
 impl<'a> Extractor<'a> {
     fn new(
         f: &'a IrFunction,
@@ -349,8 +354,8 @@ impl<'a> Extractor<'a> {
         let summary = EffectSummary {
             is_async: matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator),
             is_generator: is_generator_function(f),
-            is_cached_property: f.has_decorator(&["cached_property"]),
-            is_lru_cache: f.has_decorator(&["lru_cache", "cache"]),
+            is_cached_property: decorated_as(cx.module, f, &["cached_property"]),
+            is_lru_cache: decorated_as(cx.module, f, &["lru_cache", "cache"]),
             owner_class_qualname: f.owner_class_qualname.clone(),
             decorators: f.decorators.clone(),
             ..EffectSummary::default()

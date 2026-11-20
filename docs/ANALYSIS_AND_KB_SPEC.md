@@ -191,6 +191,11 @@ EffectSummary(f) = {
 }
 ```
 
+`is_cached_property`, `is_lru_cache`, and `FunctionDecl::is_property` know a decorator by what
+its head is bound to at module scope (`ModuleDecls::decorator_is`): an import by the imported
+symbol's last name (aliases included), a function or class of the module itself never, an
+unbound name by its spelling.
+
 `CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
 invalidation contracts announced after the call on every normal path, and the next call; set on
 `Iterate` / `Through` sites too), with `FileSummary.flows`, are computed at extraction from the
