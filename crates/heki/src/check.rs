@@ -480,6 +480,12 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     let units = project.units();
     let snap = SummarySnapshot::build(&units, &index);
     if args.write {
+        // A module that cannot be read or parsed has no summary: writing now would drop its
+        // entries, and `MUT103` would stop checking its functions once it is fixed.
+        if !project.errors.is_empty() {
+            eprintln!("Summary snapshot not written: some files could not be analyzed.");
+            return finish(&project.errors, ExitCode::SUCCESS);
+        }
         let path = project.env.root.join(SNAPSHOT_FILE);
         if !project.errors.is_empty() {
             eprintln!(

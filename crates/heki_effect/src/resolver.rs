@@ -322,6 +322,25 @@ impl ModuleDecls {
         out
     }
 
+    /// Whether the decorator `text` of a function of this module is one of `names`
+    /// (`cached_property`, `lru_cache`, ...), known by what its head is bound to at module
+    /// scope: an import names the imported symbol, so an alias counts by that symbol's last
+    /// name (`from functools import cached_property as cached`); a function or class the module
+    /// defines is its own decorator and none of `names` (an identity `def cache(fn)` caches
+    /// nothing); a head bound by neither (a builtin, a star import) counts by its spelling.
+    pub fn decorator_is(&self, text: &str, names: &[&str]) -> bool {
+        let (head, _) = decorator_parts(text);
+        let first = head.split('.').next().unwrap_or(head);
+        let symbol = if self.imports.contains_key(first) {
+            self.resolve_dotted(head, false)
+        } else if self.classes.contains_key(first) || self.functions.contains_key(first) {
+            None
+        } else {
+            Some(head.to_owned())
+        };
+        symbol.is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
+    }
+
     /// Resolve a dotted name written in this module (runtime imports, then local definitions,
     /// then builtin types). `type_checking` also consults `if TYPE_CHECKING:` imports.
     fn resolve_dotted(&self, text: &str, type_checking: bool) -> Option<String> {
@@ -1811,17 +1830,26 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             .classes
             .insert(class.qualname.clone(), ClassDecl::default());
     }
+    for f in &input.ir.functions {
+        if is_summarized_function(f) {
+            decls
+                .functions
+                .insert(f.qualname.clone(), FunctionDecl::default());
+        }
+    }
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
-    for f in &input.ir.functions {
-        if !is_summarized_function(f) {
-            continue;
-        }
-        decls
-            .functions
-            .insert(f.qualname.clone(), FunctionDecl::default());
-        let getter = f.owner_class_qualname.is_some() && f.has_decorator(PROPERTY_DECORATORS);
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| is_summarized_function(f))
+    {
+        let getter = f.owner_class_qualname.is_some()
+            && f.decorators
+                .iter()
+                .any(|d| decls.decorator_is(d, PROPERTY_DECORATORS));
         *getters_only.entry(&f.qualname).or_insert(true) &= getter;
     }
     // Resolve bases, class keywords, and annotations now that local names are known.

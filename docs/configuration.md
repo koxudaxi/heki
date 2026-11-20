@@ -42,10 +42,10 @@ command line are always checked.
 
 | Key | Meaning |
 | --- | ------- |
-| `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). |
+| `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) need their exact code or name. |
 | `ignore` | Rules to disable (prefixes match every rule they cover). |
-| `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
+| `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
 | `severity` | Rule → `"error"` or `"warning"` (affects output and SARIF level; both make `heki check` fail). |
 | `relax-async-in-tests` | `true` (default) skips `EFF101` / `EFF105` in `test_*` functions and files under `tests/`. |
 
@@ -107,7 +107,8 @@ starts in an allowed writer, an exempt method, or such an initialization.
 
 A write in a private helper (`_name`) with project callers is reported at the call sites of its
 first non-private callers; one report stands for every write behind its call, and a Ratchet
-baseline counts each of them (`sites` in JSON output).
+baseline counts each of them (`sites` in JSON output). A private function called only by its own
+recursion reports its writes itself.
 
 ## Read contracts: `[[tool.heki.read-owners]]` (`MUT203`)
 
@@ -241,7 +242,8 @@ deep = true
 | `producers` | Functions, methods, external symbols, or attributes (`Class.attr`) whose result every caller shares (dotted names or globs). |
 | `deep` | Protect the values below the result too (its attributes, items, and elements). |
 
-Functions decorated with `@lru_cache` / `@cache` are protected without configuration, and so
+Functions decorated with `@lru_cache` / `@cache` (also through an import alias; not a `cache`
+decorator the module defines itself) are protected without configuration, and so
 is every function that returns a protected value, or a part of it, on some path: wrappers and
 property getters need no entry of their own.
 

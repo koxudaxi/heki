@@ -957,7 +957,7 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
     );
     let by_name = |q: &str| diags.iter().find(|x| x["qualname"] == q).unwrap();
     let narrow = by_name("narrow");
-    assert_eq!(narrow["target"], "DataType.data_types");
+    assert_eq!(narrow["target"], "graph-index:DataType.data_types");
     assert_eq!(
         narrow["message"],
         "`narrow` writes `DataType.data_types` (direct_attr) and returns on some path without calling an invalidator of `graph-index`: tell the store which models changed"

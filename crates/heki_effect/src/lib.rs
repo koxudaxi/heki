@@ -40,7 +40,7 @@ pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, StrConstant, TypeCtx, Val, detect_src_layout, func_qualname,
+    ReadOnlyKind, StrConstant, TypeCtx, Val, aliases_of, detect_src_layout, func_qualname,
     module_name_for_path, resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
@@ -98,6 +98,10 @@ pub struct CallHop {
     pub callee: String,
     pub span: Span,
     pub path: PathBuf,
+}
+
+fn is_zero(bits: &u64) -> bool {
+    *bits == 0
 }
 
 /// A call chain kept in a summary. Propagation copies a callee's chains into its callers, so
@@ -396,6 +400,12 @@ pub struct EffectSummary {
     /// every change of them, so a caller passing an instance adds no `IndirectHelper` site.
     pub typed_params: u64,
     pub escapes_params: u64,
+    /// Parameters the function returns a quadratic reallocation of on some path: the result of
+    /// a `QuadraticRealloc` call taking the parameter (`return np.append(acc, x)`,
+    /// `return pd.concat([df, part])`), or of a project call doing so whose result it returns
+    /// (`DATA101` follows an accumulation through such helpers).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reallocates_params: u64,
     /// Parameters iterated to exhaustion on every path that returns normally when the body
     /// runs at the call (`MUT106`: passing a single-pass iterator consumes it).
     pub consumes_params: u64,
@@ -410,6 +420,17 @@ pub struct EffectSummary {
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> attributes` of the argument whose objects are changed, in place or
+    /// deeper (`p.a.append(...)`, `p.a.b = v`), also through local copies and calls: the
+    /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`). A
+    /// shallow copy of the argument shares exactly these objects (`MUT202`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub changed_param_attrs: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> spans` of the function's own changes of the argument (a local fact,
+    /// never propagated: a rule walking the call graph counts each change once, in the body
+    /// making it; `EFF201` `mutates-params`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_change_sites: BTreeMap<u8, BTreeSet<Span>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself
     /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
     /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
@@ -618,6 +639,7 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.param_change_sites.clear();
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -650,10 +672,11 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites and unresolved writes are left out: those are never propagated.
+    /// sites, parameter changes, and unresolved writes are left out: those are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
+            param_change_sites: BTreeMap::new(),
             unresolved_write_sites: BTreeSet::new(),
             ..s.clone()
         };

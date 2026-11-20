@@ -69,6 +69,18 @@ deep = true
 name = "index"
 targets = ["Node.kids"]
 invalidators = ["Index.refresh"]
+
+[[tool.heki.effect-boundaries]]
+name = "rack-view"
+scopes = ["pkg.rack_view"]
+forbid = ["writes-targets"]
+write-targets = ["Rack.items"]
+allowed-callees = ["pkg.rack_ops.empty"]
+
+[[tool.heki.write-owners]]
+name = "rack"
+targets = ["Rack.items"]
+allowed-writers = ["pkg.rack_ops.empty"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -237,6 +249,17 @@ const PLANTER: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import 
 const KID_GEN: &str = "from pkg.nodes import Node\n\n\ndef _grow_kids(node: Node, kid):\n    node.kids.append(kid)\n    return [kid]\n";
 const KID_GEN_GENERATOR: &str = "from pkg.nodes import Node\n\n\ndef _grow_kids(node: Node, kid):\n    node.kids.append(kid)\n    yield kid\n";
 const KID_USER: &str = "from pkg.kid_gen import _grow_kids\nfrom pkg.nodes import Index, Node\n\n\ndef plant_all(index: Index, node: Node, kid):\n    pending = _grow_kids(node, kid)\n    index.refresh()\n    for _ in pending:\n        pass\n";
+// Helpers handed a typed field (`EFF201` / `MUT201` `indirect_helper` writes): `refill` only
+// leaves the change to `empty`, which the boundary and the owner allow, then also changes the
+// list itself. Its summary already says that it changes its parameter, so it stays the same.
+const RACK: &str = "class Rack:\n    def __init__(self):\n        self.items = []\n";
+const RACK_OPS: &str = "def empty(xs):\n    xs.clear()\n\n\ndef refill(xs):\n    empty(xs)\n";
+const RACK_VIEW: &str = "from pkg.rack import Rack\nfrom pkg.rack_ops import refill\n\n\ndef show(s: Rack):\n    refill(s.items)\n";
+// Inherited writers (`MUT101`): a subclass in another module gains a cached property that an
+// inherited method's write leaves stale, then overrides that method.
+const NAMED: &str = "class Named:\n    def __init__(self, name):\n        self.name = name\n\n    def rename(self, name):\n        self.name = name\n";
+const LABELED: &str = "from pkg.named import Named\n\n\nclass Labeled(Named):\n    pass\n";
+const LABELED_CACHED: &str = "from functools import cached_property\n\nfrom pkg.named import Named\n\n\nclass Labeled(Named):\n    @cached_property\n    def label(self):\n        return self.name.upper()\n";
 const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n";
 
 // Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
@@ -393,6 +416,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/kid_gen.py", KID_GEN),
         ("pkg/kid_user.py", KID_USER),
         ("pkg/shelf.py", SHELF),
+        ("pkg/rack.py", RACK),
+        ("pkg/rack_ops.py", RACK_OPS),
+        ("pkg/rack_view.py", RACK_VIEW),
+        ("pkg/named.py", NAMED),
+        ("pkg/labeled.py", LABELED),
         ("pkg/fill.py", FILL),
         ("pkg/fill_main.py", FILL_MAIN),
         ("pkg/views.py", VIEWS),
@@ -1042,6 +1070,57 @@ fn steps_mut202_mut109() -> Vec<Step> {
     ]
 }
 
+/// A helper handed a typed field starts changing it itself, besides through the allowed
+/// callee, while its final summary stays the same: the writes the boundary and the owner
+/// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`).
+fn steps_indirect_helpers() -> Vec<Step> {
+    let changing = RACK_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
+    vec![
+        Step::new(
+            "a helper handed a field also changes it outside the allowed callee",
+            vec![Action::Save("pkg/rack_ops.py", changing)],
+        )
+        .present(&[
+            ("pkg/rack_view.py", "EFF201"),
+            ("pkg/rack_view.py", "MUT201"),
+        ]),
+        Step::new(
+            "the helper leaves the change to the allowed callee again",
+            vec![save("pkg/rack_ops.py", RACK_OPS)],
+        )
+        .absent(&[
+            ("pkg/rack_view.py", "EFF201"),
+            ("pkg/rack_view.py", "MUT201"),
+        ]),
+    ]
+}
+
+/// A class's family includes the methods it inherits: the inherited writer's report appears in
+/// the base class's file when a subclass in another module starts caching what it writes, and
+/// goes away when the subclass overrides the writer.
+fn steps_inherited_writers() -> Vec<Step> {
+    let overriding = format!(
+        "{LABELED_CACHED}\n    def rename(self, name):\n        self.name = name\n        del self.label\n"
+    );
+    vec![
+        Step::new(
+            "a subclass in another module caches what an inherited method writes",
+            vec![save("pkg/labeled.py", LABELED_CACHED)],
+        )
+        .present(&[("pkg/named.py", "MUT101")]),
+        Step::new(
+            "the subclass overrides the writer and invalidates the cache",
+            vec![Action::Save("pkg/labeled.py", overriding)],
+        )
+        .absent(&[("pkg/named.py", "MUT101"), ("pkg/labeled.py", "MUT101")]),
+        Step::new(
+            "the subclass no longer caches",
+            vec![save("pkg/labeled.py", LABELED)],
+        )
+        .absent(&[("pkg/named.py", "MUT101")]),
+    ]
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -1178,6 +1257,8 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_body_runs());
     steps.extend(steps_small_displays());
     steps.extend(steps_mut202_mut109());
+    steps.extend(steps_indirect_helpers());
+    steps.extend(steps_inherited_writers());
     steps.extend(steps_receiver_typing());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.

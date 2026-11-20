@@ -2,12 +2,14 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargetPattern, ContractTarget, SiteId, allows_fresh, initializes_itself,
-    parse_call_targets, parse_read_targets, parse_targets, patterns, project_classes, site_callee,
-    with_note, write_hits,
+    CallTargetPattern, ContractTarget, SiteId, allows_fresh, called_targets, group_texts,
+    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
+    parse_targets, patterns, project_classes, site_callee, with_note, write_hits,
 };
 use crate::opt_rules::Sizes;
-use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
+use crate::{
+    CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
+};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::guards::loop_bit;
@@ -16,7 +18,7 @@ use heki_effect::{
     EffectSummary, Facts, FuncKey, Runner, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
     boundary_reports_in,
 };
-use heki_ir::{InstKind, IrFunction, VarId};
+use heki_ir::{InstKind, IrFunction};
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,7 +27,6 @@ use std::sync::LazyLock;
 
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
-const DDL_PREFIXES: &[&str] = &["CREATE", "ALTER", "DROP", "PRAGMA"];
 /// `boundary_reports_in` only reports call sites of the files it is given.
 const REPORTS_OF_UNITS: &str = "boundary reports come from the checked files";
 
@@ -236,10 +237,6 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if !iteration && !anchors_call_site(&inst.kind) {
                     continue;
                 }
-                let args: &[VarId] = match &inst.kind {
-                    InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => args,
-                    _ => &[],
-                };
                 let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {
                     continue;
                 };
@@ -281,18 +278,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                             chain,
                         );
                 }
-                // Compared as bytes: the prefixes are ASCII, and slicing the constant could
-                // split a multi-byte character.
-                let ddl = args.first().and_then(|a| f.const_str(*a)).is_some_and(|q| {
-                    let q = q.trim_start().as_bytes();
-                    DDL_PREFIXES.iter().any(|p| {
-                        q.get(..p.len())
-                            .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
-                    })
-                });
                 if want103
                     && !migration_fn
-                    && !ddl
                     && let Some(chain) = per_iteration(ExecEffectKind::DbQuery)
                 {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
@@ -616,7 +603,7 @@ fn note<K: Ord>(
 /// writes to a subclass instance keep the class the configuration names.
 fn undeclared_text(entry: &str, attr: &str) -> String {
     match entry.rsplit_once('.') {
-        Some((class, pattern)) if pattern.contains(['*', '?', '[', '{']) => {
+        Some((class, pattern)) if has_glob_syntax(pattern) => {
             format!("{class}.{attr}")
         }
         _ => entry.to_owned(),
@@ -642,8 +629,8 @@ struct Reach<'a> {
     writes: BTreeMap<WriteBucket, Found>,
     /// By `read-targets` index.
     reads: BTreeMap<usize, Found>,
-    /// By `call-targets` index.
-    calls: BTreeMap<usize, Found>,
+    /// By the `call-targets` indices a call matches ([`called_targets`]).
+    calls: BTreeMap<Vec<usize>, Found>,
 }
 
 impl<'a> Reach<'a> {
@@ -683,7 +670,7 @@ impl<'a> Reach<'a> {
             };
             let own: &[(&'a Path, &'a CallSite)] = sites.get(&func).map_or(&[], Vec::as_slice);
             if b.checks_writes() && runs_body {
-                reach.collect_writes(cx, b, i, &func, own);
+                reach.collect_writes(cx, sites, b, i, &func, own);
             }
             if b.reads_targets && runs_body {
                 reach.collect_reads(cx, b, i, &func);
@@ -696,14 +683,9 @@ impl<'a> Reach<'a> {
                     path: path.to_path_buf(),
                 };
                 if b.calls && runs_body && !b.allows_call(site) {
-                    for (ti, _) in b
-                        .call_targets
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, t)| t.hit(site))
-                    {
+                    for group in called_targets(&b.call_targets, site) {
                         let nodes = &reach.nodes;
-                        note(&mut reach.calls, ti, (func.fqn(), site.span), || {
+                        note(&mut reach.calls, group, (func.fqn(), site.span), || {
                             let mut chain = chain_to(nodes, i);
                             chain.push(hop(&func, site_callee(site)));
                             let kind = if site.constructs.is_some() {
@@ -765,6 +747,7 @@ impl<'a> Reach<'a> {
     fn collect_writes(
         &mut self,
         cx: &CheckContext<'_>,
+        sites: &SitesByCaller<'_>,
         b: &Boundary<'_>,
         i: usize,
         func: &FuncKey,
@@ -783,13 +766,18 @@ impl<'a> Reach<'a> {
             let extra = match (w.via_chain.as_slice(), w.kind) {
                 ([], _) => None,
                 // A helper of the scopes counts too: it cannot see the type of the field it
-                // is handed, so the function handing it over reports the write.
+                // is handed, so the function handing it over reports the write. The helper's
+                // summary also holds what its callees change, so the write counts only when the
+                // helper changes the argument outside `allowed-callees`.
                 ([hop], WriteKind::IndirectHelper)
                     if own.iter().any(|(_, site)| {
                         site.span == hop.span
                             && site.project_callees().iter().any(|bc| {
                                 bc.callee.fqn() == hop.callee
                                     && b.counts(cx, site, &bc.callee, Facts::Body).is_some()
+                                    && helper_changes_field(cx, sites, bc, w, |site, callee| {
+                                        b.counts(cx, site, callee, Facts::Body)
+                                    })
                             })
                     }) =>
                 {
@@ -858,8 +846,9 @@ impl<'a> Reach<'a> {
     }
 
     /// Parameters of the scope function that a reached function mutates, through followed
-    /// edges only (a forward flow of "callee parameter k is scope parameter p" bits).
-    fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> u64 {
+    /// edges only (a forward flow of "callee parameter k is scope parameter p" bits), and the
+    /// distinct sites of those changes (each in the body making it).
+    fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> (u64, BTreeSet<SiteId>) {
         let mut alias: FxHashMap<(usize, usize), u64> = FxHashMap::default();
         for p in 0..params.min(64) {
             alias.insert((0, p), 1u64 << p);
@@ -884,18 +873,26 @@ impl<'a> Reach<'a> {
             }
         }
         let mut out = 0;
+        let mut sites = BTreeSet::new();
         for (i, (func, facts, _)) in self.nodes.iter().enumerate() {
-            let local = cx
+            let Some(local) = cx
                 .index
                 .file_of(func)
                 .and_then(|p| cx.index.files[p].local_functions.get(func))
                 .filter(|s| *facts == s.body_facts())
-                .map_or(0, |s| s.mutates_params);
-            for k in (0..64).filter(|k| local & (1u64 << k) != 0) {
-                out |= alias.get(&(i, k)).copied().unwrap_or(0);
+            else {
+                continue;
+            };
+            for k in (0..64u8).filter(|k| local.mutates_params & (1u64 << k) != 0) {
+                let scope_params = alias.get(&(i, usize::from(k))).copied().unwrap_or(0);
+                if scope_params != 0 {
+                    out |= scope_params;
+                    let spans = local.param_change_sites.get(&k).into_iter().flatten();
+                    sites.extend(spans.map(|span| (func.fqn(), *span)));
+                }
             }
         }
-        out
+        (out, sites)
     }
 
     fn report(
@@ -968,6 +965,8 @@ impl<'a> Reach<'a> {
                 }
             }
         }
+        // Reads and calls name their kind in the target: one boundary may forbid writing and
+        // reading the same `Class.attr`, and a report of each must stay a report of its own.
         for (ti, found) in &self.reads {
             let target = &b.read_targets[*ti].text;
             let via = via_first(found);
@@ -975,19 +974,19 @@ impl<'a> Reach<'a> {
                 "`{}` reads `{target}` ({}{via})",
                 key.qualname, found.kind
             ));
-            emit(found, target.clone(), message);
+            emit(found, format!("reads:{target}"), message);
         }
-        for (ti, found) in &self.calls {
-            let target = &b.call_targets[*ti].text;
+        for (group, found) in &self.calls {
+            let (target, called) = group_texts(&b.call_targets, group);
             let via = match found.chain.as_slice() {
                 [first, _, ..] => format!(" (via `{}`)", first.callee),
                 _ => String::new(),
             };
-            let message = forbids(format!("`{}` {} `{target}`{via}", key.qualname, found.kind));
-            emit(found, target.clone(), message);
+            let message = forbids(format!("`{}` {} {called}{via}", key.qualname, found.kind));
+            emit(found, format!("calls:{target}"), message);
         }
         if b.mutates_params {
-            let bits = self.mutated_params(cx, f.params.len());
+            let (bits, sites) = self.mutated_params(cx, f.params.len());
             if bits != 0 {
                 let names: Vec<String> = f
                     .params
@@ -997,7 +996,7 @@ impl<'a> Reach<'a> {
                     .filter(|(k, _)| bits & (1u64 << k) != 0)
                     .map(|(_, p)| format!("`{}`", p.name))
                     .collect();
-                cx.emit(
+                if let Some(d) = cx.emit(
                     out,
                     "EFF201",
                     unit,
@@ -1010,7 +1009,9 @@ impl<'a> Reach<'a> {
                         names.join(", ")
                     )),
                     &[],
-                );
+                ) {
+                    d.sites = u32::try_from(sites.len().max(1)).unwrap_or(u32::MAX);
+                }
             }
         }
     }

@@ -157,7 +157,13 @@ EffectSummary(f) = {
     // Family 1: mutation and state effects (MUT1xx / MUT2xx)
     mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
     mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i
+    changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes whose objects change (in place or deeper),
+                                                           // not just rebound: what a shallow copy shares (MUT202)
+    param_change_sites:       Map<ParamIdx, Set<Span>>,    // own changes of parameter i only, never propagated
+                                                           // (EFF201 mutates-params counts them)
     escapes_params:           Bitset,                      // stored in an attribute / container / global, or returned
+    reallocates_params:       Bitset,                      // parameter i comes back as a quadratic reallocation
+                                                           // of it (DATA101 through helpers)
     consumes_params:          Bitset,                      // iterated to exhaustion on every normal path (MUT106)
     unconditional_forwards:   Bitset,                      // passed on at calls that run on every normal path
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
@@ -205,6 +211,11 @@ EffectSummary(f) = {
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
 ```
+
+`is_cached_property`, `is_lru_cache`, and `FunctionDecl::is_property` know a decorator by what
+its head is bound to at module scope (`ModuleDecls::decorator_is`): an import by the imported
+symbol's last name (aliases included), a function or class of the module itself never, an
+unbound name by its spelling.
 
 Contract-only facts (`Final` string keys through `ModuleDecls::str_constants`, container
 entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
@@ -303,17 +314,22 @@ which module imports which.
    a class of its own), take `reads_self_attrs(p)`: the `self.<attr>` and constant-key
    `self.<dict>["k"]` reads of `p`, directly and through `self.helper()` calls, without `p`
    itself.
-2. For every method `m` of `C` and its subclasses, take the writes in `m`'s own body, **except**:
+2. For every method `m` of `C` and its subclasses, and every method `C` inherits from a project
+   ancestor that no class before it in the MRO overrides, take the writes in `m`'s own body,
+   **except**:
    - **initialization and two-phase initialization hooks**: `__init__`, `__post_init__`,
      `model_post_init`, `__setstate__`, `__enter__`, `__new__`, `setup`, `setUp`, `postinit`,
      `_open`, `_setup`, `_init_*`, `_configure_*`, and private helpers that an initializer calls;
-   - **memo and cache dictionaries**: attributes named like `_cache` / `_memo`, `setdefault`, and
-     lazy filling under `if k not in self._xxx:`;
+   - **memo and cache dictionaries**: in-place changes of attributes with a `cache` / `memo` word
+     in their name (`_cache`, `_memo`; rebinding them and `memory_*` names count), `setdefault`,
+     and lazy filling under `if k not in self._xxx:`;
    - **disjoint constant dict keys**: when the keys `p` reads (`self.params["outtmpl"]`) and the
      keys `m` writes (`self.params["proxy"]`) are all constant and disjoint.
-3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains and **`p ∉
-   invalidates_cached(m)`** (and `m` has no full invalidation such as `self.__dict__.clear()`; a
-   private helper all of whose callers invalidate is covered).
+3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains at a write
+   that leaves a stale value on some normal path of `m`: neither does every path after the write
+   invalidate `p` (`del self.p`, `self.__dict__.pop("p")` / `clear()`, a `self` call whose
+   `invalidates_cached` holds it), nor is `p` invalidated on every path to the write with no read
+   of it since (a private helper all of whose callers invalidate is covered).
 4. For an attribute in **`returns_self_attrs(p)`**, only rebinding writes count (`self.a = ...`,
    `del self.a`): the cached value holds the attribute's object itself and sees in-place changes.
    The fact is local to the getter (every read of `self.a` is returned as itself or put, as
@@ -326,16 +342,21 @@ which module imports which.
   and `direct_exec_effects ∪ transitive_exec_effects`) are saved in a normalized form
   (`.heki-summary-snapshot.json`); a pull request whose functions gained effects or mutability is
   reported.
+- Entries are built and compared from each function's defining file (`ProjectIndex::file_of`:
+  the `.py` file before its `.pyi` stub), and `--write` replaces the file atomically only when
+  every file of the project was read and parsed.
 
 #### `MUT106`: single-pass iterators consumed twice (opt-in)
 - Sources: generator expressions; `iter` / `zip` / `map` / `filter` / `enumerate` / `reversed`
   and the single-pass `itertools` functions (never `tee`, `repeat`, `cycle`, `count`); project
   generator functions; and `Iterator` / `Generator` annotations (not `Iterable` / `Sequence`).
 - Consumers: `for` loops and comprehensions, unpacking, `yield from`, and the calls that
-  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `any` / `all`
-  / `min` / `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
+  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `min` /
+  `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
   `heapq.nlargest`, `functools.reduce`, ...: one table, `consumption::FULL_CONSUMERS`, which also
-  decides where a generator's body runs), also through wrappers over one iterable; `next()` is
+  decides where a generator's body runs), also through wrappers over one iterable; `any` / `all`
+  step it but may stop early (`SHORT_CIRCUIT_CONSUMERS`: a generator's body runs, the iterator is
+  not exhausted); `next()` is
   stepping, not consumption. A project function consumes its argument when `consumes_params` says
   so, and its body runs at the call.
 - The first pass must be full (a loop that can `break`, `return`, or `raise` is partial); the
@@ -409,7 +430,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
      `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, and the Layer 2
      `copy_sanitizer` entries, as deep as each entry says: a shallow copy ends it for the top
-     level only). A copy keeps its original's class for receiver typing.
+     level only), and a slice of a value inferred as a builtin sequence is a shallow copy
+     (`readonly::subscript_step`, shared with the return flow). A copy keeps its original's class
+     for receiver typing. A phi joins the tags of all its incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
      the call hop.
@@ -460,12 +483,15 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
    - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
      dict named `requests` is not mistaken for the package (type and name resolution).
-   - **`EFF103`**: `for.iter` headers excluded; SQL literals that are DDL (`CREATE` / `ALTER` /
-     `DROP` / `PRAGMA`) and queries in migration functions excluded; the internals of ORM
-     libraries excluded.
+   - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
+     `executescript` call whose literal statement is DDL (`CREATE` / `ALTER` / `DROP` /
+     `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so helpers running DDL run
+     no query either; queries in migration functions excluded; the internals of ORM libraries
+     excluded.
    - **`DATA101`**: only `df = pd.concat([df, ...])` / `arr = np.vstack([arr, ...])` whose SSA
-     `PhiNode` accumulates across the back edge (`LoopCarried`); one-off concatenation and padding
-     in a loop are excluded.
+     `PhiNode` accumulates across the back edge (`LoopCarried`), or a project call there whose
+     callee's `reallocates_params` covers the argument carrying the previous value; one-off
+     concatenation and padding in a loop are excluded.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of the reports
@@ -475,7 +501,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
 5. **Context relaxation**: `click` / `typer` commands (`@command`), ASGI lifespan hooks,
    `LoopBound::ConstSmall` / `RetryPattern` loops, and test code (`lint.relax-async-in-tests`,
    default true) are relaxed by default.
-6. **`EFF106`** (opt-in): a forward must-hold dataflow over the CFG for `with` regions of
+6. **`EFF106`** (opt-in): a forward must-hold dataflow over the CFG, one fact per acquiring
+   `with` item (an `ExitWith` releases the acquisitions of its own statement), for `with` regions of
    synchronous locks (Layer 2 `sync_lock_or_tx` classes: `threading.Lock` / `RLock` / `Semaphore`
    / `BoundedSemaphore` / `Condition`) and transaction starters (`Session.begin()`,
    `Connection.begin()`, `Engine.begin()`, `transaction.atomic()`, `psycopg.Connection.transaction()`,
