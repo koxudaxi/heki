@@ -1609,6 +1609,7 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_recursive_snapshot());
     steps.extend(steps_moved_lines());
     steps.extend(steps_discarded_buffer());
+    steps.extend(steps_src_layout());
     steps.extend(steps_ignore_files());
     steps
 }
@@ -1719,6 +1720,17 @@ fn steps_discarded_buffer() -> Vec<Step> {
             ],
         )
         .present(&[("app/handler.py", "EFF101")]),
+    ]
+}
+
+/// The first package marker under `src/` switches the project to the `src` layout.
+fn steps_src_layout() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the first package marker under src",
+            vec![Action::Write("src/pkg/__init__.py", String::new())],
+        )
+        .present(&[("caller.py", "EFF101")]),
     ]
 }
 

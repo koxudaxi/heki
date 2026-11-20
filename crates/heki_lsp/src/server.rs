@@ -25,6 +25,7 @@
 use crate::convert;
 use crate::engine::{CONFIG_FILES, Selectors, Workspace};
 use heki_diagnostics::Diagnostic;
+use heki_effect::detect_src_layout;
 use heki_rules::project::{IGNORE_FILES, ProjectOptions, find_root};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
@@ -323,6 +324,7 @@ impl State {
         if changes
             .iter()
             .any(|c| path_of(&c.uri).is_some_and(|p| reloads(&p)))
+            || self.layout_changed()
         {
             let (pubs, errors, _) = self.load();
             return (pubs, errors);
@@ -354,6 +356,14 @@ impl State {
         pubs.extend(more);
         errors.extend(more_errors);
         (pubs, errors)
+    }
+
+    /// Whether a package marker that appeared or disappeared under `src/` switched the `src`
+    /// layout the workspace was indexed with: every module name under `src/` changes with it.
+    fn layout_changed(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(|ws| detect_src_layout(&ws.env.root) != ws.env.src_layout)
     }
 
     /// A document was closed (`text`: what it held): the file on the disk is its text again.
@@ -675,6 +685,10 @@ impl LanguageServer for Backend {
             doc.text = text;
         }
         let (pubs, errors) = Self::blocking(&self.state, move |st| {
+            if st.layout_changed() {
+                let (pubs, errors, _) = st.load();
+                return (pubs, errors);
+            }
             let Some(text) = st.text_of(&path) else {
                 return (Vec::new(), Vec::new());
             };

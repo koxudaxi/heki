@@ -478,3 +478,28 @@ fn watch_rechecks_a_call_chain_whose_end_moves() {
         "the watch's re-check equals `heki check`:\n{stdout}"
     );
 }
+
+#[test]
+fn watch_reloads_when_the_first_package_marker_under_src_appears() {
+    let p = Project::new("watch_src_layout");
+    p.write(
+        "src/pkg/util.py",
+        "import time\n\n\ndef wait():\n    time.sleep(1)\n",
+    )
+    .write(
+        "caller.py",
+        "from pkg.util import wait\n\n\nasync def call():\n    wait()\n",
+    );
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "1");
+    // Without a package under `src/`, the helper is `src.pkg.util`: the import does not reach it.
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    p.write("src/pkg/__init__.py", "");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 3 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("caller.py:5:5: EFF101 "),
+    );
+}

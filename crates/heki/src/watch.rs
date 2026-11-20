@@ -3,12 +3,13 @@
 //! callers and importers are re-analyzed only when a summary or declaration changed).
 //!
 //! Files are polled (no platform watcher dependency). A change to the configuration or to the
-//! summary snapshot reloads the whole workspace.
+//! summary snapshot, or a switch of the `src` layout, reloads the whole workspace.
 
 use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
+use heki_effect::detect_src_layout;
 use heki_lsp::{CONFIG_FILES, EditOutcome, Selectors, Workspace};
 use heki_profile::ProfileData;
 use heki_rules::project::{ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set};
@@ -161,7 +162,10 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
     while max_runs.is_none_or(|m| runs < m) {
         std::thread::sleep(POLL);
         let (now_files, now_config) = w.scan(&ws.env)?;
-        if now_config != config {
+        // A package marker appearing or disappearing under `src/` can switch the `src` layout:
+        // every module name under `src/` changes with it.
+        let relayout = detect_src_layout(&ws.env.root) != ws.env.src_layout;
+        if now_config != config || relayout {
             let (fresh, errs, stamps) = w.load()?;
             ws = fresh;
             let (d, more) = ws.diagnose_all();

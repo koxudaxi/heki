@@ -116,4 +116,6 @@ $ heki check --watch
 
 re-checks changed files and the files affected by them, using the same incremental engine, and
 prints the full list of diagnostics after every change. A change to `pyproject.toml`,
-`heki.toml`, or the summary snapshot reloads everything.
+`heki.toml`, or the summary snapshot reloads everything, and so does the first package marker
+(`__init__.py`) under `src/` appearing or the last one disappearing (module names under `src/`
+change with the `src` layout); the server does the same.
