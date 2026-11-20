@@ -10,8 +10,8 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, EffectSummary,
-    FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, WriteKind, boundary_reports_in,
-    group_by_root_cause,
+    Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, WriteKind, anchors_call_site,
+    boundary_reports_in, group_by_root_cause,
 };
 use heki_ir::{InstKind, IrFunction, LoopBound, VarId};
 use heki_kb::ExecEffectKind;
@@ -88,8 +88,9 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             } else {
                 "a blocking call"
             };
+            let verb = if r.iterates { "iterates" } else { "calls" };
             let mut message = format!(
-                "`async def {}` calls `{first}`, which reaches {what} `{}` ({}) on the event loop; offload it (`asyncio.to_thread`) or use an async API",
+                "`async def {}` {verb} `{first}`, which reaches {what} `{}` ({}) on the event loop; offload it (`asyncio.to_thread`) or use an async API",
                 r.function.qualname,
                 r.root_cause,
                 effect_name(r.effect)
@@ -165,11 +166,14 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 continue;
             }
             for inst in &bb.insts {
+                // Reading a property runs its getter (a call site at the read); iterating a
+                // generator runs its body (a call site at the iteration).
+                if !anchors_call_site(&inst.kind) {
+                    continue;
+                }
                 let args: &[VarId] = match &inst.kind {
                     InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => args,
-                    // Reading a property runs its getter (a call site at the read).
-                    InstKind::AttrLoad { .. } => &[],
-                    _ => continue,
+                    _ => &[],
                 };
                 let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {
                     continue;
@@ -330,19 +334,41 @@ impl Boundary<'_> {
         }
     }
 
-    /// Whether the effects of a project callee count at `site`: its body runs at the call and
-    /// `allowed-callees` does not name it.
-    fn counts(&self, cx: &CheckContext<'_>, site: &CallSite, callee: &FuncKey) -> bool {
-        cx.index
-            .summary(callee)
-            .is_some_and(|s| site.runs_body_of(s))
-            && !names_function(&self.allowed_callees, callee)
+    /// Which facts of a project callee count at `site`, run where the site's caller runs
+    /// `into` ([`heki_effect::ProjectIndex::delivery`]): `allowed-callees` names neither the
+    /// callee whose body runs nor the function iterating its result (`SiteRole::Through`). A
+    /// function returning a generator is not checked itself: its own body does not run there.
+    fn counts<'s>(
+        &self,
+        cx: &CheckContext<'_>,
+        site: &'s CallSite,
+        callee: &FuncKey,
+        into: Facts,
+    ) -> Option<heki_effect::Delivery<'s>> {
+        let s = cx.index.summary(callee)?;
+        let d = cx.index.delivery(site, s).filter(|d| d.into == into)?;
+        let runs_body = d.from == s.body_facts();
+        let allowed = runs_body && names_function(&self.allowed_callees, callee)
+            || d.via
+                .is_some_and(|p| names_function(&self.allowed_callees, p));
+        (!allowed).then_some(d)
     }
 
-    /// Whether the search enters a project callee: its effects count and it is not another
-    /// function of the scopes (that one reports its own violations).
-    fn follows(&self, cx: &CheckContext<'_>, site: &CallSite, callee: &FuncKey) -> bool {
-        self.counts(cx, site, callee) && !self.in_scope(callee)
+    /// Whether the search enters a project callee: its facts count and, when its own body runs,
+    /// it is not another function of the scopes (that one reports its own violations).
+    fn follows<'s>(
+        &self,
+        cx: &CheckContext<'_>,
+        site: &'s CallSite,
+        callee: &FuncKey,
+        into: Facts,
+    ) -> Option<heki_effect::Delivery<'s>> {
+        let d = self.counts(cx, site, callee, into)?;
+        let own_body = cx
+            .index
+            .summary(callee)
+            .is_some_and(|s| d.from == s.body_facts());
+        (!(own_body && self.in_scope(callee))).then_some(d)
     }
 
     /// Whether the boundary checks writes: `writes-targets`, or a `write-universe`.
@@ -443,15 +469,15 @@ pub(crate) fn eff201(
     Ok(())
 }
 
-/// Reached functions in breadth-first order (`0`: the scope function) with the parent node and
-/// the hop from it.
-type Nodes = Vec<(FuncKey, Option<(usize, CallHop)>)>;
+/// Reached nodes in breadth-first order (`0`: the scope function's body): a function, which of
+/// its facts, and the parent node with the hops from it.
+type Nodes = Vec<(FuncKey, Facts, Option<(usize, Vec<CallHop>)>)>;
 
 /// Hops from the scope function down to node `i`.
 fn chain_to(nodes: &Nodes, mut i: usize) -> Vec<CallHop> {
     let mut chain = Vec::new();
-    while let Some((parent, hop)) = &nodes[i].1 {
-        chain.push(hop.clone());
+    while let Some((parent, hops)) = &nodes[i].2 {
+        chain.extend(hops.iter().rev().cloned());
         i = *parent;
     }
     chain.reverse();
@@ -511,7 +537,9 @@ enum WriteBucket {
     Undeclared(String),
 }
 
-/// The part of the call graph one scope function reaches.
+/// The part of the call graph one scope function reaches. A node is a function's facts of one
+/// kind (`Facts`): its body, or what iterating the object it returns runs (a function returning
+/// a generator hands out the generator's body, which runs where the object is iterated).
 struct Reach<'a> {
     nodes: Nodes,
     /// Followed call edges `(caller node, callee node, binding)`.
@@ -531,34 +559,49 @@ impl<'a> Reach<'a> {
         b: &Boundary<'_>,
         start: &FuncKey,
     ) -> Self {
+        let start_facts = cx
+            .index
+            .summary(start)
+            .map_or(Facts::Body, EffectSummary::body_facts);
         let mut reach = Self {
-            nodes: vec![(start.clone(), None)],
+            nodes: vec![(start.clone(), start_facts, None)],
             edges: Vec::new(),
             exec: BTreeMap::new(),
             writes: BTreeMap::new(),
             reads: BTreeMap::new(),
             calls: BTreeMap::new(),
         };
-        let mut index_of: FxHashMap<FuncKey, usize> = FxHashMap::default();
-        index_of.insert(start.clone(), 0);
+        let mut index_of: FxHashMap<(FuncKey, Facts), usize> = FxHashMap::default();
+        index_of.insert((start.clone(), start_facts), 0);
         let mut i = 0;
         while i < reach.nodes.len() {
-            let func = reach.nodes[i].0.clone();
+            let (func, facts) = (reach.nodes[i].0.clone(), reach.nodes[i].1);
+            // The node runs the function's own body, or only what its returned object hands out
+            // (the `Return` sites of the object its calls return).
+            let runs_body = cx
+                .index
+                .summary(&func)
+                .is_some_and(|s| facts == s.body_facts());
+            let into = if runs_body {
+                Facts::Body
+            } else {
+                Facts::Result
+            };
             let own: &[(&'a Path, &'a CallSite)] = sites.get(&func).map_or(&[], Vec::as_slice);
-            if b.checks_writes() {
+            if b.checks_writes() && runs_body {
                 reach.collect_writes(cx, b, i, &func, own);
             }
-            if b.reads_targets {
+            if b.reads_targets && runs_body {
                 reach.collect_reads(cx, b, i, &func);
             }
             for &(path, site) in own {
-                let hop = |callee: String| CallHop {
-                    caller: func.clone(),
+                let hop = |caller: &FuncKey, callee: String| CallHop {
+                    caller: caller.clone(),
                     callee,
                     span: site.span,
                     path: path.to_path_buf(),
                 };
-                if b.calls && !b.allows_call(site) {
+                if b.calls && runs_body && !b.allows_call(site) {
                     for (ti, _) in b
                         .call_targets
                         .iter()
@@ -568,7 +611,7 @@ impl<'a> Reach<'a> {
                         let nodes = &reach.nodes;
                         note(&mut reach.calls, ti, (func.fqn(), site.span), || {
                             let mut chain = chain_to(nodes, i);
-                            chain.push(hop(site_callee(site)));
+                            chain.push(hop(&func, site_callee(site)));
                             let kind = if site.constructs.is_some() {
                                 "constructs"
                             } else {
@@ -582,24 +625,32 @@ impl<'a> Reach<'a> {
                     CallTarget::Layer2 {
                         symbol, effects, ..
                     } => {
-                        if b.allows_symbol(symbol) {
+                        if !runs_body || b.allows_symbol(symbol) {
                             continue;
                         }
                         for e in effects.iter().filter(|e| b.effects.contains(*e)) {
                             let nodes = &reach.nodes;
                             note(&mut reach.exec, *e, (func.fqn(), site.span), || {
                                 let mut chain = chain_to(nodes, i);
-                                chain.push(hop(symbol.clone()));
+                                chain.push(hop(&func, symbol.clone()));
                                 (chain, site.span, "")
                             });
                         }
                     }
                     CallTarget::Project(callees) => {
-                        for bc in callees.iter().filter(|bc| b.follows(cx, site, &bc.callee)) {
-                            let j = *index_of.entry(bc.callee.clone()).or_insert_with(|| {
+                        for bc in callees {
+                            let Some(d) = b.follows(cx, site, &bc.callee, into) else {
+                                continue;
+                            };
+                            let hops = match d.via {
+                                None => vec![hop(&func, bc.callee.fqn())],
+                                Some(p) => vec![hop(&func, p.fqn()), hop(p, bc.callee.fqn())],
+                            };
+                            let node = (bc.callee.clone(), d.from);
+                            let j = *index_of.entry(node).or_insert_with(|| {
                                 reach
                                     .nodes
-                                    .push((bc.callee.clone(), Some((i, hop(bc.callee.fqn())))));
+                                    .push((bc.callee.clone(), d.from, Some((i, hops))));
                                 reach.nodes.len() - 1
                             });
                             reach.edges.push((i, j, bc));
@@ -639,7 +690,8 @@ impl<'a> Reach<'a> {
                     if own.iter().any(|(_, site)| {
                         site.span == hop.span
                             && site.project_callees().iter().any(|bc| {
-                                bc.callee.fqn() == hop.callee && b.counts(cx, site, &bc.callee)
+                                bc.callee.fqn() == hop.callee
+                                    && b.counts(cx, site, &bc.callee, Facts::Body).is_some()
                             })
                     }) =>
                 {
@@ -732,11 +784,12 @@ impl<'a> Reach<'a> {
             }
         }
         let mut out = 0;
-        for (i, (func, _)) in self.nodes.iter().enumerate() {
+        for (i, (func, facts, _)) in self.nodes.iter().enumerate() {
             let local = cx
                 .index
                 .file_of(func)
                 .and_then(|p| cx.index.files[p].local_functions.get(func))
+                .filter(|s| *facts == s.body_facts())
                 .map_or(0, |s| s.mutates_params);
             for k in (0..64).filter(|k| local & (1u64 << k) != 0) {
                 out |= alias.get(&(i, k)).copied().unwrap_or(0);

@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{CheckContext, RuleConfigError};
 use heki_diagnostics::Diagnostic;
-use heki_effect::{CallHop, CallSite, FuncKey};
+use heki_effect::{CallHop, CallSite, FuncKey, SiteRole};
 use rustc_hash::FxHashSet;
 
 /// One call target: a project function, a method (with its overrides in subclasses), or a class
@@ -32,8 +32,12 @@ impl CallTargetPattern {
     /// Whether `site` calls the target: it constructs a class of the target's family, or every
     /// project function it may call (each candidate of the class hierarchy) is the target or
     /// an override of it. A construction is matched by its class only: its `__init__` runs as
-    /// part of it.
+    /// part of it. Only the call itself calls (`SiteRole::Call`): the other sites of the object
+    /// a call returns (where it is iterated, returned, or handed on) call nothing more.
     pub(crate) fn hit(&self, site: &CallSite) -> bool {
+        if site.role != SiteRole::Call {
+            return false;
+        }
         match &site.constructs {
             Some(class) => self.classes.contains(class),
             None => {

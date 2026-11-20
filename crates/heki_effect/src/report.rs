@@ -2,7 +2,7 @@
 //! (docs/ANALYSIS_AND_KB_SPEC.md section 2.4). Rule wiring (codes, severities) is in `heki_rules`.
 
 use crate::summary::BLOCKING_EFFECTS;
-use crate::{CallHop, FuncKey, ProjectIndex};
+use crate::{CallHop, FuncKey, ProjectIndex, SiteRole};
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use std::collections::BTreeMap;
@@ -23,6 +23,9 @@ pub struct BoundaryReport {
     pub root_cause: String,
     /// Shortest chain from this call site to the sink.
     pub chain: Vec<CallHop>,
+    /// The chain starts where the async function iterates a generator (`SiteRole::Iterate`, or
+    /// a project generator iterating what it is handed), not at a call.
+    pub iterates: bool,
 }
 
 /// One diagnostic to emit: a representative plus how many same-cause reports it stands for.
@@ -59,8 +62,9 @@ pub fn boundary_reports_in<'p>(
     index: &ProjectIndex,
     paths: impl IntoIterator<Item = &'p Path>,
 ) -> Vec<BoundaryReport> {
-    let mut best: BTreeMap<(PathBuf, Span, FuncKey, ExecEffectKind), Vec<CallHop>> =
-        BTreeMap::new();
+    // `(file, span, function, effect) -> (shortest chain, it starts at an iteration)`.
+    type Best = BTreeMap<(PathBuf, Span, FuncKey, ExecEffectKind), (Vec<CallHop>, bool)>;
+    let mut best = Best::new();
     for (path, file) in paths
         .into_iter()
         .filter_map(|p| index.files.get_key_value(p))
@@ -72,6 +76,10 @@ pub fn boundary_reports_in<'p>(
             if !reported_caller {
                 continue;
             }
+            let iterates = matches!(
+                site.role,
+                SiteRole::Iterate | SiteRole::Through { iterated: true, .. }
+            );
             // Awaiting another `async def` never fires: its own boundary does.
             let found = index
                 .site_effects(path, site)
@@ -81,21 +89,24 @@ pub fn boundary_reports_in<'p>(
             for (effect, chain) in found {
                 let key = (path.clone(), site.span, site.caller.clone(), effect);
                 let slot = best.entry(key).or_default();
-                if slot.is_empty() || chain.len() < slot.len() {
-                    *slot = chain;
+                if slot.0.is_empty() || chain.len() < slot.0.len() {
+                    *slot = (chain, iterates);
                 }
             }
         }
     }
     best.into_iter()
-        .map(|((path, span, function, effect), chain)| BoundaryReport {
-            root_cause: chain.last().map(|h| h.callee.clone()).unwrap_or_default(),
-            path,
-            span,
-            function,
-            effect,
-            chain,
-        })
+        .map(
+            |((path, span, function, effect), (chain, iterates))| BoundaryReport {
+                root_cause: chain.last().map(|h| h.callee.clone()).unwrap_or_default(),
+                path,
+                span,
+                function,
+                effect,
+                chain,
+                iterates,
+            },
+        )
         .collect()
 }
 

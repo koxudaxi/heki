@@ -679,6 +679,9 @@ mod tests {
                     "trio.to_thread.run_sync",
                     "starlette.concurrency.run_in_threadpool",
                     "fastapi.concurrency.run_in_threadpool",
+                    "asgiref.sync.sync_to_async",
+                    "asyncer.asyncify",
+                    "channels.db.database_sync_to_async",
                 ]),
                 offload(0),
             ),
@@ -1245,6 +1248,9 @@ mod tests {
         "trio",
         "starlette",
         "fastapi",
+        "asgiref",
+        "asyncer",
+        "channels",
     ];
 
     #[test]

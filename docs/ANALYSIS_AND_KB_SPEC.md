@@ -139,6 +139,8 @@ EffectSummary(f) = {
     escapes_params:           Bitset,                      // stored in an attribute / container / global, or returned
     consumes_params:          Bitset,                      // iterated to exhaustion on every normal path (MUT106)
     unconditional_forwards:   Bitset,                      // passed on at calls that run on every normal path
+    iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
+                                                           // passed there runs there
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
     mutates_self_attrs:       Set<AttrKeyPath>,            // reassignment or in-place change of self.<attr> (indirect too)
     invalidates_cached:       Set<AttrName>,               // del self.<prop>, self.__dict__.pop("<prop>", ...), clear
@@ -152,10 +154,52 @@ EffectSummary(f) = {
     sync_driven_only:         bool,                        // internal async def driven only by a sync driver
     unknown_calls:            bool,
 
+    // What iterating the returned object runs (a plain function returning a generator)
+    iterated:                 Option<EffectSummary>,       // in the function's own parameters
+
     // Metadata
-    is_async, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
+    is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
 ```
+
+**Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
+`ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs
+(`Result`: a generator function's body, or a plain function's `iterated`). A call (`SiteRole::Call`)
+runs the body of a plain function, of an `async def` only when it is awaited or driven (calling one
+only creates a coroutine), and never of a generator function (calling one only creates the
+generator; `FunctionDecl::is_generator`: no decorator other than `staticmethod` / `classmethod` /
+`abstractmethod` / `override`). The object a project call returns gets one more site, with the
+call's callees and bindings, wherever the calling function uses it, found by the shared iteration
+table (`consumption`):
+
+- `Iterate`: it is iterated there (a `for` loop, a comprehension: inlined from Python 3.12, a frame
+  of its own receiving it before; unpacking; `yield from`; a consuming call such as `list(...)` or
+  `items.extend(...)`; a lazy wrapper iterated there, such as `enumerate(...)` or `zip(...)`): its
+  `Result` runs in the caller's body;
+- `Return`: a plain function returns it, directly or through lazy wrappers: its `Result` goes into
+  the function's own `iterated`;
+- `Through`: it is passed to a project call whose body iterates that parameter (`iterates_params`)
+  at the call, or whose result is iterated there: its `Result` runs inside that call.
+
+Any other use runs nothing in the caller: a generator stored, yielded, returned from an
+`async def`, handed to an external or unresolved call (`StreamingResponse(rows())`), or only
+stepped with `next()` (which runs it only to its first `yield`, which the summary does not separate
+from the rest of the body). Generator expressions keep running where they are written, where they
+are almost always consumed. Every fact moves with the body: execution effects and their chains,
+parameter mutations, escapes, and slots, `self` attribute reads and writes, typed write sites, and
+the read and call sites the contract rules walk to (`MUT203`, `MUT204`, and `EFF201`'s
+`reads-targets` / `calls`: only the call itself is a call, never another site of its result); a
+chain is the call stack where the body runs (the
+generator is called from the iterating loop, not from the function that returned it, and from
+inside a function iterating it). The contract rules walk the same deliveries backwards over
+`(function, Body | Result)` states, so a private helper hands its reports only to the callers that
+run it: a private coroutine that is only scheduled (`asyncio.create_task`) reports its own writes.
+
+A function decorated with a catalog entry offloading argument 0, applied directly or as a factory
+(`@sync_to_async`, `@sync_to_async(thread_sensitive=False)`), is `d(f)`: calling it is a call of
+`d` with the function as its offloaded argument (`FunctionDecl::offloaded_by`, resolved through
+imports and re-exports when the declarations are completed; every definition of the name must be
+decorated so), and its body never runs at the call.
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
@@ -199,10 +243,13 @@ which module imports which.
 - Sources: generator expressions; `iter` / `zip` / `map` / `filter` / `enumerate` / `reversed`
   and the single-pass `itertools` functions (never `tee`, `repeat`, `cycle`, `count`); project
   generator functions; and `Iterator` / `Generator` annotations (not `Iterable` / `Sequence`).
-- Consumers: `for` loops and comprehensions, and `list` / `tuple` / `set` / `frozenset` / `dict` /
-  `sum` / `any` / `all` / `min` / `max` / `sorted` / `str.join`, also through wrappers over one
-  iterable; `next()` is stepping, not consumption. A project function consumes its argument when
-  `consumes_params` says so.
+- Consumers: `for` loops and comprehensions, unpacking, `yield from`, and the calls that
+  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `any` / `all`
+  / `min` / `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
+  `heapq.nlargest`, `functools.reduce`, ...: one table, `consumption::FULL_CONSUMERS`, which also
+  decides where a generator's body runs), also through wrappers over one iterable; `next()` is
+  stepping, not consumption. A project function consumes its argument when `consumes_params` says
+  so, and its body runs at the call.
 - The first pass must be full (a loop that can `break`, `return`, or `raise` is partial); the
   second pass must be reachable from it on normal CFG paths; an iterator created outside a loop
   and consumed inside it is reported unless the loop runs at most once.
@@ -289,6 +336,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - When a function `w(fn, *args)` calls `asyncio.to_thread(fn, ...)` (`offloads_blocking_arg =
      0`) or similar, the parameter index of `fn` is recorded in `w`'s `offloads_blocking_params`
      and propagated upward, which stops `await in_thread(self.open)` from counting as blocking.
+   - An offloading decorator (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`, or a
+     project decorator declared with `offloads-blocking-arg = 0`) makes calling the function a
+     call of the decorator's catalog entry (section 2.2).
 2. **Sync-over-async relaxation** (from datamodel-code-generator `client.py:1399`):
    - A private `async def` without route decorators that is only driven by synchronous drivers
      (`.send(None)`, `run_sync`) and never awaited from the event loop is `sync_driven_only` and
@@ -322,7 +372,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    keep it, `cancel()` / `result()` / `exception()` do.
 8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function finds the shortest chain to each forbidden effect, without entering
-   `allowed-callees`, other scope functions, or `async def` bodies that do not run at the call.
+   `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
+   bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
+   function returning a generator is entered as what iterating its result runs.
 
 ### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
 - **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**
@@ -410,7 +462,8 @@ round; `tests/sentinel/verify_soundness_kb.py` checks every claim on real CPytho
 The single place for every execution-effect origin. An entry has `symbol`, `effects`
 (`blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`,
 `unpooled_client_alloc`, `db_query`, `quadratic_realloc`), `async_safe` (`asyncio.StreamWriter.write`),
-`offloads_blocking_arg` (`asyncio.to_thread`), `excluded` (`logging.Logger.*`), `copy_sanitizer`
+`offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
+`asgiref.sync.sync_to_async`), `excluded` (`logging.Logger.*`), `copy_sanitizer`
 (`copy.deepcopy`, `BaseModel.model_copy`: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
 `opaque_to_layer3` (reserved for Layer 3). A file lists its `opaque_packages`. Projects add or

@@ -15,8 +15,8 @@ use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ReadOnlyAttr, ReadOnlyKind, Slot,
-    WriteKind,
+    BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ReadOnlyAttr, ReadOnlyKind, SiteRole,
+    Slot, WriteKind,
 };
 use rustc_hash::FxHashSet;
 use std::path::Path;
@@ -67,6 +67,8 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             rule.own_changes(unit, key, s, out);
         }
         // Without `MUT108`, only the calls of the functions with a read-only parameter matter.
+        // The call itself hands its arguments over; the other sites of the object it returns
+        // (`SiteRole`) hand over nothing more.
         let readonly: FxHashSet<&str> = cx
             .decls
             .module(&file.module_name)
@@ -76,7 +78,8 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             .map(|(q, _)| q.as_str())
             .collect();
         for site in file.call_sites.iter().filter(|s| {
-            (fields || readonly.contains(s.caller.qualname.as_str()))
+            s.role == SiteRole::Call
+                && (fields || readonly.contains(s.caller.qualname.as_str()))
                 && cx.index.file_of(&s.caller) == Some(path)
         }) {
             rule.handed_over(unit, path, site, out);
@@ -344,7 +347,11 @@ impl Rule<'_, '_> {
                 found = i;
                 break;
             }
-            for s in file.call_sites.iter().filter(|s| s.caller == func) {
+            for s in file
+                .call_sites
+                .iter()
+                .filter(|s| s.caller == func && s.role == SiteRole::Call)
+            {
                 let callees = s
                     .project_callees()
                     .iter()

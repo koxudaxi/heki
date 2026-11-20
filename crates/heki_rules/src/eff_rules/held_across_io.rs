@@ -13,7 +13,7 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::resolve_inst;
-use heki_effect::{CallHop, CallSite, Callee, SiteEffect, TypeCtx, Val};
+use heki_effect::{CallHop, CallSite, Callee, SiteEffect, TypeCtx, Val, anchors_call_site};
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
@@ -111,8 +111,9 @@ fn offense(
 ) -> Option<Offense> {
     match &inst.kind {
         InstKind::Await { .. } => Some(Offense::Await),
-        // Reading a property runs its getter (a call site at the read).
-        InstKind::Call { .. } | InstKind::MethodCall { .. } | InstKind::AttrLoad { .. } => {
+        // Reading a property runs its getter (a call site at the read); iterating a generator
+        // runs its body (a call site at the iteration).
+        kind if anchors_call_site(kind) => {
             // An awaited `async def` runs here too: its `await` is the report.
             let effects: Vec<SiteEffect> = sites
                 .get(&(qualname.to_owned(), inst.span))

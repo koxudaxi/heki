@@ -47,7 +47,11 @@ chain is a shortest one. The search does not enter:
   effects are allowed;
 - other functions of the scopes: each reports its own violations, so a violation is reported
   once, at the boundary, not again by every scope function above it;
-- `async def` functions called without `await` (calling one only creates a coroutine).
+- `async def` functions called without `await` (calling one only creates a coroutine), and
+  generators that are not iterated (calling a generator function only creates the generator;
+  its body is searched where it is iterated, as for `EFF101`, and a generator a function
+  returns where the object it returns is iterated);
+- functions an offloading decorator runs on another thread (`@sync_to_async`, ...).
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope

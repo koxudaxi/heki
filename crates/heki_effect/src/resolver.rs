@@ -217,6 +217,12 @@ pub struct FunctionDecl {
     /// `@dataclass_transform(...)` on some definition of this decorator function (PEP 681: an
     /// overload or the implementation): `Some(frozen_default)` (`MUT108`).
     pub transform: Option<bool>,
+    /// The Layer 2 symbol of a decorator that runs the function on another thread, on every
+    /// definition: a catalog entry with `offloads_blocking_arg = 0`, applied directly or as a
+    /// decorator factory (`@sync_to_async`, `@sync_to_async(thread_sensitive=False)`,
+    /// `@database_sync_to_async`, `@asyncify`). `@d def f` is `f = d(f)`: calling `f` calls
+    /// `d(f)`, which offloads the body, so the body does not run at the call.
+    pub offloaded_by: Option<String>,
 }
 
 /// Per-module declarations other modules need (stored in `FileSummary`, IR-free).
@@ -238,11 +244,15 @@ pub struct ModuleDecls {
 
 impl ModuleDecls {
     /// The pass-1 declarations these were completed from (`project_decls_for`): without the
-    /// inferred instance attribute and module global types.
+    /// inferred instance attribute and module global types, and without the offloading
+    /// decorators resolved through the project (`FunctionDecl::offloaded_by`).
     pub fn structural(&self) -> Self {
         let mut out = self.clone();
         for class in out.classes.values_mut() {
             class.attr_types.clear();
+        }
+        for function in out.functions.values_mut() {
+            function.offloaded_by = None;
         }
         out.global_types.clear();
         out
@@ -1477,18 +1487,12 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .as_deref()
                 .and_then(|a| decls.resolve_annotation(a)),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
-            is_generator: matches!(
-                f.kind,
-                FunctionKind::Generator | FunctionKind::AsyncGenerator
-            ) && f.decorators.iter().all(|d| {
-                let base = d.split('(').next().unwrap_or(d).trim();
-                let last = base.rsplit('.').next().unwrap_or(base);
-                GENERATOR_KEEPING_DECORATORS.contains(&last)
-            }),
+            is_generator: is_generator_function(f),
             is_property: getters_only[f.qualname.as_str()],
             readonly_params,
             mutable_params,
             transform: transforms[f.qualname.as_str()],
+            offloaded_by: None,
         };
         decls.functions.insert(f.qualname.clone(), decl);
     }
@@ -1645,6 +1649,39 @@ fn compares_false(
         })
 }
 
+/// Whether calling `f` returns a fresh (async) generator: a generator function without
+/// decorators other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
+/// `@contextmanager` generator returns a context manager, which runs the body at `with`). A
+/// generator expression is no generator function: its scope is never called, and its body
+/// counts where it is written, where it is almost always consumed (`sum(x for x in xs)`).
+pub(crate) fn is_generator_function(f: &IrFunction) -> bool {
+    f.name != "<genexpr>"
+        && matches!(
+            f.kind,
+            FunctionKind::Generator | FunctionKind::AsyncGenerator
+        )
+        && f.decorators.iter().all(|d| {
+            let base = d.split('(').next().unwrap_or(d).trim();
+            let last = base.rsplit('.').next().unwrap_or(base);
+            GENERATOR_KEEPING_DECORATORS.contains(&last)
+        })
+}
+
+/// The catalog symbol of a decorator of `f` that offloads the function it decorates
+/// (`FunctionDecl::offloaded_by`): its head (`sync_to_async` of
+/// `sync_to_async(thread_sensitive=False)`) resolved through the module's runtime imports and
+/// the project's re-exports.
+fn offloading_decorator(cx: &TypeCtx<'_>, f: &IrFunction) -> Option<String> {
+    f.decorators.iter().find_map(|d| {
+        let (head, _) = decorator_parts(d);
+        let symbol = cx
+            .project
+            .canonical(&cx.module.resolve_dotted(head, false)?);
+        let entry = cx.kb.lookup(&symbol)?;
+        (entry.offloads_blocking_arg == Some(0)).then_some(symbol)
+    })
+}
+
 /// Pass 2: Priority 3 class attribute types and module global instance types.
 fn complete_decls(
     input: &ModuleInput<'_>,
@@ -1653,6 +1690,29 @@ fn complete_decls(
     kb: &EffectiveEcosystemKb,
 ) -> ModuleDecls {
     let cx = TypeCtx::new(input, project, kb);
+    // `FunctionDecl::offloaded_by`: the decorator must offload every definition of the name.
+    let mut offloaded: FxHashMap<&str, Option<String>> = FxHashMap::default();
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| is_summarized_function(f))
+    {
+        let symbol = offloading_decorator(&cx, f);
+        offloaded
+            .entry(&f.qualname)
+            .and_modify(|s| {
+                if *s != symbol {
+                    *s = None;
+                }
+            })
+            .or_insert(symbol);
+    }
+    for (qualname, symbol) in offloaded {
+        if let Some(d) = decls.functions.get_mut(qualname) {
+            d.offloaded_by = symbol;
+        }
+    }
     // Classes come from the semantic model, IR classes and methods from the IR of the same
     // AST, so every IR class is declared; one that is not gets no attribute types.
     for f in &input.ir.functions {

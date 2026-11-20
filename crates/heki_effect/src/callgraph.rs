@@ -8,8 +8,8 @@
 
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ProjectIndex,
-    TypedFieldWriteSite, WriteKind,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Delivery, EffectSummary, Facts,
+    FuncKey, ProjectIndex, SiteRole, TypedFieldWriteSite, WriteKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
@@ -218,16 +218,26 @@ fn recompute(
         let site = &index.files[site_path].call_sites[*i];
         for bc in site.project_callees() {
             if let Some(callee) = index.summary(&bc.callee) {
-                apply_edge(&mut s, func, site, bc, callee, site_path);
+                apply_edge(index, &mut s, func, site, bc, callee, site_path);
             }
         }
+    }
+    // Returned objects that run nothing when iterated hand nothing out.
+    if s.iterated
+        .as_deref()
+        .is_some_and(|i| *i == EffectSummary::default())
+    {
+        s.iterated = None;
     }
     s.refresh_typed_field_writes();
     s
 }
 
-/// Transfer the facts of one resolved callee across one call site into the caller.
+/// Transfer the facts of one resolved callee across one call site into the caller: the facts
+/// the site runs ([`delivery`]), into the caller's body or into what iterating the caller's
+/// result runs.
 fn apply_edge(
+    index: &ProjectIndex,
     s: &mut EffectSummary,
     caller: &FuncKey,
     site: &CallSite,
@@ -235,61 +245,85 @@ fn apply_edge(
     callee: &EffectSummary,
     path: &Path,
 ) {
-    let hop = CallHop {
-        caller: caller.clone(),
-        callee: bc.callee.fqn(),
-        span: site.span,
-        path: path.to_path_buf(),
+    let Some(d) = delivery(|k| index.summary(k), site, callee) else {
+        return;
     };
+    let Some(facts) = callee.facts(d.from) else {
+        return;
+    };
+    let lead = lead_hops(site, path, &bc.callee, d.via);
+    let rewrite = rewrites(callee, d.from);
+    // Single-pass consumption (`MUT106`): a callee iterating its parameter k to exhaustion
+    // consumes the caller's parameter passed as argument k when the callee's body runs at the
+    // call, provided every call receiving that parameter runs on each normal path of the caller.
+    if d.from == Facts::Body && d.into == Facts::Body {
+        s.consumes_params |= caller_params(facts.consumes_params, bc) & s.unconditional_forwards;
+    }
+    let target = match d.into {
+        Facts::Body => s,
+        Facts::Result => s.iterated.get_or_insert_with(Box::default),
+    };
+    transfer(target, caller, site, bc, callee, facts, &lead, rewrite);
+}
+
+/// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
+/// build each chain ([`extend_chain`]).
+#[allow(clippy::too_many_arguments)]
+fn transfer(
+    t: &mut EffectSummary,
+    caller: &FuncKey,
+    site: &CallSite,
+    bc: &BoundCallee,
+    callee: &EffectSummary,
+    facts: &EffectSummary,
+    lead: &[CallHop],
+    rewrite: bool,
+) {
     let origin = |k: usize| bc.params.get(k);
 
     // a. Offload wrappers: a callee offloading its parameter k offloads the caller's
     //    parameter p when argument k is p. The offloaded callable is never called here,
     //    so its blocking effects never reach the caller.
-    s.offloads_blocking_params |= caller_params(callee.offloads_blocking_params, bc);
+    t.offloads_blocking_params |= caller_params(facts.offloads_blocking_params, bc);
 
-    // b. Execution effects. Calling an `async def` without awaiting or driving it only
-    //    creates a coroutine: its body runs later on the event loop, where its own boundary
-    //    reports it.
-    if runs_at_call(callee, site) {
-        for e in callee
-            .direct_exec_effects
-            .iter()
-            .chain(&callee.transitive_exec_effects)
-        {
-            s.transitive_exec_effects.insert(*e);
-            let mut chain = vec![hop.clone()];
-            chain.extend(callee.exec_chains.get(e).cloned().unwrap_or_default());
-            let slot = s.exec_chains.entry(*e).or_default();
-            if slot.is_empty() || chain.len() < slot.len() {
-                *slot = chain;
-            }
+    // b. Execution effects, with the shortest chain to each.
+    for e in facts
+        .direct_exec_effects
+        .iter()
+        .chain(&facts.transitive_exec_effects)
+    {
+        t.transitive_exec_effects.insert(*e);
+        let tail = facts.exec_chains.get(e).map_or(&[][..], Vec::as_slice);
+        let chain = extend_chain(lead, tail, rewrite);
+        let slot = t.exec_chains.entry(*e).or_default();
+        if slot.is_empty() || chain.len() < slot.len() {
+            *slot = chain;
         }
     }
 
     // c. Mutation & state effects.
     if site.recv_is_self && callee.owner_class_qualname.is_some() {
-        s.reads_self_attrs
-            .extend(callee.reads_self_attrs.iter().cloned());
-        s.mutates_self_attrs
-            .extend(callee.mutates_self_attrs.iter().cloned());
-        s.invalidates_cached
-            .extend(callee.invalidates_cached.iter().cloned());
+        t.reads_self_attrs
+            .extend(facts.reads_self_attrs.iter().cloned());
+        t.mutates_self_attrs
+            .extend(facts.mutates_self_attrs.iter().cloned());
+        t.invalidates_cached
+            .extend(facts.invalidates_cached.iter().cloned());
     }
     // A slot of a callee parameter bound to a caller parameter is that parameter's slot.
-    for (&i, slots) in &callee.inplace_param_slots {
+    for (&i, slots) in &facts.inplace_param_slots {
         if let Some(ArgOrigin {
             param: Some((p, None)),
             ..
         }) = origin(usize::from(i))
         {
-            s.inplace_param_slots
+            t.inplace_param_slots
                 .entry(*p)
                 .or_default()
                 .extend(slots.iter().cloned());
         }
     }
-    for (&i, paths) in &callee.mutated_param_paths {
+    for (&i, paths) in &facts.mutated_param_paths {
         let Some(o) = origin(usize::from(i)) else {
             continue;
         };
@@ -297,22 +331,22 @@ fn apply_edge(
         if paths.contains("")
             && let Some((p, slot)) = &o.param_slot
         {
-            s.inplace_param_slots
+            t.inplace_param_slots
                 .entry(*p)
                 .or_default()
                 .insert(slot.clone());
         }
         match &o.param {
             Some((p, None)) => {
-                s.mutates_params |= 1u64 << p;
-                s.mutated_param_paths
+                t.mutates_params |= 1u64 << p;
+                t.mutated_param_paths
                     .entry(*p)
                     .or_default()
                     .extend(paths.iter().cloned());
             }
             Some((p, Some(attr))) => {
-                s.mutates_params |= 1u64 << p;
-                s.mutated_param_paths
+                t.mutates_params |= 1u64 << p;
+                t.mutated_param_paths
                     .entry(*p)
                     .or_default()
                     .insert(attr.clone());
@@ -320,7 +354,7 @@ fn apply_edge(
             None => {}
         }
         if let Some(attr) = &o.self_attr {
-            s.mutates_self_attrs.insert(AttrKeyPath {
+            t.mutates_self_attrs.insert(AttrKeyPath {
                 attr: attr.clone(),
                 const_key: None,
             });
@@ -346,20 +380,20 @@ fn apply_edge(
         }
         for (class, attr, obj_params) in indirect {
             // A callee that already records a typed site for this field passes it up below.
-            let known = callee
+            let known = facts
                 .typed_field_write_sites
                 .iter()
-                .any(|t| t.class_qualname == class && t.attr == attr);
+                .any(|w| w.class_qualname == class && w.attr == attr);
             if !known {
                 insert_site(
-                    s,
+                    t,
                     caller,
                     TypedFieldWriteSite {
                         class_qualname: class,
                         attr,
                         kind: WriteKind::IndirectHelper,
                         span: site.span,
-                        via_chain: vec![hop.clone()],
+                        via_chain: lead.to_vec(),
                         obj_params,
                         fresh: o.fresh,
                     },
@@ -367,18 +401,20 @@ fn apply_edge(
             }
         }
     }
-    s.escapes_params |= caller_params(callee.escapes_params, bc);
-    // d. Single-pass consumption (`MUT106`): a callee iterating its parameter k to exhaustion
-    //    consumes the caller's parameter passed as argument k when the callee's body runs here,
-    //    provided every call receiving that parameter runs on each normal path of the caller.
-    if runs_at_call(callee, site) {
-        s.consumes_params |= caller_params(callee.consumes_params, bc) & s.unconditional_forwards;
-    }
-    for t in &callee.typed_field_write_sites {
-        let mut site = t.clone();
-        site.via_chain.insert(0, hop.clone());
-        site.obj_params = bound_params(t.obj_params, bc);
-        insert_site(s, caller, site);
+    t.escapes_params |= caller_params(facts.escapes_params, bc);
+    // A generator passed to a callee that iterates it runs there.
+    t.iterates_params |= caller_params(facts.iterates_params, bc);
+    for w in &facts.typed_field_write_sites {
+        let site = TypedFieldWriteSite {
+            class_qualname: w.class_qualname.clone(),
+            attr: w.attr.clone(),
+            kind: w.kind,
+            span: w.span,
+            via_chain: extend_chain(lead, &w.via_chain, rewrite),
+            obj_params: bound_params(w.obj_params, bc),
+            fresh: w.fresh,
+        };
+        insert_site(t, caller, site);
     }
 }
 
@@ -389,10 +425,113 @@ pub(crate) fn bound_params(mask: u64, bc: &BoundCallee) -> u64 {
         .fold(0, |acc, o| acc | o.may_params)
 }
 
-/// Whether the callee's body runs at this call site. Calling an `async def` without awaiting
-/// or driving it only creates a coroutine.
+/// Whether a call runs the callee's body: calling a generator function only creates the
+/// generator, and calling an `async def` without awaiting or driving it only creates a
+/// coroutine. Its body runs later: where the generator is iterated, or on the event loop,
+/// where the coroutine's own boundary reports it.
 pub(crate) fn runs_at_call(callee: &EffectSummary, site: &CallSite) -> bool {
-    !callee.is_async || site.is_awaited || site.drives_coroutine_manually
+    !callee.is_generator && (!callee.is_async || site.is_awaited || site.drives_coroutine_manually)
+}
+
+/// [`ProjectIndex::delivery`] with the summaries `summary_of` gives (the current finals during
+/// propagation).
+pub(crate) fn delivery<'s, 'i>(
+    summary_of: impl Fn(&FuncKey) -> Option<&'i EffectSummary>,
+    site: &'s CallSite,
+    callee: &EffectSummary,
+) -> Option<Delivery<'s>> {
+    let result = |into| {
+        Some(Delivery {
+            from: Facts::Result,
+            into,
+            via: None,
+        })
+    };
+    match &site.role {
+        SiteRole::Call => runs_at_call(callee, site).then_some(Delivery {
+            from: Facts::Body,
+            into: Facts::Body,
+            via: None,
+        }),
+        SiteRole::Iterate => result(Facts::Body),
+        SiteRole::Return => result(Facts::Result),
+        SiteRole::Through { via, iterated } => {
+            callee.facts(Facts::Result)?;
+            // The first candidate that iterates the parameter: its body runs at its call, or
+            // iterating its result runs what iterates the parameter.
+            let (p, _) = via.iter().find(|(p, k)| {
+                let facts = summary_of(p).and_then(|ps| {
+                    if *iterated {
+                        ps.facts(Facts::Result)
+                    } else {
+                        runs_at_call(ps, site).then_some(ps)
+                    }
+                });
+                facts.is_some_and(|f| *k < 64 && f.iterates_params & (1u64 << k) != 0)
+            })?;
+            Some(Delivery {
+                from: Facts::Result,
+                into: Facts::Body,
+                via: Some(p),
+            })
+        }
+    }
+}
+
+/// The hop from the site's caller to `callee`, at the site.
+pub(crate) fn site_hop(site: &CallSite, path: &Path, callee: String) -> CallHop {
+    CallHop {
+        caller: site.caller.clone(),
+        callee,
+        span: site.span,
+        path: path.to_path_buf(),
+    }
+}
+
+/// The hops a delivery adds in front of the callee's chains: the site's caller calls the
+/// callee, or (`via`) calls the project function that iterates the callee's result inside its
+/// own body.
+pub(crate) fn lead_hops(
+    site: &CallSite,
+    path: &Path,
+    callee: &FuncKey,
+    via: Option<&FuncKey>,
+) -> Vec<CallHop> {
+    match via {
+        None => vec![site_hop(site, path, callee.fqn())],
+        Some(p) => vec![
+            site_hop(site, path, p.fqn()),
+            CallHop {
+                caller: p.clone(),
+                callee: callee.fqn(),
+                span: site.span,
+                path: path.to_path_buf(),
+            },
+        ],
+    }
+}
+
+/// Whether the callee's chains start with a hop of its own to replace: a plain function's
+/// `iterated` facts begin where it returned the generator, but the generator runs where its
+/// result is iterated, called from there and not from the function that returned it.
+pub(crate) fn rewrites(callee: &EffectSummary, from: Facts) -> bool {
+    from == Facts::Result && !callee.is_generator
+}
+
+/// `lead` followed by `chain`. With `rewrite`, the last lead hop reaches the callee of the
+/// chain's first hop directly, which it replaces.
+pub(crate) fn extend_chain(lead: &[CallHop], chain: &[CallHop], rewrite: bool) -> Vec<CallHop> {
+    let mut out = lead.to_vec();
+    match chain.split_first() {
+        Some((first, rest)) if rewrite => {
+            if let Some(last) = out.last_mut() {
+                last.callee.clone_from(&first.callee);
+            }
+            out.extend_from_slice(rest);
+        }
+        _ => out.extend_from_slice(chain),
+    }
+    out
 }
 
 fn bits(mask: u64) -> impl Iterator<Item = usize> {
@@ -506,7 +645,12 @@ pub(crate) fn recompute_sync_driven_for(
             else {
                 continue;
             };
-            for site in file.call_sites.iter().filter(|site| &site.caller == caller) {
+            // Only calls drive a coroutine: the other sites of a call's result are no calls.
+            for site in file
+                .call_sites
+                .iter()
+                .filter(|site| &site.caller == caller && site.role == SiteRole::Call)
+            {
                 if site.project_callees().iter().any(|bc| &bc.callee == func) {
                     any = true;
                     all_ok &= !caller_async && !site.is_awaited && site.drives_coroutine_manually;
@@ -540,7 +684,7 @@ pub(crate) fn recompute_sync_driven_for(
 pub(crate) fn recompute_sync_driven(index: &mut ProjectIndex) -> Vec<FuncKey> {
     let mut incoming: FxHashMap<FuncKey, bool> = FxHashMap::default();
     for file in index.files.values() {
-        for site in &file.call_sites {
+        for site in file.call_sites.iter().filter(|s| s.role == SiteRole::Call) {
             let caller_async = index.summary(&site.caller).is_some_and(|s| s.is_async);
             let ok = !caller_async && !site.is_awaited && site.drives_coroutine_manually;
             for bc in site.project_callees() {

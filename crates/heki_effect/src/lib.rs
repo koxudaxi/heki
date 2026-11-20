@@ -191,6 +191,11 @@ pub struct EffectSummary {
     /// Parameters passed (as themselves) to project calls only where the call runs on every
     /// path that returns normally: `consumes_params` propagates through those calls alone.
     pub unconditional_forwards: u64,
+    /// Parameters an iteration steps on some path when the body runs (`for`, comprehensions,
+    /// unpacking, `yield from`, the consuming calls and lazy wrappers of `consumption`, project
+    /// calls iterating them): a generator passed there has its body run there. `next()` runs a
+    /// generator only to its first `yield` and does not count.
+    pub iterates_params: u64,
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
@@ -218,8 +223,17 @@ pub struct EffectSummary {
     /// `resolver::CHA_CANDIDATE_LIMIT` candidates.
     pub unknown_calls: bool,
 
+    /// What iterating the object this plain function returns runs: the bodies of the
+    /// generators it returns (directly, through lazy wrappers, or through the functions whose
+    /// results it returns), in terms of its own parameters. Never set for a generator
+    /// function: iterating its result runs its own body, which these fields describe.
+    pub iterated: Option<Box<EffectSummary>>,
+
     // Function metadata
     pub is_async: bool,
+    /// A generator function (`FunctionDecl::is_generator`): calling it only creates the
+    /// generator; its body runs where the generator is iterated.
+    pub is_generator: bool,
     pub is_cached_property: bool,
     pub is_lru_cache: bool,
     /// Module-relative class qualname of a method (`Outer.Inner`), as in `IrFunction`.
@@ -256,6 +270,7 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         out
     }
 
@@ -285,7 +300,53 @@ impl EffectSummary {
                 kind: s.kind.as_str().to_owned(),
             })
             .collect();
+        if let Some(i) = &mut self.iterated {
+            i.refresh_typed_field_writes();
+        }
     }
+
+    /// Which of the function's facts its own body is: a generator function's body runs when
+    /// its result is iterated.
+    pub fn body_facts(&self) -> Facts {
+        if self.is_generator {
+            Facts::Result
+        } else {
+            Facts::Body
+        }
+    }
+
+    /// The function's facts of one kind: its body's (this summary; a generator function's body
+    /// runs only when its result is iterated), or what iterating its result runs.
+    pub fn facts(&self, which: Facts) -> Option<&EffectSummary> {
+        match which {
+            Facts::Body => (!self.is_generator).then_some(self),
+            Facts::Result if self.is_generator => Some(self),
+            Facts::Result => self.iterated.as_deref(),
+        }
+    }
+}
+
+/// The two kinds of facts a call site can hand on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Facts {
+    /// What running the function's body does.
+    Body,
+    /// What iterating the object the function returns does: a generator function's body, or a
+    /// plain function's `EffectSummary::iterated`.
+    Result,
+}
+
+/// What a call site hands its caller of one project callee ([`ProjectIndex::delivery`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Delivery<'a> {
+    /// The callee's facts that run.
+    pub from: Facts,
+    /// Where they run: in the caller's body (`Body`; a generator caller's body is its
+    /// `Result`), or (`Result`) when the object the caller returns is iterated.
+    pub into: Facts,
+    /// The project function the facts run inside (`SiteRole::Through`), which iterates the
+    /// callee's result.
+    pub via: Option<&'a FuncKey>,
 }
 
 /// Where a call argument comes from, as seen by the caller (used to map callee facts back).
@@ -343,6 +404,33 @@ pub enum CallTarget {
     },
 }
 
+/// What reaching the project callees of a call site runs ([`ProjectIndex::delivery`]). A
+/// call's site is a `Call`; the object a project call returns gets one more site wherever the
+/// calling function iterates it, returns it, or passes it to a project call, with the call's
+/// callees and parameter bindings and the location of that use.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SiteRole {
+    /// The call itself: the callee's body runs here, unless calling it only creates a
+    /// coroutine (an `async def` neither awaited nor driven) or a generator.
+    #[default]
+    Call,
+    /// The object the call returns is iterated here: a `for` loop, a comprehension, unpacking,
+    /// `yield from`, a consuming call (`list(...)`, `str.join`), or a lazy wrapper iterated here
+    /// (`enumerate(...)`, `zip(...)`). A generator's body runs here, and what a function
+    /// returning a generator hands out.
+    Iterate,
+    /// The object the call returns is returned by the (plain) calling function: iterating the
+    /// caller's result runs it (`EffectSummary::iterated`).
+    Return,
+    /// The object the call returns is passed to a project call here, as parameter `.1` of its
+    /// candidate `.0`, which iterates it when its body runs at its call (`iterated == false`)
+    /// or when its result is iterated here (`iterated == true`).
+    Through {
+        via: Vec<(FuncKey, u8)>,
+        iterated: bool,
+    },
+}
+
 /// A call site retained in `FileSummary` (IR-free) for propagation and rule evaluation. Reading
 /// a property (`obj.attr` whose `attr` is a getter) is one too: it calls the getter, at the read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +449,8 @@ pub struct CallSite {
     /// method). A class without a project `__init__` still gets a site, with no callees: the
     /// call ownership rules (`MUT204`) see every construction.
     pub constructs: Option<String>,
+    /// What reaching the callees here runs (`Call` for every Layer 2 site).
+    pub role: SiteRole,
 }
 
 impl CallSite {
@@ -371,12 +461,22 @@ impl CallSite {
             CallTarget::Layer2 { .. } => &[],
         }
     }
+}
 
-    /// Whether the body of the project callee summarized by `callee` runs at this call:
-    /// calling an `async def` without awaiting or driving it only creates a coroutine.
-    pub fn runs_body_of(&self, callee: &EffectSummary) -> bool {
-        callgraph::runs_at_call(callee, self)
-    }
+/// Instructions a `CallSite` can be anchored at (its `span`): calls, property reads, and the
+/// iterations that run a generator's body (`for` headers, `yield from`, unpacking subscripts).
+/// Rules looking call sites up by instruction look at these.
+pub fn anchors_call_site(kind: &heki_ir::InstKind) -> bool {
+    use heki_ir::InstKind;
+    matches!(
+        kind,
+        InstKind::Call { .. }
+            | InstKind::MethodCall { .. }
+            | InstKind::AttrLoad { .. }
+            | InstKind::MakeIter { .. }
+            | InstKind::YieldFrom { .. }
+            | InstKind::SubscriptLoad { .. }
+    )
 }
 
 /// Lightweight per-file summary retained in `ProjectIndex` (IR bodies are dropped).
@@ -491,15 +591,10 @@ impl ProjectIndex {
     }
 
     /// Effects that run at `site` (in file `path`): the Layer 2 API's effects after the
-    /// `is_awaited` filter, or each project callee's direct and transitive effects when its
-    /// body runs there. Shared by Boundary-Only Reporting and the loop rules.
+    /// `is_awaited` filter, or the direct and transitive effects of each project callee's facts
+    /// the site runs in its caller's body ([`Self::delivery`]). Shared by Boundary-Only
+    /// Reporting and the loop rules.
     pub fn site_effects(&self, path: &Path, site: &CallSite) -> Vec<SiteEffect> {
-        let hop = |callee: String| CallHop {
-            caller: site.caller.clone(),
-            callee,
-            span: site.span,
-            path: path.to_path_buf(),
-        };
         let mut out = Vec::new();
         match &site.target {
             CallTarget::Layer2 {
@@ -508,7 +603,7 @@ impl ProjectIndex {
                 for e in effects {
                     out.push(SiteEffect {
                         effect: *e,
-                        chain: vec![hop(symbol.clone())],
+                        chain: vec![callgraph::site_hop(site, path, symbol.clone())],
                         callee: None,
                         callee_is_async: false,
                     });
@@ -516,24 +611,28 @@ impl ProjectIndex {
             }
             CallTarget::Project(callees) => {
                 for bc in callees {
-                    let Some(callee) = self
-                        .summary(&bc.callee)
-                        .filter(|callee| callgraph::runs_at_call(callee, site))
-                    else {
+                    // Facts handed to whoever iterates the caller's result do not run here.
+                    let Some((callee, d, facts)) = self.summary(&bc.callee).and_then(|callee| {
+                        let d = self
+                            .delivery(site, callee)
+                            .filter(|d| d.into == Facts::Body)?;
+                        Some((callee, d, callee.facts(d.from)?))
+                    }) else {
                         continue;
                     };
-                    let effects: BTreeSet<ExecEffectKind> = callee
+                    let lead = callgraph::lead_hops(site, path, &bc.callee, d.via);
+                    let rewrite = callgraph::rewrites(callee, d.from);
+                    let effects: BTreeSet<ExecEffectKind> = facts
                         .direct_exec_effects
                         .iter()
-                        .chain(&callee.transitive_exec_effects)
+                        .chain(&facts.transitive_exec_effects)
                         .copied()
                         .collect();
                     for e in effects {
-                        let mut chain = vec![hop(bc.callee.fqn())];
-                        chain.extend(callee.exec_chains.get(&e).cloned().unwrap_or_default());
+                        let tail = facts.exec_chains.get(&e).map_or(&[][..], Vec::as_slice);
                         out.push(SiteEffect {
                             effect: e,
-                            chain,
+                            chain: callgraph::extend_chain(&lead, tail, rewrite),
                             callee: Some(bc.callee.clone()),
                             callee_is_async: callee.is_async,
                         });
@@ -542,6 +641,15 @@ impl ProjectIndex {
             }
         }
         out
+    }
+
+    /// What `site` hands its caller of the project callee summarized by `callee`: the one
+    /// home of "does a body run here". A call runs a plain function's body, or an `async def`'s
+    /// when it is awaited or driven (calling one only creates a coroutine), never a generator
+    /// function's (calling one only creates the generator); the `Iterate`, `Return`, and
+    /// `Through` sites of the object a call returns run what iterating it runs.
+    pub fn delivery<'s>(&self, site: &'s CallSite, callee: &EffectSummary) -> Option<Delivery<'s>> {
+        callgraph::delivery(|k| self.summary(k), site, callee)
     }
 
     /// Final summary of `func`, if known.

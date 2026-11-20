@@ -3,14 +3,19 @@
 //! Produces the function's local `EffectSummary` plus the `CallSite`s the interprocedural
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
-use crate::resolver::{Callee, DeclKeys, ModuleDecls, TypeCtx, Val, func_qualname, self_aliases};
+use crate::consumption::{IterFlow, Roots, param_iteration};
+use crate::resolver::{
+    Callee, DeclKeys, ModuleDecls, TypeCtx, Val, func_qualname, is_generator_function, self_aliases,
+};
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, EffectSummary, FileSummary,
-    FuncKey, ModuleInput, ProjectDecls, ReadKind, Slot, TypedFieldReadSite, TypedFieldWriteSite,
-    WriteKind,
+    FuncKey, ModuleInput, ProjectDecls, ReadKind, SiteRole, Slot, TypedFieldReadSite,
+    TypedFieldWriteSite, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::{BlockId, ConstLiteral, FunctionId, FunctionKind, InstKind, IrFunction, VarId};
+use heki_ir::{
+    BlockId, ConstLiteral, FunctionId, FunctionKind, InstKind, IrFunction, Terminator, VarId,
+};
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
@@ -121,6 +126,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     into.mutates_params |= other.mutates_params;
     into.escapes_params |= other.escapes_params;
     into.consumes_params |= other.consumes_params;
+    into.iterates_params |= other.iterates_params;
     // A must-fact: propagate only through parameters both definitions forward unconditionally.
     into.unconditional_forwards &= other.unconditional_forwards;
     for (i, paths) in other.mutated_param_paths {
@@ -198,6 +204,20 @@ struct Extractor<'a> {
     fresh: FxHashSet<VarId>,
     summary: EffectSummary,
     sites: Vec<CallSite>,
+    /// Resolved callee of every `Call` / `MethodCall` by position (for the iteration flow).
+    callees: FxHashMap<(BlockId, usize), Callee>,
+    /// The project calls (`Call` / `MethodCall`), for the sites of the objects they return.
+    project_calls: Vec<ProjectCall>,
+}
+
+/// A project call, for the sites of the object it returns (`SiteRole`).
+struct ProjectCall {
+    /// Index of its `Call` site in `Extractor::sites`.
+    site: usize,
+    /// The variable it defines.
+    dst: VarId,
+    /// Each callee with the parameter each argument variable binds.
+    params: Vec<(FuncKey, Vec<(u8, VarId)>)>,
 }
 
 impl<'a> Extractor<'a> {
@@ -221,6 +241,7 @@ impl<'a> Extractor<'a> {
         };
         let summary = EffectSummary {
             is_async: matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator),
+            is_generator: is_generator_function(f),
             is_cached_property: f.has_decorator(&["cached_property"]),
             is_lru_cache: f.has_decorator(&["lru_cache", "cache"]),
             owner_class_qualname: f.owner_class_qualname.clone(),
@@ -245,6 +266,8 @@ impl<'a> Extractor<'a> {
             fresh: FxHashSet::default(),
             summary,
             sites: Vec::new(),
+            callees: FxHashMap::default(),
+            project_calls: Vec::new(),
         };
         ex.build_may_params();
         ex.build_fresh();
@@ -494,20 +517,133 @@ impl<'a> Extractor<'a> {
 
     fn run(mut self) -> (EffectSummary, Vec<CallSite>) {
         let f = self.f;
-        (
-            self.summary.consumes_params,
-            self.summary.unconditional_forwards,
-        ) = crate::consumption::param_consumption(f, self.cx, &self.types);
         for bb in &f.blocks {
-            for inst in &bb.insts {
-                self.visit(bb.id, &inst.kind, inst.span);
+            for (index, inst) in bb.insts.iter().enumerate() {
+                self.visit(bb.id, index, &inst.kind, inst.span);
             }
         }
+        self.iterations();
         self.summary.refresh_typed_field_writes();
         (self.summary, self.sites)
     }
 
-    fn visit(&mut self, bb: BlockId, kind: &'a InstKind, span: Span) {
+    /// Where the function iterates its parameters and the objects its project calls return
+    /// (`consumption::IterFlow`): the parameter facts (`consumes_params`,
+    /// `unconditional_forwards`, `iterates_params`), and one more site of a call's callees
+    /// wherever the object it returns is iterated, returned by this (plain) function, or passed
+    /// to a project call (`SiteRole`). Any other use (stored, passed to an external or
+    /// unresolved call, yielded, stepped with `next()`) runs nothing here.
+    fn iterations(&mut self) {
+        let f = self.f;
+        if f.params.is_empty() && self.project_calls.is_empty() {
+            return;
+        }
+        let callees = std::mem::take(&mut self.callees);
+        let flow = IterFlow::with_callees(f, self.cx, &self.types, Roots::Summary, callees);
+        let it = param_iteration(f, &flow);
+        self.summary.consumes_params = it.consumes;
+        self.summary.unconditional_forwards = it.unconditional;
+        self.summary.iterates_params = it.iterates;
+        if self.project_calls.is_empty() {
+            return;
+        }
+        let by_dst: FxHashMap<VarId, usize> = self
+            .project_calls
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.dst, i))
+            .collect();
+        let calls_in = |roots: &[VarId]| -> Vec<usize> {
+            roots
+                .iter()
+                .filter_map(|r| by_dst.get(r).copied())
+                .collect()
+        };
+        // Where each call's result is iterated.
+        let mut iterated: Vec<Vec<(Span, u16)>> = vec![Vec::new(); self.project_calls.len()];
+        for e in &flow.events {
+            let at = (e.span, f.block_loop_depth(e.block));
+            for c in calls_in(&e.stepped) {
+                if !iterated[c].contains(&at) {
+                    iterated[c].push(at);
+                }
+            }
+        }
+        // Which call results a plain function returns (a generator's `return` value ends its
+        // iteration and is no iterator handed out).
+        let mut returned = vec![false; self.project_calls.len()];
+        if f.kind == FunctionKind::Sync && !f.is_module_body {
+            for bb in &f.blocks {
+                if let Terminator::Return(Some(v)) = bb.terminator {
+                    for c in calls_in(&flow.expand_steps(&[v])) {
+                        returned[c] = true;
+                    }
+                }
+            }
+        }
+        let mut extra = Vec::new();
+        for (c, call) in self.project_calls.iter().enumerate() {
+            let site = &self.sites[call.site];
+            for &(span, depth) in &iterated[c] {
+                extra.push(role_site(site, SiteRole::Iterate, span, depth, None));
+            }
+            if returned[c] {
+                extra.push(role_site(
+                    site,
+                    SiteRole::Return,
+                    site.span,
+                    site.loop_depth,
+                    None,
+                ));
+            }
+        }
+        // Results passed to a project call (`consume(rows())`, `chunked(rows(), 100)`).
+        for (x, call) in self.project_calls.iter().enumerate() {
+            let mut via_by_arg: Vec<(VarId, Vec<(FuncKey, u8)>)> = Vec::new();
+            for (key, bound) in &call.params {
+                for &(param, arg) in bound {
+                    match via_by_arg.iter_mut().find(|(a, _)| *a == arg) {
+                        Some((_, via)) => via.push((key.clone(), param)),
+                        None => via_by_arg.push((arg, vec![(key.clone(), param)])),
+                    }
+                }
+            }
+            let x_site = &self.sites[call.site];
+            for (arg, via) in via_by_arg {
+                for y in calls_in(&flow.expand_steps(&[arg]))
+                    .into_iter()
+                    .filter(|&y| y != x)
+                {
+                    let y_site = &self.sites[self.project_calls[y].site];
+                    // Already iterated right there (a 3.11 comprehension frame `__comp_<id>(it)`).
+                    if !iterated[y].iter().any(|(s, _)| *s == x_site.span) {
+                        let role = SiteRole::Through {
+                            via: via.clone(),
+                            iterated: false,
+                        };
+                        let flags = Some((x_site.is_awaited, x_site.drives_coroutine_manually));
+                        extra.push(role_site(
+                            y_site,
+                            role,
+                            x_site.span,
+                            x_site.loop_depth,
+                            flags,
+                        ));
+                    }
+                    for &(span, depth) in &iterated[x] {
+                        let role = SiteRole::Through {
+                            via: via.clone(),
+                            iterated: true,
+                        };
+                        extra.push(role_site(y_site, role, span, depth, None));
+                    }
+                }
+            }
+        }
+        self.sites.extend(extra);
+    }
+
+    fn visit(&mut self, bb: BlockId, index: usize, kind: &'a InstKind, span: Span) {
         match kind {
             InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
                 if self.self_vars.contains(obj) {
@@ -591,18 +727,18 @@ impl<'a> Extractor<'a> {
                     }
                     _ => None,
                 };
-                self.call(
-                    bb,
-                    *dst,
-                    callee,
-                    Some(recv_origin),
+                let call = Call {
+                    dst: *dst,
+                    value: None,
+                    recv: Some(recv_origin),
                     args,
                     kwargs,
-                    *is_awaited,
+                    is_awaited: *is_awaited,
                     recv_is_self,
                     constructs,
                     span,
-                );
+                };
+                self.call_inst(bb, index, callee, &call);
             }
             InstKind::Call {
                 dst,
@@ -620,18 +756,18 @@ impl<'a> Extractor<'a> {
                 {
                     let target = self.cx.resolve_method(self.types.get(&recv), &method);
                     let (recv_origin, recv_is_self) = self.receiver(recv);
-                    self.call(
-                        bb,
-                        *dst,
-                        target,
-                        Some(recv_origin),
+                    let call = Call {
+                        dst: *dst,
+                        value: *callee_var,
+                        recv: Some(recv_origin),
                         args,
                         kwargs,
-                        *is_awaited,
+                        is_awaited: *is_awaited,
                         recv_is_self,
-                        None,
+                        constructs: None,
                         span,
-                    );
+                    };
+                    self.call_inst(bb, index, target, &call);
                     return;
                 }
                 let target = match callee_var {
@@ -654,18 +790,18 @@ impl<'a> Extractor<'a> {
                     }
                     _ => None,
                 };
-                self.call(
-                    bb,
-                    *dst,
-                    target,
-                    None,
+                let call = Call {
+                    dst: *dst,
+                    value: *callee_var,
+                    recv: None,
                     args,
                     kwargs,
-                    *is_awaited,
-                    false,
+                    is_awaited: *is_awaited,
+                    recv_is_self: false,
                     constructs,
                     span,
-                );
+                };
+                self.call_inst(bb, index, target, &call);
             }
             // A generator expression's body runs where it is consumed — almost always
             // immediately in the creating frame (`sum(f(x) for x in xs)`).
@@ -675,7 +811,18 @@ impl<'a> Extractor<'a> {
                 ..
             } => {
                 let target = self.child_callee(*id);
-                self.call(bb, *dst, target, None, &[], &[], false, false, None, span);
+                let call = Call {
+                    dst: *dst,
+                    value: None,
+                    recv: None,
+                    args: &[],
+                    kwargs: &[],
+                    is_awaited: false,
+                    recv_is_self: false,
+                    constructs: None,
+                    span,
+                };
+                self.call(bb, &target, &call);
             }
             _ => {}
         }
@@ -706,18 +853,18 @@ impl<'a> Extractor<'a> {
             uses.iter()
                 .any(|u| matches!(u, InstKind::Await { value, .. } if *value == dst))
         });
-        self.call(
-            bb,
+        let call = Call {
             dst,
-            callee,
-            Some(recv),
-            &[],
-            &[],
+            value: None,
+            recv: Some(recv),
+            args: &[],
+            kwargs: &[],
             is_awaited,
             recv_is_self,
-            None,
+            constructs: None,
             span,
-        );
+        };
+        self.call(bb, &callee, &call);
     }
 
     /// The receiver and method name of the bound method behind `var` (through copies): an
@@ -972,91 +1119,141 @@ impl<'a> Extractor<'a> {
         false
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// [`Self::call`] for a `Call` / `MethodCall` instruction at `(bb, index)`: its callee is
+    /// kept for the iteration flow, and a project call is remembered for the sites of the
+    /// object it returns.
+    fn call_inst(&mut self, bb: BlockId, index: usize, callee: Callee, call: &Call<'_>) {
+        if let Some((site, params)) = self.call(bb, &callee, call) {
+            self.project_calls.push(ProjectCall {
+                site,
+                dst: call.dst,
+                params,
+            });
+        }
+        self.callees.insert((bb, index), callee);
+    }
+
+    /// Record one call. A project callee decorated with an offloading decorator
+    /// (`FunctionDecl::offloaded_by`) is called as `d(f)(...)`: a call of the catalog's `d` with
+    /// the function as its offloaded argument, so its body does not run here. Returns the index
+    /// of the project call site, with each kept callee and the parameter each argument
+    /// variable binds.
+    #[allow(clippy::type_complexity)]
     fn call(
         &mut self,
         bb: BlockId,
-        dst: VarId,
-        callee: Callee,
-        recv: Option<ArgOrigin>,
-        args: &[VarId],
-        kwargs: &[(Option<String>, VarId)],
-        is_awaited: bool,
-        recv_is_self: bool,
-        constructs: Option<String>,
-        span: Span,
-    ) {
+        callee: &Callee,
+        call: &Call<'_>,
+    ) -> Option<(usize, Vec<(FuncKey, Vec<(u8, VarId)>)>)> {
         let loop_depth = self.f.block_loop_depth(bb);
         match callee {
             Callee::External(symbol) => {
-                self.external_call(symbol, args, is_awaited, loop_depth, span);
+                self.external_call(
+                    symbol.clone(),
+                    call.args,
+                    call.is_awaited,
+                    loop_depth,
+                    call.span,
+                );
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
-                if let Some(class) = constructs {
+                if let Some(class) = &call.constructs {
                     self.sites.push(CallSite {
                         caller: self.key.clone(),
                         target: CallTarget::Project(Vec::new()),
-                        is_awaited,
-                        span,
+                        is_awaited: call.is_awaited,
+                        span: call.span,
                         loop_depth,
-                        recv_is_self,
+                        recv_is_self: call.recv_is_self,
                         drives_coroutine_manually: false,
-                        constructs: Some(class),
+                        constructs: Some(class.clone()),
+                        role: SiteRole::Call,
                     });
                 }
+                None
             }
             Callee::Project(keys, binds_recv) => {
                 let mut callees = Vec::new();
+                let mut bindings = Vec::new();
+                let mut offloaders: Vec<String> = Vec::new();
                 let mut any_async = false;
                 for key in keys {
                     let decl = self
                         .cx
                         .project
-                        .function_decl(&key)
+                        .function_decl(key)
                         .cloned()
                         .unwrap_or_default();
+                    if let Some(symbol) = decl.offloaded_by {
+                        if !offloaders.contains(&symbol) {
+                            offloaders.push(symbol);
+                        }
+                        continue;
+                    }
                     any_async |= decl.is_async;
+                    let offset = usize::from(*binds_recv && !decl.is_staticmethod);
                     let mut params: Vec<ArgOrigin> = Vec::new();
-                    if binds_recv && !decl.is_staticmethod {
+                    if offset == 1 {
                         // Constructor calls bind a fresh object (`recv == None`).
                         params.push(if decl.is_classmethod {
                             ArgOrigin::default()
                         } else {
-                            recv.clone().unwrap_or_default()
+                            call.recv.clone().unwrap_or_default()
                         });
                     }
-                    params.extend(args.iter().map(|a| self.origin(*a)));
-                    for (name, v) in kwargs {
+                    params.extend(call.args.iter().map(|a| self.origin(*a)));
+                    let mut bound: Vec<(u8, VarId)> = call
+                        .args
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, a)| Some((u8::try_from(i + offset).ok()?, *a)))
+                        .collect();
+                    for (name, v) in call.kwargs {
                         let Some(name) = name else { continue };
                         if let Some(pos) = decl.param_names.iter().position(|p| p == name) {
                             if params.len() <= pos {
                                 params.resize(pos + 1, ArgOrigin::default());
                             }
                             params[pos] = self.origin(*v);
+                            if let Ok(pos) = u8::try_from(pos) {
+                                bound.push((pos, *v));
+                            }
                         }
                     }
                     while params.last().is_some_and(ArgOrigin::is_empty) {
                         params.pop();
                     }
                     callees.push(BoundCallee {
-                        callee: key,
+                        callee: key.clone(),
                         params,
                     });
+                    bindings.push((key.clone(), bound));
                 }
-                let drives = any_async && !is_awaited && self.drives_manually(dst);
+                // `@d def f` is `f = d(f)`: the call runs `d(f)`, which offloads `f`.
+                for symbol in offloaders {
+                    let offloaded: Vec<VarId> = call.value.into_iter().collect();
+                    self.external_call(symbol, &offloaded, call.is_awaited, loop_depth, call.span);
+                }
+                if callees.is_empty() {
+                    return None;
+                }
+                let drives = any_async && !call.is_awaited && self.drives_manually(call.dst);
                 self.sites.push(CallSite {
                     caller: self.key.clone(),
                     target: CallTarget::Project(callees),
-                    is_awaited,
-                    span,
+                    is_awaited: call.is_awaited,
+                    span: call.span,
                     loop_depth,
-                    recv_is_self,
+                    recv_is_self: call.recv_is_self,
                     drives_coroutine_manually: drives,
-                    constructs,
+                    constructs: call.constructs.clone(),
+                    role: SiteRole::Call,
                 });
+                Some((self.sites.len() - 1, bindings))
             }
             Callee::TooMany | Callee::Unresolved => {
                 self.summary.unknown_calls = true;
+                None
             }
         }
     }
@@ -1129,7 +1326,49 @@ impl<'a> Extractor<'a> {
             recv_is_self: false,
             drives_coroutine_manually: false,
             constructs: None,
+            role: SiteRole::Call,
         });
+    }
+}
+
+/// One call instruction as [`Extractor::call`] sees it.
+struct Call<'c> {
+    /// The variable the call defines.
+    dst: VarId,
+    /// The called value (`f` of `f(...)`), when it is a variable.
+    value: Option<VarId>,
+    /// The origin of a bound receiver (`obj` of `obj.m(...)`).
+    recv: Option<ArgOrigin>,
+    args: &'c [VarId],
+    kwargs: &'c [(Option<String>, VarId)],
+    is_awaited: bool,
+    recv_is_self: bool,
+    /// The project class the call constructs (`CallSite::constructs`).
+    constructs: Option<String>,
+    span: Span,
+}
+
+/// Another site of the callees of the call site `site`, for a use of the object the call
+/// returns (`SiteRole`): at `span` and loop depth `depth`, awaited and driven as `flags` says
+/// (the use is no call of the callees themselves).
+fn role_site(
+    site: &CallSite,
+    role: SiteRole,
+    span: Span,
+    depth: u16,
+    flags: Option<(bool, bool)>,
+) -> CallSite {
+    let (is_awaited, drives) = flags.unwrap_or((false, false));
+    CallSite {
+        caller: site.caller.clone(),
+        target: site.target.clone(),
+        is_awaited,
+        span,
+        loop_depth: depth,
+        recv_is_self: site.recv_is_self,
+        drives_coroutine_manually: drives,
+        constructs: None,
+        role,
     }
 }
 

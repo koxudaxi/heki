@@ -10,47 +10,75 @@
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
-use heki_effect::consumption::IterFlow;
-use heki_effect::{Callee, TypeCtx};
+use heki_effect::consumption::{IterFlow, Roots};
+use heki_effect::{CallSite, Callee, EffectSummary, Facts, SiteRole, TypeCtx};
 use heki_ir::{BlockId, InstKind, IrFunction, LoopBound, NaturalLoop, VarId};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+/// Call sites of a module by `(caller qualname, span)` ([`CheckContext::sites_by_span`]).
+type SitesBySpan<'a> = FxHashMap<(String, Span), Vec<&'a CallSite>>;
 
 pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.enabled("MUT106", unit) {
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let mut sites = None;
     for f in unit.input.ir.functions.iter().filter(|f| !f.is_class_body) {
         let types = tcx.infer(f);
-        let mut flow = IterFlow::new(f, &tcx, &types, false);
+        let mut flow = IterFlow::new(f, &tcx, &types, Roots::SinglePass);
         if flow.root_of.is_empty() {
             continue;
         }
-        add_callee_consumption(cx, f, &mut flow);
+        let sites = sites.get_or_insert_with(|| cx.sites_by_span(unit));
+        let qualname = CheckContext::key(unit, f).qualname;
+        add_callee_consumption(cx, sites, &qualname, f, &mut flow);
         report(cx, unit, f, &flow, out);
     }
 }
 
+/// Whether the body of the project callee `key` runs at the call at `span` of `qualname`, by its
+/// call site ([`heki_effect::ProjectIndex::delivery`]): an `async def` that is neither awaited
+/// nor driven, a generator function, and a function an offloading decorator runs on another
+/// thread do not run there.
+fn body_runs<'a>(
+    cx: &CheckContext<'a>,
+    sites: &SitesBySpan<'a>,
+    qualname: &str,
+    span: Span,
+    key: &heki_effect::FuncKey,
+) -> Option<&'a EffectSummary> {
+    let summary = cx.index.summary(key)?;
+    sites
+        .get(&(qualname.to_owned(), span))?
+        .iter()
+        .filter(|s| s.role == SiteRole::Call)
+        .filter(|s| s.project_callees().iter().any(|bc| bc.callee == *key))
+        .any(|s| {
+            cx.index
+                .delivery(s, summary)
+                .is_some_and(|d| d.from == Facts::Body)
+        })
+        .then_some(summary)
+}
+
 /// Calls of project functions that iterate a parameter to exhaustion consume the argument (every
 /// CHA candidate must, and its body must run at the call).
-fn add_callee_consumption(cx: &CheckContext<'_>, f: &IrFunction, flow: &mut IterFlow) {
+fn add_callee_consumption(
+    cx: &CheckContext<'_>,
+    sites: &SitesBySpan<'_>,
+    qualname: &str,
+    f: &IrFunction,
+    flow: &mut IterFlow,
+) {
     let mut found = Vec::new();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {
-            let (recv, args, kwargs, is_awaited) = match &inst.kind {
+            let (recv, args, kwargs) = match &inst.kind {
                 InstKind::MethodCall {
-                    recv,
-                    args,
-                    kwargs,
-                    is_awaited,
-                    ..
-                } => (Some(*recv), args, kwargs, *is_awaited),
-                InstKind::Call {
-                    args,
-                    kwargs,
-                    is_awaited,
-                    ..
-                } => (None, args, kwargs, *is_awaited),
+                    recv, args, kwargs, ..
+                } => (Some(*recv), args, kwargs),
+                InstKind::Call { args, kwargs, .. } => (None, args, kwargs),
                 _ => continue,
             };
             let Some(Callee::Project(keys, binds_recv)) = flow.callees.get(&(bb.id, index)) else {
@@ -58,7 +86,7 @@ fn add_callee_consumption(cx: &CheckContext<'_>, f: &IrFunction, flow: &mut Iter
             };
             let mut consumed: Option<FxHashSet<VarId>> = None;
             for key in keys {
-                let summary = cx.index.summary(key).filter(|s| !s.is_async || is_awaited);
+                let summary = body_runs(cx, sites, qualname, inst.span, key);
                 let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
                 let mask = summary.map_or(0, |s| s.consumes_params);
                 let offset = usize::from(*binds_recv && !decl.is_staticmethod);

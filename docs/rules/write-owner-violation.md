@@ -28,6 +28,15 @@ second write inside a recorded helper.
 Reading a `@property` or `functools.cached_property` attribute calls its getter, so a private
 getter hands its writes to the functions reading it; a read never calls a property's setter.
 
+A write runs where the body holding it runs. Calling a generator function only creates the
+generator: its writes run where it is iterated (as for `EFF101`), so a generator created by an
+allowed writer and iterated elsewhere writes elsewhere, and one handed to an allowed writer that
+iterates it writes inside the owner. A generator that is created and never iterated writes
+nothing. A coroutine that is never awaited or driven at a project call (handed to
+`asyncio.create_task`, `ensure_future`, `gather`, ...) runs on the event loop: a private one
+reports its own writes instead of handing them to the function that created it. Functions run on
+another thread by an offloading decorator (`@sync_to_async`, ...) are not followed either.
+
 A function that only runs inside the owner's operations is not reported either: it has project
 callers, and every path of callers above it starts in an allowed writer, an exempt method, or
 the class's own initialization (a mutator method that only the store and `__init__` call). A

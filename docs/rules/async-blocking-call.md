@@ -16,15 +16,32 @@ Reading a `@property` or `functools.cached_property` attribute of a project clas
 getter, so the read counts as a call of the getter (`self.client` whose getter opens a
 connection). A property that also defines a setter or deleter is not followed.
 
-The rule reports the boundary: the call (or property read) inside the `async def` that leads to
-the blocking operation, with the call chain as related information. Several boundaries reaching
-the same blocking call are grouped once ten or more of them exist (in the editor, per file).
+Calling a generator function only creates the generator; its body runs where the generator is
+iterated: a `for` loop or comprehension over it, unpacking it, `yield from` it, a call that
+consumes it (`list(...)`, `sorted(...)`, `"".join(...)`, `items.extend(...)`, ...), a lazy wrapper
+iterated there (`enumerate(...)`, `zip(...)`, `itertools.islice(...)`, ...), or a project
+function iterating the parameter it is handed. A generator returned by a plain function runs
+where its caller iterates it. `next(gen)` runs the body only up to its first `yield`, which heki
+does not separate from the rest, so it is not followed.
+
+The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
+that leads to the blocking operation, with the call chain as related information. Several
+boundaries reaching the same blocking call are grouped once ten or more of them exist (in the
+editor, per file).
 
 It does not report:
 
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
-  `anyio.to_thread.run_sync`, `run_in_threadpool`, and project wrappers that forward their
-  callable to them);
+  `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
+  `asyncer.asyncify`, and project wrappers that forward their callable to them);
+- functions decorated to run on a thread: `@sync_to_async` (also as a factory,
+  `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
+  and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
+  calling `f` calls `d(f)`; other decorators (`functools.wraps` wrappers) are followed;
+- generators that leave the `async def` without being iterated there: returned, stored, or
+  handed to a call that is not a consuming one, such as `StreamingResponse(rows())` or
+  `iterate_in_threadpool(rows())` (whatever iterates them later, often a thread pool, is not
+  analyzed);
 - `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
   `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
   `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
@@ -69,4 +86,5 @@ No automatic fix.
 ## Options
 - `lint.relax-async-in-tests` (default `true`): skip test code.
 - `[[tool.heki.ecosystem]]` declares project functions as blocking (`effects`), as offload
-  wrappers (`offloads-blocking-arg`), or as async-safe (`async-safe`).
+  wrappers (`offloads-blocking-arg`; with `0`, also an offloading decorator), or as async-safe
+  (`async-safe`).

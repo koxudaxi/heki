@@ -86,7 +86,7 @@ Found 2 diagnostic(s) in 4 file(s).
 - **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of
-  [`[tool.heki]` configuration](configuration.md): `write-owners`, `read-owners`,
+  [`[tool.heki]` configuration](configuration.md): `write-owners`, `read-owners`, `call-owners`,
   `readonly-returns`, and `effect-boundaries`. heki checks them through aliases, helpers, and
   subclasses, with no decorators and nothing running at run time.
 - **A safety net for reviews and coding agents.** The [language server](lsp.md) shows the
@@ -124,7 +124,7 @@ CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive 
 the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
 the obligation instead of offering a fix. See [Fixes and safety](fixes.md).
 
-See the [rules reference](rules/index.md) for all 27 rules.
+See the [rules reference](rules/index.md) for all 28 rules.
 
 ## Next steps
 

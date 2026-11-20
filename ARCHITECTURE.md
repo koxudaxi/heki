@@ -2,7 +2,7 @@
 
 | Item | Content |
 |---|---|
-| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (27 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
+| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (28 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
 | Date | 2026-11-20 |
 | Target language | Python (verified on CPython 3.11–3.15, including PEP 709, PEP 649 `__annotate__`, and PEP 810 `lazy import`) |
 | Implementation language | Rust: a single binary with a CLI and an incremental LSP server, distributed with `maturin`. Only the frontend uses `ruff_python_parser` / `ruff_python_ast` (`tag = "0.17.5"`), isolated in `heki_ast`. |
@@ -252,17 +252,20 @@ EffectSummary(f) = {
 
     // Offloading and the async context
     offloads_blocking_params: Bitset,               // wrapper that runs the callable in parameter i on a thread
+    iterates_params:          Bitset,               // stepped by an iteration: a generator passed there runs there
+    iterated:                 Option<EffectSummary>, // what iterating the returned object runs
     sync_driven_only:         bool,                 // driven only through a sync driver such as run_sync(coro)
     unknown_calls:            bool,
 
-    // Metadata: is_async, is_cached_property, is_lru_cache, owner class, decorators
+    // Metadata: is_async, is_generator, is_cached_property, is_lru_cache, owner class, decorators
 }
 ```
 
 #### Precision and noise control from real code (Stage 0-A: 339 repositories, 18.1 million lines, plus datamodel-code-generator's 196,000 lines)
 1. **User-defined offload wrappers**: besides `asyncio.to_thread`, thin project wrappers such as
    `await in_thread(self.open)` propagate `offloads_blocking_params` bottom-up (finding from
-   datamodel-code-generator `bodies.py:112`).
+   datamodel-code-generator `bodies.py:112`), and functions decorated with an offloading API
+   (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`) are calls of that API.
 2. **Sync-over-async relaxation**: an internal `async def` driven only through a synchronous
    driver is relaxed for `EFF101` / `EFF105` (finding from datamodel-code-generator
    `client.py:1399`).
@@ -361,7 +364,7 @@ versions.
 The adopted, rejected, and candidate rules are fixed by the Stage 0-A measurements (339
 repositories, 18.1 million lines, all 171 samples reviewed by hand), the Wave 2 measurements
 (19 million lines), and the study of datamodel-code-generator's 20,000 lines of in-house checkers.
-The 27 rules are listed in the [rules reference](docs/rules/index.md).
+The 28 rules are listed in the [rules reference](docs/rules/index.md).
 
 ### Family 1: Mutation & State Effect (`MUT`: hardening mature production code)
 
@@ -376,6 +379,7 @@ The 27 rules are listed in the [rules reference](docs/rules/index.md).
 | **MUT201** | When configured (contract) | **Declared write ownership**: writes to the classes and attributes listed in `[[tool.heki.write-owners]]` (through local aliases, container operations `.append()` / `[k] =`, `__dict__` / `setattr`, and helpers in other functions) are limited to the allowed modules and classes (stores, services) | Declared in `pyproject.toml` only (no decorators, no run-time cost). `exempt-methods` for construction and copy methods; a class family's initializer may initialize its own `self`; a function that only runs inside allowed contexts is not reported; `message` is appended to the report. With the Ratchet baseline an existing code base migrates step by step (generalizes datamodel-code-generator's `check_generation_store_usage.py`: 1,665 lines, 1,323 lines of tests, and 13 run-time witnesses) |
 | **MUT202** | When configured (contract) | **Declared read-only returns**: the shared objects returned by the functions and caches listed in `[[tool.heki.readonly-returns]]` (and the containers below them) must not be mutated by callers or downstream functions | Checked statically through cross-function `mutates_params` and alias tracking (replaces the run-time fingerprint monitoring of datamodel-code-generator's `tests/checks/schema_graph.py`) |
 | **MUT203** | When configured (contract) | **Declared read ownership**: reads of the classes and attributes listed in `[[tool.heki.read-owners]]` (local aliases, `getattr`, and `__dict__` included) are limited to the allowed readers (the read side of `MUT201`) | The same patterns, subclass expansion, initializer rule, `exempt-methods`, delegation from private helpers to their callers, allowed-context rule, and `message` as `MUT201`. Read sites are kept as local facts and the rule walks the reverse call graph, so summaries do not grow with propagated reads |
+| **MUT204** | On (contract) | **Declared call ownership**: calls of the functions, methods (overrides included), and constructions of the classes listed in `[[tool.heki.call-owners]]` outside the allowed callers (or inside `forbidden-callers`), through the receiver's class, bound-method aliases, and constant `getattr` calls | Reported only when every candidate is a target; `MUT203`'s delegation, initializer, and allowed-context rules; targets may call each other; call sites are local `FileSummary` facts (`CallSite::constructs`) |
 
 *(`MUT102` (`MUT102a` deep mutation / `MUT102b` representation exposure), measured in Stage 0-A,
 is **rejected**: the hits were sparse and mostly deliberate idioms;
@@ -385,13 +389,13 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 
 | Rule ID | Default | Stage 0-A density | What it finds and how precision is controlled |
 |---|---|---|---|
-| **EFF101** | On | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers, sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded, boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
+| **EFF101** | On | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators, sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
 | **EFF102** | On | Web/async **44.1%** / DB **48.5%** (90–93% indirect) | HTTP clients, sessions, or connection pools created in a loop (across functions too). `for.iter` excluded; `ConstSmall` / `RetryPattern` / `DaemonPolling` loops relaxed |
 | **EFF103** | On | DB **47.6%** (74% indirect) | Explicit database queries or external RPC calls in a loop (N+1, across functions too). `for.iter`, DDL, migrations, ORM internals, and bulk APIs excluded. **Implicit ORM lazy loading is out of scope (known limitation)** |
 | **EFF105** | Opt-in | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |
 | **EFF106** | Opt-in | 2.1% (fatal when it happens) | `await` or `BlockingNet` (across functions too) while a type-certain synchronous lock (`threading.Lock` / `RLock` / `Semaphore` / `BoundedSemaphore` / `Condition`) or a database transaction (`.begin()` / `.begin_nested()` / `transaction.atomic()` / ...) is held by a `with`. Async locks and `async with` are out of scope; offloading and test relaxation as in `EFF101` |
 | **EFF107** | Opt-in | — | `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future` results bound to a local variable but never awaited, returned, stored, passed on, or captured (lost to the garbage collector). Discarded results are Ruff's `RUF006` and are not reported; `TaskGroup.create_task` is out of scope |
-| **EFF201** | When configured (contract) | — | **Declared effect boundaries**: functions matching the `scopes` of `[[tool.heki.effect-boundaries]]` must not reach a forbidden effect (`blocking-*`, `sleep`, `blocking`, `mutates-params`, `writes-targets`), directly or transitively. Paths through `allowed-callees` and the inside of other scope functions are not followed (boundary-only reporting); the shortest call chain is attached |
+| **EFF201** | When configured (contract) | — | **Declared effect boundaries**: functions matching the `scopes` of `[[tool.heki.effect-boundaries]]` must not reach a forbidden effect (`blocking-*`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`, `calls` of `call-targets`), directly or transitively; `allow-writes` with `write-universe` reports every reached write in the universe that is not allowed (one implementation with `writes-targets`; candidates, not a gate: dcg's pass declarations show over-approximation). Paths through `allowed-callees` and the inside of other scope functions are not followed (boundary-only reporting); the shortest call chain is attached |
 | **DATA101** | On | Data/ML **19.5%** (about 90% precise with `LoopCarried`) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. **An SSA `LoopCarried` value is required**: one-off concatenation and padding are excluded |
 
 *(`DATA102` (`df.iterrows()`), measured in Stage 0-A, is **rejected**: it duplicates
@@ -641,7 +645,7 @@ message = "render entry points must not mutate model state"
 | M7 | The incremental LSP server and `--watch` |
 | M8 | End-to-end test suite through the real binary and LSP process; 100% of reachable lines |
 | M9 | CI / release / documentation workflows and the user guide |
-| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT110`, and the `MUT201` extensions (27 rules) |
+| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT110`, `MUT204`, the `EFF201` extensions, and the `MUT201` extensions (28 rules) |
 
 ### Gates for every release (from Stage 0-B)
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.
