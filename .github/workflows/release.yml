@@ -183,9 +183,12 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
   crates-io:
-    # The parser crates come from a pinned ruff git tag (ADR-009 / ADR-016), which crates.io
-    # does not accept as a dependency. The job stays off until they are published or vendored
-    # and the repository variable `PUBLISH_CRATES` is set to `true`.
+    # Off until the repository variable `PUBLISH_CRATES` is `true`, which needs two changes
+    # first: the parser crates come from a pinned ruff git tag (ADR-009 / ADR-016), which
+    # crates.io does not accept as a dependency, so they must be published or vendored; and
+    # `heki_kb` embeds `kb/` from the repository root, outside its crate archive, so the
+    # catalogs must move into the crate. `cargo publish --workspace` packages and verifies
+    # every crate before it uploads the first one.
     name: publish to crates.io
     if: github.event_name == 'release' && vars.PUBLISH_CRATES == 'true'
     needs: [pypi]
@@ -203,11 +206,7 @@ jobs:
       # Trusted publishing: a short-lived token from the repository's OIDC identity.
       - id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-      - name: Publish in dependency order
+      - name: Publish every crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: |
-          for crate in heki_ast heki_env heki_profile heki_semantic heki_ir heki_kb \
-                       heki_soundness heki_effect heki_diagnostics heki_rules heki_lsp heki; do
-            cargo publish --locked -p "$crate"
-          done
+        run: cargo publish --locked --workspace

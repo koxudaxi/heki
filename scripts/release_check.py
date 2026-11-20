@@ -10,8 +10,9 @@ project: it reports a known diagnostic with exit code 1 and a clean project with
 the one extracted from the wheel (for a platform the runner's Python cannot install, such as
 musl on a glibc runner).
 
-`versions` checks that the release tag, `pyproject.toml`, the Cargo workspace, and the metadata
-of every wheel and of the source distribution name the same version, so that a tag such as
+`versions` checks that the release tag, `pyproject.toml`, the Cargo workspace (with the versions
+of its internal dependencies), and the metadata of every wheel and of the source distribution
+name the same version, so that a tag such as
 `v0.1.0rc1` cannot publish distributions that declare `0.1.0`.
 """
 
@@ -148,6 +149,9 @@ def versions(dist: Path, tag: str | None) -> None:
         "pyproject.toml `project.version`": pyproject["project"]["version"],
         "Cargo.toml `workspace.package.version`": workspace,
     }
+    for name, dep in cargo["workspace"]["dependencies"].items():
+        if isinstance(dep, dict) and "path" in dep:
+            declared[f"Cargo.toml `workspace.dependencies.{name}`"] = dep.get("version", "(none)")
     wheels = sorted(dist.glob("*.whl"))
     sdists = sorted(dist.glob("*.tar.gz"))
     if not wheels or len(sdists) != 1:
