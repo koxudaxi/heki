@@ -42,7 +42,7 @@ BUDGETS_MIB = {
     # Peak physical footprint.
     "darwin": {"check": 69, "watch": 74, "owners": 82},
     # Peak resident set size, to calibrate from the CI runner's measurements.
-    "linux": {"check": 230, "watch": 240, "owners": 400},
+    "linux": {"check": 72, "watch": 81, "owners": 88},
 }
 RUNS = 3
 

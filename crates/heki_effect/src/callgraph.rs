@@ -197,16 +197,18 @@ pub(crate) fn propagate_with_budget(
     }
 }
 
+/// `func` is a propagation node, and `propagate_with_budget` keeps only the functions of indexed
+/// files as nodes.
 fn store(index: &mut ProjectIndex, func: &FuncKey, summary: EffectSummary) {
-    if let Some(path) = index.func_files.get(func).cloned()
-        && let Some(file) = index.files.get_mut(&path)
-    {
-        let summary = match file.local_functions.get(func) {
-            Some(local) if **local == summary => Arc::clone(local),
-            _ => Arc::new(summary),
-        };
-        file.functions.insert(func.clone(), summary);
-    }
+    let file = index
+        .files
+        .get_mut(&index.func_files[func])
+        .expect("a propagation node belongs to an indexed file");
+    let summary = match file.local_functions.get(func) {
+        Some(local) if **local == summary => Arc::clone(local),
+        _ => Arc::new(summary),
+    };
+    file.functions.insert(func.clone(), summary);
 }
 
 /// Final summary of `func` = its local facts joined with every outgoing edge's transfer.
