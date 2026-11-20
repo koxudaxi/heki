@@ -20,6 +20,9 @@ The rule reports the write itself, once per method and attribute. It does not re
   `__enter__`, `setup`, `setup_*` / `_setup_*` / `_init_*` / `_configure_*` methods, and the private helpers they call
   (`self.__setstate(state)` on the instance `__new__` allocates included); class attributes
   that `__init_subclass__` sets;
+- classes with a metaclass other than `type` / `abc.ABCMeta` along their MRO (also one heki
+  cannot resolve): the metaclass may turn attribute writes into descriptor calls (a generated
+  property whose setter invalidates the cached value), which heki does not see;
 - lazy initialization: a write under a `None` / falsy check of the same attribute
   (`if self._key is None: self._key = ...`, `if not self._parts: ...`);
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the

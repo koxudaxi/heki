@@ -61,6 +61,20 @@ impl Method<'_> {
             .next()
             .unwrap_or(&self.key.qualname)
     }
+
+    /// The fqn of the class defining the method.
+    fn class(&self) -> String {
+        let owner = self.key.qualname.rsplit_once('.').map_or("", |(c, _)| c);
+        format!("{}.{owner}", self.key.module)
+    }
+}
+
+/// The instances `m` runs on are of a class with a metaclass other than `type` / `abc.ABCMeta`
+/// ([`ProjectDecls::has_custom_metaclass`]): writing their attributes may run a descriptor the
+/// metaclass installed (one that invalidates a cached property, say), which heki does not see,
+/// so the write rules (`MUT101`, `MUT107`, and through them `MUT111`) stay quiet about them.
+fn writes_may_run_descriptors(decls: &ProjectDecls, m: &Method<'_>) -> bool {
+    decls.has_custom_metaclass(&m.class())
 }
 
 /// A private function or method name (`_name`, not a dunder), or a synthetic scope
@@ -225,6 +239,7 @@ struct StaleWrite<'m, 'a> {
 /// too.
 fn stale_writes<'m, 'a>(
     index: &'a ProjectIndex,
+    decls: &ProjectDecls,
     methods: &'m [Method<'a>],
     family: &[&'m Method<'a>],
     init_called: &FxHashSet<FuncKey>,
@@ -235,7 +250,7 @@ fn stale_writes<'m, 'a>(
         let Some(ps) = index.summary(&p.key) else {
             continue;
         };
-        if !ps.is_cached_property {
+        if !ps.is_cached_property || writes_may_run_descriptors(decls, p) {
             continue;
         }
         let p_name = p.name();
@@ -252,7 +267,10 @@ fn stale_writes<'m, 'a>(
             if !writers(m) || !visited.insert((m.path, &m.key)) {
                 continue;
             }
-            if m.key == p.key || filter1_init(m, init_called) {
+            if m.key == p.key
+                || filter1_init(m, init_called)
+                || writes_may_run_descriptors(decls, m)
+            {
                 continue;
             }
             let Some(ms) = index.summary(&m.key) else {
@@ -362,20 +380,27 @@ pub(crate) fn mut101_mut111(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         }
         let init_called = private_methods_called_from_init(cx.index, &family);
         let writers = |m: &Method<'_>| read || m.checked.is_some();
-        stale_writes(cx.index, methods, &family, &init_called, writers, |w| {
-            // An overriding `@cached_property` shares the instance `__dict__` slot: one report
-            // per property name.
-            if let Some(Checked { unit, .. }) = w.writer.checked
-                && reported
-                && seen.insert((w.writer.key.clone(), w.attr, w.prop.name().to_owned()))
-            {
-                let p_name = w.prop.name();
-                let class_qualname = cx
-                    .index
-                    .summary(&w.prop.key)
-                    .and_then(|ps| ps.owner_class_qualname.as_deref())
-                    .unwrap_or_default();
-                cx.emit(
+        stale_writes(
+            cx.index,
+            cx.decls,
+            methods,
+            &family,
+            &init_called,
+            writers,
+            |w| {
+                // An overriding `@cached_property` shares the instance `__dict__` slot: one report
+                // per property name.
+                if let Some(Checked { unit, .. }) = w.writer.checked
+                    && reported
+                    && seen.insert((w.writer.key.clone(), w.attr, w.prop.name().to_owned()))
+                {
+                    let p_name = w.prop.name();
+                    let class_qualname = cx
+                        .index
+                        .summary(&w.prop.key)
+                        .and_then(|ps| ps.owner_class_qualname.as_deref())
+                        .unwrap_or_default();
+                    cx.emit(
                     out,
                     "MUT101",
                     unit,
@@ -391,11 +416,12 @@ pub(crate) fn mut101_mut111(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     )),
                     &[],
                 );
-            }
-            if read {
-                stale.entry(&w.prop.key).or_default().push(w);
-            }
-        });
+                }
+                if read {
+                    stale.entry(&w.prop.key).or_default().push(w);
+                }
+            },
+        );
     }
     if report_reads {
         reads.report(cx, &stale, out);
@@ -431,7 +457,7 @@ pub fn stale_writes_by_file(
         }
         let init_called = private_methods_called_from_init(index, &family);
         let writers = |m: &Method<'_>| wanted(m.path);
-        stale_writes(index, methods, &family, &init_called, writers, |w| {
+        stale_writes(index, decls, methods, &family, &init_called, writers, |w| {
             out.entry(w.writer.path.to_path_buf())
                 .or_default()
                 .insert(StaleWriteKey {
@@ -2403,7 +2429,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     for_each_class_family(cx, |methods, family, init_called| {
         let hashes: Vec<_> = methods
             .iter()
-            .filter(|h| h.name() == "__hash__")
+            .filter(|h| h.name() == "__hash__" && !writes_may_run_descriptors(cx.decls, h))
             .filter_map(|h| Some((h, cx.index.summary(&h.key)?)))
             .collect();
         if hashes.is_empty() {
@@ -2435,6 +2461,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         && m.name() != "__hash__"
                         && !filter1_init(m, init_called)
                         && !init_helpers.contains(&m.key)
+                        && !writes_may_run_descriptors(cx.decls, m)
                 })
                 .filter_map(|(m, checked)| Some((m, checked, local_summary(cx.index, m)?)));
             for (m, Checked { unit, f }, local) in writers {

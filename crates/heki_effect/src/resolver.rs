@@ -236,6 +236,10 @@ pub struct ClassDecl {
     pub decorators: Vec<(String, Option<bool>)>,
     /// The resolved `metaclass=` of the class statement.
     pub metaclass: Option<String>,
+    /// The class statement names a metaclass other than `type` and `abc.ABCMeta`, also one heki
+    /// cannot resolve ([`ProjectDecls::has_custom_metaclass`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub custom_metaclass: bool,
     /// The `frozen=` keyword of the class statement (`class C(Base, frozen=False)`).
     pub frozen_keyword: Option<bool>,
     /// `@dataclass_transform(...)` on this class (as a base class or metaclass of the classes it
@@ -1479,6 +1483,18 @@ impl ProjectDecls {
         })
     }
 
+    /// Whether a project class along the MRO of `class` names a metaclass other than `type` and
+    /// `abc.ABCMeta` (`metaclass=Meta`, also one heki cannot resolve). Python creates every
+    /// subclass with it too, and it may replace any attribute of the class with a descriptor
+    /// (`setattr(cls, f"_attr_{name}", property(...))` in its `__init__`), so writing an
+    /// attribute of an instance may run code heki does not see.
+    pub fn has_custom_metaclass(&self, class: &str) -> bool {
+        self.mro(class).into_iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, &c));
+            self.class(&c).is_some_and(|decl| decl.custom_metaclass)
+        })
+    }
+
     /// Every project class that (transitively) inherits from `class`, sorted.
     pub fn subclasses_of(&self, class: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -2115,7 +2131,15 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .find(|(k, _)| k == name)
                 .map(|(_, v)| v.as_str())
         };
-        let metaclass = keyword("metaclass").and_then(|m| decls.resolve_dotted(m, false));
+        let metaclass_text = keyword("metaclass");
+        let metaclass = metaclass_text.and_then(|m| decls.resolve_dotted(m, false));
+        // `type` is no name the module binds: it stays the builtin unless the module rebinds it.
+        let custom_metaclass = metaclass_text.is_some_and(|text| {
+            !matches!(
+                metaclass.as_deref().unwrap_or(text),
+                "type" | "builtins.type" | "abc.ABCMeta"
+            )
+        });
         let frozen_keyword = keyword("frozen").and_then(bool_literal);
         let is_protocol = bases
             .iter()
@@ -2137,6 +2161,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         if let Some(c) = decls.classes.get_mut(&class.qualname) {
             c.bases = bases;
             c.metaclass = metaclass;
+            c.custom_metaclass = custom_metaclass;
             c.frozen_keyword = frozen_keyword;
             c.is_protocol = is_protocol;
             c.members = members;

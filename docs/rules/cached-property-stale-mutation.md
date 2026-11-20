@@ -29,6 +29,9 @@ It does not report:
 - two-phase initialization: `__init__`, `__post_init__`, `model_post_init`, `__setstate__`,
   `__enter__`, `setup`, `setup_*` / `_setup_*` / `_init_*` / `_configure_*` methods, and private helpers called from
   `__init__`;
+- classes with a metaclass other than `type` / `abc.ABCMeta` along their MRO (also one heki
+  cannot resolve): the metaclass may turn attribute writes into descriptor calls (a generated
+  property whose setter invalidates the cached value), which heki does not see;
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
   `if key not in self._memo:` pattern): in-place changes of an attribute with a `cache` or
   `memo` word in its name; rebinding it (`self.cache_size = n`) and names such as

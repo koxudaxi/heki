@@ -491,6 +491,108 @@ fn mut101_getters_calling_self_methods_for_their_effects() {
     );
 }
 
+// ========================================================== MUT101 / MUT107: custom metaclasses
+
+/// A metaclass other than `type` / `abc.ABCMeta` may replace attributes with descriptors when it
+/// creates the class: here `_attr_is_on` becomes a property whose setter invalidates `is_on`, so
+/// `self._attr_is_on = True` is a descriptor call heki does not see. The write rules stay quiet
+/// on such classes and their subclasses; a plain class, an `abc.ABCMeta` class, and one with
+/// `metaclass=type` are reported.
+const METACLASSES: &str = r#"from abc import ABCMeta
+from functools import cached_property
+
+
+def _attr_property(name):
+    def getter(obj):
+        return getattr(obj, f"__attr_{name}")
+
+    def setter(obj, value):
+        setattr(obj, f"__attr_{name}", value)
+        obj.__dict__.pop(name, None)
+
+    return property(getter, setter)
+
+
+class CachedProperties(type):
+    def __init__(cls, name, bases, namespace, **kwargs):
+        super().__init__(name, bases, namespace, **kwargs)
+        for prop in namespace.get("_cached", ()):
+            setattr(cls, f"_attr_{prop}", _attr_property(prop))
+
+
+class Entity(metaclass=CachedProperties):
+    _cached = ("is_on",)
+
+    def __init__(self):
+        self._attr_is_on = False
+
+    @cached_property
+    def is_on(self):
+        return self._attr_is_on
+
+    def __hash__(self):
+        return hash(self._attr_is_on)
+
+
+class Switch(Entity):
+    def turn_on(self):
+        self._attr_is_on = True
+
+
+class Plain:
+    def __init__(self):
+        self._attr_is_on = False
+
+    @cached_property
+    def is_on(self):
+        return self._attr_is_on
+
+    def __hash__(self):
+        return hash(self._attr_is_on)
+
+    def turn_on(self):
+        self._attr_is_on = True
+
+
+class Abstract(metaclass=ABCMeta):
+    def __init__(self):
+        self._attr_is_on = False
+
+    @cached_property
+    def is_on(self):
+        return self._attr_is_on
+
+    def turn_on(self):
+        self._attr_is_on = True
+
+
+class Typed(metaclass=type):
+    def __init__(self):
+        self._attr_is_on = False
+
+    @cached_property
+    def is_on(self):
+        return self._attr_is_on
+
+    def turn_on(self):
+        self._attr_is_on = True
+"#;
+
+#[test]
+fn mut101_and_mut107_stay_quiet_on_classes_a_metaclass_may_give_descriptors() {
+    let p = Project::new("regr_mut101_metaclass");
+    p.write("entities.py", METACLASSES);
+    assert_eq!(
+        lines(&p, "MUT101"),
+        vec![
+            at(54, "Plain.turn_on"),
+            at(66, "Abstract.turn_on"),
+            at(78, "Typed.turn_on"),
+        ]
+    );
+    assert_eq!(lines(&p, "MUT107"), vec![at(54, "Plain.turn_on")]);
+}
+
 // ============================================================= MUT101: lazy initialization
 
 /// Lazy initializations (`if self._conn is None: self._conn = ...`, `if not self.finalized:`, in

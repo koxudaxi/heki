@@ -1697,6 +1697,22 @@ fn steps() -> Vec<Step> {
         )
         .present(&[("pkg/derived.py", "MUT101")]),
         Step::new(
+            "the base class gets a metaclass of its own, which may give its subclasses descriptors",
+            vec![save(
+                "pkg/base.py",
+                &BASE.replace(
+                    "class Base:",
+                    "class Meta(type):\n    pass\n\n\nclass Base(metaclass=Meta):",
+                ),
+            )],
+        )
+        .absent(&[("pkg/derived.py", "MUT101")]),
+        Step::new(
+            "the base class is created by `type` again",
+            vec![save("pkg/base.py", BASE)],
+        )
+        .present(&[("pkg/derived.py", "MUT101")]),
+        Step::new(
             "the base class's cached property returns the object the subclass changes in place",
             vec![save(
                 "pkg/base.py",
