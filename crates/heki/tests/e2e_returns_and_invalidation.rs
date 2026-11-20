@@ -1238,6 +1238,64 @@ fn mut109_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
     );
 }
 
+const PROTOCOL_BINDING: &str = r#"import typing
+
+
+class Positioned(typing.Protocol):
+    x: int
+
+
+class Model:
+    def __init__(self) -> None:
+        self.x = 0
+
+
+class Point:
+    def __init__(self) -> None:
+        self.x = 0
+
+
+def notify(o) -> None:
+    pass
+
+
+def _set_x(o) -> None:
+    o.x = 1
+
+
+def set_positioned(p: Positioned) -> None:
+    _set_x(p)
+"#;
+
+/// A helper writing an attribute of an object typed with a protocol writes it on the protocol
+/// and on each implementation: each write is matched against the targets of its own class
+/// (`Model.x` once, not once per class the object may be), and a target on the protocol covers
+/// the write too.
+#[test]
+fn mut109_ties_a_helper_write_through_a_protocol_to_each_class_once() {
+    let p = Project::new("mut109_protocol_binding");
+    p.write(
+        "pyproject.toml",
+        "[[tool.heki.invalidation]]\nname = \"model\"\ntargets = [\"Model.x\"]\ninvalidators = [\"notify\"]\n\n[[tool.heki.invalidation]]\nname = \"positioned\"\ntargets = [\"Positioned.x\"]\ninvalidators = [\"notify\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/models.py", PROTOCOL_BINDING);
+    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let mut messages: Vec<&str> = diags
+        .iter()
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        vec![
+            "`set_positioned` writes `Model.x` (indirect_helper) via `pkg.models._set_x` and returns on some path without calling an invalidator of `model`",
+            "`set_positioned` writes `Positioned.x` (indirect_helper) via `pkg.models._set_x` and returns on some path without calling an invalidator of `positioned`",
+        ],
+        "{diags:#?}"
+    );
+}
+
 #[test]
 fn mut109_configuration_errors() {
     let p = inv_project("mut109_config");

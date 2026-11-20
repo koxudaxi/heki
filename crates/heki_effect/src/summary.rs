@@ -1176,8 +1176,8 @@ impl<'a> Extractor<'a> {
             classes
         };
         let field = field.map_or(0, |(class, attr)| c.target_of(&with_bases(class), attr));
-        let classes: Vec<String> = instances.iter().flat_map(|c| with_bases(c)).collect();
-        let classes = if c.names_class(&classes) {
+        let classes: Vec<Vec<String>> = instances.iter().map(|c| with_bases(c)).collect();
+        let classes = if classes.iter().any(|line| c.names_class(line)) {
             classes
         } else {
             Vec::new()

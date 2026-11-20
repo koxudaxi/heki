@@ -736,7 +736,11 @@ pub(crate) fn propagate_facts(
                 };
                 let mask = match w.through {
                     Through::Field => targets.field,
-                    Through::Instance => contracts.target_of(&targets.classes, w.attr),
+                    Through::Instance => targets
+                        .classes
+                        .iter()
+                        .find(|line| line[0] == w.class)
+                        .map_or(0, |line| contracts.target_of(line, w.attr)),
                 };
                 let reach = w.origin.reach;
                 if mask == 0 || builds_written_object(initializer, reach, w.obj_params) {
