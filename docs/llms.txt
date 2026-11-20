@@ -8,7 +8,7 @@
 - [Overview](https://heki.koxudaxi.dev/): heki (壁, Japanese for "wall") checks what Python code does across functions and modules: which objects it mutates, which references it shares, and which blocking, network, or database work it reaches
 - [Scope and Limitations](https://heki.koxudaxi.dev/scope/): This page says what heki checks, what it leaves to other tools, where its knowledge comes from, and what it does when it cannot tell
 - [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable: its Python package ships only that executable and installs no Python dependencies into your environment
-- [Getting Started](https://heki.koxudaxi.dev/getting-started/): With no arguments heki checks every Python file under the current directory, honoring .gitignore, .hekiignore, and the exclude setting
+- [Getting Started](https://heki.koxudaxi.dev/getting-started/): This page runs heki on a project, reads a diagnostic, applies a fix, and picks the rules
 
 ## Usage
 

@@ -588,6 +588,8 @@ Source: https://heki.koxudaxi.dev/getting-started/
 
 # Getting Started
 
+This page runs heki on a project, reads a diagnostic, applies a fix, and picks the rules.
+
 ## Run it
 
 From the root of a project (the directory with `pyproject.toml`):
@@ -596,8 +598,9 @@ From the root of a project (the directory with `pyproject.toml`):
 $ heki check
 ```
 
-With no arguments heki checks every Python file under the current directory, honoring
-`.gitignore`, `.hekiignore`, and the `exclude` setting. Pass files or directories to narrow it:
+heki checks every Python file under the current directory, except the
+[excluded and ignored ones](https://heki.koxudaxi.dev/configuration/#which-files-are-checked). Pass files or directories
+to narrow it:
 
 ```console
 $ heki check src/ tests/test_api.py
@@ -614,18 +617,21 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def handler` calls 
   = related: app/users.py:5:12: `load_user` calls `requests.get`
 ```
 
-- `app/api.py:5:12` is where to look; `EFF101` / `async-blocking-call` the rule, with its
-  severity.
-- The message says what heki proved: here, a chain of calls from an `async def` to a blocking
-  network call. The `related` lines are the hops of that chain, so you can follow it across
-  files (editors show them as clickable related information).
-- `heki rule EFF101` explains the rule, its exclusions, and what to do instead. The
-  [rules reference](https://heki.koxudaxi.dev/rules/) has the same text for every rule.
+| Part | Meaning |
+| ---- | ------- |
+| `app/api.py:5:12` | where to look |
+| `EFF101 (async-blocking-call)` | the rule's code and name |
+| `[error]` | its severity |
+| the message | what heki proved: here, a chain of calls from an `async def` to a blocking network call |
+| `related` lines | the hops of that chain, to follow it across files; editors show them as related information you can jump to |
+
+`heki rule EFF101` explains the rule, its exclusions, and what to do instead. The
+[rules reference](https://heki.koxudaxi.dev/rules/) has the same text for every rule.
 
 ## Fix what heki can prove
 
-Rules in the `OPT` family come with rewrites. The safe, always-profitable ones (`OPT101`,
-`OPT102`) are applied with `--fix`; `--diff` shows them first:
+`--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
+`--diff` shows them first:
 
 ```console
 $ heki check --diff
@@ -643,11 +649,10 @@ $ heki check --fix
 Fixed 1 issue(s) in 1 file(s).
 ```
 
-`--fix` then reports what is left (here the `EFF101` above, which has no automatic fix).
+`--fix` then reports what is left, such as the `EFF101` above, which has no automatic fix.
 
-A fix is applied only when heki proved it does not change what the program does. When it cannot,
-the diagnostic says why and nothing is rewritten, for example when the list is also handed to
-other code inside the loop:
+When heki cannot prove a fix safe, the diagnostic says why and nothing is rewritten. Here the
+list is also handed to other code inside the loop:
 
 ```console
 $ heki check app/shared.py --output-format concise
@@ -655,7 +660,7 @@ app/shared.py:4:9: OPT101 `rows = rows + [...]` copies the whole list on every i
 Found 1 diagnostic(s) in 1 file(s).
 ```
 
-See [Fixes and Safety](https://heki.koxudaxi.dev/fixes/).
+[Fixes and Safety](https://heki.koxudaxi.dev/fixes/) lists which rules are fixed, and what a fix must prove.
 
 ## Silence a diagnostic
 
@@ -665,9 +670,8 @@ Append a suppression comment to the reported line:
 user = load_user(user_id)  # heki: ignore[EFF101]
 ```
 
-`# heki: ignore` without codes silences every rule on the line; `# noqa: EFF101` works too.
-To keep a rule away from whole files, use `per-file-ignores` in the
-[configuration](https://heki.koxudaxi.dev/configuration/).
+The other forms (`# heki: ignore`, `# noqa: EFF101`) and `per-file-ignores` are in
+[Inline suppressions](https://heki.koxudaxi.dev/configuration/#inline-suppressions).
 
 ## Choose the rules
 
@@ -677,19 +681,22 @@ $ heki check --extend-select EFF105  # add an opt-in rule
 $ heki check --ignore OPT110         # everything except one rule
 ```
 
-Codes, code prefixes, and rule names (`async-blocking-call`) are all accepted. Opt-in rules
-(`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) are enabled only by their exact
-code or name.
+Codes, code prefixes, and rule names (`async-blocking-call`) are accepted. A prefix does not
+enable the opt-in rules: see [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
 
-## Machine-readable output
+## Output formats
 
 ```console
-$ heki check --output-format json    # also: full (default), concise, github, sarif
+$ heki check --output-format json
 ```
 
-`json` includes the evidence behind each diagnostic, the blocker that stops a fix, the call chain,
-and the fix edits. `github` prints GitHub Actions annotations; `sarif` feeds code-scanning
-dashboards with the message, the location, and the call chain (no evidence or blocker).
+| Format | Prints |
+| ------ | ------ |
+| `full` (default) | each diagnostic with its source line and call chain |
+| `concise` | one line per diagnostic |
+| `json` | every field: also the evidence, the blocker that stops a fix, and the fix edits ([fields](https://heki.koxudaxi.dev/coding-agents/#use-the-cli-in-the-agents-loop)) |
+| `github` | GitHub Actions annotations ([CI](https://heki.koxudaxi.dev/adoption/#continuous-integration)) |
+| `sarif` | the message, the location, and the call chain, for code-scanning dashboards (no evidence or blocker) |
 
 ## Exit codes
 
