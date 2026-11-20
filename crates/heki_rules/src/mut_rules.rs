@@ -1764,6 +1764,8 @@ fn dominates(f: &IrFunction, d: heki_ir::BlockId, b: heki_ir::BlockId) -> bool {
 
 mod readonly_mutation;
 
+pub use readonly_mutation::{CHAIN_RULES, ChainFacts, chain_facts};
+
 /// `MUT108` (in-place changes of frozen dataclass / `NamedTuple` / `dataclass_transform` fields,
 /// `Final` / `ReadOnly` attributes, and `ReadOnly` `TypedDict` keys) and `MUT110` (`Sequence` /
 /// `Mapping` parameters handed to functions that change them), through one analysis.

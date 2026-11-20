@@ -531,10 +531,13 @@ heki/
   are re-checked: each file's summary and check record what they read of the declarations
   (modules looked up, subclass lists, property names, class facts). So are the files of
   functions whose callers changed their calls (their contract reports depend on their callers),
-  the class families of changed methods, and the diagnostics showing a call site that only moved;
-  those positions are re-propagated into the callers' summaries without changing facts. Files
-  changed on disk and configuration changes are followed. `crates/heki/tests/lsp_oracle.rs`
-  compares the server with `heki check` after every step of an editing session (46 steps).
+  the class families of changed methods, the `MUT108` / `MUT110` reports above a function whose
+  own in-place changes or calls changed (their call chains walk the functions' own summaries and
+  calls down to the first body that makes the change), and the diagnostics showing a call site
+  that only moved; those positions are re-propagated into the callers' summaries without changing
+  facts. Files changed on disk and configuration changes are followed.
+  `crates/heki/tests/lsp_oracle.rs` compares the server with `heki check` after every step of an
+  editing session (92 steps).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
 - **LSP features**: the call chains of `EFF101` / `MUT201` and others are
   `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven

@@ -16,7 +16,7 @@ pub mod project;
 pub mod selection;
 pub mod snapshot;
 
-pub use mut_rules::family_readers;
+pub use mut_rules::{CHAIN_RULES, ChainFacts, chain_facts, family_readers};
 pub use selection::{RuleSelection, SelectionError};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
