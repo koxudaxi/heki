@@ -1677,3 +1677,140 @@ fn lazy_iterators_do_their_io_when_iterated() {
         ]
     );
 }
+
+/// `(path, line, rule, qualname, target)` of every diagnostic of `heki check` on a project of
+/// `files` (`pyproject.toml` included).
+fn check_files(
+    name: &str,
+    files: &[(&str, &str)],
+    rules: &str,
+) -> Vec<(String, u64, String, String, String)> {
+    let p = Project::new(name);
+    for (rel, text) in files {
+        p.write(rel, text);
+    }
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", rules]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["target"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+const DECLARED_PROJECT_FUNCTIONS: &str = r#"[project]
+name = "t"
+
+[[tool.heki.ecosystem]]
+symbol = "pkg.db.run_query"
+effects = ["blocking_db"]
+
+[[tool.heki.ecosystem]]
+symbol = "pkg.log.emit"
+excluded = true
+
+[[tool.heki.ecosystem]]
+symbol = "pkg.net.fetch"
+async-safe = true
+
+[[tool.heki.ecosystem]]
+symbol = "pkg.db.open_db"
+return-type = "sqlite3.Connection"
+"#;
+
+const DECLARED_DB: &str = r#"def run_query(cur, sql):
+    return cur.execute(sql)
+
+
+def open_db(factory):
+    return factory()
+"#;
+
+const DECLARED_LOG: &str = r#"import time
+
+
+def emit(message):
+    time.sleep(0.1)
+"#;
+
+const DECLARED_NET: &str = r#"import requests
+
+
+def fetch(url):
+    return requests.get(url)
+"#;
+
+const DECLARED_APP: &str = r#"from pkg.db import open_db, run_query
+from pkg.log import emit
+from pkg.net import fetch
+
+
+async def tp_declared_effects(cur):
+    return run_query(cur, "SELECT 1")
+
+
+async def tn_excluded_and_async_safe(url):
+    emit("x")
+    fetch(url)
+
+
+def tp_async_safe_keeps_its_allocations(urls):
+    for u in urls:
+        fetch(u)
+
+
+def tp_declared_result(factory, ids):
+    conn = open_db(factory)
+    for i in ids:
+        conn.execute("SELECT ?", (i,))
+"#;
+
+/// An ecosystem entry naming a project function applies when its source is checked too: its
+/// effects add to the body's, `excluded` / `async-safe` keep the body's (blocking) effects from
+/// its callers, and `return-type` types its result.
+#[test]
+fn declarations_of_project_functions_apply_to_their_callers() {
+    let files = [
+        ("pyproject.toml", DECLARED_PROJECT_FUNCTIONS),
+        ("pkg/__init__.py", ""),
+        ("pkg/db.py", DECLARED_DB),
+        ("pkg/log.py", DECLARED_LOG),
+        ("pkg/net.py", DECLARED_NET),
+        ("pkg/app.py", DECLARED_APP),
+    ];
+    let app = |line, rule: &str, qualname: &str, target: &str| {
+        (
+            "pkg/app.py".to_owned(),
+            line,
+            rule.to_owned(),
+            qualname.to_owned(),
+            target.to_owned(),
+        )
+    };
+    assert_eq!(
+        check_files("catalog_declared_project", &files, RULES),
+        vec![
+            app(7, "EFF101", "tp_declared_effects", "pkg.db.run_query"),
+            app(
+                17,
+                "EFF102",
+                "tp_async_safe_keeps_its_allocations",
+                "requests.get"
+            ),
+            app(
+                23,
+                "EFF103",
+                "tp_declared_result",
+                "sqlite3.Connection.execute"
+            ),
+        ]
+    );
+}

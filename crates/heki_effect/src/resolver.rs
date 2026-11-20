@@ -2181,10 +2181,11 @@ impl<'a> TypeCtx<'a> {
         match self.project.symbol(fqn) {
             Symbol::Class(_) => return Some(Val::Inst(fqn.to_owned())),
             Symbol::Function(_, decl) => {
-                return decl
-                    .return_type
-                    .as_ref()
-                    .map(|t| Val::Inst(self.project.canonical(t)));
+                return self.declared_result(fqn, arg).or_else(|| {
+                    decl.return_type
+                        .as_ref()
+                        .map(|t| Val::Inst(self.project.canonical(t)))
+                });
             }
             Symbol::Module | Symbol::Global(_) => return None,
             Symbol::External => {}
@@ -2257,6 +2258,19 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// The class an ecosystem entry naming the function `fqn` gives its result (a declaration
+    /// of a project function wins over its annotation).
+    fn declared_result(
+        &self,
+        fqn: &str,
+        arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<Val> {
+        let entry = self.kb.lookup(fqn)?;
+        entry
+            .return_type_in(entry.case_for(arg))
+            .map(|t| Val::Inst(t.to_owned()))
+    }
+
     /// Value returned by a resolved call target (`arg` as for [`Self::call_result`]).
     fn callee_result(
         &self,
@@ -2270,9 +2284,11 @@ impl<'a> TypeCtx<'a> {
                 if key.qualname.ends_with(".__init__") {
                     return None;
                 }
-                decl.return_type
-                    .as_ref()
-                    .map(|t| Val::Inst(self.project.canonical(t)))
+                self.declared_result(&key.fqn(), arg).or_else(|| {
+                    decl.return_type
+                        .as_ref()
+                        .map(|t| Val::Inst(self.project.canonical(t)))
+                })
             }
             Callee::External(fqn) => self.call_result(fqn, arg),
             _ => None,

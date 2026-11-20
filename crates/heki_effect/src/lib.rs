@@ -273,6 +273,11 @@ pub struct EffectSummary {
     /// The guards every occurrence of an execution effect depends on (`guards`); an effect
     /// without an entry runs whenever the function does.
     pub exec_guards: BTreeMap<ExecEffectKind, EffectGuards>,
+
+    /// Execution effects an ecosystem entry naming the function keeps from its callers: every
+    /// one when it is `excluded`, the blocking ones when it is `async_safe` (applied to the
+    /// final summary, whatever the callees bring).
+    pub declared_hidden: BTreeSet<ExecEffectKind>,
 }
 
 /// An input of a function that a guard tests: parameter `param` itself, or its attribute
@@ -360,6 +365,21 @@ pub struct ArgBinding {
 }
 
 impl EffectSummary {
+    /// Drop the execution effects in `hidden`, with their chains and guards, here and in what
+    /// iterating the returned object runs.
+    pub(crate) fn hide_exec_effects(&mut self, hidden: &BTreeSet<ExecEffectKind>) {
+        if hidden.is_empty() {
+            return;
+        }
+        self.direct_exec_effects.retain(|e| !hidden.contains(e));
+        self.transitive_exec_effects.retain(|e| !hidden.contains(e));
+        self.exec_chains.retain(|e, _| !hidden.contains(e));
+        self.exec_guards.retain(|e, _| !hidden.contains(e));
+        if let Some(iterated) = &mut self.iterated {
+            iterated.hide_exec_effects(hidden);
+        }
+    }
+
     /// Copy with every source location zeroed: Early Cutoff compares facts, not positions,
     /// so an edit that only moves code does not notify callers.
     pub fn without_locations(&self) -> Self {

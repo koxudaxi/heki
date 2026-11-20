@@ -802,6 +802,7 @@ impl<'a> Extractor<'a> {
             }
         }
         self.iterations();
+        self.apply_declaration();
         if self.summary.is_cached_property && f.kind == FunctionKind::Sync {
             self.summary.returns_self_attrs = self.returned_self_attrs();
         }
@@ -2002,6 +2003,54 @@ impl<'a> Extractor<'a> {
         };
         let site = self.site(bb, target, is_awaited, span);
         self.sites.push(site);
+    }
+
+    /// An ecosystem entry naming the function (`[[tool.heki.ecosystem]]`) declares what calling
+    /// it does, as for an external function: its `effects` run in the body, its
+    /// `offloads_blocking_arg` (the receiver not counted) is a parameter the body offloads, and
+    /// `excluded` / `async_safe` keep every effect / the blocking ones from its callers.
+    fn apply_declaration(&mut self) {
+        let fqn = self.key.fqn();
+        let Some(entry) = self.cx.kb.lookup(&fqn) else {
+            return;
+        };
+        let hidden: BTreeSet<ExecEffectKind> = if entry.excluded {
+            let loop_sensitive = [
+                ExecEffectKind::UnpooledClientAlloc,
+                ExecEffectKind::DbQuery,
+                ExecEffectKind::QuadraticRealloc,
+            ];
+            BLOCKING_EFFECTS
+                .iter()
+                .copied()
+                .chain(loop_sensitive)
+                .collect()
+        } else if entry.async_safe {
+            BLOCKING_EFFECTS.iter().copied().collect()
+        } else {
+            BTreeSet::new()
+        };
+        for &e in &entry.effects {
+            let had = !self.summary.direct_exec_effects.insert(e);
+            guards::add_occurrence(
+                &mut self.summary.exec_guards,
+                e,
+                had,
+                &crate::EffectGuards::default(),
+            );
+            let chain = vec![self.hop(fqn.clone(), self.f.span)];
+            self.summary.exec_chains.insert(e, chain);
+        }
+        if let Some(k) = entry.offloads_blocking_arg {
+            let bound_first =
+                self.f.owner_class_qualname.is_some() && !self.f.has_decorator(&["staticmethod"]);
+            let p = u32::from(k) + u32::from(bound_first);
+            if p < 64 {
+                self.summary.offloads_blocking_params |= 1u64 << p;
+            }
+        }
+        self.summary.hide_exec_effects(&hidden);
+        self.summary.declared_hidden = hidden;
     }
 
     /// The function returns (through `step`) the result of the read-only producer `producer`

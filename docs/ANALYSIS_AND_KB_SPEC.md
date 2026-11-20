@@ -554,7 +554,11 @@ the call's `effects` and `return_type`, and an argument that is not passed, or m
 through `*` / `**` unpacking, selects none. A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`): an
-override sets the keys it lists and keeps the built-in entry's others. An `async_safe` entry
+override sets the keys it lists and keeps the built-in entry's others. An entry naming a project
+function applies to its summary: its `effects` are direct effects (chain: the function itself),
+`offloads_blocking_arg` a parameter it offloads, `excluded` / `async_safe` hide every / the
+blocking effects of the final summary from its callers (`EffectSummary::declared_hidden`), and
+its `return_type` types the call over the annotation. An `async_safe` entry
 keeps only its loop-sensitive effects when the catalog is loaded (built-in entries carry no
 blocking effect at all).
 
