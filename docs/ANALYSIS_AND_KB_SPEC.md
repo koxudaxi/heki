@@ -158,7 +158,7 @@ EffectSummary(f) = {
     // Family 1: mutation and state effects (MUT1xx / MUT2xx)
     mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
     mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i
-    escapes_params:           Bitset,                      // stored in an attribute / container / global, or returned
+    escapes_params:           Bitset,                      // stored in an attribute / container / global / closure variable
     consumes_params:          Bitset,                      // iterated to exhaustion on every normal path (MUT106)
     unconditional_forwards:   Bitset,                      // passed on at calls that run on every normal path
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator

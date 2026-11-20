@@ -509,6 +509,22 @@ fn mut103_skips_new_functions_and_honors_per_file_ignores() {
     assert_eq!(hits(&stdout), vec![hit("pkg/api.py", 1, "MUT103")]);
 }
 
+/// A parameter stored in a module global escapes; a returned one does not.
+#[test]
+fn mut103_reports_parameters_published_to_globals_and_closures() {
+    let p = Project::new("snapshot_escapes");
+    let before = "latest = None\n\n\ndef publish(x):\n    pass\n\n\ndef give(x):\n    pass\n";
+    p.write("pkg/__init__.py", "").write("pkg/pub.py", before);
+    assert_eq!(p.heki(&["snapshot", "--write"]).0, 0);
+    p.write(
+        "pkg/pub.py",
+        "latest = None\n\n\ndef publish(x):\n    global latest\n    latest = x\n\n\ndef give(x):\n    return x\n",
+    );
+    let (code, stdout, _) = p.check(&["--select", "MUT103", "--output-format", "json"]);
+    assert_eq!(code, 1);
+    assert_eq!(hits(&stdout), vec![hit("pkg/pub.py", 4, "MUT103")]);
+}
+
 #[test]
 fn snapshot_files_that_cannot_be_read_or_written() {
     let p = Project::new("snapshot_io");

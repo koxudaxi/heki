@@ -1340,6 +1340,10 @@ impl<'a> Extractor<'a> {
             } if self.changes_in_place(*dst, *lhs, *op) => {
                 self.container_mut(*lhs, None, span);
             }
+            // A value stored in a module global or a closure variable outlives the call.
+            InstKind::StoreGlobal { value, .. } | InstKind::StoreDeref { value, .. } => {
+                self.note_escape(*value);
+            }
             InstKind::AttrStore { obj, attr, value } => {
                 self.write_attr(*obj, attr, WriteKind::DirectAttr, span);
                 self.note_escape(*value);
