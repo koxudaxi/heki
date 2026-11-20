@@ -10,62 +10,107 @@ use super::{
     reports_unresolved,
 };
 use crate::{CheckContext, DottedPattern, RuleConfigError};
+use globset::{GlobSet, GlobSetBuilder};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{CallHop, CallSite, FuncKey, SiteRole};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// One call target: a project function, a method (with its overrides in subclasses), or a class
 /// (constructing it).
 pub(crate) struct CallTargetPattern {
     /// The configured text (diagnostic target and baseline key).
     pub text: String,
-    /// The functions and methods the text names.
-    functions: FunctionMatcher,
-    /// Classes the whole text names, plus their subclasses: constructing one calls the target.
-    classes: FxHashSet<String>,
     /// `classes` and the method's class family: an initializer of one of them calling the
     /// target on its own `self` initializes itself. A text naming no class (`reset`) has none:
-    /// its classes are those whose methods it names ([`Self::calls_on`], [`Families`]).
+    /// its classes are those whose methods it names ([`CallTargets::calls_on`], [`Families`]).
     family: FxHashSet<String>,
     /// The last name of the text (`replace_reference` of `DataType.replace_reference`): what a
     /// call on an object of unknown class names (`MUT207`).
     pub name: DottedPattern,
 }
 
-impl CallTargetPattern {
-    /// What `site` calls of the target: the class it constructs, or every candidate the target
+/// The call targets of one contract (`call-owners.targets`, `effect-boundaries.call-targets`),
+/// indexed so that the targets a call matches are looked up, not tried one by one: the cost of
+/// a contract grows with its call sites, whatever its number of targets.
+pub(crate) struct CallTargets {
+    pub patterns: Vec<CallTargetPattern>,
+    /// The functions and methods each target names, by target.
+    pub(crate) functions: Arc<FunctionMatchers>,
+    /// Each project class a target's whole text names, or a subclass of one: the targets
+    /// constructing it calls.
+    constructors: FxHashMap<String, Vec<usize>>,
+}
+
+impl CallTargets {
+    /// The targets `site` calls, as the groups to report (indices into `patterns`): each target
+    /// that every candidate matches, on its own (constructing a class matches by its class
+    /// only: its `__init__` runs as part of it); or, when no single target covers every
+    /// candidate but each candidate is a target (`A.reset` and `B.reset` both named,
+    /// `obj: Base` whose `reset` is one of the two), one group of the targets the candidates
+    /// match. Only the call itself calls (`SiteRole::Call`): the other sites of the object a
+    /// call returns (where it is iterated, returned, or handed on) call nothing more.
+    pub(crate) fn called(&self, site: &CallSite) -> Vec<Vec<usize>> {
+        if site.role != SiteRole::Call {
+            return Vec::new();
+        }
+        if let Some(class) = &site.constructs {
+            let hits = self.constructors.get(class).map_or(&[][..], Vec::as_slice);
+            return hits.iter().map(|&i| vec![i]).collect();
+        }
+        let per_callee: Vec<Vec<usize>> = site
+            .project_callees()
+            .iter()
+            .map(|bc| self.functions.matching(&bc.callee))
+            .collect();
+        groups(&per_callee)
+    }
+
+    /// What `site` calls of target `i`: the class it constructs, or every candidate the target
     /// names.
-    fn called_at(&self, site: &CallSite) -> Vec<String> {
+    fn called_at(&self, i: usize, site: &CallSite) -> Vec<String> {
         match &site.constructs {
             Some(class) => vec![class.clone()],
             None => site
                 .project_callees()
                 .iter()
-                .filter(|bc| self.functions.matches(&bc.callee))
+                .filter(|bc| self.functions.matchers[i].matches(&bc.callee))
                 .map(|bc| bc.callee.fqn())
                 .collect(),
         }
     }
 
-    /// Whether calling `name` on an instance of the project class `class` may call the target:
-    /// `class` is of the target's family, or the method `name` its MRO finds first is the
+    /// Whether calling `name` on an instance of the project class `class` may call target
+    /// `i`: `class` is of the target's family, or the method `name` its MRO finds first is the
     /// target (`Model.reset` for the target `reset`).
-    pub(crate) fn calls_on(&self, cx: &CheckContext<'_>, class: &str, name: &str) -> bool {
-        self.family.contains(class)
+    pub(crate) fn calls_on(
+        &self,
+        cx: &CheckContext<'_>,
+        i: usize,
+        class: &str,
+        name: &str,
+    ) -> bool {
+        self.patterns[i].family.contains(class)
             || cx
                 .decls
                 .mro_method(class, name)
-                .is_some_and(|k| self.functions.matches(&k))
+                .is_some_and(|k| self.functions.matchers[i].matches(&k))
     }
 
-    /// Add to `out` the project classes defining the methods `site` calls that the target
+    /// Add to `out` the project classes defining the methods `site` calls that target `i`
     /// names.
-    fn defining_classes(&self, cx: &CheckContext<'_>, site: &CallSite, out: &mut Vec<String>) {
+    fn defining_classes(
+        &self,
+        cx: &CheckContext<'_>,
+        i: usize,
+        site: &CallSite,
+        out: &mut Vec<String>,
+    ) {
         for bc in site.project_callees() {
             if let Some((owner, _)) = bc.callee.qualname.rsplit_once('.')
-                && self.functions.matches(&bc.callee)
+                && self.functions.matchers[i].matches(&bc.callee)
             {
                 let class = format!("{}.{owner}", bc.callee.module);
                 if cx.decls.is_project_class(&class) {
@@ -74,61 +119,9 @@ impl CallTargetPattern {
             }
         }
     }
-
-    /// Whether `site` calls the target: it constructs a class of the target's family, or every
-    /// project function it may call (each candidate of the class hierarchy) is the target or
-    /// an override of it. A construction is matched by its class only: its `__init__` runs as
-    /// part of it. Only the call itself calls (`SiteRole::Call`): the other sites of the object
-    /// a call returns (where it is iterated, returned, or handed on) call nothing more.
-    fn hit(&self, site: &CallSite) -> bool {
-        if site.role != SiteRole::Call {
-            return false;
-        }
-        match &site.constructs {
-            Some(class) => self.classes.contains(class),
-            None => {
-                let callees = site.project_callees();
-                !callees.is_empty() && callees.iter().all(|bc| self.functions.matches(&bc.callee))
-            }
-        }
-    }
 }
 
-/// The targets of one contract that `site` calls, as the groups to report (indices into
-/// `targets`): each target every candidate matches, on its own; or, when no single target
-/// covers every candidate but each candidate is a target (`A.reset` and `B.reset` both named,
-/// `obj: Base` whose `reset` is one of the two), one group of the targets the candidates match.
-pub(crate) fn called_targets(targets: &[CallTargetPattern], site: &CallSite) -> Vec<Vec<usize>> {
-    let whole: Vec<Vec<usize>> = targets
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.hit(site))
-        .map(|(i, _)| vec![i])
-        .collect();
-    let callees = site.project_callees();
-    if !whole.is_empty() || site.role != SiteRole::Call || site.constructs.is_some() {
-        return whole;
-    }
-    let mut union = BTreeSet::new();
-    for bc in callees {
-        let matching: Vec<usize> = targets
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.functions.matches(&bc.callee))
-            .map(|(i, _)| i)
-            .collect();
-        if matching.is_empty() {
-            return whole;
-        }
-        union.extend(matching);
-    }
-    if union.is_empty() {
-        return whole;
-    }
-    vec![union.into_iter().collect()]
-}
-
-/// The class families of the groups of targets that sites call ([`called_targets`]): the
+/// The class families of the groups of targets that sites call ([`CallTargets::called`]): the
 /// targets' families with the classes defining the methods a site calls that they name, and
 /// their subclasses (an initializer of one of them calling the method on its own `self`
 /// initializes itself). Kept per group and defining classes, which many sites share.
@@ -143,13 +136,13 @@ impl Families {
     fn at(
         &mut self,
         cx: &CheckContext<'_>,
-        targets: &[CallTargetPattern],
+        targets: &CallTargets,
         group: &[usize],
         site: &CallSite,
     ) -> Rc<FxHashSet<String>> {
         let mut defining = Vec::new();
         for &i in group {
-            targets[i].defining_classes(cx, site, &mut defining);
+            targets.defining_classes(cx, i, site, &mut defining);
         }
         defining.sort_unstable();
         defining.dedup();
@@ -159,7 +152,7 @@ impl Families {
         }
         let mut family: FxHashSet<String> = group
             .iter()
-            .flat_map(|&i| targets[i].family.iter().cloned())
+            .flat_map(|&i| targets.patterns[i].family.iter().cloned())
             .collect();
         for class in &key.1 {
             family.extend(cx.decls.subclasses_of(class));
@@ -171,24 +164,199 @@ impl Families {
     }
 }
 
-/// The configured texts of a group of [`called_targets`]: the diagnostic target (`A.reset|B.reset`)
-/// and the message's name of what is called (``A.reset` or `B.reset``). With the call `site`,
-/// a glob target is named by the functions or the class the site calls of it
-/// ([`super::names_members`]); an `EFF201` report stands for every site of its target and
+/// The groups of [`CallTargets::called`] from the targets each candidate of a call matches.
+fn groups(per_callee: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let Some((first, rest)) = per_callee.split_first() else {
+        return Vec::new();
+    };
+    let mut every: BTreeSet<usize> = first.iter().copied().collect();
+    let mut union = every.clone();
+    for matching in rest {
+        every.retain(|i| matching.contains(i));
+        union.extend(matching);
+    }
+    if !every.is_empty() {
+        return every.into_iter().map(|i| vec![i]).collect();
+    }
+    if per_callee.iter().all(|m| !m.is_empty()) {
+        return vec![union.into_iter().collect()];
+    }
+    Vec::new()
+}
+
+/// The call targets of every `call-owners` contract, indexed together: the targets a call
+/// matches are looked up once per call, whatever the number of contracts.
+struct ContractCalls {
+    functions: FunctionMatchers,
+    /// `(contract, target)` of each matcher of `functions`.
+    owners: Vec<(usize, usize)>,
+    /// The `(contract, target)` pairs constructing each class calls.
+    constructors: FxHashMap<String, Vec<(usize, usize)>>,
+}
+
+impl ContractCalls {
+    fn new<'t>(contracts: impl Iterator<Item = &'t CallTargets>) -> Self {
+        let mut matchers = Vec::new();
+        let mut owners = Vec::new();
+        let mut constructors: FxHashMap<String, Vec<(usize, usize)>> = FxHashMap::default();
+        for (c, targets) in contracts.enumerate() {
+            for (t, m) in targets.functions.matchers.iter().enumerate() {
+                matchers.push(m.clone());
+                owners.push((c, t));
+            }
+            for (class, hits) in &targets.constructors {
+                let pairs = constructors.entry(class.clone()).or_default();
+                pairs.extend(hits.iter().map(|&t| (c, t)));
+            }
+        }
+        Self {
+            functions: FunctionMatchers::new(matchers),
+            owners,
+            constructors,
+        }
+    }
+
+    /// [`CallTargets::called`] of every contract `site` calls a target of, by contract.
+    fn called(&self, site: &CallSite) -> Vec<(usize, Vec<Vec<usize>>)> {
+        if site.role != SiteRole::Call {
+            return Vec::new();
+        }
+        let mut by_contract: BTreeMap<usize, Vec<Vec<usize>>> = BTreeMap::new();
+        if let Some(class) = &site.constructs {
+            for &(c, t) in self.constructors.get(class).into_iter().flatten() {
+                by_contract.entry(c).or_default().push(vec![t]);
+            }
+            return by_contract.into_iter().collect();
+        }
+        let callees = site.project_callees();
+        for (k, bc) in callees.iter().enumerate() {
+            for m in self.functions.matching(&bc.callee) {
+                let (c, t) = self.owners[m];
+                let per_callee = by_contract
+                    .entry(c)
+                    .or_insert_with(|| vec![Vec::new(); callees.len()]);
+                per_callee[k].push(t);
+            }
+        }
+        by_contract
+            .into_iter()
+            .map(|(c, per_callee)| (c, groups(&per_callee)))
+            .filter(|(_, g)| !g.is_empty())
+            .collect()
+    }
+}
+
+/// Function patterns indexed by the names they may match ([`FunctionMatcher`]): the matchers
+/// a function satisfies are found from the dotted suffixes of its names and from its class.
+#[derive(Debug)]
+pub(crate) struct FunctionMatchers {
+    matchers: Vec<FunctionMatcher>,
+    /// Literal whole texts, and the matchers of each.
+    literal: FxHashMap<String, Vec<usize>>,
+    /// Glob whole texts, and the matcher of each glob.
+    globs: GlobSet,
+    glob_matchers: Vec<usize>,
+    /// The classes of each `Class.method` matcher's class family, and the matchers of each.
+    methods: FxHashMap<String, Vec<usize>>,
+}
+
+impl FunctionMatchers {
+    pub(crate) fn new(matchers: Vec<FunctionMatcher>) -> Self {
+        let mut literal: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        let mut globs = GlobSetBuilder::new();
+        let mut glob_matchers = Vec::new();
+        let mut methods: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        for (i, m) in matchers.iter().enumerate() {
+            match m.whole_glob() {
+                Some(glob) => {
+                    globs.add(glob.clone());
+                    glob_matchers.push(i);
+                }
+                None => literal
+                    .entry(m.whole_text().to_owned())
+                    .or_default()
+                    .push(i),
+            }
+            for class in m.method_family().into_iter().flatten() {
+                methods.entry(class.clone()).or_default().push(i);
+            }
+        }
+        Self {
+            matchers,
+            literal,
+            globs: globs
+                .build()
+                .expect("each glob compiled into a matcher already"),
+            glob_matchers,
+            methods,
+        }
+    }
+
+    /// The matchers whose whole text may name `name` or one of its dotted suffixes.
+    fn naming(&self, name: &str, out: &mut Vec<usize>) {
+        let suffixes =
+            std::iter::once(name).chain(name.match_indices('.').map(|(i, _)| &name[i + 1..]));
+        for suffix in suffixes {
+            out.extend(self.literal.get(suffix).into_iter().flatten());
+            out.extend(
+                self.globs
+                    .matches(suffix)
+                    .into_iter()
+                    .map(|g| self.glob_matchers[g]),
+            );
+        }
+    }
+
+    /// The matchers `key` satisfies ([`FunctionMatcher::matches`]), ascending.
+    pub(crate) fn matching(&self, key: &FuncKey) -> Vec<usize> {
+        let mut found = Vec::new();
+        self.naming(&key.fqn(), &mut found);
+        self.naming(&key.qualname, &mut found);
+        if let Some((owner, _)) = key.qualname.rsplit_once('.') {
+            let class = format!("{}.{owner}", key.module);
+            found.extend(self.methods.get(&class).into_iter().flatten());
+        }
+        found.sort_unstable();
+        found.dedup();
+        found.retain(|&i| self.matchers[i].matches(key));
+        found
+    }
+
+    /// Whether `key` satisfies some matcher.
+    pub(crate) fn any(&self, key: &FuncKey) -> bool {
+        !self.matching(key).is_empty()
+    }
+
+    /// The matchers whose whole text names the class `class` (its fqn).
+    fn naming_class(&self, class: &str) -> Vec<usize> {
+        let mut found = Vec::new();
+        self.naming(class, &mut found);
+        found.sort_unstable();
+        found.dedup();
+        found.retain(|&i| self.matchers[i].names(class));
+        found
+    }
+}
+
+/// The configured texts of a group of [`CallTargets::called`]: the diagnostic target
+/// (`A.reset|B.reset`) and the message's name of what is called (``A.reset` or `B.reset``).
+/// With the call `site`, a glob target is named by the functions or the class the site calls of
+/// it ([`super::names_members`]); an `EFF201` report stands for every site of its target and
 /// names the target.
 pub(crate) fn group_texts(
-    targets: &[CallTargetPattern],
+    targets: &CallTargets,
     group: &[usize],
     site: Option<&CallSite>,
 ) -> (String, String) {
-    let texts: Vec<&str> = group.iter().map(|&i| targets[i].text.as_str()).collect();
+    let text = |i: usize| targets.patterns[i].text.as_str();
+    let texts: Vec<&str> = group.iter().map(|&i| text(i)).collect();
     // In the order first named, each once.
     let mut named: Vec<String> = Vec::new();
     let mut seen: FxHashSet<String> = FxHashSet::default();
     for &i in group {
         let names = match site {
-            Some(site) if super::names_members(&targets[i].text) => targets[i].called_at(site),
-            _ => vec![targets[i].text.clone()],
+            Some(site) if super::names_members(text(i)) => targets.called_at(i, site),
+            _ => vec![text(i).to_owned()],
         };
         for name in names {
             if seen.insert(name.clone()) {
@@ -205,25 +373,41 @@ pub(crate) fn parse_call_targets(
     all_classes: &[String],
     texts: &[String],
     context: &'static str,
-) -> Result<Vec<CallTargetPattern>, RuleConfigError> {
-    let mut out = Vec::new();
+) -> Result<CallTargets, RuleConfigError> {
+    let mut patterns = Vec::new();
+    let mut matchers = Vec::new();
     for text in texts {
         let functions = FunctionMatcher::new(cx, all_classes, text, context)?;
-        let classes = functions.classes(cx, all_classes);
-        let mut family = classes.clone();
-        family.extend(functions.method_family().into_iter().flatten().cloned());
         let name = text
             .rsplit_once('.')
             .map_or(text.as_str(), |(_, last)| last);
-        out.push(CallTargetPattern {
+        patterns.push(CallTargetPattern {
             text: text.clone(),
-            functions,
-            classes,
-            family,
+            family: functions.method_family().cloned().unwrap_or_default(),
             name: DottedPattern::new(name, context)?,
         });
+        matchers.push(functions);
     }
-    Ok(out)
+    let functions = Arc::new(FunctionMatchers::new(matchers));
+    // The classes each target names, found class by class.
+    let mut constructors: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+    for class in all_classes {
+        for i in functions.naming_class(class) {
+            for named in std::iter::once(class.clone()).chain(cx.decls.subclasses_of(class)) {
+                patterns[i].family.insert(named.clone());
+                constructors.entry(named).or_default().push(i);
+            }
+        }
+    }
+    for targets in constructors.values_mut() {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+    Ok(CallTargets {
+        patterns,
+        functions,
+        constructors,
+    })
 }
 
 /// The callee shown for `site` in a call chain: the constructed class or the first candidate.
@@ -250,7 +434,7 @@ fn receiver_params(site: &CallSite) -> u64 {
 
 pub(super) struct CallOwnerRule<'r> {
     pub(super) name: &'r str,
-    pub(super) targets: Vec<CallTargetPattern>,
+    pub(super) targets: CallTargets,
     pub(super) allowance: Allowance,
     pub(super) note: Option<&'r str>,
     /// `unresolved = "report"`: calls heki cannot tie to a class are reported (`MUT207`).
@@ -275,16 +459,13 @@ pub(crate) fn mut204(
     let mut rules = Vec::new();
     for rule in &cx.config.call_owners {
         let context = "call-owners.targets";
+        let targets = parse_call_targets(cx, &all_classes, &rule.targets, context)?;
         // The targets may call each other: a call of the guarded operation is checked where it
         // is made, so what the operation does inside is part of it.
-        let guarded = rule
-            .targets
-            .iter()
-            .map(|t| FunctionMatcher::new(cx, &all_classes, t, context))
-            .collect::<Result<Vec<_>, _>>()?;
+        let guarded = Arc::clone(&targets.functions);
         rules.push(CallOwnerRule {
             name: &rule.name,
-            targets: parse_call_targets(cx, &all_classes, &rule.targets, context)?,
+            targets,
             allowance: Allowance::new(&AllowanceKeys {
                 allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
                 forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
@@ -306,14 +487,16 @@ pub(crate) fn mut204(
     let sites = cx.sites_by_caller();
     let mut callers: Vec<&FuncKey> = sites.keys().copied().collect();
     callers.sort();
+    let contracts = ContractCalls::new(rules.iter().map(|r| &r.targets));
     let mut reports = MergedReports::default();
     let mut families: Vec<Families> = rules.iter().map(|_| Families::default()).collect();
     for key in callers {
         for &(path, site) in &sites[key] {
-            for (rule, families) in rules.iter().zip(&mut families) {
-                for group in called_targets(&rule.targets, site) {
+            for (c, groups) in contracts.called(site) {
+                let rule = &rules[c];
+                for group in groups {
                     let (target, called) = group_texts(&rule.targets, &group, Some(site));
-                    let family = families.at(cx, &rule.targets, &group, site);
+                    let family = families[c].at(cx, &rule.targets, &group, site);
                     let found = delegated_reports(
                         cx,
                         &sites,

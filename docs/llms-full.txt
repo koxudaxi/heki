@@ -2257,6 +2257,9 @@ follows these rules:
   (`y = x; x = y`) can close a cycle. A walk along copies ends on such a cycle.
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
+- A contract's targets are looked up from what an access names (the dotted suffixes of a
+  function's names, its class), never tried one by one: the cost grows with the sites, not with
+  sites times targets, and the targets of every contract of a rule are indexed together.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
@@ -2283,8 +2286,9 @@ of assignments in reverse, a loop rotating aliases of many `self` containers, a 
 many `self` containers, a loop over a generator whose body makes many calls, loops whose bodies hold
 many conditional blocks one after another, a function consuming a generator's result many times in a
 row, methods changing a typed dict of `self` thousands of times, a method storing under a key after
-each of hundreds of tests that such a dict holds the key, and a function reading attributes down a
-chain ten thousand deep (`x = x.child`).
+each of hundreds of tests that such a dict holds the key, a function reading attributes down a chain
+ten thousand deep (`x = x.child`), and thousands of `call-owners` targets, in one contract or in as
+many contracts.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

@@ -146,6 +146,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (`reads `pkg.types.DataType._flag``, was `reads `pkg.*._*``), and one report standing for
   several members lists the others; the diagnostic target, and so the baseline key, stays the
   configured text.
+- `call-owners` contracts (`MUT204`) and the `calls` of effect boundaries look a call's
+  targets up from the callee's names instead of trying every target, and `MUT204` indexes the
+  targets of all its contracts together: a contract of 1,300 targets on a 200,000-line project
+  took about 30 s and now takes about 1 s, with the same reports.
 
 ## [0.1.2] - 2026-11-21
 

@@ -808,7 +808,7 @@ pub(crate) fn has_glob_syntax(text: &str) -> bool {
 
 /// Dotted-name pattern: a glob (`pkg.*.Model`, `*Store.*`, `Mode?.fields`) that matches the name
 /// or one of its dot-separated suffixes (`Model.fields` matches `pkg.model.Model.fields`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DottedPattern {
     text: String,
     /// `None` for a literal name, compared as a string.
@@ -828,6 +828,16 @@ impl DottedPattern {
             text: text.to_owned(),
             glob: has_glob_syntax(text).then_some(glob),
         })
+    }
+
+    /// The configured text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The glob of a pattern with glob syntax (`None`: a literal name).
+    pub fn glob(&self) -> Option<&Glob> {
+        self.glob.as_ref().map(GlobMatcher::glob)
     }
 
     pub fn matches(&self, name: &str) -> bool {
