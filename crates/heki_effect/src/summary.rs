@@ -18,8 +18,8 @@ use crate::{
 };
 use heki_ast::Span;
 use heki_ir::{
-    BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
-    IrFunction, NaturalLoop, PhiNode, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
+    InstKind, IrFunction, NaturalLoop, PhiNode, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -47,6 +47,35 @@ pub const CONTAINER_MUTATORS: &[&str] = &[
     "symmetric_difference_update",
     "__setitem__",
     "__delitem__",
+];
+
+/// Augmented assignments changing a container in place, by the container's class: `xs += ys`
+/// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
+const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[
+    ("builtins.list", &[BinOpKind::Add, BinOpKind::Mult]),
+    ("builtins.bytearray", &[BinOpKind::Add, BinOpKind::Mult]),
+    (
+        "builtins.set",
+        &[
+            BinOpKind::BitOr,
+            BinOpKind::BitAnd,
+            BinOpKind::Sub,
+            BinOpKind::BitXor,
+        ],
+    ),
+    ("builtins.dict", &[BinOpKind::BitOr]),
+    ("collections.deque", &[BinOpKind::Add, BinOpKind::Mult]),
+    ("collections.OrderedDict", &[BinOpKind::BitOr]),
+    ("collections.defaultdict", &[BinOpKind::BitOr]),
+    (
+        "collections.Counter",
+        &[
+            BinOpKind::Add,
+            BinOpKind::Sub,
+            BinOpKind::BitOr,
+            BinOpKind::BitAnd,
+        ],
+    ),
 ];
 
 /// Execution effects `EFF101` treats as blocking the event loop.
@@ -1225,6 +1254,15 @@ impl<'a> Extractor<'a> {
                     self.typed_read(owner, k, ReadKind::DictDirect, span);
                 }
             }
+            InstKind::BinOp {
+                dst,
+                op,
+                lhs,
+                in_place: true,
+                ..
+            } if self.changes_in_place(*dst, *lhs, *op) => {
+                self.container_mut(*lhs, None, span);
+            }
             InstKind::AttrStore { obj, attr, value } => {
                 self.write_attr(*obj, attr, WriteKind::DirectAttr, span);
                 self.note_escape(*value);
@@ -1655,6 +1693,19 @@ impl<'a> Extractor<'a> {
     }
 
     /// In-place mutation of the container held in `var` (mutator method or subscript write).
+    /// Whether the augmented assignment `lhs op= ...` (defining `dst`) changes the container
+    /// `lhs` holds in place: a built-in container whose class does so for `op`, bound to a name
+    /// (a store of the result to an attribute or item is a write of its own).
+    fn changes_in_place(&self, dst: VarId, lhs: VarId, op: BinOpKind) -> bool {
+        let stored = self.uses.get(&dst).into_iter().flatten().any(|u| {
+            matches!(u, InstKind::AttrStore { value, .. } | InstKind::SubscriptStore { value, .. } if *value == dst)
+        });
+        !stored
+            && matches!(self.val(lhs), Some(Val::Inst(class)) if IN_PLACE_OPERATORS
+                .iter()
+                .any(|(c, ops)| c == class && ops.contains(&op)))
+    }
+
     fn container_mut(&mut self, var: VarId, const_key: Option<&str>, span: Span) {
         if let Some(attr) = self.self_attr_alias.get(&var).cloned() {
             self.summary.mutates_self_attrs.insert(AttrKeyPath {

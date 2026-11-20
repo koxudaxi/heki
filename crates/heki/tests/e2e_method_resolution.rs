@@ -2,8 +2,8 @@
 //! Python's MRO (C3 linearization), constructing a named class (its own `__init__`, not a
 //! subclass's) and calling a method through it, class methods called through their class,
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
-//! statements, module-level names bound twice, the parameters `*` arguments bind, and project
-//! methods named like container mutators.
+//! statements, module-level names bound twice, the parameters `*` arguments bind, project
+//! methods named like container mutators, and augmented assignments.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -489,6 +489,40 @@ fn a_project_method_named_like_a_container_mutator_decides_itself() {
     check_marks(
         "named_mutators",
         &[("pkg/holders.py", HOLDERS)],
+        &["MUT201"],
+    );
+}
+
+/// An augmented assignment changes a built-in container in place (`items += ys` extends the list
+/// a local name holds); on a copy or an immutable value it binds a new object.
+const AUGMENTED: &str = r#"from pkg.model import Model
+
+
+def extend_alias(m: Model):
+    items = m.items
+    items += [1]  # MUT201
+
+
+def through_attribute(m: Model):
+    m.items += [1]  # MUT201
+
+
+def copied(m: Model):
+    items = list(m.items)
+    items += [1]
+
+
+def counted(m: Model):
+    n = len(m.items)
+    n += 1
+    return n
+"#;
+
+#[test]
+fn augmented_assignments_change_containers_in_place() {
+    check_marks(
+        "augmented_assignments",
+        &[("pkg/model.py", MODEL), ("pkg/augmented.py", AUGMENTED)],
         &["MUT201"],
     );
 }
