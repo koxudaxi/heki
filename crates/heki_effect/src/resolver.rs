@@ -133,16 +133,15 @@ pub fn resolve_relative_module(
 /// Fully qualified symbol bound by one import.
 fn import_target(imp: &ModuleImport, module_name: &str, is_package: bool) -> Option<String> {
     if !imp.is_from {
-        let top = imp
-            .imported_name
-            .split('.')
-            .next()
-            .unwrap_or(&imp.imported_name);
         // `import a.b.c` binds `a`; `import a.b.c as x` binds `a.b.c`.
-        return Some(if imp.bound_name == top {
-            top.to_owned()
-        } else {
+        return Some(if imp.has_alias {
             imp.imported_name.clone()
+        } else {
+            imp.imported_name
+                .split('.')
+                .next()
+                .unwrap_or(&imp.imported_name)
+                .to_owned()
         });
     }
     let base = resolve_relative_module(module_name, is_package, imp.level, imp.module.as_deref())?;

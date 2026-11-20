@@ -150,3 +150,26 @@ fn a_function_local_class_does_not_merge_with_a_module_class_of_its_name() {
         "{stdout}"
     );
 }
+
+#[test]
+fn an_alias_spelling_the_first_component_binds_the_submodule() {
+    let p = Project::new("disc_dotted_alias");
+    p.write("pkg/__init__.py", "def wait():\n    pass\n")
+        .write("pkg/io.py", BLOCKING_WAIT)
+        .write(
+            "app.py",
+            "import pkg.io as pkg\n\n\nasync def go():\n    pkg.wait()\n",
+        );
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    assert!(
+        stdout.contains("app.py:5:5: EFF101 `async def go` calls `pkg.io.wait`"),
+        "{stdout}"
+    );
+    // Without the alias `import pkg.io` binds `pkg`: its no-op `wait`.
+    p.write(
+        "app.py",
+        "import pkg.io\n\n\nasync def go():\n    pkg.wait()\n",
+    );
+    assert_eq!(concise(&p), (0, String::new()));
+}

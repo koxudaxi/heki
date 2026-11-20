@@ -63,6 +63,10 @@ pub struct ModuleImport {
     pub module: Option<String>,
     pub imported_name: String,
     pub bound_name: String,
+    /// An explicit `as` clause: `import a.b as x` binds `x` to `a.b`, while `import a.b`
+    /// binds `a` to `a` (also when the alias spells the first component, `import a.b as a`).
+    #[serde(default)]
+    pub has_alias: bool,
     pub level: u32,
     pub is_from: bool,
     pub is_lazy: bool,
@@ -645,6 +649,7 @@ impl<'a> Analyzer<'a> {
                         module: None,
                         imported_name: alias.name.to_string(),
                         bound_name: bound,
+                        has_alias: alias.asname.is_some(),
                         level: 0,
                         is_from: false,
                         is_lazy: imp.is_lazy,
@@ -677,6 +682,7 @@ impl<'a> Analyzer<'a> {
                         module: module.clone(),
                         imported_name: alias.name.to_string(),
                         bound_name: bound,
+                        has_alias: alias.asname.is_some(),
                         level: imp.level,
                         is_from: true,
                         is_lazy: imp.is_lazy,
