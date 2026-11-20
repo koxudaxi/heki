@@ -18,29 +18,121 @@ use heki_rules::project::{
     FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 const POLL: Duration = Duration::from_millis(200);
 
-/// Stamps of the Python files of the project (keyed like `ParsedFile::path`).
-type FileStamps = BTreeMap<PathBuf, SystemTime>;
+/// Files whose timestamps are younger than this at a poll may still change without changing
+/// them (file systems with coarse timestamps): their content is compared too (`Stamp`).
+const RACY: Duration = Duration::from_secs(2);
 
-/// Stamps of the files whose change reloads the workspace (absent files have none).
-type ConfigStamps = BTreeMap<PathBuf, SystemTime>;
+/// What a poll compares of a file: its size and modification time and, on Unix, its inode and
+/// status-change time, which every write and every replacement update, also one that restores
+/// the modification time (as file synchronization tools do).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Signature {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    status_changed: (i64, i64),
+    #[cfg(unix)]
+    inode: (u64, u64),
+}
+
+impl Signature {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(unix)]
+            status_changed: (meta.ctime(), meta.ctime_nsec()),
+            #[cfg(unix)]
+            inode: (meta.dev(), meta.ino()),
+        }
+    }
+
+    /// The latest time the file is stamped with.
+    fn latest(&self) -> Option<SystemTime> {
+        #[cfg(unix)]
+        {
+            let (secs, nanos) = self.status_changed;
+            let status = u64::try_from(secs).ok().map(|s| {
+                SystemTime::UNIX_EPOCH + Duration::new(s, u32::try_from(nanos).unwrap_or_default())
+            });
+            self.modified.max(status)
+        }
+        #[cfg(not(unix))]
+        self.modified
+    }
+}
+
+/// A file as one poll saw it. A file stamped within `RACY` of the poll could change again
+/// inside the resolution of its timestamps, so its content is hashed, at that poll and at the
+/// next one (when such a change has to show).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Stamp {
+    signature: Signature,
+    content: Option<u64>,
+    racy: bool,
+}
+
+impl Stamp {
+    /// `path` as a poll at `now` sees it (`None`: it cannot be looked at); `earlier`: as the
+    /// previous poll saw it.
+    fn take(path: &Path, earlier: Option<&Stamp>, now: SystemTime) -> Option<Self> {
+        let signature = Signature::of(&std::fs::metadata(path).ok()?);
+        let racy = signature
+            .latest()
+            .is_none_or(|t| now.duration_since(t).map_or(true, |age| age < RACY));
+        let content = (racy || earlier.is_some_and(|e| e.racy))
+            .then(|| std::fs::read(path).ok())
+            .flatten()
+            .map(|bytes| {
+                let mut hasher = std::hash::DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                hasher.finish()
+            });
+        Some(Self {
+            signature,
+            content,
+            racy,
+        })
+    }
+
+    /// The file is as it was at `earlier`: the same signature and, where both polls read it,
+    /// the same content.
+    fn same_as(&self, earlier: &Self) -> bool {
+        self.signature == earlier.signature
+            && !matches!((self.content, earlier.content), (Some(a), Some(b)) if a != b)
+    }
+}
+
+/// Stamps of files: the Python files of the project (keyed like `ParsedFile::path`), or those
+/// whose change reloads the workspace (absent files have none).
+type Stamps = BTreeMap<PathBuf, Stamp>;
+
+/// Whether no file of `earlier` changed, appeared, or disappeared in `now`.
+fn unchanged(earlier: &Stamps, now: &Stamps) -> bool {
+    earlier.len() == now.len()
+        && now
+            .iter()
+            .all(|(p, s)| earlier.get(p).is_some_and(|e| s.same_as(e)))
+}
 
 /// Test hook: stop after this many re-checks (the watch otherwise runs until interrupted).
 const MAX_RUNS_ENV: &str = "HEKI_WATCH_MAX_RUNS";
 
-fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
-fn stamps_of(paths: &[PathBuf]) -> ConfigStamps {
+/// Stamps of `paths` at a poll; `earlier`: as the previous poll saw them.
+fn stamps_of<'p>(paths: impl IntoIterator<Item = &'p PathBuf>, earlier: &Stamps) -> Stamps {
+    let now = SystemTime::now();
     paths
-        .iter()
-        .filter_map(|p| Some((p.clone(), mtime(p)?)))
+        .into_iter()
+        .filter_map(|p| Some((p.clone(), Stamp::take(p, earlier.get(p), now)?)))
         .collect()
 }
 
@@ -53,10 +145,10 @@ struct Watcher<'a> {
 struct Loaded {
     ws: Workspace,
     errors: Vec<FileError>,
-    files: FileStamps,
+    files: Stamps,
     /// The configuration files, the summary snapshot, and the Ratchet baseline.
     config_files: Vec<PathBuf>,
-    config: ConfigStamps,
+    config: Stamps,
 }
 
 impl Watcher<'_> {
@@ -71,11 +163,11 @@ impl Watcher<'_> {
 
     /// Stamps first (a change during the analysis shows up on the next poll), then the
     /// workspace.
-    fn load(&self) -> Result<Loaded> {
+    fn load(&self, earlier: (&Stamps, &Stamps)) -> Result<Loaded> {
         let env = ProjectEnv::load(&self.opts())?;
         let config_files = self.config_files(&env);
-        let config = stamps_of(&config_files);
-        let files = self.scan(&env)?;
+        let config = stamps_of(&config_files, earlier.1);
+        let files = self.scan(&env, earlier.0)?;
         let selectors = Selectors {
             select: self.args.select.clone(),
             extend_select: self.args.extend_select.clone(),
@@ -109,7 +201,7 @@ impl Watcher<'_> {
 
     /// The Python files of the project with their stamps. A path of the command line that does
     /// not exist (any more) holds no files: the watch goes on, and its files come back with it.
-    fn scan(&self, env: &ProjectEnv) -> Result<FileStamps> {
+    fn scan(&self, env: &ProjectEnv, earlier: &Stamps) -> Result<Stamps> {
         let exclude = exclude_set(&env.cfg)?;
         let present: Vec<PathBuf> = self
             .args
@@ -118,10 +210,11 @@ impl Watcher<'_> {
             .filter(|p| p.exists())
             .cloned()
             .collect();
-        Ok(collect_files(&present, &env.root, &exclude)?
-            .into_iter()
-            .filter_map(|p| Some((display_path(&p), mtime(&p)?)))
-            .collect())
+        let files: Vec<PathBuf> = collect_files(&present, &env.root, &exclude)?
+            .iter()
+            .map(|p| display_path(p))
+            .collect();
+        Ok(stamps_of(&files, earlier))
     }
 
     fn print(&self, report: &Report) -> bool {
@@ -227,7 +320,7 @@ impl Report {
     }
 
     /// Apply the files that changed between two polls (`before` -> `now`) to `ws`.
-    fn apply(&mut self, ws: &mut Workspace, before: &FileStamps, now: &FileStamps) {
+    fn apply(&mut self, ws: &mut Workspace, before: &Stamps, now: &Stamps) {
         // Files to re-analyze once the batch is in the index. A file of the batch is analyzed
         // against the index as the files before it left it: what a later one changes for it
         // queues it again.
@@ -237,7 +330,9 @@ impl Report {
             self.diags.remove(gone);
             self.errors.remove(gone);
         }
-        let changed = now.iter().filter(|(p, t)| before.get(*p) != Some(t));
+        let changed = now
+            .iter()
+            .filter(|(p, s)| before.get(*p).is_none_or(|b| !s.same_as(b)));
         for (p, _) in changed {
             match std::fs::read_to_string(p) {
                 Ok(text) => {
@@ -287,7 +382,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         .and_then(|v| v.parse().ok());
     // What fails before the first check (a missing path, an invalid configuration) ends the
     // run, as it ends `heki check`; later, the watch reports it and waits for a fix.
-    let loaded = w.load()?;
+    let loaded = w.load((&Stamps::new(), &Stamps::new()))?;
     let (mut files, mut config_files, mut config) =
         (loaded.files, loaded.config_files, loaded.config);
     let mut ws = Some(loaded.ws);
@@ -296,14 +391,17 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
     let mut runs = 0;
     while max_runs.is_none_or(|m| runs < m) {
         std::thread::sleep(POLL);
-        let now_config = stamps_of(&config_files);
+        let now_config = stamps_of(&config_files, &config);
+        let reconfigured = !unchanged(&config, &now_config);
+        // The racy files' content hashes of this poll are what the next one compares.
+        config = now_config;
         // A package marker appearing or disappearing under `src/` can switch the `src` layout:
         // every module name under `src/` changes with it.
         let relayout = ws
             .as_ref()
             .is_some_and(|ws| detect_src_layout(&ws.env.root) != ws.env.src_layout);
-        if now_config != config || relayout {
-            match w.load() {
+        if reconfigured || relayout {
+            match w.load((&files, &config)) {
                 Ok(loaded) => {
                     (files, config_files, config) =
                         (loaded.files, loaded.config_files, loaded.config);
@@ -312,12 +410,11 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                 }
                 Err(e) => {
                     ws = None;
-                    config = now_config;
                     report = Report::failed(&e);
                 }
             }
         } else if let Some(ws) = ws.as_mut() {
-            let now_files = match w.scan(&ws.env) {
+            let now_files = match w.scan(&ws.env, &files) {
                 Ok(now_files) => now_files,
                 Err(e) => {
                     let failure = Some(format!("{e:#}"));
@@ -329,7 +426,9 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                     continue;
                 }
             };
-            if now_files == files && report.failure.is_none() {
+            if unchanged(&files, &now_files) && report.failure.is_none() {
+                // The racy files' content hashes of this poll are what the next one compares.
+                files = now_files;
                 continue;
             }
             report.failure = None;
@@ -342,4 +441,34 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         dirty = w.print(&report);
     }
     Ok(report.exit_code(dirty))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stamps_compare_content_while_timestamps_are_racy() {
+        let dir = std::env::temp_dir().join(format!("heki_watch_stamps_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.py");
+        std::fs::write(&path, "x = 1\n").unwrap();
+        let now = SystemTime::now();
+        let first = Stamp::take(&path, None, now).unwrap();
+        assert!(first.racy && first.content.is_some(), "{first:?}");
+        // Long after, the file is no longer racy, but the poll after a racy one still reads it.
+        let later = now + RACY * 2;
+        let second = Stamp::take(&path, Some(&first), later).unwrap();
+        assert!(!second.racy && second.content.is_some(), "{second:?}");
+        assert!(second.same_as(&first));
+        let third = Stamp::take(&path, Some(&second), later).unwrap();
+        assert_eq!(third.content, None);
+        assert!(third.same_as(&second));
+        // A change the signature misses (a timestamp too coarse to move) shows in the content.
+        let mut rewritten = first.clone();
+        rewritten.content = Some(first.content.unwrap() ^ 1);
+        assert!(!rewritten.same_as(&first));
+        assert!(Stamp::take(&dir.join("missing.py"), None, now).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

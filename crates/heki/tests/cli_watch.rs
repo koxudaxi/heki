@@ -186,9 +186,9 @@ fn watch_rechecks_a_coroutine_that_stops_being_sync_driven() {
     );
 }
 
-/// Replace a file's content without changing its modification time, atomically (the watch
-/// never sees the change).
-fn write_unnoticed(path: &std::path::Path, content: &[u8]) {
+/// Replace a file's content atomically, keeping its modification time (as file synchronization
+/// tools do).
+fn replace_keeping_mtime(path: &std::path::Path, content: &[u8]) {
     let stamp = std::fs::metadata(path).unwrap().modified().unwrap();
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, content).unwrap();
@@ -202,7 +202,7 @@ fn write_unnoticed(path: &std::path::Path, content: &[u8]) {
 }
 
 #[test]
-fn watch_skips_unreadable_callers_and_deleted_unindexed_files() {
+fn watch_notices_replacements_that_keep_the_modification_time() {
     let p = Project::new("watch_unreadable");
     let caller = "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n";
     p.write("pkg/__init__.py", "")
@@ -210,30 +210,33 @@ fn watch_skips_unreadable_callers_and_deleted_unindexed_files() {
         .write("pkg/api.py", caller)
         .write("pkg/api2.py", caller)
         .write("pkg/broken.py", "def f(:\n");
-    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "2");
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "3");
     wait_for(&rx, "syntax error");
     wait_for(&rx, "[heki watch] 0 diagnostic(s) in 4 file(s)");
     // The file with the syntax error was never indexed; deleting it changes nothing else.
     std::fs::remove_file(p.dir.join("pkg/broken.py")).unwrap();
     wait_for(&rx, "[heki watch] 0 diagnostic(s) in 4 file(s)");
-    // The callers change behind the watch's back (same modification time): one is no
-    // longer UTF-8, the other no longer parses. When their callee starts blocking, the first
-    // cannot be re-checked and is skipped; the second reports its syntax error.
-    write_unnoticed(&p.dir.join("pkg/api.py"), b"\xff\xfe");
-    write_unnoticed(&p.dir.join("pkg/api2.py"), b"def handler(:\n");
-    p.write(
-        "pkg/util.py",
-        "import time\n\n\ndef helper():\n    time.sleep(1)\n",
+    // The helper is replaced by a blocking one with the old modification time.
+    replace_keeping_mtime(
+        &p.dir.join("pkg/util.py"),
+        b"import time\n\n\ndef helper():\n    time.sleep(1)\n",
     );
-    let lines = wait_for(&rx, "[heki watch]");
+    wait_for(&rx, "[heki watch] 2 diagnostic(s) in 4 file(s)");
+    // So are the callers: one is no longer UTF-8, the other no longer parses. Both are
+    // reported, as `heki check` reports them.
+    replace_keeping_mtime(&p.dir.join("pkg/api.py"), b"\xff\xfe");
+    replace_keeping_mtime(&p.dir.join("pkg/api2.py"), b"def handler(:\n");
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "error: pkg/api.py: stream did not contain valid UTF-8"),
+        "{lines:#?}"
+    );
     assert!(
         lines
             .iter()
             .any(|l| l.starts_with("error: pkg/api2.py:1:13: syntax error")),
-        "{lines:#?}"
-    );
-    assert!(
-        !lines.iter().any(|l| l.contains("pkg/api.py")),
         "{lines:#?}"
     );
     let out = child.wait_with_output().unwrap();

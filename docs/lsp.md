@@ -125,4 +125,7 @@ prints the full list of diagnostics after every change, compared with the Ratche
 (`__init__.py`) under `src/` appearing or the last one disappearing (module names under `src/`
 change with the `src` layout); the server does the same. What fails once the watch runs, a
 configuration that no longer parses or a watched path that disappears, is reported, and the watch
-goes on until it is fixed.
+goes on until it is fixed. A file counts as changed when its size, modification time, or (on Unix)
+inode or status-change time changes, so a replacement that keeps the modification time is seen
+too; a file stamped within the last two seconds is also compared by content, for file systems
+whose timestamps are coarse.
