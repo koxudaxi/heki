@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish to PyPI (otherwise only build and check the distributions)"
+        description: "Publish to PyPI from main (otherwise only build and check the distributions)"
         type: boolean
         default: false
 
@@ -202,7 +202,9 @@ jobs:
     # "Re-run all jobs" rebuilds the distributions, and PyPI refuses changed files under a name
     # it already has.
     name: publish to PyPI
-    if: github.event_name == 'release' || inputs.publish
+    # The `pypi` environment, which PyPI's trusted publisher names, admits only main and release
+    # tags as well.
+    if: github.event_name == 'release' || (inputs.publish && github.ref == 'refs/heads/main')
     needs: [ci, wheels, sdist, smoke, versions]
     runs-on: ubuntu-24.04
     environment:
