@@ -1611,6 +1611,7 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_discarded_buffer());
     steps.extend(steps_src_layout());
     steps.extend(steps_ignore_files());
+    steps.extend(steps_baseline());
     steps
 }
 
@@ -1762,6 +1763,45 @@ fn steps_ignore_files() -> Vec<Step> {
             vec![Action::Write(".hekiignore", String::new())],
         )
         .present(&[("app/generated.py", "EFF101"), ("app/handler.py", "EFF101")]),
+    ]
+}
+
+/// A baseline of `handle`'s blocking calls in `app/handler.py`, allowing `count` of them.
+fn handler_baseline(count: u32) -> String {
+    format!(
+        "version = 2\n\n[[entries]]\npath = \"app/handler.py\"\nqualname = \"handle\"\nrule_code = \"EFF101\"\ntarget = \"time.sleep\"\ncount = {count}\n"
+    )
+}
+
+/// A Ratchet baseline in the configuration applies to the editor too.
+fn steps_baseline() -> Vec<Step> {
+    let configured = EDGE_CONFIG.replace(
+        "[tool.heki.lint]",
+        "[tool.heki]\nbaseline = \"heki-baseline.toml\"\n\n[tool.heki.lint]",
+    );
+    vec![
+        Step::new(
+            "a baseline records the blocking call of the handler",
+            vec![
+                Action::Write("heki-baseline.toml", handler_baseline(1)),
+                Action::Configure(configured),
+            ],
+        )
+        .absent(&[("app/handler.py", "EFF101")])
+        .present(&[("app/dup_user.py", "EFF101")]),
+        Step::new(
+            "a second blocking call in the handler",
+            vec![save(
+                "app/handler.py",
+                &format!("# saved\n{HANDLER}    wait()\n"),
+            )],
+        )
+        .present(&[("app/handler.py", "EFF101")]),
+        Step::new(
+            "the baseline grows to both calls",
+            vec![Action::Write("heki-baseline.toml", handler_baseline(2))],
+        )
+        .absent(&[("app/handler.py", "EFF101")]),
     ]
 }
 

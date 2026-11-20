@@ -217,6 +217,7 @@ impl State {
                 ..ProjectOptions::default()
             },
             &Selectors::default(),
+            None,
         );
         self.pending.clear();
         let mut files: BTreeSet<PathBuf> =
@@ -316,10 +317,15 @@ impl State {
         // analyzed again (an ignore file changes which files belong to the project), as
         // `heki check --watch` does.
         let config_root = find_root(self.root.as_deref().unwrap_or(Path::new(".")));
+        let baseline = self
+            .workspace
+            .as_ref()
+            .and_then(|ws| ws.baseline_path().map(Path::to_path_buf));
         let reloads = |p: &Path| {
             CONFIG_FILES.iter().any(|n| config_root.join(n) == p)
                 || p.file_name()
                     .is_some_and(|n| IGNORE_FILES.iter().any(|i| n == *i))
+                || baseline.as_deref() == Some(p)
         };
         if changes
             .iter()
@@ -428,6 +434,8 @@ fn watched_files_registration() -> Registration {
             watcher("**/*.{py,pyi}".into()),
             watcher(format!("**/{{{}}}", CONFIG_FILES.join(","))),
             watcher(format!("**/{{{}}}", IGNORE_FILES.join(","))),
+            // Ratchet baselines (any name; the configuration says which).
+            watcher("**/*.toml".into()),
         ],
     };
     Registration {

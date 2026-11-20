@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
-    baseline_key, github_escape, path_text, render, unified_diff,
+    github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{analyze_project, analyze_project_with};
 use heki_profile::ProfileData;
@@ -16,7 +16,7 @@ use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
     fold_root_causes,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -325,7 +325,7 @@ pub(crate) fn report(
             );
         }
         // Legacy entries compare in their own unit, before `--update-baseline` rewrites them.
-        let cmp = baseline.compare(&baseline_counts(&diags, &key_path, unit));
+        let cmp = baseline.keep_regressions(&mut diags, &key_path);
         if !args.update_baseline {
             for (key, allowed, cur) in &cmp.stale_entries {
                 log!(
@@ -350,8 +350,6 @@ pub(crate) fn report(
             );
         }
         regressions = cmp.regressions.len();
-        let regressed: FxHashSet<_> = cmp.regressions.iter().map(|(k, _, _)| k.clone()).collect();
-        diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
     }
     if let Some(bp) = baseline_path.as_ref().filter(|_| args.update_baseline) {
         if !project.errors.is_empty() {

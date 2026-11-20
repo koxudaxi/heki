@@ -51,7 +51,9 @@ waits for its analysis, none are offered, and a client that applies versioned wo
 (`workspaceEdit.documentChanges`) gets them with that version, so it rejects them if the
 document changed meanwhile.
 
-It reads the same configuration as `heki check`. A configuration `heki check` rejects (an
+It reads the same configuration as `heki check`, including the Ratchet baseline: with
+`baseline` configured, a file shows what `heki check` reports against it (every finding of an
+entry that grew), and a change of the baseline file re-checks every file. A configuration `heki check` rejects (an
 unknown rule, a contract target that is not `Class.attr`, an invalid pattern) is logged as a
 warning, and the server analyzes nothing until it is fixed. One difference is deliberate: `heki check`
 reports ten or more `async def` boundaries that reach the same blocking call once, with a count,
@@ -117,7 +119,8 @@ $ heki check --watch
 ```
 
 re-checks changed files and the files affected by them, using the same incremental engine, and
-prints the full list of diagnostics after every change. A change to `pyproject.toml`,
+prints the full list of diagnostics after every change, compared with the Ratchet baseline
+(`--baseline` or `baseline`) as `heki check` compares them. A change to `pyproject.toml`,
 `heki.toml`, or the summary snapshot reloads everything, and so does the first package marker
 (`__init__.py`) under `src/` appearing or the last one disappearing (module names under `src/`
 change with the `src` layout); the server does the same.

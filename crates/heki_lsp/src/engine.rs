@@ -5,7 +5,7 @@
 //! time and dropped as soon as its summary and diagnostics are computed.
 
 use globset::GlobSet;
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Diagnostic, RatchetBaseline};
 use heki_effect::{
     CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, analyze_project_with_reads,
 };
@@ -35,6 +35,8 @@ pub enum EngineError {
     UnknownSeverityRule(String),
     #[error(transparent)]
     Rules(heki_rules::RuleConfigError),
+    #[error(transparent)]
+    Baseline(Box<heki_diagnostics::BaselineError>),
 }
 
 /// The files of a project root whose change reloads the whole workspace: the configuration and
@@ -120,6 +122,8 @@ pub struct Workspace {
     pub env: ProjectEnv,
     selection: RuleSelection,
     snapshot: Option<SummarySnapshot>,
+    /// The Ratchet baseline the diagnostics are compared with, and its file.
+    baseline: Option<(PathBuf, RatchetBaseline)>,
     /// The directories discovery walks (`ProjectOptions::paths`).
     walked: Vec<PathBuf>,
     exclude: GlobSet,
@@ -173,10 +177,12 @@ type EcosystemView = BTreeMap<FuncKey, Vec<CallSite>>;
 
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the index is built).
-    /// `overrides` replaces the disk text of open documents.
+    /// `overrides` replaces the disk text of open documents. `baseline` replaces the Ratchet
+    /// baseline of the configuration (`--baseline`).
     pub fn load(
         opts: &ProjectOptions<'_>,
         selectors: &Selectors,
+        baseline: Option<&Path>,
     ) -> Result<(Self, Vec<String>), EngineError> {
         let project = Project::load(opts).map_err(EngineError::Project)?;
         let env_cfg = &project.env.cfg;
@@ -200,6 +206,17 @@ impl Workspace {
             Some(SummarySnapshot::load(&snapshot_path).map_err(EngineError::Snapshot)?)
         } else {
             None
+        };
+        let baseline_path = baseline
+            .map(Path::to_path_buf)
+            .or_else(|| env_cfg.baseline.as_ref().map(|b| project.env.root.join(b)));
+        let baseline = match baseline_path {
+            Some(path) => {
+                let recorded =
+                    RatchetBaseline::load(&path).map_err(|e| EngineError::Baseline(Box::new(e)))?;
+                Some((path, recorded))
+            }
+            None => None,
         };
         let exclude = exclude_set(env_cfg).map_err(EngineError::Project)?;
         let patching_builtins = project
@@ -258,6 +275,7 @@ impl Workspace {
                 env,
                 selection,
                 snapshot,
+                baseline,
                 walked: opts.paths.to_vec(),
                 exclude,
                 files,
@@ -283,6 +301,12 @@ impl Workspace {
         self.files.keys()
     }
 
+    /// The Ratchet baseline file the diagnostics are compared with: a change of it changes them
+    /// all.
+    pub fn baseline_path(&self) -> Option<&Path> {
+        self.baseline.as_ref().map(|(path, _)| path.as_path())
+    }
+
     /// A Python file the project indexes: one that discovery finds (`collect_files`: ignore
     /// files, hidden directories, and `exclude` leave files out), as `heki check` does.
     pub fn accepts(&self, path: &Path) -> bool {
@@ -303,8 +327,9 @@ impl Workspace {
         )
     }
 
-    /// Diagnostics of one parsed file against the current index; records which other files
-    /// they point into and what the check read of the declarations.
+    /// Diagnostics of one parsed file against the current index and, as `heki check` reports
+    /// them, against the Ratchet baseline; records which other files they point into and what
+    /// the check read of the declarations.
     fn check(&mut self, parsed: &ParsedFile) -> Result<Vec<Diagnostic>, String> {
         let unit = parsed.unit();
         let extras = CheckExtras {
@@ -347,7 +372,13 @@ impl Workspace {
             self.chain_reports.remove(&parsed.path);
         }
         self.check_reads.insert(parsed.path.clone(), reads);
-        checked
+        // Baseline keys name the file, so the counts of one file are the counts of its keys.
+        checked.map(|mut diags| {
+            if let Some((_, baseline)) = &self.baseline {
+                baseline.keep_regressions(&mut diags, &|_| parsed.rel.clone());
+            }
+            diags
+        })
     }
 
     /// Diagnostics of `text` as `path` against the current index (the summaries are unchanged).
@@ -840,7 +871,7 @@ mod tests {
             paths: &paths,
             ..ProjectOptions::default()
         };
-        let (mut ws, errors) = Workspace::load(&opts, &Selectors::default()).unwrap();
+        let (mut ws, errors) = Workspace::load(&opts, &Selectors::default(), None).unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         // After indexing (a race a process cannot set up portably), `b.py` stops being UTF-8
         // and `c.py` stops parsing: both errors are reported, `a.py` is still checked.

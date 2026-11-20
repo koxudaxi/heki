@@ -602,6 +602,21 @@ impl RatchetBaseline {
         out
     }
 
+    /// What a check against this baseline reports of `diags`: every diagnostic of a key whose
+    /// count (in the baseline's unit) grew past its entry. `key_path` gives the baseline path of
+    /// a diagnostic's file. Returns the comparison the counts were kept by.
+    pub fn keep_regressions(
+        &self,
+        diags: &mut Vec<Diagnostic>,
+        key_path: &dyn Fn(&Path) -> String,
+    ) -> RatchetComparison {
+        let cmp = self.compare(&baseline_counts(diags, key_path, self.unit));
+        let regressed: std::collections::BTreeSet<&BaselineKey> =
+            cmp.regressions.iter().map(|(k, _, _)| k).collect();
+        diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
+        cmp
+    }
+
     pub fn from_toml_str(text: &str, path: &Path) -> Result<Self, BaselineError> {
         let file: BaselineFile = toml::from_str(text).map_err(|cause| BaselineError::Toml {
             path: path.to_path_buf(),

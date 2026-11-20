@@ -91,7 +91,9 @@ fn watch_exits_with_the_last_reports_status() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("`--fix`, `--diff`, `--baseline`"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("`--fix`, `--diff`, and `--update-baseline`")
+    );
     let diags: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(diags[0]["rule_code"], "OPT101");
     // Invalid configuration is reported before watching starts.
@@ -485,4 +487,31 @@ fn watch_reloads_when_the_first_package_marker_under_src_appears() {
             .unwrap()
             .contains("caller.py:5:5: EFF101 "),
     );
+}
+
+#[test]
+fn watch_compares_with_the_ratchet_baseline_like_check() {
+    let p = Project::new("watch_baseline");
+    let blocking = "import time\n\n\nasync def handler():\n    time.sleep(1)\n";
+    p.write("a.py", blocking);
+    assert_eq!(p.check(&["--baseline", "b.toml", "--update-baseline"]).0, 0);
+    let (child, rx) = spawn_watch(
+        &p,
+        &["--baseline", "b.toml", "--output-format", "concise"],
+        "2",
+    );
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 1 file(s)");
+    assert!(!lines.iter().any(|l| l.contains("ignored")), "{lines:#?}");
+    // A second call grows the entry: both calls are reported, as by `heki check`.
+    p.write("a.py", &format!("{blocking}    time.sleep(2)\n"));
+    wait_for(&rx, "[heki watch] 2 diagnostic(s) in 1 file(s)");
+    // Allowing both in the baseline file reloads the workspace.
+    p.write(
+        "b.toml",
+        &p.read("b.toml").replace("count = 1", "count = 2"),
+    );
+    assert_eq!(p.check(&["--baseline", "b.toml"]).0, 0);
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 1 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
 }

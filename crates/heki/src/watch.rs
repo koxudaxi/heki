@@ -54,7 +54,8 @@ impl Watcher<'_> {
             extend_select: self.args.extend_select.clone(),
             ignore: self.args.ignore.clone(),
         };
-        let (ws, errors) = Workspace::load(&self.opts(), &selectors)?;
+        let (ws, errors) =
+            Workspace::load(&self.opts(), &selectors, self.args.baseline.as_deref())?;
         Ok((ws, errors, stamps))
     }
 
@@ -70,6 +71,13 @@ impl Watcher<'_> {
         let root = &ws_env.root;
         let mut config: Vec<PathBuf> = CONFIG_FILES.iter().map(|n| root.join(n)).collect();
         config.extend(self.args.config.clone());
+        // The Ratchet baseline the diagnostics are compared with.
+        config.extend(
+            self.args
+                .baseline
+                .clone()
+                .or_else(|| ws_env.cfg.baseline.as_ref().map(|b| root.join(b))),
+        );
         let stamps = config.iter().filter_map(|p| mtime(p)).collect();
         Ok((files, stamps))
     }
@@ -145,9 +153,9 @@ fn record(
 }
 
 pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCode> {
-    if args.fix || args.diff || args.baseline.is_some() || args.update_baseline {
+    if args.fix || args.diff || args.update_baseline {
         eprintln!(
-            "warning: `--watch` only reports diagnostics; `--fix`, `--diff`, `--baseline`, and `--update-baseline` are ignored."
+            "warning: `--watch` only reports diagnostics; `--fix`, `--diff`, and `--update-baseline` are ignored."
         );
     }
     let w = Watcher { args, hot };
