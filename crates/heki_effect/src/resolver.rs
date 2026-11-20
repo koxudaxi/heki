@@ -2747,22 +2747,34 @@ impl<'a> TypeCtx<'a> {
         match recv {
             Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
-                    // Unbound call through the class: `Base.method(obj, ...)`.
-                    return match self.project.class_targets(fqn, method) {
-                        Callee::Project(keys, _) => Callee::Project(keys, false),
-                        other => other,
-                    };
+                    return self.through_class(self.project.class_targets(fqn, method));
                 }
                 let target = self.project.canonical(&format!("{fqn}.{method}"));
                 self.call_targets(Some(Recv::Ref(&target)))
             }
-            Some(Recv::Class(class)) => match self.project.method_targets(class, method, false) {
-                Callee::Project(keys, _) => Callee::Project(keys, false),
-                other => other,
-            },
+            Some(Recv::Class(class)) => {
+                self.through_class(self.project.method_targets(class, method, false))
+            }
             Some(Recv::Inst(class)) => self.project.method_targets(class, method, false),
             Some(Recv::Super(class)) => self.project.method_targets(class, method, true),
             None => Callee::Unresolved,
+        }
+    }
+
+    /// The targets of calling `method` through a class object, from its definitions `callee`:
+    /// a class method binds the class to `cls`; a plain function takes the instance as its
+    /// first argument, and a static method takes none.
+    fn through_class(&self, callee: Callee) -> Callee {
+        match callee {
+            Callee::Project(keys, _) => {
+                let binds = keys.iter().all(|k| {
+                    self.project
+                        .function_decl(k)
+                        .is_some_and(|d| d.is_classmethod)
+                });
+                Callee::Project(keys, binds)
+            }
+            other => other,
         }
     }
 

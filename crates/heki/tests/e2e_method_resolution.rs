@@ -1,7 +1,7 @@
 //! Which functions a call runs, end to end through the real binary: methods found along
 //! Python's MRO (C3 linearization), constructing a named class (its own `__init__`, not a
-//! subclass's) and calling a method through it, calling an instance (`__call__`), and
-//! constructions through a module.
+//! subclass's) and calling a method through it, class methods called through their class,
+//! calling an instance (`__call__`), and constructions through a module.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -152,6 +152,56 @@ async def through_cls():
 #[test]
 fn a_named_class_constructs_itself_and_finds_its_own_methods() {
     check_marks("named_class", &[("pkg/named.py", NAMED)], &["EFF101"]);
+}
+
+/// A class method called through its class binds the class to `cls`: the first argument is
+/// its second parameter. A static method and a plain function called through the class bind
+/// none.
+const CLASS_CALLS: &str = r#"from pkg.model import Model
+
+
+class Store:
+    @classmethod
+    def drain(cls, xs):
+        xs.clear()
+
+    @classmethod
+    def drain_through(cls, xs):
+        cls.drain(xs)
+
+    @classmethod
+    def keep(cls, xs, ys):
+        ys.clear()
+
+    @staticmethod
+    def wipe(xs):
+        xs.clear()
+
+    def own(self, xs):
+        xs.clear()
+
+
+def through_class(m: Model, other: list):
+    Store.drain(m.items)  # MUT201
+    Store.drain_through(m.items)  # MUT201
+    Store.keep(m.items, other)
+    Store.wipe(m.items)  # MUT201
+    Store.own(Store(), m.items)  # MUT201
+    Store.own(m.items, other)
+"#;
+
+const MODEL: &str = r#"class Model:
+    def __init__(self):
+        self.items = []
+"#;
+
+#[test]
+fn class_methods_called_through_their_class_bind_the_class() {
+    check_marks(
+        "class_calls",
+        &[("pkg/model.py", MODEL), ("pkg/store.py", CLASS_CALLS)],
+        &["MUT201"],
+    );
 }
 
 /// Calling an instance runs its `__call__` with the instance as `self`, and returns what that
