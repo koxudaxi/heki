@@ -18,8 +18,9 @@ The first public preview.
   and exit codes `0` / `1` / `2`. The target Python version (`py311` to `py315`) comes from
   `requires-python` or `--target-version`, and `--watch` re-checks on every change.
 - 31 rules in four families:
-  - Mutation and state: `MUT101`, `MUT107`, `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`,
-    `MUT204`, `MUT205`, and the opt-in `MUT103`, `MUT106`, `MUT108`, and `MUT111`.
+  - Mutation and state: `MUT107`, `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`,
+    `MUT205`, and the opt-in `MUT103`, `MUT106`, `MUT108`, and `MUT111`, and `MUT101`
+    (experimental: its precision outside a few code bases is still low, and it may change).
   - Execution effects: `EFF101`, `EFF102`, `EFF103`, `EFF201`, and the opt-in `EFF105`,
     `EFF106`, and `EFF107`.
   - Data pipelines: `DATA101`.

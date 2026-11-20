@@ -59,7 +59,7 @@ fn semantic_fixtures_gate_json() {
     let fixtures = std::fs::read_to_string(repo_root().join("tests/semantic/fixtures.py")).unwrap();
     p.write("tests/semantic/fixtures.py", &fixtures).write(
         "heki.toml",
-        "[lint]\nrelax-async-in-tests = false\n\n[[write-owners]]\nname = \"store\"\ntargets = [\"Model.fields\"]\nallowed-writers = [\"Store.*\"]\n",
+        "[lint]\nrelax-async-in-tests = false\nextend-select = [\"MUT101\"]\n\n[[write-owners]]\nname = \"store\"\ntargets = [\"Model.fields\"]\nallowed-writers = [\"Store.*\"]\n",
     );
     let (code, stdout, _) = p.heki(&["--output-format", "json"]);
     assert_eq!(code, 1);

@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT108", "MUT111"]
+extend-select = ["MUT101", "MUT108", "MUT111"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -1639,8 +1639,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT108\", \"MUT111\"]",
-                "extend-select = [\"MUT108\", \"MUT111\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),

@@ -192,7 +192,9 @@ const UNSAVED: &str = "from functools import cached_property\n\n\nclass Box:\n  
 fn lsp_unsaved_and_outside_documents_and_stats_before_indexing() {
     let p = Project::new("lsp_unsaved");
     let outside = Project::new("lsp_unsaved_outside");
-    p.write("pkg/__init__.py", "").write("pkg/util.py", UTIL);
+    p.write("pkg/__init__.py", "")
+        .write("pkg/util.py", UTIL)
+        .write("heki.toml", "[lint]\nextend-select = [\"MUT101\"]\n");
     outside.write("x.py", API);
     let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
     // No root in `initialize`: the working directory is the workspace.
@@ -253,7 +255,9 @@ const BOX: &str = "from functools import cached_property\n\n\nclass Box:\n    de
 #[test]
 fn lsp_unsaved_module_next_to_its_indexed_stub() {
     let p = Project::new("lsp_stub");
-    p.write("pkg/__init__.py", "").write(
+    p.write("pkg/__init__.py", "")
+        .write("heki.toml", "[lint]\nextend-select = [\"MUT101\"]\n")
+        .write(
         "pkg/box.pyi",
         "from functools import cached_property\n\n\nclass Box:\n    @cached_property\n    def total(self) -> int: ...\n    def add(self, x: int) -> None: ...\n",
     );

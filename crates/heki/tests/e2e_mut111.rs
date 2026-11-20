@@ -334,11 +334,14 @@ fn mut111_is_opt_in_and_counts_suppressed_writes() {
     p.write("pkg/__init__.py", "")
         .write("pkg/parser.py", PARSER)
         .write("pkg/helpers.py", HELPERS);
-    // Neither the default rules nor the `MUT` prefix select it.
+    // Neither the default rules nor the `MUT` prefix select it, or the opt-in `MUT101`.
     for args in [&[][..], &["--select", "MUT"]] {
         let diags = diagnostics(&p, args);
         assert!(reads(&diags).is_empty(), "{diags:#?}");
-        assert!(diags.iter().any(|d| d["rule_code"] == "MUT101"));
+        assert!(
+            diags.iter().all(|d| d["rule_code"] != "MUT101"),
+            "{diags:#?}"
+        );
     }
     let by_slug = diagnostics(&p, &["--select", "cached-property-stale-read"]);
     assert_eq!(reads(&by_slug).len(), 4);

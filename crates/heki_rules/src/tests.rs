@@ -87,6 +87,13 @@ fn check(src: &str, config: &HekiConfig) -> Vec<Diagnostic> {
     check_with(&[("app.py", src)], config, &[])
 }
 
+/// The default configuration plus the opt-in `MUT101`.
+fn with_mut101() -> HekiConfig {
+    let mut config = HekiConfig::default();
+    config.lint.extend_select.push("MUT101".to_owned());
+    config
+}
+
 fn codes(diags: &[Diagnostic]) -> Vec<&str> {
     diags.iter().map(|d| d.rule_code.as_str()).collect()
 }
@@ -151,6 +158,7 @@ fn semantic_fixtures_all_tp_detected_and_no_tn() {
     let mut config = owners(&["Model.fields"], &["Store.*"]);
     // The fixtures live under `tests/`: turn the test-code relaxation off for them.
     config.lint.relax_async_in_tests = Some(false);
+    config.lint.extend_select.push("MUT101".to_owned());
     let diags = check_with(&[("tests/semantic/fixtures.py", FIXTURES)], &config, &[]);
     let (tp, tn) = expectations(FIXTURES);
     assert_eq!(tp.len(), 7, "{tp:?}");
@@ -265,7 +273,7 @@ class Outer:
 
 #[test]
 fn mut101_filters() {
-    let diags = check(MUT101_SRC, &HekiConfig::default());
+    let diags = check(MUT101_SRC, &with_mut101());
     let targets: BTreeSet<(String, String)> = diags
         .iter()
         .filter(|d| d.rule_code == "MUT101")
@@ -315,7 +323,7 @@ class P:
     def replace(self, p):
         self.params.update(p)
 "#;
-    let diags = check(src, &HekiConfig::default());
+    let diags = check(src, &with_mut101());
     let methods: BTreeSet<&str> = diags.iter().map(|d| d.qualname.as_str()).collect();
     assert_eq!(methods, BTreeSet::from(["P.set_tmpl", "P.replace"]));
 }

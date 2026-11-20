@@ -71,7 +71,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT101",
         slug: "cached-property-stale-mutation",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        default_enabled: false,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating an attribute read by `@cached_property` without invalidating the cache.",

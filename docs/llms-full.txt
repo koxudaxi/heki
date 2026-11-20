@@ -13,7 +13,7 @@ Source: https://heki.koxudaxi.dev/
 mutations across function calls.
 
 With no configuration, it catches blocking I/O in `async` code, database queries and HTTP clients
-in loops, quadratic loops, and stale caches. You can also add rules in `pyproject.toml` to restrict
+in loops, and quadratic loops. You can also add rules in `pyproject.toml` to restrict
 which functions may mutate state or reach I/O.
 
 <p>
@@ -136,13 +136,13 @@ Each report shows the chain of calls that leads to the bug.
 | --- | --- |
 | A blocking call several helpers below an `async def` | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) |
 | A database query, or a new HTTP client, on every loop iteration | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/), [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) |
-| A `@cached_property` left stale after another method changes what it read | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) |
 | A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) |
 | Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) |
 | Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) |
 | Opt-in: a generator consumed twice | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) |
 | Opt-in: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) |
+| Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) |
 
 ### A safety net for reviews and coding agents
 
@@ -889,7 +889,7 @@ supported version that every clause admits:
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
 - A prefix or `ALL` enables only the default rules. The opt-in rules (`EFF105`, `EFF106`,
-  `EFF107`, `MUT103`, `MUT106`, `MUT108`, `MUT111`) need their exact code or name. In `ignore`, a
+  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`) need their exact code or name. In `ignore`, a
   prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, and `--extend-select` and `--ignore` add
   to the configured lists.
@@ -1744,7 +1744,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. |  |
+| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 |
 | MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
 | MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
@@ -2336,11 +2336,14 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
 
 ## What it does
+Opt-in and experimental: enable it with `extend-select = ["MUT101"]`. Its precision
+outside a few code bases is still low, so its behavior may change in any release.
+
 Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
 of the same class (or of a subclass) reads, without invalidating the cached value. A method the
 class inherits from a project base class and does not override runs on its instances too, so it

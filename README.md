@@ -4,7 +4,7 @@
 mutations across function calls.
 
 With no configuration, it catches blocking I/O in `async` code, database queries and HTTP clients
-in loops, quadratic loops, and stale caches. You can also add rules in `pyproject.toml` to restrict
+in loops, and quadratic loops. You can also add rules in `pyproject.toml` to restrict
 which functions may mutate state or reach I/O.
 
 📚 [Documentation](https://heki.koxudaxi.dev/) ·
@@ -123,12 +123,12 @@ Each report shows the chain of calls that leads to the bug.
 | --- | --- |
 | A blocking call several helpers below an `async def` | `EFF101` |
 | A database query, or a new HTTP client, on every loop iteration | `EFF103`, `EFF102` |
-| A `@cached_property` left stale after another method changes what it read | `MUT101` |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | `MUT107` |
 | A `Sequence` / `Mapping` argument changed in place by a helper | `MUT110` |
 | Opt-in: a frozen or `ReadOnly` field changed in place | `MUT108` |
 | Opt-in: I/O while a lock or a database transaction is held | `EFF106` |
 | Opt-in: a generator consumed twice | `MUT106` |
+| Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | `MUT101` |
 | Opt-in: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
 
 ### A safety net for reviews and coding agents

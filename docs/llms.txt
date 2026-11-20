@@ -34,7 +34,7 @@
 
 - [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix
 - [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Opt-in · No automatic fix
-- [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+- [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
 - [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
 - [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
 - [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix

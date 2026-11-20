@@ -2,11 +2,14 @@
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
 
 ## What it does
+Opt-in and experimental: enable it with `extend-select = ["MUT101"]`. Its precision
+outside a few code bases is still low, so its behavior may change in any release.
+
 Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
 of the same class (or of a subclass) reads, without invalidating the cached value. A method the
 class inherits from a project base class and does not override runs on its instances too, so it
