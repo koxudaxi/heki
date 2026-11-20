@@ -15,7 +15,7 @@
 use heki_env::{CopySanitizerSetting, EcosystemOverride, PythonVersion};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 /// Embedded Layer 1 files (`kb/soundness/*.toml`): `(path relative to the repository, contents)`.
@@ -416,6 +416,8 @@ fn top_level_package(symbol: &str) -> &str {
 pub struct EffectiveEcosystemKb {
     pub entries: BTreeMap<String, EcosystemEntry>,
     pub opaque_packages: Vec<String>,
+    /// The symbols `[[tool.heki.ecosystem]]` names ([`Self::declared`]).
+    pub user_symbols: BTreeSet<String>,
     pub digest: String,
 }
 
@@ -438,6 +440,7 @@ impl EffectiveEcosystemKb {
         Self {
             entries,
             opaque_packages,
+            user_symbols: BTreeSet::new(),
             digest,
         }
     }
@@ -466,10 +469,24 @@ impl EffectiveEcosystemKb {
                 });
             patch.apply(entry);
         }
-        Ok(Self::materialize(
-            raw.into_values().collect(),
-            opaque_packages,
-        ))
+        let mut kb = Self::materialize(raw.into_values().collect(), opaque_packages);
+        kb.user_symbols = overrides.iter().map(|p| p.symbol.clone()).collect();
+        if !kb.user_symbols.is_empty() {
+            let users: Vec<&str> = kb.user_symbols.iter().map(String::as_str).collect();
+            let keyed = format!("{}|{}", kb.digest, users.join(","));
+            kb.digest = blake3::hash(keyed.as_bytes()).to_hex().to_string();
+        }
+        Ok(kb)
+    }
+
+    /// The entry of `symbol` when the project's configuration names it: a declaration of one
+    /// of the project's own functions. A function the project defines is followed through its
+    /// body otherwise, also when the built-in catalog lists its name (a package's own source).
+    pub fn declared(&self, symbol: &str) -> Option<&EcosystemEntry> {
+        self.user_symbols
+            .contains(symbol)
+            .then(|| self.entries.get(symbol))
+            .flatten()
     }
 
     pub fn lookup(&self, symbol: &str) -> Option<&EcosystemEntry> {
@@ -2216,6 +2233,11 @@ mod tests {
             }
         );
         assert_eq!(kb.entries.len(), builtin.entries.len() + 3);
+        // Only what the configuration names is a declaration of project code.
+        assert!(kb.declared("mypkg.db.open").is_some());
+        assert!(kb.declared("time.sleep").is_some());
+        assert_eq!(kb.declared("sqlite3.Connection.execute"), None);
+        assert_eq!(builtin.declared("time.sleep"), None);
         assert_eq!(kb.opaque_packages, builtin.opaque_packages);
         assert_ne!(kb.digest, builtin.digest);
     }

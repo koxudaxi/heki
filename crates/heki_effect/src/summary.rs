@@ -2969,13 +2969,14 @@ impl<'a> Extractor<'a> {
         self.sites.push(site);
     }
 
-    /// An ecosystem entry naming the function (`[[tool.heki.ecosystem]]`) declares what calling
-    /// it does, as for an external function: its `effects` run in the body, its
-    /// `offloads_blocking_arg` (the receiver not counted) is a parameter the body offloads, and
-    /// `excluded` / `async_safe` keep every effect / the blocking ones from its callers.
+    /// A `[[tool.heki.ecosystem]]` entry naming the function declares what calling it does, as
+    /// for an external function (the built-in catalog does not apply to project code): its
+    /// `effects` run in the body, its `offloads_blocking_arg` (the receiver not counted) is a
+    /// parameter the body offloads, and `excluded` / `async_safe` keep every effect / the
+    /// blocking ones from its callers.
     fn apply_declaration(&mut self) {
         let fqn = self.key.fqn();
-        let Some(entry) = self.cx.kb.lookup(&fqn) else {
+        let Some(entry) = self.cx.kb.declared(&fqn) else {
             return;
         };
         let hidden: BTreeSet<ExecEffectKind> = if entry.excluded {

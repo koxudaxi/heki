@@ -909,7 +909,8 @@ excluded = true               # never reported
 An override sets the keys it lists on the built-in entry for the same symbol; the keys it
 leaves out keep their built-in values (`effects = []` removes every effect).
 
-An entry may name a function or method of the project itself (by the module that defines it):
+An entry may name a function or method of the project itself (by the module that defines it;
+the built-in catalog never describes the project's own functions):
 its `effects` add to what heki finds in its body, `excluded` keeps every effect of the body
 from its callers and `async-safe` the blocking ones, `return-type` types its result over its
 annotation, and `offloads-blocking-arg` counts the receiver out as for a library method.

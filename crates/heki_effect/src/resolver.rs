@@ -2906,14 +2906,14 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// The class an ecosystem entry naming the function `fqn` gives its result (a declaration
-    /// of a project function wins over its annotation).
+    /// The class a `[[tool.heki.ecosystem]]` entry naming the project function `fqn` gives its
+    /// result (the declaration wins over its annotation).
     fn declared_result(
         &self,
         fqn: &str,
         arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<Ty> {
-        let entry = self.kb.lookup(fqn)?;
+        let entry = self.kb.declared(fqn)?;
         entry.return_type_in(entry.case_for(arg)).map(Ty::inst)
     }
 
