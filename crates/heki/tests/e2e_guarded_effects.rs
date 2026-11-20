@@ -3,7 +3,13 @@
 //!
 //! - Lazy initialization (`EFF102` / `EFF103`): a client or query created only while an
 //!   attribute is unset, which the code then sets, runs once per object, not on every loop
-//!   iteration.
+//!   iteration; so does a `functools.cached_property` getter. One only an unset local variable
+//!   or a first-iteration flag lets run runs once per run of the loop, and one behind a module
+//!   global once per process.
+//! - Calls every way on from which leaves the loop (`EFF102` / `EFF103`): `return`, `break`,
+//!   `raise` right after them, they run once per run of the loop.
+//! - Futures known to be done (`EFF101`): `f.result()` under `if f.done():` or after
+//!   `await asyncio.wrap_future(f)` returns at once.
 //! - Arguments that decide a guard (`EFF102`, `EFF101`): `load(name, cache=False)` does not
 //!   reach the `if cache:` branch of the callee; neither does an omitted parameter whose literal
 //!   default is falsy.
@@ -277,6 +283,562 @@ fn lazy_initialization_runs_once_per_object() {
         &[("pkg/__init__.py", ""), ("pkg/lazy.py", LAZY)],
         &[],
         &["EFF101", "EFF102", "EFF103"],
+    );
+}
+
+/// A `functools.cached_property` getter runs once per instance, as a lazy initialization of
+/// `self` does, through any number of calls: `cached_property` from `functools`, from a module
+/// of the project that imports it, or from `kombu.utils`, which re-exports it. Reading one in
+/// a loop on an instance the loop does not construct, also one of the instances a loop
+/// iterates over, does not run it per iteration; on one it constructs in each iteration it
+/// does. A plain `@property` runs on every read, and the event loop blocks the one time.
+const CACHED: &str = r#"import functools
+import sqlite3
+
+import requests
+from kombu.utils import cached_property as kombu_cached
+
+from pkg.compat import cached_property
+
+
+class Downloader:
+    @functools.cached_property
+    def db(self):
+        return sqlite3.connect("cookies.db")
+
+    @cached_property
+    def session(self):
+        return requests.Session()
+
+    @kombu_cached
+    def client(self):
+        return requests.Session()
+
+    @property
+    def fresh(self):
+        return requests.Session()
+
+    @functools.cached_property
+    def pooled(self):
+        if self._pool is None:
+            self._pool = requests.Session()
+        return self._pool
+
+    def available(self, target):
+        return self.db is not None
+
+    def first_comp(self, targets):
+        return [t for t in targets if self.available(t)]
+
+    def each(self, urls):
+        for u in urls:
+            self.session.get(u)
+            self.client.get(u)
+            self.pooled.get(u)
+            self.fresh.get(u)  # EFF102
+
+
+def loops(d: Downloader, ds: list[Downloader], targets):
+    for t in targets:
+        d.available(t)
+        Downloader().available(t)  # EFF102
+    for e in ds:
+        e.available(1)
+
+
+async def handler(d: Downloader):
+    return d.db  # EFF101
+"#;
+
+#[test]
+fn cached_properties_run_once_per_instance() {
+    check_marks(
+        "guards_cached",
+        &[
+            ("pkg/__init__.py", ""),
+            ("pkg/compat.py", "from functools import cached_property\n"),
+            ("pkg/cached.py", CACHED),
+        ],
+        &[],
+        &["EFF101", "EFF102", "EFF103"],
+    );
+}
+
+/// A local variable a loop carries, made only while it is unset (`if conn is None: conn =
+/// connect()`, `conn = conn or connect()`, also a parameter's default), and a call only a
+/// first-iteration flag lets run (`if first: ...; first = False`, `if not seen:`), run once
+/// per run of the loop, as does a loop around both loops that keeps the variable. A module
+/// global set the same way (`global _session`) is set once per process, for every caller.
+/// Reported: a variable reset in the loop (also by a handler), or set there to a value the
+/// branch does not compute (`prev = row`, which may be `None`), a branch that does not always
+/// set it, a loop that starts it unset in each iteration, a flag set again in each iteration,
+/// a global the branch does not set, and a global the function also sets back to `None` before
+/// the test or after the initialization (one set back before a `raise` undoes a failed
+/// initialization only).
+const LOCAL_LAZY: &str = r#"import sqlite3
+
+import requests
+
+_session = None
+_warned = False
+
+
+def lazy_none(urls):
+    s = None
+    for u in urls:
+        if s is None:
+            s = requests.Session()
+        s.get(u)
+
+
+def lazy_not(urls, s=None):
+    for u in urls:
+        if not s:
+            s = requests.Session()
+        s.get(u)
+
+
+def lazy_or(urls):
+    s = None
+    for u in urls:
+        s = s or requests.Session()
+        s.get(u)
+
+
+def lazy_query(cur: sqlite3.Cursor, ids):
+    cols = None
+    for i in ids:
+        if cols is None:
+            cols = cur.execute("SELECT * FROM meta").fetchall()
+        print(cols, i)
+
+
+def lazy_outer_kept(groups):
+    s = None
+    for g in groups:
+        for u in g:
+            if s is None:
+                s = requests.Session()
+            s.get(u)
+
+
+def lazy_marker(cur: sqlite3.Cursor, ids):
+    marker = None
+    for i in ids:
+        if marker is None:
+            cur.execute("SELECT 1")
+            marker = 1
+
+
+def lazy_last(urls):
+    last = object()
+    for u in urls:
+        if last is not None:
+            requests.get(u)
+            last = None
+
+
+def lazy_break(urls, c):
+    if c:
+        s = requests.Session()
+    else:
+        s = None
+    for u in urls:
+        if s is None:
+            s = requests.Session()
+            break
+
+
+def lazy_reset(urls):
+    s = None
+    for u in urls:
+        if s is None:
+            s = requests.Session()  # EFF102
+        s.get(u)
+        s = None
+
+
+def lazy_param_reset(urls, default):
+    s = None
+    for u in urls:
+        if s is None:
+            s = requests.Session()  # EFF102
+        if not u:
+            s = default
+
+
+def lazy_sometimes(urls, ok):
+    s = None
+    for u in urls:
+        if s is None:
+            if ok:
+                s = requests.Session()  # EFF102
+            else:
+                requests.Session()  # EFF102
+
+
+def lazy_outer_reset(groups):
+    for g in groups:
+        s = None
+        for u in g:
+            if s is None:
+                s = requests.Session()  # EFF102
+            s.get(u)
+
+
+def lazy_reset_on_error(urls):
+    s = None
+    for u in urls:
+        try:
+            if s is None:
+                s = requests.Session()  # EFF102
+            s.get(u)
+        except OSError:
+            s = None
+
+
+def first_flag(cur: sqlite3.Cursor, ids):
+    first = True
+    for i in ids:
+        if first:
+            cur.execute("SELECT 1")
+            first = False
+
+
+def seen_flag(urls):
+    seen = False
+    for u in urls:
+        if not seen:
+            requests.get(u)
+            seen = True
+
+
+def prev_none(cur: sqlite3.Cursor, rows):
+    prev = None
+    for r in rows:
+        if prev is None:
+            cur.execute("SELECT 1")  # EFF103
+        prev = r
+
+
+def prev_reset(cur: sqlite3.Cursor, rows):
+    prev = None
+    for r in rows:
+        if prev is None:
+            cur.execute("SELECT 1")  # EFF103
+        prev = r if r else None
+
+
+def empty_reset(cur: sqlite3.Cursor, rows):
+    cache = []
+    for r in rows:
+        if not cache:
+            cache = cur.execute("SELECT 1").fetchall()  # EFF103
+        if r:
+            cache = []
+
+
+def flag_set_each(urls):
+    pending = None
+    for u in urls:
+        if pending is not None:
+            requests.get(pending)  # EFF102
+            pending = None
+        pending = u
+
+
+def session():
+    global _session
+    if _session is None:
+        _session = requests.Session()
+    return _session
+
+
+def warn_once():
+    global _warned
+    if not _warned:
+        _warned = True
+        requests.get("https://example.com/warn")
+
+
+def unset_global():
+    global _session
+    if _session is None:
+        requests.Session()
+
+
+def inline_global(urls):
+    global _session
+    for u in urls:
+        if _session is None:
+            _session = requests.Session()
+        _session.get(u)
+
+
+def reset_before():
+    global _session
+    _session = None
+    if _session is None:
+        _session = requests.Session()
+    return _session
+
+
+def reset_after():
+    global _session
+    if _session is None:
+        _session = requests.Session()
+    s = _session
+    _session = None
+    return s
+
+
+def reset_sometimes(flag):
+    global _session
+    if _session is None:
+        _session = requests.Session()
+    s = _session
+    if flag:
+        _session = None
+    return s
+
+
+_conn = None
+
+
+def connect_or_fail():
+    global _conn
+    if _conn is None:
+        try:
+            _conn = requests.Session()
+        except OSError:
+            _conn = None
+            raise
+    return _conn
+
+
+def callers(urls):
+    for u in urls:
+        session().get(u)
+        warn_once()
+        connect_or_fail()
+        unset_global()  # EFF102
+        reset_before()  # EFF102
+        reset_after()  # EFF102
+        reset_sometimes(u)  # EFF102
+"#;
+
+#[test]
+fn local_and_global_lazy_initialization() {
+    check_marks(
+        "guards_local_lazy",
+        &[("pkg/__init__.py", ""), ("pkg/local_lazy.py", LOCAL_LAZY)],
+        &[],
+        &["EFF102", "EFF103"],
+    );
+}
+
+/// A call every way on from which leaves the loop (`return`, `break`, `raise`, also after
+/// other calls) runs at most once per run of the loop; a `break` out of an inner loop still
+/// runs it once per iteration of the outer one, and a handler that goes on with the loop runs
+/// it again.
+const EXITS: &str = r#"import sqlite3
+
+import requests
+
+
+def first_match(urls):
+    for u in urls:
+        if u.startswith("https"):
+            s = requests.Session()
+            return s.get(u)
+    return None
+
+
+def first_break(urls):
+    for u in urls:
+        if u.startswith("https"):
+            requests.get(u)
+            print(u)
+            break
+
+
+def query_then_return(cur: sqlite3.Cursor, ids):
+    while ids:
+        cur.execute("SELECT 1")
+        return ids.pop()
+    return None
+
+
+def raise_after(urls):
+    for u in urls:
+        if not u:
+            requests.get("https://example.com/report")
+            raise ValueError(u)
+
+
+def inner_break(groups):
+    for g in groups:
+        for u in g:
+            requests.get(u)  # EFF102
+            break
+
+
+def retry_on_error(urls):
+    for u in urls:
+        try:
+            return requests.get(u)  # EFF102
+        except OSError:
+            continue
+    return None
+
+
+def per_item(urls):
+    for u in urls:
+        if u:
+            requests.get(u)  # EFF102
+"#;
+
+#[test]
+fn calls_before_the_loop_ends_run_once() {
+    check_marks(
+        "guards_exits",
+        &[("pkg/__init__.py", ""), ("pkg/exits.py", EXITS)],
+        &[],
+        &["EFF102", "EFF103"],
+    );
+}
+
+/// Waiting on a `concurrent.futures.Future` known to be done returns at once: `result()` or
+/// `exception()` under `if f.done():` (after an early return, a `while not f.done():` poll, an
+/// `and`), once `await asyncio.wrap_future(f)` has returned (also imported, or through a
+/// copy), on an attribute the method does not assign, and in a helper. Reported: a future no
+/// test or `await` on every path finished, a test of another future, and an event a done
+/// callback sets, which is not followed.
+const FUTURES: &str = r#"import asyncio
+from asyncio import wrap_future
+from concurrent.futures import Future, ThreadPoolExecutor
+
+
+async def done_test(f: Future):
+    if f.done():
+        return f.result()
+    return None
+
+
+async def early_return(f: Future):
+    if not f.done():
+        return None
+    return f.exception()
+
+
+async def poll_until(f: Future):
+    while not f.done():
+        await asyncio.sleep(0.1)
+    return f.result()
+
+
+async def and_test(f: Future, ok: bool):
+    if ok and f.done():
+        return f.result()
+    return None
+
+
+async def wrapped(ex: ThreadPoolExecutor):
+    f = ex.submit(print)
+    await asyncio.wrap_future(f)
+    return f.result()
+
+
+async def imported(f: Future):
+    await wrap_future(f)
+    return f.result()
+
+
+async def copied(f: Future):
+    w = asyncio.wrap_future(f)
+    await w
+    return f.result()
+
+
+class Holder:
+    def __init__(self, f: Future):
+        self._future = f
+
+    async def get(self):
+        if self._future.done():
+            return self._future.result()
+        return None
+
+    async def other(self, g: Future):
+        if g.done():
+            return self._future.result()  # EFF101
+        return None
+
+
+def helper(f: Future):
+    if f.done():
+        return f.result()
+    return None
+
+
+async def through_helper(f: Future):
+    return helper(f)
+
+
+async def not_done(f: Future):
+    return f.result()  # EFF101
+
+
+async def or_test(f: Future, ok: bool):
+    if ok or f.done():
+        return f.result()  # EFF101
+    return None
+
+
+async def one_branch(f: Future, ok: bool):
+    if ok:
+        await asyncio.wrap_future(f)
+    return f.result()  # EFF101
+
+
+async def handler_path(f: Future):
+    try:
+        await asyncio.wrap_future(f)
+    except OSError:
+        pass
+    return f.result()  # EFF101
+
+
+class Waiter:
+    async def __call__(self):
+        return None
+
+
+async def call_instance(f: Future, w: Waiter):
+    await w()
+    return f.result()  # EFF101
+
+
+async def unpacked(fs: list[Future]):
+    await asyncio.wrap_future(*fs)
+    return fs[0].result()  # EFF101
+
+
+async def event_set(f: Future):
+    done = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    f.add_done_callback(lambda _: loop.call_soon_threadsafe(done.set))
+    await done.wait()
+    return f.result()  # EFF101
+"#;
+
+#[test]
+fn futures_known_to_be_done_do_not_block() {
+    check_marks(
+        "guards_futures",
+        &[("pkg/__init__.py", ""), ("pkg/futures.py", FUTURES)],
+        &[],
+        &["EFF101"],
     );
 }
 

@@ -31,9 +31,13 @@ display; see `EFF102`).
 
 As for `EFF102`, a query that only runs while an attribute is unset, which the code then sets
 (`if self._columns is None: self._columns = cursor.execute(...)`), runs once per object and is
-not reported when the loop does not construct the object; a call whose arguments switch off
-the branch with the query (a constant, a literal default, a test the caller has made) is not
-followed into it.
+not reported when the loop does not construct the object; so does one in a
+`functools.cached_property` getter, and one behind a module global runs once per process. A
+query that only runs while a local variable the loop carries is unset or a first-iteration flag
+holds (`if first: cursor.execute(...); first = False`), or that every way on from leaves the
+loop (`cursor.execute(...)` followed by `return`, `break`, or `raise`), runs once per run of the
+loop. A call whose arguments switch off the branch with the query (a constant, a literal
+default, a test the caller has made) is not followed into it.
 
 ## Why is this bad?
 One round trip per item makes the run time grow with the number of rows and with the network
