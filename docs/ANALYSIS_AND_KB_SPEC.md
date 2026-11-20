@@ -108,8 +108,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   another `finally` body, or holding a way out itself, multiply with each copy around them. A
   typed `except` clause's test is opaque (a bare `except:` always matches); every `except*`
   clause may run on part of the group; an exception no clause takes is raised again.
-- **Size budget**: a function's lowering takes at most 8 units per byte of its source (at
-  least 4,096, at most 100,000; a unit is a block, an instruction, a phi, a name's value in a
+- **Size budget**: a function's lowering takes at most 4 units per byte of its source (at
+  least 4,096, at most 50,000; a unit is a block, an instruction, a phi, a name's value in a
   block, or a block a name's lookup passes; real code takes under one per byte). Past it,
   the function is unmodeled: its body becomes one call of an unknown callable with every
   parameter, whose result it returns, and its `a1_hazards` hold `unmodeled`, so the Soundness

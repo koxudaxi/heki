@@ -22,9 +22,9 @@ const MATCH_ARGS: &str = "__match_args__";
 /// body is lowered once per way out of its `try`, so copies of nested `finally` bodies
 /// multiply; past the budget the function is left unmodeled ([`crate::UNMODELED`]) instead of
 /// growing.
-const UNITS_PER_SOURCE_BYTE: usize = 8;
+const UNITS_PER_SOURCE_BYTE: usize = 4;
 const MIN_UNITS: usize = 4096;
-const MAX_UNITS: usize = 100_000;
+const MAX_UNITS: usize = 50_000;
 
 fn unit_budget(span: Span) -> usize {
     let source_bytes = span.end.saturating_sub(span.start) as usize;
