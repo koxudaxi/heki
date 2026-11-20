@@ -52,6 +52,7 @@ use heki_ast::Span;
 use heki_ir::ModuleIr;
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::SemanticModel;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,6 +103,23 @@ pub struct CallHop {
     pub path: PathBuf,
 }
 
+/// A call chain kept in a summary. Propagation copies a callee's chains into its callers, so
+/// the hops are shared: a chain through a call points to the hop that call made, and extending
+/// a chain copies pointers. `Arc` compares, orders, and hashes by value, so the chains do too.
+pub type SharedChain = Vec<Arc<CallHop>>;
+
+/// The hops of a kept chain, owned (what a report shows).
+pub fn owned_chain(chain: &[Arc<CallHop>]) -> Vec<CallHop> {
+    chain.iter().map(|hop| CallHop::clone(hop)).collect()
+}
+
+/// Zero the position of every hop of a kept chain (a hop shared with other chains is copied).
+fn zero_hop_spans(chain: &mut [Arc<CallHop>]) {
+    for hop in chain {
+        Arc::make_mut(hop).span = Span { start: 0, end: 0 };
+    }
+}
+
 /// Write site detail for MUT201.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldWriteSite {
@@ -113,7 +131,7 @@ pub struct TypedFieldWriteSite {
     /// function that performs it: the summary owner when `via_chain` is empty, else the
     /// last hop's callee.
     pub span: Span,
-    pub via_chain: Vec<CallHop>,
+    pub via_chain: SharedChain,
     /// Parameters of the summary owner the written object may be, as itself (bit 0: a
     /// method's own `self`), mapped through every hop. Empty for an object that is no
     /// parameter: a fresh instance, an attribute of one, a call result.
@@ -372,7 +390,7 @@ pub struct EffectSummary {
     pub direct_exec_effects: BTreeSet<ExecEffectKind>,
     pub transitive_exec_effects: BTreeSet<ExecEffectKind>,
     /// Shortest known call chain reaching each effect (direct or transitive).
-    pub exec_chains: BTreeMap<ExecEffectKind, Vec<CallHop>>,
+    pub exec_chains: BTreeMap<ExecEffectKind, SharedChain>,
 
     // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
     pub mutates_params: u64,
@@ -564,18 +582,14 @@ impl EffectSummary {
     pub fn without_locations(&self) -> Self {
         let mut out = self.clone();
         for chain in out.exec_chains.values_mut() {
-            for hop in chain {
-                hop.span = Span { start: 0, end: 0 };
-            }
+            zero_hop_spans(chain);
         }
         out.typed_field_write_sites = out
             .typed_field_write_sites
             .into_iter()
             .map(|mut site| {
                 site.span = Span { start: 0, end: 0 };
-                for hop in &mut site.via_chain {
-                    hop.span = Span { start: 0, end: 0 };
-                }
+                zero_hop_spans(&mut site.via_chain);
                 site
             })
             .collect();
@@ -589,9 +603,7 @@ impl EffectSummary {
             .collect();
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
-            for hop in &mut r.chain {
-                hop.span = Span { start: 0, end: 0 };
-            }
+            zero_hop_spans(&mut r.chain);
         }
         out.unresolved_write_sites = out
             .unresolved_write_sites
@@ -607,9 +619,7 @@ impl EffectSummary {
             .map(|mut w| {
                 w.span = Span { start: 0, end: 0 };
                 w.origin = Span { start: 0, end: 0 };
-                for hop in &mut w.via_chain {
-                    hop.span = Span { start: 0, end: 0 };
-                }
+                zero_hop_spans(&mut w.via_chain);
                 w
             })
             .collect();
@@ -852,23 +862,35 @@ pub struct FileSummary {
     pub path: PathBuf,
     pub module_name: String,
     pub content_hash: String,
-    /// Final (interprocedurally propagated) summaries; filled by `ProjectIndex`.
-    pub functions: FxHashMap<FuncKey, EffectSummary>,
-    /// Project call edges `(caller, callee, span)` (reverse call graph source).
-    pub call_edges: Vec<(FuncKey, FuncKey, Span)>,
+    /// Final (interprocedurally propagated) summaries; filled by `ProjectIndex`. A final summary
+    /// that propagation leaves equal to the local one is that one.
+    pub functions: FxHashMap<FuncKey, Arc<EffectSummary>>,
     /// Local (one-function) summaries before propagation.
-    pub local_functions: FxHashMap<FuncKey, EffectSummary>,
+    pub local_functions: FxHashMap<FuncKey, Arc<EffectSummary>>,
     pub call_sites: Vec<CallSite>,
-    /// Declarations other modules need for name and receiver resolution.
-    pub decls: ModuleDecls,
+    /// Declarations other modules need for name and receiver resolution (shared with the
+    /// project declarations built from the index).
+    pub decls: Arc<ModuleDecls>,
     /// What summarizing the file read of the project declarations (completing its own
     /// declarations included): a change of any of these keys can change the summary. Recorded
-    /// for the language server's index only (`analyze_project_with_reads`, the incremental
+    /// for the language server's index only (`summarize_project_with_reads`, the incremental
     /// updates); empty otherwise.
     pub decl_reads: DeclKeys,
     /// The `MUT109` flow facts of the file's functions (local, IR-free; empty unless an
     /// `invalidation` contract is configured).
     pub flows: FxHashMap<FuncKey, FuncFlow>,
+}
+
+impl FileSummary {
+    /// Project call edges `(caller, callee, span)`, the source of the reverse call graph: every
+    /// resolved project callee of every call site.
+    pub fn call_edges(&self) -> impl Iterator<Item = (&FuncKey, &FuncKey, Span)> + '_ {
+        self.call_sites.iter().flat_map(|site| {
+            site.project_callees()
+                .iter()
+                .map(move |bc| (&site.caller, &bc.callee, site.span))
+        })
+    }
 }
 
 /// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
@@ -918,6 +940,10 @@ pub struct ProjectIndex {
     pub(crate) func_files: FxHashMap<FuncKey, PathBuf>,
     /// The declared contracts the summaries depend on (`None`: no contract facts).
     pub(crate) contracts: Option<Arc<dyn Contracts>>,
+    /// Propagation leaves typed writes where they are made: callers get neither the write sites
+    /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
+    /// enabled rule reads them; every function keeps its own.
+    pub(crate) skips_typed_writes: bool,
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
@@ -927,7 +953,7 @@ pub(crate) fn is_stub(path: &Path) -> bool {
 
 /// Summarize every module of a project and propagate effects to a fixpoint.
 pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
-    analyze(modules, kb, false, None)
+    analyze_project_with(modules, kb, None)
 }
 
 /// [`analyze_project`] with the declared contracts the summaries depend on (`MUT202` producers,
@@ -937,32 +963,63 @@ pub fn analyze_project_with(
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
 ) -> ProjectIndex {
-    analyze(modules, kb, false, contracts)
+    analyze_project_for(modules, kb, contracts, TypedWrites::Propagated)
 }
 
-/// [`analyze_project_with`] recording what each file's summary read of the project declarations
-/// (`FileSummary::decl_reads`), for an index that incremental updates keep current.
-pub fn analyze_project_with_reads(
+/// [`analyze_project_with`], propagating typed writes only when a rule reads them.
+pub fn analyze_project_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
+    typed_writes: TypedWrites,
 ) -> ProjectIndex {
-    analyze(modules, kb, true, contracts)
+    let files = summarize(modules, kb, false, contracts.as_deref());
+    ProjectIndex::build_for(files, contracts, typed_writes)
 }
 
-fn analyze(
+/// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
+/// `typed_field_writes`) from callees to callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedWrites {
+    Propagated,
+    /// No enabled rule reads propagated typed writes: each function keeps its own only.
+    Local,
+}
+
+/// The local summaries of every module of a project with `contracts`, recording what each read
+/// of the project declarations (`FileSummary::decl_reads`), for an index that incremental
+/// updates keep current. [`ProjectIndex::build_with`] propagates them; it needs no IR, so the
+/// caller can drop the modules first.
+pub fn summarize_project_with_reads(
+    modules: &[ModuleInput<'_>],
+    kb: &EffectiveEcosystemKb,
+    contracts: Option<&dyn Contracts>,
+) -> Vec<FileSummary> {
+    summarize(modules, kb, true, contracts)
+}
+
+fn summarize(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     track: bool,
-    contracts: Option<Arc<dyn Contracts>>,
-) -> ProjectIndex {
+    contracts: Option<&dyn Contracts>,
+) -> Vec<FileSummary> {
     let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
-    let files = modules
-        .iter()
+    if track {
+        // Every module's reads go to the one recorder of `decls`: one module at a time.
+        return modules
+            .iter()
+            .zip(own)
+            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+            .collect();
+    }
+    // A module's local summary depends on it and the declarations only (indexed collect: input
+    // order).
+    modules
+        .par_iter()
         .zip(own)
-        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts.as_deref()))
-        .collect();
-    ProjectIndex::build_with(files, contracts)
+        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+        .collect()
 }
 
 impl ProjectIndex {
@@ -971,12 +1028,28 @@ impl ProjectIndex {
         Self::build_with(files, None)
     }
 
+    /// Whether callers got the typed writes of their callees ([`TypedWrites`]).
+    pub fn propagates_typed_writes(&self) -> bool {
+        !self.skips_typed_writes
+    }
+
     /// [`Self::build`] for summaries extracted with `contracts`.
-    pub fn build_with(mut files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
+    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
+        Self::build_for(files, contracts, TypedWrites::Propagated)
+    }
+
+    /// [`Self::build_with`], propagating typed writes as `typed_writes` says; incremental
+    /// updates keep doing so.
+    pub fn build_for(
+        mut files: Vec<FileSummary>,
+        contracts: Option<Arc<dyn Contracts>>,
+        typed_writes: TypedWrites,
+    ) -> Self {
         // Index stubs first so a sibling `.py` implementation always owns the module's symbols.
         files.sort_by_key(|f| !is_stub(&f.path));
         let mut index = Self {
             contracts,
+            skips_typed_writes: typed_writes == TypedWrites::Local,
             ..Self::default()
         };
         for mut file in files {
@@ -1037,9 +1110,10 @@ impl ProjectIndex {
                             continue;
                         };
                         let tail = facts.exec_chains.get(&e).map_or(&[][..], Vec::as_slice);
+                        let chain = callgraph::extend_chain(&lead, tail, rewrite);
                         out.push(SiteEffect {
                             effect: e,
-                            chain: callgraph::extend_chain(&lead, tail, rewrite),
+                            chain: owned_chain(&chain),
                             callee: Some(bc.callee.clone()),
                             callee_is_async: callee.is_async,
                             once_loops: through.once_loops,
@@ -1062,6 +1136,10 @@ impl ProjectIndex {
 
     /// Final summary of `func`, if known.
     pub fn summary(&self, func: &FuncKey) -> Option<&EffectSummary> {
+        self.shared_summary(func).map(Arc::as_ref)
+    }
+
+    fn shared_summary(&self, func: &FuncKey) -> Option<&Arc<EffectSummary>> {
         self.files
             .get(self.func_files.get(func)?)?
             .functions
@@ -1081,24 +1159,24 @@ impl ProjectIndex {
 
     /// Every module's declarations, `.pyi` stubs first (a later `.py` sharing the module name
     /// replaces them).
-    fn preferred_decls(&self) -> Vec<ModuleDecls> {
-        let mut entries: Vec<(bool, ModuleDecls)> = self
+    fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
+        let mut entries: Vec<(bool, Arc<ModuleDecls>)> = self
             .files
             .values()
-            .map(|f| (is_stub(&f.path), f.decls.clone()))
+            .map(|f| (is_stub(&f.path), Arc::clone(&f.decls)))
             .collect();
         entries.sort_by_key(|(stub, _)| !*stub);
         entries.into_iter().map(|(_, d)| d).collect()
     }
 
     /// Preferred declarations currently indexed for `module_name` (`.py` over `.pyi`).
-    pub fn module_decls(&self, module_name: &str) -> Option<ModuleDecls> {
+    pub fn module_decls(&self, module_name: &str) -> Option<Arc<ModuleDecls>> {
         let mut stub = None;
         for f in self.files.values().filter(|f| f.module_name == module_name) {
             if !is_stub(&f.path) {
-                return Some(f.decls.clone());
+                return Some(Arc::clone(&f.decls));
             }
-            stub = Some(f.decls.clone());
+            stub = Some(Arc::clone(&f.decls));
         }
         stub
     }
@@ -1109,11 +1187,11 @@ impl ProjectIndex {
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
     ) -> IncrementalUpdate {
-        let others: Vec<(bool, ModuleDecls)> = self
+        let others: Vec<(bool, Arc<ModuleDecls>)> = self
             .files
             .values()
             .filter(|f| f.path != input.path)
-            .map(|f| (is_stub(&f.path), f.decls.clone()))
+            .map(|f| (is_stub(&f.path), Arc::clone(&f.decls)))
             .collect();
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
@@ -1159,13 +1237,13 @@ impl ProjectIndex {
 
     /// Update a single file's summary and report whether downstream callers are affected.
     ///
-    /// `new_file` carries local facts (`local_functions`, `call_sites`, `call_edges`); its
+    /// `new_file` carries local facts (`local_functions`, `call_sites`); its
     /// final summaries are recomputed here. Callers are re-propagated only when a final
     /// summary of the file changed (location-insensitively) — **Early Cutoff**.
     pub fn update_file(&mut self, mut new_file: FileSummary) -> IncrementalUpdate {
         let path = new_file.path.clone();
         let old_file = self.files.remove(&path);
-        let mut previous: FxHashMap<FuncKey, EffectSummary> = FxHashMap::default();
+        let mut previous: FxHashMap<FuncKey, Arc<EffectSummary>> = FxHashMap::default();
         let mut owned_before: FxHashSet<FuncKey> = FxHashSet::default();
         if let Some(old) = &old_file {
             for (k, v) in &old.functions {
@@ -1189,7 +1267,7 @@ impl ProjectIndex {
         let mut sync_candidates: FxHashSet<FuncKey> = own.clone();
         for file in old_file.iter().chain(std::iter::once(&new_file)) {
             sync_candidates.extend(file.local_functions.keys().cloned());
-            for (_, callee, _) in &file.call_edges {
+            for (_, callee, _) in file.call_edges() {
                 sync_candidates.insert(callee.clone());
             }
         }
@@ -1213,9 +1291,9 @@ impl ProjectIndex {
         let mut region = callgraph::scc_closure(self, &own);
         for func in &region {
             if !own.contains(func)
-                && let Some(s) = self.summary(func)
+                && let Some(s) = self.shared_summary(func)
             {
-                previous.insert(func.clone(), s.clone());
+                previous.insert(func.clone(), Arc::clone(s));
             }
         }
         callgraph::reset_to_local(self, &region);
@@ -1350,7 +1428,7 @@ impl ProjectIndex {
                 self.func_files.insert(func.clone(), file.path.clone());
             }
         }
-        for (caller, callee, _) in &file.call_edges {
+        for (caller, callee, _) in file.call_edges() {
             self.reverse_call_graph
                 .entry(callee.clone())
                 .or_default()
@@ -1364,7 +1442,7 @@ impl ProjectIndex {
                 self.func_files.remove(func);
             }
         }
-        for (caller, callee, _) in &file.call_edges {
+        for (caller, callee, _) in file.call_edges() {
             if let Some(set) = self.reverse_call_graph.get_mut(callee) {
                 set.remove(caller);
                 if set.is_empty() {

@@ -28,6 +28,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Methods that mutate their receiver in place (section 2.4; shared by MUT101/201/202).
 pub const CONTAINER_MUTATORS: &[&str] = &[
@@ -69,7 +70,7 @@ pub(crate) fn summarize_module(
     input: &ModuleInput<'_>,
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
-    own: (ModuleDecls, DeclKeys),
+    own: (Arc<ModuleDecls>, DeclKeys),
     track: bool,
     contracts: Option<&dyn Contracts>,
 ) -> FileSummary {
@@ -110,14 +111,6 @@ fn extract_module(
             qualname: func_qualname(f).to_owned(),
         };
         let (summary, mut sites, flow) = Extractor::new(f, &key, &cx, &input.path, contracts).run();
-        for site in &sites {
-            if let CallTarget::Project(callees) = &site.target {
-                for c in callees {
-                    file.call_edges
-                        .push((key.clone(), c.callee.clone(), site.span));
-                }
-            }
-        }
         if let Some(mut flow) = flow {
             // Site-list indices of the function become indices into the file's call sites.
             let offset = u32::try_from(file.call_sites.len()).unwrap_or(u32::MAX);
@@ -140,13 +133,28 @@ fn extract_module(
         file.call_sites.extend(sites);
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
-            Some(existing) => merge_duplicate(existing, summary),
+            Some(existing) => merge_duplicate(Arc::make_mut(existing), summary),
             None => {
-                file.local_functions.insert(key, summary);
+                file.local_functions.insert(key, Arc::new(summary));
             }
         }
     }
+    release_spare_capacity(&mut file);
     file
+}
+
+/// Building by pushes leaves spare capacity in the call-site containers, and a file's summary
+/// stays in the index for the whole run.
+fn release_spare_capacity(file: &mut FileSummary) {
+    for site in &mut file.call_sites {
+        if let CallTarget::Project(callees) = &mut site.target {
+            for bc in callees.iter_mut() {
+                bc.params.shrink_to_fit();
+            }
+            callees.shrink_to_fit();
+        }
+    }
+    file.call_sites.shrink_to_fit();
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
@@ -2811,7 +2819,7 @@ impl<'a> Extractor<'a> {
         for e in &effects {
             let had = !self.summary.direct_exec_effects.insert(*e);
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &occurrence);
-            let chain = vec![self.hop(symbol.clone(), span)];
+            let chain = vec![Arc::new(self.hop(symbol.clone(), span))];
             self.summary.exec_chains.insert(*e, chain);
         }
         let target = CallTarget::Layer2 {
@@ -2827,7 +2835,7 @@ impl<'a> Extractor<'a> {
     /// The function returns (through `step`) the result of the read-only producer `producer`
     /// it calls or reads at `span` (`MUT202` return flow; `deep` as the producer is declared).
     fn seed_protected(&mut self, producer: String, deep: bool, step: ReturnStep, span: Span) {
-        let chain = vec![self.hop(producer.clone(), span)];
+        let chain = vec![Arc::new(self.hop(producer.clone(), span))];
         ProtectedReturn::add(
             &mut self.summary.returns_protected,
             producer,

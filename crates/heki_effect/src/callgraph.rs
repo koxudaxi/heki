@@ -11,11 +11,12 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
     Facts, FuncKey, NewArg, NewCond, NewKind, ProjectIndex, ProtectedReturn, ReturnsNew, Shared,
-    SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
+    SharedChain, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Recomputations allowed per SCC member before the SCC is declared non-converged.
 const MAX_ITERATIONS_PER_SCC_MEMBER: usize = 16;
@@ -200,6 +201,10 @@ fn store(index: &mut ProjectIndex, func: &FuncKey, summary: EffectSummary) {
     if let Some(path) = index.func_files.get(func).cloned()
         && let Some(file) = index.files.get_mut(&path)
     {
+        let summary = match file.local_functions.get(func) {
+            Some(local) if **local == summary => Arc::clone(local),
+            _ => Arc::new(summary),
+        };
         file.functions.insert(func.clone(), summary);
     }
 }
@@ -214,7 +219,7 @@ fn recompute(
     let path = &index.func_files[func];
     let file = &index.files[path];
     let local = &file.local_functions[func];
-    let mut s = local.clone();
+    let mut s = EffectSummary::clone(local);
     s.sync_driven_only = file
         .functions
         .get(func)
@@ -396,12 +401,12 @@ fn return_flow_edge(
     } else {
         return;
     };
-    let mut chain = vec![CallHop {
+    let mut chain = vec![Arc::new(CallHop {
         caller: caller.clone(),
         callee: bc.callee.fqn(),
         span: site.span,
         path: path.to_path_buf(),
-    }];
+    })];
     chain.extend(tail);
     ProtectedReturn::add(&mut s.returns_protected, producer, produced, step, chain);
 }
@@ -451,26 +456,26 @@ fn apply_edge(
     // call hands over.
     let here = (d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site))
         .then_some(resolver);
-    transfer(
-        target, own_writes, caller, site, bc, callee, facts, &lead, rewrite, here,
-    );
+    transfer(target, own_writes, site, bc, callee, facts, &lead, rewrite);
+    if !index.skips_typed_writes {
+        transfer_typed_writes(
+            target, caller, site, bc, callee, facts, &lead, rewrite, here,
+        );
+    }
 }
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
-/// build each chain ([`extend_chain`]). `here` resolves the construction of the writes of facts
-/// that run during the call (`None`: they construct nothing).
+/// build each chain ([`extend_chain`]).
 #[allow(clippy::too_many_arguments)]
 fn transfer(
     t: &mut EffectSummary,
     own_writes: &BTreeMap<u8, BTreeSet<String>>,
-    caller: &FuncKey,
     site: &CallSite,
     bc: &BoundCallee,
     callee: &EffectSummary,
     facts: &EffectSummary,
-    lead: &[CallHop],
+    lead: &[Arc<CallHop>],
     rewrite: bool,
-    here: Option<&Resolver<'_>>,
 ) {
     let origin = |k: usize| bc.params.get(k);
 
@@ -572,6 +577,34 @@ fn transfer(
                 const_key: None,
             });
         }
+    }
+    t.escapes_params |= caller_params(facts.escapes_params, bc);
+    // A generator passed to a callee that iterates it runs there.
+    t.iterates_params |= caller_params(facts.iterates_params, bc);
+}
+
+/// The typed writes a call hands its caller: an `IndirectHelper` site for each typed field or
+/// instance the callee changes without seeing its type, the callee's write facts, and (from a
+/// private callee, or for what iterating the callee's result runs) its write sites. `here`
+/// resolves the construction of the writes of facts that run during the call (`None`: they
+/// construct nothing).
+#[allow(clippy::too_many_arguments)]
+fn transfer_typed_writes(
+    t: &mut EffectSummary,
+    caller: &FuncKey,
+    site: &CallSite,
+    bc: &BoundCallee,
+    callee: &EffectSummary,
+    facts: &EffectSummary,
+    lead: &[Arc<CallHop>],
+    rewrite: bool,
+    here: Option<&Resolver<'_>>,
+) {
+    let origin = |k: usize| bc.params.get(k);
+    for (&i, paths) in &facts.mutated_param_paths {
+        let Some(o) = origin(usize::from(i)) else {
+            continue;
+        };
         let mut indirect = Vec::new();
         if let Some((class, attr)) = &o.typed_field
             && paths.contains("")
@@ -630,9 +663,6 @@ fn transfer(
             }
         }
     }
-    t.escapes_params |= caller_params(facts.escapes_params, bc);
-    // A generator passed to a callee that iterates it runs there.
-    t.iterates_params |= caller_params(facts.iterates_params, bc);
     // Typed writes: every callee's facts reach the caller. A private callee hands its write
     // sites to its callers too, a public one reports its own; what iterating a plain function's
     // result runs (`rewrite`) runs nowhere in the function, so its sites go to whoever iterates.
@@ -752,17 +782,17 @@ pub(crate) fn lead_hops(
     path: &Path,
     callee: &FuncKey,
     via: Option<&FuncKey>,
-) -> Vec<CallHop> {
+) -> SharedChain {
     match via {
-        None => vec![site_hop(site, path, callee.fqn())],
+        None => vec![Arc::new(site_hop(site, path, callee.fqn()))],
         Some(p) => vec![
-            site_hop(site, path, p.fqn()),
-            CallHop {
+            Arc::new(site_hop(site, path, p.fqn())),
+            Arc::new(CallHop {
                 caller: p.clone(),
                 callee: callee.fqn(),
                 span: site.span,
                 path: path.to_path_buf(),
-            },
+            }),
         ],
     }
 }
@@ -776,12 +806,19 @@ pub(crate) fn rewrites(callee: &EffectSummary, from: Facts) -> bool {
 
 /// `lead` followed by `chain`. With `rewrite`, the last lead hop reaches the callee of the
 /// chain's first hop directly, which it replaces.
-pub(crate) fn extend_chain(lead: &[CallHop], chain: &[CallHop], rewrite: bool) -> Vec<CallHop> {
-    let mut out = lead.to_vec();
+pub(crate) fn extend_chain(
+    lead: &[Arc<CallHop>],
+    chain: &[Arc<CallHop>],
+    rewrite: bool,
+) -> SharedChain {
+    let mut out = Vec::with_capacity(lead.len() + chain.len());
+    out.extend_from_slice(lead);
     match chain.split_first() {
         Some((first, rest)) if rewrite => {
-            if let Some(last) = out.last_mut() {
-                last.callee.clone_from(&first.callee);
+            if let Some(last) = out.last_mut()
+                && last.callee != first.callee
+            {
+                Arc::make_mut(last).callee.clone_from(&first.callee);
             }
             out.extend_from_slice(rest);
         }
@@ -947,7 +984,7 @@ pub(crate) fn recompute_sync_driven_for(
                 .and_then(|f| f.functions.get_mut(&func))
             && s.sync_driven_only != want
         {
-            s.sync_driven_only = want;
+            Arc::make_mut(s).sync_driven_only = want;
             changed.push(func);
         }
     }
@@ -975,7 +1012,7 @@ pub(crate) fn recompute_sync_driven(index: &mut ProjectIndex) -> Vec<FuncKey> {
                 && !has_route_decorator(&s.decorators)
                 && incoming.get(func).copied().unwrap_or(false);
             if s.sync_driven_only != want {
-                s.sync_driven_only = want;
+                Arc::make_mut(s).sync_driven_only = want;
                 changed.push(func.clone());
             }
         }

@@ -538,10 +538,11 @@ heki/
 - Direct dependencies on `ruff_python_*` stay inside `heki_ast`.
 
 ### Incremental LSP design (two stages for 10–50 ms responses)
-- **Start-up (in the background)**: every file is analyzed in parallel; IR is dropped and only
-  the light `FileSummary`s and the reverse call graph (`ProjectIndex`) stay in memory (about
-  0.3–1.5 s and tens of MB for 100,000 lines). A source-level guard test fails when the resident
-  state holds IR or the semantic model.
+- **Start-up (in the background)**: every file is analyzed in parallel; the parsed files (IR,
+  semantic model, text) are dropped once every file is summarized, before propagation, and only
+  the `FileSummary`s and the reverse call graph (`ProjectIndex`) stay in memory. What each
+  file's check read of the declarations is kept as interned key ids. A source-level guard test
+  fails when the resident state holds IR or the semantic model.
 - **While editing (`didChange`, 250 ms debounce)**: only the edited file is parsed and analyzed
   again; rules within one function and cross-function rules that use the cached summaries of
   other files report immediately.
@@ -684,6 +685,9 @@ message = "render entry points must not mutate model state"
 4. **Performance**: a 100,000-line repository is analyzed in a few seconds.
 5. **Release integrity**: the release workflow runs CI on the release commit and checks the tag
    against every distribution's version before it publishes.
+6. **Memory**: CI (`scripts/check_memory.py`) bounds the peak memory (resident set size on
+   Linux, physical footprint on macOS) of `heki check`, with and without an ownership contract,
+   and of the `--watch` engine on a generated project.
 
 ### Remaining for v1.0
 The conservative `SoundnessSummary` (A2), Layer 3 on-demand analysis with its disk cache,

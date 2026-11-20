@@ -570,6 +570,7 @@ dependencies = [
  "heki_ir",
  "heki_kb",
  "heki_semantic",
+ "rayon",
  "rustc-hash",
  "serde",
 ]

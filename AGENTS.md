@@ -67,6 +67,8 @@ python3.15 tests/difftest/soundness_e2e_counterexamples.py
 cargo build --release -p heki
 python3.15 scripts/build_docs.py --heki target/release/heki --check
 python3.15 scripts/build_llms_txt.py --check
+# Peak memory of `heki check` and the `--watch` engine on a generated project
+python3.15 scripts/check_memory.py --heki target/release/heki
 ```
 
 ## 4. Adding or changing rules

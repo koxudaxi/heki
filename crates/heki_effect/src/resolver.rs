@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -891,7 +891,9 @@ struct Recorder {
 /// Declarations of every project module plus derived indexes.
 #[derive(Debug, Default)]
 pub struct ProjectDecls {
-    modules: FxHashMap<String, ModuleDecls>,
+    /// Shared with the index's file summaries and the other passes: one copy of each module's
+    /// declarations.
+    modules: FxHashMap<String, Arc<ModuleDecls>>,
     /// Class fqn -> direct project subclasses.
     subclasses: FxHashMap<String, Vec<String>>,
     /// Names of the property getters (`FunctionDecl::is_property`) of every class: an
@@ -936,9 +938,10 @@ pub(crate) enum Symbol<'a> {
 }
 
 impl ProjectDecls {
-    pub fn new(modules: impl IntoIterator<Item = ModuleDecls>) -> Self {
+    pub fn new(modules: impl IntoIterator<Item = impl Into<Arc<ModuleDecls>>>) -> Self {
         let mut out = Self::default();
         for m in modules {
+            let m = m.into();
             out.modules.insert(m.module_name.clone(), m);
         }
         out.rebuild_indexes();
@@ -947,7 +950,8 @@ impl ProjectDecls {
 
     /// Replace (or add) one module's declarations; the derived indexes are rebuilt because a
     /// base may be canonicalized through any module.
-    pub fn replace(&mut self, decls: ModuleDecls) {
+    pub fn replace(&mut self, decls: impl Into<Arc<ModuleDecls>>) {
+        let decls = decls.into();
         self.modules.insert(decls.module_name.clone(), decls);
         self.rebuild_indexes();
     }
@@ -1189,7 +1193,7 @@ impl ProjectDecls {
 
     pub fn module(&self, name: &str) -> Option<&ModuleDecls> {
         self.read(|k| note(&mut k.modules, name));
-        self.modules.get(name)
+        self.modules.get(name).map(Arc::as_ref)
     }
 
     /// Longest project-module prefix of `fqn` and the remaining dotted part.
@@ -1634,10 +1638,10 @@ pub struct DeclPasses {
 impl DeclPasses {
     /// From the completed declarations of every module (`.py` implementations after `.pyi`
     /// stubs sharing a module name, so that they win).
-    pub fn new(completed: impl IntoIterator<Item = ModuleDecls>) -> Self {
-        let completed: Vec<ModuleDecls> = completed.into_iter().collect();
+    pub fn new(completed: impl IntoIterator<Item = Arc<ModuleDecls>>) -> Self {
+        let completed: Vec<Arc<ModuleDecls>> = completed.into_iter().collect();
         Self {
-            structural: ProjectDecls::new(completed.iter().map(ModuleDecls::structural)),
+            structural: ProjectDecls::new(completed.iter().map(|d| d.structural())),
             completed: ProjectDecls::new(completed),
         }
     }
@@ -1648,9 +1652,10 @@ impl DeclPasses {
     }
 
     /// Replace (or add) one module's completed declarations; returns what changed.
-    pub fn replace(&mut self, completed: ModuleDecls) -> DeclKeys {
+    pub fn replace(&mut self, completed: impl Into<Arc<ModuleDecls>>) -> DeclKeys {
+        let completed = completed.into();
         let name = completed.module_name.clone();
-        if self.completed.module(&name) == Some(&completed) {
+        if self.completed.module(&name) == Some(&*completed) {
             return DeclKeys::default();
         }
         let before = self.structural.indexes();
@@ -1683,7 +1688,7 @@ pub(crate) fn update_module_decls(
     input: &ModuleInput<'_>,
     kb: &EffectiveEcosystemKb,
     passes: &mut DeclPasses,
-) -> (DeclKeys, ModuleDecls, DeclKeys) {
+) -> (DeclKeys, Arc<ModuleDecls>, DeclKeys) {
     let name = &input.module_name;
     let structural = structural_decls(input);
     let restructured = passes.structural.module(name) != Some(&structural);
@@ -1693,9 +1698,10 @@ pub(crate) fn update_module_decls(
     }
     let (completed, reads) = complete_against(input, structural, &passes.structural, kb);
     if passes.completed.module(name) == Some(&completed) {
-        return (DeclKeys::default(), completed, reads);
+        return (DeclKeys::default(), Arc::new(completed), reads);
     }
-    passes.completed.replace(completed.clone());
+    let completed = Arc::new(completed);
+    passes.completed.replace(Arc::clone(&completed));
     (passes.changed(name, before.as_ref()), completed, reads)
 }
 
@@ -1705,8 +1711,10 @@ pub(crate) fn own_module_decls(
     input: &ModuleInput<'_>,
     kb: &EffectiveEcosystemKb,
     passes: &DeclPasses,
-) -> (ModuleDecls, DeclKeys) {
-    complete_against(input, structural_decls(input), &passes.structural, kb)
+) -> (Arc<ModuleDecls>, DeclKeys) {
+    let (completed, reads) =
+        complete_against(input, structural_decls(input), &passes.structural, kb);
+    (Arc::new(completed), reads)
 }
 
 /// [`complete_decls`] with what it read of `pass1`.
@@ -1726,46 +1734,47 @@ fn complete_against(
 pub(crate) fn project_decls_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
-    others: Option<Vec<(bool, ModuleDecls)>>,
+    others: Option<Vec<(bool, Arc<ModuleDecls>)>>,
     track: bool,
-) -> (ProjectDecls, Vec<(ModuleDecls, DeclKeys)>) {
+) -> (ProjectDecls, Vec<(Arc<ModuleDecls>, DeclKeys)>) {
     // Process stubs before implementation `.py` files so a `.py` module always wins when both
     // share one module name.
-    let order = |items: Vec<(bool, ModuleDecls)>| {
+    let order = |items: Vec<(bool, Arc<ModuleDecls>)>| {
         let mut items = items;
         items.sort_by_key(|(stub, _)| !*stub);
         items.into_iter().map(|(_, d)| d)
     };
-    let structural: Vec<(bool, ModuleDecls)> = modules
+    let structural: Vec<(bool, Arc<ModuleDecls>)> = modules
         .iter()
-        .map(|m| (crate::is_stub(&m.path), structural_decls(m)))
+        .map(|m| (crate::is_stub(&m.path), Arc::new(structural_decls(m))))
         .collect();
     let others = others.unwrap_or_default();
     let pass1 = ProjectDecls::new(order(
         others
             .iter()
-            .map(|(stub, d)| (*stub, d.structural()))
+            .map(|(stub, d)| (*stub, Arc::new(d.structural())))
             .chain(structural.iter().cloned())
             .collect(),
     ));
-    let own: Vec<(ModuleDecls, DeclKeys)> = modules
+    let own: Vec<(Arc<ModuleDecls>, DeclKeys)> = modules
         .iter()
         .zip(&structural)
         .map(|(m, (_, d))| {
-            if track {
-                complete_against(m, d.clone(), &pass1, kb)
+            let (completed, reads) = if track {
+                complete_against(m, ModuleDecls::clone(d), &pass1, kb)
             } else {
                 (
-                    complete_decls(m, d.clone(), &pass1, kb),
+                    complete_decls(m, ModuleDecls::clone(d), &pass1, kb),
                     DeclKeys::default(),
                 )
-            }
+            };
+            (Arc::new(completed), reads)
         })
         .collect();
     let completed = structural
         .iter()
         .zip(&own)
-        .map(|((stub, _), (d, _))| (*stub, d.clone()));
+        .map(|((stub, _), (d, _))| (*stub, Arc::clone(d)));
     let decls = ProjectDecls::new(order(others.into_iter().chain(completed).collect()));
     (decls, own)
 }

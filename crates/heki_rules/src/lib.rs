@@ -17,7 +17,7 @@ pub mod project;
 pub mod selection;
 pub mod snapshot;
 
-pub use contracts::{MAX_INVALIDATIONS, summary_contracts};
+pub use contracts::{MAX_INVALIDATIONS, summary_contracts, typed_writes};
 pub use mut_rules::{CHAIN_RULES, ChainFacts, chain_facts, family_readers};
 pub use selection::{RuleSelection, SelectionError};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
@@ -596,6 +596,7 @@ impl<'a> CheckContext<'a> {
                 f.functions
                     .iter()
                     .filter(move |(k, _)| self.index.file_of(k) == Some(path.as_path()))
+                    .map(|(k, s)| (k, &**s))
             })
             .collect();
         funcs.sort_by(|a, b| a.0.cmp(b.0));

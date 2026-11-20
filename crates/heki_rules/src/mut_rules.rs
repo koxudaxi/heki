@@ -137,6 +137,7 @@ fn local_summary<'a>(cx: &CheckContext<'a>, m: &Method<'_>) -> Option<&'a Effect
         .files
         .get(m.path)
         .and_then(|f| f.local_functions.get(&m.key))
+        .map(|s| &**s)
 }
 
 /// Memo / cache dictionaries by name (`self._cache`, `self.memo`).
@@ -1032,6 +1033,10 @@ pub(crate) fn mut201(
     if !writes && !unresolved || cx.config.write_owners.is_empty() {
         return Ok(());
     }
+    debug_assert!(
+        cx.index.propagates_typed_writes(),
+        "`typed_writes` decides for MUT201"
+    );
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
     for rule in &cx.config.write_owners {
@@ -1170,7 +1175,7 @@ pub(crate) fn mut201(
                                     rule.note,
                                 )
                             },
-                            || site.via_chain.clone(),
+                            || heki_effect::owned_chain(&site.via_chain),
                         );
                     }
                 }
@@ -1451,7 +1456,7 @@ impl<'a> Mut202Fn<'a> {
                     span,
                     path: self.unit.input.path.clone(),
                 }];
-                via.extend(r.chain.iter().cloned());
+                via.extend(heki_effect::owned_chain(&r.chain));
                 Ro::new(r.producer.clone(), r.shared, via)
             }),
             Callee::External(sym) => self

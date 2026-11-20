@@ -8,7 +8,7 @@ use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, baseline_counts, baseline_key,
     fix_python_source, render, unified_diff,
 };
-use heki_effect::{analyze_project, analyze_project_with};
+use heki_effect::{ProjectIndex, analyze_project, analyze_project_for};
 use heki_profile::ProfileData;
 use heki_rules::project::{ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
@@ -69,9 +69,10 @@ pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&ProfileData>) 
     }
 }
 
-/// One analysis pass: the project and its diagnostics after inline suppressions.
+/// One analysis pass: the project, its index, and its diagnostics after inline suppressions.
 struct Analyzed {
     project: Project,
+    index: ProjectIndex,
     diags: Vec<Diagnostic>,
 }
 
@@ -91,7 +92,8 @@ fn analyze(
     let env = &project.env;
     let inputs = project.inputs();
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
-    let index = analyze_project_with(&inputs, &env.kb, contracts);
+    let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
+    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes);
     let units = project.units();
     let extras = CheckExtras {
         soundness_kb: &env.soundness_kb,
@@ -105,7 +107,11 @@ fn analyze(
     drop(inputs);
     retain_unsuppressed(&mut diags, &project.files);
     annotate_hot(&mut diags, hot);
-    Ok(Analyzed { project, diags })
+    Ok(Analyzed {
+        project,
+        index,
+        diags,
+    })
 }
 
 /// Whether `--fix` / `--diff` applies this diagnostic's fix: `safe` + `unconditional` rules
@@ -268,8 +274,16 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         );
         refused = run.refused;
     }
-    let Analyzed { project, diags } = analyze(args, hot.as_ref(), None)?;
+    let Analyzed {
+        project,
+        index,
+        diags,
+    } = analyze(args, hot.as_ref(), None)?;
     let code = report(args, &project, diags)?;
+    // The process ends here: freeing the index and the parsed files one allocation at a time
+    // would only cost time.
+    std::mem::forget(index);
+    std::mem::forget(project);
     finish(&refused, code)
 }
 

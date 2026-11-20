@@ -40,6 +40,22 @@ $ python3 tests/difftest/counterexamples.py
   (`kb/soundness/builtins.toml`) on the running interpreter.
 - `counterexamples.py` shows that the naive rewrites heki refuses really change behavior.
 
+## Memory
+
+```console
+$ cargo build --release
+$ python3 scripts/check_memory.py --heki target/release/heki
+```
+
+CI fails when the peak memory of `heki check` (with and without an ownership contract) or of
+the `--watch` engine on a generated project exceeds its budget in the script (the lowest of three runs: the resident set size on Linux, the
+physical footprint on macOS, each platform with its own budgets). The project is shaped after what dominates heki's memory on
+real code bases: typed field writes reached through long chains of private helpers (with an
+ownership contract, every caller keeps the write sites they hand over, with their chains), effect chains below `async def` entry points, and many
+modules and classes (every file's check reads the project's declarations). When a budget is
+exceeded, find what grew before raising it: `/usr/bin/time -l` (macOS) or `-v` (Linux) gives the
+peak of a run, and a counting global allocator in a scratch build gives the live bytes per phase.
+
 ## Documentation
 
 ```console

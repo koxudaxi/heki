@@ -727,6 +727,10 @@ impl<'a> Reach<'a> {
         func: &FuncKey,
         own: &[(&Path, &CallSite)],
     ) {
+        debug_assert!(
+            cx.index.propagates_typed_writes(),
+            "`typed_writes` decides for EFF201"
+        );
         let writes = cx
             .index
             .summary(func)
@@ -746,7 +750,7 @@ impl<'a> Reach<'a> {
                             })
                     }) =>
                 {
-                    Some(hop.clone())
+                    Some(CallHop::clone(hop))
                 }
                 _ => continue,
             };
