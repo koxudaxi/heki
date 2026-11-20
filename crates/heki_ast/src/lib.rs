@@ -5,8 +5,15 @@
 //! All downstream crates consume `heki_ast`'s stable span, AST, and PEP 810
 //! lazy-import abstractions.
 
+mod source;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use source::{
+    SourceEncoding, SourceError, decode_source, encode_source, read_source, source_encoding,
+    write_source,
+};
 
 pub use ruff_python_ast as raw_ast;
 pub use ruff_text_size::{Ranged, TextRange, TextSize};

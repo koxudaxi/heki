@@ -1919,6 +1919,7 @@ fn dump_commands_report_read_and_syntax_errors() {
     p.write("broken.py", "def f(:\n    pass\n")
         .write("ok.py", "x = [i for i in range(3)]\n");
     std::fs::write(p.dir.join("latin1.py"), b"x = '\xff'\n").unwrap();
+    std::fs::write(p.dir.join("declared.py"), b"# coding: latin-1\n\xe9 = 1\n").unwrap();
     for cmd in ["dump-semantic", "dump-ir"] {
         let (code, stdout, stderr) = p.heki(&[cmd, "missing.py"]);
         assert_eq!(code, 2);
@@ -1927,6 +1928,10 @@ fn dump_commands_report_read_and_syntax_errors() {
         let (code, _, stderr) = p.heki(&[cmd, "latin1.py"]);
         assert_eq!(code, 2);
         assert!(stderr.contains("valid UTF-8"), "{stderr}");
+        // A PEP 263 declaration selects the encoding: `é` is an identifier.
+        let (code, stdout, stderr) = p.heki(&[cmd, "declared.py"]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stdout.contains("\"é\""), "{stdout}");
         let (code, _, stderr) = p.heki(&[cmd, "broken.py"]);
         assert_eq!(code, 2);
         assert!(stderr.starts_with("heki error: parse errors: "), "{stderr}");

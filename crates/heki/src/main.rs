@@ -197,7 +197,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Snapshot(args) => check::run_snapshot(&args),
         Commands::Assumptions(args) => run_assumptions(args),
         Commands::DumpSemantic(args) => {
-            let src = std::fs::read_to_string(&args.file)?;
+            let src = heki_ast::read_source(&args.file)?;
             let parsed = heki_ast::parse_module(&src)
                 .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
@@ -208,7 +208,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Commands::DumpIr(args) => {
-            let src = std::fs::read_to_string(&args.file)?;
+            let src = heki_ast::read_source(&args.file)?;
             let parsed = heki_ast::parse_module(&src)
                 .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
             let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
@@ -276,7 +276,7 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
     let per_file: Vec<(usize, Vec<AssumptionRecord>, Option<String>)> = files
         .par_iter()
         .map(|path| {
-            let src = match std::fs::read_to_string(path) {
+            let src = match heki_ast::read_source(path) {
                 Ok(s) => s,
                 Err(e) => return (0, Vec::new(), Some(format!("{}: {e}", path.display()))),
             };

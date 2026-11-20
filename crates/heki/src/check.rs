@@ -237,7 +237,7 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
     if args.fix {
         let (fixes, files, _) = fix_in_memory(args, hot.as_ref())?;
         for f in &files {
-            std::fs::write(&f.path, &f.fixed)
+            heki_ast::write_source(&f.path, &f.fixed)
                 .with_context(|| format!("failed to write `{}`", f.path.display()))?;
         }
         eprintln!("Fixed {fixes} issue(s) in {} file(s).", files.len());

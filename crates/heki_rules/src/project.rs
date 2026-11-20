@@ -339,7 +339,7 @@ impl Project {
                 let source = match opts.overrides.and_then(|o| o.get(&display_path(p))) {
                     Some(text) => text.clone(),
                     None => {
-                        std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?
+                        heki_ast::read_source(p).map_err(|e| format!("{}: {e}", p.display()))?
                     }
                 };
                 parse_source(p, &env.root, source, env.src_layout, env.runtime)

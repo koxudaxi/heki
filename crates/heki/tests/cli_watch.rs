@@ -478,3 +478,35 @@ fn watch_rechecks_a_call_chain_whose_end_moves() {
         "the watch's re-check equals `heki check`:\n{stdout}"
     );
 }
+
+#[test]
+fn watch_reads_changed_files_in_their_declared_encoding() {
+    let p = Project::new("watch_latin1");
+    let legacy = |body: &[u8]| {
+        [
+            b"# -*- coding: iso-8859-1 -*-\n# caf\xe9\n".as_slice(),
+            body,
+        ]
+        .concat()
+    };
+    std::fs::write(
+        p.dir.join("legacy.py"),
+        legacy(b"async def handler():\n    pass\n"),
+    )
+    .unwrap();
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "1");
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 1 file(s)");
+    std::fs::write(
+        p.dir.join("legacy.py"),
+        legacy(b"import time\n\n\nasync def handler():\n    time.sleep(1)  # \xe9\n"),
+    )
+    .unwrap();
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 1 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("legacy.py:7:5: EFF101 ")
+    );
+}

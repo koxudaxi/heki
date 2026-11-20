@@ -84,7 +84,7 @@ impl Watcher<'_> {
         }
         sort_diagnostics(&mut all);
         let source_line = |p: &Path, line: u32| {
-            std::fs::read_to_string(p).ok().and_then(|s| {
+            heki_ast::read_source(p).ok().and_then(|s| {
                 s.lines()
                     .nth(line.saturating_sub(1) as usize)
                     .map(str::to_owned)
@@ -183,7 +183,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                 .map(|(p, _)| p)
                 .collect();
             for p in &changed {
-                match std::fs::read_to_string(p) {
+                match heki_ast::read_source(p) {
                     Ok(text) => {
                         let out = ws.edit(p, &text);
                         affected.extend(out.affected.iter().cloned());
@@ -196,7 +196,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                 }
             }
             affected.retain(|p| !changed.contains(&p));
-            let read = |p: &Path| std::fs::read_to_string(p).ok();
+            let read = |p: &Path| heki_ast::read_source(p).ok();
             for (p, out) in ws.refresh_all(affected, &read) {
                 record(&mut diags, &mut errors, &p, out);
             }

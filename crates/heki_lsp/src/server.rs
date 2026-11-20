@@ -323,7 +323,7 @@ impl State {
 fn text_of(docs: &FxHashMap<PathBuf, Doc>, path: &Path) -> Option<String> {
     match docs.get(path) {
         Some(d) => Some(d.text.clone()),
-        None => std::fs::read_to_string(path).ok(),
+        None => heki_ast::read_source(path).ok(),
     }
 }
 
