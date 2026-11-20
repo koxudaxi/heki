@@ -61,3 +61,55 @@ fn write_owner_targets_use_every_glob_form_on_dotted_suffixes() {
         assert_eq!(reports(&p, "MUT201"), expected, "{target}");
     }
 }
+
+const MODEL_VALUE: &str = "class Model:\n    def __init__(self) -> None:\n        self.value = 0\n";
+
+#[test]
+fn a_boundary_forbidding_reads_and_writes_of_one_field_reports_both() {
+    let p = project(
+        "boundary_read_and_write",
+        "[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"app.render\"]\nforbid = [\"reads-targets\", \"writes-targets\"]\nread-targets = [\"Model.value\"]\nwrite-targets = [\"Model.value\"]\n",
+    );
+    p.write(
+        "app.py",
+        &format!(
+            "{MODEL_VALUE}\n\ndef helper(m: Model) -> None:\n    x = m.value\n    m.value = x + 1\n\n\ndef render(m: Model) -> None:\n    helper(m)"
+        ),
+    );
+    // Both at the call of `helper`, each its own report and baseline entry.
+    assert_eq!(
+        reports(&p, "EFF201"),
+        vec![
+            (12, "pure:Model.value".to_owned(), 1),
+            (12, "pure:reads:Model.value".to_owned(), 1),
+        ]
+    );
+}
+
+#[test]
+fn two_invalidation_contracts_on_one_write_are_two_reports() {
+    let p = project(
+        "two_invalidations",
+        "[[tool.heki.invalidation]]\nname = \"one\"\ntargets = [\"Model.value\"]\ninvalidators = [\"app.notify_a\"]\n\n[[tool.heki.invalidation]]\nname = \"two\"\ntargets = [\"Model.value\"]\ninvalidators = [\"app.notify_b\"]\n",
+    );
+    let src = format!(
+        "{MODEL_VALUE}\n\ndef notify_a() -> None: ...\n\n\ndef notify_b() -> None: ...\n\n\ndef change(m: Model) -> None:\n    m.value = 1\n"
+    );
+    p.write("app.py", &src);
+    assert_eq!(
+        reports(&p, "MUT109"),
+        vec![
+            (13, "one:Model.value".to_owned(), 1),
+            (13, "two:Model.value".to_owned(), 1),
+        ]
+    );
+    // Announcing the change to one contract leaves the other's report.
+    p.write(
+        "app.py",
+        &src.replace("    m.value = 1\n", "    m.value = 1\n    notify_b()\n"),
+    );
+    assert_eq!(
+        reports(&p, "MUT109"),
+        vec![(13, "one:Model.value".to_owned(), 1)]
+    );
+}

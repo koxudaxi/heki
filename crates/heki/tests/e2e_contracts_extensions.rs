@@ -502,15 +502,35 @@ fn eff201_reads_calls_and_allowed_writes() {
         found(&diags),
         vec![
             // Two calls deep, through helpers outside the scope.
-            d(dec, 7, "decide", "decisions:DataType.is_optional"),
-            d(dec, 11, "decide_twice", "decisions:DataType.is_optional"),
+            d(dec, 7, "decide", "decisions:reads:DataType.is_optional"),
+            d(
+                dec,
+                11,
+                "decide_twice",
+                "decisions:reads:DataType.is_optional"
+            ),
             // Reading a property runs its getter, which reads the target.
-            d(dec, 19, "decide_property", "decisions:DataType.is_optional"),
-            d(dec, 23, "decide_getattr", "decisions:Model.class_name"),
+            d(
+                dec,
+                19,
+                "decide_property",
+                "decisions:reads:DataType.is_optional"
+            ),
+            d(
+                dec,
+                23,
+                "decide_getattr",
+                "decisions:reads:Model.class_name"
+            ),
             // A subclass of the target class.
-            d(dec, 27, "decide_sub", "decisions:Model.class_name"),
-            d(dec, 35, "seal", "decisions:DataType.replace_reference"),
-            d(dec, 36, "seal", "decisions:FinalFacts"),
+            d(dec, 27, "decide_sub", "decisions:reads:Model.class_name"),
+            d(
+                dec,
+                35,
+                "seal",
+                "decisions:calls:DataType.replace_reference"
+            ),
+            d(dec, 36, "seal", "decisions:calls:FinalFacts"),
             // Writes of the universe that `allow-writes` does not name.
             d(pas, 10, "sort_bases", "pass-sort:Model.fields"),
             d(pas, 11, "sort_bases", "pass-sort:DataType.is_optional"),
@@ -613,8 +633,8 @@ def direct(store: Store) -> None:
     assert_eq!(
         found(&diags),
         vec![
-            d(r, 7, "page", "no-store-ops:Store.*"),
-            d(r, 15, "direct", "no-store-ops:Store.*"),
+            d(r, 7, "page", "no-store-ops:calls:Store.*"),
+            d(r, 15, "direct", "no-store-ops:calls:Store.*"),
         ],
         "{diags:#?}"
     );

@@ -66,7 +66,10 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     .target(&classes, &u.attr)
                     .map_or_else(|| format!("{}.{}", u.class_qualname, u.attr), str::to_owned);
                 // One report per call or write, contract, and target; it stands for every
-                // original write behind it (two writes of one helper are two sites).
+                // original write behind it (two writes of one helper are two sites). The
+                // diagnostic target names the contract: two contracts announcing one write are
+                // two reports, and two baseline entries.
+                let report_target = format!("{}:{target}", rule.name);
                 let writer = u
                     .via_chain
                     .last()
@@ -80,7 +83,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     unit,
                     key,
                     u.span,
-                    &target,
+                    &report_target,
                     (writer, u.origin),
                     || {
                         with_note(

@@ -912,6 +912,8 @@ impl<'a> Reach<'a> {
                 }
             }
         }
+        // Reads and calls name their kind in the target: one boundary may forbid writing and
+        // reading the same `Class.attr`, and a report of each must stay a report of its own.
         for (ti, found) in &self.reads {
             let target = &b.read_targets[*ti].text;
             let via = via_first(found);
@@ -919,7 +921,7 @@ impl<'a> Reach<'a> {
                 "`{}` reads `{target}` ({}{via})",
                 key.qualname, found.kind
             ));
-            emit(found, target.clone(), message);
+            emit(found, format!("reads:{target}"), message);
         }
         for (ti, found) in &self.calls {
             let target = &b.call_targets[*ti].text;
@@ -928,7 +930,7 @@ impl<'a> Reach<'a> {
                 _ => String::new(),
             };
             let message = forbids(format!("`{}` {} `{target}`{via}", key.qualname, found.kind));
-            emit(found, target.clone(), message);
+            emit(found, format!("calls:{target}"), message);
         }
         if b.mutates_params {
             let bits = self.mutated_params(cx, f.params.len());
