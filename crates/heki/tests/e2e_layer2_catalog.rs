@@ -43,7 +43,10 @@ fn check_configured(
     rules: &str,
 ) -> Vec<(u64, String, String, String)> {
     let p = Project::new(name);
-    p.write("pyproject.toml", &format!("[project]\nname = \"t\"\n\n{config}"));
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n{config}"),
+    );
     p.write(rel, source);
     let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", rules]);
     assert!(code == 0 || code == 1, "{stdout}{stderr}");
@@ -1352,7 +1355,12 @@ def tp_caller_of_the_update_copy():
 #[test]
 fn model_copy_with_update_is_a_shallow_copy() {
     assert_eq!(
-        check("catalog_model_copy", "app/models.py", MODEL_COPIES, "MUT202"),
+        check(
+            "catalog_model_copy",
+            "app/models.py",
+            MODEL_COPIES,
+            "MUT202"
+        ),
         vec![
             d(
                 23,
@@ -1559,9 +1567,24 @@ fn consuming_calls_iterate_catalog_iterables() {
             "EFF101"
         ),
         vec![
-            d(5, "EFF101", "tp_consuming_calls", "sqlalchemy.orm.Query.__iter__"),
-            d(6, "EFF101", "tp_consuming_calls", "sqlalchemy.orm.Query.__iter__"),
-            d(8, "EFF101", "tp_consuming_calls", "sqlalchemy.orm.Query.__iter__"),
+            d(
+                5,
+                "EFF101",
+                "tp_consuming_calls",
+                "sqlalchemy.orm.Query.__iter__"
+            ),
+            d(
+                6,
+                "EFF101",
+                "tp_consuming_calls",
+                "sqlalchemy.orm.Query.__iter__"
+            ),
+            d(
+                8,
+                "EFF101",
+                "tp_consuming_calls",
+                "sqlalchemy.orm.Query.__iter__"
+            ),
         ]
     );
 }
@@ -1633,7 +1656,12 @@ fn lazy_iterators_do_their_io_when_iterated() {
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.to_list"
             ),
-            d(19, "EFF105", "tp_iterated_on_the_loop", "os.walk().__iter__"),
+            d(
+                19,
+                "EFF105",
+                "tp_iterated_on_the_loop",
+                "os.walk().__iter__"
+            ),
             d(
                 32,
                 "EFF103",

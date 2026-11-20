@@ -290,9 +290,9 @@ impl EcosystemEntry {
         &self,
         mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<&ArgCase> {
-        self.cases.iter().find(|case| {
-            arg(case.arg, case.param.as_deref()).is_some_and(|fact| case.holds(&fact))
-        })
+        self.cases
+            .iter()
+            .find(|case| arg(case.arg, case.param.as_deref()).is_some_and(|fact| case.holds(&fact)))
     }
 
     /// The effects of a call selecting `case`.
@@ -461,7 +461,10 @@ impl EffectiveEcosystemKb {
                 });
             patch.apply(entry);
         }
-        Ok(Self::materialize(raw.into_values().collect(), opaque_packages))
+        Ok(Self::materialize(
+            raw.into_values().collect(),
+            opaque_packages,
+        ))
     }
 
     pub fn lookup(&self, symbol: &str) -> Option<&EcosystemEntry> {
@@ -848,7 +851,11 @@ mod tests {
         ArgCase {
             arg: Some(0),
             param: Some(param.into()),
-            prefix: if url { s(PANDAS_URL_SCHEMES) } else { Vec::new() },
+            prefix: if url {
+                s(PANDAS_URL_SCHEMES)
+            } else {
+                Vec::new()
+            },
             instance_of: if url {
                 Vec::new()
             } else {
@@ -1198,7 +1205,10 @@ mod tests {
                     with_prefix("pymysql.cursors.Cursor", DBAPI_EXECUTES),
                     with_prefix("django.db.backends.utils.CursorWrapper", DBAPI_EXECUTES),
                     with_prefix(qs, QUERYSET_RUNS),
-                    s(&["redis.client.Pipeline.execute", "redis.client.Pipeline.watch"]),
+                    s(&[
+                        "redis.client.Pipeline.execute",
+                        "redis.client.Pipeline.watch",
+                    ]),
                     with_prefix("redis.Redis", REDIS_COMMANDS),
                     s(&["pymongo.database.Database.command"]),
                     with_prefix("pymongo.collection.Collection", MONGO_COLLECTION_OPS),
@@ -1391,10 +1401,7 @@ mod tests {
             ),
             (
                 [
-                    QUERYSET_BULK
-                        .iter()
-                        .map(|m| format!("{qs}.a{m}"))
-                        .collect(),
+                    QUERYSET_BULK.iter().map(|m| format!("{qs}.a{m}")).collect(),
                     with_prefix(
                         "pymongo.asynchronous.collection.AsyncCollection",
                         MONGO_BULK,
@@ -1454,7 +1461,10 @@ mod tests {
                 async_safe(entry(&[DbQuery])),
             ),
             (
-                s(&["psycopg.AsyncConnection.execute", "psycopg.AsyncCursor.execute"]),
+                s(&[
+                    "psycopg.AsyncConnection.execute",
+                    "psycopg.AsyncCursor.execute",
+                ]),
                 async_safe(returning("psycopg.AsyncCursor", entry(&[DbQuery]))),
             ),
             (
@@ -1531,9 +1541,7 @@ mod tests {
                 [LOCK_CLASSES, TRANSACTION_STARTERS]
                     .concat()
                     .iter()
-                    .filter(|n| {
-                        **n != "sqlalchemy.engine.Engine.begin" && !SAVEPOINTS.contains(*n)
-                    })
+                    .filter(|n| **n != "sqlalchemy.engine.Engine.begin" && !SAVEPOINTS.contains(*n))
                     .map(|n| (*n).to_owned())
                     .collect(),
                 EcosystemEntry {
@@ -1590,7 +1598,11 @@ mod tests {
                 returning(cursor, entry(&[])),
             ),
             (
-                [s(&[&format!("{cursor}.__iter__")]), with_prefix(cursor, CURSOR_RUNS)].concat(),
+                [
+                    s(&[&format!("{cursor}.__iter__")]),
+                    with_prefix(cursor, CURSOR_RUNS),
+                ]
+                .concat(),
                 entry(&[BlockingDb, DbQuery]),
             ),
             (
@@ -1633,7 +1645,10 @@ mod tests {
         ];
         vec![
             (
-                LOCK_CLASSES.iter().map(|c| format!("{c}.acquire")).collect(),
+                LOCK_CLASSES
+                    .iter()
+                    .map(|c| format!("{c}.acquire"))
+                    .collect(),
                 waits(vec![off(0, "blocking"), zero(1, "timeout")]),
             ),
             (
@@ -2076,10 +2091,7 @@ mod tests {
             cases: vec![named.clone()],
             ..e.clone()
         };
-        assert_eq!(
-            named_entry.return_type_in(Some(&named)),
-            Some("m.Named")
-        );
+        assert_eq!(named_entry.return_type_in(Some(&named)), Some("m.Named"));
         assert_eq!(named_entry.effects_in(Some(&named)), &[BlockingSync]);
     }
 

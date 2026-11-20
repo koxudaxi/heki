@@ -1730,7 +1730,13 @@ impl<'a> Extractor<'a> {
                         events.invalidators.push((self.pos.0, self.pos.1, mask));
                     }
                 }
-                self.external_call(bb, symbol.clone(), call.passed(), call.is_awaited, call.span);
+                self.external_call(
+                    bb,
+                    symbol.clone(),
+                    call.passed(),
+                    call.is_awaited,
+                    call.span,
+                );
                 // `list(query)` iterates the query as a `for` loop does.
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
                     self.iteration(bb, iterable, false, call.span);
