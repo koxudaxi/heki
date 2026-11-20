@@ -83,7 +83,7 @@ pub enum Severity {
 
 /// `[tool.heki.lint]` section (Ruff + `t-linter` conventions, kebab-case).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct LintConfig {
     /// `None` when the key is absent (the default rules); `Some([])` selects no rule before
     /// `extend-select`, as in Ruff.
@@ -99,7 +99,7 @@ pub struct LintConfig {
 
 /// `[[tool.heki.write-owners]]` contract for `MUT201`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WriteOwnerRule {
     pub name: String,
     pub targets: Vec<String>,
@@ -124,7 +124,7 @@ pub struct WriteOwnerRule {
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ReadOwnerRule {
     pub name: String,
     pub targets: Vec<String>,
@@ -140,7 +140,7 @@ pub struct ReadOwnerRule {
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
 /// construct a class (the call side of `write-owners` / `read-owners`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CallOwnerRule {
     pub name: String,
     /// Project functions, methods (`Class.method`, overrides in subclasses included), or classes
@@ -158,7 +158,7 @@ pub struct CallOwnerRule {
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
 /// directly or through calls, from the functions of `scopes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct EffectBoundaryRule {
     pub name: String,
     /// Modules, classes, or functions (dotted patterns) whose functions are checked.
@@ -190,7 +190,7 @@ pub struct EffectBoundaryRule {
 
 /// `[[tool.heki.readonly-returns]]` contract for `MUT202`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ReadOnlyReturnRule {
     pub name: String,
     pub producers: Vec<String>,
@@ -200,7 +200,7 @@ pub struct ReadOnlyReturnRule {
 /// `[[tool.heki.invalidation]]` contract for `MUT109`: a write to one of `targets` must be
 /// followed, on every path to a normal return, by a call that reaches one of `invalidators`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct InvalidationRule {
     pub name: String,
     /// `Class.attr` targets whose writes must be announced (subclasses included).
@@ -221,7 +221,7 @@ pub struct InvalidationRule {
 /// sets the keys it lists (`None`: left out) on the built-in entry for the same `symbol`, whose
 /// other keys stay.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct EcosystemOverride {
     pub symbol: String,
     pub effects: Option<Vec<String>>,
@@ -247,7 +247,7 @@ pub enum CopySanitizerSetting {
 
 /// Top-level `[tool.heki]` or `heki.toml` configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct HekiConfig {
     pub target_version: Option<String>,
     pub exclude: Option<Vec<String>>,
@@ -275,11 +275,82 @@ pub enum ConfigError {
         path: PathBuf,
         cause: std::io::Error,
     },
+    /// Invalid TOML, an unknown key, or a value of the wrong type.
     #[error("failed to parse TOML in {path}: {cause}")]
     Toml {
         path: PathBuf,
         cause: toml::de::Error,
     },
+    #[error(
+        "`[tool.heki]` in {path}: only a `pyproject.toml` holds the settings under `tool.heki`; this file holds them at the top level (`[lint]`, `[[ecosystem]]`)"
+    )]
+    ToolTable { path: PathBuf },
+    #[error(
+        "`{key}` at the top level of {path}: a `pyproject.toml` holds the settings under `[tool.heki]`"
+    )]
+    TopLevelSetting { path: PathBuf, key: String },
+}
+
+/// Which tables of a configuration file hold the settings, by the file's name (as Ruff reads
+/// `pyproject.toml` and `ruff.toml`): a `pyproject.toml` holds them in `[tool.heki]`, its other
+/// tables belong to the packaging standards and other tools; any other file (`heki.toml`,
+/// `.heki.toml`, a `--config` file) holds them at its top level and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigLayout {
+    PyProject,
+    TopLevel,
+}
+
+impl ConfigLayout {
+    fn of(path: &Path) -> Self {
+        if path.file_name().is_some_and(|n| n == "pyproject.toml") {
+            Self::PyProject
+        } else {
+            Self::TopLevel
+        }
+    }
+
+    /// The configuration in `text`, the contents of `path`. A setting is never ignored: an
+    /// unknown key, a `[tool.heki]` table outside a `pyproject.toml`, and a setting at the top
+    /// level of a `pyproject.toml` are errors.
+    fn parse(self, path: &Path, text: &str) -> Result<HekiConfig, ConfigError> {
+        let toml_error = |cause| ConfigError::Toml {
+            path: path.to_path_buf(),
+            cause,
+        };
+        let table: toml::Table = toml::from_str(text).map_err(toml_error)?;
+        match self {
+            Self::PyProject => {
+                if let Some(key) = table
+                    .keys()
+                    .find(|k| HekiConfig::KEYS.contains(&k.as_str()))
+                {
+                    return Err(ConfigError::TopLevelSetting {
+                        path: path.to_path_buf(),
+                        key: key.clone(),
+                    });
+                }
+                let wrapper: PyProjectWrapper = toml::from_str(text).map_err(toml_error)?;
+                Ok(HekiConfig {
+                    requires_python: wrapper.requires_python(),
+                    ..wrapper.tool.heki.unwrap_or_default()
+                })
+            }
+            Self::TopLevel => {
+                if table.contains_key("tool") {
+                    return Err(ConfigError::ToolTable {
+                        path: path.to_path_buf(),
+                    });
+                }
+                let cfg: HekiConfig = toml::from_str(text).map_err(toml_error)?;
+                let dir = path.parent().unwrap_or(Path::new(""));
+                Ok(HekiConfig {
+                    requires_python: sibling_requires_python(&dir.join("pyproject.toml")),
+                    ..cfg
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -468,69 +539,39 @@ struct ToolSection {
 }
 
 impl HekiConfig {
-    /// Load an explicit configuration file: `pyproject.toml` (its `[tool.heki]` table, empty
-    /// config when absent) or a `heki.toml`-style file (top-level keys).
+    /// The top-level keys of the configuration (`[tool.heki]` of a `pyproject.toml`).
+    pub const KEYS: &'static [&'static str] = &[
+        "target-version",
+        "exclude",
+        "extend-exclude",
+        "baseline",
+        "lint",
+        "write-owners",
+        "read-owners",
+        "call-owners",
+        "readonly-returns",
+        "invalidation",
+        "effect-boundaries",
+        "ecosystem",
+    ];
+
+    /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
+    /// `pyproject.toml` (empty config when absent), the top-level keys of any other file.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|cause| ConfigError::Io {
             path: path.to_path_buf(),
             cause,
         })?;
-        if path.file_name().is_some_and(|n| n == "pyproject.toml") {
-            let wrapper: PyProjectWrapper =
-                toml::from_str(&text).map_err(|cause| ConfigError::Toml {
-                    path: path.to_path_buf(),
-                    cause,
-                })?;
-            let requires_python = wrapper.requires_python();
-            return Ok(Self {
-                requires_python,
-                ..wrapper.tool.heki.unwrap_or_default()
-            });
-        }
-        let cfg: Self = toml::from_str(&text).map_err(|cause| ConfigError::Toml {
-            path: path.to_path_buf(),
-            cause,
-        })?;
-        let dir = path.parent().unwrap_or(Path::new(""));
-        Ok(Self {
-            requires_python: sibling_requires_python(&dir.join("pyproject.toml")),
-            ..cfg
-        })
+        ConfigLayout::of(path).parse(path, &text)
     }
 
     /// Load configuration from either `heki.toml` / `.heki.toml` or `pyproject.toml` `[tool.heki]`.
     pub fn load_from_dir(root: &Path) -> Result<Self, ConfigError> {
-        for candidate in ["heki.toml", ".heki.toml"] {
+        for candidate in ["heki.toml", ".heki.toml", "pyproject.toml"] {
             let p = root.join(candidate);
             if p.is_file() {
-                let text = std::fs::read_to_string(&p).map_err(|cause| ConfigError::Io {
-                    path: p.clone(),
-                    cause,
-                })?;
-                let cfg: Self =
-                    toml::from_str(&text).map_err(|cause| ConfigError::Toml { path: p, cause })?;
-                return Ok(Self {
-                    requires_python: sibling_requires_python(&root.join("pyproject.toml")),
-                    ..cfg
-                });
+                return Self::load_from_file(&p);
             }
-        }
-        let pyproject = root.join("pyproject.toml");
-        if pyproject.is_file() {
-            let text = std::fs::read_to_string(&pyproject).map_err(|cause| ConfigError::Io {
-                path: pyproject.clone(),
-                cause,
-            })?;
-            let wrapper: PyProjectWrapper =
-                toml::from_str(&text).map_err(|cause| ConfigError::Toml {
-                    path: pyproject,
-                    cause,
-                })?;
-            let requires_python = wrapper.requires_python();
-            return Ok(Self {
-                requires_python,
-                ..wrapper.tool.heki.unwrap_or_default()
-            });
         }
         Ok(Self::default())
     }
@@ -839,6 +880,32 @@ sync-lock-or-tx = true
                 },
             ]
         );
+    }
+
+    /// `HekiConfig::KEYS` names every setting (the literal lists every field).
+    #[test]
+    fn keys_name_every_setting() {
+        let all = HekiConfig {
+            target_version: Some(String::new()),
+            exclude: Some(Vec::new()),
+            extend_exclude: Vec::new(),
+            baseline: Some(PathBuf::new()),
+            lint: LintConfig::default(),
+            write_owners: Vec::new(),
+            read_owners: Vec::new(),
+            call_owners: Vec::new(),
+            readonly_returns: Vec::new(),
+            invalidation: Vec::new(),
+            effect_boundaries: Vec::new(),
+            ecosystem: Vec::new(),
+            requires_python: None,
+        };
+        let table = toml::Table::try_from(&all).unwrap();
+        let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
+        let mut expected = HekiConfig::KEYS.to_vec();
+        keys.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
     }
 
     #[test]

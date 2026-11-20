@@ -181,6 +181,78 @@ fn unreadable_and_malformed_configuration_is_a_configuration_error() {
     );
 }
 
+/// A configuration file's name decides which of its tables hold the settings, as for Ruff's
+/// `pyproject.toml` and `ruff.toml`: a `pyproject.toml` holds them in `[tool.heki]` (its other
+/// tables belong to other tools), any other file at its top level. A setting heki would not
+/// read is a configuration error: an unknown key, a `[tool.heki]` table outside a
+/// `pyproject.toml`, or a setting at the top level of a `pyproject.toml`.
+#[test]
+fn a_setting_in_the_wrong_table_or_under_an_unknown_key_is_a_configuration_error() {
+    let p = Project::new("cfg_tables");
+    p.write(
+        "app.py",
+        "import mylib
+
+
+async def handler():
+    mylib.fetch()
+",
+    );
+    let entry = "symbol = \"mylib.fetch\"\neffects = [\"blocking_net\"]\n";
+    let reports = |args: &[&str]| {
+        let mut all = vec!["--output-format", "json"];
+        all.extend_from_slice(args);
+        let (code, stdout, stderr) = p.check(&all);
+        assert_eq!(code, 1, "{args:?}: {stdout}{stderr}");
+        hits(&stdout)
+    };
+    let fails = |args: &[&str], needle: &str| {
+        let (code, stdout, stderr) = p.check(args);
+        assert_eq!(code, 2, "{args:?}: {stdout}{stderr}");
+        assert!(stderr.contains(needle), "{args:?}: {stderr}");
+    };
+    let expected = vec![hit("app.py", 5, "EFF101")];
+    p.write("custom.toml", &format!("[[ecosystem]]\n{entry}"));
+    assert_eq!(reports(&["--config", "custom.toml"]), expected);
+    p.write(
+        "alt/pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n[tool.ruff]\nline-length = 99\n\n[[tool.heki.ecosystem]]\n{entry}"),
+    );
+    assert_eq!(reports(&["--config", "alt/pyproject.toml"]), expected);
+
+    p.write("custom.toml", &format!("[[tool.heki.ecosystem]]\n{entry}"));
+    fails(
+        &["--config", "custom.toml"],
+        "`[tool.heki]` in custom.toml: only a `pyproject.toml` holds the settings under `tool.heki`",
+    );
+    p.write("heki.toml", &format!("[[tool.heki.ecosystem]]\n{entry}"));
+    fails(&[], "`[tool.heki]` in");
+    std::fs::remove_file(p.dir.join("heki.toml")).unwrap();
+    p.write(
+        "alt/pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n[[ecosystem]]\n{entry}"),
+    );
+    fails(
+        &["--config", "alt/pyproject.toml"],
+        "`ecosystem` at the top level of alt/pyproject.toml: a `pyproject.toml` holds the settings under `[tool.heki]`",
+    );
+    p.write(
+        "custom.toml",
+        "[lint]\nignore = [\"EFF101\"]\nbogus = true\n",
+    );
+    fails(&["--config", "custom.toml"], "unknown field `bogus`");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki]\ntarget_version = \"py312\"\n",
+    );
+    fails(&[], "unknown field `target_version`");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"s\"\ntarget = [\"Model.fields\"]\n",
+    );
+    fails(&[], "unknown field `target`");
+}
+
 #[test]
 fn ecosystem_overrides_add_and_exclude_blocking_apis() {
     let p = Project::new("cfg_ecosystem");

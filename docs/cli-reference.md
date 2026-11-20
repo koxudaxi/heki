@@ -50,7 +50,7 @@ Options:
       --output-format <OUTPUT_FORMAT>
           Output format [default: full] [possible values: full, concise, json, github, sarif]
       --config <CONFIG>
-          Explicit configuration file (`heki.toml` or `pyproject.toml`)
+          Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
       --target-version <TARGET_VERSION>
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --baseline <BASELINE>
@@ -107,7 +107,7 @@ Options:
       --write
           Write `.heki-summary-snapshot.json` at the project root (default: print it)
       --config <CONFIG>
-          Explicit configuration file (`heki.toml` or `pyproject.toml`)
+          Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
       --target-version <TARGET_VERSION>
           Target Python version (`py311`..`py315`)
   -h, --help

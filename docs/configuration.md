@@ -27,12 +27,30 @@ OPT103 = "warning"
    `.git`.
 2. heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` in that directory. A
    `pyproject.toml` without `[tool.heki]` still marks the root: its project gets the defaults.
-3. `--config <path>` names the file instead.
+3. `--config <path>` names the file instead. The project root stays where step 1 finds it.
 
 One run checks one project: its configuration applies to every file of the run, also to files
 given from another project. `heki check a/one.py b/two.py` uses `a/`'s configuration for both, so
 check projects with their own configurations in separate runs: `heki check a/`, then
 `heki check b/`.
+
+### Which tables hold the settings
+
+The file's name decides, as Ruff reads `pyproject.toml` and `ruff.toml`:
+
+- A file named `pyproject.toml` holds the settings in `[tool.heki]` (`[tool.heki.lint]`,
+  `[[tool.heki.ecosystem]]`, ...). Its other tables belong to the packaging standards and other
+  tools, and heki does not read them.
+- Any other file (`heki.toml`, `.heki.toml`, or the file `--config` names, whatever its name)
+  holds the same keys at its top level, without the `tool.heki` prefix (`[lint]`,
+  `[[ecosystem]]`).
+
+heki never ignores a setting. These are configuration errors (exit code 2):
+
+- an unknown key in any of heki's tables (the message names it: ``unknown field `bogus` ``);
+- a `[tool.heki]` table in a file that is not named `pyproject.toml`;
+- a heki setting at the top level of a `pyproject.toml` (`[[ecosystem]]` instead of
+  `[[tool.heki.ecosystem]]`).
 
 ## Top-level settings
 

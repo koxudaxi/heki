@@ -87,7 +87,8 @@ struct CheckArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Full)]
     output_format: OutputFormat,
-    /// Explicit configuration file (`heki.toml` or `pyproject.toml`).
+    /// Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file
+    /// with the keys at its top level, like `heki.toml`.
     #[arg(long)]
     config: Option<PathBuf>,
     /// Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`).
@@ -141,7 +142,8 @@ struct SnapshotArgs {
     /// Write `.heki-summary-snapshot.json` at the project root (default: print it).
     #[arg(long)]
     write: bool,
-    /// Explicit configuration file (`heki.toml` or `pyproject.toml`).
+    /// Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file
+    /// with the keys at its top level, like `heki.toml`.
     #[arg(long)]
     config: Option<PathBuf>,
     /// Target Python version (`py311`..`py315`).
