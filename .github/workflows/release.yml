@@ -214,6 +214,15 @@ jobs:
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
+  docs:
+    # The production site documents a release once its distributions are on PyPI.
+    name: production docs
+    needs: [pypi]
+    if: github.event_name == 'release'
+    uses: ./.github/workflows/docs.yml
+    permissions:
+      contents: read
+
   crates-io:
     # Off until the repository variable `PUBLISH_CRATES` is `true`, which needs two changes
     # first: the parser crates come from a pinned ruff git tag (ADR-009 / ADR-016), which
