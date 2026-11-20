@@ -57,6 +57,11 @@ pub const CONTAINER_MUTATORS: &[&str] = &[
     "__delitem__",
 ];
 
+/// The (value, place) pairs the store walk of `returns_origins` may take per byte of a function's
+/// source, above a floor: a function past it returns objects of unknown origin.
+const KEPT_PAIRS_PER_SOURCE_BYTE: usize = 1;
+const MIN_KEPT_PAIRS: usize = 4096;
+
 /// Augmented assignments changing a container in place, by the container's class: `xs += ys`
 /// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
 const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[
@@ -1679,30 +1684,35 @@ impl<'a> Extractor<'a> {
                 _ => None,
             })
         };
-        // The objects the function stores somewhere, and where, through copies and phis.
+        // The objects the function stores somewhere, and where: a stored value, and each value
+        // it copies through copies and phis, is kept there. One walk serves every store and
+        // takes each (value, place) pair once; past a budget of pairs proportional to the
+        // function's source, what it returns is unknown.
+        let budget = KEPT_PAIRS_PER_SOURCE_BYTE * f.span.end.saturating_sub(f.span.start) as usize
+            + MIN_KEPT_PAIRS;
         let mut kept: FxHashMap<VarId, Vec<ownership::Place<'_>>> = FxHashMap::default();
-        for inst in f
+        let mut seen: FxHashSet<(VarId, ownership::Place<'_>)> = FxHashSet::default();
+        let mut work: Vec<(VarId, ownership::Place<'_>)> = f
             .blocks
             .iter()
             .filter(|b| live.block(b.id))
             .flat_map(|b| &b.insts)
-        {
-            for (value, place) in ownership::stores(&inst.kind) {
-                let mut work = vec![value];
-                let mut seen: FxHashSet<VarId> = FxHashSet::default();
-                while let Some(v) = work.pop() {
-                    if !seen.insert(v) {
-                        continue;
-                    }
-                    kept.entry(v).or_default().push(place);
-                    match (self.defs.get(&v).map(|i| &i.kind), phis.get(&v)) {
-                        (Some(InstKind::Copy { src, .. }), _) => work.push(*src),
-                        (None, Some((_, phi))) => {
-                            work.extend(phi.incoming.iter().map(|(_, v)| *v));
-                        }
-                        _ => {}
-                    }
+            .flat_map(|inst| ownership::stores(&inst.kind))
+            .collect();
+        while let Some((v, place)) = work.pop() {
+            if !seen.insert((v, place)) {
+                continue;
+            }
+            if seen.len() > budget {
+                return;
+            }
+            kept.entry(v).or_default().push(place);
+            match (self.defs.get(&v).map(|i| &i.kind), phis.get(&v)) {
+                (Some(InstKind::Copy { src, .. }), _) => work.push((*src, place)),
+                (None, Some((_, phi))) => {
+                    work.extend(phi.incoming.iter().map(|(_, x)| (*x, place)));
                 }
+                _ => {}
             }
         }
         let origins = |roots: &[VarId]| {

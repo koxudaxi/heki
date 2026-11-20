@@ -257,6 +257,77 @@ fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
     assert_eq!(lines, vec![2 + tests as u64 + 3 * tests as u64 + 1]);
 }
 
+/// A function appending each alias of a long chain to a list (one list for all of them, or a new
+/// list per alias) and returning the last alias or its parameter, and a caller changing what it
+/// returns.
+fn alias_chain_stores(aliases: usize, one_list: bool) -> String {
+    let mut lines = vec![
+        "def keep(x, shared, flag):".to_owned(),
+        "    a0 = x".to_owned(),
+    ];
+    for i in 1..=aliases {
+        lines.push(format!("    a{i} = a{}", i - 1));
+        if one_list {
+            lines.push(format!("    shared.append(a{i})"));
+        } else {
+            lines.push(format!("    t{i} = []"));
+            lines.push(format!("    t{i}.append(a{i})"));
+        }
+    }
+    // Through the list's stores, or the parameter itself.
+    let returned = if one_list {
+        format!("a{aliases}")
+    } else {
+        "x".to_owned()
+    };
+    lines.push(format!("    return {returned} if flag else []"));
+    lines.extend(
+        [
+            "",
+            "",
+            "def use(given, shared, flag):",
+            "    x = keep(given, shared, flag)",
+            "    x.append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    lines.join("\n") + "\n"
+}
+
+/// Each alias of a long chain appended to one list: what the function returns follows the
+/// stores of every alias in one walk, each value and place once, and the caller's change of the
+/// result (an element of `shared` on one path, new on the other) is reported.
+#[test]
+fn stores_of_a_long_alias_chain_into_one_list_keep_each_value_once() {
+    let p = Project::new("bounds_alias_chain_one_list");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &alias_chain_stores(12_000, true));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "MUT112")
+            .map(|d| d["qualname"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["use"]
+    );
+}
+
+/// Each alias of a long chain appended to a new list of its own: the pairs of value and place
+/// grow with the square of the chain, so past the budget proportional to the source what the
+/// function returns (its parameter, or a new list) is unknown, and nothing is reported from it.
+#[test]
+fn stores_of_a_long_alias_chain_into_many_lists_past_the_budget_return_unknown() {
+    let p = Project::new("bounds_alias_chain_many_lists");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &alias_chain_stores(8_000, false));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found.iter().all(|d| d["rule_code"] != "MUT112"),
+        "{found:#?}"
+    );
+}
+
 /// A function returning the last of a long chain of calls, each handed the previous call's
 /// result as two of its arguments (`x40 = choose(x39, x39, flag)`), with `choose` returning
 /// either: what each call returns is resolved once, not once per path down the chain.
