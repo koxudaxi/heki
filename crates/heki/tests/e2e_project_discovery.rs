@@ -87,3 +87,26 @@ fn a_typing_stub_importing_builtins_patches_nothing() {
     p.write("m.py", "import builtins\n");
     assert!(!concise(&p).1.contains("OPT101"));
 }
+
+#[test]
+fn syntax_newer_than_the_target_version_is_a_syntax_error() {
+    let p = Project::new("disc_target_syntax");
+    p.write("a.py", "lazy import json\n\n\ndef f():\n    return json\n")
+        .write("types.pyi", "type Alias = int\n");
+    let (code, _, stderr) = p.check(&["--target-version", "py311"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("a.py:1:1: syntax error: Cannot use `lazy` import statement on Python 3.11"),
+        "{stderr}"
+    );
+    // A stub never runs: `type` statements there are fine on 3.11.
+    assert!(!stderr.contains("types.pyi"), "{stderr}");
+    let (code, _, stderr) = p.check(&["--target-version", "py315"]);
+    assert_eq!(code, 0, "{stderr}");
+    // The target can come from `requires-python`.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\nrequires-python = \">=3.13\"\n",
+    );
+    assert_eq!(p.check(&[]).0, 2);
+}

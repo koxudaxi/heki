@@ -542,6 +542,7 @@ dependencies = [
 name = "heki_ast"
 version = "0.1.0"
 dependencies = [
+ "heki_env",
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_text_size",

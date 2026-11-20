@@ -25,7 +25,7 @@ OPT103 = "warning"
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes its oldest admitted version, clamped to 3.11–3.15 (`>=3.9` → `py311`). `--target-version` overrides both. |
+| `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes its oldest admitted version, clamped to 3.11–3.15 (`>=3.9` → `py311`). `--target-version` overrides both. Syntax newer than the target (`lazy import` before `py315`, `type` statements before `py312`, ...) is a syntax error in `.py` files; `.pyi` stubs never run and may use it. |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths (globs, matched against paths and path components). |
 | `extend-exclude` | `[]` | Adds excluded paths. |
 | `baseline` | none | Ratchet baseline file used when `--baseline` is not given. |
