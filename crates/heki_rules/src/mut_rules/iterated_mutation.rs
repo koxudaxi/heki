@@ -339,10 +339,11 @@ fn changing_methods<'m, 'a: 'm>(
     let members: FxHashMap<&FuncKey, &'m Method<'a>> =
         family.iter().map(|m| (&m.key, *m)).collect();
     for &(path, site) in &exposure.loop_calls {
-        for bc in site.project_callees() {
-            let Some(m) = members.get(&bc.callee) else {
-                continue;
-            };
+        for m in site
+            .project_callees()
+            .iter()
+            .filter_map(|bc| members.get(&bc.callee))
+        {
             if m.key != g.key && breaks(&m.key) && seen.insert(&m.key) {
                 let message = format!(
                     "`{}` calls `{}` while iterating `{}`",
