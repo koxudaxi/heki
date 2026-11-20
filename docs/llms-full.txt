@@ -2198,9 +2198,11 @@ $ gh workflow run release-draft.yml --ref <branch> -f pr_number=123 -f dry_run=t
 - Up to 100 runs wait for the one in progress, in order. GitHub cancels a run that arrives while
   100 are waiting, and a later run does not take over its pull requests. A canceled run shows in
   `gh run list --workflow release-draft.yml --status cancelled`. Its pull requests are among those
-  merged after the first published release that still lack `breaking-change-analyzed`
-  (`gh pr list --state merged --search "-label:breaking-change-analyzed merged:>=<first-release-date>"`). Replay
-  each of them, in merge order.
+  merged after the first published release that still lack `breaking-change-analyzed`. List them
+  with `gh pr list --state merged --limit 1000 --search "-label:breaking-change-analyzed
+  merged:>=<first-release-date>"` (`gh pr list` shows 30 without `--limit`, and a search returns
+  at most 1,000, so split the date range when it lists 1,000), and replay each of them, in merge
+  order.
 - A dry run works from any branch, so a change to the workflow can be tried before it is on
   `main`. It prints the analysis, the planned draft, and the comments in the run's log, and
   changes no label, comment, or release. The pull request must be merged into `main`, and a
