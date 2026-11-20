@@ -310,6 +310,9 @@ EffectSummary(f) = {
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
     returns_new:              bool,                        // returns an object it constructs, nothing else
                                                            // holding it (fresh-objects)
+    returns_origins:          Origins,                     // what the returned object may be, path by path:
+                                                           // new, held state, parameter i, or an element of
+                                                           // parameter i (MUT112; propagated)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
@@ -363,10 +366,11 @@ invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry 
 `unresolved = "report"` ends a target with (`Contracts::unresolved_read`,
 `Contracts::unresolved_call`), so a summary keeps no read or call no rule asks for.
 
-`CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
-invalidation contracts announced after the call on every normal path, and the next call; set on
-`Iterate` / `Through` sites too), with `FileSummary.flows`, are computed at extraction from the
-CFG and its post-dominator tree, only when a contract is configured; `ProjectIndex` keeps no IR.
+`CallSite.returned` (whether the call's result may be returned, and how) is computed at
+extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
+the call on every normal path, and the next call; set on `Iterate` / `Through` sites too), with
+`FileSummary.flows`, is computed from the CFG and its post-dominator tree, only when a contract is
+configured. `ProjectIndex` keeps no IR.
 
 `FileSummary.cache_flows` (`heki_effect::CacheFlow`, one per definition) holds the `MUT101` facts
 of every method that writes a `self` attribute in its own body: the writes (attribute, position,

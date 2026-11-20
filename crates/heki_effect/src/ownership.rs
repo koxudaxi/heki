@@ -1,0 +1,423 @@
+//! `MUT112` ownership (docs/ANALYSIS_AND_KB_SPEC.md section 2.3): whether the object a value
+//! holds is one the function makes itself, state that outlives the call, or a parameter, path
+//! by path.
+//!
+//! [`source`] tells what the instruction defining a value makes of it. `heki_rules` applies it
+//! forward over a function's values; the extractor applies it backward, from the values a
+//! function returns ([`origins_of`]), into [`EffectSummary::returns_origins`], which
+//! propagation carries across the calls whose results are returned: a call's result is
+//! classified across functions, through any number of wrappers.
+//!
+//! [`EffectSummary::returns_origins`]: crate::EffectSummary::returns_origins
+
+use crate::readonly::{COPY_METHODS, SLICE_COPYING_TYPES};
+use crate::resolver::Callee;
+use heki_ir::{Inst, InstKind, PhiNode, VarId};
+use heki_kb::EffectiveEcosystemKb;
+use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
+
+/// The kinds of object a value may hold, path by path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Origins {
+    /// A new object made during the call: a display, a comprehension, a copy, a constructor's
+    /// result, an operator's result.
+    pub new: bool,
+    /// State that outlives the call: an attribute, a global, a closure cell, an element of a
+    /// parameter or of such state, or what a memoizing function returns.
+    pub held: bool,
+    /// Parameters (bit `i`: parameter `i < 64`) it may be, as themselves.
+    pub params: u64,
+    /// Parameters it may be an element of (an item, an attribute, an iteration step): the
+    /// caller's argument holds it.
+    pub elements: u64,
+}
+
+impl Origins {
+    /// What either value may be.
+    pub fn join(&mut self, other: Self) {
+        self.new |= other.new;
+        self.held |= other.held;
+        self.params |= other.params;
+        self.elements |= other.elements;
+    }
+
+    /// What an element of a value of these origins may be: an element of a parameter it may be,
+    /// or held state (an element of a new object is of unknown origin).
+    pub fn element(self) -> Self {
+        Self {
+            held: self.held,
+            elements: self.params | self.elements,
+            ..Self::default()
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// State outliving a call that an instruction reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holder<'i> {
+    /// `obj.<attr>`.
+    Attr(&'i str),
+    /// `getattr(obj, name)`: the attribute the operand names.
+    NamedAttr(VarId),
+    /// A module global or a builtin.
+    Global(&'i str),
+    /// A variable of an enclosing function.
+    Cell(&'i str),
+}
+
+/// What the instruction defining a value makes of the object it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source<'i> {
+    /// A new object.
+    New,
+    /// State that outlives the call.
+    Held(Holder<'i>),
+    /// The operand's object: a copy of the reference, `typing.cast`, an in-place operator.
+    Same(VarId),
+    /// An element of the operand: an item, `get` / `pop` / `setdefault`, an iteration step.
+    Element(VarId),
+    /// An element of the first operand, or the second when the key is missing:
+    /// `d.get(k, default)`, `d.pop(k, default)`.
+    ElementOr(VarId, VarId),
+    /// An attribute, or the operand when it is missing: `getattr(obj, name, default)`.
+    HeldOr(Holder<'i>, VarId),
+    /// A slice of the operand: a new sequence for the builtin sequences (and a value of unknown
+    /// class, far more often a list), possibly a view of it for another class (`numpy`).
+    Slice(VarId),
+    /// What the project callees return: their summaries say.
+    Project,
+    Unknown,
+}
+
+/// Calls of these return a new object.
+const NEW_OBJECT_CALLS: &[&str] = &[
+    "builtins.list",
+    "builtins.dict",
+    "builtins.set",
+    "builtins.frozenset",
+    "builtins.tuple",
+    "builtins.bytearray",
+    "builtins.sorted",
+    "builtins.dict.fromkeys",
+    "collections.defaultdict",
+    "collections.OrderedDict",
+    "collections.Counter",
+    "collections.deque",
+    "collections.ChainMap",
+    "copy.copy",
+    "copy.deepcopy",
+    "copy.replace",
+    "dataclasses.replace",
+];
+
+/// `typing.cast(T, value)` returns `value`.
+const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
+
+/// What the instruction `kind` makes of the object its result holds. A call's resolution is
+/// `callee` (`None` for any other instruction); `constructs` says the call constructs a project
+/// class.
+pub fn source<'i>(
+    kind: &'i InstKind,
+    callee: Option<&Callee>,
+    constructs: bool,
+    kb: &EffectiveEcosystemKb,
+) -> Source<'i> {
+    match kind {
+        InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => Source::New,
+        InstKind::BinOp {
+            lhs,
+            in_place: true,
+            ..
+        } => Source::Same(*lhs),
+        InstKind::BinOp { .. } => Source::New,
+        InstKind::Copy { src, .. } => Source::Same(*src),
+        InstKind::LoadGlobal { name, .. } => Source::Held(Holder::Global(name)),
+        InstKind::LoadDeref { name, .. } => Source::Held(Holder::Cell(name)),
+        InstKind::AttrLoad { attr, .. } => Source::Held(Holder::Attr(attr)),
+        InstKind::SubscriptLoad {
+            obj,
+            is_slice: true,
+            ..
+        } => Source::Slice(*obj),
+        InstKind::SubscriptLoad { obj, .. } => Source::Element(*obj),
+        InstKind::MakeIter { iterable, .. } => Source::Same(*iterable),
+        InstKind::IterNext { iter, .. } => Source::Element(*iter),
+        InstKind::Call { callee: name, .. } if name.starts_with("__comp_") => Source::New,
+        InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => {
+            if constructs {
+                return Source::New;
+            }
+            if let Some(Callee::Project(..)) = callee {
+                return Source::Project;
+            }
+            let symbol = match callee {
+                Some(Callee::External(s)) => s.as_str(),
+                _ => "",
+            };
+            if NEW_OBJECT_CALLS.contains(&symbol)
+                || kb
+                    .lookup(symbol)
+                    .is_some_and(|e| e.copy_sanitizer.is_some())
+            {
+                return Source::New;
+            }
+            if CASTS.contains(&symbol) {
+                return args.get(1).map_or(Source::Unknown, |v| Source::Same(*v));
+            }
+            if symbol == "builtins.getattr" {
+                let Some(name) = args.get(1) else {
+                    return Source::Unknown;
+                };
+                return match args.get(2) {
+                    Some(default) => Source::HeldOr(Holder::NamedAttr(*name), *default),
+                    None => Source::Held(Holder::NamedAttr(*name)),
+                };
+            }
+            match kind {
+                InstKind::MethodCall { recv, method, .. } => method_source(*recv, method, args),
+                _ => Source::Unknown,
+            }
+        }
+        _ => Source::Unknown,
+    }
+}
+
+/// [`source`] of a method call outside the project, by the method's name.
+fn method_source<'i>(recv: VarId, method: &str, args: &[VarId]) -> Source<'i> {
+    if COPY_METHODS.contains(&method) {
+        return Source::New;
+    }
+    match (method, args) {
+        ("get" | "pop", [_, default, ..]) => Source::ElementOr(recv, *default),
+        ("get" | "pop" | "__getitem__" | "setdefault", [_, ..]) => Source::Element(recv),
+        _ => Source::Unknown,
+    }
+}
+
+/// Whether a slice of an object of class `class` (`None`: unknown) is a new sequence.
+pub fn slice_copies(class: Option<&str>) -> bool {
+    class.is_none_or(|c| SLICE_COPYING_TYPES.contains(&c))
+}
+
+/// Methods that keep the object handed to them in their receiver (as an element, or the default
+/// of `setdefault`).
+pub const STORING_METHODS: &[&str] = &["append", "appendleft", "insert", "add", "setdefault"];
+
+/// Where an instruction stores an object: in another object (a display, an attribute, an item,
+/// `setattr`, a container method), in a global, or in a closure cell. The object is part of that
+/// state from then on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Place<'i> {
+    Object(VarId),
+    Global(&'i str),
+    Cell(&'i str),
+}
+
+/// The values the instruction `kind` stores, and where.
+pub fn stores(kind: &InstKind) -> Vec<(VarId, Place<'_>)> {
+    match kind {
+        InstKind::AttrStore { obj, value, .. } | InstKind::SubscriptStore { obj, value, .. } => {
+            vec![(*value, Place::Object(*obj))]
+        }
+        InstKind::StoreGlobal { name, value } => vec![(*value, Place::Global(name))],
+        InstKind::StoreDeref { name, value } => vec![(*value, Place::Cell(name))],
+        InstKind::AllocBuiltin { dst, elems, .. } => {
+            elems.iter().map(|v| (*v, Place::Object(*dst))).collect()
+        }
+        InstKind::DictLiteral { dst, entries } => entries
+            .iter()
+            .filter_map(|e| match e {
+                heki_ir::DictEntry::KeyValue { value, .. } => Some((*value, Place::Object(*dst))),
+                heki_ir::DictEntry::Unpack { .. } => None,
+            })
+            .collect(),
+        InstKind::MethodCall {
+            recv, method, args, ..
+        } if STORING_METHODS.contains(&method.as_str()) => args
+            .last()
+            .map(|v| (*v, Place::Object(*recv)))
+            .into_iter()
+            .collect(),
+        InstKind::Call { callee, args, .. } if callee == "setattr" && args.len() == 3 => {
+            vec![(args[2], Place::Object(args[0]))]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The edges of `f` a branch on a constant never takes (`while True:` never leaves at its
+/// header), by `(from, to)` block.
+pub fn dead_edges(
+    f: &heki_ir::IrFunction,
+    defs: &FxHashMap<VarId, &Inst>,
+) -> FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)> {
+    let mut out = FxHashSet::default();
+    for b in &f.blocks {
+        let heki_ir::Terminator::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = b.terminator
+        else {
+            continue;
+        };
+        if let Some(InstKind::Const {
+            literal: heki_ir::ConstLiteral::Bool(taken),
+            ..
+        }) = defs.get(&cond).map(|i| &i.kind)
+        {
+            out.insert((b.id, if *taken { else_bb } else { then_bb }));
+        }
+    }
+    out
+}
+
+/// What a parameter is to the function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamRole {
+    /// Parameter `i`: the caller's object.
+    Plain(u8),
+    /// `*args` / `**kwargs`: a new tuple or dict holding the caller's objects.
+    Packed,
+}
+
+/// A value of the backward walk: the object itself, or one of its elements.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Part {
+    Object,
+    Element,
+}
+
+/// The origins of the objects the `roots` hold: a walk back through copies, phis (not along the
+/// `dead` edges), casts, in-place operators, iterations, items, and the defaults of `get` /
+/// `pop` / `getattr`, which classifies what each value's definition ([`source`] by `source_of`)
+/// or parameter (`param_of`) makes of it. An element of a new object is of unknown origin, one
+/// of a parameter is the caller's, and one of held state is held; an object the function stores
+/// in another (`kept`, through copies and phis) is an element of that one, and one stored in a
+/// global or a closure cell is held. A project call adds nothing: propagation adds what its
+/// callees return.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn origins_of<'i>(
+    defs: &FxHashMap<VarId, &'i Inst>,
+    phis: &FxHashMap<VarId, (heki_ir::BlockId, &PhiNode)>,
+    dead: &FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)>,
+    roots: impl IntoIterator<Item = VarId>,
+    source_of: impl Fn(&'i Inst) -> Source<'i>,
+    param_of: impl Fn(VarId) -> Option<ParamRole>,
+    slice_copies: impl Fn(VarId) -> bool,
+    kept: &FxHashMap<VarId, Vec<Place<'_>>>,
+) -> Origins {
+    let mut out = Origins::default();
+    let mut seen: FxHashSet<(VarId, Part)> = FxHashSet::default();
+    let mut work: Vec<(VarId, Part)> = roots.into_iter().map(|v| (v, Part::Object)).collect();
+    while let Some((var, part)) = work.pop() {
+        if !seen.insert((var, part)) {
+            continue;
+        }
+        if let Some(role) = param_of(var) {
+            match (role, part) {
+                (ParamRole::Plain(i), Part::Object) if i < 64 => out.params |= 1u64 << i,
+                (ParamRole::Plain(i), Part::Element) if i < 64 => out.elements |= 1u64 << i,
+                (ParamRole::Packed, Part::Object) => out.new = true,
+                _ => out.held = true,
+            }
+            continue;
+        }
+        if let Some(into) = kept.get(&var) {
+            for place in into {
+                match place {
+                    Place::Object(c) => work.push((*c, Part::Element)),
+                    Place::Global(_) | Place::Cell(_) => out.held = true,
+                }
+            }
+            continue;
+        }
+        if let Some((block, phi)) = phis.get(&var) {
+            work.extend(
+                phi.incoming
+                    .iter()
+                    .filter(|(from, _)| !dead.contains(&(*from, *block)))
+                    .map(|(_, v)| (*v, part)),
+            );
+            continue;
+        }
+        let Some(inst) = defs.get(&var) else {
+            continue;
+        };
+        match source_of(inst) {
+            Source::New => out.new |= part == Part::Object,
+            Source::Held(_) => out.held = true,
+            Source::Same(v) => work.push((v, part)),
+            Source::Element(v) => work.push((v, Part::Element)),
+            Source::ElementOr(v, default) => {
+                work.push((v, Part::Element));
+                work.push((default, part));
+            }
+            Source::HeldOr(_, default) => {
+                out.held = true;
+                work.push((default, part));
+            }
+            Source::Slice(v) if slice_copies(v) => out.new |= part == Part::Object,
+            Source::Slice(v) => work.push((v, part)),
+            Source::Project | Source::Unknown => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_join_keeps_every_kind() {
+        let mut a = Origins {
+            new: true,
+            ..Origins::default()
+        };
+        a.join(Origins {
+            held: true,
+            params: 0b10,
+            ..Origins::default()
+        });
+        assert_eq!(
+            a,
+            Origins {
+                new: true,
+                held: true,
+                params: 0b10,
+                elements: 0,
+            }
+        );
+        assert!(!a.is_empty());
+        assert!(Origins::default().is_empty());
+        // An element of a new object is of unknown origin; of a parameter, the caller's.
+        assert_eq!(
+            a.element(),
+            Origins {
+                held: true,
+                elements: 0b10,
+                ..Origins::default()
+            }
+        );
+    }
+
+    #[test]
+    fn methods_outside_the_project_by_name() {
+        let (r, k, d) = (VarId(1), VarId(2), VarId(3));
+        assert_eq!(method_source(r, "get", &[k, d]), Source::ElementOr(r, d));
+        assert_eq!(method_source(r, "pop", &[k, d]), Source::ElementOr(r, d));
+        assert_eq!(method_source(r, "get", &[k]), Source::Element(r));
+        assert_eq!(method_source(r, "setdefault", &[k, d]), Source::Element(r));
+        assert_eq!(method_source(r, "copy", &[]), Source::New);
+        assert_eq!(method_source(r, "keys", &[]), Source::Unknown);
+        assert!(slice_copies(None));
+        assert!(slice_copies(Some("builtins.list")));
+        assert!(!slice_copies(Some("numpy.ndarray")));
+    }
+}
