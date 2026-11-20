@@ -1599,8 +1599,10 @@ It does not report:
 - `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
   `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
   `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
-- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`,
-  `sqlalchemy.create_engine(...)`) and calls that only build an object (`Redis.pipeline()`, a
+- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`, except
+  that a `mongodb+srv://` URI literal is resolved in the constructor unless `connect=False`,
+  `pymysql.connect(..., defer_connect=True)`, `sqlalchemy.create_engine(...)`) and calls that
+  only build an object (`Redis.pipeline()`, a
   lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
 - spawning a process without waiting (`subprocess.Popen(...)`);
 - coroutine functions that only run through a synchronous driver (`asyncio.run`, ...);

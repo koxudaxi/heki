@@ -1380,3 +1380,63 @@ fn pandas_readers_do_the_io_of_their_source() {
         ]
     );
 }
+
+const CONNECTION_OPTIONS: &str = r#"import pymongo
+import pymysql
+
+
+async def tp_srv_uri_resolves_in_the_constructor():
+    pymongo.MongoClient("mongodb+srv://cluster.example/")
+    pymongo.MongoClient(host="mongodb+srv://cluster.example/", connect=True)
+
+
+async def tn_deferred_connections(uri):
+    pymongo.MongoClient("mongodb+srv://cluster.example/", connect=False)
+    pymongo.MongoClient("mongodb://db.example/")
+    pymongo.MongoClient(uri)
+    pymysql.connect(host="db", defer_connect=True)
+
+
+async def tp_connections(options):
+    pymysql.connect(host="db")
+    pymysql.connect(**options)
+    conn = pymysql.connect(host="db", defer_connect=True)
+    conn.connect()
+"#;
+
+/// Connection options decide whether a client constructor does I/O: a `mongodb+srv://` URI is
+/// resolved at once unless `connect=False`; `defer_connect=True` leaves the socket closed until
+/// `connect()`.
+#[test]
+fn connection_options_decide_where_the_connection_is_made() {
+    assert_eq!(
+        check(
+            "catalog_connection_options",
+            "app/connect.py",
+            CONNECTION_OPTIONS,
+            "EFF101"
+        ),
+        vec![
+            d(
+                6,
+                "EFF101",
+                "tp_srv_uri_resolves_in_the_constructor",
+                "pymongo.MongoClient"
+            ),
+            d(
+                7,
+                "EFF101",
+                "tp_srv_uri_resolves_in_the_constructor",
+                "pymongo.MongoClient"
+            ),
+            d(18, "EFF101", "tp_connections", "pymysql.connect"),
+            d(19, "EFF101", "tp_connections", "pymysql.connect"),
+            d(
+                21,
+                "EFF101",
+                "tp_connections",
+                "pymysql.connections.Connection.connect"
+            ),
+        ]
+    );
+}

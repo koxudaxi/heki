@@ -1072,10 +1072,32 @@ mod tests {
                     "boto3.resource",
                     "redis.Redis",
                     "redis.StrictRedis",
-                    "pymongo.MongoClient",
                     "psycopg_pool.ConnectionPool",
                 ]),
                 entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                // `connect=True` (the default) resolves a `mongodb+srv://` URI at once.
+                s(&["pymongo.MongoClient"]),
+                with_cases(
+                    vec![
+                        ArgCase {
+                            arg: Some(4),
+                            param: Some("connect".into()),
+                            equals: Some(ArgLiteral::Bool(false)),
+                            effects: Some(vec![UnpooledClientAlloc]),
+                            ..ArgCase::default()
+                        },
+                        ArgCase {
+                            arg: Some(0),
+                            param: Some("host".into()),
+                            prefix: s(&["mongodb+srv://"]),
+                            effects: Some(vec![BlockingNet, UnpooledClientAlloc]),
+                            ..ArgCase::default()
+                        },
+                    ],
+                    entry(&[UnpooledClientAlloc]),
+                ),
             ),
             (
                 s(&["requests.session"]),
@@ -1181,6 +1203,8 @@ mod tests {
                     with_prefix("psycopg.Connection", COMMIT_ROLLBACK),
                     with_prefix("psycopg2.extensions.connection", COMMIT_ROLLBACK),
                     with_prefix("pymysql.connections.Connection", COMMIT_ROLLBACK),
+                    // Connects a `defer_connect=True` connection.
+                    s(&["pymysql.connections.Connection.connect"]),
                     // A cursor loop or a bulk API by design: blocking, but no N+1 query.
                     s(&["redis.Redis.scan", "pandas.DataFrame.to_sql"]),
                     with_prefix(qs, QUERYSET_BULK),
@@ -1251,9 +1275,17 @@ mod tests {
             ),
             (
                 s(&["pymysql.connect"]),
-                returning(
-                    "pymysql.connections.Connection",
-                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                with_cases(
+                    vec![ArgCase {
+                        param: Some("defer_connect".into()),
+                        equals: Some(ArgLiteral::Bool(true)),
+                        effects: Some(vec![UnpooledClientAlloc]),
+                        ..ArgCase::default()
+                    }],
+                    returning(
+                        "pymysql.connections.Connection",
+                        entry(&[BlockingDb, UnpooledClientAlloc]),
+                    ),
                 ),
             ),
             (

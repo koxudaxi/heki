@@ -1516,17 +1516,26 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 # --- DB: PyMySQL ---
-# `pymysql.connect` is the `Connection` class, which connects in its constructor.
+# `pymysql.connect` is the `Connection` class, which connects in its constructor unless
+# `defer_connect=True` (a keyword-only parameter) leaves the socket closed until `connect()`.
 
 [[entries]]
 symbol = "pymysql.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
 return_type = "pymysql.connections.Connection"
+cases = [
+    { param = "defer_connect", equals = true, effects = ["unpooled_client_alloc"] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymysql.connections.Connection.cursor"
 return_type = "pymysql.cursors.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymysql.connections.Connection.connect"
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2479,14 +2488,20 @@ async_safe = true
 opaque_to_layer3 = true
 
 # --- Document DB: pymongo (sync) ---
-# `MongoClient(...)` returns at once and connects on background threads (a `mongodb+srv://`
-# URI also resolves DNS records in the constructor). `find()` returns a cursor that queries
+# `MongoClient(...)` returns at once and connects on background threads, but with
+# `connect=True` (the default outside function-as-a-service platforms) a `mongodb+srv://` URI
+# resolves its DNS records in the constructor; `connect=False` defers that to the first
+# operation. `AsyncMongoClient` always defers it. `find()` returns a cursor that queries
 # on its first iteration; it is listed as the query. The bulk writes (`insert_many`,
 # `bulk_write`) send many documents at once: no `db_query`.
 
 [[entries]]
 symbol = "pymongo.MongoClient"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { arg = 4, param = "connect", equals = false, effects = ["unpooled_client_alloc"] },
+    { arg = 0, param = "host", prefix = ["mongodb+srv://"], effects = ["blocking_net", "unpooled_client_alloc"] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
