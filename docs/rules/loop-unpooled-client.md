@@ -21,6 +21,19 @@ items (also through a name or a module constant bound to one that nothing grows,
 `enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer constants
 (`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
 
+A client that is only created while an attribute is unset, which the code then sets (lazy
+initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`
+before connecting), is created once per object, not on every iteration: the call is not
+reported unless a data-sized loop around it constructs the object in each iteration
+(`Connection().send(cmd)`); `conn.send(cmd)` on a connection made before the loop, taken from
+a pool, or held by the receiver is not reported.
+
+A call whose arguments switch off the branch that creates the client is not followed into
+it: `load(name, cache=False)` does not reach the `urlopen` under `if cache:` in `load`. This
+covers constant arguments and the literal defaults of omitted ones (`False`, `None`, `0`, `""`,
+empty displays), tests the caller has already made on the same value (`isinstance`, `is None`,
+truthiness), and wrappers that pass the value on.
+
 ## Why is this bad?
 Each new client pays for DNS, TCP, and TLS setup again and throws its connection pool away.
 In a loop this dominates the run time and exhausts sockets.

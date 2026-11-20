@@ -254,6 +254,9 @@ EffectSummary(f) = {
     typed_field_write_sites:  Set<(Class, Attr, WriteKind, Chain)>, // direct and indirect writes (MUT201, EFF201)
     typed_field_read_sites:   Set<(Class, Attr, ReadKind)>,         // own reads only, never propagated (MUT203)
 
+    exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy init
+                                                    // (once per object, from which parameters)
+
     // Offloading and the async context
     offloads_blocking_params: Bitset,               // wrapper that runs the callable in parameter i on a thread
     iterates_params:          Bitset,               // stepped by an iteration: a generator passed there runs there

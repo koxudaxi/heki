@@ -9,6 +9,7 @@ use crate::opt_rules::Sizes;
 use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
+use heki_effect::guards::loop_bit;
 use heki_effect::{
     BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, EffectSummary,
     Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
@@ -171,15 +172,20 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             // `for.iter` / `MakeIter` live in the preheader (depth 0), so they never get here.
             // Loops whose size the code fixes (small constant ranges and displays, retries,
             // daemon polling) are relaxed: a call is reported when some loop around it is
-            // data-sized.
-            let mut in_data_loop = || {
+            // data-sized (the mask of those loops, as `SiteEffect::once_loops`), and the effect
+            // does not run once per object across that loop (lazy initialization).
+            let mut data_loops = || {
                 let sizes = sizes.get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit));
-                f.loops.iter().enumerate().any(|(i, lp)| {
-                    lp.body.contains(&bb.id)
-                        && *data_sized[i].get_or_insert_with(|| sizes.data_sized(lp))
-                })
+                f.loops
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, lp)| {
+                        lp.body.contains(&bb.id)
+                            && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
+                    })
+                    .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
             };
-            let mut checked: Option<bool> = None;
+            let mut checked: Option<u64> = None;
             for inst in &bb.insts {
                 // Reading a property runs its getter (a call site at the read); iterating a
                 // generator runs its body and iterating an object of a catalogued class its
@@ -205,11 +211,21 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     .filter(|s| !iteration || s.project_callees().is_empty())
                     .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                     .collect();
-                let mut hot = || *checked.get_or_insert_with(&mut in_data_loop);
-                if want102
-                    && let Some(chain) = shortest(&effects, ExecEffectKind::UnpooledClientAlloc)
-                    && hot()
-                {
+                let mut hot = || *checked.get_or_insert_with(&mut data_loops);
+                // The shortest chain of an effect of `kind` that some data-sized loop runs on
+                // every iteration.
+                let mut per_iteration = |kind: ExecEffectKind| {
+                    if !effects.iter().any(|e| e.effect == kind) {
+                        return None;
+                    }
+                    let data = hot();
+                    effects
+                        .iter()
+                        .filter(|e| e.effect == kind && data & !e.once_loops != 0)
+                        .map(|e| e.chain.as_slice())
+                        .min_by_key(|c| c.len())
+                };
+                if want102 && let Some(chain) = per_iteration(ExecEffectKind::UnpooledClientAlloc) {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
                             out,
@@ -237,8 +253,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if want103
                     && !migration_fn
                     && !ddl
-                    && let Some(chain) = shortest(&effects, ExecEffectKind::DbQuery)
-                    && hot()
+                    && let Some(chain) = per_iteration(ExecEffectKind::DbQuery)
                 {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(

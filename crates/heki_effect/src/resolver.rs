@@ -202,6 +202,13 @@ pub struct FunctionDecl {
     /// Resolved return annotation (class fqn), Advisory only.
     pub return_type: Option<String>,
     pub param_names: Vec<String>,
+    /// How many leading parameters a position binds (the receiver included).
+    pub positional_params: u8,
+    /// How many leading parameters a keyword binds (all but `*args` / `**kwargs`, which come
+    /// last).
+    pub named_params: u8,
+    /// The literal defaults, by parameter position (`guards`: an omitted argument).
+    pub defaults: Vec<(u8, crate::ConstArg)>,
     /// Calling it returns a fresh (async) generator: a generator function without decorators
     /// other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
     /// `@contextmanager` generator returns a context manager). `MUT106` single-pass sources.
@@ -1536,6 +1543,21 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .as_deref()
                 .and_then(|a| decls.resolve_annotation(a)),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+            positional_params: count_u8(
+                f.params
+                    .iter()
+                    .take_while(|p| !p.kw_only && !p.is_vararg && !p.is_kwarg),
+            ),
+            named_params: count_u8(f.params.iter().filter(|p| !p.is_vararg && !p.is_kwarg)),
+            defaults: f
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    let c = crate::ConstArg::of_literal(p.default.as_ref()?)?;
+                    Some((u8::try_from(i).ok()?, c))
+                })
+                .collect(),
             is_generator: is_generator_function(f),
             is_property: getters_only[f.qualname.as_str()],
             readonly_params,
@@ -1632,6 +1654,11 @@ fn note_attr(
         }
         _ => None,
     };
+}
+
+/// The length of `items`, saturated to `u8` (positions past 255 never bind exactly).
+fn count_u8<T>(items: impl Iterator<Item = T>) -> u8 {
+    u8::try_from(items.count()).unwrap_or(u8::MAX)
 }
 
 /// `FunctionDecl::readonly_params` and `FunctionDecl::mutable_params` of `f`.
@@ -1939,8 +1966,12 @@ pub fn func_qualname(f: &IrFunction) -> &str {
 
 /// Variables that alias `root` through `Copy` and phis whose inputs all alias it.
 pub fn self_aliases(f: &IrFunction, root: VarId) -> FxHashSet<VarId> {
-    let mut set = FxHashSet::default();
-    set.insert(root);
+    aliases_of(f, [root])
+}
+
+/// Variables that are one of `roots` through `Copy` and phis whose inputs all are.
+pub fn aliases_of(f: &IrFunction, roots: impl IntoIterator<Item = VarId>) -> FxHashSet<VarId> {
+    let mut set: FxHashSet<VarId> = roots.into_iter().collect();
     loop {
         let before = set.len();
         for bb in &f.blocks {

@@ -43,7 +43,7 @@ IrFunction {
     id, name, qualname,
     owner_class, owner_class_qualname,   // nested classes kept apart from their outer class
     kind:               Sync | Async | Generator | AsyncGenerator,
-    params:             Vec<ParamInfo>,  // name, default, *args / **kwargs, PEP 484 annotation (Advisory lane only)
+    params:             Vec<ParamInfo>,  // name, literal default, keyword-only, *args / **kwargs, PEP 484 annotation (Advisory lane only)
     return_annotation:  Option<String>,  // Advisory lane only
     decorators:         Vec<String>,     // @cached_property, @lru_cache, @property, CLI and web routes, lifespan, ...
     local_annotations:  Vec<LocalAnnotation>, // annotated locals and self.attr (Advisory lane only)
@@ -73,7 +73,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Names | `LoadGlobal`, `LoadName`, `LoadDeref`, `StoreGlobal`, `StoreDeref`, `Copy`, `Delete`, `Import` | `Copy` adds to the direct alias set, `Delete` removes by strong update; `Import` / `LoadGlobal` carry the PEP 810 `is_lazy` flag |
 | Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; until types are exact, any special method may run |
 | Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds |
-| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones |
+| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones; `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
 | Iteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
@@ -173,6 +173,11 @@ EffectSummary(f) = {
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
 
+    // Guards: when an effect runs
+    exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy
+                                                           // initialization (once per object, from which
+                                                           // parameters)
+
     // Offloading and the sync-driven context
     offloads_blocking_params: Bitset,                      // wrapper running the callable in parameter i on a thread
     sync_driven_only:         bool,                        // internal async def driven only by a sync driver
@@ -190,6 +195,18 @@ EffectSummary(f) = {
 invalidation contracts announced after the call on every normal path, and the next call; set on
 `Iterate` / `Through` sites too), with `FileSummary.flows`, are computed at extraction from the
 CFG and its post-dominator tree, only when a contract is configured; `ProjectIndex` keeps no IR.
+
+**Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
+`if x is None:`, `isinstance(x, T)`, also through `and` / `or` / `not`, early returns, and
+conditional expressions; on a parameter, or an attribute of one the function never assigns)
+records that test. An effect inside a lazy initialization (`MUT107`'s branch, when every way out
+of it sets the attribute) runs once per object. At each call the callee's guards are mapped to
+the caller (`through_call`, wherever a callee's facts reach a caller): a constant argument, the
+literal default of an omitted parameter, or a test the caller has made on the same value that
+decides a guard against the effect prunes it there; an undecided test of a caller input becomes
+the caller's guard. A generator's guards are decided at the call that creates it. `EFF102` /
+`EFF103` do not count a lazily initialized effect per iteration unless a data-sized loop around
+the call constructs the object. Anything not recognized keeps the effect.
 
 **Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
 `ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs

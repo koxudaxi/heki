@@ -4,23 +4,26 @@
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
 use crate::consumption::{IterFlow, Roots, param_iteration};
+use crate::guards::{self, GuardInputs, LocalGuards};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
-    Callee, DeclKeys, ModuleDecls, TypeCtx, Val, func_qualname, is_generator_function, self_aliases,
+    Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
+    is_generator_function, self_aliases,
 };
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Contracts, EffectSummary,
-    FileSummary, FuncKey, ModuleInput, ProjectDecls, ReadKind, SiteRole, Slot, TypedFieldReadSite,
-    TypedFieldWriteSite, WriteKind,
+    ArgBinding, ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Contracts,
+    EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput, ProjectDecls, ReadKind,
+    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
     BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
-    IrFunction, Terminator, VarId,
+    IrFunction, NaturalLoop, PhiNode, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -158,6 +161,12 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     into.returns_self_attrs.extend(other.returns_self_attrs);
     into.returns_self_attrs
         .retain(|a| !read.iter().any(|r| r.contains(a)));
+    // The effects of either definition, with the guards of each occurrence.
+    for e in &other.direct_exec_effects {
+        let had = into.direct_exec_effects.contains(e);
+        let occ = other.exec_guards.get(e).cloned().unwrap_or_default();
+        guards::add_occurrence(&mut into.exec_guards, *e, had, &occ);
+    }
     into.direct_exec_effects.extend(other.direct_exec_effects);
     into.transitive_exec_effects
         .extend(other.transitive_exec_effects);
@@ -261,6 +270,15 @@ struct Extractor<'a> {
     /// `cls(...)`), through copies and phis whose every input is one (`a = A(x) if c else
     /// A(y)`): `TypedFieldWriteSite::fresh`.
     fresh: FxHashSet<VarId>,
+    /// Attributes the function assigns or deletes on any object.
+    stored_attrs: Vec<&'a str>,
+    /// The block and phi defining each phi variable (`GuardInputs::phis`).
+    phis: OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
+    /// Buffers of the guard analysis's backward walks (`GuardInputs::scratch`).
+    scratch: RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
+    /// The loops around each block.
+    around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
+    guards: LocalGuards,
     summary: EffectSummary,
     sites: Vec<CallSite>,
     /// Resolved callee of every `Call` / `MethodCall` by position (for the iteration flow).
@@ -309,9 +327,14 @@ impl<'a> Extractor<'a> {
         let types = cx.infer(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
+        let mut stored_attrs = Vec::new();
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let Some(d) = inst.kind.dst() {
                 defs.insert(d, inst);
+            }
+            if let InstKind::AttrStore { attr, .. } | InstKind::AttrDelete { attr, .. } = &inst.kind
+            {
+                stored_attrs.push(attr.as_str());
             }
             for op in inst.kind.operands() {
                 uses.entry(op).or_default().push(&inst.kind);
@@ -348,6 +371,11 @@ impl<'a> Extractor<'a> {
             dict_of: FxHashMap::default(),
             may_params: FxHashMap::default(),
             fresh: FxHashSet::default(),
+            stored_attrs,
+            phis: OnceCell::new(),
+            scratch: RefCell::default(),
+            around: OnceCell::new(),
+            guards: LocalGuards::default(),
             summary,
             sites: Vec::new(),
             callees: FxHashMap::default(),
@@ -370,6 +398,41 @@ impl<'a> Extractor<'a> {
         let returned = readonly::returned_values(f, &ex.defs, |kind| ex.derivations(kind));
         ex.returned = returned;
         ex
+    }
+
+    fn guard_inputs(&self) -> GuardInputs<'_, 'a> {
+        GuardInputs {
+            f: self.f,
+            defs: &self.defs,
+            uses: &self.uses,
+            types: &self.types,
+            param_alias: &self.param_alias,
+            param_slot_alias: &self.param_slot_alias,
+            stored_attrs: &self.stored_attrs,
+            fresh: &self.fresh,
+            phis: &self.phis,
+            scratch: &self.scratch,
+        }
+    }
+
+    /// The loops around `bb`, from a table built on first use.
+    fn loops_around(&self, bb: BlockId) -> &[&'a NaturalLoop] {
+        let f = self.f;
+        let table = self.around.get_or_init(|| {
+            let mut table: Vec<Vec<&'a NaturalLoop>> = vec![Vec::new(); f.blocks.len()];
+            for lp in &f.loops {
+                for b in &lp.body {
+                    table[b.0 as usize].push(lp);
+                }
+            }
+            table
+        });
+        &table[bb.0 as usize]
+    }
+
+    /// [`ArgBinding`] of the argument `var` of a call inside `loops`.
+    fn binding(&self, var: VarId, loops: &[&NaturalLoop]) -> ArgBinding {
+        self.guards.binding(&self.guard_inputs(), var, loops)
     }
 
     /// [`Self::may_params`]: a monotone fixpoint over copies and phis.
@@ -666,6 +729,7 @@ impl<'a> Extractor<'a> {
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
             reach: self.reach_of(var),
+            binding: None,
         }
     }
 
@@ -1104,6 +1168,7 @@ impl<'a> Extractor<'a> {
                 args,
                 kwargs,
                 is_awaited,
+                star_from,
             } => {
                 if crate::callgraph::is_private_name(method) {
                     self.summary.private_calls.insert(method.clone());
@@ -1124,7 +1189,7 @@ impl<'a> Extractor<'a> {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
                 let callee = self.cx.resolve_method(self.types.get(recv), method);
-                let (recv_origin, recv_is_self) = self.receiver(*recv);
+                let (recv_origin, recv_is_self) = self.receiver(*recv, bb);
                 // `pkg.Model(...)`: a project class reached through a module. Through a module,
                 // only a class binds the receiver (its `__init__`); a class without a project
                 // `__init__` resolves to its own name.
@@ -1145,6 +1210,7 @@ impl<'a> Extractor<'a> {
                     recv: Some(recv_origin),
                     args,
                     kwargs,
+                    star_from: *star_from,
                     is_awaited: *is_awaited,
                     recv_is_self,
                     constructs,
@@ -1159,6 +1225,7 @@ impl<'a> Extractor<'a> {
                 args,
                 kwargs,
                 is_awaited,
+                star_from,
             } => {
                 // A non-inlined comprehension iterates its first argument.
                 if callee_var.is_none()
@@ -1176,13 +1243,14 @@ impl<'a> Extractor<'a> {
                     && let Some((recv, method)) = callee_var.and_then(|v| self.bound_method(v))
                 {
                     let target = self.cx.resolve_method(self.types.get(&recv), &method);
-                    let (recv_origin, recv_is_self) = self.receiver(recv);
+                    let (recv_origin, recv_is_self) = self.receiver(recv, bb);
                     let call = Call {
                         dst: *dst,
                         value: *callee_var,
                         recv: Some(recv_origin),
                         args,
                         kwargs,
+                        star_from: *star_from,
                         is_awaited: *is_awaited,
                         recv_is_self,
                         constructs: None,
@@ -1217,6 +1285,7 @@ impl<'a> Extractor<'a> {
                     recv: None,
                     args,
                     kwargs,
+                    star_from: *star_from,
                     is_awaited: *is_awaited,
                     recv_is_self: false,
                     constructs,
@@ -1241,6 +1310,7 @@ impl<'a> Extractor<'a> {
                     recv: None,
                     args: &[],
                     kwargs: &[],
+                    star_from: None,
                     is_awaited: false,
                     recv_is_self: false,
                     constructs: None,
@@ -1281,20 +1351,27 @@ impl<'a> Extractor<'a> {
         }
         let symbol = format!("{class}.__iter__");
         if self.cx.kb.lookup(&symbol).is_some() {
-            let loop_depth = self.f.block_loop_depth(bb);
-            self.external_call(symbol, &[], false, loop_depth, span);
+            self.external_call(bb, symbol, &[], false, span);
         }
     }
 
     /// The origin of a receiver bound to a method's first parameter, and whether it is the
     /// calling method's own `self`: `super()` binds the calling method's `self` (parameter 0).
-    fn receiver(&self, recv: VarId) -> (ArgOrigin, bool) {
+    /// The receiver binds the parameter exactly (`ArgOrigin::binding`) at a call in `bb`.
+    fn receiver(&self, recv: VarId, bb: BlockId) -> (ArgOrigin, bool) {
         let mut origin = self.origin(recv);
+        let mut binding = self.binding(recv, self.loops_around(bb));
         let is_super = matches!(self.types.get(&recv), Some(Val::Super(_)));
         if is_super {
             origin.param = Some((0, None));
             origin.may_params = 1;
+            binding.input = Some(GuardSubject {
+                param: 0,
+                attr: None,
+            });
+            binding.derived_params = 1;
         }
+        origin.binding = Some(binding);
         (origin, is_super || self.self_vars.contains(&recv))
     }
 
@@ -1306,7 +1383,7 @@ impl<'a> Extractor<'a> {
         let Some(callee) = self.cx.resolve_attr_load(self.types.get(&obj), attr) else {
             return;
         };
-        let (recv, recv_is_self) = self.receiver(obj);
+        let (recv, recv_is_self) = self.receiver(obj, bb);
         let is_awaited = self.uses.get(&dst).is_some_and(|uses| {
             uses.iter()
                 .any(|u| matches!(u, InstKind::Await { value, .. } if *value == dst))
@@ -1317,6 +1394,7 @@ impl<'a> Extractor<'a> {
             recv: Some(recv),
             args: &[],
             kwargs: &[],
+            star_from: None,
             is_awaited,
             recv_is_self,
             constructs: None,
@@ -1661,13 +1739,7 @@ impl<'a> Extractor<'a> {
                         events.invalidators.push((self.pos.0, self.pos.1, mask));
                     }
                 }
-                self.external_call(
-                    symbol.clone(),
-                    call.args,
-                    call.is_awaited,
-                    loop_depth,
-                    call.span,
-                );
+                self.external_call(bb, symbol.clone(), call.args, call.is_awaited, call.span);
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
                 if let Some(class) = &call.constructs {
@@ -1683,6 +1755,9 @@ impl<'a> Extractor<'a> {
                         role: SiteRole::Call,
                         returned: None,
                         flow: None,
+                        guards: Vec::new(),
+                        once_per: None,
+                        once_loops: 0,
                     });
                 }
                 None
@@ -1696,16 +1771,14 @@ impl<'a> Extractor<'a> {
                 let mut bindings = Vec::new();
                 let mut offloaders: Vec<String> = Vec::new();
                 let mut any_async = false;
+                let unknown = FunctionDecl::default();
+                let loops = self.loops_around(bb);
                 for key in keys {
-                    let decl = self
-                        .cx
-                        .project
-                        .function_decl(key)
-                        .cloned()
-                        .unwrap_or_default();
-                    if let Some(symbol) = decl.offloaded_by {
-                        if !offloaders.contains(&symbol) {
-                            offloaders.push(symbol);
+                    let cx = self.cx;
+                    let decl = cx.project.function_decl(key).unwrap_or(&unknown);
+                    if let Some(symbol) = &decl.offloaded_by {
+                        if !offloaders.contains(symbol) {
+                            offloaders.push(symbol.clone());
                         }
                         continue;
                     }
@@ -1725,7 +1798,17 @@ impl<'a> Extractor<'a> {
                             call.recv.clone().unwrap_or_default()
                         });
                     }
-                    params.extend(call.args.iter().map(|a| self.origin(*a)));
+                    // A position binds its parameter exactly before any `*` unpacking, and a
+                    // keyword unless it lands in `**kwargs`.
+                    for (j, a) in call.args.iter().enumerate() {
+                        let mut o = self.origin(*a);
+                        if call.star_from.is_none_or(|s| j < usize::from(s))
+                            && offset + j < usize::from(decl.positional_params)
+                        {
+                            o.binding = Some(self.binding(*a, loops));
+                        }
+                        params.push(o);
+                    }
                     let mut bound: Vec<(u8, VarId)> = call
                         .args
                         .iter()
@@ -1739,9 +1822,36 @@ impl<'a> Extractor<'a> {
                                 params.resize(pos + 1, ArgOrigin::default());
                             }
                             params[pos] = self.origin(*v);
+                            if pos < usize::from(decl.named_params) {
+                                params[pos].binding = Some(self.binding(*v, loops));
+                            }
                             if let Ok(pos) = u8::try_from(pos) {
                                 bound.push((pos, *v));
                             }
+                        }
+                    }
+                    // An omitted parameter has its literal default, unless `*` / `**`
+                    // unpacking may pass it.
+                    if call.star_from.is_none() && call.kwargs.iter().all(|(n, _)| n.is_some()) {
+                        for (pos, c) in &decl.defaults {
+                            let pos = usize::from(*pos);
+                            let by_position = pos < usize::from(decl.positional_params)
+                                && pos < offset + call.args.len();
+                            let by_name = decl.param_names.get(pos).is_some_and(|n| {
+                                call.kwargs
+                                    .iter()
+                                    .any(|(k, _)| k.as_deref() == Some(n.as_str()))
+                            });
+                            if by_position || by_name {
+                                continue;
+                            }
+                            if params.len() <= pos {
+                                params.resize(pos + 1, ArgOrigin::default());
+                            }
+                            params[pos].binding = Some(ArgBinding {
+                                constant: Some(*c),
+                                ..ArgBinding::default()
+                            });
                         }
                     }
                     while params.last().is_some_and(ArgOrigin::is_empty) {
@@ -1756,7 +1866,7 @@ impl<'a> Extractor<'a> {
                 // `@d def f` is `f = d(f)`: the call runs `d(f)`, which offloads `f`.
                 for symbol in offloaders {
                     let offloaded: Vec<VarId> = call.value.into_iter().collect();
-                    self.external_call(symbol, &offloaded, call.is_awaited, loop_depth, call.span);
+                    self.external_call(bb, symbol, &offloaded, call.is_awaited, call.span);
                 }
                 if callees.is_empty() {
                     return None;
@@ -1774,22 +1884,17 @@ impl<'a> Extractor<'a> {
                             .push((self.pos.0, self.pos.1, invalidates));
                     }
                 }
+                let site = self.site(bb, CallTarget::Project(callees), call.is_awaited, call.span);
                 self.sites.push(CallSite {
-                    caller: self.key.clone(),
-                    target: CallTarget::Project(callees),
-                    is_awaited: call.is_awaited,
-                    span: call.span,
-                    loop_depth,
                     recv_is_self: call.recv_is_self,
                     drives_coroutine_manually: drives,
                     constructs: call.constructs.clone(),
-                    role: SiteRole::Call,
                     returned: if constructor {
                         None
                     } else {
                         self.returned.get(&call.dst).copied()
                     },
-                    flow: None,
+                    ..site
                 });
                 Some((self.sites.len() - 1, bindings))
             }
@@ -1800,12 +1905,33 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// A call site in block `bb` with the caller's guards there.
+    fn site(&self, bb: BlockId, target: CallTarget, is_awaited: bool, span: Span) -> CallSite {
+        let cx = self.guard_inputs();
+        CallSite {
+            caller: self.key.clone(),
+            target,
+            is_awaited,
+            span,
+            loop_depth: self.f.block_loop_depth(bb),
+            recv_is_self: false,
+            drives_coroutine_manually: false,
+            constructs: None,
+            role: SiteRole::Call,
+            returned: None,
+            flow: None,
+            guards: self.guards.facts_at(&cx, bb),
+            once_per: self.guards.once_per_at(&cx, bb),
+            once_loops: self.guards.once_loops_at(&cx, bb, self.loops_around(bb)),
+        }
+    }
+
     fn external_call(
         &mut self,
+        bb: BlockId,
         symbol: String,
         args: &[VarId],
         is_awaited: bool,
-        loop_depth: u16,
         span: Span,
     ) {
         if symbol == "builtins.setattr" || symbol == "builtins.object.__setattr__" {
@@ -1849,29 +1975,21 @@ impl<'a> Extractor<'a> {
         if effects.is_empty() && entry.offloads_blocking_arg.is_none() {
             return;
         }
+        let occurrence = self.guards.occurrence(&self.guard_inputs(), bb);
         for e in &effects {
-            self.summary.direct_exec_effects.insert(*e);
+            let had = !self.summary.direct_exec_effects.insert(*e);
+            guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &occurrence);
             let chain = vec![self.hop(symbol.clone(), span)];
             self.summary.exec_chains.insert(*e, chain);
         }
-        self.sites.push(CallSite {
-            caller: self.key.clone(),
-            target: CallTarget::Layer2 {
-                symbol,
-                effects,
-                offloads_blocking_arg: entry.offloads_blocking_arg,
-                async_safe: entry.async_safe,
-            },
-            is_awaited,
-            span,
-            loop_depth,
-            recv_is_self: false,
-            drives_coroutine_manually: false,
-            constructs: None,
-            role: SiteRole::Call,
-            returned: None,
-            flow: None,
-        });
+        let target = CallTarget::Layer2 {
+            symbol,
+            effects,
+            offloads_blocking_arg: entry.offloads_blocking_arg,
+            async_safe: entry.async_safe,
+        };
+        let site = self.site(bb, target, is_awaited, span);
+        self.sites.push(site);
     }
 
     /// The function returns (through `step`) the result of the read-only producer `producer`
@@ -1898,6 +2016,8 @@ struct Call<'c> {
     recv: Option<ArgOrigin>,
     args: &'c [VarId],
     kwargs: &'c [(Option<String>, VarId)],
+    /// `InstKind::Call::star_from`.
+    star_from: Option<u8>,
     is_awaited: bool,
     recv_is_self: bool,
     /// The project class the call constructs (`CallSite::constructs`).
@@ -1928,6 +2048,12 @@ fn role_site(
         role,
         returned: None,
         flow: None,
+        // The callees' facts run only where the object was made: under the guards of its call.
+        // A lazy initialization of the caller around the call bounds them per call, not per
+        // iteration of a loop around the other use.
+        guards: site.guards.clone(),
+        once_per: site.once_per,
+        once_loops: 0,
     }
 }
 

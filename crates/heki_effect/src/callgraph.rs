@@ -6,13 +6,14 @@
 //! `ProjectIndex::build` runs it over every function; `ProjectIndex::update_file` over the
 //! edited file's SCC closure and then over the affected callers only.
 
+use crate::guards;
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Delivery, EffectSummary, Facts,
     FuncKey, ProjectIndex, ProtectedReturn, Shared, SiteRole, TypedFieldWriteSite, WriteKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// Recomputations allowed per SCC member before the SCC is declared non-converged.
@@ -209,7 +210,8 @@ fn recompute(
 ) -> EffectSummary {
     let path = &index.func_files[func];
     let file = &index.files[path];
-    let mut s = file.local_functions[func].clone();
+    let local = &file.local_functions[func];
+    let mut s = local.clone();
     s.sync_driven_only = file
         .functions
         .get(func)
@@ -219,7 +221,16 @@ fn recompute(
         let site = &index.files[site_path].call_sites[*i];
         for bc in site.project_callees() {
             if let Some(callee) = index.summary(&bc.callee) {
-                apply_edge(index, &mut s, func, site, bc, callee, site_path);
+                apply_edge(
+                    index,
+                    &mut s,
+                    &local.mutated_param_paths,
+                    func,
+                    site,
+                    bc,
+                    callee,
+                    site_path,
+                );
                 return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
             }
         }
@@ -279,10 +290,12 @@ fn return_flow_edge(
 
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts
 /// the site runs ([`delivery`]), into the caller's body or into what iterating the caller's
-/// result runs.
+/// result runs. The caller's own writes through its parameters are `own_writes`.
+#[allow(clippy::too_many_arguments)]
 fn apply_edge(
     index: &ProjectIndex,
     s: &mut EffectSummary,
+    own_writes: &BTreeMap<u8, BTreeSet<String>>,
     caller: &FuncKey,
     site: &CallSite,
     bc: &BoundCallee,
@@ -307,7 +320,9 @@ fn apply_edge(
         Facts::Body => s,
         Facts::Result => s.iterated.get_or_insert_with(Box::default),
     };
-    transfer(target, caller, site, bc, callee, facts, &lead, rewrite);
+    transfer(
+        target, own_writes, caller, site, bc, callee, facts, &lead, rewrite,
+    );
 }
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
@@ -315,6 +330,7 @@ fn apply_edge(
 #[allow(clippy::too_many_arguments)]
 fn transfer(
     t: &mut EffectSummary,
+    own_writes: &BTreeMap<u8, BTreeSet<String>>,
     caller: &FuncKey,
     site: &CallSite,
     bc: &BoundCallee,
@@ -330,13 +346,28 @@ fn transfer(
     //    so its blocking effects never reach the caller.
     t.offloads_blocking_params |= caller_params(facts.offloads_blocking_params, bc);
 
-    // b. Execution effects, with the shortest chain to each.
+    // b. Execution effects, with the shortest chain to each. An effect whose guard the call
+    //    decides against does not run here; the others take the call's guards and the
+    //    callee's undecided tests of caller inputs (except of an attribute the caller assigns
+    //    itself).
     for e in facts
         .direct_exec_effects
         .iter()
         .chain(&facts.transitive_exec_effects)
     {
-        t.transitive_exec_effects.insert(*e);
+        let Some(mut through) = guards::through_call(site, bc, facts.exec_guards.get(e)) else {
+            continue;
+        };
+        through.guards.inputs.retain(|g| {
+            g.subject.attr.as_ref().is_none_or(|a| {
+                !own_writes
+                    .get(&g.subject.param)
+                    .is_some_and(|paths| paths.contains(a))
+            })
+        });
+        let new = t.transitive_exec_effects.insert(*e);
+        let had = !new || t.direct_exec_effects.contains(e);
+        guards::add_occurrence(&mut t.exec_guards, *e, had, &through.guards);
         let tail = facts.exec_chains.get(e).map_or(&[][..], Vec::as_slice);
         let chain = extend_chain(lead, tail, rewrite);
         let slot = t.exec_chains.entry(*e).or_default();

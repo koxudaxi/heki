@@ -279,7 +279,10 @@ The two kinds of rules make opposite choices when information is missing:
   name computed at run time, more than eight possible overrides, or a function outside the
   checked files that the catalog does not list. heki would rather miss a finding than report
   one it cannot back with a call chain; reports that cross functions show that chain as
-  related locations.
+  related locations. A branch the caller's arguments switch off is not followed
+  (`load(name, cache=False)` does not reach the request under `if cache:`), and a client or
+  query created only while an attribute is unset counts once per object, not once per loop
+  iteration.
 
 The missed findings close as heki learns more: annotate values whose class it cannot see, add
 your blocking or offloading APIs to `[[tool.heki.ecosystem]]`, and declare contracts for the
@@ -322,6 +325,12 @@ state that matters.
   runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on its own.
   Iterating an object runs its class's `__iter__` only for classes the catalog lists (a
   SQLAlchemy `Query`); the `__iter__` methods of project classes are not followed.
+- **Guards.** A test is followed when it checks the function's own input directly: truthiness,
+  `is None`, or `isinstance` with builtin classes. `a or b` gives no guard on either value, the
+  classes of project objects and annotated types do not decide `isinstance`, a lazy
+  initialization needs a direct test and the store in the function itself, and `EFF201` does not
+  use guards. An object a factory function returns counts as obtained once, like a pooled
+  connection.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
@@ -1556,6 +1565,15 @@ function iterating the parameter it is handed. A generator returned by a plain f
 where its caller iterates it. `next(gen)` runs the body only up to its first `yield`, which heki
 does not separate from the rest, so it is not followed.
 
+A call whose arguments switch off the callee's branch with the blocking call is not followed
+into it: `load(name, cache=False)` does not reach the request under `if cache:`. This covers
+constant arguments and the literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty
+displays), and tests the caller has already made on the same value: a call made only when
+`isinstance(self._input, PathLike)` is false does not reach the callee's branch for
+`isinstance(self._input, PathLike)`. A generator's branches are decided at the call that
+creates it. Lazy initialization does not relax this rule: a connection opened once still
+blocks the event loop that once.
+
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several
 boundaries reaching the same blocking call are grouped once ten or more of them exist (in the
@@ -1635,8 +1653,10 @@ Opt-in: blocking local filesystem I/O reachable from `async def`.
 ## What it does
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
 `pathlib.Path.read_text` / `write_text` / `read_bytes` / `write_bytes` / `open`, `os.listdir`,
-`os.scandir`, `os.walk`, and `shutil` copies and removals. It follows the same boundary and
-offload rules as `EFF101`, generators and offloading decorators included.
+`os.scandir`, `os.walk`, and `shutil` copies and removals. It follows the same boundary,
+offload, and guard rules as `EFF101`, generators and offloading decorators included: `await
+in_thread(self.open) if isinstance(self._input, PathLike) else self.open()` is not reported
+when `open` only opens a file under `isinstance(self._input, PathLike)`.
 
 This rule is opt-in: enable it with `--extend-select EFF105` or `extend-select = ["EFF105"]`.
 Selecting the `EFF` prefix does not enable it.
@@ -2498,6 +2518,12 @@ own implementation, or loops whose size the code fixes when no data-sized loop i
 (`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
 display; see `EFF102`).
 
+As for `EFF102`, a query that only runs while an attribute is unset, which the code then sets
+(`if self._columns is None: self._columns = cursor.execute(...)`), runs once per object and is
+not reported when the loop does not construct the object; a call whose arguments switch off
+the branch with the query (a constant, a literal default, a test the caller has made) is not
+followed into it.
+
 ## Why is this bad?
 One round trip per item makes the run time grow with the number of rows and with the network
 latency to the database. A single batched query is usually orders of magnitude faster.
@@ -2779,6 +2805,19 @@ loops whose size the code fixes, when no data-sized loop is around them: display
 items (also through a name or a module constant bound to one that nothing grows, and through
 `enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer constants
 (`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
+
+A client that is only created while an attribute is unset, which the code then sets (lazy
+initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`
+before connecting), is created once per object, not on every iteration: the call is not
+reported unless a data-sized loop around it constructs the object in each iteration
+(`Connection().send(cmd)`); `conn.send(cmd)` on a connection made before the loop, taken from
+a pool, or held by the receiver is not reported.
+
+A call whose arguments switch off the branch that creates the client is not followed into
+it: `load(name, cache=False)` does not reach the `urlopen` under `if cache:` in `load`. This
+covers constant arguments and the literal defaults of omitted ones (`False`, `None`, `0`, `""`,
+empty displays), tests the caller has already made on the same value (`isinstance`, `is None`,
+truthiness), and wrappers that pass the value on.
 
 ## Why is this bad?
 Each new client pays for DNS, TCP, and TLS setup again and throws its connection pool away.

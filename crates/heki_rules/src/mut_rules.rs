@@ -11,7 +11,7 @@ use heki_effect::{
     self_aliases,
 };
 use heki_env::HekiConfig;
-use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{CompareOpKind, Inst, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -1729,77 +1729,19 @@ fn private_methods_named_in_initializers<'m>(
 }
 
 /// Filter 2 (`MUT107`): the initializing branches of the `None` / falsy guards of
-/// `self.<attr>` in `f` — the `then` block of `if self.<attr> is None:` / `== None` /
-/// `if not self.<attr>:`, the `else` block of `is not None` / `!= None` / `if self.<attr>:`.
-/// Only a block the guard alone leads to counts: an `if` without `else` falls through to a
-/// block that the other branch reaches too.
+/// `self.<attr>` in `f` (`heki_effect::guards::lazy_init_branches`, which the effect lane's
+/// lazy initialization shares).
 fn lazy_init_branches(f: &IrFunction, attr: &str) -> Vec<heki_ir::BlockId> {
     let self_vars = f
         .params
         .first()
         .map(|p| self_aliases(f, p.var))
         .unwrap_or_default();
-    let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
-    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-        if let Some(d) = inst.kind.dst() {
-            defs.insert(d, &inst.kind);
-        }
-    }
-    let loads_attr = |v: &VarId| {
-        let mut v = *v;
-        while let Some(InstKind::Copy { src, .. }) = defs.get(&v) {
-            v = *src;
-        }
-        matches!(defs.get(&v), Some(InstKind::AttrLoad { obj, attr: a, .. }) if self_vars.contains(obj) && a == attr)
-    };
-    let is_none = |v: &VarId| {
-        matches!(
-            defs.get(v),
-            Some(InstKind::Const {
-                literal: ConstLiteral::None,
-                ..
-            })
-        )
-    };
-    let none_test =
-        |l: &VarId, r: &VarId| (loads_attr(l) && is_none(r)) || (is_none(l) && loads_attr(r));
-    let preds = f.predecessors();
-    let mut out = Vec::new();
-    for bb in &f.blocks {
-        let Terminator::Branch {
-            cond,
-            then_bb,
-            else_bb,
-        } = &bb.terminator
-        else {
-            continue;
-        };
-        let init = match defs.get(cond) {
-            Some(InstKind::Compare {
-                op: CompareOpKind::Is | CompareOpKind::Eq,
-                lhs,
-                rhs,
-                ..
-            }) if none_test(lhs, rhs) => *then_bb,
-            Some(InstKind::Compare {
-                op: CompareOpKind::IsNot | CompareOpKind::NotEq,
-                lhs,
-                rhs,
-                ..
-            }) if none_test(lhs, rhs) => *else_bb,
-            Some(InstKind::UnaryOp {
-                op: heki_ir::UnaryOpKind::Not,
-                operand,
-                ..
-            }) if loads_attr(operand) => *then_bb,
-            _ if loads_attr(cond) => *else_bb,
-            _ => continue,
-        };
-        if preds[init.0 as usize] == [bb.id] {
-            out.push(init);
-        }
-    }
-    out
+    heki_effect::guards::lazy_init_branches(f)
+        .into_iter()
+        .filter(|b| b.attr == attr && self_vars.contains(&b.obj))
+        .map(|b| b.init)
+        .collect()
 }
 
 /// Whether every path from the entry of `f` to block `b` runs through block `d` (normal and

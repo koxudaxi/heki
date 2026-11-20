@@ -128,7 +128,10 @@ The two kinds of rules make opposite choices when information is missing:
   name computed at run time, more than eight possible overrides, or a function outside the
   checked files that the catalog does not list. heki would rather miss a finding than report
   one it cannot back with a call chain; reports that cross functions show that chain as
-  related locations.
+  related locations. A branch the caller's arguments switch off is not followed
+  (`load(name, cache=False)` does not reach the request under `if cache:`), and a client or
+  query created only while an attribute is unset counts once per object, not once per loop
+  iteration.
 
 The missed findings close as heki learns more: annotate values whose class it cannot see, add
 your blocking or offloading APIs to `[[tool.heki.ecosystem]]`, and declare contracts for the
@@ -171,6 +174,12 @@ state that matters.
   runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on its own.
   Iterating an object runs its class's `__iter__` only for classes the catalog lists (a
   SQLAlchemy `Query`); the `__iter__` methods of project classes are not followed.
+- **Guards.** A test is followed when it checks the function's own input directly: truthiness,
+  `is None`, or `isinstance` with builtin classes. `a or b` gives no guard on either value, the
+  classes of project objects and annotated types do not decide `isinstance`, a lazy
+  initialization needs a direct test and the store in the function itself, and `EFF201` does not
+  use guards. An object a factory function returns counts as obtained once, like a pooled
+  connection.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
