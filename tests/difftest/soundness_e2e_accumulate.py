@@ -385,6 +385,28 @@ def local_holder(n):
     return holder.text
 
 
+def set_or_built(items):
+    """The right operand is built by a call: `|=` inserts its elements in the same order."""
+    s = set()
+    for g in items:
+        s = s | set([g, -g])
+    return s
+
+
+class Encoder:
+    """Bytes and tuple attributes, each assigned a literal of its kind: `+=` copies them."""
+
+    def __init__(self):
+        self.data = b""
+        self.parts = ()
+
+    def encode(self, n):
+        for i in range(n):
+            self.data += b"x"
+            self.parts += (i,)
+        return self.data, self.parts
+
+
 def run(fn, *args):
     try:
         out = fn(*args)
@@ -422,6 +444,8 @@ def main() -> int:
             run(merge_with_comment, items),
             run(Collector().collect, n),
             run(local_holder, n),
+            run(set_or_built, items),
+            run(Encoder().encode, n),
             run(key_not_simple_text, items),
             run(constant_key, items),
             run(parameter_key, items, "k"),

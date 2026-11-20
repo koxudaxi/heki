@@ -2164,9 +2164,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                 collect(&out);
             }
         }
+        // A phi passes it on (the phi's own uses are checked too); a terminator returns,
+        // raises, or tests it.
         let consumes = |d: VarId, site: &UseSite| match *site {
-            UseSite::Phi { .. } => true,
-            UseSite::Term(_) => false,
+            UseSite::Phi { .. } | UseSite::Term(_) => matches!(site, UseSite::Phi { .. }),
             UseSite::Inst(b, i) => match &f.block(b).insts[i].kind {
                 InstKind::IterNext { .. } | InstKind::MakeIter { .. } | InstKind::Copy { .. } => {
                     true
@@ -2201,16 +2202,12 @@ impl<'a, 'c> Rules<'a, 'c> {
         let mut sorted: Vec<VarId> = derived.into_iter().collect();
         sorted.sort_unstable();
         sorted.into_iter().find_map(|d| {
-            let site = cx.uses(d).iter().find(|u| !consumes(d, u))?;
-            let at = match *site {
-                UseSite::Inst(b, i) => f.block(b).insts[i].span.start,
-                UseSite::Term(b) => crate::interpreter::term_span(f, b).start,
-                UseSite::Phi { block, .. } => f.block(block).term_span.unwrap_or(f.span).start,
-            };
+            cx.uses(d).iter().find(|u| !consumes(d, u))?;
+            let made_at = cx.def_inst(d).map_or(f.span, |(_, _, i)| i.span);
             Some(format!(
-                "{} is used for more than its elements (line {}): a `deque` iterator is another type",
+                "{} (line {}) is used for more than its elements: a `deque` iterator is another type",
                 self.ck.name(d),
-                self.line(at)
+                self.line(made_at.start)
             ))
         })
     }

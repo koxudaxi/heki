@@ -337,6 +337,10 @@ const INTERP: &[Expect] = &[
         )],
     ),
     ("consumed_before_the_loop", &[("OPT101", V::Fix(&[ONE]))]),
+    (
+        "slice_object_subscripts",
+        &[("OPT101", V::Fix(&["x.extend([data[s], nums[s]])"]))],
+    ),
 ];
 
 #[test]
@@ -492,6 +496,23 @@ const ACCUMULATE: &[Expect] = &[
             "OPT103",
             V::Blocked("Unique(holder.text): `holder.text` is reachable through `holder`"),
         )],
+    ),
+    (
+        "set_or_built",
+        &[("OPT102", V::Fix(&["s |= set([g, -g])"]))],
+    ),
+    (
+        "Encoder.encode",
+        &[
+            (
+                "OPT103",
+                V::Blocked("Unique(self.data): `self.data` is reachable through `self`"),
+            ),
+            (
+                "OPT103",
+                V::Blocked("Unique(self.parts): `self.parts` is reachable through `self`"),
+            ),
+        ],
     ),
 ];
 
@@ -923,6 +944,10 @@ const DEQUE: &[Expect] = &[
             ]),
         )],
     ),
+    (
+        "drain_then_iterate",
+        &[("OPT120", V::Fix(&["deque(range(n))", "q.popleft()"]))],
+    ),
 ];
 
 #[test]
@@ -1197,13 +1222,18 @@ const COUNTEREXAMPLES: &[Expect] = &[
         "cx_iterator_type_observed",
         &[(
             "OPT120",
-            V::Blocked(
-                "DequeEquivalentOps(q): the result of `iter(...)` is used for more than its elements",
-            ),
+            V::Blocked("DequeEquivalentOps(q): the result of `iter(...)` (line"),
         )],
     ),
     // `q[1::2]` is no front pop: not a candidate.
     ("cx_stepped_slice", &[]),
+    (
+        "cx_iterator_returned",
+        &[(
+            "OPT120",
+            V::Blocked("DequeEquivalentOps(q): the result of `iter(...)` (line"),
+        )],
+    ),
 ];
 
 #[test]
@@ -1219,7 +1249,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 40/40"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 41/41"));
 }
 
 // ======================================================================== module-level facts

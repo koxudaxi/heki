@@ -872,6 +872,20 @@ def old_stepped_slice(n):
     return steps
 
 
+def cx_iterator_returned(n):
+    q = list(range(n))
+    while q:
+        q.pop(0)
+    return iter(q)
+
+
+def old_iterator_returned(n):
+    q = collections.deque(range(n))
+    while q:
+        q.popleft()
+    return iter(q)
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -939,6 +953,7 @@ def main() -> int:
         (cx_extended_by_its_own_iterator, old_extended_by_its_own_iterator, lambda f: f(2)),
         (cx_iterator_type_observed, old_iterator_type_observed, lambda f: f(3)),
         (cx_stepped_slice, old_stepped_slice, lambda f: f(9)),
+        (cx_iterator_returned, old_iterator_returned, lambda f: type(f(3)).__name__),
     ]
     lines = []
     for cx, old, call in pairs:

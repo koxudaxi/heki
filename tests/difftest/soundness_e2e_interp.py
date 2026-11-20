@@ -547,6 +547,17 @@ def many_sites(n, c):
     return x
 
 
+def slice_object_subscripts(n):
+    """`seq[s]` with a `slice` object is a new sequence, not an element."""
+    data = b"abcdef"
+    nums = [1, 2, 3]
+    s = slice(0, 2)
+    x = []
+    for i in range(n):
+        x = x + [data[s], nums[s]]
+    return x
+
+
 def run(fn, *args):
     try:
         out = fn(*args)
@@ -620,6 +631,7 @@ def main() -> int:
             run(stale_handler_alias, items, int),
             run(many_sites, n, n % 5),
             run(consumed_before_the_loop, items),
+            run(slice_object_subscripts, n),
         ]
     lines.append(f"CACHE = {CACHE}")
     print("\n".join(lines))

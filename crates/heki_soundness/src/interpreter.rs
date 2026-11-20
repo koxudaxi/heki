@@ -608,12 +608,12 @@ impl<'a> FnCtx<'a> {
     /// loop, a comprehension) yields that object's elements: an iterator *retaining* an object
     /// (`map(f, xs)`, a generator expression over `xs`) yields whatever its code produces.
     fn yielded_kinds(&self, st: &FrameState, it: VarId) -> Option<KindMask> {
-        match &self.def_inst(it)?.2.kind {
-            InstKind::MakeIter { iterable, .. } => match self.iterable_elems(st, *iterable) {
-                ElemKinds::Known(m) => Some(m),
-                ElemKinds::Unknown => None,
-            },
-            _ => None,
+        let InstKind::MakeIter { iterable, .. } = self.def_inst(it)?.2.kind else {
+            return None;
+        };
+        match self.iterable_elems(st, iterable) {
+            ElemKinds::Known(m) => Some(m),
+            ElemKinds::Unknown => None,
         }
     }
 
