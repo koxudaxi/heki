@@ -1114,8 +1114,10 @@ impl<'a> FnCtx<'a> {
                 st.add_derived(*dst, &[*outer_iter]);
                 self.after_def(st, *dst, span);
             }
-            InstKind::MakeClosure { dst, captured, .. } => {
-                for &c in captured {
+            InstKind::MakeClosure { dst, .. } => {
+                // The function object keeps every value its creation evaluates: captured
+                // variables, and default values when the IR passes them.
+                for c in inst.kind.operands() {
                     st.mark_escaped(c, EscapeWitness::CapturedByClosure, span);
                 }
                 Self::opaque(st, *dst, "function", span);
