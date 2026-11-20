@@ -16,7 +16,7 @@ use crate::consumption::{Consumption, IterFlow, resolve_inst};
 use crate::resolver::{Callee, TypeCtx, Val};
 use crate::{BoundCallee, CallSite, EffectSummary, Facts, FuncKey, ProjectIndex};
 use heki_ast::Span;
-use heki_ir::{BlockId, Inst, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{BlockId, Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -601,17 +601,37 @@ pub(crate) fn container_iterations(
     out
 }
 
+/// The checked containers of `self` (attribute and class) a value may step an iterator over.
+type Live = FxHashMap<VarId, BTreeSet<(String, IteratedContainer)>>;
+
+/// The passes [`live_containers`] takes at most: a container a loop passes back through a chain
+/// of copies takes one pass per link, and real code takes a few.
+const MAX_LIVE_PASSES: usize = 24;
+
+/// The `(value, container)` facts [`live_containers`] keeps at most: a multiple of the
+/// function's source size, within bounds, far above what real code keeps. A loop rotating
+/// aliases of many containers, or a chain of merges of them, gives each value every container.
+const LIVE_FACTS_PER_SOURCE_BYTE: usize = 1;
+const MIN_LIVE_FACTS: usize = 4096;
+const MAX_LIVE_FACTS: usize = 100_000;
+
+fn live_facts_budget(f: &IrFunction) -> usize {
+    let source_bytes = f.span.end.saturating_sub(f.span.start) as usize;
+    (source_bytes * LIVE_FACTS_PER_SOURCE_BYTE).clamp(MIN_LIVE_FACTS, MAX_LIVE_FACTS)
+}
+
 /// The values whose iteration steps an iterator over a checked container of `self`: the
 /// container itself (through copies), its `keys()` / `values()` / `items()` views, lazy wrappers
 /// of either (`enumerate`, `zip`, `reversed`, `itertools.chain`, a generator expression), and
-/// the iterators made from them. A merged value may be any of its inputs.
+/// the iterators made from them. A merged value may be any of its inputs. Past the pass limit or
+/// the budget of facts the facts are not final: none is kept, and the method has no iterations.
 fn live_containers(
     f: &IrFunction,
     tcx: &TypeCtx<'_>,
     types: &FxHashMap<VarId, Val>,
     self_attrs: &FxHashMap<VarId, String>,
-) -> FxHashMap<VarId, BTreeSet<(String, IteratedContainer)>> {
-    let mut live: FxHashMap<VarId, BTreeSet<(String, IteratedContainer)>> = FxHashMap::default();
+) -> Live {
+    let mut live: Live = FxHashMap::default();
     for (var, attr) in self_attrs {
         if let Some(container) = types.get(var).and_then(IteratedContainer::of_val) {
             live.entry(*var)
@@ -622,76 +642,101 @@ fn live_containers(
     if live.is_empty() {
         return live;
     }
-    loop {
-        let before: usize = live.values().map(BTreeSet::len).sum();
+    let budget = live_facts_budget(f);
+    let mut facts: usize = live.values().map(BTreeSet::len).sum();
+    for _ in 0..MAX_LIVE_PASSES {
+        let before = facts;
         for bb in &f.blocks {
-            for phi in &bb.phis {
-                let merged: BTreeSet<_> = phi
-                    .incoming
-                    .iter()
-                    .filter_map(|(_, v)| live.get(v))
-                    .flatten()
-                    .cloned()
-                    .collect();
-                if !merged.is_empty() {
-                    live.entry(phi.dst).or_default().extend(merged);
-                }
-            }
-            for inst in &bb.insts {
-                let (dst, sources): (VarId, Vec<VarId>) = match &inst.kind {
-                    InstKind::Copy { dst, src } => (*dst, vec![*src]),
-                    InstKind::MakeIter { dst, iterable, .. } => (*dst, vec![*iterable]),
-                    InstKind::MakeGenExpr {
-                        dst, outer_iter, ..
-                    } => (*dst, vec![*outer_iter]),
-                    InstKind::MethodCall {
-                        dst,
-                        recv,
-                        method,
-                        args,
-                        kwargs,
-                        ..
-                    } if args.is_empty()
-                        && kwargs.is_empty()
-                        && matches!(method.as_str(), "keys" | "values" | "items") =>
-                    {
-                        let views = live.get(recv).map(|s| {
-                            s.iter()
-                                .filter(|(_, c)| *c == IteratedContainer::Mapping)
-                                .cloned()
-                                .collect::<BTreeSet<_>>()
-                        });
-                        if let Some(views) = views.filter(|v| !v.is_empty()) {
-                            live.entry(*dst).or_default().extend(views);
-                        }
-                        continue;
-                    }
-                    // `itertools.chain(...)` is a method call on the module.
-                    InstKind::Call { dst, args, .. } | InstKind::MethodCall { dst, args, .. }
-                        if args.iter().any(|a| live.contains_key(a)) =>
-                    {
-                        match resolve_inst(tcx, types, &inst.kind) {
-                            Callee::External(symbol) => (*dst, lazily_iterated(&symbol, args)),
-                            _ => continue,
-                        }
-                    }
-                    _ => continue,
+            let links = bb.phis.iter().map(Link::Phi);
+            for link in links.chain(bb.insts.iter().map(Link::Inst)) {
+                let Some((dst, found)) = flows(tcx, types, &live, link) else {
+                    continue;
                 };
-                let found: BTreeSet<_> = sources
-                    .iter()
-                    .filter_map(|v| live.get(v))
-                    .flatten()
-                    .cloned()
-                    .collect();
-                if !found.is_empty() {
-                    live.entry(dst).or_default().extend(found);
+                facts += join(&mut live, dst, found);
+                if facts > budget {
+                    return Live::default();
                 }
             }
         }
-        if live.values().map(BTreeSet::len).sum::<usize>() == before {
+        if facts == before {
             return live;
         }
     }
+    Live::default()
+}
+
+/// A phi or an instruction, through which values flow in [`live_containers`].
+enum Link<'f> {
+    Phi(&'f PhiNode),
+    Inst(&'f Inst),
+}
+
+/// The value `link` defines and the containers it may iterate from its inputs (`None`: it
+/// iterates none of theirs).
+fn flows(
+    tcx: &TypeCtx<'_>,
+    types: &FxHashMap<VarId, Val>,
+    live: &Live,
+    link: Link<'_>,
+) -> Option<(VarId, BTreeSet<(String, IteratedContainer)>)> {
+    let union = |sources: &[VarId]| -> BTreeSet<(String, IteratedContainer)> {
+        sources
+            .iter()
+            .filter_map(|v| live.get(v))
+            .flatten()
+            .cloned()
+            .collect()
+    };
+    let inst = match link {
+        Link::Phi(phi) => {
+            let inputs: Vec<VarId> = phi.incoming.iter().map(|(_, v)| *v).collect();
+            return Some((phi.dst, union(&inputs)));
+        }
+        Link::Inst(inst) => inst,
+    };
+    match &inst.kind {
+        InstKind::Copy { dst, src } => Some((*dst, union(&[*src]))),
+        InstKind::MakeIter { dst, iterable, .. } => Some((*dst, union(&[*iterable]))),
+        InstKind::MakeGenExpr {
+            dst, outer_iter, ..
+        } => Some((*dst, union(&[*outer_iter]))),
+        InstKind::MethodCall {
+            dst,
+            recv,
+            method,
+            args,
+            kwargs,
+            ..
+        } if args.is_empty()
+            && kwargs.is_empty()
+            && matches!(method.as_str(), "keys" | "values" | "items") =>
+        {
+            let mut views = union(&[*recv]);
+            views.retain(|(_, c)| *c == IteratedContainer::Mapping);
+            Some((*dst, views))
+        }
+        // `itertools.chain(...)` is a method call on the module.
+        InstKind::Call { dst, args, .. } | InstKind::MethodCall { dst, args, .. }
+            if args.iter().any(|a| live.contains_key(a)) =>
+        {
+            match resolve_inst(tcx, types, &inst.kind) {
+                Callee::External(symbol) => Some((*dst, union(&lazily_iterated(&symbol, args)))),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Add the containers `found` to those `dst` may iterate; the number of new facts.
+fn join(live: &mut Live, dst: VarId, found: BTreeSet<(String, IteratedContainer)>) -> usize {
+    if found.is_empty() {
+        return 0;
+    }
+    let slot = live.entry(dst).or_default();
+    let before = slot.len();
+    slot.extend(found);
+    slot.len() - before
 }
 
 /// The arguments iterating the result of the builtin or `itertools` call `symbol` steps while
