@@ -131,7 +131,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | `MUT101` |
 | Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
 | Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | `MUT112` |
-| Opt-in: a dict or set changed while a suspended generator, or a loop calling a helper, iterates it | `MUT113` |
+| Opt-in, experimental: a dict or set changed while a suspended generator, or a loop calling a helper, iterates it | `MUT113` |
 
 ### A safety net for reviews and coding agents
 
