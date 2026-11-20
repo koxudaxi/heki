@@ -1247,3 +1247,24 @@ fn absolute_paths_print_from_the_working_directory_through_links_and_stay_absolu
         other.display()
     );
 }
+
+/// A path given through a symbolic link into the working directory prints relative to it, on
+/// every platform (not only where the temporary directory itself is a link).
+#[cfg(unix)]
+#[test]
+fn absolute_paths_through_a_link_into_the_working_directory_print_relative() {
+    let p = Project::new("reg_paths_link");
+    p.write("src/pkg/__init__.py", "")
+        .write("src/pkg/a.py", &format!("import os\n\n\n{IMPORT_BLOCKS}"));
+    let src = p.dir.join("src");
+    let link = p.dir.join("link");
+    std::os::unix::fs::symlink(&src, &link).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["check", "--output-format", "concise"])
+        .arg(&link)
+        .current_dir(&src)
+        .output()
+        .unwrap();
+    let out = String::from_utf8(out.stdout).unwrap();
+    assert!(out.starts_with("pkg/a.py:8:16: OPT120 "), "{out}");
+}
