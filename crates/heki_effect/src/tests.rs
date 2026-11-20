@@ -687,6 +687,37 @@ fn gate_5_update_file_early_cutoff() {
     );
 }
 
+/// `sync_driven_only` is decided by a function's callers: re-propagating a function after an
+/// edit of a callee or of its own module keeps what they decided, and an edit that decides it
+/// again unchanged is no change.
+#[test]
+fn gate_5_edits_keep_what_callers_decided_about_a_coroutine() {
+    let leaf = "import time\n\ndef block():\n    time.sleep(1)\n";
+    let worker = "from pkg.leaf import block\n\nasync def _work():\n    block()\n";
+    let mut index = project(&[
+        ("pkg/__init__.py", ""),
+        ("pkg/leaf.py", leaf),
+        ("pkg/worker.py", worker),
+        (
+            "pkg/driver.py",
+            "from pkg.worker import _work\n\ndef drive():\n    _work().send(None)\n",
+        ),
+    ]);
+    assert!(summary(&index, "pkg.worker", "_work").sync_driven_only);
+    // The callee's blocking call moves: the coroutine copies the new position.
+    let res = reanalyze(
+        &mut index,
+        "pkg/leaf.py",
+        &leaf.replace("    time.sleep", "\n    time.sleep"),
+    );
+    assert!(!res.summary_changed);
+    assert!(summary(&index, "pkg.worker", "_work").sync_driven_only);
+    let res = reanalyze(&mut index, "pkg/worker.py", &format!("# workers\n{worker}"));
+    assert!(!res.summary_changed);
+    assert!(res.changed.is_empty());
+    assert!(summary(&index, "pkg.worker", "_work").sync_driven_only);
+}
+
 #[test]
 fn gate_5_cross_file_cycle_does_not_keep_stale_effects() {
     let mut index = project(&[

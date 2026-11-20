@@ -130,6 +130,15 @@ const CHAIN_LOW: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Re
 const CHAIN_MID: &str = "from pkg.chain_low import book, peek, stamp\n\n\ndef relay(r, v, l):\n    stamp(r)\n    peek(v)\n    return book(l)\n";
 const CHAIN_TOP: &str = "from pkg.chain_mid import relay\n\n\nclass Store:\n    def run(self, r, v, l):\n        return relay(r, v, l)\n\n\ndef outside(r, v, l):\n    return None\n";
 
+// The index across files: two modules drive each other's private coroutine by hand
+// (`sync_driven_only`), and a coroutine a sync function drives calls a blocking helper in
+// another module.
+const DRIVE_A: &str = "from pkg.drive_b import _cb\n\n\nasync def _ca():\n    return 1\n\n\ndef drive_b():\n    _cb().send(None)\n";
+const DRIVE_B: &str = "from pkg.drive_a import _ca\n\n\nasync def _cb():\n    return 1\n\n\ndef drive_a():\n    _ca().send(None)\n";
+const SLOW_LEAF: &str = "import time\n\n\ndef block():\n    time.sleep(1)\n";
+const WORKER: &str = "from pkg.slow_leaf import block\n\n\nasync def _work():\n    block()\n";
+const WORKER_DRIVER: &str = "from pkg.worker import _work\n\n\ndef drive():\n    _work().send(None)\n";
+
 // Files: a module a caller already imports is created, then deleted; a stub is put next to a
 // module, then removed.
 const USES_EXTRA: &str = "from pkg.extra import slow\n\n\nasync def go():\n    return slow()\n";
@@ -381,6 +390,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/fill_main.py", FILL_MAIN),
         ("pkg/views.py", VIEWS),
         ("pkg/tagged.py", TAGGED),
+        ("pkg/drive_a.py", DRIVE_A),
+        ("pkg/drive_b.py", DRIVE_B),
+        ("pkg/slow_leaf.py", SLOW_LEAF),
+        ("pkg/worker.py", WORKER),
+        ("pkg/worker_driver.py", WORKER_DRIVER),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -558,6 +572,31 @@ fn steps_receiver_typing() -> Vec<Step> {
             vec![save("pkg/tagged.py", TAGGED)],
         )
         .present(&[("pkg/views.py", "MUT201")]),
+    ]
+}
+
+/// The index across files: facts its callers decide (`sync_driven_only`).
+fn steps_effect_index() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a comment in a module whose coroutine another module drives by hand",
+            vec![save("pkg/drive_a.py", &format!("# drivers\n{DRIVE_A}"))],
+        )
+        .absent(&[("pkg/drive_a.py", "EFF101"), ("pkg/drive_b.py", "EFF101")])
+        .cutoff(),
+        Step::new(
+            "a blank line above the blocking call below a hand-driven coroutine",
+            vec![save(
+                "pkg/slow_leaf.py",
+                &SLOW_LEAF.replace("    time.sleep", "\n    time.sleep"),
+            )],
+        )
+        .absent(&[("pkg/worker.py", "EFF101")]),
+        Step::new(
+            "the coroutine's module is edited after its callee moved",
+            vec![save("pkg/worker.py", &format!("{WORKER}# done\n"))],
+        )
+        .absent(&[("pkg/worker.py", "EFF101")]),
     ]
 }
 
@@ -1088,6 +1127,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_small_displays());
     steps.extend(steps_mut202_mut109());
     steps.extend(steps_receiver_typing());
+    steps.extend(steps_effect_index());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(

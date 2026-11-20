@@ -67,15 +67,21 @@ fn out_sites_of<'f>(
     out
 }
 
-/// Reset the final summaries of `region` to their local facts.
+/// Reset the final summaries of `region` to their local facts. `sync_driven_only` is kept: it
+/// is decided by the function's callers, not propagated from its callees, and recomputed only
+/// for the functions whose callers may have changed ([`recompute_sync_driven_for`]).
 pub(crate) fn reset_to_local(index: &mut ProjectIndex, region: &FxHashSet<FuncKey>) {
     for func in region {
         let Some(path) = index.func_files.get(func).cloned() else {
             continue;
         };
         if let Some(file) = index.files.get_mut(&path)
-            && let Some(local) = file.local_functions.get(func).cloned()
+            && let Some(mut local) = file.local_functions.get(func).cloned()
         {
+            local.sync_driven_only = file
+                .functions
+                .get(func)
+                .is_some_and(|cur| cur.sync_driven_only);
             file.functions.insert(func.clone(), local);
         }
     }

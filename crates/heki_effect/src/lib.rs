@@ -983,6 +983,13 @@ impl ProjectIndex {
             self.remove_file_links(old);
         }
         new_file.functions = new_file.local_functions.clone();
+        // What the callers decided before the edit: the recomputation below reports a function
+        // only when its flag differs from that.
+        for (func, s) in &mut new_file.functions {
+            if let Some(old) = previous.get(func) {
+                s.sync_driven_only = old.sync_driven_only;
+            }
+        }
         self.add_file_links(&new_file);
         let own: FxHashSet<FuncKey> = new_file
             .local_functions
