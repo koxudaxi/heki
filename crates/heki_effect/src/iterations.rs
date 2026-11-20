@@ -12,11 +12,11 @@
 //! afterwards); the changes are propagated through the methods a function calls on `self` and
 //! the helpers it hands a container to (`callgraph`).
 
-use crate::consumption::resolve_inst;
+use crate::consumption::{Consumption, IterFlow, resolve_inst};
 use crate::resolver::{Callee, TypeCtx, Val};
 use crate::{BoundCallee, CallSite, EffectSummary, Facts, FuncKey, ProjectIndex};
 use heki_ast::Span;
-use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
+use heki_ir::{BlockId, Inst, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -339,6 +339,198 @@ impl BetweenSteps {
     pub(crate) fn is_empty(&self) -> bool {
         !self.suspends && self.calls.is_empty()
     }
+}
+
+/// What a use of a project call's result does with the object.
+enum ResultUse {
+    /// Nothing that steps it or lets it out: a copy, a comparison, a lazy wrapper made of it
+    /// (the wrapper's own uses are the object's).
+    Inert,
+    /// It escapes: stored, yielded, captured, handed to code heki does not follow, or returned
+    /// by a generator or a coroutine. Any later code may step it.
+    Escapes,
+    /// It is stepped to exhaustion, returned by a plain function, or passed to a project call.
+    Uses,
+    /// A step that may leave a generator suspended, resumed by a use reachable from `Resume`.
+    Steps(Resume),
+}
+
+/// Where the code after a step that may leave a generator suspended starts.
+#[derive(Clone, Copy)]
+enum Resume {
+    /// After the instruction at `(block, index)`.
+    After(BlockId, usize),
+    /// A `for` loop: on leaving its body other than through its `header` (the loop's next step).
+    /// `exhausted`: the header's edge taken once the iterator ends, which exhausts the object.
+    Loop {
+        header: BlockId,
+        exhausted: Option<BlockId>,
+    },
+}
+
+/// The project call results among `results` (`flow` roots) whose object outlives one of the
+/// function's uses of it: it escapes, or a step that may leave it suspended (`next()`, a method of
+/// it, a `for` loop that leaves early or over a wrapper that may stop first, `any()`) is followed
+/// by another use. The code between them runs while a generator is suspended. A `plain` function
+/// (neither a generator nor a coroutine) hands a returned result on to its caller.
+pub(crate) fn held_results(
+    f: &IrFunction,
+    flow: &IterFlow,
+    results: &FxHashSet<VarId>,
+    plain: bool,
+) -> FxHashSet<VarId> {
+    let carried = |v: VarId| -> Vec<VarId> {
+        if !flow.root_of.contains_key(&v) && !flow.may_roots.contains_key(&v) {
+            return Vec::new();
+        }
+        let mut roots = flow.expand_steps(&[v]);
+        roots.retain(|r| results.contains(r));
+        roots
+    };
+    let events: FxHashMap<(BlockId, usize), Vec<&Consumption>> =
+        flow.events.iter().fold(FxHashMap::default(), |mut by, e| {
+            by.entry((e.block, e.index)).or_default().push(e);
+            by
+        });
+    let mut held: FxHashSet<VarId> = FxHashSet::default();
+    let mut uses: FxHashMap<VarId, Vec<(BlockId, usize)>> = FxHashMap::default();
+    let mut steps: FxHashMap<VarId, Vec<Resume>> = FxHashMap::default();
+    for bb in &f.blocks {
+        for (index, inst) in bb.insts.iter().enumerate() {
+            let at = events.get(&(bb.id, index)).map_or(&[][..], Vec::as_slice);
+            for v in inst.kind.operands() {
+                for r in carried(v) {
+                    match result_use(f, flow, (bb.id, index), inst, at, v, r) {
+                        ResultUse::Inert => {}
+                        ResultUse::Escapes => {
+                            held.insert(r);
+                        }
+                        ResultUse::Uses => uses.entry(r).or_default().push((bb.id, index)),
+                        ResultUse::Steps(resume) => {
+                            uses.entry(r).or_default().push((bb.id, index));
+                            steps.entry(r).or_default().push(resume);
+                        }
+                    }
+                }
+            }
+        }
+        if let Terminator::Return(Some(v)) = bb.terminator {
+            for r in carried(v) {
+                if plain {
+                    uses.entry(r).or_default().push((bb.id, bb.insts.len()));
+                } else {
+                    held.insert(r);
+                }
+            }
+        }
+    }
+    for (r, resumes) in &steps {
+        let later = &uses[r];
+        if resumes.iter().any(|resume| resumed(f, *resume, later)) {
+            held.insert(*r);
+        }
+    }
+    held
+}
+
+/// What the instruction `inst` at `(block, index)` does with the project call result `r`, which
+/// its operand `v` carries; `events` are the flow's iterations there.
+fn result_use(
+    f: &IrFunction,
+    flow: &IterFlow,
+    (block, index): (BlockId, usize),
+    inst: &Inst,
+    events: &[&Consumption],
+    v: VarId,
+    r: VarId,
+) -> ResultUse {
+    let after = Resume::After(block, index);
+    if let InstKind::MakeIter { dst, iterable, .. } = &inst.kind {
+        let exhausts = flow.expand(&[*iterable]).contains(&r);
+        return ResultUse::Steps(loop_resume(f, *dst, exhausts).unwrap_or(after));
+    }
+    if let Some(e) = events.iter().find(|e| e.stepped.contains(&r)) {
+        return if e.full && e.roots.contains(&r) {
+            ResultUse::Uses
+        } else {
+            ResultUse::Steps(after)
+        };
+    }
+    let wraps = inst
+        .kind
+        .dst()
+        .is_some_and(|d| flow.expand_steps(&[d]).contains(&r));
+    match &inst.kind {
+        InstKind::Copy { .. }
+        | InstKind::Compare { .. }
+        | InstKind::UnaryOp { .. }
+        | InstKind::Delete { .. } => ResultUse::Inert,
+        _ if wraps => ResultUse::Inert,
+        // A generator's own methods step it (`send()`, `throw()`).
+        InstKind::MethodCall { recv, .. } if *recv == v => ResultUse::Steps(after),
+        InstKind::Call { .. } | InstKind::MethodCall { .. } => {
+            match flow.callees.get(&(block, index)) {
+                Some(Callee::External(s)) if s == "builtins.next" => ResultUse::Steps(after),
+                Some(Callee::Project(..)) => ResultUse::Uses,
+                _ => ResultUse::Escapes,
+            }
+        }
+        _ => ResultUse::Escapes,
+    }
+}
+
+/// [`Resume::Loop`] for the `for` loop stepping the iterator `iter`, whose end exhausts the
+/// object (`exhausts`) or may leave it suspended (`zip(range(3), it)`); `None` without one.
+fn loop_resume(f: &IrFunction, iter: VarId, exhausts: bool) -> Option<Resume> {
+    let header = f.blocks.iter().find(|b| {
+        b.insts
+            .iter()
+            .any(|i| matches!(i.kind, InstKind::IterNext { iter: it, .. } if it == iter))
+    })?;
+    let exhausted = match header.terminator {
+        Terminator::Branch { else_bb, .. } if exhausts => Some(else_bb),
+        _ => None,
+    };
+    Some(Resume::Loop {
+        header: header.id,
+        exhausted,
+    })
+}
+
+/// Whether one of `uses` (positions; a block's terminator is at its instruction count) can run
+/// after the step that `resume` continues, on normal or exception edges.
+fn resumed(f: &IrFunction, resume: Resume, uses: &[(BlockId, usize)]) -> bool {
+    let next = |b: BlockId| {
+        let block = f.block(b);
+        let mut succs = block.terminator.successors();
+        succs.extend(block.exc_target);
+        succs
+    };
+    let mut seen: FxHashSet<BlockId> = FxHashSet::default();
+    let mut stack = match resume {
+        Resume::After(block, index) => {
+            if uses.iter().any(|&(b, i)| b == block && i > index) {
+                return true;
+            }
+            next(block)
+        }
+        Resume::Loop { header, exhausted } => {
+            seen.insert(header);
+            let mut succs = next(header);
+            succs.retain(|s| Some(*s) != exhausted && Some(*s) != f.block(header).exc_target);
+            succs
+        }
+    };
+    while let Some(b) = stack.pop() {
+        if !seen.insert(b) {
+            continue;
+        }
+        if uses.iter().any(|&(u, _)| u == b) {
+            return true;
+        }
+        stack.extend(next(b));
+    }
+    false
 }
 
 /// The iterations of the method `f` over the checked containers of its own instance

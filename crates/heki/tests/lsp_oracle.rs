@@ -500,8 +500,9 @@ const OWN_SUB_SORTING: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):
 // generator takes a snapshot and stops, the subclass hands the dict to a helper of a third module
 // that changes it, and the helper stops changing it), and a private
 // generator whose consumer in another module starts changing the dict in its loop, then keeps the
-// generator, then only counts again; then a helper there iterating the generator, whose result a
-// function keeps, starts suspending inside its loop (its calls stay the same).
+// generator, then only counts again, then steps it by hand before counting the rest, then
+// counts again; then a helper there iterating the generator, whose result a function keeps,
+// starts suspending inside its loop (its calls stay the same).
 const SUBSCRIPTIONS: &str = "class Subscriptions:\n    def __init__(self):\n        self.by_node = {}\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.by_node.values()\n\n    def next_subscriber(self):\n        return next(self._cursor)\n";
 const SUB_DROP: &str = "from pkg.subscriptions import Subscriptions\n\n\nclass Dropping(Subscriptions):\n    def size(self):\n        return len(self.by_node)\n";
 const SUB_DROP_CHANGING: &str = "from pkg.subscriptions import Subscriptions\n\n\nclass Dropping(Subscriptions):\n    def drop(self, node):\n        self.by_node.pop(node, None)\n";
@@ -1846,7 +1847,7 @@ fn steps_mut111() -> Vec<Step> {
 /// `MUT113`: a generator's report follows the methods of its class family in other modules that
 /// change the container it iterates (`heki_rules::family_readers`), where they change it (the
 /// places other files show, `shown_places`), and what its callers in other modules do with it
-/// (`EffectSummary::result_iterations`).
+/// (`EffectSummary::result_iterations`, `CallSite::result_held`).
 fn steps_mut113() -> Vec<Step> {
     let moved = SUB_DROP_CHANGING.replace(
         "        self.by_node.pop",
@@ -1863,6 +1864,10 @@ fn steps_mut113() -> Vec<Step> {
     let keeping = TALLY_USE.replace(
         "    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n",
         "    t.cursor = t._walk()\n    return 0\n",
+    );
+    let stepping = TALLY_USE.replace(
+        "    for k in t._walk():\n",
+        "    g = t._walk()\n    next(g)\n    for k in g:\n",
     );
     vec![
         Step::new(
@@ -1907,6 +1912,16 @@ fn steps_mut113() -> Vec<Step> {
         .present(&[("pkg/tally.py", "MUT113")]),
         Step::new(
             "the other module only counts the items again",
+            vec![save("pkg/tally_use.py", TALLY_USE)],
+        )
+        .absent(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the other module steps the generator by hand before counting the rest",
+            vec![Action::Save("pkg/tally_use.py", stepping)],
+        )
+        .present(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the other module counts every item again",
             vec![save("pkg/tally_use.py", TALLY_USE)],
         )
         .absent(&[("pkg/tally.py", "MUT113")]),

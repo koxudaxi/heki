@@ -294,6 +294,273 @@ fn mut113_follows_where_a_generator_object_goes() {
     );
 }
 
+/// A generator whose object outlives one use of it: stored, handed to code heki does not follow,
+/// returned by a coroutine, or stepped (`next()`, `send()`, a loop leaving early, `any()`, a
+/// wrapper stopping first) and then used again, also when the later use consumes it. A step with
+/// no later use, an exhausting loop, a comparison, and `del` do not hold it.
+const HELD: &str = r#"import itertools
+
+
+class Table:
+    def __init__(self) -> None:
+        self.table: dict[str, int] = {}
+        self.pending: list[object] = []
+
+    def remove(self, k: str) -> None:
+        del self.table[k]
+
+    def note(self, k: str) -> str:
+        return k
+
+    def _stepped(self):
+        yield from self.table
+
+    def stepped_then_consumed(self):
+        g = self._stepped()
+        next(g)
+        self.remove("b")
+        return list(g)
+
+    def _broken(self):
+        yield from self.table
+
+    def first_then_rest(self):
+        it = self._broken()
+        for first in it:
+            break
+        self.remove("b")
+        rest = []
+        for k in it:
+            rest.append(k)
+        return rest
+
+    def _tested(self):
+        yield from self.table
+
+    def any_then_rest(self):
+        g = self._tested()
+        any(g)
+        self.remove("b")
+        return list(g)
+
+    def _sliced(self):
+        yield from self.table
+
+    def sliced_then_rest(self):
+        g = self._sliced()
+        head = list(itertools.islice(g, 1))
+        self.remove("b")
+        return head + list(g)
+
+    def _zipped(self):
+        yield from self.table
+
+    def zipped_then_rest(self):
+        g = self._zipped()
+        for _, k in zip(range(1), g):
+            self.note(k)
+        self.remove("b")
+        return list(g)
+
+    def _sent(self):
+        yield from self.table
+
+    def sent_then_rest(self):
+        g = self._sent()
+        g.send(None)
+        self.remove("b")
+        return list(g)
+
+    def _handed(self):
+        yield from self.table
+
+    def stepped_then_handed(self):
+        g = self._handed()
+        next(g)
+        self.remove("b")
+        return consume(g)
+
+    def _started(self):
+        yield from self.table
+
+    def started(self):
+        g = self._started()
+        next(g)
+        return g
+
+    def _queued(self):
+        yield from self.table
+
+    def queue(self):
+        self.pending.append(self._queued())
+
+    async def _later(self):
+        return self._awaited()
+
+    def _awaited(self):
+        yield from self.table
+
+    def _first(self):
+        yield from self.table
+
+    def first_only(self):
+        return next(self._first())
+
+    def _checked(self):
+        yield from self.table
+
+    def checked_then_iterated(self, flag: bool):
+        g = self._checked() if flag else None
+        if g is not None:
+            for k in g:
+                self.note(k)
+        del g
+        self.remove("b")
+
+    def _left(self):
+        yield from self.table
+
+    def left_by_return(self):
+        for k in self._left():
+            if k == "a":
+                return True
+        self.remove("b")
+        return False
+
+    def _discarded(self):
+        yield from self.table
+
+    def discarded(self):
+        self._discarded()
+        self.remove("b")
+
+    def _exhausted(self):
+        yield from self.table
+
+    def exhausted_then_reused(self):
+        g = self._exhausted()
+        for k in g:
+            self.note(k)
+        self.remove("b")
+        return list(g)
+
+
+def consume(rows):
+    return [r for r in rows]
+"#;
+
+const HELD_RUN: &str = r#"import asyncio
+from pkg.table import Table
+
+
+def fresh():
+    t = Table()
+    t.table.update(a=1, b=2, c=3)
+    return t
+
+
+def attempt(name, fn):
+    try:
+        fn()
+        print(name, "ok")
+    except RuntimeError as e:
+        print(name, e)
+
+
+attempt("stepped_then_consumed", lambda: fresh().stepped_then_consumed())
+attempt("first_then_rest", lambda: fresh().first_then_rest())
+attempt("any_then_rest", lambda: fresh().any_then_rest())
+attempt("sliced_then_rest", lambda: fresh().sliced_then_rest())
+attempt("zipped_then_rest", lambda: fresh().zipped_then_rest())
+attempt("sent_then_rest", lambda: fresh().sent_then_rest())
+attempt("stepped_then_handed", lambda: fresh().stepped_then_handed())
+
+
+def started():
+    t = fresh()
+    g = t.started()
+    t.remove("b")
+    list(g)
+
+
+attempt("started", started)
+
+
+def queued():
+    t = fresh()
+    t.queue()
+    g = t.pending[0]
+    next(g)
+    t.remove("b")
+    list(g)
+
+
+attempt("queue", queued)
+
+
+def later():
+    t = fresh()
+    g = asyncio.run(t._later())
+    next(g)
+    t.remove("b")
+    list(g)
+
+
+attempt("later", later)
+attempt("first_only", lambda: (lambda t: (t.first_only(), t.remove("b")))(fresh()))
+attempt("checked_then_iterated", lambda: fresh().checked_then_iterated(True))
+attempt("left_by_return", lambda: fresh().left_by_return())
+attempt("discarded", lambda: fresh().discarded())
+attempt("exhausted_then_reused", lambda: fresh().exhausted_then_reused())
+"#;
+
+#[test]
+fn mut113_reports_a_generator_that_outlives_one_use_of_it() {
+    let p = Project::new("mut113_held");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/table.py", HELD)
+        .write("run.py", HELD_RUN);
+    let held = |line, generator| d("pkg/table.py", line, generator, "Table.table");
+    assert_eq!(
+        reports(&diagnostics(&p, &["--extend-select", "MUT113"])),
+        vec![
+            held(16, "Table._stepped"),
+            held(25, "Table._broken"),
+            held(38, "Table._tested"),
+            held(47, "Table._sliced"),
+            held(56, "Table._zipped"),
+            held(66, "Table._sent"),
+            held(75, "Table._handed"),
+            held(84, "Table._started"),
+            held(92, "Table._queued"),
+            held(101, "Table._awaited"),
+        ]
+    );
+    let raised = "dictionary changed size during iteration";
+    let expected: Vec<String> = [
+        ("stepped_then_consumed", raised),
+        ("first_then_rest", raised),
+        ("any_then_rest", raised),
+        ("sliced_then_rest", raised),
+        ("zipped_then_rest", raised),
+        ("sent_then_rest", raised),
+        ("stepped_then_handed", raised),
+        ("started", raised),
+        ("queue", raised),
+        ("later", raised),
+        ("first_only", "ok"),
+        ("checked_then_iterated", "ok"),
+        ("left_by_return", "ok"),
+        ("discarded", "ok"),
+        ("exhausted_then_reused", "ok"),
+    ]
+    .iter()
+    .map(|(name, outcome)| format!("{name} {outcome}"))
+    .collect();
+    let output = run_python(&p.dir, "run.py");
+    assert_eq!(output.lines().collect::<Vec<_>>(), expected);
+}
+
 /// The container classes whose iterators check for changes, and the changes each checks.
 const CONTAINERS: &str = r#"import collections
 from collections import OrderedDict, deque
