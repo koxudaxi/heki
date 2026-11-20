@@ -617,13 +617,15 @@ impl Workspace {
         out.into_iter().collect()
     }
 
-    /// Files defining classes whose `MUT101` / `MUT107` / `MUT112` reports read the summaries of
-    /// the `changed` methods (class families span modules).
-    fn family_files(&self, changed: &[FuncKey]) -> Vec<PathBuf> {
+    /// Files defining classes whose `MUT101` / `MUT107` / `MUT112` / `MUT113` reports read the
+    /// summaries of the `changed` methods (class families span modules) or the call sites of the
+    /// `calling` functions (`MUT113` follows a generator's object through its callers).
+    fn family_files(&self, changed: &[FuncKey], calling: &[&FuncKey]) -> Vec<PathBuf> {
         let classes = family_readers(
             &self.index,
             self.decls.completed(),
             changed,
+            calling,
             self.selection.is_enabled("MUT112"),
         );
         self.index
@@ -781,13 +783,13 @@ impl Workspace {
         affected.extend(self.reading(change));
         affected.extend(self.callee_files(callers.0, callers.1));
         affected.extend(self.handed_over_files(&update.changed));
-        affected.extend(self.family_files(&update.changed));
         let changed: Vec<&FuncKey> = callers
             .0
             .keys()
             .chain(callers.1.keys())
             .filter(|k| callers.0.get(*k) != callers.1.get(*k))
             .collect();
+        affected.extend(self.family_files(&update.changed, &changed));
         if self.reach.owners {
             affected.extend(self.below_files(&changed, callers));
         }

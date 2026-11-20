@@ -710,8 +710,11 @@ functions with none).
    (the class's own first), with each method's first change (its own, else its first call that
    changes the container) as a related location.
 6. Incremental updates: `heki_rules::family_readers` re-checks the family of a changed method when
-   a class of it has a suspending generator, and the families of the generators a changed function
-   calls; the language server re-checks the files showing a container change site that moved.
+   a class of it has a suspending generator, and the families of the generators whose objects the
+   calls of a function may receive when its summary or its call sites changed: its callees, and
+   in turn what each hands on (the result of a call it returns, or iterates while suspending: the
+   relation step 5 follows up from a generator). The language server re-checks the files showing
+   a container change site that moved.
 
 #### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
 - The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,
