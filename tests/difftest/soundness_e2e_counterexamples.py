@@ -534,6 +534,61 @@ def old_tuple_or_element(flag, n):
     return hits
 
 
+# ------------------------------------------------------------------------------
+# OPT110: elements that other code or an earlier iteration may have replaced
+# ------------------------------------------------------------------------------
+def replace_first(xs):
+    xs[0] = []
+
+
+def cx_elements_after_escape(n):
+    keys = list(range(9))
+    source = [0]
+    replace_first(source)
+    out = []
+    for p in source:
+        out.append(p in keys)
+    return out
+
+
+def old_elements_after_escape(n):
+    keys = list(range(9))
+    source = [0]
+    replace_first(source)
+    out = []
+    keys_set = set(keys)
+    for p in source:
+        out.append(p in keys_set)
+    return out
+
+
+def cx_list_from_earlier_iteration(n):
+    keys = list(range(9))
+    previous = []
+    out = []
+    for i in range(n):
+        current = [0]
+        for p in previous:
+            out.append(p in keys)
+        current.append([])
+        previous = current
+    return out
+
+
+def old_list_from_earlier_iteration(n):
+    keys = list(range(9))
+    previous = []
+    out = []
+    for i in range(n):
+        current = [0]
+        keys_set = set(keys)
+        for p in previous:
+            out.append(p in keys_set)
+        current.append([])
+        previous = current
+    return out
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -578,6 +633,8 @@ def main() -> int:
         (cx_ints_or_parameter, old_ints_or_parameter, lambda f: f(False, [[]])),
         (cx_range_or_parameter, old_range_or_parameter, lambda f: f(True, [[]])),
         (cx_tuple_or_element, old_tuple_or_element, lambda f: f(False, 0)),
+        (cx_elements_after_escape, old_elements_after_escape, lambda f: f(1)),
+        (cx_list_from_earlier_iteration, old_list_from_earlier_iteration, lambda f: f(3)),
     ]
     lines = []
     for cx, old, call in pairs:

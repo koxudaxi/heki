@@ -328,7 +328,16 @@ impl FrameState {
 
     /// Transitive escape (spec section 4.2): every variable that may share an object with `v`
     /// becomes `Shared`; if `v` is a derived reference, so does everything it derives from.
+    /// The code that receives the objects may replace their elements whenever it runs, so their
+    /// element kinds become unknown.
     pub(crate) fn mark_escaped(&mut self, v: VarId, witness: EscapeWitness, span: Span) {
+        let reached = self.allocs_of(v);
+        let bases = self.derives_from.get(&v).cloned().unwrap_or_default();
+        for a in reached.iter().chain(&bases) {
+            if let Some(e) = self.alloc_elems.get_mut(a) {
+                *e = ElemKinds::Unknown;
+            }
+        }
         let mut direct: Vec<VarId> = Vec::new();
         for a in self.allocs_of(v) {
             if let Some(m) = self.alias_sets.get(&a) {
@@ -692,14 +701,23 @@ impl<'a> FnCtx<'a> {
             },
             SmallVec::from_slice(&[site]),
         );
-        st.alloc_elems.insert(
-            site,
-            if tracks_elems(kind) {
-                elems
-            } else {
-                ElemKinds::Unknown
-            },
-        );
+        let elems = if tracks_elems(kind) {
+            elems
+        } else {
+            ElemKinds::Unknown
+        };
+        // A site in a loop summarizes every object it creates: while a variable or an iterator
+        // still refers to an earlier one, the site's kinds must keep describing that one too.
+        let earlier_object_referenced = st
+            .alias_sets
+            .get(&site)
+            .is_some_and(|m| m.iter().any(|&x| x != dst))
+            || st.derived_refs.get(&site).is_some_and(|d| !d.is_empty());
+        let elems = match st.alloc_elems.get(&site) {
+            Some(earlier) if earlier_object_referenced => earlier.join(elems),
+            _ => elems,
+        };
+        st.alloc_elems.insert(site, elems);
     }
 
     fn opaque(st: &mut FrameState, dst: VarId, reason: &str, span: Span) {

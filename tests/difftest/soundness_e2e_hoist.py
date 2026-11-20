@@ -536,6 +536,17 @@ def probes_from_either_list(n, c):
     return hits
 
 
+def probes_measured_first(n):
+    """`len` only reads the list: its elements stay known."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    probes = list(range(n))
+    hits = [len(probes)]
+    for p in probes:
+        if p in allowed:
+            hits.append(p)
+    return hits
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -601,6 +612,7 @@ def main() -> int:
             run(unhashable_elements, n),
             run(probes_from_a_list, n),
             run(probes_from_either_list, n, n % 2),
+            run(probes_measured_first, n),
         ]
     print("\n".join(lines))
     return 0
