@@ -233,7 +233,8 @@ class Proxy:
         self.kind = "proxy"
 
     def __hash__(self):
-        return hash((self.kind, self.__wrapped__))
+        wrapped = self.__wrapped__
+        return hash((self.kind, wrapped))
 
     def __setitem__(self, key, value):
         self.__wrapped__[key] = value
@@ -328,11 +329,11 @@ class FrozenSequence(Sequence):
         vec![
             at("pkg/seq.py", 12, "Sequence.replace"),
             at("pkg/seq.py", 27, "TableWriter.done"),
-            at("pkg/seq.py", 50, "Counted.write"),
-            at("pkg/seq.py", 61, "Copied.write"),
-            at("pkg/seq.py", 75, "Measured.write"),
-            at("pkg/seq.py", 97, "Indexed.write"),
-            at("pkg/seq.py", 108, "Typed.write"),
+            at("pkg/seq.py", 51, "Counted.write"),
+            at("pkg/seq.py", 62, "Copied.write"),
+            at("pkg/seq.py", 76, "Measured.write"),
+            at("pkg/seq.py", 98, "Indexed.write"),
+            at("pkg/seq.py", 109, "Typed.write"),
         ]
     );
 }
@@ -349,6 +350,9 @@ fn a_writer_whose_class_hashes_otherwise_leaves_the_base_hash_alone() {
 
     def __hash__(self):
         return hash(self.name)
+
+    def relabel(self, name):
+        self.name = name
 
 
 class MetaField(Field):
@@ -382,13 +386,27 @@ class Identity(Field):
 class Column(Field):
     def rename(self, name):
         self.name = name
+
+
+class Labeled(MetaField):
+    def __hash__(self):
+        return hash(("labeled", self.name))
+
+
+class Tagged(MetaField):
+    def __hash__(self):
+        return hash(("tagged", self.name))
 "#,
         );
     // `CompositeKey` instances hash with their own `__hash__`, and `Identity` instances (an
     // `__eq__` without `__hash__`) cannot be hashed: neither writer changes a `Field` hash.
+    // `Field.relabel` runs on instances of every class here, and is reported once.
     assert_eq!(
         reports(&p, "MUT107"),
-        vec![at("pkg/keys.py", 25, "Column.rename")]
+        vec![
+            at("pkg/fields.py", 9, "Field.relabel"),
+            at("pkg/keys.py", 25, "Column.rename"),
+        ]
     );
 }
 
