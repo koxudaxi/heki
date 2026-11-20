@@ -73,25 +73,27 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             continue;
         }
         let types = tcx.infer(f);
+        let flow = TaskFlow::of(f);
         let qualname = CheckContext::key(unit, f).qualname;
         for inst in candidates {
-            let Callee::External(symbol) = resolve_inst(&tcx, &types, &inst.kind) else {
-                continue;
+            let factory = match resolve_inst(&tcx, &types, &inst.kind) {
+                Callee::External(s) => TASK_FACTORIES.iter().find(|(f, _)| *f == s),
+                _ => None,
             };
-            let Some((_, keyword)) = TASK_FACTORIES.iter().find(|(s, _)| *s == symbol) else {
+            let Some(&(symbol, keyword)) = factory else {
                 continue;
             };
             if task_argument(&inst.kind, keyword)
-                .is_some_and(|arg| makes_no_task(f, &tcx, &types, arg))
+                .is_some_and(|arg| makes_no_task(&flow, &tcx, &types, arg))
             {
                 continue;
             }
             let dst = inst.kind.dst().expect("calls define their result");
-            let aliases = aliases_of(f, dst);
-            let Some(name) = name_of(f, &aliases) else {
+            let aliases = flow.aliases([dst]);
+            let Some(name) = flow.name_of(&aliases) else {
                 continue;
             };
-            if retained(f, &aliases, &holders_of(f, &aliases)) {
+            if flow.keeps(&aliases) {
                 continue;
             }
             cx.emit(
@@ -114,30 +116,26 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
 /// The argument a factory call makes its task from: the first positional one, or the one passed
 /// as `keyword` (`None` when `*` or `**` unpacking may supply it instead).
 fn task_argument(kind: &InstKind, keyword: &str) -> Option<VarId> {
-    let (InstKind::Call {
-        args,
-        kwargs,
-        star_from,
-        ..
+    match kind {
+        InstKind::Call {
+            args,
+            kwargs,
+            star_from,
+            ..
+        }
+        | InstKind::MethodCall {
+            args,
+            kwargs,
+            star_from,
+            ..
+        } if *star_from != Some(0) => args.first().copied().or_else(|| {
+            kwargs
+                .iter()
+                .find(|(name, _)| name.as_deref() == Some(keyword))
+                .map(|(_, v)| *v)
+        }),
+        _ => None,
     }
-    | InstKind::MethodCall {
-        args,
-        kwargs,
-        star_from,
-        ..
-    }) = kind
-    else {
-        return None;
-    };
-    if *star_from == Some(0) {
-        return None;
-    }
-    args.first().copied().or_else(|| {
-        kwargs
-            .iter()
-            .find(|(name, _)| name.as_deref() == Some(keyword))
-            .map(|(_, v)| *v)
-    })
 }
 
 /// Whether `arg` is known not to be a coroutine, so the factory makes no new task from it: a
@@ -147,7 +145,7 @@ fn task_argument(kind: &InstKind, keyword: &str) -> Option<VarId> {
 /// and `ensure_future` returns a future it is handed). An argument of unknown kind may be a
 /// coroutine and is reported.
 fn makes_no_task(
-    f: &IrFunction,
+    flow: &TaskFlow<'_>,
     tcx: &TypeCtx<'_>,
     types: &FxHashMap<VarId, Val>,
     arg: VarId,
@@ -156,14 +154,15 @@ fn makes_no_task(
     {
         return true;
     }
-    let Some(call) = defining_call(f, arg) else {
+    let Some(call) = flow.calls.get(&arg) else {
         return false;
     };
     match resolve_inst(tcx, types, call) {
         Callee::Project(keys, _) => {
             !keys.is_empty()
                 && keys.iter().all(|key| {
-                    // Calling a class returns the instance its `__init__` sets up, of unknown kind.
+                    // Calling a class returns the instance its `__init__` sets up, of unknown
+                    // kind.
                     key.qualname.rsplit('.').next() != Some("__init__")
                         && tcx
                             .project
@@ -175,121 +174,139 @@ fn makes_no_task(
     }
 }
 
-/// The call instruction whose result `var` is, through copies.
-fn defining_call(f: &IrFunction, mut var: VarId) -> Option<&InstKind> {
-    loop {
-        let def = f
-            .blocks
-            .iter()
-            .flat_map(|b| &b.insts)
-            .find(|i| i.kind.dst() == Some(var))?;
-        match &def.kind {
-            InstKind::Copy { src, .. } => var = *src,
-            kind @ (InstKind::Call { .. } | InstKind::MethodCall { .. }) => return Some(kind),
-            _ => return None,
-        }
-    }
+/// What the rule reads of one function, indexed once for all its factory calls, so that each
+/// call costs only the values it reaches.
+#[derive(Default)]
+struct TaskFlow<'f> {
+    /// The values a `Copy` binds from each value.
+    copies: FxHashMap<VarId, Vec<VarId>>,
+    /// The phis each value flows into.
+    phis: FxHashMap<VarId, Vec<VarId>>,
+    /// The attributes read from each value (`task.cancel`).
+    attributes: FxHashMap<VarId, Vec<VarId>>,
+    /// The local name each `Copy` binds, with its source position.
+    names: FxHashMap<VarId, (u32, &'f str)>,
+    /// The call each value is the result of, through copies (`pending = e.wait()`).
+    calls: FxHashMap<VarId, &'f InstKind>,
+    /// Values awaited, returned or yielded, stored (attribute value, subscript key or value,
+    /// global, enclosing scope, container literal), passed to a call, or captured by a closure
+    /// or generator expression.
+    kept: FxHashSet<VarId>,
+    /// Receivers of a [`LIFETIME_METHODS`] call.
+    ended: FxHashSet<VarId>,
 }
 
-/// `var` and every `Copy` / phi alias of it.
-fn aliases_of(f: &IrFunction, var: VarId) -> FxHashSet<VarId> {
-    closed_under(f, FxHashSet::from_iter([var]), |_| None)
-}
-
-/// The values that hold the task: its aliases, and every attribute read from a holder with the
-/// aliases of that value. Every public attribute of `asyncio.Task` is a method, and a bound
-/// method (`task.cancel`) holds the task as its `__self__`, so wherever it is kept the task is.
-fn holders_of(f: &IrFunction, aliases: &FxHashSet<VarId>) -> FxHashSet<VarId> {
-    closed_under(f, aliases.clone(), |kind| match kind {
-        InstKind::AttrLoad { dst, obj, .. } => Some((*obj, *dst)),
-        _ => None,
-    })
-}
-
-/// `set` closed under `Copy`, phis, and the `(source, value)` pairs `derives` reads from an
-/// instruction.
-fn closed_under(
-    f: &IrFunction,
-    mut set: FxHashSet<VarId>,
-    derives: impl Fn(&InstKind) -> Option<(VarId, VarId)>,
-) -> FxHashSet<VarId> {
-    loop {
-        let before = set.len();
+impl<'f> TaskFlow<'f> {
+    fn of(f: &'f IrFunction) -> Self {
+        let mut flow = Self::default();
+        let mut calls = Vec::new();
         for bb in &f.blocks {
             for phi in &bb.phis {
-                if phi.incoming.iter().any(|(_, v)| set.contains(v)) {
-                    set.insert(phi.dst);
+                for (_, v) in &phi.incoming {
+                    flow.phis.entry(*v).or_default().push(phi.dst);
                 }
             }
             for inst in &bb.insts {
-                let edge = match &inst.kind {
-                    InstKind::Copy { dst, src } => Some((*src, *dst)),
-                    kind => derives(kind),
-                };
-                if let Some((src, dst)) = edge
-                    && set.contains(&src)
+                match &inst.kind {
+                    InstKind::Copy { dst, src } => {
+                        flow.copies.entry(*src).or_default().push(*dst);
+                        if let Some(name) = f.var_name(*dst).filter(|n| !n.starts_with('.')) {
+                            flow.names.insert(*dst, (inst.span.start, name));
+                        }
+                    }
+                    InstKind::AttrLoad { dst, obj, .. } => {
+                        flow.attributes.entry(*obj).or_default().push(*dst);
+                    }
+                    kind @ (InstKind::Call { dst, .. } | InstKind::MethodCall { dst, .. }) => {
+                        calls.push((*dst, kind));
+                    }
+                    _ => {}
+                }
+                if let InstKind::MethodCall { recv, method, .. } = &inst.kind
+                    && LIFETIME_METHODS.contains(&method.as_str())
                 {
-                    set.insert(dst);
+                    flow.ended.insert(*recv);
+                }
+                flow.kept.extend(kept_operands(&inst.kind));
+            }
+            if let Terminator::Return(Some(v)) = &bb.terminator {
+                flow.kept.insert(*v);
+            }
+        }
+        // Each value has one `Copy` source, so every value is reached from at most one call.
+        for (dst, kind) in calls {
+            let mut pending = vec![dst];
+            while let Some(v) = pending.pop() {
+                if flow.calls.insert(v, kind).is_none() {
+                    pending.extend(flow.copies.get(&v).into_iter().flatten());
                 }
             }
         }
-        if set.len() == before {
-            return set;
+        flow
+    }
+
+    /// `roots` and every value copying one of them, through `Copy` and phis.
+    fn aliases(&self, roots: impl IntoIterator<Item = VarId>) -> FxHashSet<VarId> {
+        let mut set = FxHashSet::default();
+        let mut pending: Vec<VarId> = roots.into_iter().collect();
+        while let Some(v) = pending.pop() {
+            if set.insert(v) {
+                for edges in [&self.copies, &self.phis] {
+                    pending.extend(edges.get(&v).into_iter().flatten());
+                }
+            }
         }
+        set
+    }
+
+    /// The first local name the task is bound to (`None`: never bound to a name, e.g. a bare
+    /// expression statement or a value passed on directly).
+    fn name_of(&self, aliases: &FxHashSet<VarId>) -> Option<String> {
+        aliases
+            .iter()
+            .filter_map(|v| self.names.get(v))
+            .min_by_key(|(start, _)| *start)
+            .map(|(_, name)| (*name).to_owned())
+    }
+
+    /// Whether an alias of the task, or a method bound to one (`task.cancel`, which holds the
+    /// task as its `__self__`; every public attribute of `asyncio.Task` is a method), is kept,
+    /// or whether an alias is ended by a [`LIFETIME_METHODS`] call on it. What is read from a
+    /// bound method (`task.cancel.__name__`) holds nothing.
+    fn keeps(&self, aliases: &FxHashSet<VarId>) -> bool {
+        let methods = self.aliases(
+            aliases
+                .iter()
+                .flat_map(|a| self.attributes.get(a).into_iter().flatten().copied()),
+        );
+        aliases
+            .iter()
+            .any(|v| self.kept.contains(v) || self.ended.contains(v))
+            || methods.iter().any(|v| self.kept.contains(v))
     }
 }
 
-/// The first local name the task is bound to (`None`: never bound to a name, e.g. a bare
-/// expression statement or a value passed on directly).
-fn name_of(f: &IrFunction, aliases: &FxHashSet<VarId>) -> Option<String> {
-    f.blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match i.kind {
-            InstKind::Copy { dst, .. } if aliases.contains(&dst) => f
-                .var_name(dst)
-                .filter(|n| !n.starts_with('.'))
-                .map(|n| (i.span.start, n)),
-            _ => None,
-        })
-        .min_by_key(|(start, _)| *start)
-        .map(|(_, n)| n.to_owned())
-}
-
-/// Whether any of the task's `holders` is awaited, returned or yielded, stored (attribute value,
-/// subscript key or value, global, enclosing scope, container literal), passed to a call,
-/// captured by a closure or generator expression, or whether an alias is ended by a
-/// [`LIFETIME_METHODS`] call on it.
-fn retained(f: &IrFunction, aliases: &FxHashSet<VarId>, holders: &FxHashSet<VarId>) -> bool {
-    let has = |v: &VarId| holders.contains(v);
-    let retains = |kind: &InstKind| match kind {
+/// The operands an instruction keeps: see [`TaskFlow::kept`]. Only being the receiver of a
+/// method call keeps nothing alive (`task.add_done_callback(...)`).
+fn kept_operands(kind: &InstKind) -> Vec<VarId> {
+    match kind {
         InstKind::Await { value, .. }
         | InstKind::YieldFrom { value, .. }
         | InstKind::AttrStore { value, .. }
         | InstKind::StoreGlobal { value, .. }
-        | InstKind::StoreDeref { value, .. } => has(value),
-        InstKind::SubscriptStore { index, value, .. } => has(index) || has(value),
-        // Only being the receiver keeps nothing alive (`task.add_done_callback(...)`).
-        InstKind::MethodCall {
-            recv,
-            method,
-            args,
-            kwargs,
-            ..
-        } => {
-            args.iter().chain(kwargs.iter().map(|(_, v)| v)).any(has)
-                || aliases.contains(recv) && LIFETIME_METHODS.contains(&method.as_str())
-        }
+        | InstKind::StoreDeref { value, .. } => vec![*value],
+        InstKind::SubscriptStore { index, value, .. } => vec![*index, *value],
+        InstKind::MethodCall { args, kwargs, .. } => args
+            .iter()
+            .chain(kwargs.iter().map(|(_, v)| v))
+            .copied()
+            .collect(),
         InstKind::Yield { .. }
         | InstKind::AllocBuiltin { .. }
         | InstKind::DictLiteral { .. }
         | InstKind::MakeClosure { .. }
         | InstKind::MakeGenExpr { .. }
-        | InstKind::Call { .. } => kind.operands().iter().any(has),
-        _ => false,
-    };
-    f.blocks.iter().any(|bb| {
-        matches!(&bb.terminator, Terminator::Return(Some(v)) if has(v))
-            || bb.insts.iter().any(|inst| retains(&inst.kind))
-    })
+        | InstKind::Call { .. } => kind.operands(),
+        _ => Vec::new(),
+    }
 }

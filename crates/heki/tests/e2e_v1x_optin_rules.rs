@@ -1102,7 +1102,7 @@ def returned():
 
 async def method_results_only():
     task = asyncio.create_task(work())
-    print(task.get_name(), task.done())
+    print(task.get_name(), task.done(), task.cancel.__name__)
     if task.cancelled:
         pass
 "##;
@@ -1114,8 +1114,8 @@ fn eff107_bound_methods_of_the_task_keep_it_where_they_are_kept() {
         .write("pkg/bound.py", BOUND_METHODS);
     let diags = diagnostics(&p, &["--select", "EFF107"]);
     // A bound method passed to a call (positionally or by keyword), stored in an attribute or a
-    // container through a copy, or returned holds the task. The results of its methods, and a
-    // method read only to be tested, hold nothing.
+    // container through a copy, or returned holds the task. The results of its methods, what is
+    // read from a bound method, and a method read only to be tested hold nothing.
     assert_eq!(
         found(&diags),
         vec![d("pkg/bound.py", 39, "EFF107", "asyncio.create_task->task")]
@@ -1217,6 +1217,7 @@ async def may_make_a_task(
     f = asyncio.ensure_future(wrapped())
     g = asyncio.ensure_future(Job())
     h = asyncio.create_task(*coros)
+    i = asyncio.create_task(coros[0])
     await asyncio.sleep(0)
 "##;
 
@@ -1232,7 +1233,7 @@ fn eff107_reports_only_arguments_that_may_be_coroutines() {
     // function), nor from a value typed as a future (catalog return types, annotations,
     // `Executor.submit`). `may_make_a_task`: each one may, from a coroutine, a parameter, an
     // awaitable, an annotated callable's result, a decorated function's result, a constructed
-    // object, or a `*` argument.
+    // object, an item of a parameter, or a `*` argument.
     assert_eq!(
         found(&diags),
         vec![
@@ -1244,6 +1245,7 @@ fn eff107_reports_only_arguments_that_may_be_coroutines() {
             d(t, 93, "EFF107", "asyncio.ensure_future->f"),
             d(t, 94, "EFF107", "asyncio.ensure_future->g"),
             d(t, 95, "EFF107", "asyncio.create_task->h"),
+            d(t, 96, "EFF107", "asyncio.create_task->i"),
         ]
     );
 }
