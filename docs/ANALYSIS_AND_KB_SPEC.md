@@ -461,8 +461,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of callers reach
-     the same root cause, they are grouped into one representative with the count. Inline
-     suppressions apply to each report before grouping.
+     the same root cause, they are grouped into one representative with the count.
 5. **Context relaxation**: `click` / `typer` commands (`@command`), ASGI lifespan hooks,
    `LoopBound::ConstSmall` / `RetryPattern` loops, and test code (`lint.relax-async-in-tests`,
    default true) are relaxed by default.

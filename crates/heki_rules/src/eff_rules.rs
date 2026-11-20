@@ -70,8 +70,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             .index
             .summary(&r.function)
             .is_some_and(|s| relaxed(s, &r.function, unit, relax_tests));
-        // Suppressed before grouping: a group stands for the reports nobody silenced.
-        if !cx.enabled(code, unit) || relaxed_here || CheckContext::suppressed(code, unit, r.span) {
+        if !cx.enabled(code, unit) || relaxed_here {
             continue;
         }
         if code == "EFF105" {

@@ -24,7 +24,7 @@ pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
 use globset::{Glob, GlobMatcher};
 use heki_ast::{LineIndex, Span};
-use heki_diagnostics::{Diagnostic, InlineIgnores, RelatedLocation};
+use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::{
     CallHop, CallSite, EffectSummary, FuncKey, ModuleInput, ProjectDecls, ProjectIndex,
 };
@@ -371,9 +371,6 @@ pub struct ModuleUnit<'a> {
     /// Project-relative POSIX path (`per-file-ignores`, test-path relaxation).
     pub rel_path: String,
     pub lines: LineIndex,
-    /// The file's `# heki: ignore[...]` / `# noqa` comments. The caller drops suppressed
-    /// diagnostics; a rule that folds reports of several lines into one consults them first.
-    pub ignores: InlineIgnores,
 }
 
 #[derive(Debug, Error)]
@@ -536,13 +533,6 @@ impl<'a> CheckContext<'a> {
     /// Whether `code` runs on `unit` (selection + `per-file-ignores`).
     pub fn enabled(&self, code: &str, unit: &ModuleUnit<'_>) -> bool {
         self.selection.is_enabled_for(code, &unit.rel_path)
-    }
-
-    /// Whether an inline comment on the line of `span` suppresses `code` in `unit`.
-    pub fn suppressed(code: &str, unit: &ModuleUnit<'_>, span: Span) -> bool {
-        let meta = find_rule(code).expect("emitted rules are registered");
-        unit.ignores
-            .is_suppressed(unit.lines.line(span.start), meta.code, meta.slug)
     }
 
     /// `FuncKey` of an IR function of `unit`.
