@@ -552,6 +552,41 @@ class C:
 }
 
 #[test]
+fn semantic_annotations_share_one_scope_per_block() {
+    let source = "\
+import sys
+if sys:
+    x: int
+else:
+    y: str
+def f():
+    local: bytes = b''
+    return local
+";
+    let m314 = dump_source("dump-semantic", "fe_annotation_blocks", source, "py314");
+    let module = &m314["scopes"][0];
+    let annotate: Vec<&Value> = children(&m314, module)
+        .into_iter()
+        .filter(|s| s["kind"] == "annotation")
+        .collect();
+    // One for the module's conditional annotations (at the first), one for `f`'s signature.
+    assert_eq!(annotate.len(), 2);
+    assert_eq!(annotate[0]["line"], 3);
+    assert_eq!(
+        reads(annotate[0]),
+        BTreeMap::from([("int", "builtin"), ("str", "builtin")])
+    );
+    // A function's own annotations get an `__annotate__` scope that is never evaluated.
+    let f = scope(&m314, &["function f"]);
+    let local = scope(&m314, &["function f", "annotation __annotate__"]);
+    assert!(reads(local).is_empty());
+    assert!(!reads(f).contains_key("bytes"));
+    // Before 3.14 CPython still records a function annotation's names in the function.
+    let m312 = dump_source("dump-semantic", "fe_annotation_blocks", source, "py312");
+    assert_eq!(reads(scope(&m312, &["function f"]))["bytes"], "builtin");
+}
+
+#[test]
 fn semantic_generator_walrus_writes_the_declared_global() {
     let source = "\
 def f():
@@ -635,7 +670,7 @@ fn semantic_comprehension_scopes_follow_pep709() {
 #[test]
 fn semantic_annotation_scopes_follow_pep649() {
     // 3.14+: every `def` gets a sibling `__annotate__` scope; module / class annotations share
-    // one per body (the corpus keeps them last, where CPython opens it too).
+    // one per body, opened at the first annotation (the corpus keeps them last).
     let m314 = semantic(TOUR, "py314");
     let module = &m314["scopes"][0];
     let top = child_kinds(&m314, module);

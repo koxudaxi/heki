@@ -133,6 +133,12 @@ struct ScopeBuilder {
     /// The PEP 709 inlined comprehensions open at the current point of this scope's body
     /// (indices into `Analyzer::comp_regions`), innermost last.
     open_comp_regions: Vec<usize>,
+    /// The PEP 649 `__annotate__` scope of this module, class, or function body's variable
+    /// annotations, once it has one.
+    annotation_scope: Option<ScopeId>,
+    /// A function body's `__annotate__` scope: never evaluated, so its own name loads are no
+    /// references (names read inside its comprehensions and lambdas are).
+    unevaluated: bool,
     /// The inlined comprehensions of the parent scope that lexically enclose this scope: their
     /// targets are cells this scope can capture (`[lambda: i for i in r]`), unlike every other
     /// comprehension target of the parent.
@@ -174,6 +180,8 @@ impl ScopeBuilder {
             bound_names: FxHashSet::default(),
             comp_target_bindings: Vec::new(),
             open_comp_regions: Vec::new(),
+            annotation_scope: None,
+            unevaluated: false,
             enclosing_comp_regions: Vec::new(),
             module_walrus_globals: FxHashSet::default(),
             global_decls: FxHashSet::default(),
@@ -245,6 +253,9 @@ impl ScopeBuilder {
     }
 
     fn add_read(&mut self, raw_name: &str, in_inlined_comp: bool, in_class_comp: bool) {
+        if self.unevaluated && !in_inlined_comp {
+            return;
+        }
         let name = self.mangle(raw_name);
         if in_inlined_comp {
             self.in_comp_reads.insert(name.clone());
@@ -387,41 +398,42 @@ impl<'a> Analyzer<'a> {
     }
 
     fn visit_suite(&mut self, suite: &[Stmt]) {
-        // On Python 3.14+ without `from __future__ import annotations`, module/class-level
-        // variable annotations (`x: T`) are collected into a single `__annotate__` scope.
-        let cur_kind = self.scopes[self.cur_scope_id().0 as usize].kind;
-        let collect_ann_scope = self.profile.pep649_deferred_annotations
-            && !self.has_future_annotations
-            && matches!(cur_kind, ScopeKind::Module | ScopeKind::Class);
-
-        let mut deferred_anns: Vec<&Expr> = Vec::new();
         for stmt in suite {
-            if collect_ann_scope && let Stmt::AnnAssign(aa) = stmt {
-                self.visit_ann_assign_with_deferred(aa, &mut deferred_anns);
-                continue;
-            }
             self.visit_stmt(stmt);
-        }
-        if !deferred_anns.is_empty() {
-            let line = self.lines.line(deferred_anns[0].range().start().to_u32());
-            self.push_scope(ScopeKind::Annotation, "__annotate__".to_string(), line);
-            for ann in deferred_anns {
-                self.visit_expr(ann);
-            }
-            self.pop_scope();
         }
     }
 
-    fn visit_ann_assign_with_deferred<'b>(
-        &mut self,
-        aa: &'b ast::StmtAnnAssign,
-        deferred: &mut Vec<&'b Expr>,
-    ) {
-        self.visit_ann_assign_target(aa);
-        deferred.push(&aa.annotation);
-        if let Some(val) = &aa.value {
-            self.visit_expr(val);
+    /// The annotation of a variable annotation statement (`x: T`) of the current block.
+    fn visit_variable_annotation(&mut self, annotation: &Expr) {
+        if self.has_future_annotations {
+            return;
         }
+        if !self.profile.pep649_deferred_annotations {
+            // Evaluated in place in module and class bodies; a function's are never evaluated,
+            // but CPython's symtable still records their names.
+            self.visit_expr(annotation);
+            return;
+        }
+        // PEP 649: the block's annotations share one `__annotate__` scope, opened at its first
+        // annotation (wherever it is nested in the block's statements).
+        let block = self.cur_scope_id();
+        let annotate = match self.scopes[block.0 as usize].annotation_scope {
+            Some(id) => id,
+            None => {
+                let line = self.lines.line(annotation.range().start().to_u32());
+                let id = self.push_scope(ScopeKind::Annotation, "__annotate__".to_string(), line);
+                self.pop_scope();
+                let block_kind = self.scopes[block.0 as usize].kind;
+                // A function's annotations are never evaluated: the names they read directly
+                // are no references (CPython 3.14 `ste_in_unevaluated_annotation`).
+                self.scopes[id.0 as usize].unevaluated = block_kind == ScopeKind::Function;
+                self.scopes[block.0 as usize].annotation_scope = Some(id);
+                id
+            }
+        };
+        self.scope_stack.push(annotate);
+        self.visit_expr(annotation);
+        self.scope_stack.pop();
     }
 
     /// `x: T` binds `x` even without a value (an unassigned local in a function); a
@@ -485,11 +497,7 @@ impl<'a> Analyzer<'a> {
             }
             Stmt::AnnAssign(aa) => {
                 self.visit_ann_assign_target(aa);
-                // In function scopes, local variable annotations are never evaluated at runtime in Python 3.
-                let cur_kind = self.scopes[self.cur_scope_id().0 as usize].kind;
-                if !self.has_future_annotations && cur_kind != ScopeKind::Function {
-                    self.visit_expr(&aa.annotation);
-                }
+                self.visit_variable_annotation(&aa.annotation);
                 if let Some(val) = &aa.value {
                     self.visit_expr(val);
                 }
