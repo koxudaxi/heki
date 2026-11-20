@@ -13,8 +13,11 @@ mod watch;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use heki_ast::LineIndex;
+use heki_rules::experimental::{
+    EXPERIMENTAL_FEATURES, EXPERIMENTAL_POLICY, ExperimentalFeature, experimental_rule,
+};
 use heki_rules::project::{Project, ProjectOptions};
-use heki_rules::{CORE_RULES, find_rule};
+use heki_rules::{CORE_RULES, RuleMeta, find_rule};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -59,6 +62,9 @@ enum Commands {
     /// Internal/testing: dump `heki_ir` SSA-CFG IR as JSON for debugging and verification.
     #[command(hide = true)]
     DumpIr(DumpSemanticArgs),
+    /// Internal: dump the experimental features as JSON for `scripts/build_docs.py`.
+    #[command(hide = true)]
+    DumpExperimental,
 }
 
 #[derive(Debug, Args)]
@@ -134,6 +140,23 @@ enum RuleFormat {
     Json,
 }
 
+/// A rule as `heki rule --output-format json` prints it.
+#[derive(serde::Serialize)]
+struct RuleRecord {
+    #[serde(flatten)]
+    rule: &'static RuleMeta,
+    experimental: Option<&'static ExperimentalFeature>,
+}
+
+impl RuleRecord {
+    fn new(rule: &'static RuleMeta) -> Self {
+        Self {
+            rule,
+            experimental: experimental_rule(rule.code),
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 struct SnapshotArgs {
     /// Files or directories to summarize.
@@ -183,7 +206,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let json = args.output_format == RuleFormat::Json;
             let Some(q) = args.rule.as_deref().filter(|_| !args.all) else {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(CORE_RULES)?);
+                    let records: Vec<_> = CORE_RULES.iter().map(RuleRecord::new).collect();
+                    println!("{}", serde_json::to_string_pretty(&records)?);
                 } else {
                     for r in CORE_RULES {
                         println!(
@@ -199,10 +223,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::from(2));
             };
             if json {
-                println!("{}", serde_json::to_string_pretty(r)?);
+                println!("{}", serde_json::to_string_pretty(&RuleRecord::new(r))?);
             } else {
-                // `ruff rule` layout: the rule's Markdown page.
-                print!("# {} ({})\n\n{}\n\n{}", r.slug, r.code, r.summary, r.doc);
+                // `ruff rule` layout: the rule's Markdown page, with an experimental rule's note
+                // before its documentation.
+                let note = experimental_rule(r.code)
+                    .map(|f| {
+                        format!(
+                            "This rule is experimental. {} {EXPERIMENTAL_POLICY}\n\n",
+                            f.reason
+                        )
+                    })
+                    .unwrap_or_default();
+                print!(
+                    "# {} ({})\n\n{}\n\n{note}{}",
+                    r.slug, r.code, r.summary, r.doc
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -229,6 +265,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let model = heki_semantic::analyze_module(&parsed, &src, profile);
             let ir = heki_ir::build_module_ir(&parsed, &src, &model, profile);
             println!("{}", serde_json::to_string_pretty(&ir)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::DumpExperimental => {
+            let registry = serde_json::json!({
+                "policy": EXPERIMENTAL_POLICY,
+                "features": EXPERIMENTAL_FEATURES,
+            });
+            println!("{}", serde_json::to_string_pretty(&registry)?);
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -304,6 +348,71 @@ fn main() -> ExitCode {
         Err(err) => {
             log!(format, "heki error: {err:#}");
             ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+    use heki_rules::CORE_RULES;
+    use heki_rules::experimental::{EXPERIMENTAL_FEATURES, ExperimentalKind};
+    use std::collections::BTreeSet;
+
+    type Target = (ExperimentalKind, String);
+
+    /// Every key of `value` with its tables (`lint.select`); a list of tables has no default
+    /// entry to take keys from.
+    fn config_keys(value: &serde_json::Value, prefix: &str, out: &mut BTreeSet<Target>) {
+        for (key, inner) in value.as_object().into_iter().flatten() {
+            let path = format!("{prefix}{key}");
+            config_keys(inner, &format!("{path}."), out);
+            out.insert((ExperimentalKind::ConfigKey, path));
+        }
+    }
+
+    /// What an entry can name: the rule codes, `heki <command> --<option>`, and the
+    /// configuration keys. Output fields are not listed yet: an entry of that kind fails until
+    /// they are.
+    fn existing_targets() -> BTreeSet<Target> {
+        let mut out: BTreeSet<Target> = CORE_RULES
+            .iter()
+            .map(|r| (ExperimentalKind::Rule, r.code.to_owned()))
+            .collect();
+        for command in Cli::command().get_subcommands() {
+            for long in command.get_arguments().filter_map(|a| a.get_long()) {
+                let option = format!("heki {} --{long}", command.get_name());
+                out.insert((ExperimentalKind::CliOption, option));
+            }
+        }
+        let config = serde_json::to_value(heki_env::HekiConfig::default()).unwrap();
+        config_keys(&config, "", &mut out);
+        out
+    }
+
+    #[test]
+    fn experimental_entries_name_existing_rules_options_and_keys() {
+        let existing = existing_targets();
+        for (kind, target) in [
+            (ExperimentalKind::CliOption, "heki check --profile"),
+            (ExperimentalKind::ConfigKey, "lint.relax-async-in-tests"),
+            (ExperimentalKind::ConfigKey, "write-owners"),
+        ] {
+            assert!(existing.contains(&(kind, target.to_owned())), "{target}");
+        }
+        // A behavior is described in words: there is no name to look up.
+        for f in EXPERIMENTAL_FEATURES
+            .iter()
+            .filter(|f| f.kind != ExperimentalKind::Behavior)
+        {
+            assert!(
+                existing.contains(&(f.kind, f.target.to_owned())),
+                "{}: no {:?} `{}`",
+                f.id,
+                f.kind,
+                f.target
+            );
         }
     }
 }

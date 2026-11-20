@@ -87,6 +87,12 @@ $ uvx --from "zensical==0.1.2" zensical serve
 - Rule documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`: `heki rule <CODE>` prints
   it, and the generator copies it into `docs/rules/`. CI fails when the generated pages are
   stale.
+- Experimental features are listed, each with why it is experimental, in
+  `crates/heki_rules/src/experimental.rs`. `heki rule <CODE>` and the generated pages (the rule
+  pages and [Experimental Features](experimental.md)) read the list, and the generator fails
+  when a hand-written page marks a rule differently. An experimental feature can change or go
+  away in any release, and the release notes list each change; once it is stable, its entry is
+  removed.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which

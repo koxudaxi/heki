@@ -9,6 +9,7 @@ heki has 31 rules in four families. Every rule is enabled by default except the 
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
 - 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
 - 🔌 Opt-in rule.
+- 🧪 Experimental rule: it can change or be removed in any release ([Experimental Features](../experimental.md)).
 
 ## Mutation & State (MUT)
 
@@ -16,7 +17,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| MUT101 | [cached-property-stale-mutation](cached-property-stale-mutation.md) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 |
+| MUT101 | [cached-property-stale-mutation](cached-property-stale-mutation.md) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 🧪 |
 | MUT103 | [summary-effect-regression](summary-effect-regression.md) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
 | MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
 | MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |

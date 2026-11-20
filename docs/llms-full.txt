@@ -1737,6 +1737,7 @@ heki has 31 rules in four families. Every rule is enabled by default except the 
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
 - 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
 - 🔌 Opt-in rule.
+- 🧪 Experimental rule: it can change or be removed in any release ([Experimental Features](https://heki.koxudaxi.dev/experimental/)).
 
 ## Mutation & State (MUT)
 
@@ -1744,7 +1745,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 |
+| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 🧪 |
 | MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
 | MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
@@ -1796,6 +1797,29 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 | OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
 | OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
 | OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
+
+
+---
+
+Source: https://heki.koxudaxi.dev/experimental/
+
+# Experimental Features
+
+Experimental features can change or be removed in any release, and each change is listed in the release notes. A feature leaves this page when it becomes stable.
+
+An experimental rule is never enabled by default: it runs only when `select` or `extend-select` names its code or name, and `heki check` then reports it like any other rule. `heki rule <CODE>` and the rule's page say that it is experimental.
+
+| ID | Kind | Target | Since | Tracking |
+| -- | ---- | ------ | ----- | -------- |
+| `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
+
+## `rule.MUT101`
+
+- **Kind:** rule
+- **Target:** [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/)
+- **Since:** 0.1.0
+
+Its precision outside a few code bases is still low.
 
 
 ---
@@ -2119,6 +2143,12 @@ $ uvx --from "zensical==0.1.2" zensical serve
 - Rule documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`: `heki rule <CODE>` prints
   it, and the generator copies it into `docs/rules/`. CI fails when the generated pages are
   stale.
+- Experimental features are listed, each with why it is experimental, in
+  `crates/heki_rules/src/experimental.rs`. `heki rule <CODE>` and the generated pages (the rule
+  pages and [Experimental Features](https://heki.koxudaxi.dev/experimental/)) read the list, and the generator fails
+  when a hand-written page marks a rule differently. An experimental feature can change or go
+  away in any release, and the release notes list each change; once it is stable, its entry is
+  removed.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -2336,13 +2366,16 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Opt-in · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
 
+!!! warning "Experimental"
+
+    Its precision outside a few code bases is still low. Experimental features can change or be removed in any release, and each change is listed in the release notes. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
 ## What it does
-Opt-in and experimental: enable it with `extend-select = ["MUT101"]`. Its precision
-outside a few code bases is still low, so its behavior may change in any release.
+Opt-in: enable it with `extend-select = ["MUT101"]`.
 
 Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
 of the same class (or of a subclass) reads, without invalidating the cached value. A method the
