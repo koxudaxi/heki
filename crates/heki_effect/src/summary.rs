@@ -284,11 +284,14 @@ struct Extractor<'a> {
 }
 
 /// A project call, for the sites of the object it returns (`SiteRole`).
+/// A point of a function: (block, instruction index).
+type Position = (BlockId, usize);
+
 struct ProjectCall {
     /// Index of its `Call` site in `Extractor::sites`.
     site: usize,
-    /// Its position (block, instruction index).
-    at: (BlockId, usize),
+    /// Where the call is.
+    at: Position,
     /// The variable it defines.
     dst: VarId,
     /// Each callee with the parameter each argument variable binds.
@@ -796,7 +799,7 @@ impl<'a> Extractor<'a> {
         };
         // Where each call's result is iterated.
         // With the position of the iteration (for `MUT109`'s flow at the site).
-        let mut iterated: Vec<Vec<(Span, u16, (BlockId, usize))>> =
+        let mut iterated: Vec<Vec<(Span, u16, Position)>> =
             vec![Vec::new(); self.project_calls.len()];
         for e in &flow.events {
             let (span, depth) = (e.span, f.block_loop_depth(e.block));

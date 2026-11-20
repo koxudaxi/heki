@@ -1257,7 +1257,6 @@ struct Mut202Fn<'a> {
     f: &'a IrFunction,
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
-    defs: FxHashMap<VarId, &'a Inst>,
     ro: FxHashMap<VarId, Ro>,
 }
 
@@ -1269,12 +1268,6 @@ impl<'a> Mut202Fn<'a> {
         returns: &'a ReadOnlyReturns,
         f: &'a IrFunction,
     ) -> Self {
-        let mut defs = FxHashMap::default();
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            if let Some(d) = inst.kind.dst() {
-                defs.insert(d, inst);
-            }
-        }
         Self {
             cx,
             unit,
@@ -1283,7 +1276,6 @@ impl<'a> Mut202Fn<'a> {
             f,
             key: CheckContext::key(unit, f),
             types: tcx.infer(f),
-            defs,
             ro: FxHashMap::default(),
         }
     }
@@ -1367,8 +1359,8 @@ impl<'a> Mut202Fn<'a> {
         match &inst.kind {
             InstKind::Copy { src, .. } => self.ro.get(src).cloned(),
             InstKind::SubscriptLoad { obj, index, .. } => {
-                let step = if readonly::is_unpacking(inst, *index, &self.defs) {
-                    ReturnStep::UNPACKED
+                let step = if heki_effect::consumption::is_unpacking(self.f, *index, inst.span) {
+                    ReturnStep::TARGET_ITEM
                 } else {
                     ReturnStep::ELEMENT
                 };

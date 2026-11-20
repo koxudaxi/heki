@@ -9,7 +9,7 @@
 //! graph, so a wrapper needs no configuration of its own.
 
 use crate::CallHop;
-use heki_ir::{ConstLiteral, Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
+use heki_ir::{Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -73,9 +73,9 @@ impl ReturnStep {
         from_object: false,
         from_elements: true,
     };
-    /// An item of tuple / list unpacking (`a, b = value`): shared like the value when the value
-    /// is, else like an element.
-    pub const UNPACKED: Self = Self {
+    /// An item of target unpacking (`a, b = value`, `consumption::is_unpacking`): shared like
+    /// the value when the value is, else like an element.
+    pub const TARGET_ITEM: Self = Self {
         from_object: true,
         from_elements: true,
     };
@@ -145,21 +145,6 @@ pub fn call_derivation(
     method
         .filter(|m| ELEMENT_ACCESSORS.contains(m))
         .map(|_| Derivation::Step(ReturnStep::ELEMENT))
-}
-
-/// Tuple / list unpacking (`a, b = value`) lowers to a constant-index load spanning the target
-/// itself: `index` is defined by an integer constant with the load's span.
-pub fn is_unpacking(load: &Inst, index: VarId, defs: &FxHashMap<VarId, &Inst>) -> bool {
-    matches!(
-        defs.get(&index),
-        Some(Inst {
-            kind: InstKind::Const {
-                literal: ConstLiteral::Int(_),
-                ..
-            },
-            span,
-        }) if *span == load.span
-    )
 }
 
 /// A function that may return (on some path) a value shared with a read-only producer's other
@@ -265,8 +250,8 @@ pub(crate) fn returned_values(
             InstKind::IterNext { iter, .. } => work.push((*iter, step.after(ReturnStep::ELEMENT))),
             InstKind::AttrLoad { obj, .. } => work.push((*obj, step.after(ReturnStep::ELEMENT))),
             InstKind::SubscriptLoad { obj, index, .. } => {
-                let derived = if is_unpacking(inst, *index, defs) {
-                    ReturnStep::UNPACKED
+                let derived = if crate::consumption::is_unpacking(f, *index, inst.span) {
+                    ReturnStep::TARGET_ITEM
                 } else {
                     ReturnStep::ELEMENT
                 };
@@ -293,7 +278,7 @@ mod tests {
     const ALL_STEPS: [ReturnStep; 4] = [
         ReturnStep::ITSELF,
         ReturnStep::ELEMENT,
-        ReturnStep::UNPACKED,
+        ReturnStep::TARGET_ITEM,
         ReturnStep::SHALLOW_COPY,
     ];
 
@@ -314,7 +299,7 @@ mod tests {
             assert_eq!(ReturnStep::ELEMENT.apply(s), shared(elements, elements));
             // Unpacking keeps a shared object, else reads an element.
             let unpacked = if object { s } else { shared(true, true) };
-            assert_eq!(ReturnStep::UNPACKED.apply(s), unpacked);
+            assert_eq!(ReturnStep::TARGET_ITEM.apply(s), unpacked);
             // A shallow copy is new; what it holds stays shared.
             assert_eq!(ReturnStep::SHALLOW_COPY.apply(s), shared(false, elements));
             assert_eq!(ReturnStep::ITSELF.apply(s), s);
