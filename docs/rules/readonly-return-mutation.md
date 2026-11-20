@@ -20,8 +20,9 @@ Mutations through attributes, subscripts, container methods, in-place operators,
 that mutate their argument are followed, also on the call result itself
 (`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)`, and the copy sanitizers of the ecosystem knowledge base clear it,
-shallow copies (`copy.copy`, `.copy()`, `dataclasses.replace(...)`) free the top level only: the
-values below stay shared. A wrapper that returns a copy on one path and the shared value on
+shallow copies (`copy.copy`, `.copy()`, `dataclasses.replace(...)`, and a slice `xs[:]` unless the
+value is known to be of a class other than the built-in sequences, whose slice may be a view)
+free the top level only: the values below stay shared. A wrapper that returns a copy on one path and the shared value on
 another still returns a shared value.
 
 ## Why is this bad?
