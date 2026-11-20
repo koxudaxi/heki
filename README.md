@@ -70,49 +70,73 @@ Found 2 diagnostic(s) in 3 file(s).
 
 ## Why heki?
 
-- **Bugs that cross function boundaries.** A blocking call several helpers below an
-  `async def` (`EFF101`), a database query or an HTTP client created on every iteration of a
-  loop (`EFF103`, `EFF102`), a `@cached_property` left stale when another method changes what
-  it read (`MUT101`), an attribute `__hash__` reads changing after the object went into a `set`
-  (`MUT107`), and a `Sequence` / `Mapping` argument changed in place by a helper (`MUT110`).
-  Opt-in rules add frozen dataclass and `ReadOnly` fields changed in place (`MUT108`), I/O while
-  a `threading` lock or a database transaction is held (`EFF106`), and generators consumed twice
-  (`MUT106`). A report that crosses functions shows its call chain.
-- **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
-  and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
-  "rendering does no I/O") become a few lines of `[tool.heki]` configuration: `write-owners`,
-  `read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries`. heki
-  checks them through aliases, helpers, and subclasses, with no decorators and nothing running at
-  run time.
-- **A safety net for reviews and coding agents.** The language server shows the findings while
-  you edit and re-checks only what an edit can affect. `heki snapshot` records what every public
-  function does (what it mutates, which I/O it reaches), and `MUT103` reports a function that
-  gained an effect, which a diff does not show. Agents get the same checks as JSON.
-- **Fast, quiet, and easy to adopt.** About 1.5 seconds for a 200,000-line project. A report
-  needs evidence, so heki stays quiet when it cannot tell. Configuration, suppression comments,
-  and output formats follow Ruff, and a Ratchet baseline fails CI only on new findings.
+### Bugs that cross function boundaries
+
+Each report shows the chain of calls that leads to the bug.
+
+| What goes wrong | Rule |
+| --- | --- |
+| A blocking call several helpers below an `async def` | `EFF101` |
+| A database query, or a new HTTP client, on every loop iteration | `EFF103`, `EFF102` |
+| A `@cached_property` left stale after another method changes what it read | `MUT101` |
+| An attribute that `__hash__` reads, changed after the object went into a `set` | `MUT107` |
+| A `Sequence` / `Mapping` argument changed in place by a helper | `MUT110` |
+| Opt-in: a frozen or `ReadOnly` field changed in place | `MUT108` |
+| Opt-in: I/O while a lock or a database transaction is held | `EFF106` |
+| Opt-in: a generator consumed twice | `MUT106` |
+
+### Your conventions, checked
+
+Rules you keep today by review, by AST scripts, or by run-time guards in tests become a few lines
+of configuration:
+
+```toml
+[[tool.heki.write-owners]]
+targets = ["app.models.Order.items"]
+allowed-writers = ["app.store.*"]
+```
+
+heki follows aliases, helpers, and subclasses, with no decorators and nothing running at run
+time. The other contracts are `read-owners`, `call-owners`, `readonly-returns`, `invalidation`,
+and `effect-boundaries`.
+
+### A safety net for reviews and coding agents
+
+- The language server checks while you edit and re-checks only what an edit can affect.
+- `heki snapshot` records what each public function does, and `MUT103` reports a function that gained an
+  effect, which a diff does not show.
+- Coding agents get the same checks as JSON.
+
+### Fast, quiet, and easy to adopt
+
+- Under a second for a 200,000-line project.
+- A report needs evidence: when heki cannot tell, it stays quiet.
+- Configuration, suppression comments, and output formats follow Ruff, and a baseline fails CI
+  only on new findings.
 
 ## How heki differs
 
-| Tool | Checks | Does not see, and heki reports |
-| ---- | ------ | ------------------------------ |
-| Ruff | the syntax of one file at a time | a blocking call that is not written in the `async def` itself |
-| ty, Pyrefly, pyright, mypy | whether values match their declared types | what a function does, which no annotation describes; in-place changes to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments made through aliases or helpers (types stop only reassignment and direct calls) |
-| tach, import-linter | which modules may import which | which functions write or read a field, or reach I/O: code allowed to import a module can still change state it does not own |
+| Tool | Checks | heki adds |
+| --- | --- | --- |
+| Ruff | one file's syntax and style | a blocking call reached through other functions |
+| ty, Pyrefly, pyright, mypy | that values match their declared types | what functions do: in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
+| tach, import-linter | which modules may import which | which functions write or read a field, or reach I/O |
 
-heki leaves to these tools what they already cover (`EFF107` reports only tasks bound to a
-variable, because Ruff's `RUF006` reports the discarded ones), so use it next to them.
+heki leaves to these tools what they already cover, so use it next to them.
 
 ## Rewrites proven under CPython's semantics
 
 The `OPT` rules find quadratic list, dict, set, bytes, and queue patterns. `heki check --fix`
-rewrites one only when a separate analysis proves that the program behaves the same under
-CPython's semantics: it trusts no type annotation (a subclass can override `__add__`), any other
-reference to the object blocks an in-place update, evaluation order and exceptions are kept, and
-builtins count only while the module does not rebind them. Its scope analysis is checked against
-CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive rewrite changes
-the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
-the obligation instead of offering a fix.
+rewrites one only when it proves that the program behaves the same:
+
+- it trusts no type annotation (a subclass can override `__add__`);
+- any other reference to the object blocks an in-place update;
+- evaluation order and exceptions are kept;
+- builtins count only while the module does not rebind them.
+
+The scope analysis is checked against CPython's `symtable` on 3.11 to 3.15, and adversarial
+programs that break a naive rewrite must all be blocked on CPython. When a proof fails, the
+report names the missing obligation instead of offering a fix.
 
 ## Scope
 
