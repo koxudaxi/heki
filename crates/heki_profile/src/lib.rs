@@ -193,13 +193,21 @@ pub fn parse_gecko(text: &str) -> Result<ProfileData, ProfileError> {
             column(func_t, "fileName")?,
         );
         let weights = samples.get("weight").and_then(Value::as_array);
+        // A dump stores each stack once and lists its samples by index: sum their weights
+        // first, so a stack is expanded once however often it was sampled.
+        let mut by_stack: BTreeMap<Option<usize>, u64> = BTreeMap::new();
         for i in 0..s_stack.len() {
             let weight = weights
                 .and_then(|w| w.get(i))
                 .and_then(Value::as_u64)
                 .unwrap_or(1);
+            let stack = reference(s_stack, i, st_frame.len(), "samples.stack", true)?;
+            let sum = by_stack.entry(stack).or_default();
+            *sum = total_weight([*sum, weight])?;
+        }
+        for (stack, weight) in by_stack {
             let mut frames = Vec::new();
-            let mut cur = reference(s_stack, i, st_frame.len(), "samples.stack", true)?;
+            let mut cur = stack;
             while let Some(si) = cur {
                 if frames.len() > st_frame.len() {
                     return Err(ProfileError::Parse("cyclic gecko stack table".into()));
@@ -287,6 +295,19 @@ mod tests {
         assert!(!p.is_hot(Path::new("src/app.py"), "missing"));
         assert!(parse_collapsed("no-count\n").is_err());
         assert!(parse_collapsed("a;b x\n").is_err());
+    }
+
+    #[test]
+    fn gecko_samples_of_one_stack_add_up() {
+        let samples = "1, ".repeat(9_999) + "0";
+        let gecko = format!(
+            r#"{{"threads": [{{"samples": {{"stack": [{samples}]}}, "stackTable": {{"frame": [0, 1], "prefix": [null, 0]}}, "frameTable": {{"func": [0, 1]}}, "funcTable": {{"name": [0, 1], "fileName": [2, 2]}}}}], "shared": {{"stringArray": ["main", "work", "app.py"]}}}}"#
+        );
+        let p = parse_gecko(&gecko).unwrap();
+        let work = &p.sites[&("app.py".to_owned(), "work".to_owned())];
+        assert_eq!((work.self_pct, work.cum_pct), (99.99, 99.99));
+        let main = &p.sites[&("app.py".to_owned(), "main".to_owned())];
+        assert_eq!((main.self_pct, main.cum_pct), (0.01, 100.0));
     }
 
     #[test]
