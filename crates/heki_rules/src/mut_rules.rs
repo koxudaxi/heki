@@ -2009,6 +2009,9 @@ pub(crate) fn site_call<'i>(
             && s.runner == runner
             && !s.project_callees().is_empty()
     })?;
+    if wraps_call_at_own_span(f, inst, &call) {
+        return None;
+    }
     let callee = Callee::Project(
         site.project_callees()
             .iter()
@@ -2040,6 +2043,23 @@ pub(crate) fn site_call<'i>(
         callee,
         site: Some(site),
     })
+}
+
+/// Whether the call instruction `inst` consumes the result of another call instruction with
+/// the same span. Only an instruction the IR builder synthesizes around a source expression
+/// shares its span (a comprehension's `acc.append(elt)` carries the span of `elt`); when that
+/// expression is a call, the call site at the span is the expression's, not the synthesized
+/// instruction's.
+fn wraps_call_at_own_span(f: &IrFunction, inst: &Inst, call: &CallInst<'_>) -> bool {
+    call.recv
+        .map(|(recv, _)| recv)
+        .into_iter()
+        .chain(call.args.iter().copied())
+        .chain(call.kwargs.iter().map(|(_, v)| *v))
+        .any(|v| {
+            f.def_inst(v)
+                .is_some_and(|(_, def)| def.span == inst.span && CallInst::of(&def.kind).is_some())
+        })
 }
 
 const MUTABLE_BUILTINS: &[&str] = &[

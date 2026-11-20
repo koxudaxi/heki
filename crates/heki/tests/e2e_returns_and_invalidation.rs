@@ -435,6 +435,79 @@ fn mut202_follows_protected_values_through_returns() {
     );
 }
 
+/// Comprehensions collecting what wrappers of a shared value return.
+const COLLECTING: &str = r#"from __future__ import annotations
+
+from collections.abc import Sequence
+from functools import lru_cache
+
+from pkg.graph import Graph, Schema
+
+
+def load(graph: Graph, raw: object) -> Schema:
+    return graph.schema(raw)
+
+
+def own_or_loaded(graph: Graph, item: Schema, raw: object) -> Schema:
+    if raw is not None:
+        return load(graph, raw)
+    return item
+
+
+def collect(graph: Graph, items: list[Schema], raw: object) -> list[Schema]:
+    return [own_or_loaded(graph, item, raw) for item in items]
+
+
+def collect_set(graph: Graph, items: Sequence[Schema], raw: object) -> set[Schema]:
+    return {load(graph, raw) for _ in items}
+
+
+def changed(schema: Schema) -> Schema:
+    schema.items.append(1)
+    return schema
+
+
+def change_each(graph: Graph, raws: Sequence[object]) -> list[Schema]:
+    return [changed(load(graph, raw)) for raw in raws]
+
+
+@lru_cache
+def table(name: str) -> dict[str, int]:
+    return {name: 1}
+
+
+def filled(acc: list[int]) -> dict[str, int]:
+    acc.append(1)
+    return table("a")
+
+
+def collect_tables(accs: list[list[int]]) -> list[dict[str, int]]:
+    return [filled(acc) for acc in accs]
+"#;
+
+#[test]
+fn mut202_comprehension_collecting_wrapper_results_mutates_nothing() {
+    let p = Project::new("mut202_collecting");
+    p.write("pyproject.toml", RO_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/graph.py", GRAPH)
+        .write("pkg/collecting.py", COLLECTING);
+    // A comprehension appends its element, the result of the element's own call: no argument of
+    // that call. Handing the shared value to a helper that changes it is a mutation. Python 3.11
+    // runs a comprehension in a frame of its own, 3.12 inlines it (PEP 709).
+    for (version, qualname) in [
+        ("py311", "change_each.<locals>.<listcomp>"),
+        ("py312", "change_each"),
+    ] {
+        let diags = diagnostics(&p, &["--select", "MUT202", "--target-version", version]);
+        assert_eq!(
+            found(&diags),
+            vec![d("pkg/collecting.py", 33, "MUT202", qualname)],
+            "{version}: {diags:#?}"
+        );
+    }
+}
+
 // ============================================================================== MUT109
 
 const INV_CONFIG: &str = r#"[project]
