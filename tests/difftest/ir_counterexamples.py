@@ -4,9 +4,8 @@
 safe that changes behaviour on CPython. Each `cx_*` function is the original; `old_*` is the
 exact text the fix produced for it. `main()` asserts that every old rewrite diverges from its
 original, and `crates/heki/tests/e2e_soundness.rs` asserts that heki now reports each original
-as `Blocked` or not at all and rewrites none of them.
+as `Blocked` or not at all and rewrites none of them. Run it with CPython 3.15.
 """
-from __future__ import annotations
 
 
 # ------------------------------------------------------------------------------
@@ -257,6 +256,184 @@ def old_capture_through_generator_expression(items):
     return old
 
 
+# ------------------------------------------------------------------------------
+# Function and class objects keep what their definition evaluates
+# ------------------------------------------------------------------------------
+def cx_default_keeps_value(items):
+    acc = []
+    def saved(old=acc):
+        return old
+    for x in items:
+        acc = acc + [x]
+    return saved()
+
+
+def old_default_keeps_value(items):
+    acc = []
+    def saved(old=acc):
+        return old
+    for x in items:
+        acc.append(x)
+    return saved()
+
+
+def cx_keyword_only_default_keeps_value(items):
+    acc = []
+    def saved(*, old=acc):
+        return old
+    for x in items:
+        acc = acc + [x]
+    return saved()
+
+
+def old_keyword_only_default_keeps_value(items):
+    acc = []
+    def saved(*, old=acc):
+        return old
+    for x in items:
+        acc.append(x)
+    return saved()
+
+
+def cx_lambda_default_keeps_value(items):
+    acc = []
+    saved = lambda old=acc: old
+    for x in items:
+        acc = acc + [x]
+    return saved()
+
+
+def old_lambda_default_keeps_value(items):
+    acc = []
+    saved = lambda old=acc: old
+    for x in items:
+        acc.append(x)
+    return saved()
+
+
+def cx_return_annotation_keeps_value(items):
+    acc = []
+    def tag() -> acc:
+        pass
+    old = tag.__annotations__["return"]
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_return_annotation_keeps_value(items):
+    acc = []
+    def tag() -> acc:
+        pass
+    old = tag.__annotations__["return"]
+    for x in items:
+        acc.append(x)
+    return old
+
+
+def cx_parameter_annotation_keeps_value(items):
+    acc = []
+    def tag(*args: acc):
+        pass
+    old = tag.__annotations__["args"]
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_parameter_annotation_keeps_value(items):
+    acc = []
+    def tag(*args: acc):
+        pass
+    old = tag.__annotations__["args"]
+    for x in items:
+        acc.append(x)
+    return old
+
+
+def cx_class_annotation_keeps_value(items):
+    acc = []
+    class Tagged:
+        field: acc
+    old = Tagged.__annotations__["field"]
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_class_annotation_keeps_value(items):
+    acc = []
+    class Tagged:
+        field: acc
+    old = Tagged.__annotations__["field"]
+    for x in items:
+        acc.append(x)
+    return old
+
+
+def cx_type_parameter_bound_keeps_value(items):
+    acc = []
+    def generic[T: acc]():
+        pass
+    old = generic.__type_params__[0].__bound__
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_type_parameter_bound_keeps_value(items):
+    acc = []
+    def generic[T: acc]():
+        pass
+    old = generic.__type_params__[0].__bound__
+    for x in items:
+        acc.append(x)
+    return old
+
+
+def cx_type_alias_keeps_value(items):
+    acc = []
+    type Alias = acc
+    old = Alias.__value__
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_type_alias_keeps_value(items):
+    acc = []
+    type Alias = acc
+    old = Alias.__value__
+    for x in items:
+        acc.append(x)
+    return old
+
+
+class Recorder:
+    seen = []
+
+    def __init_subclass__(cls, tag=None, **kwargs):
+        Recorder.seen.append(tag)
+
+
+def cx_class_keyword_reaches_user_code(items):
+    acc = []
+    class Tagged(Recorder, tag=acc):
+        pass
+    for x in items:
+        acc = acc + [x]
+    return Recorder.seen[-1]
+
+
+def old_class_keyword_reaches_user_code(items):
+    acc = []
+    class Tagged(Recorder, tag=acc):
+        pass
+    for x in items:
+        acc.append(x)
+    return Recorder.seen[-1]
+
+
 def run(call, fn):
     try:
         return repr(call(fn))
@@ -308,6 +485,20 @@ def main() -> int:
             old_capture_through_generator_expression,
             lambda f: f([1]),
         ),
+        *[
+            (cx, old, lambda f: f([1]))
+            for cx, old in [
+                (cx_default_keeps_value, old_default_keeps_value),
+                (cx_keyword_only_default_keeps_value, old_keyword_only_default_keeps_value),
+                (cx_lambda_default_keeps_value, old_lambda_default_keeps_value),
+                (cx_return_annotation_keeps_value, old_return_annotation_keeps_value),
+                (cx_parameter_annotation_keeps_value, old_parameter_annotation_keeps_value),
+                (cx_class_annotation_keeps_value, old_class_annotation_keeps_value),
+                (cx_type_parameter_bound_keeps_value, old_type_parameter_bound_keeps_value),
+                (cx_type_alias_keeps_value, old_type_alias_keeps_value),
+                (cx_class_keyword_reaches_user_code, old_class_keyword_reaches_user_code),
+            ]
+        ],
     ]
     lines = []
     for cx, old, call in pairs:

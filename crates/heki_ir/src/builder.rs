@@ -33,6 +33,7 @@ pub fn build_module_ir(
     let mut ctx = ModuleLowerer {
         source,
         profile,
+        future_annotations: semantic.has_future_annotations,
         class_by_span,
         lazy_import_names,
         functions: Vec::new(),
@@ -130,6 +131,8 @@ struct FunctionSpec<'a> {
 struct ModuleLowerer<'a> {
     source: &'a str,
     profile: RuntimeProfile,
+    /// `from __future__ import annotations`: annotations stay strings.
+    future_annotations: bool,
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
     functions: Vec<IrFunction>,
@@ -875,10 +878,24 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     self.lower_delete_target(target);
                 }
             }
+            // The alias evaluates its value (and its type parameters' bounds) lazily, in a scope
+            // that reads the names it uses from this frame: an unlowered function closing
+            // over them.
             Stmt::TypeAlias(ta) => {
                 let span = Span::from(ta.range);
-                let v = self.emit_const(ConstLiteral::Other, span);
-                self.lower_assign_target(&ta.name, v, span);
+                let mut names = self.capture_type_param_reads(ta.type_params.as_deref());
+                names.extend(self.capture_free_names(names_loaded(&[&ta.value])));
+                let captured = self.read_captured_vars(&names, span);
+                let dst = self.fresh_var(None);
+                self.emit(
+                    InstKind::MakeClosure {
+                        dst,
+                        func_id: None,
+                        captured,
+                    },
+                    span,
+                );
+                self.lower_assign_target(&ta.name, dst, span);
             }
             Stmt::Assign(a) => {
                 let span = Span::from(a.range);
@@ -901,6 +918,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 if let Some(val_expr) = &aa.value {
                     let val = self.lower_expr(val_expr);
                     self.lower_assign_target(&aa.target, val, span);
+                }
+                // A function never evaluates its local variables' annotations; a module or
+                // class body stores simple names' annotations in its `__annotations__`.
+                if aa.simple && (self.is_module_body || self.is_class_body) {
+                    let mut retained = Vec::new();
+                    let lazily_read = self.lower_annotations(&[&aa.annotation], &mut retained);
+                    self.capture_free_names(lazily_read);
                 }
             }
             Stmt::For(f) => self.lower_for(f),
@@ -1011,18 +1035,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             decorators.push(self.module.slice_text(Span::from(dec.expression.range())));
             let _ = self.lower_expr(&dec.expression);
         }
-        // Default argument expressions execute in the enclosing scope at def time.
-        for p in func
-            .parameters
-            .posonlyargs
-            .iter()
-            .chain(func.parameters.args.iter())
-            .chain(func.parameters.kwonlyargs.iter())
-        {
-            if let Some(def) = &p.default {
-                let _ = self.lower_expr(def);
-            }
-        }
+        // The function object keeps its defaults (`__defaults__`, `__kwdefaults__`) and its
+        // eagerly evaluated annotations (`__annotations__`).
+        let mut retained: Vec<VarId> = parameter_defaults(&func.parameters)
+            .map(|d| self.lower_expr(d))
+            .collect();
+        let annotations = function_annotations(&func.parameters, func.returns.as_deref());
+        let lazily_read = self.lower_annotations(&annotations, &mut retained);
 
         let (owner_class, owner_class_qualname) = if self.is_class_body {
             (self.owner_class, self.owner_class_qualname.clone())
@@ -1060,18 +1079,56 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             body: FunctionBody::Suite(&func.body),
         });
 
-        let captured_names = self.collect_child_captures(child_id);
-        let captured_vars = self.read_captured_vars(&captured_names, span);
+        let mut captured_names = self.collect_child_captures(child_id);
+        captured_names.extend(self.capture_free_names(lazily_read));
+        captured_names.extend(self.capture_type_param_reads(func.type_params.as_deref()));
+        let mut captured = self.read_captured_vars(&captured_names, span);
+        captured.extend(retained);
         let dst = self.fresh_var(Some(func.name.to_string()));
         self.emit(
             InstKind::MakeClosure {
                 dst,
                 func_id: Some(child_id),
-                captured: captured_vars,
+                captured,
             },
             span,
         );
         self.write_var(func.name.as_str(), dst, span);
+    }
+
+    /// Evaluate annotations the way the definition does: eagerly before 3.14 (their values
+    /// pushed to `retained`, the dict that holds them), not at all under
+    /// `from __future__ import annotations`, and from 3.14 in a lazily run `__annotate__`
+    /// scope, whose free names are returned.
+    fn lower_annotations(
+        &mut self,
+        annotations: &[&'a Expr],
+        retained: &mut Vec<VarId>,
+    ) -> Vec<String> {
+        if self.module.future_annotations {
+            Vec::new()
+        } else if self.module.profile.pep649_deferred_annotations {
+            names_loaded(annotations)
+        } else {
+            retained.extend(annotations.iter().map(|a| self.lower_expr(a)));
+            Vec::new()
+        }
+    }
+
+    /// The names the lazily evaluated scopes of PEP 695 type parameters read (bounds,
+    /// constraints, defaults), captured like a nested function's free names.
+    fn capture_type_param_reads(&mut self, params: Option<&'a ast::TypeParams>) -> Vec<String> {
+        let exprs: Vec<&Expr> = params
+            .into_iter()
+            .flat_map(|tp| &tp.type_params)
+            .flat_map(|p| match p {
+                ast::TypeParam::TypeVar(tv) => vec![tv.bound.as_deref(), tv.default.as_deref()],
+                ast::TypeParam::ParamSpec(ps) => vec![ps.default.as_deref()],
+                ast::TypeParam::TypeVarTuple(tvt) => vec![tvt.default.as_deref()],
+            })
+            .flatten()
+            .collect();
+        self.capture_free_names(names_loaded(&exprs))
     }
 
     fn lower_class_def(&mut self, cls: &'a ast::StmtClassDef) {
@@ -1081,12 +1138,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             decorators.push(self.module.slice_text(Span::from(dec.expression.range())));
             let _ = self.lower_expr(&dec.expression);
         }
+        // The class keeps its bases and hands its keywords to the metaclass and to
+        // `__init_subclass__`.
+        let mut retained = Vec::new();
         if let Some(args) = &cls.arguments {
             for arg in &args.args {
-                let _ = self.lower_expr(arg);
+                retained.push(self.lower_expr(arg));
             }
             for kw in &args.keywords {
-                let _ = self.lower_expr(&kw.value);
+                retained.push(self.lower_expr(&kw.value));
             }
         }
 
@@ -1113,14 +1173,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             body: FunctionBody::Suite(&cls.body),
         });
 
-        let captured_names = self.collect_child_captures(child_id);
-        let captured_vars = self.read_captured_vars(&captured_names, span);
+        let mut captured_names = self.collect_child_captures(child_id);
+        captured_names.extend(self.capture_type_param_reads(cls.type_params.as_deref()));
+        let mut captured = self.read_captured_vars(&captured_names, span);
+        captured.extend(retained);
         let dst = self.fresh_var(Some(cls.name.to_string()));
         self.emit(
             InstKind::MakeClosure {
                 dst,
                 func_id: Some(child_id),
-                captured: captured_vars,
+                captured,
             },
             span,
         );
@@ -1150,10 +1212,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
-    /// The child's free variables (those it forwards to its own nested scopes included) that
-    /// are cells of this frame, by their SSA names; the others are free here too.
+    /// [`Self::capture_free_names`] of the child's free variables (those it forwards to its own
+    /// nested scopes included).
     fn collect_child_captures(&mut self, child_id: FunctionId) -> Vec<String> {
         let names = self.module.free_names[child_id.0 as usize].clone();
+        self.capture_free_names(names)
+    }
+
+    /// The names a nested scope reads from enclosing function scopes that are cells of this
+    /// frame, by their SSA names; the others are free here too.
+    fn capture_free_names(&mut self, names: Vec<String>) -> Vec<String> {
         let mut own_captures = Vec::new();
         for name in names {
             if let Some(cell) = self.resolve_comp_rename(&name) {
@@ -2221,18 +2289,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::Call(call) => self.lower_call(call, false),
             Expr::Lambda(lam) => {
-                if let Some(params) = &lam.parameters {
-                    for p in params
-                        .posonlyargs
-                        .iter()
-                        .chain(params.args.iter())
-                        .chain(params.kwonlyargs.iter())
-                    {
-                        if let Some(def) = &p.default {
-                            let _ = self.lower_expr(def);
-                        }
-                    }
-                }
+                // The function object keeps its defaults.
+                let retained: Vec<VarId> = lam
+                    .parameters
+                    .iter()
+                    .flat_map(|params| parameter_defaults(params))
+                    .map(|d| self.lower_expr(d))
+                    .collect();
                 let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<lambda>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
@@ -2252,7 +2315,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     body: FunctionBody::Expr(&lam.body),
                 });
                 let captured_names = self.collect_child_captures(child_id);
-                let captured = self.read_captured_vars(&captured_names, span);
+                let mut captured = self.read_captured_vars(&captured_names, span);
+                captured.extend(retained);
                 let dst = self.fresh_var(None);
                 self.emit(
                     InstKind::MakeClosure {
@@ -3180,6 +3244,53 @@ fn parameter_defaults(params: &ast::Parameters) -> impl Iterator<Item = &Expr> {
         .chain(&params.args)
         .chain(&params.kwonlyargs)
         .filter_map(|p| p.default.as_deref())
+}
+
+/// A function's annotations in the order the definition evaluates them: the parameters'
+/// (positional, `*args`, keyword-only, `**kwargs`), then the return annotation.
+fn function_annotations<'e>(
+    params: &'e ast::Parameters,
+    returns: Option<&'e Expr>,
+) -> Vec<&'e Expr> {
+    let with_default = |p: &'e ast::ParameterWithDefault| p.parameter.annotation.as_deref();
+    let plain =
+        |p: &'e Option<Box<ast::Parameter>>| p.as_deref().and_then(|p| p.annotation.as_deref());
+    params
+        .posonlyargs
+        .iter()
+        .chain(&params.args)
+        .filter_map(with_default)
+        .chain(plain(&params.vararg))
+        .chain(params.kwonlyargs.iter().filter_map(with_default))
+        .chain(plain(&params.kwarg))
+        .chain(returns)
+        .collect()
+}
+
+/// The names an expression loads, also inside the scopes nested in it: what a lazily evaluated
+/// scope built from it (an `__annotate__` function, a type parameter's bound, a type alias's
+/// value) reads from the frame it is defined in.
+fn names_loaded(exprs: &[&Expr]) -> Vec<String> {
+    use heki_ast::raw_ast::visitor::{self, Visitor};
+
+    struct Loads(Vec<String>);
+    impl<'e> Visitor<'e> for Loads {
+        fn visit_expr(&mut self, expr: &'e Expr) {
+            if let Expr::Name(n) = expr
+                && n.ctx == ast::ExprContext::Load
+                && !self.0.iter().any(|seen| seen == n.id.as_str())
+            {
+                self.0.push(n.id.to_string());
+            }
+            visitor::walk_expr(self, expr);
+        }
+    }
+
+    let mut loads = Loads(Vec::new());
+    for e in exprs {
+        loads.visit_expr(e);
+    }
+    loads.0
 }
 
 fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {

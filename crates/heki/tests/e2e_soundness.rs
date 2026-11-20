@@ -1197,6 +1197,18 @@ const IR_COUNTEREXAMPLES: &[Expect] = &[
     ("cx_capture_through_function", CAPTURED),
     ("cx_capture_through_class", CAPTURED),
     ("cx_capture_through_generator_expression", CAPTURED),
+    // A function keeps its defaults and annotations (evaluated eagerly before 3.14, closed
+    // over by `__annotate__` from 3.14), a type parameter's bound or a type alias's value
+    // closes over the names it reads, and a class hands its keywords to `__init_subclass__`.
+    ("cx_default_keeps_value", CAPTURED),
+    ("cx_keyword_only_default_keeps_value", CAPTURED),
+    ("cx_lambda_default_keeps_value", CAPTURED),
+    ("cx_return_annotation_keeps_value", CAPTURED),
+    ("cx_parameter_annotation_keeps_value", CAPTURED),
+    ("cx_class_annotation_keeps_value", CAPTURED),
+    ("cx_type_parameter_bound_keeps_value", CAPTURED),
+    ("cx_type_alias_keeps_value", CAPTURED),
+    ("cx_class_keyword_reaches_user_code", CAPTURED),
 ];
 
 const CAPTURED: &[(&str, V)] = &[(
@@ -1219,7 +1231,11 @@ fn check_fixture_unchanged(name: &str, fixture: &str, expect: &[Expect]) {
     let p = Project::new(name);
     let original = repo_file(fixture);
     p.write("cases.py", &original);
-    assert_verdicts(&opt_json(&p, &["--include-size-dependent"]), expect);
+    // Before 3.14 annotations are evaluated eagerly, from 3.14 lazily: both keep the object.
+    for version in ["py313", "py315"] {
+        let args = ["--include-size-dependent", "--target-version", version];
+        assert_verdicts(&opt_json(&p, &args), expect);
+    }
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
@@ -1228,5 +1244,17 @@ fn check_fixture_unchanged(name: &str, fixture: &str, expect: &[Expect]) {
     assert!(
         transcript.contains(&format!("old rewrites diverge: {total}/{total}")),
         "{transcript}"
+    );
+}
+
+#[test]
+fn string_annotations_keep_nothing() {
+    // Under `from __future__ import annotations` the function keeps the annotation's text.
+    let src = "from __future__ import annotations\n\n\ndef tagged(items):\n    acc = []\n    def tag() -> acc:\n        pass\n    old = tag.__annotations__[\"return\"]\n    for x in items:\n        acc = acc + [x]\n    return old, acc\n\n\nprint(tagged([1]))\n";
+    check_module(
+        "sound_string_annotations",
+        &[("cases.py", src)],
+        &[("tagged", &[("OPT101", V::Fix(&["acc.append(x)"]))])],
+        true,
     );
 }

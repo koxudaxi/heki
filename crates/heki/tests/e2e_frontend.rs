@@ -1388,7 +1388,8 @@ fn ir_newer_syntax() {
         ["ValueError, TypeError"]
     );
 
-    // PEP 695 `type` statements bind an opaque value.
+    // PEP 695 `type` statements bind an alias whose value a scope of its own evaluates
+    // lazily: a closure the IR does not lower.
     let ir = self::ir(TOUR_312, "py312");
     let module = &ir["functions"][0];
     let stored: Vec<&str> = of_kind(module, "StoreGlobal")
@@ -1396,11 +1397,11 @@ fn ir_newer_syntax() {
         .map(|s| s["name"].as_str().unwrap())
         .collect();
     assert!(stored.starts_with(&["Alias", "Pair", "Variadic"]));
-    let opaque = of_kind(module, "Const")
+    let lazy = of_kind(module, "MakeClosure")
         .iter()
-        .filter(|c| c["literal"] == "other")
+        .filter(|c| c["func_id"].is_null())
         .count();
-    assert_eq!(opaque, 3);
+    assert_eq!(lazy, 3);
 
     // `from __future__ import annotations`: annotation text is still recorded.
     let ir = self::ir(TOUR_FUTURE, "py314");

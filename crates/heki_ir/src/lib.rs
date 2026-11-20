@@ -349,7 +349,10 @@ pub enum InstKind {
         outer_iter: VarId,
         captured: Vec<VarId>,
     },
-    /// Nested function or lambda capturing outer variables.
+    /// A function, lambda, or class object, or a lazily evaluated scope without a lowered
+    /// body (`func_id: None`: a `type` alias). `captured` is every value the object keeps or
+    /// hands to code that runs later: its closure cells, defaults, eagerly evaluated
+    /// annotations, and a class's bases and keywords.
     MakeClosure {
         dst: VarId,
         func_id: Option<FunctionId>,
