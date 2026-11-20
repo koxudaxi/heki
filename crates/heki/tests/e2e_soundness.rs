@@ -961,7 +961,11 @@ const DEQUE: &[Expect] = &[
             V::Blocked("DequeEquivalentOps(q): the result of `reversed(...)` (line"),
         )],
     ),
+    ("unpacked_queue", &[("OPT120", V::Blocked(UNPACKED_QUEUE))]),
+    ("matched_queue", &[("OPT120", V::Blocked(UNPACKED_QUEUE))]),
 ];
+
+const UNPACKED_QUEUE: &str = "DequeEquivalentOps(q): the list is made by unpacking";
 
 #[test]
 fn deque_rules() {

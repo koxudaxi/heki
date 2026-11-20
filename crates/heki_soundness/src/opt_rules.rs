@@ -2277,7 +2277,12 @@ impl<'a, 'c> Rules<'a, 'c> {
             let ai = inst_at(f, loc);
             let rewritten_slice = matches!(form, Some(FrontForm::SliceRebind { .. })) && loc == at;
             let (init, unpacks) = match &ai.kind {
-                InstKind::AllocBuiltin { kind: List, .. } => (true, false),
+                // A display or a comprehension. A starred target or pattern (`first, *rest =
+                // xs`) makes a list too, with no expression to turn into a deque.
+                InstKind::AllocBuiltin { kind: List, .. } => (
+                    true,
+                    self.m.text(ai.span).is_none_or(|t| !t.starts_with('[')),
+                ),
                 InstKind::Call {
                     dst,
                     callee_var,
@@ -2294,10 +2299,16 @@ impl<'a, 'c> Rules<'a, 'c> {
             if init && !unpacks && !lp.body.contains(&loc.0) {
                 init_sites.push(loc);
             } else if init && unpacks {
-                bad_alloc = Some(format!(
-                    "`list(...)` with `*` / `**` arguments (line {}) has no `deque` equivalent: `deque` reads a second argument as `maxlen`",
-                    self.line(ai.span.start)
-                ));
+                bad_alloc = Some(match ai.kind {
+                    InstKind::AllocBuiltin { .. } => format!(
+                        "the list is made by unpacking (line {}): there is no display to turn into a `deque`",
+                        self.line(ai.span.start)
+                    ),
+                    _ => format!(
+                        "`list(...)` with `*` / `**` arguments (line {}) has no `deque` equivalent: `deque` reads a second argument as `maxlen`",
+                        self.line(ai.span.start)
+                    ),
+                });
             } else if !rewritten_slice {
                 bad_alloc = Some(format!(
                     "it is also created at line {}",

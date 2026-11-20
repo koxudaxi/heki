@@ -72,4 +72,6 @@ than a list iterator: no iterator of the list may be live at a change, consumed 
 call (`q.extend(reversed(q))`), or used for more than its elements (`type(iter(q))`). `list(xs)`
 of a value that is not a builtin container becomes `deque(list(xs))`, which keeps the length
 query `list` makes; `list(**kw)` and `list(*args)` block the fix (`deque` reads a second
-argument as `maxlen`). Only `q = q[1:]` is a front pop: `q[1:n]` and `q[1::2]` are not.
+argument as `maxlen`), and so does a list a starred target or pattern makes (`first, *q =
+items`), which has no display to rewrite. Only `q = q[1:]` is a front pop: `q[1:n]` and
+`q[1::2]` are not.

@@ -308,6 +308,25 @@ def annotated_queue(items):
     return out
 
 
+def unpacked_queue(items):
+    """`*q` makes the list: there is no display to turn into a deque."""
+    first, *q = [0, *items]
+    out = [first]
+    while q:
+        out.append(q.pop(0))
+    return out
+
+
+def matched_queue(items):
+    """A star pattern makes the list: there is no display to turn into a deque."""
+    match [0, *items]:
+        case [first, *q]:
+            out = [first]
+            while q:
+                out.append(q.pop(0))
+            return out
+
+
 def fill_front_with_comment(n):
     q = list()
     for i in range(n):
@@ -380,6 +399,8 @@ def main() -> int:
             run(rebuilt_per_iteration, n),
             run(drain_and_test, items),
             run(annotated_queue, items),
+            run(unpacked_queue, items),
+            run(matched_queue, items),
         ]
     lines.append(type(deque()).__name__)
     print("\n".join(lines))
