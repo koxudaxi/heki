@@ -500,8 +500,10 @@ which module imports which.
   method of the class and its subclasses, with `MUT101`'s initialization, memo, and constant-key
   filters, writes directly under a `None` / falsy guard of the same attribute (lazy
   initialization, `CacheFlow` writes), the attributes `__hash__` caches itself (`self._hash`), and stored-hash names.
-- Initialization includes the private methods `__init__` reaches through other private methods on
-  `self` (`__init__` -> `self._load()` -> `self._decode()`).
+- Initialization includes the private methods only `__init__` and such methods call (every
+  caller in the reverse call graph is one): `__init__` -> `self._load()` -> `self._decode()`.
+  Since any method's calls decide this, the language server re-checks a class family with a
+  `__hash__` or a cached property when any of its methods changes (`family_readers`).
 - A writer whose class uses another `__hash__` (`ProjectDecls::hash_owner`: a class between it and
   the hash's class defines `__hash__`, or `__eq__` alone, which leaves its instances unhashable)
   is not paired with that hash.

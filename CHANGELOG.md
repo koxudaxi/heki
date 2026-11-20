@@ -19,8 +19,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `dict` has filed: an in-place change (an item store, `append`) of an attribute `__hash__`
   hands whole to `hash()` (`hash(self.items)`: a list or `bytearray` there cannot be hashed, and
   a project value answers for its own hash), a writer whose class defines its own `__hash__`
-  (or `__eq__` alone) below the hash's class, and a private helper `__init__` reaches through
-  other private helpers (`__init__` -> `self._load()` -> `self._decode()`). A writer in a
+  (or `__eq__` alone) below the hash's class, and a private helper that only `__init__` and
+  other such helpers call (`__init__` -> `self._load()` -> `self._decode()`). A writer in a
   subclass with its own `__hash__` is now reported against that hash.
 - `MUT202` (`readonly-return-mutation`) no longer reports a shared object filling its own memo
   (a cache-named attribute changed in place, a store under `if k not in ...`, `setdefault`, a
