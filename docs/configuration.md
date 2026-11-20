@@ -63,6 +63,8 @@ message = "use GenerationStore.set_fields() instead"
   (`DataModel.fields` matches `pkg.model.DataModel.fields`), and globs are allowed. Subclasses of
   a target class are covered too.
 - `allowed-writers`: functions allowed to write (fully qualified or qualname, globs allowed).
+- `forbidden-writers`: when set, only writes by these functions are reported (matched like
+  `allowed-writers`); see [Allowed and forbidden functions](#allowed-and-forbidden-functions).
 - `exempt-methods`: construction and copy methods allowed to write the targets. A plain name
   (`__deepcopy__`) matches any method of that name; an entry with a dot or a glob
   (`DataModel.copy_deep`, `create_*`) is matched like `allowed-writers`.
@@ -74,6 +76,10 @@ A class's own initialization is always allowed: an initializer (`__init__`, `__p
 `self`, directly, through `super().__init__()`, or through helpers it passes `self` to. So is a
 function that only runs inside the owner's operations: every path of project callers above it
 starts in an allowed writer, an exempt method, or such an initialization.
+
+A write in a private helper (`_name`) with project callers is reported at the call sites of its
+first non-private callers; one report stands for every write behind its call, and a Ratchet
+baseline counts each of them (`sites` in JSON output).
 
 ## Read contracts: `[[tool.heki.read-owners]]` (`MUT203`)
 
@@ -88,9 +94,66 @@ message = "read children through GenerationIndex instead"
 
 The read side of `write-owners`: reads of a target (`ref.children`, a local alias,
 `getattr(ref, "children")`, `ref.__dict__["children"]`) outside `allowed-readers` and
-`exempt-methods` are reported. Targets, subclasses, initializers, private helpers, and
-`message` work as for `write-owners`. Reads through a parameter without a project-class
-annotation are not seen.
+`exempt-methods` are reported. Targets, subclasses, initializers, private helpers, `message`,
+and `forbidden-readers` work as for `write-owners`. Reads through a parameter without a
+project-class annotation are not seen.
+
+## Call contracts: `[[tool.heki.call-owners]]` (`MUT204`)
+
+```toml
+[[tool.heki.call-owners]]
+name = "reference-mutators"
+targets = ["DataType.replace_reference", "pkg.util.reset_cache", "FinalFacts"]
+allowed-callers = ["pkg.parser.generation.*"]
+exempt-methods = ["__deepcopy__"]
+message = "use a GenerationStore operation instead"
+```
+
+The call side of `write-owners`: calls of a target outside `allowed-callers` and
+`exempt-methods` are reported.
+
+- `targets`: functions, methods, or classes (dotted names or globs, matched against the fully
+  qualified name and any dotted suffix). A `Class.method` target covers the overrides of the
+  method in subclasses; a class target means constructing the class or a subclass. A call is
+  reported only when every function it may call (each candidate of the class hierarchy) is a
+  target, so `text.replace(...)` on a `str` is never a call of `DataType.replace_reference`.
+  Bound-method aliases (`replace = dt.replace_reference`) and `getattr(dt, "replace_reference")`
+  with a constant name are followed.
+- `allowed-callers`, `forbidden-callers`, `exempt-methods`, `message`: as for `write-owners`.
+
+Private helpers, functions that only run inside allowed callers, and a class's own
+initialization work as for `write-owners`. The targets of a contract may call each other: a call
+of the guarded operation is checked where it is made, so what the operation does inside is part
+of it.
+
+## Allowed and forbidden functions
+
+`allowed-writers`, `allowed-readers`, and `allowed-callers` name the functions a contract allows;
+without them, every access to a target is reported. `forbidden-writers`, `forbidden-readers`,
+and `forbidden-callers` name where the contract applies instead, so a layer rule ("the parser
+must not read `Reference.children`") needs no list of every other layer:
+
+```toml
+[[tool.heki.read-owners]]
+name = "parser-reads"
+targets = ["Reference.children"]
+forbidden-readers = ["pkg.parser.*"]
+allowed-readers = ["pkg.parser.index.*"]
+```
+
+The two lists combine as follows:
+
+| `allowed-*` | `forbidden-*` | Reported |
+| ----------- | ------------- | -------- |
+| unset | unset | every access |
+| set | unset | accesses outside the allowed functions |
+| unset | set | accesses by the forbidden functions |
+| set | set | accesses by the forbidden functions, except the allowed ones |
+
+An access counts as one by a forbidden function when the function that is reported, one of the
+private helpers it hands the access through, or the function making the access is forbidden.
+`allowed-*` and `exempt-methods` win wherever they apply on that path, as does the rule for
+functions that only run inside allowed callers.
 
 ## Effect boundaries: `[[tool.heki.effect-boundaries]]` (`EFF201`)
 
@@ -102,18 +165,37 @@ forbid = ["writes-targets", "blocking"]
 write-targets = ["DataModel.*", "DataType.*"]
 allowed-callees = ["pkg.logging.*"]
 message = "render entry points must not mutate model state"
+
+[[tool.heki.effect-boundaries]]
+name = "decisions-read-final-facts"
+scopes = ["pkg.model._decisions.*"]
+forbid = ["reads-targets", "calls"]
+read-targets = ["DataType.is_optional", "DataModel._additional_imports"]
+call-targets = ["GenerationStore.*"]
+
+[[tool.heki.effect-boundaries]]
+name = "pass-sort-base-classes"
+scopes = ["pkg.parser.passes.sort_base_classes"]
+allow-writes = ["DataModel.base_classes"]
+write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 ```
 
 | Key | Meaning |
 | --- | ------- |
 | `scopes` | Modules, classes, or functions (dotted names or globs) whose functions must stay inside the boundary; nested functions are included. |
-| `forbid` | `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`, `sleep`, `blocking` (all six), `mutates-params` (for a method, `self` is a parameter), `writes-targets`. An unknown token is a configuration error. |
+| `forbid` | `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`, `sleep`, `blocking` (all six), `mutates-params` (for a method, `self` is a parameter), `writes-targets`, `reads-targets`, `calls`. An unknown token is a configuration error. |
 | `write-targets` | `Class.attr` targets of `writes-targets` (required with it; subclasses included). |
-| `allowed-callees` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed. |
+| `read-targets` | `Class.attr` targets of `reads-targets` (required with it; subclasses included): reads as `read-owners` sees them, also inside property getters. |
+| `call-targets` | Functions, methods, or classes of `calls` (required with it), matched as the `targets` of `call-owners`. |
+| `write-universe` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
+| `allow-writes` | `Class.attr` writes the boundary allows; they are exempt from `write-targets` too. Needs `write-universe`. |
+| `allowed-callees` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `message` | Text appended to every report of the boundary. |
 
 Each scope function is checked through any number of calls; a violation inside another scope
-function is reported there only, once.
+function is reported there only, once. One report per scope function and forbidden kind (or
+target) stands for every distinct site of it that the function reaches, and a Ratchet baseline
+counts each of them.
 
 ## Shared return values: `[[tool.heki.readonly-returns]]` (`MUT202`)
 

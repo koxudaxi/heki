@@ -1,4 +1,5 @@
-//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT110`, `MUT201`, `MUT202`, `MUT203`
+//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT110`, `MUT201`, `MUT202`, `MUT203`,
+//! `MUT204`
 //! (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
@@ -6,7 +7,7 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, EffectSummary, FuncKey, ProjectDecls,
-    ProjectIndex, TypeCtx, TypedFieldReadSite, Val, WriteKind, self_aliases,
+    ProjectIndex, TypeCtx, Val, WriteKind, self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -512,26 +513,91 @@ pub(crate) fn patterns(
 
 /// The functions a contract lets touch its targets: `allowed-*` patterns (matched against the
 /// fqn and the qualname) and `exempt-methods` (a plain name matches the last qualname
-/// component; an entry with a dot or a glob is a pattern like `allowed-*`).
-struct Allowance {
+/// component; an entry with a dot or a glob is a pattern like `allowed-*`). `forbidden-*`
+/// patterns (matched like `allowed-*`) narrow where the contract applies: when set, only
+/// accesses by them are reported, and the allowed functions stay exceptions inside them.
+#[derive(Default)]
+pub(crate) struct Allowance {
     allowed: Vec<DottedPattern>,
     exempt_names: FxHashSet<String>,
+    forbidden: Vec<DottedPattern>,
+    /// Functions the contract guards (`call-owners` targets): they are part of the guarded
+    /// operation, whose calls are checked where they are made, so they may use each other.
+    targets: Vec<FunctionMatcher>,
+}
+
+/// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
+/// qualname (dotted suffixes, globs), and, for `Class.method`, the overrides of the method in
+/// the class family the class part names.
+pub(crate) struct FunctionMatcher {
+    whole: DottedPattern,
+    method: Option<(FxHashSet<String>, DottedPattern)>,
+}
+
+impl FunctionMatcher {
+    pub(crate) fn new(
+        cx: &CheckContext<'_>,
+        all_classes: &[String],
+        text: &str,
+        context: &'static str,
+    ) -> Result<Self, RuleConfigError> {
+        let mut method = None;
+        if let Some((class, name)) = text.rsplit_once('.') {
+            let owners = class_set(cx, &DottedPattern::new(class, context)?, all_classes);
+            if !owners.is_empty() {
+                method = Some((owners, DottedPattern::new(name, context)?));
+            }
+        }
+        Ok(Self {
+            whole: DottedPattern::new(text, context)?,
+            method,
+        })
+    }
+
+    pub(crate) fn matches(&self, key: &FuncKey) -> bool {
+        self.whole.matches(&key.fqn())
+            || self.whole.matches(&key.qualname)
+            || self.method.as_ref().is_some_and(|(family, name)| {
+                key.qualname.rsplit_once('.').is_some_and(|(owner, last)| {
+                    name.matches(last) && family.contains(&format!("{}.{owner}", key.module))
+                })
+            })
+    }
+
+    /// The class family of `Class.method` (empty for a function).
+    pub(crate) fn method_family(&self) -> Option<&FxHashSet<String>> {
+        self.method.as_ref().map(|(family, _)| family)
+    }
+
+    /// Every project class the whole text names, plus their subclasses.
+    pub(crate) fn classes(
+        &self,
+        cx: &CheckContext<'_>,
+        all_classes: &[String],
+    ) -> FxHashSet<String> {
+        class_set(cx, &self.whole, all_classes)
+    }
+}
+
+/// The `allowed-*`, `forbidden-*`, and `exempt-methods` keys of one owner contract with their
+/// configuration contexts (`write-owners.allowed-writers`, ...).
+pub(crate) struct AllowanceKeys<'c> {
+    pub allowed: (&'c [String], &'static str),
+    pub forbidden: (&'c [String], &'static str),
+    pub exempt: (&'c [String], &'static str),
 }
 
 impl Allowance {
-    fn new(
-        allowed: &[String],
-        allowed_context: &'static str,
-        exempt: &[String],
-        exempt_context: &'static str,
-    ) -> Result<Self, RuleConfigError> {
+    pub(crate) fn new(keys: &AllowanceKeys<'_>) -> Result<Self, RuleConfigError> {
         let mut out = Self {
-            allowed: patterns(allowed, allowed_context)?,
+            allowed: patterns(keys.allowed.0, keys.allowed.1)?,
             exempt_names: FxHashSet::default(),
+            forbidden: patterns(keys.forbidden.0, keys.forbidden.1)?,
+            targets: Vec::new(),
         };
-        for e in exempt {
+        for e in keys.exempt.0 {
             if e.contains(['.', '*', '?', '[', '{']) {
-                out.allowed.push(DottedPattern::new(e, exempt_context)?);
+                out.allowed.push(DottedPattern::new(e, keys.exempt.1)?);
             } else {
                 out.exempt_names.insert(e.clone());
             }
@@ -539,7 +605,7 @@ impl Allowance {
         Ok(out)
     }
 
-    fn allows(&self, key: &FuncKey) -> bool {
+    pub(crate) fn allows(&self, key: &FuncKey) -> bool {
         let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
         if self.exempt_names.contains(name) {
             return true;
@@ -548,6 +614,39 @@ impl Allowance {
         self.allowed
             .iter()
             .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+            || self.targets.iter().any(|t| t.matches(key))
+    }
+
+    /// The same allowance, with the guarded functions `targets` allowed too.
+    pub(crate) fn with_targets(self, targets: Vec<FunctionMatcher>) -> Self {
+        Self { targets, ..self }
+    }
+
+    /// Whether the contract has `forbidden-*` patterns.
+    pub(crate) fn has_forbidden(&self) -> bool {
+        !self.forbidden.is_empty()
+    }
+
+    /// Whether an access by `key` falls under the contract: every function without
+    /// `forbidden-*`, else the functions they name.
+    pub(crate) fn in_scope(&self, key: &FuncKey) -> bool {
+        if self.forbidden.is_empty() {
+            return true;
+        }
+        let fqn = key.fqn();
+        self.forbidden
+            .iter()
+            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+    }
+
+    /// `outside the <owners> of `name``, or `inside the forbidden <who> of `name`` for a contract
+    /// with `forbidden-*`.
+    pub(crate) fn where_text(&self, owners: &str, forbidden: &str, name: &str) -> String {
+        if self.has_forbidden() {
+            format!("inside the {forbidden} of `{name}`")
+        } else {
+            format!("outside the {owners} of `{name}`")
+        }
     }
 }
 
@@ -653,6 +752,70 @@ pub(crate) fn with_note(base: String, note: Option<&str>) -> String {
     }
 }
 
+/// One violation site: the function holding the write, read, or call (fqn) and its span there.
+pub(crate) type SiteId = (String, Span);
+
+/// The reports of a contract rule, merged by `(reporting function, span, target)`: the first
+/// report of a key gives the message and the related chain, and every distinct violation site
+/// behind the key counts (`Diagnostic::sites`), so a second write inside a private helper that is
+/// reported at its caller is visible to the Ratchet baseline.
+#[derive(Default)]
+pub(crate) struct MergedReports<'u> {
+    reports: BTreeMap<(FuncKey, Span, String), MergedReport<'u>>,
+}
+
+struct MergedReport<'u> {
+    unit: &'u ModuleUnit<'u>,
+    message: String,
+    chain: Vec<CallHop>,
+    sites: BTreeSet<SiteId>,
+}
+
+impl<'u> MergedReports<'u> {
+    /// Add a report of `func` at `span` for `target`, standing for `site`; `message` and
+    /// `chain` are only built for the first report of the key.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add(
+        &mut self,
+        unit: &'u ModuleUnit<'u>,
+        func: &FuncKey,
+        span: Span,
+        target: &str,
+        site: SiteId,
+        message: impl FnOnce() -> String,
+        chain: impl FnOnce() -> Vec<CallHop>,
+    ) {
+        self.reports
+            .entry((func.clone(), span, target.to_owned()))
+            .or_insert_with(|| MergedReport {
+                unit,
+                message: message(),
+                chain: chain(),
+                sites: BTreeSet::new(),
+            })
+            .sites
+            .insert(site);
+    }
+
+    pub(crate) fn emit(self, cx: &CheckContext<'_>, code: &'static str, out: &mut Vec<Diagnostic>) {
+        for ((func, span, target), r) in self.reports {
+            let sites = u32::try_from(r.sites.len()).unwrap_or(u32::MAX);
+            if let Some(d) = cx.emit(
+                out,
+                code,
+                r.unit,
+                span,
+                &func.qualname,
+                target,
+                r.message,
+                &r.chain,
+            ) {
+                d.sites = sites;
+            }
+        }
+    }
+}
+
 struct OwnerRule<'r> {
     name: &'r str,
     targets: Vec<ContractTarget>,
@@ -678,12 +841,11 @@ pub(crate) fn mut201(
             "write-owners",
             "write-owners.targets",
         )?;
-        let allowance = Allowance::new(
-            &rule.allowed_writers,
-            "write-owners.allowed-writers",
-            &rule.exempt_methods,
-            "write-owners.exempt-methods",
-        )?;
+        let allowance = Allowance::new(&AllowanceKeys {
+            allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+            forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+            exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+        })?;
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
             let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;
@@ -707,7 +869,7 @@ pub(crate) fn mut201(
 
     let mut paths: Vec<_> = cx.index.files.keys().collect();
     paths.sort();
-    let mut seen = FxHashSet::default();
+    let mut reports = MergedReports::default();
     let mut sites = None;
     for path in paths {
         let file = &cx.index.files[path];
@@ -729,8 +891,11 @@ pub(crate) fn mut201(
                                 .iter()
                                 .filter_map(|h| keys_by_fqn.get(&h.callee).cloned()),
                         );
-                        // Allowed writers and exempt methods anywhere on the chain.
-                        if chain.iter().any(|k| rule.allowance.allows(k)) {
+                        // Allowed writers and exempt methods anywhere on the chain; with
+                        // `forbidden-writers`, a forbidden function must be on it.
+                        if chain.iter().any(|k| rule.allowance.allows(k))
+                            || !chain.iter().any(|k| rule.allowance.in_scope(k))
+                        {
                             continue;
                         }
                         let origin = if site.kind == WriteKind::IndirectHelper && chain.len() >= 2 {
@@ -762,38 +927,45 @@ pub(crate) fn mut201(
                             continue;
                         }
                         let span = site.via_chain.first().map_or(site.span, |h| h.span);
-                        if !seen.insert((key.clone(), span, t.text.clone())) {
-                            continue;
-                        }
-                        let via = site
+                        let writer = site
                             .via_chain
                             .last()
-                            .map(|h| format!(" via `{}`", h.callee))
-                            .unwrap_or_default();
-                        cx.emit(
-                            out,
-                            "MUT201",
+                            .map_or_else(|| key.fqn(), |h| h.callee.clone());
+                        reports.add(
                             unit,
+                            key,
                             span,
-                            &key.qualname,
-                            t.text.clone(),
-                            with_note(
-                                format!(
-                                    "`{}` writes `{}` ({}){via} outside the write owners of `{}`",
-                                    key.qualname,
-                                    t.text,
-                                    site.kind.as_str(),
-                                    rule.name
-                                ),
-                                rule.note,
-                            ),
-                            &site.via_chain,
+                            &t.text,
+                            (writer, site.span),
+                            || {
+                                let via = site
+                                    .via_chain
+                                    .last()
+                                    .map(|h| format!(" via `{}`", h.callee))
+                                    .unwrap_or_default();
+                                with_note(
+                                    format!(
+                                        "`{}` writes `{}` ({}){via} {}",
+                                        key.qualname,
+                                        t.text,
+                                        site.kind.as_str(),
+                                        rule.allowance.where_text(
+                                            "write owners",
+                                            "forbidden writers",
+                                            rule.name
+                                        )
+                                    ),
+                                    rule.note,
+                                )
+                            },
+                            || site.via_chain.clone(),
                         );
                     }
                 }
             }
         }
     }
+    reports.emit(cx, "MUT201", out);
 
     // `forbid-cached-property-on`: a `@cached_property` defined on a guarded class.
     for unit in cx.units {
@@ -1521,12 +1693,12 @@ struct ReadOwnerRule<'r> {
     note: Option<&'r str>,
 }
 
-/// Where one read is reported.
-struct ReadReport {
-    func: FuncKey,
-    span: Span,
-    /// Hops from `func` down to the reading function (empty: `func` reads itself).
-    chain: Vec<CallHop>,
+/// Where one access (a read, a call) is reported.
+pub(crate) struct DelegatedReport {
+    pub func: FuncKey,
+    pub span: Span,
+    /// Hops from `func` down to the accessing function (empty: `func` accesses itself).
+    pub chain: Vec<CallHop>,
 }
 
 /// `MUT203`: reads of `read-owners` targets outside their allowed readers. Read sites are
@@ -1551,30 +1723,17 @@ pub(crate) fn mut203(
                 "read-owners",
                 "read-owners.targets",
             )?,
-            allowance: Allowance::new(
-                &rule.allowed_readers,
-                "read-owners.allowed-readers",
-                &rule.exempt_methods,
-                "read-owners.exempt-methods",
-            )?,
+            allowance: Allowance::new(&AllowanceKeys {
+                allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
+                forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
+                exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
+            })?,
             note: rule.message.as_deref(),
         });
     }
     let sites = cx.sites_by_caller();
-    // Every function once, from its defining file.
-    let mut funcs: Vec<(&FuncKey, &EffectSummary)> = cx
-        .index
-        .files
-        .iter()
-        .flat_map(|(path, f)| {
-            f.functions
-                .iter()
-                .filter(move |(k, _)| cx.index.file_of(k) == Some(path.as_path()))
-        })
-        .collect();
-    funcs.sort_by(|a, b| a.0.cmp(b.0));
-    let mut seen = FxHashSet::default();
-    for (key, s) in funcs {
+    let mut reports = MergedReports::default();
+    for (key, s) in cx.defined_functions() {
         for read in &s.typed_field_read_sites {
             for rule in &rules {
                 for t in rule
@@ -1582,93 +1741,115 @@ pub(crate) fn mut203(
                     .iter()
                     .filter(|t| t.matches(&read.class_qualname, &read.attr))
                 {
-                    for r in read_reports(cx, &sites, &rule.allowance, &t.classes, key, read) {
-                        if !seen.insert((r.func.clone(), r.span, t.text.clone())) {
-                            continue;
-                        }
+                    let found = delegated_reports(
+                        cx,
+                        &sites,
+                        &rule.allowance,
+                        &t.classes,
+                        key,
+                        read.obj_params,
+                        read.span,
+                    );
+                    for r in found {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
                             continue;
                         };
-                        let via = if r.chain.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" via `{}`", key.fqn())
-                        };
-                        cx.emit(
-                            out,
-                            "MUT203",
+                        reports.add(
                             unit,
+                            &r.func,
                             r.span,
-                            &r.func.qualname,
-                            t.text.clone(),
-                            with_note(
-                                format!(
-                                    "`{}` reads `{}` ({}){via} outside the read owners of `{}`",
-                                    r.func.qualname,
-                                    t.text,
-                                    read.kind.as_str(),
-                                    rule.name
-                                ),
-                                rule.note,
-                            ),
-                            &r.chain,
+                            &t.text,
+                            (key.fqn(), read.span),
+                            || {
+                                let via = if r.chain.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" via `{}`", key.fqn())
+                                };
+                                with_note(
+                                    format!(
+                                        "`{}` reads `{}` ({}){via} {}",
+                                        r.func.qualname,
+                                        t.text,
+                                        read.kind.as_str(),
+                                        rule.allowance.where_text(
+                                            "read owners",
+                                            "forbidden readers",
+                                            rule.name
+                                        )
+                                    ),
+                                    rule.note,
+                                )
+                            },
+                            || r.chain.clone(),
                         );
                     }
                 }
             }
         }
     }
+    reports.emit(cx, "MUT203", out);
     Ok(())
 }
 
-/// One state of the walk from a read up the reverse call graph.
+/// One state of the walk from an access up the reverse call graph.
 struct WalkState {
     func: FuncKey,
-    /// Parameters of `func` the read object may be.
+    /// Parameters of `func` the accessed object may be.
     obj: u64,
-    /// The state below (towards the reader) and the hop from `func` down to it.
+    /// A function from the accessing one up to `func` falls under `forbidden-*`
+    /// (`Allowance::in_scope`).
+    in_scope: bool,
+    /// The state below (towards the accessing function) and the hop from `func` down to it.
     down: Option<(usize, CallHop)>,
 }
 
-/// Where a read in `reader` is reported: at the read itself, or — for a private helper with
-/// project callers — at every call site of each outermost non-private caller, found breadth
-/// first over `(function, read object parameters)` states (cycle-safe). Allowed functions end
-/// a path; an initializer reading its own instance and a function that only runs inside
-/// allowed contexts (MUT201's rules) are not reported.
-fn read_reports(
+/// Where an access in `func` (at `span`, to an object that may be its parameters `obj`) is
+/// reported: at the access itself, or — for a private helper with project callers — at every
+/// call site of each outermost non-private caller, found breadth first over `(function, object
+/// parameters)` states (cycle-safe). Allowed functions end a path; an initializer accessing its
+/// own instance and a function that only runs inside allowed contexts (MUT201's rules) are not
+/// reported. With `forbidden-*`, a report needs a forbidden function between the reporting
+/// function and the access (both included).
+pub(crate) fn delegated_reports(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
     allowance: &Allowance,
     family: &FxHashSet<String>,
-    reader: &FuncKey,
-    read: &TypedFieldReadSite,
-) -> Vec<ReadReport> {
-    if allowance.allows(reader) {
+    func: &FuncKey,
+    obj: u64,
+    span: Span,
+) -> Vec<DelegatedReport> {
+    if allowance.allows(func) {
         return Vec::new();
     }
-    if !delegates(cx, reader) {
-        if initializes_itself(cx, reader, family, read.obj_params)
-            || runs_inside_allowed(cx, sites, allowance, family, reader, read.obj_params)
+    let in_scope = allowance.in_scope(func);
+    if !delegates(cx, func) {
+        if !in_scope
+            || initializes_itself(cx, func, family, obj)
+            || runs_inside_allowed(cx, sites, allowance, family, func, obj)
         {
             return Vec::new();
         }
-        return vec![ReadReport {
-            func: reader.clone(),
-            span: read.span,
+        return vec![DelegatedReport {
+            func: func.clone(),
+            span,
             chain: Vec::new(),
         }];
     }
     let mut states = vec![WalkState {
-        func: reader.clone(),
-        obj: read.obj_params,
+        func: func.clone(),
+        obj,
+        in_scope,
         down: None,
     }];
-    let mut visited: FxHashSet<(FuncKey, u64)> = FxHashSet::default();
-    visited.insert((reader.clone(), read.obj_params));
+    let mut visited: FxHashSet<(FuncKey, u64, bool)> = FxHashSet::default();
+    visited.insert((func.clone(), obj, in_scope));
     let mut out = Vec::new();
     let mut i = 0;
     while i < states.len() {
-        let (callee, obj) = (states[i].func.clone(), states[i].obj);
+        let (callee, obj, below_in_scope) =
+            (states[i].func.clone(), states[i].obj, states[i].in_scope);
         let mut callers: Vec<&FuncKey> = cx
             .index
             .reverse_call_graph
@@ -1679,6 +1860,7 @@ fn read_reports(
             .collect();
         callers.sort();
         for caller in callers {
+            let in_scope = below_in_scope || allowance.in_scope(caller);
             for (path, site) in sites.get(caller).into_iter().flatten() {
                 for bc in site
                     .project_callees()
@@ -1693,14 +1875,16 @@ fn read_reports(
                         path: path.to_path_buf(),
                     };
                     if delegates(cx, caller) {
-                        if visited.insert((caller.clone(), caller_obj)) {
+                        if visited.insert((caller.clone(), caller_obj, in_scope)) {
                             states.push(WalkState {
                                 func: caller.clone(),
                                 obj: caller_obj,
+                                in_scope,
                                 down: Some((i, hop)),
                             });
                         }
-                    } else if !initializes_itself(cx, caller, family, caller_obj)
+                    } else if in_scope
+                        && !initializes_itself(cx, caller, family, caller_obj)
                         && !runs_inside_allowed(cx, sites, allowance, family, caller, caller_obj)
                     {
                         let mut chain = vec![hop];
@@ -1709,7 +1893,7 @@ fn read_reports(
                             chain.push(h.clone());
                             j = *below;
                         }
-                        out.push(ReadReport {
+                        out.push(DelegatedReport {
                             func: caller.clone(),
                             span: site.span,
                             chain,
@@ -1722,3 +1906,9 @@ fn read_reports(
     }
     out
 }
+
+// ==================================================================================== MUT204
+
+mod call_owners;
+
+pub(crate) use call_owners::{CallTargetPattern, mut204, parse_call_targets, site_callee};

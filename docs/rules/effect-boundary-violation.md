@@ -25,8 +25,20 @@ count for a read.
   - `writes-targets`: writes to the `Class.attr` entries of `write-targets` (and their
     subclasses), in every form `MUT201` follows; a class's own initialization is no write
     (constructing a fresh object runs its `__init__`), as for `MUT201`;
+  - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
+    subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
+    `obj.__dict__["attr"]`, a property getter that reads it); an initializer reading its own
+    instance is no read;
+  - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
+    a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
+    constant name), or a class (constructing it); a call is one only when every function it may
+    call is a target;
   - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
     parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
+- `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
+  write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
+  `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
+  boundary. Without `allow-writes`, the boundary allows no write of the universe.
 
 Each scope function is searched breadth first over the project call graph, so the reported
 chain is a shortest one. The search does not enter:
@@ -37,10 +49,21 @@ chain is a shortest one. The search does not enter:
   once, at the boundary, not again by every scope function above it;
 - `async def` functions called without `await` (calling one only creates a coroutine).
 
-A violation is reported once per scope function and forbidden effect (or write target), at the
-call in the scope function that starts the shortest chain (or at the blocking call or write
-itself), with the chain as related information; `mutates-params` is reported at the function's
-definition.
+A violation is reported once per scope function and forbidden effect (or write, read, or call
+target; a `write-universe` write once per written `Class.attr`), at the call in the scope
+function that starts the shortest chain (or at the blocking call, write, read, or call itself),
+with the chain as related information; `mutates-params` is reported at the function's
+definition. The report counts every distinct site of that kind the scope function reaches
+(`sites` in JSON), so a Ratchet baseline sees a second blocking call or write below a recorded
+report.
+
+`allow-writes` is only as precise as heki's view of which object each write changes. On a
+196,000-line code generator whose 124 declared passes a run-time check confirms (no pass writes a
+fact it does not declare), one boundary per pass reported 12 passes (25 reports): writes to
+objects the pass constructs or copies, state that property getters write while rendering, and
+store operations whose writes depend on their arguments. With every local and property type
+supplied by a type checker, it reported 36 passes. Treat its reports as candidates to review, or
+narrow the universe, rather than gating on it.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -89,8 +112,16 @@ No automatic fix.
     (`pure-render:blocking_net`, `pure-render:DataModel.fields`, `pure-render:mutates-params`).
   - `scopes`: modules, classes, or functions (dotted names or globs).
   - `forbid`: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
-    `blocking-sync`, `sleep`, `blocking`, `mutates-params`, `writes-targets`.
+    `blocking-sync`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`,
+    `calls`.
   - `write-targets`: `Class.attr` entries for `writes-targets` (required with it).
+  - `read-targets`: `Class.attr` entries for `reads-targets` (required with it).
+  - `call-targets`: functions, methods, or classes for `calls` (required with it), as for the
+    `targets` of `[[tool.heki.call-owners]]`.
+  - `write-universe`: `Class.attr` entries whose reached writes are reported unless
+    `allow-writes` names them; the diagnostic target is the entry, with a glob attribute replaced
+    by the written one (`pass:DataModel.fields` for `DataModel.*`).
+  - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
   - `message`: appended to every message of the boundary.

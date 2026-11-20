@@ -100,7 +100,23 @@ pub struct Workspace {
     /// The indexed files that may patch `builtins` (they import it or touch `__builtins__`):
     /// while there is one, no module trusts builtin names (Assumption A1(b)).
     patching_builtins: FxHashSet<PathBuf>,
+    /// What the configured contracts read across functions (`Workspace::affected_by`).
+    reach: ContractReach,
     stats: EngineStats,
+}
+
+/// What the configured contracts read across functions besides the summaries of callees.
+#[derive(Debug, Clone, Copy, Default)]
+struct ContractReach {
+    /// An owner contract (`write-owners`, `read-owners`, `call-owners`): whether a function only
+    /// runs inside allowed callers is decided by walking every caller above it, so a change of
+    /// the calls of a function can change the reports of everything below it.
+    owners: bool,
+    /// A contract on calls (`call-owners`, an effect boundary forbidding `calls`): a call of a
+    /// target is reported at the callers of the private helper making it, or at a scope function
+    /// any number of calls above it, and a call of a function without effects changes no
+    /// summary.
+    calls: bool,
 }
 
 /// Per function of one file: its project call sites without positions, and the cached
@@ -157,6 +173,16 @@ impl Workspace {
                 )
             })
             .collect();
+        let reach = ContractReach {
+            owners: !env_cfg.write_owners.is_empty()
+                || !env_cfg.read_owners.is_empty()
+                || !env_cfg.call_owners.is_empty(),
+            calls: !env_cfg.call_owners.is_empty()
+                || env_cfg
+                    .effect_boundaries
+                    .iter()
+                    .any(|b| b.forbid.iter().any(|t| t == "calls")),
+        };
         let Project { env, errors, .. } = project;
         let decls = index.decl_passes();
         let stats = EngineStats {
@@ -175,6 +201,7 @@ impl Workspace {
                 shown: FxHashMap::default(),
                 check_reads: FxHashMap::default(),
                 patching_builtins,
+                reach,
                 stats,
             },
             errors,
@@ -289,7 +316,8 @@ impl Workspace {
     }
 
     /// What the callees of `path`'s functions see of them: per function, its project call
-    /// sites (without positions) and the cached properties it invalidates.
+    /// sites and constructions of project classes (without positions) and the cached
+    /// properties it invalidates.
     fn caller_view(&self, path: &Path) -> CallerView {
         let mut out = CallerView::new();
         let Some(file) = self.index.files.get(path) else {
@@ -298,7 +326,7 @@ impl Workspace {
         for site in file
             .call_sites
             .iter()
-            .filter(|s| !s.project_callees().is_empty())
+            .filter(|s| !s.project_callees().is_empty() || s.constructs.is_some())
         {
             let mut site = site.clone();
             site.span = heki_ast::Span { start: 0, end: 0 };
@@ -400,7 +428,81 @@ impl Workspace {
         affected.extend(self.reading(change));
         affected.extend(self.callee_files(callers.0, callers.1));
         affected.extend(self.family_files(&update.changed));
+        let changed: Vec<&FuncKey> = callers
+            .0
+            .keys()
+            .chain(callers.1.keys())
+            .filter(|k| callers.0.get(*k) != callers.1.get(*k))
+            .collect();
+        if self.reach.owners {
+            affected.extend(self.below_files(&changed, callers));
+        }
+        if self.reach.calls {
+            affected.extend(self.above_files(&changed));
+        }
         affected
+    }
+
+    /// Files of every function below the `changed` callers (their callees before and after
+    /// the edit, and transitively the callees of those): the allowed-context walk of the owner
+    /// contracts reads the calls of every caller above a function.
+    fn below_files(
+        &self,
+        changed: &[&FuncKey],
+        callers: (&CallerView, &CallerView),
+    ) -> FxHashSet<PathBuf> {
+        let mut out = FxHashSet::default();
+        if changed.is_empty() {
+            return out;
+        }
+        let mut below: FxHashMap<&FuncKey, Vec<&FuncKey>> = FxHashMap::default();
+        for site in self.index.files.values().flat_map(|f| &f.call_sites) {
+            below
+                .entry(&site.caller)
+                .or_default()
+                .extend(site.project_callees().iter().map(|bc| &bc.callee));
+        }
+        let mut queue: Vec<&FuncKey> = changed
+            .iter()
+            .flat_map(|k| [callers.0.get(*k), callers.1.get(*k)])
+            .flatten()
+            .flat_map(|(sites, _)| sites.iter().flat_map(CallSite::project_callees))
+            .map(|bc| &bc.callee)
+            .collect();
+        let mut seen: FxHashSet<&FuncKey> = queue.iter().copied().collect();
+        while let Some(func) = queue.pop() {
+            out.extend(self.index.file_of(func).map(Path::to_path_buf));
+            for next in below.get(func).into_iter().flatten() {
+                if seen.insert(next) {
+                    queue.push(next);
+                }
+            }
+        }
+        out
+    }
+
+    /// Files of every function above the `changed` callers on the reverse call graph: their
+    /// calls of `call-owners` targets are reported there when they are private helpers, and
+    /// effect boundaries forbidding `calls` reach them from any scope function above.
+    fn above_files(&self, changed: &[&FuncKey]) -> FxHashSet<PathBuf> {
+        let mut queue: Vec<&FuncKey> = changed.to_vec();
+        let mut seen: FxHashSet<&FuncKey> = queue.iter().copied().collect();
+        let mut out = FxHashSet::default();
+        while let Some(func) = queue.pop() {
+            for caller in self
+                .index
+                .reverse_call_graph
+                .get(func)
+                .into_iter()
+                .flatten()
+            {
+                if seen.insert(caller) {
+                    out.extend(self.index.file_of(caller).map(Path::to_path_buf));
+                    queue.push(caller);
+                }
+            }
+        }
+        out
     }
 
     /// Re-analyze an edited file: update its summary (Early Cutoff when no fact changed) and

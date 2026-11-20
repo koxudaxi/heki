@@ -577,6 +577,20 @@ impl<'a> Extractor<'a> {
                 }
                 let callee = self.cx.resolve_method(self.types.get(recv), method);
                 let (recv_origin, recv_is_self) = self.receiver(*recv);
+                // `pkg.Model(...)`: a project class reached through a module. Through a module,
+                // only a class binds the receiver (its `__init__`); a class without a project
+                // `__init__` resolves to its own name.
+                let constructs = match (self.types.get(recv), &callee) {
+                    (Some(Val::Ref(fqn)), Callee::Project(_, true)) => {
+                        Some(self.cx.project.canonical(&format!("{fqn}.{method}")))
+                    }
+                    (Some(Val::Ref(_)), Callee::External(symbol))
+                        if self.cx.project.class_qualname(symbol).is_some() =>
+                    {
+                        Some(symbol.clone())
+                    }
+                    _ => None,
+                };
                 self.call(
                     bb,
                     *dst,
@@ -586,6 +600,7 @@ impl<'a> Extractor<'a> {
                     kwargs,
                     *is_awaited,
                     recv_is_self,
+                    constructs,
                     span,
                 );
             }
@@ -597,14 +612,47 @@ impl<'a> Extractor<'a> {
                 kwargs,
                 is_awaited,
             } => {
+                let callee_val = callee_var.and_then(|v| self.types.get(&v));
+                // `m = obj.method; m(...)` and `getattr(obj, "method")(...)` call a method of
+                // the receiver, as `obj.method(...)` does.
+                if callee_val.is_none()
+                    && let Some((recv, method)) = callee_var.and_then(|v| self.bound_method(v))
+                {
+                    let target = self.cx.resolve_method(self.types.get(&recv), &method);
+                    let (recv_origin, recv_is_self) = self.receiver(recv);
+                    self.call(
+                        bb,
+                        *dst,
+                        target,
+                        Some(recv_origin),
+                        args,
+                        kwargs,
+                        *is_awaited,
+                        recv_is_self,
+                        None,
+                        span,
+                    );
+                    return;
+                }
                 let target = match callee_var {
-                    Some(v) => self.cx.resolve_call(self.types.get(v)),
+                    Some(_) => self.cx.resolve_call(callee_val),
                     // Non-inlined comprehension (Python 3.11, `__comp_<function id>`) runs
                     // immediately.
                     None => callee
                         .strip_prefix("__comp_")
                         .and_then(|n| n.parse::<u32>().ok())
                         .map_or(Callee::Unresolved, |id| self.child_callee(FunctionId(id))),
+                };
+                // `Model(...)`: calling a named class binds the receiver of its `__init__`; a
+                // class without a project `__init__` resolves to its own name.
+                let constructs = match (callee_val, &target) {
+                    (Some(Val::Ref(fqn)), Callee::Project(_, true)) => Some(fqn.clone()),
+                    (Some(Val::Ref(fqn)), Callee::External(_))
+                        if self.cx.project.class_qualname(fqn).is_some() =>
+                    {
+                        Some(fqn.clone())
+                    }
+                    _ => None,
                 };
                 self.call(
                     bb,
@@ -615,6 +663,7 @@ impl<'a> Extractor<'a> {
                     kwargs,
                     *is_awaited,
                     false,
+                    constructs,
                     span,
                 );
             }
@@ -626,7 +675,7 @@ impl<'a> Extractor<'a> {
                 ..
             } => {
                 let target = self.child_callee(*id);
-                self.call(bb, *dst, target, None, &[], &[], false, false, span);
+                self.call(bb, *dst, target, None, &[], &[], false, false, None, span);
             }
             _ => {}
         }
@@ -666,8 +715,39 @@ impl<'a> Extractor<'a> {
             &[],
             is_awaited,
             recv_is_self,
+            None,
             span,
         );
+    }
+
+    /// The receiver and method name of the bound method behind `var` (through copies): an
+    /// attribute load that runs no property getter (`m = obj.method`), or `getattr(obj, "method"[,
+    /// default])` with a constant name.
+    fn bound_method(&self, var: VarId) -> Option<(VarId, String)> {
+        let mut cur = var;
+        // Copies of an SSA variable form a tree, so the walk ends.
+        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur) {
+            cur = *src;
+        }
+        match self.defs.get(&cur)? {
+            InstKind::AttrLoad { obj, attr, .. } => {
+                let getter = self
+                    .cx
+                    .resolve_attr_load(self.types.get(obj), attr)
+                    .is_some();
+                (!getter).then(|| (*obj, attr.clone()))
+            }
+            InstKind::Call {
+                callee_var: Some(f),
+                args,
+                ..
+            } if matches!(self.types.get(f), Some(Val::Ref(s)) if s == "builtins.getattr")
+                && (2..=3).contains(&args.len()) =>
+            {
+                Some((args[0], self.const_str(args[1])?))
+            }
+            _ => None,
+        }
     }
 
     fn child_callee(&self, id: FunctionId) -> Callee {
@@ -903,12 +983,27 @@ impl<'a> Extractor<'a> {
         kwargs: &[(Option<String>, VarId)],
         is_awaited: bool,
         recv_is_self: bool,
+        constructs: Option<String>,
         span: Span,
     ) {
         let loop_depth = self.f.block_loop_depth(bb);
         match callee {
             Callee::External(symbol) => {
                 self.external_call(symbol, args, is_awaited, loop_depth, span);
+                // A project class without a project `__init__` (a dataclass, a pydantic model):
+                // its construction is still a call site, with no project callees.
+                if let Some(class) = constructs {
+                    self.sites.push(CallSite {
+                        caller: self.key.clone(),
+                        target: CallTarget::Project(Vec::new()),
+                        is_awaited,
+                        span,
+                        loop_depth,
+                        recv_is_self,
+                        drives_coroutine_manually: false,
+                        constructs: Some(class),
+                    });
+                }
             }
             Callee::Project(keys, binds_recv) => {
                 let mut callees = Vec::new();
@@ -957,6 +1052,7 @@ impl<'a> Extractor<'a> {
                     loop_depth,
                     recv_is_self,
                     drives_coroutine_manually: drives,
+                    constructs,
                 });
             }
             Callee::TooMany | Callee::Unresolved => {
@@ -1032,6 +1128,7 @@ impl<'a> Extractor<'a> {
             loop_depth,
             recv_is_self: false,
             drives_coroutine_manually: false,
+            constructs: None,
         });
     }
 }
