@@ -83,7 +83,7 @@ struct CheckArgs {
     /// Explicit configuration file (`heki.toml` or `pyproject.toml`).
     #[arg(long)]
     config: Option<PathBuf>,
-    /// Target Python version (`py312`, `py313`, `py314`, `py315`).
+    /// Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`).
     #[arg(long)]
     target_version: Option<String>,
     /// Ratchet baseline TOML file (line-number-independent).

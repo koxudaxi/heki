@@ -52,7 +52,7 @@ Options:
       --config <CONFIG>
           Explicit configuration file (`heki.toml` or `pyproject.toml`)
       --target-version <TARGET_VERSION>
-          Target Python version (`py312`, `py313`, `py314`, `py315`)
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
       --update-baseline
