@@ -35,17 +35,21 @@ Found 2 diagnostic(s) in 4 file(s).
 ## What it finds
 
 - **Shared state** (`MUT`): a `@cached_property` left stale after the attribute it reads
-  changes, writes to state another component owns (declared once in configuration), mutation
-  of objects returned by `@lru_cache`, and side effects a public function gained since a saved
-  snapshot.
+  changes, an attribute `__hash__` reads changing after the object was hashed, a single-pass
+  iterator consumed twice, writes and reads of state another component owns (declared once in
+  configuration), mutation of objects returned by `@lru_cache`, and side effects a public
+  function gained since a saved snapshot.
 - **Execution effects** (`EFF`, `DATA`): blocking calls reachable from `async def` through any
-  number of helpers, HTTP / database clients created inside loops, N+1 queries, and quadratic
-  DataFrame / array accumulation.
+  number of helpers, HTTP / database clients created inside loops, N+1 queries, `await` or
+  network I/O while a `threading` lock or a database transaction is held, tasks that only a
+  weak reference keeps alive, effects a declared boundary forbids, and quadratic DataFrame /
+  array accumulation.
 - **Complexity rewrites** (`OPT`): quadratic list, dict, set, bytes, and queue patterns. heki
   rewrites them only when its alias analysis **proves** the rewrite preserves behavior; when it
-  cannot, the diagnostic names the proof obligation that failed.
+  cannot, the diagnostic names the proof obligation that failed. Linear `list` lookups and
+  nested-loop joins inside loops are reported as suggestions.
 
-See the [rules reference](rules/index.md) for all 17 rules.
+See the [rules reference](rules/index.md) for all 25 rules.
 
 ## Why another tool
 
@@ -235,7 +239,7 @@ $ heki check --ignore OPT110         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are all accepted. Opt-in rules
-(`EFF105`, `MUT103`) are enabled only by their exact code or name.
+(`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) are enabled only by their exact code or name.
 
 ## Machine-readable output
 
@@ -300,7 +304,7 @@ command line are always checked.
 | Key | Meaning |
 | --- | ------- |
 | `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). |
-| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `MUT103`) need their exact code or name. |
+| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) need their exact code or name. |
 | `ignore` | Rules to disable (prefixes match every rule they cover). |
 | `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
 | `severity` | Rule → `"error"` or `"warning"` (affects output and SARIF level; both make `heki check` fail). |
@@ -316,14 +320,66 @@ configured lists.
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields", "DataType.data_types"]
 allowed-writers = ["pkg.parser.generation.*", "Store.*"]
+exempt-methods = ["__deepcopy__", "copy_deep"]
 forbid-cached-property-on = ["DataModel"]
+message = "use GenerationStore.set_fields() instead"
 ```
 
 - `targets`: `Class.attr` names. A target matches the fully qualified name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`), and globs are allowed. Subclasses of
   a target class are covered too.
 - `allowed-writers`: functions allowed to write (fully qualified or qualname, globs allowed).
+- `exempt-methods`: construction and copy methods allowed to write the targets. A plain name
+  (`__deepcopy__`) matches any method of that name; an entry with a dot or a glob
+  (`DataModel.copy_deep`, `create_*`) is matched like `allowed-writers`.
 - `forbid-cached-property-on`: classes on which defining a `@cached_property` is itself reported.
+- `message`: text appended to every report of the contract (where to write instead).
+
+A class's own initialization is always allowed: an initializer (`__init__`, `__post_init__`,
+`__new__`, `model_post_init`, `__setstate__`) of a target class or a subclass may write its own
+`self`, directly, through `super().__init__()`, or through helpers it passes `self` to. So is a
+function that only runs inside the owner's operations: every path of project callers above it
+starts in an allowed writer, an exempt method, or such an initialization.
+
+## Read contracts: `[[tool.heki.read-owners]]` (`MUT203`)
+
+```toml
+[[tool.heki.read-owners]]
+name = "reference-children"
+targets = ["pkg.reference.Reference.children"]
+allowed-readers = ["*GenerationIndex*", "*GenerationStore*"]
+exempt-methods = ["__deepcopy__"]
+message = "read children through GenerationIndex instead"
+```
+
+The read side of `write-owners`: reads of a target (`ref.children`, a local alias,
+`getattr(ref, "children")`, `ref.__dict__["children"]`) outside `allowed-readers` and
+`exempt-methods` are reported. Targets, subclasses, initializers, private helpers, and
+`message` work as for `write-owners`. Reads through a parameter without a project-class
+annotation are not seen.
+
+## Effect boundaries: `[[tool.heki.effect-boundaries]]` (`EFF201`)
+
+```toml
+[[tool.heki.effect-boundaries]]
+name = "pure-render"
+scopes = ["*.render", "*.render_module_code", "pkg.domain.*"]
+forbid = ["writes-targets", "blocking"]
+write-targets = ["DataModel.*", "DataType.*"]
+allowed-callees = ["pkg.logging.*"]
+message = "render entry points must not mutate model state"
+```
+
+| Key | Meaning |
+| --- | ------- |
+| `scopes` | Modules, classes, or functions (dotted names or globs) whose functions must stay inside the boundary; nested functions are included. |
+| `forbid` | `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`, `sleep`, `blocking` (all six), `mutates-params` (for a method, `self` is a parameter), `writes-targets`. An unknown token is a configuration error. |
+| `write-targets` | `Class.attr` targets of `writes-targets` (required with it; subclasses included). |
+| `allowed-callees` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed. |
+| `message` | Text appended to every report of the boundary. |
+
+Each scope function is checked through any number of calls; a violation inside another scope
+function is reported there only, once.
 
 ## Shared return values: `[[tool.heki.readonly-returns]]` (`MUT202`)
 
@@ -512,10 +568,11 @@ custom tooling.
 ## Rolling out rules
 
 - Start with the default rules and a baseline, or `--select` one family at a time.
-- Declare ownership contracts (`write-owners`) for the shared state you care about; `MUT201`
-  reports nothing until a contract exists.
-- Keep the opt-in rules (`EFF105`, `MUT103`) for code where they matter: async services and
-  library APIs.
+- Declare ownership contracts (`write-owners`, `read-owners`) for the shared state you care
+  about and effect boundaries (`effect-boundaries`) for the code that must stay pure; `MUT201`,
+  `MUT203`, and `EFF201` report nothing until a contract exists.
+- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) for code where they
+  matter: async services, threaded code, and library APIs.
 - Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
 
 
@@ -663,7 +720,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 17 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 25 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
@@ -679,8 +736,11 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | ---- | ---- | ------- | ------: |
 | MUT101 | [cached-property-stale-mutation](cached-property-stale-mutation.md) | Mutating an attribute read by `@cached_property` without invalidating the cache. |  |
 | MUT103 | [summary-effect-regression](summary-effect-regression.md) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
+| MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
+| MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`. |  |
+| MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
 
 ## Execution Effects (EFF)
 
@@ -692,6 +752,9 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. |  |
 | EFF103 | [loop-db-query](loop-db-query.md) | Explicit DB query / external RPC executed inside a loop (N+1). |  |
 | EFF105 | [async-blocking-fs](async-blocking-fs.md) | Opt-in: blocking local filesystem I/O reachable from `async def`. | 🔌 |
+| EFF106 | [lock-or-tx-held-across-io](lock-or-tx-held-across-io.md) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | 🔌 |
+| EFF107 | [unretained-async-task](unretained-async-task.md) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | 🔌 |
+| EFF201 | [effect-boundary-violation](effect-boundary-violation.md) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. |  |
 
 ## Data Pipelines (DATA)
 
@@ -712,6 +775,8 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 | OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
 | OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
 | OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
+| OPT112 | [loop-linear-list-lookup](loop-linear-list-lookup.md) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). |  |
+| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
 | OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
 | OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
 | OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
@@ -926,7 +991,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_kb` | the knowledge bases: Layer 1 (builtins semantics for the soundness lane) and Layer 2 (ecosystem effects) |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
-| `heki_rules` | the 17 rules, rule selection, project discovery |
+| `heki_rules` | the 25 rules, rule selection, project discovery |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
 | `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |
@@ -1115,6 +1180,175 @@ decision.
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/effect-boundary-violation/
+
+# effect-boundary-violation (EFF201)
+
+Family: Execution Effects (EFF) · Enabled by default · No automatic fix
+
+Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.
+
+## What it does
+Checks the functions of a declared effect boundary (`[[tool.heki.effect-boundaries]]`): they
+must not reach a forbidden effect, directly or through the functions they call.
+
+- `scopes` select the checked functions. A pattern names a module (`pkg.domain`,
+  `pkg.domain.*`), a class (`pkg.Renderer`), or a function (`*.render`); every function defined
+  inside a matched name is in scope, nested functions included. Patterns are matched against
+  the function's qualified name, its qualname, and every dotted prefix of them, so `render` also
+  selects a module named `render`.
+- `forbid` lists the forbidden effects:
+  - `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`,
+    `sleep`, or `blocking` for all six: blocking calls of the ecosystem knowledge base
+    (`requests.get`, `sqlite3`, `open`, `subprocess.run`, `time.sleep`, ...);
+  - `writes-targets`: writes to the `Class.attr` entries of `write-targets` (and their
+    subclasses), in every form `MUT201` follows; a class's own initialization is no write
+    (constructing a fresh object runs its `__init__`), as for `MUT201`;
+  - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
+    parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
+
+Each scope function is searched breadth first over the project call graph, so the reported
+chain is a shortest one. The search does not enter:
+
+- `allowed-callees` (project functions or ecosystem symbols, matched like `scopes`): their
+  effects are allowed;
+- other functions of the scopes: each reports its own violations, so a violation is reported
+  once, at the boundary, not again by every scope function above it;
+- `async def` functions called without `await` (calling one only creates a coroutine).
+
+A violation is reported once per scope function and forbidden effect (or write target), at the
+call in the scope function that starts the shortest chain (or at the blocking call or write
+itself), with the chain as related information; `mutates-params` is reported at the function's
+definition.
+
+## Why is this bad?
+Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
+must not do network I/O, a hot path must not sleep. The promise usually breaks several calls
+away from the function that makes it, where a reviewer does not look. The boundary states it
+once in configuration and checks every path.
+
+## Example
+```toml
+[[tool.heki.effect-boundaries]]
+name = "pure-render"
+scopes = ["*.render"]
+forbid = ["blocking", "writes-targets"]
+write-targets = ["DataModel.fields"]
+allowed-callees = ["pkg.cache.*"]
+message = "render entry points must not mutate model state"
+```
+
+```python
+import requests
+
+
+def get_json(url: str) -> dict:
+    return requests.get(url).json()
+
+
+class Model:
+    def render(self) -> str:
+        data = get_json("https://example.com")  # EFF201: reaches `requests.get`
+        return str(data)
+```
+
+Use instead:
+```python
+class Model:
+    def render(self, data: dict) -> str:
+        return str(data)  # the caller fetches `data` before rendering
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.effect-boundaries]]`:
+  - `name`: the boundary name, used in messages and in the diagnostic target
+    (`pure-render:blocking_net`, `pure-render:DataModel.fields`, `pure-render:mutates-params`).
+  - `scopes`: modules, classes, or functions (dotted names or globs).
+  - `forbid`: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
+    `blocking-sync`, `sleep`, `blocking`, `mutates-params`, `writes-targets`.
+  - `write-targets`: `Class.attr` entries for `writes-targets` (required with it).
+  - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
+    allowed.
+  - `message`: appended to every message of the boundary.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/hash-attr-mutation/
+
+# hash-attr-mutation (MUT107)
+
+Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+
+Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).
+
+## What it does
+Checks methods that rebind or mutate an attribute that the class's `__hash__` reads (directly
+or through a `self.helper()` call), when the class or one of its subclasses changes the
+attribute after initialization.
+
+The rule reports the write itself, once per method and attribute. It does not report:
+
+- initialization: `__new__`, `__init__`, `__post_init__`, `model_post_init`, `__setstate__`,
+  `__enter__`, `setup`, `_init_*` / `_configure_*` methods, and the private helpers they call
+  (`self.__setstate(state)` on the instance `__new__` allocates included); class attributes
+  that `__init_subclass__` sets;
+- lazy initialization: a write under a `None` / falsy check of the same attribute
+  (`if self._key is None: self._key = ...`, `if not self._parts: ...`);
+- memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
+  `if key not in self._memo:` pattern);
+- constant dictionary keys `__hash__` never reads (`self.meta["note"]` while `__hash__` reads
+  `self.meta["id"]`);
+- the hash's own cache: an attribute the hash computation writes itself (`self._hash = ...`
+  in `__hash__` or a `self.helper()` it calls), which other methods reset, and a stored hash
+  value (`self._hash`, `self._hashcode`) that a deserialization hook recomputes.
+
+## Why is this bad?
+A `set` or a `dict` files an object under the hash it had when it was added. Once an attribute
+the hash is computed from changes, lookups compute a different hash and look in the wrong
+place: `obj in seen` is `False` for an object that is in `seen`, a `dict` holds a key no
+lookup finds, and the object can be added a second time.
+
+## Example
+```python
+class Tag:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Tag) and other.name == self.name
+
+    def __hash__(self) -> int:
+        return hash(self.name)
+
+    def rename(self, name: str) -> None:
+        self.name = name  # a `Tag` in a set can no longer be found
+```
+
+Use instead:
+```python
+from dataclasses import dataclass, replace
+
+
+@dataclass(frozen=True)
+class Tag:
+    name: str
+
+
+def rename(tag: Tag, name: str) -> Tag:
+    return replace(tag, name=name)  # a new object, hashed when it is stored
+```
+
+## Fix safety
+No automatic fix: whether to make the object immutable, hash only fields that never change,
+or remove the object from its containers before changing it is a design decision.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/
 
 # immutable-quadratic-concat (OPT103)
@@ -1154,6 +1388,86 @@ def encode(parts: list[bytes]) -> bytes:
 No automatic fix (the rewrite needs a buffer before the loop and a join after it). The
 diagnostic still lists the proof obligations: the accumulator must not be read inside the loop
 or by an exception handler, and its intermediate values must not escape.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/iterator-double-consumption/
+
+# iterator-double-consumption (MUT106)
+
+Family: Mutation & State (MUT) · Opt-in · No automatic fix
+
+Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).
+
+## What it does
+Checks for a single-pass iterator or generator that is consumed a second time. Once an
+iterator is exhausted, every further pass over it sees no items, silently.
+
+Single-pass values are:
+
+- generator expressions (`(x for x in xs)`);
+- `iter`, `zip`, `map`, `filter`, `enumerate`, `reversed`, and the single-pass `itertools`
+  functions (`chain`, `islice`, `starmap`, `takewhile`, `dropwhile`, `filterfalse`,
+  `compress`, `accumulate`, `groupby`, `pairwise`, `batched`, `zip_longest`, `product`,
+  `permutations`, `combinations`, `combinations_with_replacement`), resolved through imports
+  so a shadowed name is never matched;
+- calls of project generator functions (from any module);
+- parameters and locals annotated `Iterator`, `Generator`, `AsyncIterator`, or
+  `AsyncGenerator` (`typing` or `collections.abc`; `Iterable`, `Sequence`, and `Collection`
+  may be re-iterable and are not tracked).
+
+A value is consumed by a `for` loop or comprehension over it, `yield from`, `list`, `tuple`,
+`set`, `frozenset`, `dict`, `sum`, `any`, `all`, `min`, `max`, `sorted`, `str.join`, a wrapper
+that is itself consumed (`enumerate(it)`, `map(f, it)`, `chain(it, other)`, `zip(it, it)`, a
+generator expression over it, ...), or a project function that iterates the parameter it is
+passed to exhaustion. `next(it)` and `len` are not consumptions, and neither is `zip` / `map`
+over several iterables: they stop at the shortest one (`zip(range(n), it)` takes `n` items).
+
+The rule reports the second pass when the first one runs to exhaustion and the second is
+reachable from it, without rebinding the variable in between. It also reports a value created
+outside a loop and consumed to exhaustion inside it: the next iteration sees nothing.
+
+It does not report:
+
+- a first pass that may stop early: a `for` loop with `break`, `return`, or `raise` inside
+  (`it = iter(lines)`, then `for line in it: ... break`, then `for line in it:` is the
+  idiomatic way to resume);
+- passes on exclusive branches (`if c: list(it) else: sorted(it)`);
+- a variable rebound to a fresh iterator in between;
+- `itertools.tee` results, `repeat`, `cycle`, and `count`;
+- loops that run at most once (`for _ in range(1)`), and a consumption followed by leaving the
+  loop (`data = list(it)` then `break`);
+- consuming the rest of an iterator inside a loop over that iterator itself.
+
+## Why is this bad?
+The second pass silently gets an empty iterator: totals become zero, a second report is empty,
+and a retry processes nothing. Nothing fails, so the bug is noticed far away from its cause.
+
+## Example
+```python
+def summarize(lines: list[str]) -> tuple[int, list[str]]:
+    rows = (line.strip() for line in lines)
+    count = sum(1 for _ in rows)
+    kept = [r for r in rows if r]  # MUT106: `rows` was consumed by `sum`
+    return count, kept
+```
+
+Use instead:
+```python
+def summarize(lines: list[str]) -> tuple[int, list[str]]:
+    rows = [line.strip() for line in lines]  # a list can be iterated any number of times
+    count = len(rows)
+    kept = [r for r in rows if r]
+    return count, kept
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["MUT106"]` (or `--extend-select MUT106`) enables the rule. It is
+  opt-in: selecting the `MUT` prefix does not enable it.
 
 
 ---
@@ -1304,6 +1618,82 @@ The fix is applied by `heki check --fix` only when heki proves it safe:
 Otherwise the diagnostic explains which proof obligation blocks the fix, and nothing is
 rewritten. For example `for v in x: x = x + [v]` terminates, but `x.append(v)` would loop
 forever: heki reports it as disproved and never touches it. Type annotations are never trusted.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/
+
+# lock-or-tx-held-across-io (EFF106)
+
+Family: Execution Effects (EFF) · Opt-in · No automatic fix
+
+Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.
+
+## What it does
+Checks for an `await`, or a call reaching blocking network I/O (directly or through project
+helpers), while a `with` block holds a synchronous lock or a database transaction.
+
+The held resource must be type-certain:
+
+- an instance of `threading.Lock`, `RLock`, `Semaphore`, `BoundedSemaphore`, or `Condition`,
+  created in `__init__` (`self._lock = threading.Lock()`), at module level, locally, or given
+  by an annotated parameter;
+- a transaction started by `sqlalchemy.orm.Session.begin()` / `begin_nested()`,
+  `Connection.begin()` / `begin_nested()`, `Engine.begin()`, `sqlmodel.Session.begin()`,
+  `django.db.transaction.atomic()`, or `psycopg.Connection.transaction()`.
+
+The rule reports the `await` or the call while the resource is certainly held (on every path),
+with the call chain to the network I/O as related information. Leaving the `with` block
+releases it.
+
+It does not report:
+
+- `async with` and async locks (`asyncio.Lock`, `anyio.Lock`, ...);
+- objects whose type is not known, or not a registered lock or transaction;
+- work after the `with` block, and handlers reached only after the block exited;
+- calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`, ...);
+- database queries inside a transaction, local file I/O, or `time.sleep`;
+- CLI commands, ASGI lifespan handlers, and tests, as for `EFF101`.
+
+## Why is this bad?
+A synchronous lock held across an `await` blocks every thread that wants it until the coroutine
+resumes, and a second coroutine acquiring it on the event loop thread deadlocks the loop. Held
+across a network request, the lock serializes every waiting thread behind that request. A
+transaction held across a request or an `await` keeps its pooled connection checked out and its
+row locks taken, which exhausts the pool under load.
+
+## Example
+```python
+import asyncio
+import threading
+
+
+class Cache:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: dict[str, bytes] = {}
+
+    async def refresh(self, key: str) -> None:
+        with self._lock:
+            self._data[key] = await fetch(key)  # EFF106
+```
+
+Use instead:
+```python
+    async def refresh(self, key: str) -> None:
+        value = await fetch(key)
+        with self._lock:  # hold the lock only for the update
+            self._data[key] = value
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["EFF106"]` (or `--extend-select EFF106`) enables the rule. It is
+  opt-in: selecting the `EFF` prefix does not enable it.
+- `lint.relax-async-in-tests` applies as for `EFF101`.
 
 
 ---
@@ -1493,6 +1883,74 @@ reference could change it, and every element and probe is a hashable builtin sca
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/
+
+# loop-linear-list-lookup (OPT112)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
+
+Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).
+
+## What it does
+Checks `list.index()`, `list.remove()`, and `list.count()` calls that run on every iteration
+of a loop, on a list that outlives the iteration.
+
+The receiver must certainly be a builtin `list`: a list display or comprehension, `list(...)`,
+or a `list[...]` / `List[...]` annotation on a parameter, a local, or a class attribute
+(`self.items`). Calls on a `set`, a `str`, a project class, or a receiver of unknown type are
+not reported. Neither are:
+
+- loops whose size does not depend on the data: small constant ranges and displays
+  (`for i in range(3)`, `for s in SUFFIXES` with `SUFFIXES = (".py", ".pyi")`), retry loops,
+  and daemon polling loops; the iterable of a `for` loop, which runs once;
+- lists built in the iteration (`parts = [...]` inside the loop) and lists of the loop element
+  (`row.cells.index(x)`);
+- small constant lists: a display of at most 8 constants that nothing changes, in the
+  function, as a module global (`LEVELS = ["low", "mid", "high"]`), or as an attribute its
+  class only ever assigns such a display (`self.preferred = [",", ";"]`, a class attribute);
+- calls after which the loop always ends (`return items.index(x)`, a `break` on every path);
+- `index(x, start)`, which scans from a position that usually moves forward.
+
+## Why is this bad?
+Each call scans the list from the start (and `remove()` also shifts the elements after the
+removed one), so the loop costs the product of the loop size and the list size: O(n²) when both
+grow with the input. A `dict` or `set` built once before the loop answers each lookup in
+constant time, and `collections.Counter` counts every value in one pass.
+
+## Example
+```python
+def ranks(names: list[str], winners: list[str]) -> list[int]:
+    return [names.index(w) for w in winners]
+
+
+def drop(items: list[int], unwanted: list[int]) -> None:
+    for x in unwanted:
+        items.remove(x)
+```
+
+Use instead:
+```python
+def ranks(names: list[str], winners: list[str]) -> list[int]:
+    position = {}
+    for i, name in enumerate(names):
+        position.setdefault(name, i)  # the first index, as `list.index`
+    return [position[w] for w in winners]  # `KeyError` where `index` raised `ValueError`
+
+
+def drop(items: list[int], unwanted: list[int]) -> None:
+    gone = set(unwanted)
+    items[:] = [x for x in items if x not in gone]
+```
+
+The rewrites are not drop-in replacements: `remove()` drops only the first occurrence of each
+value and raises `ValueError` for a missing one, and the values must be hashable.
+
+## Fix safety
+No automatic fix.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/loop-linear-membership/
 
 # loop-linear-membership (OPT110)
@@ -1584,6 +2042,155 @@ def fetch_all(urls: list[str]) -> list[str]:
 
 ## Fix safety
 No automatic fix.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/nested-loop-equijoin/
+
+# nested-loop-equijoin (OPT113)
+
+Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
+
+Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
+
+## What it does
+Checks nested loops that join two collections by comparing a key of each with `==`:
+`for a in A: for b in B: if a.k == b.k:`, including a comprehension as the inner loop
+(`[b for b in B if b.k == a.k]`).
+
+The keys are the loop elements themselves, their unpacked components (`for k, v in pairs`),
+attributes (`a.k`, `a.x.y`), and constant subscripts (`a["k"]`, `a[0]`). Both loops must be
+`for` loops whose size depends on the data. The rule reports one diagnostic per inner loop, at
+its first matching comparison. It does not report:
+
+- traversals, where the inner iterable is computed from the outer element
+  (`for b in a.children`, `for b in index[a.k]`, `for b in f(a)`, `for b in xs[i + 1:]`);
+- comparisons that do not select pairs: `!=`, a negated `==`, one alternative of an `or`
+  (`a.k == b.k or match(a, b)`), a result that is stored instead of tested, a value picked for
+  every pair (`1 if a.k == b.k else 0`), or a match that only skips to the next iteration
+  (`if a == b: continue` in an all-pairs loop);
+- small constant loops (`for b in ("x", "y")`, `for i in range(3)`, a constant tuple).
+
+## Why is this bad?
+The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.
+Indexing the inner collection by its key once (a `dict` from key to elements, or a `set` of the
+keys) makes it O(n + m). A `break` after the first match does not help much: a missing key
+still scans the whole inner collection.
+
+## Example
+```python
+def attach(orders, customers):
+    for order in orders:
+        for customer in customers:
+            if order.customer_id == customer.id:
+                order.customer = customer
+                break
+```
+
+Use instead:
+```python
+def attach(orders, customers):
+    by_id = {}
+    for customer in customers:
+        by_id.setdefault(customer.id, customer)  # the first match, as the `break`
+    for order in orders:
+        customer = by_id.get(order.customer_id)
+        if customer is not None:
+            order.customer = customer
+```
+
+The keys must be hashable, and `==` must agree with their hash.
+
+## Fix safety
+No automatic fix.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/read-owner-violation/
+
+# read-owner-violation (MUT203)
+
+Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+
+Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.
+
+## What it does
+Checks reads of attributes that a `[[tool.heki.read-owners]]` contract reserves for a set of
+allowed reader functions: the read side of `MUT201`. A read is reported when it happens outside
+the allowed readers:
+
+- directly (`ref.children`), also on `self` and through local aliases;
+- through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
+  with a constant name;
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`.
+
+A target names a class and an attribute; it covers the class's subclasses too.
+
+A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
+project callers hands the responsibility to its callers: the read is reported at every call
+site of the first non-private callers above it, with the chain of calls as related
+information. Reads in a class's own initializer on its own `self` are allowed, and so are reads
+in a function that only runs inside allowed contexts (every path of callers above it starts in
+an allowed reader or an exempt method), as for `MUT201`.
+
+## Why is this bad?
+Some state is only meaningful through the component that maintains it: an index that keeps a
+derived view consistent, a store that resolves references lazily. Reading the raw attribute
+elsewhere sees stale or partial data, and the bug only shows up for some inputs. The contract
+states which functions may read it once in configuration, with no runtime cost.
+
+## Example
+```toml
+[[tool.heki.read-owners]]
+name = "reference-children"
+targets = ["Reference.children"]
+allowed-readers = ["*GenerationIndex*"]
+message = "read children through GenerationIndex instead"
+```
+
+```python
+class Reference:
+    def __init__(self) -> None:
+        self.children: list["Reference"] = []
+
+
+class GenerationIndex:
+    def children_of(self, ref: Reference) -> list[Reference]:
+        return list(ref.children)  # allowed reader
+
+
+def _kids(ref: Reference) -> list[Reference]:
+    return ref.children
+
+
+def render(ref: Reference) -> str:
+    return ", ".join(map(str, _kids(ref)))  # MUT203: reads `Reference.children` via `_kids`
+```
+
+Use instead:
+```python
+def render(ref: Reference, index: GenerationIndex) -> str:
+    return ", ".join(map(str, index.children_of(ref)))
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.read-owners]]`:
+  - `name`: the contract name, shown in messages.
+  - `targets`: `Class.attr` entries; globs and dotted suffixes match.
+  - `allowed-readers`: functions allowed to read the targets, as dotted names or globs matched
+    against the function's qualified name and its `Class.method` qualname.
+  - `exempt-methods`: methods allowed to read the targets (`__repr__`, `__deepcopy__`); a plain
+    name matches any function or method of that name, an entry with a dot or a glob is matched
+    like `allowed-readers`.
+  - `message`: appended to every message of the contract.
+
+Known limitation: a read through a parameter without a project-class annotation
+(`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown.
 
 
 ---
@@ -1751,6 +2358,72 @@ No automatic fix.
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/unretained-async-task/
+
+# unretained-async-task (EFF107)
+
+Family: Execution Effects (EFF) · Opt-in · No automatic fix
+
+Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.
+
+## What it does
+Checks for the result of `asyncio.create_task(...)`, `asyncio.ensure_future(...)`, or
+`loop.create_task(...)` that is bound to a local variable but never kept: never awaited,
+returned, yielded, stored (in an attribute, a container, a global, or an enclosing scope),
+passed to a call (`tasks.add(task)`, `asyncio.gather(task)`), captured by a closure, cancelled,
+or asked for its result.
+
+`loop.create_task` needs a receiver known to be an event loop (`asyncio.get_running_loop()`,
+`get_event_loop()`, `new_event_loop()`, or an annotated `asyncio.AbstractEventLoop`).
+
+It does not report:
+
+- a call whose result is discarded (`asyncio.create_task(work())` as a statement): that is
+  Ruff's `RUF006`;
+- `asyncio.TaskGroup.create_task`, which keeps its tasks;
+- receivers of unknown type.
+
+Being only the receiver of `add_done_callback(...)` or `set_name(...)` does not keep the task:
+the callback does not hold it strongly.
+
+## Why is this bad?
+The event loop keeps only a weak reference to a task. Once the function that created it returns,
+nothing references the task any more, and it can be garbage-collected before it finishes: the
+work silently stops halfway.
+
+## Example
+```python
+import asyncio
+
+
+async def handle(event: dict[str, str]) -> None:
+    task = asyncio.create_task(notify(event))  # EFF107
+    task.add_done_callback(log_failure)
+```
+
+Use instead:
+```python
+import asyncio
+
+background_tasks: set[asyncio.Task[None]] = set()
+
+
+async def handle(event: dict[str, str]) -> None:
+    task = asyncio.create_task(notify(event))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["EFF107"]` (or `--extend-select EFF107`) enables the rule. It is
+  opt-in: selecting the `EFF` prefix does not enable it.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/write-owner-violation/
 
 # write-owner-violation (MUT201)
@@ -1764,14 +2437,32 @@ Checks writes to attributes and containers that a `[[tool.heki.write-owners]]` c
 reserves for a set of allowed writer functions. A write is reported when it happens outside the
 allowed writers:
 
-- directly (`model.fields = [...]`, `model.fields.append(...)`);
+- directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
 - through a local alias (`fields = model.fields; fields.append(...)`);
-- through a helper that mutates the container it receives (`helper(model.fields)`), reported
-  once at the outermost call site.
+- through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`;
+- through a helper that mutates the container or object it receives (`helper(model.fields)`),
+  reported once at the outermost call site.
 
-Writes in the owning class's own initializers (`__init__`, `__post_init__`, `__new__`,
-`model_post_init`, `__setstate__`) are allowed. A private helper with project callers hands the
-responsibility to its callers.
+A target names a class and an attribute; it covers the class's subclasses too (the target's
+class family).
+
+A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
+project callers hands the responsibility to its callers: the write is reported at the call
+sites of the first non-private callers, with the chain of calls as related information.
+
+A function that only runs inside the owner's operations is not reported either: it has project
+callers, and every path of callers above it starts in an allowed writer, an exempt method, or
+the class's own initialization (a mutator method that only the store and `__init__` call). A
+function without project callers, one that is also called from anywhere else, or one reached
+only through a cycle of other functions stays reported.
+
+A class's own initialization is allowed: a write inside an initializer (`__init__`,
+`__post_init__`, `__new__`, `model_post_init`, `__setstate__`) of a class of the target's
+family is not reported when the written object is the initializer's own `self`, whether it
+writes it directly, through a local alias, through `super().__init__()`, or through helpers it
+passes `self` to (`self._init_fields()`, `_setup(self)`). An object that may be `self`
+(`self if flag else other`) gets the benefit of the doubt. Writes to objects that are provably
+not `self` stay reported: another parameter, a fresh instance, an attribute of `self`.
 
 ## Why is this bad?
 Large code bases often have one component that owns a piece of shared state (a store, a
@@ -1785,12 +2476,19 @@ and no decorators.
 name = "model-store"
 targets = ["Model.fields"]
 allowed-writers = ["Store.*"]
+exempt-methods = ["__deepcopy__"]
+message = "use Store.add_field() instead"
 ```
 
 ```python
 class Model:
     def __init__(self) -> None:
-        self.fields: list[str] = []  # allowed: the class initializer
+        self.fields: list[str] = []  # allowed: the class's own initialization
+
+    def __deepcopy__(self, memo: dict) -> "Model":
+        new = Model()
+        new.fields = list(self.fields)  # allowed: exempt method
+        return new
 
 
 class Store:
@@ -1812,6 +2510,17 @@ def parse(model: Model, store: Store) -> None:
 No automatic fix.
 
 ## Options
-- `[[tool.heki.write-owners]]`: `name`, `targets` (`Class.attr`; globs and dotted suffixes match),
-  `allowed-writers` (function names or globs), `forbid-cached-property-on` (classes on which a
-  `@cached_property` is itself reported).
+- `[[tool.heki.write-owners]]`:
+  - `name`: the contract name, shown in messages.
+  - `targets`: `Class.attr` entries; globs and dotted suffixes match (`Model.fields`,
+    `pkg.model.Model.*`).
+  - `allowed-writers`: functions allowed to write the targets, as dotted names or globs matched
+    against the function's qualified name and its `Class.method` qualname (`Store.*`,
+    `pkg.parser.generation.*`).
+  - `exempt-methods`: construction and copy methods allowed to write the targets. A plain name
+    (`__deepcopy__`, `copy_deep`) matches any function or method of that name; an entry with a
+    dot or a glob (`Model.copy_deep`, `create_*`) is matched like `allowed-writers`. A write is
+    allowed when any function on its chain (the writer and the private helpers between) is an
+    allowed writer or an exempt method.
+  - `message`: appended to every message of the contract (`use Store.add_field() instead`).
+  - `forbid-cached-property-on`: classes on which a `@cached_property` is itself reported.
