@@ -438,6 +438,17 @@ def returned_alias(items):
     for x in xs:
         httpx.Client()
 
+
+def drained_queue(inactive_users):
+    while inactive_users:
+        inactive_users.pop()
+        httpx.Client()
+
+
+class Worker:
+    def serve(self):
+        while self._running:
+            httpx.Client()
 ";
     assert_eq!(
         reports("ir_loop_sizes", src, "EFF102"),
@@ -445,6 +456,7 @@ def returned_alias(items):
             ("shadowed_range", "EFF102"),
             ("grown_constructor", "EFF102"),
             ("returned_alias", "EFF102"),
+            ("drained_queue", "EFF102"),
         ])
     );
 }

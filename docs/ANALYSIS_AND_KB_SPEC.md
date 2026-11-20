@@ -104,15 +104,18 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 - **A1 fallback**: a function with `a1_hazards` is excluded **from `heki_soundness` only**;
   **`heki_effect` (family 1 `MUT`, family 2 `EFF` / `DATA`) continues**.
 - **`LoopBound`** (never a Soundness premise; used for profitability and Advisory noise only):
-  - `ConstSmall(k)`: a `for` over a small display (below) or `range(k)` / `range(a, b)`
-    spanning at most 8, also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
+  - `ConstSmall(k)`: a `for` over a small display (below) or `range(...)` (the builtin, by
+    name resolution) spanning at most 8, also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
     `filter`, and `.items()` / `.keys()` / `.values()`, and with range bounds that are constant
     integer expressions (`+`, `-`, `*`, module constants included).
   - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
     handler) over a small constant range or a target named like `retry` / `attempt`, or a
     `while` loop with a retry body that sleeps.
-  - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops, and
-    `while True:` with a retry body that sleeps (resident workers and reconnect loops).
+  - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops (the
+    flag's name has the word `running`, `active`, or `alive`, or after `not` a word like `stop`
+    or `shutdown`, and the body does not drain it as a collection: no `pop()` / `popleft()` /
+    `remove()` ..., subscript, or `for` over it), and `while True:` with a retry body that
+    sleeps (resident workers and reconnect loops).
   - `Unbounded`: everything else.
 - **Size facts** (`heki_ir::facts`, the one home of size and trip-count facts; profitability and
   Advisory noise only, never Soundness premises):

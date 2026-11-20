@@ -930,6 +930,12 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
         ("returned_alias", unbounded.clone()),
         // A generator expression's loop runs over the iterable its creator passed it.
         ("generator_over_range.<locals>.<genexpr>", small(3)),
+        // A collection drained in the loop is no flag, whatever its name; flags are matched
+        // by whole words.
+        ("drained_queue", unbounded.clone()),
+        ("drained_active", unbounded.clone()),
+        ("Worker.serve", serde_json::json!("daemon_polling")),
+        ("Worker.until_shutdown", serde_json::json!("daemon_polling")),
     ];
     let functions = ir["functions"].as_array().unwrap();
     let loop_of = |name: &str| -> &Value {

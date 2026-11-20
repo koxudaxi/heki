@@ -222,3 +222,22 @@ def returned_alias(items):
 def generator_over_range():
     return sum(1 for _ in range(3))
 
+
+def drained_queue(inactive_users):
+    while inactive_users:
+        inactive_users.pop()
+
+
+def drained_active(active_users):
+    while active_users:
+        active_users.pop()
+
+
+class Worker:
+    def serve(self):
+        while self._isRunning:
+            pass
+
+    def until_shutdown(self):
+        while not self.shutdown_requested:
+            pass

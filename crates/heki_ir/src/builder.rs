@@ -3557,17 +3557,16 @@ fn classify_iter_expr_bound(iter: &Expr) -> LoopBound {
 }
 
 fn classify_while_bound(w: &ast::StmtWhile) -> LoopBound {
-    let is_flag_loop = match w.test.as_ref() {
-        Expr::Attribute(a) => looks_like_daemon_flag(a.attr.as_str()),
-        Expr::Name(n) => looks_like_daemon_flag(n.id.as_str()),
-        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => match u.operand.as_ref() {
-            Expr::Attribute(a) => looks_like_stop_flag(a.attr.as_str()),
-            Expr::Name(n) => looks_like_stop_flag(n.id.as_str()),
-            _ => false,
-        },
+    let (flag, looks_like_flag): (&Expr, fn(&str) -> bool) = match w.test.as_ref() {
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => (&u.operand, looks_like_stop_flag),
+        test => (test, looks_like_daemon_flag),
+    };
+    let named = match flag {
+        Expr::Attribute(a) => looks_like_flag(a.attr.as_str()),
+        Expr::Name(n) => looks_like_flag(n.id.as_str()),
         _ => false,
     };
-    if is_flag_loop {
+    if named && !drains(&w.body, flag) {
         return LoopBound::DaemonPolling;
     }
     if is_retry_body(&w.body) && has_sleep_call(&w.body) {
@@ -3577,6 +3576,59 @@ fn classify_while_bound(w: &ast::StmtWhile) -> LoopBound {
         return LoopBound::RetryPattern;
     }
     LoopBound::Unbounded
+}
+
+/// Whether `body` takes items out of the collection `tested` names (`while queue: item =
+/// queue.pop()`): a loop over its items, however its name reads, not a flag loop.
+fn drains(body: &[Stmt], tested: &Expr) -> bool {
+    use heki_ast::raw_ast::visitor::{self, Visitor};
+
+    struct Drains<'t> {
+        tested: Option<String>,
+        found: bool,
+        _expr: std::marker::PhantomData<&'t ()>,
+    }
+    impl Drains<'_> {
+        fn is_tested(&self, e: &Expr) -> bool {
+            self.tested.is_some() && expr_dotted_name(e) == self.tested
+        }
+    }
+    impl<'e> Visitor<'e> for Drains<'_> {
+        fn visit_stmt(&mut self, stmt: &'e Stmt) {
+            if let Stmt::For(f) = stmt
+                && self.is_tested(&f.iter)
+            {
+                self.found = true;
+            }
+            visitor::walk_stmt(self, stmt);
+        }
+        fn visit_expr(&mut self, expr: &'e Expr) {
+            match expr {
+                Expr::Subscript(sub) if self.is_tested(&sub.value) => self.found = true,
+                Expr::Call(call) => {
+                    if let Expr::Attribute(m) = call.func.as_ref()
+                        && self.is_tested(&m.value)
+                        && matches!(
+                            m.attr.as_str(),
+                            "pop" | "popleft" | "popitem" | "remove" | "clear" | "get_nowait"
+                        )
+                    {
+                        self.found = true;
+                    }
+                }
+                _ => {}
+            }
+            visitor::walk_expr(self, expr);
+        }
+    }
+
+    let mut v = Drains {
+        tested: expr_dotted_name(tested),
+        found: false,
+        _expr: std::marker::PhantomData,
+    };
+    v.visit_body(body);
+    v.found
 }
 
 /// The single comparisons with a `len(...)` operand a `while` test requires (the test itself
@@ -3604,14 +3656,39 @@ fn len_cap_tests(test: &Expr) -> Vec<Span> {
         .collect()
 }
 
+/// The words of an identifier, lowercase (`_isRunning` -> `is`, `running`).
+fn identifier_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if (c == '_' || (c.is_ascii_uppercase() && prev_lower)) && !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        if c != '_' {
+            cur.push(c.to_ascii_lowercase());
+        }
+        prev_lower = c.is_ascii_lowercase();
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
 fn looks_like_daemon_flag(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("running") || lower.contains("active") || lower.contains("alive")
+    identifier_words(name)
+        .iter()
+        .any(|w| matches!(w.as_str(), "running" | "active" | "alive"))
 }
 
 fn looks_like_stop_flag(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("stop") || lower.contains("closed") || lower.contains("shutdown")
+    identifier_words(name).iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "stop" | "stopped" | "stopping" | "closed" | "closing" | "shutdown"
+        )
+    })
 }
 
 fn target_looks_like_retry(target: &Expr) -> bool {
