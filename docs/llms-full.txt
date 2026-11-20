@@ -899,12 +899,22 @@ excluded = true               # never reported
 | --- | ------- |
 | `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
 | `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
-| `async-safe` | Safe to call from `async def`. |
+| `async-safe` | Safe to call from `async def`: it never blocks the event loop, so blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread. |
 | `excluded` | Never reported (logging and similar). |
-| `copy-sanitizer` | Returns a copy (ends `MUT202` protection). |
+| `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too, `"shallow"` (or `true`) only the object itself, so the values below it stay protected. |
+| `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
+| `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 
-An override replaces the built-in entry for the same symbol as a whole.
+An override sets the keys it lists on the built-in entry for the same symbol; the keys it
+leaves out keep their built-in values (`effects = []` removes every effect).
+
+An entry may name a function or method of the project itself (by the module that defines it;
+the built-in catalog never describes the project's own functions):
+its `effects` add to what heki finds in its body, `excluded` keeps every effect of the body
+from its callers and `async-safe` the blocking ones, `return-type` types its result over its
+annotation, and `offloads-blocking-arg` counts the receiver out as for a library method.
+`copy-sanitizer` and `sync-lock-or-tx` are read for library symbols only.
 
 ## Inline suppressions
 
@@ -1620,8 +1630,17 @@ Direct or indirect blocking network/DB/subprocess/sleep call reachable from `asy
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
 synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), database drivers
-(`sqlite3`, `psycopg`, `pymongo`, ...), subprocesses waiting for completion, `time.sleep`, and
-other blocking synchronization.
+(`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
+`conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
+waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
+`queue.Queue.get()` / `put()`, `Future.result()`, `concurrent.futures.wait()`; a zero timeout or
+`blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
+on its own flag parameter and its caller passes `False`: `close(wait=False)` over
+`shutdown(wait=wait)`). A function SQLAlchemy's
+`AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
+its database I/O through the session or connection it receives is awaited for it, its other
+blocking calls are reported. Where an argument decides what a library call does, a literal
+one is followed: `pd.read_csv("https://...")` downloads the file.
 
 Reading a `@property` or `functools.cached_property` attribute of a project class runs its
 getter, so the read counts as a call of the getter (`self.client` whose getter opens a
@@ -1653,7 +1672,9 @@ It does not report:
 
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
   `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
-  `asyncer.asyncify`, and project wrappers that forward their callable to them);
+  `asyncer.asyncify`, and project wrappers that forward their callable to them; what the
+  offloaded function does besides blocking still counts where it is called, such as its
+  queries in a loop for `EFF103`);
 - functions decorated to run on a thread: `@sync_to_async` (also as a factory,
   `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
   and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
@@ -1665,8 +1686,10 @@ It does not report:
 - `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
   `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
   `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
-- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`,
-  `sqlalchemy.create_engine(...)`) and calls that only build an object (`Redis.pipeline()`, a
+- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`, except
+  that a `mongodb+srv://` URI literal is resolved in the constructor unless `connect=False`,
+  `pymysql.connect(..., defer_connect=True)`, `sqlalchemy.create_engine(...)`) and calls that
+  only build an object (`Redis.pipeline()`, a
   lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
 - spawning a process without waiting (`subprocess.Popen(...)`);
 - coroutine functions that only run through a synchronous driver (`asyncio.run`, ...);
@@ -1723,7 +1746,9 @@ Opt-in: blocking local filesystem I/O reachable from `async def`.
 ## What it does
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
 `pathlib.Path.read_text` / `write_text` / `read_bytes` / `write_bytes` / `open`, `os.listdir`,
-`os.scandir`, `os.walk`, and `shutil` copies and removals. It follows the same boundary,
+`os.scandir`, iterating `os.walk(...)`, `shutil` copies and removals, and the pandas file readers
+(`pd.read_csv(path)`; one given a URL literal downloads it and is `EFF101`, one given an
+`io.StringIO` / `io.BytesIO` buffer does no I/O). It follows the same boundary,
 offload, and guard rules as `EFF101`, generators and offloading decorators included: `await
 in_thread(self.open) if isinstance(self._input, PathLike) else self.open()` is not reported
 when `open` only opens a file under `isinstance(self._input, PathLike)`.
@@ -1996,7 +2021,8 @@ chain is a shortest one. The search does not enter:
   generators that are not iterated (calling a generator function only creates the generator;
   its body is searched where it is iterated, as for `EFF101`, and a generator a function
   returns where the object it returns is iterated);
-- functions an offloading decorator runs on another thread (`@sync_to_async`, ...).
+- functions an offloading decorator or API runs on another thread (`@sync_to_async`,
+  `asyncio.to_thread(f)`, ...).
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope
@@ -2561,7 +2587,9 @@ the other quadratic reallocations of the ecosystem knowledge base. Only loop-car
 accumulation is reported: the result feeds the next iteration and is computed from the previous
 value, also when it grows on some iterations only. One-off concatenations inside a loop are
 not, also on a branch that leaves the variable unchanged otherwise
-(`if step: x = np.append(edges, last)`).
+(`if step: x = np.append(edges, last)`), nor is writing into a buffer passed as `out=`
+(`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous value must be
+among the data that is combined.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -2603,15 +2631,19 @@ Explicit DB query / external RPC executed inside a loop (N+1).
 Checks loops that run a database query on every iteration (the "N+1 queries" problem):
 `cursor.execute(...)`, `session.execute(...)` (awaited ones on async sessions and connections
 too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, `count`, ...)
-and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension),
+and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension,
+`list(query)`),
 the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
 variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
-that reach them, including the getter of a property read in the loop and a generator iterated in
+that reach them, also when an offloading API runs them on a worker thread per item (`await
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
 calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
-`Redis.pipeline()`), DDL statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
+`Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
+batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
+statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
 (`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
 own implementation, or loops whose size the code fixes when no data-sized loop is around them
 (`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
@@ -2917,8 +2949,9 @@ Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
 Checks loops that allocate a network or database client on every iteration: module-level
 request helpers that open a new connection per call (`requests.get`, `httpx.get`), client
 constructors, sync and async (`requests.Session()`, `httpx.AsyncClient()`,
-`aiohttp.ClientSession()`, `boto3.client(...)`), and connection factories (`sqlite3.connect`,
-`redis.Redis`, `create_async_engine`, ...), directly or through project functions,
+`aiohttp.ClientSession()`, `boto3.client(...)`), connection factories (`sqlite3.connect`,
+`redis.Redis`, `create_async_engine`, ...), and connection pools (`psycopg_pool.ConnectionPool`),
+directly or through project functions,
 including the getter of a property read in the loop (`self.client.get(url)` where the `client`
 getter builds a new client).
 
@@ -3258,12 +3291,14 @@ Checks mutations of objects returned by a shared producer:
   and recursion.
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
-that mutate their argument are followed, also on the call result itself
+that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`) are
+followed, also on the call result itself
 (`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
-`model.model_copy(deep=True)`, and the copy sanitizers of the ecosystem knowledge base clear it,
-shallow copies (`copy.copy`, `.copy()`, `dataclasses.replace(...)`) free the top level only: the
-values below stay shared. A wrapper that returns a copy on one path and the shared value on
-another still returns a shared value.
+`model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
+reference), and the deep copy sanitizers of the ecosystem knowledge base clear it, shallow copies
+(`copy.copy`, `.copy()`, `dataclasses.replace(...)`, a sanitizer declared
+`copy-sanitizer = "shallow"`) free the top level only: the values below stay shared. A wrapper
+that returns a copy on one path and the shared value on another still returns a shared value.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone

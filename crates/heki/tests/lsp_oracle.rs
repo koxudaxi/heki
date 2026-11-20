@@ -197,6 +197,9 @@ const CONFIGURE: &str = "from pkg.frozen.helpers import add_default, clear_names
 const OFFLOAD: &str = "import requests\n\n\ndef fetch_profile():\n    return requests.post(\"https://example.com\")\n";
 const OFFLOAD_DECORATED: &str = "import requests\nfrom asgiref.sync import sync_to_async\n\n\n@sync_to_async\ndef fetch_profile():\n    return requests.post(\"https://example.com\")\n";
 const VIEW: &str = "from pkg.offload import fetch_profile\n\n\nasync def view():\n    return await fetch_profile()\n";
+// A function run on a worker thread, awaited per item in another module (`EFF103`).
+const WORKER_OPS: &str = "from asgiref.sync import sync_to_async\nfrom sqlalchemy.orm import Session\n\n\n@sync_to_async\ndef load(session: Session, i):\n    return i\n";
+const WORKER_VIEW: &str = "from pkg.worker_ops import load\n\n\nasync def load_all(session, ids):\n    for i in ids:\n        await load(session, i)\n";
 const FEED: &str =
     "import httpx\n\n\ndef rows():\n    return [httpx.get(\"https://example.com\")]\n";
 const FEED_GENERATOR: &str =
@@ -366,6 +369,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/chain_top.py", CHAIN_TOP),
         ("pkg/offload.py", OFFLOAD),
         ("pkg/view.py", VIEW),
+        ("pkg/worker_ops.py", WORKER_OPS),
+        ("pkg/worker_view.py", WORKER_VIEW),
         ("pkg/feed.py", FEED),
         ("pkg/feed_user.py", FEED_USER),
         ("pkg/fills.py", FILLS),
@@ -696,6 +701,20 @@ fn steps_body_runs() -> Vec<Step> {
             vec![save("pkg/offload.py", OFFLOAD)],
         )
         .present(&[("pkg/view.py", "EFF101")]),
+        Step::new(
+            "a function run on a worker thread starts a query per call",
+            vec![Action::Save(
+                "pkg/worker_ops.py",
+                WORKER_OPS.replace("    return i\n", "    return session.execute(i)\n"),
+            )],
+        )
+        .present(&[("pkg/worker_view.py", "EFF103")])
+        .absent(&[("pkg/worker_view.py", "EFF101")]),
+        Step::new(
+            "the worker's query is removed",
+            vec![save("pkg/worker_ops.py", WORKER_OPS)],
+        )
+        .absent(&[("pkg/worker_view.py", "EFF103")]),
         Step::new(
             "a helper becomes a generator: the report moves to the iteration",
             vec![save("pkg/feed.py", FEED_GENERATOR)],

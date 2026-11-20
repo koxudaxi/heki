@@ -103,7 +103,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pydantic.BaseModel.model_copy"
-copy_sanitizer = true
+copy_sanitizer = "shallow"
 opaque_to_layer3 = true
 
 # --- HTTP: requests ---
@@ -505,7 +505,8 @@ opaque_to_layer3 = true
 # (likewise `boto3.resource.<Resource>.<action>`). Every listed operation is a network call;
 # DynamoDB item reads and writes are database queries too (`query` / `scan` page through
 # results in loops by design, so they are not). Local helpers (`generate_presigned_url`,
-# `get_paginator`) are not listed.
+# `get_paginator`) are not listed. A `boto3.Session(...)` only holds configuration (profile,
+# region, credentials): its `client()` / `resource()` allocate the clients, so it is not listed.
 
 [[entries]]
 symbol = "boto3.client"
@@ -514,11 +515,6 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "boto3.resource"
-effects = ["unpooled_client_alloc"]
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "boto3.Session"
 effects = ["unpooled_client_alloc"]
 opaque_to_layer3 = true
 
@@ -1135,7 +1131,9 @@ opaque_to_layer3 = true
 
 # --- DB: SQLAlchemy (asyncio) ---
 # `create_async_engine`, `AsyncEngine.connect()` / `begin()`, and `async_sessionmaker` are plain
-# functions returning objects or async context managers.
+# functions returning objects or async context managers. `run_sync(fn, *args)` awaits
+# `greenlet_spawn(fn, sync_session_or_connection, *args)`: `fn` runs on the event loop's thread
+# with a synchronous facade whose database I/O is awaited for it (`sync_facade_arg`).
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.create_async_engine"
@@ -1184,6 +1182,12 @@ opaque_to_layer3 = true
 symbol = "sqlalchemy.ext.asyncio.AsyncConnection.stream"
 effects = ["db_query"]
 async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncConnection.run_sync"
+async_safe = true
+sync_facade_arg = 0
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1244,6 +1248,12 @@ opaque_to_layer3 = true
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.stream_scalars"
 effects = ["db_query"]
 async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.run_sync"
+async_safe = true
+sync_facade_arg = 0
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1373,9 +1383,22 @@ effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.run_sync"
+async_safe = true
+sync_facade_arg = 0
+opaque_to_layer3 = true
+
 # --- DB: psycopg (3) and psycopg_pool ---
-# `psycopg.connect` is `Connection.connect`. A client-side cursor receives the whole result in
-# `execute`, so its `fetch*` methods do no I/O and are not listed.
+# `psycopg.connect` is `Connection.connect`. `Connection.execute` returns a new cursor and
+# `Cursor.execute` the cursor itself (awaited, for the async classes), so statements chain on
+# their results. A client-side cursor receives the whole result in
+# `execute`, so its `fetch*` methods do no I/O and are not listed. `cursor(name)` with a name
+# returns a server-side cursor instead: `execute` declares it and each fetch (an iteration
+# included) sends `FETCH`, blocking, though reading the rows of a declared statement is no new
+# query. A pool's constructor starts
+# its workers, which connect in the background (`open(wait=True)` would wait): it allocates a
+# pool of connections without blocking.
 
 [[entries]]
 symbol = "psycopg.connect"
@@ -1392,11 +1415,15 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg.Connection.cursor"
 return_type = "psycopg.Cursor"
+cases = [
+    { arg = 0, param = "name", nonempty = true, return_type = "psycopg.ServerCursor" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg.Connection.execute"
 effects = ["blocking_db", "db_query"]
+return_type = "psycopg.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1412,11 +1439,48 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg.Cursor.execute"
 effects = ["blocking_db", "db_query"]
+return_type = "psycopg.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg.Cursor.executemany"
 effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.execute"
+effects = ["blocking_db", "db_query"]
+return_type = "psycopg.ServerCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.executemany"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.fetchone"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.fetchmany"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.fetchall"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.scroll"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.__iter__"
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1430,23 +1494,52 @@ opaque_to_layer3 = true
 symbol = "psycopg.AsyncConnection.cursor"
 async_safe = true
 return_type = "psycopg.AsyncCursor"
+cases = [
+    { arg = 0, param = "name", nonempty = true, return_type = "psycopg.AsyncServerCursor" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg.AsyncConnection.execute"
 effects = ["db_query"]
 async_safe = true
+return_type = "psycopg.AsyncCursor"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg.AsyncCursor.execute"
 effects = ["db_query"]
 async_safe = true
+return_type = "psycopg.AsyncCursor"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg.AsyncCursor.executemany"
 effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncServerCursor.execute"
+effects = ["db_query"]
+async_safe = true
+return_type = "psycopg.AsyncServerCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncServerCursor.executemany"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg_pool.ConnectionPool"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg_pool.AsyncConnectionPool"
+effects = ["unpooled_client_alloc"]
 async_safe = true
 opaque_to_layer3 = true
 
@@ -1501,17 +1594,26 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 # --- DB: PyMySQL ---
-# `pymysql.connect` is the `Connection` class, which connects in its constructor.
+# `pymysql.connect` is the `Connection` class, which connects in its constructor unless
+# `defer_connect=True` (a keyword-only parameter) leaves the socket closed until `connect()`.
 
 [[entries]]
 symbol = "pymysql.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
 return_type = "pymysql.connections.Connection"
+cases = [
+    { param = "defer_connect", equals = true, effects = ["unpooled_client_alloc"] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymysql.connections.Connection.cursor"
 return_type = "pymysql.cursors.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymysql.connections.Connection.connect"
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1542,7 +1644,9 @@ opaque_to_layer3 = true
 # --- DB: Django ---
 # `connection.cursor()` opens the connection when needed. QuerySet methods that only build
 # another QuerySet are lazy (no effect); the ones that run the query block, and their `a*`
-# variants are coroutines. Model managers (`Model.objects`) are not resolved.
+# variants are coroutines. Model managers (`Model.objects`) are not resolved. The bulk APIs
+# (`bulk_create`, `in_bulk`) write or read many rows in one statement: they block, but a loop
+# over batches of them is no N+1, so they are no `db_query`.
 
 [[entries]]
 symbol = "django.db.connection.cursor"
@@ -1637,12 +1741,12 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.bulk_create"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.in_bulk"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1712,13 +1816,11 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.abulk_create"
-effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.ain_bulk"
-effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
@@ -1730,7 +1832,10 @@ opaque_to_layer3 = true
 
 # --- Key-value: redis (sync) ---
 # Clients connect lazily, on the first command. `pipeline()` only buffers commands until
-# `execute()`. `scan` is called in a cursor loop by design, so it is no `db_query`.
+# `execute()`: a buffered command returns the pipeline itself, so calls chain
+# (`pipe.set(k, v).incr(n).execute()`). `watch()` sends `WATCH` at once; the commands a watching
+# pipeline then runs immediately (until `multi()`) are not told apart from buffered ones, the
+# `watch()` call is reported. `scan` is called in a cursor loop by design, so it is no `db_query`.
 # `redis.StrictRedis` is an alias of `redis.Redis`.
 
 [[entries]]
@@ -1763,6 +1868,156 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "redis.client.Pipeline.execute"
 effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.watch"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.get"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.set"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.setex"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.mget"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.mset"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.delete"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.exists"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.expire"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.ttl"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.incr"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.decr"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hget"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hset"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hmget"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hgetall"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hdel"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lpush"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.rpush"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lpop"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.rpop"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lrange"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.sadd"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.srem"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.smembers"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zadd"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zrange"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.publish"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.keys"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.eval"
+return_type = "redis.client.Pipeline"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1916,7 +2171,8 @@ effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 # --- Key-value: redis.asyncio ---
-# Commands return awaitables; `pipeline()` is a plain method returning an async pipeline.
+# Commands return awaitables; `pipeline()` is a plain method returning an async pipeline, whose
+# buffered commands return the pipeline (as for `redis`) and whose `watch()` is a coroutine.
 
 [[entries]]
 symbol = "redis.asyncio.Redis"
@@ -1948,6 +2204,186 @@ opaque_to_layer3 = true
 symbol = "redis.asyncio.client.Pipeline.execute"
 effects = ["db_query"]
 async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.watch"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.get"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.set"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.setex"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.mget"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.mset"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.delete"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.exists"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.expire"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.ttl"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.incr"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.decr"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hget"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hset"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hmget"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hgetall"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hdel"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lpush"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.rpush"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lpop"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.rpop"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lrange"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.sadd"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.srem"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.smembers"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zadd"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zrange"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.publish"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.keys"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.eval"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2130,13 +2566,21 @@ async_safe = true
 opaque_to_layer3 = true
 
 # --- Document DB: pymongo (sync) ---
-# `MongoClient(...)` returns at once and connects on background threads (a `mongodb+srv://`
-# URI also resolves DNS records in the constructor). `find()` returns a cursor that queries
-# on its first iteration; it is listed as the query.
+# `MongoClient(...)` returns at once and connects on background threads, but with
+# `connect=True` (the default outside function-as-a-service platforms) a `mongodb+srv://` URI
+# resolves its DNS records in the constructor; `connect=False` defers that to the first
+# operation. `AsyncMongoClient` always defers it. `find()` returns a lazy cursor, whose
+# builder methods (`sort`, `limit`, ...) return it again; iterating it (or `to_list()`) runs the
+# query. `aggregate()` runs its command at the call. The bulk writes (`insert_many`,
+# `bulk_write`) send many documents at once: no `db_query`.
 
 [[entries]]
 symbol = "pymongo.MongoClient"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { arg = 4, param = "connect", equals = false, effects = ["unpooled_client_alloc"] },
+    { arg = 0, param = "host", prefix = ["mongodb+srv://"], effects = ["blocking_net", "unpooled_client_alloc"] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2161,7 +2605,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.collection.Collection.find"
-effects = ["blocking_db", "db_query"]
+return_type = "pymongo.cursor.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2176,7 +2620,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.collection.Collection.insert_many"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2226,7 +2670,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.collection.Collection.bulk_write"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2242,6 +2686,111 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.collection.Collection.find_one_and_delete"
 effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.__iter__"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.to_list"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.distinct"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.explain"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.sort"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.limit"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.skip"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.batch_size"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.hint"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.max_time_ms"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.max_await_time_ms"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.where"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.collation"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.comment"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.allow_disk_use"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.min"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.max"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.add_option"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.remove_option"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.rewind"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.clone"
+return_type = "pymongo.cursor.Cursor"
 opaque_to_layer3 = true
 
 # --- Document DB: pymongo (asyncio) ---
@@ -2278,8 +2827,8 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.collection.AsyncCollection.find"
-effects = ["db_query"]
 async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2296,7 +2845,6 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.collection.AsyncCollection.insert_many"
-effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
@@ -2356,7 +2904,6 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.collection.AsyncCollection.bulk_write"
-effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
@@ -2378,8 +2925,137 @@ effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.__aiter__"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.to_list"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.distinct"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.explain"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.sort"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.limit"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.skip"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.batch_size"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.hint"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.max_time_ms"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.max_await_time_ms"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.where"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.collation"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.comment"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.allow_disk_use"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.min"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.max"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.add_option"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.remove_option"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.rewind"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.clone"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
 # --- DB transaction starters (EFF106, opt-in) ---
 # A `with` block over the result of the call holds a transaction (and its pooled connection).
+# `Connection.begin_nested()` sends `SAVEPOINT` at the call and `Session.begin_nested()` flushes
+# the pending changes first, so both block; like a driver's `commit()`, transaction control is
+# no `db_query`. `begin()` sends nothing until the first statement.
 
 [[entries]]
 symbol = "sqlalchemy.orm.Session.begin"
@@ -2388,6 +3064,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.orm.Session.begin_nested"
+effects = ["blocking_db"]
 sync_lock_or_tx = true
 opaque_to_layer3 = true
 
@@ -2403,6 +3080,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.engine.Connection.begin_nested"
+effects = ["blocking_db"]
 sync_lock_or_tx = true
 opaque_to_layer3 = true
 
@@ -2420,6 +3098,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.Session.begin_nested"
+effects = ["blocking_db"]
 sync_lock_or_tx = true
 opaque_to_layer3 = true
 
@@ -2434,51 +3113,91 @@ sync_lock_or_tx = true
 opaque_to_layer3 = true
 
 # --- Data: pandas I/O ---
-# Readers of files and buffers are `blocking_fs` (EFF105, opt-in); SQL readers run a query.
+# Readers of files are `blocking_fs` (EFF105, opt-in); SQL readers run a query. A reader's
+# source decides its I/O: a URL literal is downloaded (`urlopen` for `http(s)://` / `ftp://`,
+# fsspec for the object stores), an in-memory buffer (`io.StringIO` / `io.BytesIO`) is parsed
+# without I/O. `read_hdf` / `read_spss` take local paths only; `read_sas` is not listed as
+# reading URLs.
 
 [[entries]]
 symbol = "pandas.read_csv"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_table"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_fwf"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_excel"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "io", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "io", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_json"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path_or_buf", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path_or_buf", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_parquet"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_feather"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_orc"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_pickle"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2489,16 +3208,27 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_xml"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_stata"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_sas"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]

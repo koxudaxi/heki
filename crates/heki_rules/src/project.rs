@@ -9,7 +9,7 @@ use heki_diagnostics::{Diagnostic, InlineIgnores};
 use heki_effect::{ModuleInput, detect_src_layout, module_name_for_path};
 use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
 use heki_ir::ModuleIr;
-use heki_kb::{EcosystemEntry, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
+use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
 use heki_semantic::SemanticModel;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -299,7 +299,7 @@ impl ProjectEnv {
         let overrides = cfg
             .ecosystem
             .iter()
-            .map(EcosystemEntry::try_from)
+            .map(EcosystemPatch::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         let kb = EffectiveEcosystemKb::load_builtin(&overrides)?;
         let soundness_kb = EffectiveSoundnessKb::load_builtin(runtime.python_version)?;

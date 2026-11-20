@@ -10,15 +10,19 @@ Explicit DB query / external RPC executed inside a loop (N+1).
 Checks loops that run a database query on every iteration (the "N+1 queries" problem):
 `cursor.execute(...)`, `session.execute(...)` (awaited ones on async sessions and connections
 too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, `count`, ...)
-and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension),
+and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension,
+`list(query)`),
 the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
 variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
-that reach them, including the getter of a property read in the loop and a generator iterated in
+that reach them, also when an offloading API runs them on a worker thread per item (`await
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
 calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
-`Redis.pipeline()`), DDL statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
+`Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
+batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
+statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
 (`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
 own implementation, or loops whose size the code fixes when no data-sized loop is around them
 (`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small

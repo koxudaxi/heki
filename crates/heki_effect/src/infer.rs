@@ -18,16 +18,25 @@
 //! comprehension or generator expression with a scope of its own iterates the value its
 //! enclosing function hands it, so the enclosing function is inferred first.
 
-use crate::resolver::{Callee, TypeCtx, Val};
+use crate::resolver::{self, Callee, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
 use heki_ir::{
     BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
     IrFunction, PhiNode, Terminator, UnaryOpKind, VarId,
 };
+use heki_kb::ArgFact;
 use rustc_hash::FxHashMap;
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
+
+/// The arguments a call passes, as written (for the catalog's argument cases).
+#[derive(Clone, Copy, Default)]
+struct Passed<'c> {
+    args: &'c [VarId],
+    kwargs: &'c [(Option<String>, VarId)],
+    star_from: Option<u8>,
+}
 
 /// What the fixpoint knows about a variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,7 +758,33 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// What calling special method `name` on an instance returns.
     fn dunder(&self, o: &Obj, name: &str) -> Option<Ty> {
         let cx = self.cx;
-        cx.callee_result(&cx.project.method_targets(&o.class, name, false))
+        cx.callee_result(&cx.project.method_targets(&o.class, name, false), |_, _| {
+            None
+        })
+    }
+
+    /// What a call passes at position `index` or by `keyword`, for the catalog's argument cases
+    /// (`resolver::passed_arg`): the argument's constant and its class.
+    fn passed(
+        &self,
+        call: Passed<'_>,
+        index: Option<u8>,
+        keyword: Option<&str>,
+    ) -> Option<ArgFact> {
+        let class = |v: VarId| {
+            self.need(v)
+                .ok()
+                .flatten()
+                .and_then(Ty::obj)
+                .map(|o| o.class.clone())
+        };
+        resolver::passed_arg(
+            call.args,
+            call.kwargs,
+            call.star_from,
+            (index, keyword),
+            |v| resolver::arg_fact(|d| self.f.def_inst(d).map(|(_, i)| i), class, v),
+        )
     }
 
     fn step(&self, inst: &Inst) -> Step {
@@ -806,15 +841,24 @@ impl<'e, 'a> Engine<'e, 'a> {
             InstKind::Call {
                 callee_var: Some(c),
                 args,
+                kwargs,
+                star_from,
                 ..
-            } => match self.need(*c)? {
-                Some(Ty::Ref(fqn)) if fqn == "builtins.super" && args.is_empty() => {
-                    self.owner.clone().map(Ty::Super)
+            } => {
+                let call = Passed {
+                    args,
+                    kwargs,
+                    star_from: *star_from,
+                };
+                match self.need(*c)? {
+                    Some(Ty::Ref(fqn)) if fqn == "builtins.super" && args.is_empty() => {
+                        self.owner.clone().map(Ty::Super)
+                    }
+                    Some(Ty::Ref(fqn)) => return self.call_named(fqn, call),
+                    Some(callee) => self.called(callee, call),
+                    None => None,
                 }
-                Some(Ty::Ref(fqn)) => return self.call_named(fqn, args),
-                Some(callee) => self.called(callee),
-                None => None,
-            },
+            }
             // A non-inlined comprehension (Python 3.11) returns the container it builds from the
             // value it iterates.
             InstKind::Call {
@@ -827,8 +871,20 @@ impl<'e, 'a> Engine<'e, 'a> {
                 return item_ty(cx.child_output(comprehension_id(callee), seed));
             }
             InstKind::MethodCall {
-                recv, method, args, ..
-            } => return self.method_call(*recv, method, args),
+                recv,
+                method,
+                args,
+                kwargs,
+                star_from,
+                ..
+            } => {
+                let call = Passed {
+                    args,
+                    kwargs,
+                    star_from: *star_from,
+                };
+                return self.method_call(*recv, method, call);
+            }
             _ => None,
         })
     }
@@ -1005,7 +1061,8 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// its items, anything else returns what [`TypeCtx::call_result`] says. A container they
     /// build is one whatever it wraps, so an unset argument adds no items yet (as in a display):
     /// a loop rebinding `items = list(items)` keeps its type.
-    fn call_named(&self, fqn: &str, args: &[VarId]) -> Step {
+    fn call_named(&self, fqn: &str, call: Passed<'_>) -> Step {
+        let args = call.args;
         let items = |i: usize| args.get(i).map_or(Elem::Empty, |a| self.items_of(*a));
         let iterator = |class: &str, item: Elem| Ty::container(class, Args::items(item));
         Ok(Some(match fqn {
@@ -1072,27 +1129,34 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
             // type.
-            _ if !args.is_empty() && self.cx.kb.lookup(fqn).is_some_and(|e| e.copy_sanitizer) => {
+            _ if !args.is_empty()
+                && self
+                    .cx
+                    .kb
+                    .lookup(fqn)
+                    .is_some_and(|e| e.copy_sanitizer.is_some()) =>
+            {
                 return Ok(self.need(args[0])?.cloned());
             }
-            _ => return Ok(self.cx.call_result(fqn)),
+            _ => return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k))),
         }))
     }
 
-    fn method_call(&self, recv: VarId, method: &str, args: &[VarId]) -> Step {
+    fn method_call(&self, recv: VarId, method: &str, call: Passed<'_>) -> Step {
+        let args = call.args;
         let cx = self.cx;
         let r = self.need(recv)?;
         if let Some(Ty::Ref(fqn)) = r
             && !cx.project.is_project_class(fqn)
         {
-            return self.call_named(&cx.project.canonical(&format!("{fqn}.{method}")), args);
+            return self.call_named(&cx.project.canonical(&format!("{fqn}.{method}")), call);
         }
         if let Some(o) = r.and_then(Ty::obj)
             && let Some(item) = self.container_method(o, method, args)
         {
             return item_ty(item);
         }
-        Ok(r.and_then(|recv| self.member_call(recv, method)))
+        Ok(r.and_then(|recv| self.member_call(recv, method, call)))
     }
 
     /// The class the static type of a member of `recv` comes from, whether the lookup starts
@@ -1127,11 +1191,11 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// type checker; past the project classes, what the ecosystem knowledge base says of the
     /// method of the first external base: a copy (`model_copy`, `list.copy`) has its receiver's
     /// type.
-    fn member_call(&self, recv: &Ty, method: &str) -> Option<Ty> {
+    fn member_call(&self, recv: &Ty, method: &str, call: Passed<'_>) -> Option<Ty> {
         if let Ty::Union(os) = recv {
             return join_all(
                 os.iter()
-                    .map(|o| self.member_call(&Ty::Inst(o.clone()), method)),
+                    .map(|o| self.member_call(&Ty::Inst(o.clone()), method, call)),
             );
         }
         let cx = self.cx;
@@ -1149,20 +1213,26 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .and_then(|t| t.bind_self(Some(&self_ty)));
         }
         match cx.project.method_targets(class, method, skip_self) {
-            Callee::External(symbol) if cx.kb.lookup(&symbol).is_some_and(|e| e.copy_sanitizer) => {
+            Callee::External(symbol)
+                if cx
+                    .kb
+                    .lookup(&symbol)
+                    .is_some_and(|e| e.copy_sanitizer.is_some()) =>
+            {
                 Some(self_ty)
             }
-            callee => cx.callee_result(&callee),
+            callee => cx.callee_result(&callee, |i, k| self.passed(call, i, k)),
         }
     }
 
     /// What calling a value of type `callee` returns: a partial object calls what it wraps, an
     /// instance its `__call__`.
-    fn called(&self, callee: &Ty) -> Option<Ty> {
+    fn called(&self, callee: &Ty, call: Passed<'_>) -> Option<Ty> {
         match callee {
-            Ty::Ref(fqn) => self.cx.call_result(fqn),
-            Ty::Partial(inner) => self.called(inner),
-            other => self.member_call(other, "__call__"),
+            Ty::Ref(fqn) => self.cx.call_result(fqn, |i, k| self.passed(call, i, k)),
+            // What the partial object binds shifts the arguments: they are not followed.
+            Ty::Partial(inner) => self.called(inner, Passed::default()),
+            other => self.member_call(other, "__call__", call),
         }
     }
 
