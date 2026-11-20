@@ -34,8 +34,10 @@ pub fn subscript_step(f: &IrFunction, inst: &Inst, obj_type: Option<&str>) -> Re
         {
             ReturnStep::TARGET_ITEM
         }
+        // A slice copies unless the value's class is known to share its storage (a NumPy
+        // view): an unannotated value is far more often a list, and a report needs evidence.
         InstKind::SubscriptLoad { is_slice: true, .. }
-            if obj_type.is_some_and(|t| SLICE_COPYING_TYPES.contains(&t)) =>
+            if obj_type.is_none_or(|t| SLICE_COPYING_TYPES.contains(&t)) =>
         {
             ReturnStep::SHALLOW_COPY
         }

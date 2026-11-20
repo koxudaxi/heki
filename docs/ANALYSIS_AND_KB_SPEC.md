@@ -450,7 +450,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
      `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, and the Layer 2
      `copy_sanitizer` entries, as deep as each entry says: a shallow copy ends it for the top
-     level only), and a slice of a value inferred as a builtin sequence is a shallow copy
+     level only), and a slice is a shallow copy unless the value's class is inferred and is not a
+     builtin sequence
      (`readonly::subscript_step`, shared with the return flow). A copy keeps its original's class
      for receiver typing. A phi joins the tags of all its incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a

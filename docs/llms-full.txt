@@ -3400,11 +3400,11 @@ generator is iterated. Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
 reference), and the deep copy sanitizers of the ecosystem knowledge base clear it, shallow copies
 (`copy.copy`, `.copy()`, `dataclasses.replace(...)`, a sanitizer declared
-`copy-sanitizer = "shallow"`, and slices of builtin lists and other builtin sequences,
-`rows()[:]`) free the top level only: the values below stay shared, so a helper rebinding an
+`copy-sanitizer = "shallow"`, and slices of builtin lists, other builtin sequences, and values
+whose class heki cannot infer, `rows()[:]`) free the top level only: the values below stay shared, so a helper rebinding an
 attribute of the copy (`b.name = "new"`) changes nothing shared, and one changing the object an
-attribute holds (`b.tags.append(x)`) does. A slice of any other object may be a view of it
-(`numpy`) and stays shared. A wrapper that returns a copy on one path and the shared value on
+attribute holds (`b.tags.append(x)`) does. A slice of an object of another known class may
+be a view of it (`numpy`) and stays shared. A wrapper that returns a copy on one path and the shared value on
 another still returns a shared value.
 
 ## Why is this bad?
