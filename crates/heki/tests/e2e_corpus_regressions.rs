@@ -199,7 +199,7 @@ def data_sized(load, values) -> None:
 
 #[test]
 fn r06_small_displays_of_bytes_and_containers_are_not_reported() {
-    // A display of at most 8 items that nothing grows is small whatever its items are; `*s`
+    // A display of at most 16 items that nothing grows is small whatever its items are; `*s`
     // passes the items, not the list. The same display handed to unknown code may grow, and a
     // list built at run time is data-sized.
     assert_reports(
@@ -215,8 +215,9 @@ fn r06_small_displays_of_bytes_and_containers_are_not_reported() {
 
 const UNHASHABLE_ELEMENTS: &str = r#"def heroes(rows) -> None:
     expected = [
-        {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5},
-        {"id": 6}, {"id": 7}, {"id": 8}, {"id": 9},
+        {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6},
+        {"id": 7}, {"id": 8}, {"id": 9}, {"id": 10}, {"id": 11}, {"id": 12},
+        {"id": 13}, {"id": 14}, {"id": 15}, {"id": 16}, {"id": 17},
     ]
     for row in rows:
         assert row in expected
@@ -230,7 +231,7 @@ def collected(rows, probes) -> list:
 
 
 def ints(rows) -> None:
-    expected = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    expected = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     for row in rows:
         assert row in expected
 "#;

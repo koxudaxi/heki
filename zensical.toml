@@ -17,6 +17,7 @@ nav = [
     { "CLI Reference" = "cli-reference.md" },
   ]},
   { "Rules" = "rules/index.md" },
+  { "Experimental Features" = "experimental.md" },
   { "Integrations" = [
     { "Editors (LSP)" = "lsp.md" },
     { "Coding Agents" = "coding-agents.md" },

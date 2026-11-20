@@ -156,7 +156,7 @@ def sd_membership(probes):
 
 
 def sd_rebuild(probes):
-    keys = [1, 2, 3, 5, 8, 13, 21, 34, 55]
+    keys = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584]
     hits = 0
     for p in range(probes):
         if p in set(keys):

@@ -1298,7 +1298,7 @@ fn check_module(name: &str, files: &[(&str, &str)], expect: &[Expect], runs: boo
 
 const DRAIN: &str = "def drain(n):\n    q = [1, 2, 3, *range(n)]\n    out = []\n    while q:\n        out.append(q.pop(0))\n    return out[:n]\n";
 
-const MEMBERSHIP: &str = "def member(n):\n    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]\n    return [p for p in [3, 6, 9, 12, 15, 18, 21, 24, 27, 30] if p in allowed]\n\n\ndef dedup(n):\n    seen = []\n    for v in [1, 2, 2, 3, 3, 3, 4, 4, 4, 4]:\n        if v not in seen:\n            seen.append(v)\n    return seen\n\n\ndef drain_list(n):\n    q = list([1, 2, 3])\n    out = []\n    while q:\n        out.append(q.pop(0))\n    return out\n";
+const MEMBERSHIP: &str = "def member(n):\n    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]\n    return [p for p in [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51] if p in allowed]\n\n\ndef dedup(n):\n    seen = []\n    for v in [1, 2, 2, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 5, 6, 6]:\n        if v not in seen:\n            seen.append(v)\n    return seen\n\n\ndef drain_list(n):\n    q = list([1, 2, 3])\n    out = []\n    while q:\n        out.append(q.pop(0))\n    return out\n";
 
 const SET_REBOUND_110: &[(&str, V)] = &[(
     "OPT110",
@@ -1676,7 +1676,7 @@ fn string_annotations_keep_nothing() {
 fn the_last_operand_of_a_chained_comparison_is_its_own() {
     // `i in keys == keys` would become `i in keys_set == keys`, which changes the second
     // comparison; the last operand of `0 < i in keys` belongs to one comparison only.
-    let src = "def shared(n):\n    keys = list(range(9))\n    hit = None\n    for i in range(n):\n        hit = i in keys == keys\n    return hit\n\n\ndef last(n):\n    keys = list(range(9))\n    hit = None\n    for i in range(n):\n        hit = 0 < i in keys\n    return hit\n\n\nprint(shared(1), last(2))\n";
+    let src = "def shared(n):\n    keys = list(range(17))\n    hit = None\n    for i in range(n):\n        hit = i in keys == keys\n    return hit\n\n\ndef last(n):\n    keys = list(range(17))\n    hit = None\n    for i in range(n):\n        hit = 0 < i in keys\n    return hit\n\n\nprint(shared(1), last(2))\n";
     check_module(
         "sound_chain_operands",
         &[("cases.py", src)],

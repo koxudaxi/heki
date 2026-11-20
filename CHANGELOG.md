@@ -7,6 +7,18 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ## [0.1.1] - Unreleased
 
+### Changed
+
+- `MUT111` and `heki check --profile` are experimental: `MUT111` reports the readers of the stale
+  writes `MUT101` finds, so it shares `MUT101`'s precision, and `--profile` reads the output of
+  CPython 3.15's sampling profiler, whose format can still change. The new
+  [Experimental Features](https://heki.koxudaxi.dev/experimental/) page lists every experimental
+  feature, and `heki rule` says when a rule is experimental.
+- Small displays and loop bounds now go up to 16 items (8 before), so loops whose fixed trip
+  count is 9 to 16 and containers of 9 to 16 items no longer get size-dependent reports
+  (`OPT103`, `OPT110`, `OPT111`, `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`, `EFF102`,
+  `EFF103`).
+
 ### Fixed
 
 - The errors of files that cannot be read or parsed (and of files that changed on disk during
@@ -23,6 +35,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - The language server, when the client names no workspace folder, indexes the working directory
   in the form it compares document paths in; on Windows a document could otherwise be missed
   as part of the project.
+- `OPT113` (`nested-loop-equijoin`) no longer reports a join when the code fixes the size of
+  either loop, such as a module tuple of operation names or `range(10)`: the cost then grows
+  with the other side only. Its help for the grouped index now says to read each outer key with
+  `.get(key, [])`, so that a key with no element keeps its empty list.
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.

@@ -80,7 +80,7 @@ def old_rebound_in_iterable(n):
 
 def cx_changed_in_iterable(n):
     """The original check only looked at the preheader block; `and` puts `pop` before it."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for p in (allowed.pop() and range(n)):
         if p in allowed:
@@ -89,7 +89,7 @@ def cx_changed_in_iterable(n):
 
 
 def old_changed_in_iterable(n):
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     allowed_set = set(allowed)
     for p in (allowed.pop() and range(n)):
@@ -101,7 +101,7 @@ def old_changed_in_iterable(n):
 def cx_rebuilt_from_rebound(n):
     keys = [100]
     hits = 0
-    for p in (keys := [1, 2, 3, 4, 5, 6, 7, 8, 9]):
+    for p in (keys := [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]):
         if p in set(keys) and p < n:
             hits += 1
     return hits
@@ -111,7 +111,7 @@ def old_rebuilt_from_rebound(n):
     keys = [100]
     hits = 0
     keys_set = set(keys)
-    for p in (keys := [1, 2, 3, 4, 5, 6, 7, 8, 9]):
+    for p in (keys := [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]):
         if p in keys_set and p < n:
             hits += 1
     return hits
@@ -241,7 +241,7 @@ def old_set_of_dict_keys(items):
 # Edits that name something the function rebinds
 # ------------------------------------------------------------------------------
 def cx_local_set(n, set=lambda xs: ()):
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for p in range(n):
         if p in allowed:
@@ -250,7 +250,7 @@ def cx_local_set(n, set=lambda xs: ()):
 
 
 def old_local_set(n, set=lambda xs: ()):
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     allowed_set = set(allowed)
     for p in range(n):
@@ -438,7 +438,7 @@ def old_function_kept_by_map(items):
 # OPT110: a loop over an iterator that keeps a list yields what the iterator computes
 # ------------------------------------------------------------------------------
 def cx_map_over_ints(n):
-    keys = list(range(9))
+    keys = list(range(17))
     out = []
     for p in map(lambda _: [], range(n)):
         out.append(p in keys)
@@ -446,7 +446,7 @@ def cx_map_over_ints(n):
 
 
 def old_map_over_ints(n):
-    keys = list(range(9))
+    keys = list(range(17))
     out = []
     keys_set = set(keys)
     for p in map(lambda _: [], range(n)):
@@ -455,7 +455,7 @@ def old_map_over_ints(n):
 
 
 def cx_generator_over_ints(n):
-    keys = list(range(9))
+    keys = list(range(17))
     out = []
     for p in ([] for _ in range(n)):
         out.append(p in keys)
@@ -463,7 +463,7 @@ def cx_generator_over_ints(n):
 
 
 def old_generator_over_ints(n):
-    keys = list(range(9))
+    keys = list(range(17))
     out = []
     keys_set = set(keys)
     for p in ([] for _ in range(n)):
@@ -475,7 +475,7 @@ def old_generator_over_ints(n):
 # OPT110 / OPT130: a variable that may also hold an object from outside the function
 # ------------------------------------------------------------------------------
 def cx_ints_or_parameter(flag, arg):
-    keys = list(range(9))
+    keys = list(range(17))
     source = [0] if flag else arg
     out = []
     for p in source:
@@ -484,7 +484,7 @@ def cx_ints_or_parameter(flag, arg):
 
 
 def old_ints_or_parameter(flag, arg):
-    keys = list(range(9))
+    keys = list(range(17))
     source = [0] if flag else arg
     out = []
     keys_set = set(keys)
@@ -494,7 +494,7 @@ def old_ints_or_parameter(flag, arg):
 
 
 def cx_range_or_parameter(flag, arg):
-    keys = list(range(9))
+    keys = list(range(17))
     source = arg if flag else range(3)
     out = []
     for p in source:
@@ -503,7 +503,7 @@ def cx_range_or_parameter(flag, arg):
 
 
 def old_range_or_parameter(flag, arg):
-    keys = list(range(9))
+    keys = list(range(17))
     source = arg if flag else range(3)
     out = []
     keys_set = set(keys)
@@ -541,7 +541,7 @@ def replace_first(xs):
 
 
 def cx_elements_after_escape(n):
-    keys = list(range(9))
+    keys = list(range(17))
     source = [0]
     replace_first(source)
     out = []
@@ -551,7 +551,7 @@ def cx_elements_after_escape(n):
 
 
 def old_elements_after_escape(n):
-    keys = list(range(9))
+    keys = list(range(17))
     source = [0]
     replace_first(source)
     out = []
@@ -562,7 +562,7 @@ def old_elements_after_escape(n):
 
 
 def cx_list_from_earlier_iteration(n):
-    keys = list(range(9))
+    keys = list(range(17))
     previous = []
     out = []
     for i in range(n):
@@ -575,7 +575,7 @@ def cx_list_from_earlier_iteration(n):
 
 
 def old_list_from_earlier_iteration(n):
-    keys = list(range(9))
+    keys = list(range(17))
     previous = []
     out = []
     for i in range(n):
@@ -592,7 +592,7 @@ def old_list_from_earlier_iteration(n):
 # OPT110: a subscript with a `slice` object is a new list, not an element
 # ------------------------------------------------------------------------------
 def cx_subscript_with_slice_object(n):
-    keys = list(range(9))
+    keys = list(range(17))
     s = slice(0, 1)
     p = keys[s]
     out = []
@@ -602,7 +602,7 @@ def cx_subscript_with_slice_object(n):
 
 
 def old_subscript_with_slice_object(n):
-    keys = list(range(9))
+    keys = list(range(17))
     s = slice(0, 1)
     p = keys[s]
     out = []
@@ -721,7 +721,7 @@ def old_entry_reads_what_eq_changes():
 # OPT130: what the hoisted constructor shares, expands, or receives
 # ------------------------------------------------------------------------------
 def cx_rebuilt_container_changed(n):
-    keys = list(range(9))
+    keys = list(range(17))
     hits = 0
     for _ in range(n):
         if 0 in (tmp := list(keys)):
@@ -731,7 +731,7 @@ def cx_rebuilt_container_changed(n):
 
 
 def old_rebuilt_container_changed(n):
-    keys = list(range(9))
+    keys = list(range(17))
     hits = 0
     keys_list = list(keys)
     for _ in range(n):
@@ -761,7 +761,7 @@ def old_rebuild_with_unpacked_argument(packed, items):
 
 
 def cx_rebuild_copy_with_argument(n):
-    keys = list(range(9))
+    keys = list(range(17))
     hit = None
     for i in range(n):
         hit = i in set(keys.copy(1))
@@ -769,7 +769,7 @@ def cx_rebuild_copy_with_argument(n):
 
 
 def old_rebuild_copy_with_argument(n):
-    keys = list(range(9))
+    keys = list(range(17))
     hit = None
     hoisted = set(keys.copy(1))
     for i in range(n):
@@ -782,7 +782,7 @@ def old_rebuild_copy_with_argument(n):
 # ------------------------------------------------------------------------------
 def cx_set_declared_without_value(n):
     set: object
-    keys = list(range(9))
+    keys = list(range(17))
     hit = None
     for i in range(n):
         hit = i in keys
@@ -791,7 +791,7 @@ def cx_set_declared_without_value(n):
 
 def old_set_declared_without_value(n):
     set: object
-    keys = list(range(9))
+    keys = list(range(17))
     hit = None
     keys_set = set(keys)
     for i in range(n):
@@ -903,7 +903,7 @@ def main() -> int:
             lambda f: drain_iterators(f(["b", "c"])),
         ),
         (cx_rebound_in_iterable, old_rebound_in_iterable, lambda f: f(5)),
-        (cx_changed_in_iterable, old_changed_in_iterable, lambda f: f(11)),
+        (cx_changed_in_iterable, old_changed_in_iterable, lambda f: f(18)),
         (cx_rebuilt_from_rebound, old_rebuilt_from_rebound, lambda f: f(5)),
         (cx_dedup_rebound_in_iterable, old_dedup_rebound_in_iterable, lambda f: f([5, 6])),
         (cx_nested_builtin_raises, old_nested_builtin_raises, lambda f: f([], "x")),
