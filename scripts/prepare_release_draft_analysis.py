@@ -1,8 +1,9 @@
 """Skip the Claude analysis for pull requests whose changes cannot reach a release's behavior.
 
 A path is safe when it is not part of what heki ships or how a release is built: tests, the
-documentation, development scripts, and the CI and documentation workflows. `release.yml` is not
-safe, since its build matrix decides the platforms a release supports. The file list comes from
+documentation, development scripts, and the CI, documentation, and release bookkeeping workflows.
+`release.yml` is not safe, since its build matrix decides the platforms a release supports, and
+neither is `scripts/set_release_versions.py`, which writes the version a release declares. The file list comes from
 the diff Claude reads (`prepare_release_draft_artifacts.py`), not from the pull request's file
 list, which can miss a file the merge changed. A record that does not parse, or an empty list,
 goes to Claude.
@@ -21,6 +22,7 @@ SAFE_EXACT_PATHS = frozenset(
         ".github/workflows/ci.yml",
         ".github/workflows/docs.yml",
         ".github/workflows/release-draft.yml",
+        ".github/workflows/release-sync.yml",
         ".gitignore",
         "AGENTS.md",
         "ARCHITECTURE.md",

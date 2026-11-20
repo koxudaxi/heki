@@ -1,19 +1,21 @@
 """Checks the release workflow runs on the built distributions before they are published.
 
 Usage:
-    python scripts/release_check.py smoke dist/heki-*.whl [--install]
-    python scripts/release_check.py versions dist/ [--tag v0.1.0]  # needs `packaging`
+    python scripts/release_check.py smoke dist/heki-*.whl [--install] [--version 0.1.0]
+    python scripts/release_check.py versions dist/ [--version 0.1.0]  # needs `packaging`
+
+The version is the release's: the tag without its `v`, which the build jobs wrote into the
+manifests (`scripts/set_release_versions.py`). Without `--version`, a run that built the
+committed manifests, it is `Cargo.toml`'s `workspace.package.version`.
 
 `smoke` checks that a wheel carries the `heki` executable and that the executable analyzes a
-project: it reports a known diagnostic with exit code 1 and a clean project with 0. With
-`--install` it runs the executable installed into a fresh virtual environment by uv, otherwise
-the one extracted from the wheel (for a platform the runner's Python cannot install, such as
-musl on a glibc runner).
+project: `heki --version` prints the version, and `heki check` reports a known diagnostic with
+exit code 1 and a clean project with 0. With `--install` it runs the executable installed into
+a fresh virtual environment by uv, otherwise the one extracted from the wheel (for a platform
+the runner's Python cannot install, such as musl on a glibc runner).
 
-`versions` checks that the release tag, `pyproject.toml`, the Cargo workspace (with the versions
-of its internal dependencies), and the metadata of every wheel and of the source distribution
-name the same version, so that a tag such as
-`v0.1.0rc1` cannot publish distributions that declare `0.1.0`.
+`versions` checks that the metadata of every wheel and of the source distribution declare the
+version, so that a tag such as `v0.2.0-rc.1` cannot publish distributions that declare `0.2.0`.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import tempfile
 import tomllib
 import zipfile
 from pathlib import Path
+from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -41,7 +44,7 @@ def cargo_version() -> str:
     return cargo["workspace"]["package"]["version"]
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     sys.exit(f"release check failed: {message}")
 
 
@@ -85,15 +88,18 @@ def run(exe: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedP
     return subprocess.run([str(exe), *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
-def smoke(wheel_path: Path, install: bool) -> None:
+def smoke(wheel_path: Path, install: bool, expected: str) -> None:
     with zipfile.ZipFile(wheel_path) as wheel, tempfile.TemporaryDirectory() as tmp_name:
         tmp = Path(tmp_name)
         member = executable_member(wheel, wheel_path.name)
         exe = installed(wheel_path, tmp) if install else extracted(wheel, member, tmp)
 
         version = run(exe, "--version")
-        if version.returncode != 0 or version.stdout.strip() != f"heki {cargo_version()}":
-            fail(f"`heki --version` printed {version.stdout!r} (exit {version.returncode})")
+        if version.returncode != 0 or version.stdout.strip() != f"heki {expected}":
+            fail(
+                f"`heki --version` printed {version.stdout!r} (exit {version.returncode}), "
+                f"not `heki {expected}`"
+            )
         rules = run(exe, "rule", "--all")
         if rules.returncode != 0 or "EFF101" not in rules.stdout:
             fail(f"`heki rule --all` failed (exit {rules.returncode}): {rules.stderr}")
@@ -139,38 +145,19 @@ def sdist_version(path: Path) -> str:
         return email.parser.HeaderParser().parsestr(data.read().decode())["Version"]
 
 
-WORKSPACE_VERSION = "Cargo.toml `workspace.package.version`"
-
-
-def manifest_versions(root: Path = ROOT) -> dict[str, str]:
-    """The version every manifest entry declares, by entry; the release draft reads it too."""
-    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    cargo = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
-    declared: dict[str, str] = {
-        "pyproject.toml `project.version`": pyproject["project"]["version"],
-        WORKSPACE_VERSION: cargo["workspace"]["package"]["version"],
-    }
-    for name, dep in cargo["workspace"]["dependencies"].items():
-        if isinstance(dep, dict) and "path" in dep:
-            declared[f"Cargo.toml `workspace.dependencies.{name}`"] = dep.get("version", "(none)")
-    return declared
-
-
-def versions(dist: Path, tag: str | None) -> None:
+def versions(dist: Path, version: str) -> None:
     from packaging.version import InvalidVersion, Version
 
-    declared = manifest_versions()
-    workspace = declared[WORKSPACE_VERSION]
+    try:
+        expected = Version(version)
+    except InvalidVersion:
+        fail(f"{version!r} is not a version")
     wheels = sorted(dist.glob("*.whl"))
     sdists = sorted(dist.glob("*.tar.gz"))
     if not wheels or len(sdists) != 1:
         fail(f"expected wheels and one source distribution in {dist}, found {wheels + sdists}")
-    declared |= {w.name: wheel_version(w) for w in wheels}
+    declared = {w.name: wheel_version(w) for w in wheels}
     declared[sdists[0].name] = sdist_version(sdists[0])
-    if tag is not None:
-        declared[f"tag `{tag}`"] = tag.removeprefix("v")
-
-    expected = Version(workspace)
 
     def same(text: str) -> bool:
         try:
@@ -182,23 +169,25 @@ def versions(dist: Path, tag: str | None) -> None:
     if wrong:
         listing = "\n".join(f"  {where}: {v}" for where, v in wrong.items())
         fail(f"versions differ from {expected}:\n{listing}")
-    print(f"Every distribution and manifest declares {expected} ({len(declared)} places).")
+    print(f"Every distribution declares {expected} ({len(declared)} distributions).")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     smoke_args = commands.add_parser("smoke", help="check one wheel and run its executable")
     smoke_args.add_argument("wheel", type=Path)
     smoke_args.add_argument("--install", action="store_true", help="install it with uv first")
-    version_args = commands.add_parser("versions", help="compare the declared versions")
+    version_args = commands.add_parser("versions", help="compare the distributions' versions")
     version_args.add_argument("dist", type=Path)
-    version_args.add_argument("--tag", help="the release tag (`v` + the version)")
-    args = parser.parse_args()
+    for command in (smoke_args, version_args):
+        command.add_argument("--version", help="the release version (the tag without its `v`)")
+    args = parser.parse_args(argv)
+    version = args.version or cargo_version()
     if args.command == "smoke":
-        smoke(args.wheel.resolve(), args.install)
+        smoke(args.wheel.resolve(), args.install, version)
     else:
-        versions(args.dist, args.tag)
+        versions(args.dist, version)
     return 0
 
 

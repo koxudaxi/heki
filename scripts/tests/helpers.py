@@ -1,4 +1,4 @@
-"""Helpers for the tests of the Release Draft workflow's scripts: git repositories, a fake `gh`, script runs."""
+"""Helpers for the tests of the release workflows' scripts: git repositories, a fake `gh`, script runs."""
 
 from __future__ import annotations
 
