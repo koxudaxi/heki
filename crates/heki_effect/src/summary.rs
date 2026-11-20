@@ -1434,11 +1434,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// Record an escape of `var`'s object at the current instruction; a definite escape of a
-    /// parameter keeps it (`EffectSummary::retains_params`).
+    /// parameter keeps it (`EffectSummary::retains_params`). Only reached when an ownership
+    /// contract is declared ([`Self::store_escapes`], [`Self::call_escapes`]).
     fn escape(&mut self, var: VarId, how: Escape) {
-        if !self.ownership {
-            return;
-        }
         if how == Escape::Definite {
             self.summary.retains_params |= self.may_params.get(&var).copied().unwrap_or(0);
         }
@@ -2655,11 +2653,9 @@ impl<'a> Extractor<'a> {
     /// `callee`-th of the site the call adds). Each object bound to a parameter exactly is asked
     /// about for `ArgOrigin::new_object` and is kept only if the callee keeps that parameter; an
     /// argument after `*` unpacking, or one no parameter takes, may be kept. A generator or a
-    /// coroutine that is created, not run, keeps its arguments.
+    /// coroutine that is created, not run, keeps its arguments. Only called when an ownership
+    /// contract is declared.
     fn hand_over(&mut self, call: &Call<'_>, decl: &FunctionDecl, callee: usize, handed: &Handed) {
-        if !self.ownership {
-            return;
-        }
         let limit = call
             .star_from
             .map_or(usize::MAX, |s| handed.offset + usize::from(s));

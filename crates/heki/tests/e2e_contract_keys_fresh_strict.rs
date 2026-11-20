@@ -1414,6 +1414,35 @@ def starred(extra: list[object]) -> None:
     node = DataModelFieldBase()
     _log(*extra, node)
     node.name = "x"
+
+
+def logged_copy(obj) -> None:
+    dup = copy.copy(obj)
+    _log(dup)
+    dup.name = "x"
+
+
+def _fresh_named() -> DataModelFieldBase:
+    node = DataModelFieldBase()
+    node.name = "x"
+    return node
+
+
+def uses_fresh() -> None:
+    REGISTRY.append(_fresh_named())
+
+
+def nonlocal_holder() -> None:
+    holder = None
+
+    def keep() -> None:
+        nonlocal holder
+        node = DataModelFieldBase()
+        holder = node
+        node.name = "x"
+
+    keep()
+    print(holder)
 "#;
 
 /// `def <name>() -> None:` binding a new object to `n0`, then `n1 = n0` ... and writing it.
@@ -1469,10 +1498,14 @@ unresolved = "report"
             // New on one path only. (`register` and `unregister` change the entries of the object
             // they create.)
             d(o, 67, "MUT201", "either", name),
-            // After `*` unpacking, no argument binds a known parameter: it may be kept.
+            // After `*` unpacking, no argument binds a known parameter: it may be kept. (A copy
+            // handed to `*objs` that only prints them, line 96, and a private factory filling the
+            // object it creates, line 101, construct their objects.)
             d(o, 90, "MUT201", "starred", name),
+            // Stored in a closure variable before the write.
+            d(o, 116, "MUT201", "nonlocal_holder.<locals>.keep", name),
             // Followed through fourteen copies, not fifteen.
-            d(o, 129, "MUT201", "fifteen", name),
+            d(o, 158, "MUT201", "fifteen", name),
         ]
     );
 }
@@ -1525,6 +1558,14 @@ def entries(model: DataModel, left: DataModel, right: DataModel, flag: bool, nam
 
 def deep(tree: Tree, names: list[str]) -> None:
     tree.levels["a"]["b"].append(names[0])
+
+
+def _label(obj) -> None:
+    obj.name = "x"
+
+
+def label_all(options: dict[str, object]) -> None:
+    _label(**options)
 "#;
 
 /// `def <name>(obj) -> None:` binding `obj.items` to `c0`, then `c1 = c0` ... and appending.
@@ -1591,8 +1632,10 @@ write-universe = ['DataModel.meta["kw"]']
             d(o, 38, "MUT201", "entries", meta),
             // An entry of an entry.
             d(o, 46, "MUT201", "deep", "Tree.levels"),
+            // A caller passes only `**options`: no argument binds the parameter.
+            d(o, 50, "MUT205", "_label", "name"),
             // The container of an object of unknown class through fourteen copies, not fifteen.
-            d(o, 65, "MUT205", "fourteen", "items"),
+            d(o, 73, "MUT205", "fourteen", "items"),
         ]
     );
     let pass = diags.iter().find(|x| x["rule_code"] == "EFF201").unwrap();
