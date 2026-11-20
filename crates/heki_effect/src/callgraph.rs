@@ -7,6 +7,7 @@
 //! edited file's SCC closure and then over the affected callers only.
 
 use crate::guards;
+use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
@@ -792,6 +793,13 @@ fn transfer(
             .extend(facts.mutates_self_attrs.iter().cloned());
         t.invalidates_cached
             .extend(facts.invalidates_cached.iter().cloned());
+    }
+    let changes = iterations::call_changes(site, bc, callee, facts);
+    if !changes.is_empty() {
+        iterations::merge_changes(
+            &mut t.iteration_facts_mut().changes_self_containers,
+            changes,
+        );
     }
     // A slot of a callee parameter bound to a caller parameter is that parameter's slot.
     for (&i, slots) in &facts.inplace_param_slots {

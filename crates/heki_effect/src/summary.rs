@@ -8,6 +8,7 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
+use crate::iterations::{self, BetweenSteps, ContainerChange, IteratedContainer, ResultIteration};
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -23,8 +24,8 @@ use crate::{
 };
 use heki_ast::Span;
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
-    IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FunctionId, FunctionKind, Inst,
+    InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -364,6 +365,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         into.inplace_param_slots.entry(i).or_default().extend(slots);
     }
     into.mutates_self_attrs.extend(other.mutates_self_attrs);
+    if let Some(facts) = other.iterations {
+        into.iteration_facts_mut().merge(*facts);
+    }
     into.invalidates_cached.extend(other.invalidates_cached);
     into.typed_field_write_sites
         .extend(other.typed_field_write_sites);
@@ -1313,6 +1317,18 @@ impl<'a> Extractor<'a> {
         self.resolve_construction();
         self.returned_origins();
         self.iterations();
+        let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
+        let container_iterations = iterations::container_iterations(
+            f,
+            self.cx,
+            &self.types,
+            &self.self_attr_alias,
+            &site_spans,
+            self.summary.is_generator,
+        );
+        if !container_iterations.is_empty() {
+            self.summary.iteration_facts_mut().container_iterations = container_iterations;
+        }
         self.apply_declaration();
         if self.summary.is_cached_property && f.kind == FunctionKind::Sync {
             self.summary.returns_self_attrs = self.returned_self_attrs();
@@ -1330,6 +1346,30 @@ impl<'a> Extractor<'a> {
             }
         });
         (self.summary, self.sites, flow)
+    }
+
+    /// `IterationFacts::result_iterations`: what runs between the steps of each iteration (by
+    /// position, `iterated`, per project call) of the object a project call returns (a
+    /// generator, or one a plain function hands on).
+    fn result_iterations(&mut self, iterated: &[Vec<(Span, u16, Position)>]) {
+        if iterated.iter().all(Vec::is_empty) {
+            return;
+        }
+        let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
+        for (call, uses) in self.project_calls.iter().zip(iterated) {
+            for &(_, _, (block, index)) in uses {
+                let inst = &self.f.block(block).insts[index];
+                if let Some(between) =
+                    BetweenSteps::of(self.f, inst, &site_spans, self.summary.is_generator)
+                {
+                    let call = self.sites[call.site].span;
+                    self.summary
+                        .iteration_facts_mut()
+                        .result_iterations
+                        .push(ResultIteration { call, between });
+                }
+            }
+        }
     }
 
     /// Where the function iterates its parameters and the objects its project calls return
@@ -1376,6 +1416,7 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
+        self.result_iterations(&iterated);
         // Which call results a plain function returns (a generator's `return` value ends its
         // iteration and is no iterator handed out).
         let mut returned = vec![false; self.project_calls.len()];
@@ -2069,6 +2110,7 @@ impl<'a> Extractor<'a> {
                 obj,
                 index,
                 key_const,
+                is_slice,
                 ..
             } => {
                 // `obj.__dict__["attr"]`, `obj.__dict__[KEY]`.
@@ -2077,6 +2119,14 @@ impl<'a> Extractor<'a> {
                 {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
+                // Reading a missing key of a `defaultdict` inserts it.
+                if !is_slice
+                    && !crate::consumption::is_unpacking(self.f, *index, span)
+                    && matches!(self.val(*obj), Some(Val::Inst(c)) if c == "collections.defaultdict")
+                    && !self.reads_present_key(bb, *obj, *index)
+                {
+                    self.self_container_change(*obj, ContainerChange::Resizes, span);
+                }
             }
             InstKind::BinOp {
                 dst,
@@ -2084,8 +2134,12 @@ impl<'a> Extractor<'a> {
                 lhs,
                 in_place: true,
                 ..
-            } if self.changes_in_place(*dst, *lhs, *op) => {
-                self.container_mut(*lhs, None, None, span);
+            } if self.has_in_place_operator(*lhs, *op) => {
+                if self.changes_in_place(*dst, *lhs, *op) {
+                    self.container_mut(*lhs, None, None, span);
+                }
+                // `self.items |= other` changes the container before storing it back.
+                self.self_container_change(*lhs, ContainerChange::Resizes, span);
             }
             // A value stored in a module global or a closure variable outlives the call.
             InstKind::StoreGlobal { value, .. } | InstKind::StoreDeref { value, .. } => {
@@ -2108,6 +2162,7 @@ impl<'a> Extractor<'a> {
                 value,
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, false, span);
+                self.self_container_change(*obj, ContainerChange::StoresItems, span);
                 self.note_escape(*value);
             }
             InstKind::SubscriptDelete {
@@ -2116,6 +2171,7 @@ impl<'a> Extractor<'a> {
                 key_const,
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, true, span);
+                self.self_container_change(*obj, ContainerChange::Resizes, span);
             }
             InstKind::MethodCall {
                 dst,
@@ -2143,6 +2199,11 @@ impl<'a> Extractor<'a> {
                             self.note_escape(*a);
                         }
                     }
+                }
+                if !matches!(callee, Callee::Project(..))
+                    && let Some(change) = iterations::method_change(method)
+                {
+                    self.self_container_change(*recv, change, span);
                 }
                 // `obj.__dict__.get("attr"[, default])`.
                 if method == "get"
@@ -2736,10 +2797,46 @@ impl<'a> Extractor<'a> {
         let stored = self.uses.get(&dst).into_iter().flatten().any(|u| {
             matches!(u, InstKind::AttrStore { value, .. } | InstKind::SubscriptStore { value, .. } if *value == dst)
         });
-        !stored
-            && matches!(self.val(lhs), Some(Val::Inst(class)) if IN_PLACE_OPERATORS
-                .iter()
-                .any(|(c, ops)| c == class && ops.contains(&op)))
+        !stored && self.has_in_place_operator(lhs, op)
+    }
+
+    /// Whether `lhs op= ...` changes the built-in container `lhs` holds in place, whatever the
+    /// result is stored to.
+    fn has_in_place_operator(&self, lhs: VarId, op: BinOpKind) -> bool {
+        matches!(self.val(lhs), Some(Val::Inst(class)) if IN_PLACE_OPERATORS
+            .iter()
+            .any(|(c, ops)| c == class && ops.contains(&op)))
+    }
+
+    /// Whether `bb` is the branch `if index in <the container obj holds>:` enters, so that reading
+    /// `obj[index]` there finds the key (also for copies of the container).
+    fn reads_present_key(&self, bb: BlockId, obj: VarId, index: VarId) -> bool {
+        let container = self.self_attr_alias.get(&obj);
+        self.f.blocks.iter().any(|p| match &p.terminator {
+            Terminator::Branch { cond, then_bb, .. } if *then_bb == bb => matches!(
+                self.defs.get(cond).map(|i| &i.kind),
+                Some(InstKind::Compare { op: CompareOpKind::In, lhs, rhs, .. })
+                    if *lhs == index && (*rhs == obj || container.is_some() && self.self_attr_alias.get(rhs) == container)
+            ),
+            _ => false,
+        })
+    }
+
+    /// An in-place change of the container `var` holds, when it is `self.<attr>` of a class whose
+    /// iterators check for changes (`MUT113`).
+    fn self_container_change(&mut self, var: VarId, change: ContainerChange, span: Span) {
+        let checked = self.val(var).and_then(IteratedContainer::of_val).is_some();
+        let Some(attr) = self.self_attr_alias.get(&var).filter(|_| checked) else {
+            return;
+        };
+        let attr = attr.clone();
+        let facts = self.summary.iteration_facts_mut();
+        iterations::merge_changes(&mut facts.changes_self_containers, [(attr.clone(), change)]);
+        facts
+            .self_container_change_sites
+            .entry(attr)
+            .or_default()
+            .insert(span);
     }
 
     /// In-place mutation of the container held in `var` (mutator method or subscript write):
