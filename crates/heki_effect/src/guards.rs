@@ -840,6 +840,14 @@ fn contradictory(facts: FactSet) -> bool {
 /// What holds on the edges out of one block, by target (`None`: the edge is infeasible).
 type OutEdges = Vec<(BlockId, Option<FactSet>)>;
 
+/// The variables a [`Facts::decompose`] is inside, and what it found for each variable and
+/// truthiness whose result does not depend on the path to it (while one branch is decided).
+#[derive(Default)]
+struct Decomposing {
+    stack: Vec<VarId>,
+    done: FxHashMap<(VarId, bool), FactSet>,
+}
+
 /// A forward must-analysis of the conditions that hold at each block: branch edges add what
 /// their condition says (through copies, `not`, and the phis of `and` / `or` / conditional
 /// expressions), merges keep what holds on every edge, infeasible edges drop out.
@@ -988,7 +996,14 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
     }
 
     /// What `v` having truthiness `holds` says.
-    fn decompose(&self, v: VarId, holds: bool, stack: &mut Vec<VarId>) -> FactSet {
+    fn decompose(&self, v: VarId, holds: bool, walk: &mut Decomposing) -> FactSet {
+        self.decompose_at(v, holds, walk).0
+    }
+
+    /// [`Self::decompose`], with the lowest position in the walk's stack where it cut a cycle:
+    /// a result that cut none below `v` is the same on every path to `v`, and is kept (a
+    /// condition reaches the same phis through many paths: `c = c or not c`).
+    fn decompose_at(&self, v: VarId, holds: bool, walk: &mut Decomposing) -> (FactSet, usize) {
         let mut out: FactSet = 0;
         if let Some(&a) = self.merged.get(&v) {
             out |= fact(a, holds);
@@ -996,17 +1011,27 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
         if let Some(&(t, polarity)) = self.test_of.get(&v) {
             out |= fact(t, holds == polarity);
         }
-        if stack.contains(&v) {
-            return out;
+        if let Some(at) = walk.stack.iter().position(|w| *w == v) {
+            return (out, at);
         }
-        stack.push(v);
+        if let Some(&known) = walk.done.get(&(v, holds)) {
+            return (known, usize::MAX);
+        }
+        let depth = walk.stack.len();
+        walk.stack.push(v);
+        let mut low = usize::MAX;
+        let mut sub = |w: VarId, h: bool, walk: &mut Decomposing| {
+            let (found, at) = self.decompose_at(w, h, walk);
+            low = low.min(at);
+            found
+        };
         match self.cx.def(v) {
-            Some(InstKind::Copy { src, .. }) => out |= self.decompose(*src, holds, stack),
+            Some(InstKind::Copy { src, .. }) => out |= sub(*src, holds, walk),
             Some(InstKind::UnaryOp {
                 op: UnaryOpKind::Not,
                 operand,
                 ..
-            }) => out |= self.decompose(*operand, !holds, stack),
+            }) => out |= sub(*operand, !holds, walk),
             _ => {
                 // The phi has the value of the edge taken: what holds on every feasible edge
                 // whose incoming value has this truthiness. A loop phi whose back edge is not
@@ -1023,7 +1048,7 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                         let Some(edge) = edge else {
                             continue;
                         };
-                        let e = edge | self.decompose(*w, holds, stack);
+                        let e = edge | sub(*w, holds, walk);
                         if contradictory(e) {
                             continue;
                         }
@@ -1034,8 +1059,12 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 }
             }
         }
-        stack.pop();
-        out
+        walk.stack.pop();
+        if low >= depth {
+            walk.done.insert((v, holds), out);
+            low = usize::MAX;
+        }
+        (out, low)
     }
 
     /// What holds on the edge `from -> to`: `None` while `from` is not done, then `Some(None)`
@@ -1067,8 +1096,9 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                     then_bb,
                     else_bb,
                 } => {
+                    let mut walk = Decomposing::default();
                     for (t, holds) in [(*then_bb, true), (*else_bb, false)] {
-                        let e = cur | self.decompose(*cond, holds, &mut Vec::new());
+                        let e = cur | self.decompose(*cond, holds, &mut walk);
                         out.push((t, (!contradictory(e)).then_some(e)));
                     }
                 }
