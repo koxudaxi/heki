@@ -218,6 +218,11 @@ pub struct EffectSummary {
     /// shallow copy of the argument shares exactly these objects (`MUT202`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub changed_param_attrs: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> spans` of the function's own changes of the argument (a local fact,
+    /// never propagated: a rule walking the call graph counts each change once, in the body
+    /// making it; `EFF201` `mutates-params`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_change_sites: BTreeMap<u8, BTreeSet<Span>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself
     /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
     /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
@@ -394,6 +399,7 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.param_change_sites.clear();
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             for hop in &mut r.chain {
@@ -422,10 +428,11 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites are left out: read sites are never propagated.
+    /// sites and parameter changes are left out: they are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_reads = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
+            param_change_sites: BTreeMap::new(),
             ..s.clone()
         };
         without_reads(self) == without_reads(other) && self.same_facts(other)

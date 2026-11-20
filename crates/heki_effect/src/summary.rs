@@ -185,6 +185,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     for (i, attrs) in other.changed_param_attrs {
         into.changed_param_attrs.entry(i).or_default().extend(attrs);
     }
+    for (i, spans) in other.param_change_sites {
+        into.param_change_sites.entry(i).or_default().extend(spans);
+    }
     for (i, slots) in other.inplace_param_slots {
         into.inplace_param_slots.entry(i).or_default().extend(slots);
     }
@@ -1495,22 +1498,28 @@ impl<'a> Extractor<'a> {
     }
 
     /// A change below the attribute `attr` of parameter `i` (of the object `p.attr` holds).
-    fn change_below_param_attr(&mut self, i: u8, attr: String) {
+    fn change_below_param_attr(&mut self, i: u8, attr: String, span: Span) {
         self.summary
             .changed_param_attrs
             .entry(i)
             .or_default()
             .insert(attr.clone());
-        self.mutate_param(i, attr);
+        self.mutate_param(i, attr, span);
     }
 
-    fn mutate_param(&mut self, i: u8, path: String) {
+    /// The function's own change, at `span`, of parameter `i` at `path`.
+    fn mutate_param(&mut self, i: u8, path: String, span: Span) {
         self.summary.mutates_params |= 1u64 << i;
         self.summary
             .mutated_param_paths
             .entry(i)
             .or_default()
             .insert(path);
+        self.summary
+            .param_change_sites
+            .entry(i)
+            .or_default()
+            .insert(span);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1593,8 +1602,8 @@ impl<'a> Extractor<'a> {
             });
         }
         match owner.param {
-            Some((i, None)) => self.mutate_param(i, attr.to_owned()),
-            Some((i, Some(path))) => self.change_below_param_attr(i, path),
+            Some((i, None)) => self.mutate_param(i, attr.to_owned(), span),
+            Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
             None => {}
         }
         if let Some(class) = owner.typed_class {
@@ -1624,8 +1633,8 @@ impl<'a> Extractor<'a> {
             });
         }
         match self.param_alias.get(&var).cloned() {
-            Some((i, None)) => self.mutate_param(i, String::new()),
-            Some((i, Some(path))) => self.change_below_param_attr(i, path),
+            Some((i, None)) => self.mutate_param(i, String::new(), span),
+            Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
             None => {}
         }
         if let Some((i, slot)) = self.param_slot_alias.get(&var).cloned() {

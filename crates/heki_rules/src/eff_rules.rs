@@ -789,8 +789,9 @@ impl<'a> Reach<'a> {
     }
 
     /// Parameters of the scope function that a reached function mutates, through followed
-    /// edges only (a forward flow of "callee parameter k is scope parameter p" bits).
-    fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> u64 {
+    /// edges only (a forward flow of "callee parameter k is scope parameter p" bits), and the
+    /// distinct sites of those changes (each in the body making it).
+    fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> (u64, BTreeSet<SiteId>) {
         let mut alias: FxHashMap<(usize, usize), u64> = FxHashMap::default();
         for p in 0..params.min(64) {
             alias.insert((0, p), 1u64 << p);
@@ -815,18 +816,26 @@ impl<'a> Reach<'a> {
             }
         }
         let mut out = 0;
+        let mut sites = BTreeSet::new();
         for (i, (func, facts, _)) in self.nodes.iter().enumerate() {
-            let local = cx
+            let Some(local) = cx
                 .index
                 .file_of(func)
                 .and_then(|p| cx.index.files[p].local_functions.get(func))
                 .filter(|s| *facts == s.body_facts())
-                .map_or(0, |s| s.mutates_params);
-            for k in (0..64).filter(|k| local & (1u64 << k) != 0) {
-                out |= alias.get(&(i, k)).copied().unwrap_or(0);
+            else {
+                continue;
+            };
+            for k in (0..64u8).filter(|k| local.mutates_params & (1u64 << k) != 0) {
+                let scope_params = alias.get(&(i, usize::from(k))).copied().unwrap_or(0);
+                if scope_params != 0 {
+                    out |= scope_params;
+                    let spans = local.param_change_sites.get(&k).into_iter().flatten();
+                    sites.extend(spans.map(|span| (func.fqn(), *span)));
+                }
             }
         }
-        out
+        (out, sites)
     }
 
     fn report(
@@ -920,7 +929,7 @@ impl<'a> Reach<'a> {
             emit(found, format!("calls:{target}"), message);
         }
         if b.mutates_params {
-            let bits = self.mutated_params(cx, f.params.len());
+            let (bits, sites) = self.mutated_params(cx, f.params.len());
             if bits != 0 {
                 let names: Vec<String> = f
                     .params
@@ -930,7 +939,7 @@ impl<'a> Reach<'a> {
                     .filter(|(k, _)| bits & (1u64 << k) != 0)
                     .map(|(_, p)| format!("`{}`", p.name))
                     .collect();
-                cx.emit(
+                if let Some(d) = cx.emit(
                     out,
                     "EFF201",
                     unit,
@@ -943,7 +952,9 @@ impl<'a> Reach<'a> {
                         names.join(", ")
                     )),
                     &[],
-                );
+                ) {
+                    d.sites = u32::try_from(sites.len().max(1)).unwrap_or(u32::MAX);
+                }
             }
         }
     }

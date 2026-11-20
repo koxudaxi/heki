@@ -315,3 +315,21 @@ fn a_private_recursion_no_other_function_calls_reports_its_own_accesses() {
     // A recursion without reads reports none.
     assert_eq!(lines("MUT203"), Vec::<u64>::new());
 }
+
+#[test]
+fn a_mutates_params_report_counts_every_change_it_reaches() {
+    let p = project(
+        "boundary_param_changes",
+        "[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"app.scope\"]\nforbid = [\"mutates-params\"]\nallowed-callees = [\"app.allowed\"]\n",
+    );
+    let src = "def helper(ys):\n    ys.pop()\n\n\ndef allowed(ys):\n    ys.sort()\n\n\ndef scope(xs):\n    xs.append(1)\n    helper(xs)\n    allowed(xs)\n";
+    p.write("app.py", src);
+    let target = || "pure:mutates-params".to_owned();
+    assert_eq!(reports(&p, "EFF201"), vec![(9, target(), 2)]);
+    // A second change in the scope function is a new site for the Ratchet baseline.
+    p.write(
+        "app.py",
+        &src.replace("    xs.append(1)\n", "    xs.append(1)\n    xs.clear()\n"),
+    );
+    assert_eq!(reports(&p, "EFF201"), vec![(9, target(), 3)]);
+}
