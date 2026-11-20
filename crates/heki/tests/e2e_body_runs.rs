@@ -1477,6 +1477,18 @@ def defaults_switch_it_off(urls):
 
 def a_keyword_switches_it_on(urls):
     return list(map(functools.partial(fetch_if, enabled=True), urls))  # EFF102
+
+
+def fetch_flagged(url, enabled=True, marker=None, item=None):
+    if enabled:
+        return requests.get(url)
+    return None
+
+
+def after_an_inner_unpacking(values, flags):
+    # `fetch_flagged("u", *flags, False, item)`: `False` lands after what `flags` holds.
+    key = functools.partial(functools.partial(fetch_flagged, "u", *flags), False)
+    return sorted(values, key=key)  # EFF102
 "#;
 
 #[test]

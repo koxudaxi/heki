@@ -3233,8 +3233,8 @@ impl<'a> Extractor<'a> {
             .is_some_and(|i| lambda(&i.kind) && made() > 1)
     }
 
-    /// The value `var` holds a copy of, through at most 16 copies (dead code can close a cycle
-    /// of them).
+    /// The value `var` holds a copy of, through at most 16 copies: the walk runs at every call
+    /// handing a callable, so a longer chain is not followed.
     fn copied(&self, var: VarId) -> VarId {
         let mut cur = var;
         for _ in 0..16 {
@@ -3247,8 +3247,8 @@ impl<'a> Extractor<'a> {
     }
 
     /// What calling `var` calls when it holds a `functools.partial` object (`partial(f, a,
-    /// k=b)` calls `f(a, ..., k=b)`), through copies and nested partials (the inner one's
-    /// arguments go first).
+    /// k=b)` calls `f(a, ..., k=b)`), through copies and at most 16 nested partials (the inner
+    /// one's arguments go first; past the bound, the call is not resolved).
     fn partial(&self, var: VarId) -> Option<Partial> {
         let mut found: Option<Partial> = None;
         let mut cur = var;
@@ -3267,6 +3267,10 @@ impl<'a> Extractor<'a> {
                 open: false,
             });
             p.callable = inner;
+            // The outer partials' arguments come after what this one unpacks with `*`.
+            if open {
+                p.args.clear();
+            }
             p.args.splice(0..0, held.iter().copied());
             p.kwargs.splice(0..0, kwargs.iter().cloned());
             p.open |= open;
