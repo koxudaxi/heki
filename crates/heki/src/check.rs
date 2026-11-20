@@ -4,6 +4,7 @@
 
 use crate::{CheckArgs, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
+use heki_ast::LineIndex;
 use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
     baseline_key, render, unified_diff,
@@ -324,18 +325,16 @@ pub(crate) fn report(
             r.path = shown_path(&r.path);
         }
     }
-    let by_shown: FxHashMap<PathBuf, &ParsedFile> = project
+    let by_shown: FxHashMap<PathBuf, (&ParsedFile, LineIndex)> = project
         .files
         .iter()
-        .map(|p| (shown_path(&p.path), p))
+        .map(|p| (shown_path(&p.path), (p, LineIndex::from_source(&p.source))))
         .collect();
     let source_line = |p: &Path, line: u32| {
-        by_shown.get(p).and_then(|f| {
-            f.source
-                .lines()
-                .nth(usize::try_from(line.saturating_sub(1)).unwrap_or(usize::MAX))
-                .map(str::to_owned)
-        })
+        by_shown
+            .get(p)
+            .and_then(|(f, lines)| lines.line_text(&f.source, line))
+            .map(str::to_owned)
     };
     print!(
         "{}",

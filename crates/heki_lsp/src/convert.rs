@@ -5,7 +5,7 @@
 //!   suggestions → `refactor.rewrite.heki`.
 //! - Every diagnostic → a `quickfix` appending `# heki: ignore[CODE]` to its line.
 
-use heki_ast::Span;
+use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
 use heki_env::Severity;
 use heki_rules::find_rule;
@@ -26,11 +26,12 @@ pub fn position(text: &str, offset: u32) -> Position {
         .rev()
         .find(|&o| text.is_char_boundary(o))
         .unwrap_or(0);
-    let before = &text[..offset];
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let lines = LineIndex::from_source(text);
+    let line = lines.line(offset as u32);
+    let line_start = lines.line_start(line).unwrap_or(0) as usize;
     Position {
-        line: before.matches('\n').count() as u32,
-        character: before[line_start..].encode_utf16().count() as u32,
+        line: line - 1,
+        character: text[line_start..offset].encode_utf16().count() as u32,
     }
 }
 
@@ -131,13 +132,11 @@ pub fn code_actions(
                 ..Default::default()
             }));
         }
-        let line = d.line.saturating_sub(1) as usize;
-        let end = text
-            .lines()
-            .nth(line)
+        let end = LineIndex::from_source(text)
+            .line_text(text, d.line)
             .map_or(0, |l| l.encode_utf16().count() as u32);
         let at = Position {
-            line: line as u32,
+            line: d.line.saturating_sub(1),
             character: end,
         };
         out.push(CodeActionOrCommand::CodeAction(CodeAction {
@@ -182,5 +181,15 @@ mod tests {
         let e = text.find('£').unwrap() as u32 + 1;
         assert_eq!(position(text, e).character, 5);
         assert_eq!(position(text, 10_000).line, 2);
+    }
+
+    #[test]
+    fn positions_count_cr_and_crlf_line_breaks() {
+        let text = "a\rb\r\nc";
+        let at = |c: char| position(text, text.find(c).unwrap() as u32);
+        assert_eq!(
+            [at('a'), at('b'), at('c')].map(|p| (p.line, p.character)),
+            [(0, 0), (1, 0), (2, 0)]
+        );
     }
 }

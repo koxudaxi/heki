@@ -12,6 +12,9 @@ pub use ruff_python_ast as raw_ast;
 pub use ruff_text_size::{Ranged, TextRange, TextSize};
 
 /// Fast byte-offset -> 1-based `(line, column)` table for a Python source file.
+///
+/// Lines end at `\n`, `\r\n`, or a lone `\r`, as Python's tokenizer (universal newlines) and
+/// the LSP specification count them.
 #[derive(Debug, Clone)]
 pub struct LineIndex {
     line_starts: Vec<u32>,
@@ -19,13 +22,33 @@ pub struct LineIndex {
 
 impl LineIndex {
     pub fn from_source(source: &str) -> Self {
+        let bytes = source.as_bytes();
         let mut line_starts = vec![0u32];
-        for (idx, b) in source.bytes().enumerate() {
-            if b == b'\n' {
+        for (idx, &b) in bytes.iter().enumerate() {
+            let ends_line = b == b'\n' || (b == b'\r' && bytes.get(idx + 1) != Some(&b'\n'));
+            if ends_line {
                 line_starts.push((idx + 1) as u32);
             }
         }
         Self { line_starts }
+    }
+
+    /// Byte offset where 1-based `line` starts (`None` past the last line).
+    pub fn line_start(&self, line: u32) -> Option<u32> {
+        self.line_starts
+            .get(usize::try_from(line.checked_sub(1)?).ok()?)
+            .copied()
+    }
+
+    /// The text of 1-based `line` of `source` without its line break.
+    pub fn line_text<'s>(&self, source: &'s str, line: u32) -> Option<&'s str> {
+        let start = self.line_start(line)? as usize;
+        let end = self
+            .line_start(line + 1)
+            .map_or(source.len(), |next| next as usize);
+        source
+            .get(start..end)
+            .map(|l| l.trim_end_matches(['\n', '\r']))
     }
 
     /// 1-based line number for a byte offset.
@@ -204,6 +227,24 @@ def nested():
             imports[4].names[0],
             ("os.path".to_string(), Some("osp".to_string()))
         );
+    }
+
+    #[test]
+    fn lines_end_at_lf_crlf_and_lone_cr() {
+        let src = "a\nb\r\nc\rd";
+        let index = LineIndex::from_source(src);
+        let at = |c: char| index.line_col(u32::try_from(src.find(c).unwrap()).unwrap());
+        assert_eq!(
+            [at('a'), at('b'), at('c'), at('d')],
+            [(1, 1), (2, 1), (3, 1), (4, 1)]
+        );
+        let texts: Vec<Option<&str>> = (0..=5).map(|l| index.line_text(src, l)).collect();
+        assert_eq!(
+            texts,
+            [None, Some("a"), Some("b"), Some("c"), Some("d"), None]
+        );
+        // A final line break starts an empty last line.
+        assert_eq!(LineIndex::from_source("a\r").line_text("a\r", 2), Some(""));
     }
 
     #[test]

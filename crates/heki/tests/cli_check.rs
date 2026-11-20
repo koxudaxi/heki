@@ -135,6 +135,37 @@ fn inline_suppressions_ignore_hashes_in_strings() {
 }
 
 #[test]
+fn inline_suppressions_and_source_lines_in_files_with_cr_or_crlf_line_breaks() {
+    let p = Project::new("line_breaks");
+    for (file, br) in [("cr.py", "\r"), ("crlf.py", "\r\n"), ("lf.py", "\n")] {
+        let src = [
+            "import time  # heki: ignore[EFF101]",
+            "",
+            "async def h():",
+            "    time.sleep(1)  # heki: ignore[EFF101]",
+            "    time.sleep(2)",
+            "",
+        ]
+        .join(br);
+        p.write(file, &src);
+    }
+    let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(code, 1);
+    // Each file reports only the unsuppressed call, on its own line 5.
+    let starts: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.split(" EFF101 ").next().unwrap())
+        .collect();
+    assert_eq!(
+        starts,
+        ["cr.py:5:5:", "crlf.py:5:5:", "lf.py:5:5:"],
+        "{stdout}"
+    );
+    let (_, full, _) = p.heki(&["cr.py"]);
+    assert!(full.contains("\n5 |     time.sleep(2)\n"), "{full}");
+}
+
+#[test]
 fn ratchet_baseline_update_and_compare() {
     let p = Project::new("ratchet");
     p.write("a.py", BLOCKING);

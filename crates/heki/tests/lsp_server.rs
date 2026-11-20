@@ -463,3 +463,38 @@ fn lsp_applies_document_changes_in_message_order() {
     assert_eq!(lsp.latest[&b], Vec::<Value>::new());
     lsp.stop(true);
 }
+
+/// A server indexing `p`, ready for documents (`capabilities` of the client).
+fn ready_server(p: &Project, capabilities: Value) -> Lsp {
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": capabilities}),
+    );
+    lsp.notify("initialized", json!({}));
+    lsp.ready();
+    lsp
+}
+
+#[test]
+fn lsp_positions_and_suppressions_in_documents_with_cr_line_breaks() {
+    let p = Project::new("lsp_cr");
+    let text = "import time  # heki: ignore[EFF101]\r\rasync def h():\r    time.sleep(1)\r";
+    p.write("a.py", text);
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.open(&a, text);
+    let diags = lsp.diagnostics(&a, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["EFF101"]);
+    assert_eq!(
+        diags[0]["range"]["start"],
+        json!({"line": 3, "character": 4})
+    );
+    // The suppression goes at the end of that line, before its line break.
+    let actions = lsp.code_actions(&a, &diags[0]["range"], &diags);
+    assert_eq!(
+        actions[0]["edit"]["changes"][&a][0]["range"]["start"],
+        json!({"line": 3, "character": 17})
+    );
+    lsp.stop(true);
+}

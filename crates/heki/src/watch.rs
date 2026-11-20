@@ -7,6 +7,7 @@
 
 use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
+use heki_ast::LineIndex;
 use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
 use heki_lsp::{CONFIG_FILES, EditOutcome, Selectors, Workspace};
 use heki_profile::ProfileData;
@@ -84,11 +85,10 @@ impl Watcher<'_> {
         }
         sort_diagnostics(&mut all);
         let source_line = |p: &Path, line: u32| {
-            std::fs::read_to_string(p).ok().and_then(|s| {
-                s.lines()
-                    .nth(line.saturating_sub(1) as usize)
-                    .map(str::to_owned)
-            })
+            let text = std::fs::read_to_string(p).ok()?;
+            LineIndex::from_source(&text)
+                .line_text(&text, line)
+                .map(str::to_owned)
         };
         print!(
             "{}",
