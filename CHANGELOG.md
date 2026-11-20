@@ -85,6 +85,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `if False:`) is not what the function returns: a wrapper returning a cached or
   `readonly-returns` value only there is no producer, and changing its result is no `MUT202`
   report.
+- `MUT112` no longer counts an attribute of an object the function makes itself
+  (`visitor = Visitor()`, then `visitor.errors`) as borrowed state, nor a value that a flag
+  parameter copies (`if not in_place: x = x.copy()`).
+- `MUT113` no longer counts the changes a function makes to a container it has just bound to the
+  attribute (`self.xref = {}`, then `self.xref[k] = v`), nor a store or a `defaultdict` read under
+  a key the container holds (past `if self.items.get(k) is None: raise KeyError(k)`, inside
+  `if k in self.items:` at any depth).
 - Sizes the code states are no longer taken as data-sized (`EFF102`, `EFF103`, `DATA101`, and
   the `OPT` rules): a builtin constructor of a fixed iterable (`list(range(7))`,
   `tuple(".;:")`), a string constant, a comprehension over fixed iterables or a new list filled

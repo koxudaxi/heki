@@ -1198,6 +1198,128 @@ fn mut112_follows_returned_calls_through_nested_calls() {
     }
 }
 
+/// An attribute of an object the function makes itself is no borrowed state, and a copy that a
+/// flag of the caller's picks is the function's choice; an attribute of a parameter, and a copy
+/// that another test picks (of the value, or of other state), still count, as does a copy whose
+/// edge other branches join first.
+const PICKED: &str = r#"class Collector:
+    def __init__(self):
+        self.errors = []
+
+
+def collect(tree):
+    if not tree:
+        return []
+    visitor = Collector()
+    return visitor.errors
+
+
+def validate(tree):
+    errors = collect(tree)
+    errors.append("checked")
+    return errors
+
+
+def local_attribute(flag):
+    visitor = Collector()
+    alias = visitor
+    errors = alias.errors if flag else []
+    errors.append(1)
+    named = getattr(Collector(), "errors", [])
+    named.append(1)
+    bare = getattr(Collector(), "errors")
+    bare.append(1)
+
+
+def parameter_attribute(node, flag):
+    errors = node.errors if flag else []
+    errors.append(1)
+
+
+def fill(image, mask, value, in_place=False):
+    if not in_place:
+        image = image.copy()
+    image[mask] = value
+    return image
+
+
+def extended(items, copy=True):
+    items = list(items) if copy else items
+    items.append(1)
+    return items
+
+
+def by_mode(items, mode="copy"):
+    chosen = list(items) if mode == "copy" else items
+    chosen.append(1)
+
+
+def either(items, copy, force):
+    wanted = copy or force
+    if wanted:
+        items = list(items)
+    items.append(1)
+
+
+def copied_first(items, flag):
+    snapshot = list(items)
+    chosen = snapshot if flag else items
+    chosen.append(1)
+
+
+def ordered(items, order=False):
+    chosen = sorted(items) if order else items
+    chosen.append(1)
+
+
+def drop_cached(task_ids, cached):
+    ids = task_ids if isinstance(task_ids, set) else set(task_ids)
+    ids.difference_update(cached)
+    return ids
+
+
+def restricted(caps, config):
+    if config.get("bundle2"):
+        caps = set(caps)
+        caps.add("bundle2")
+    if config.get("narrow"):
+        caps.add("narrow")
+    return caps
+
+
+def when_given(items):
+    if items:
+        items = list(items)
+    items.append(1)
+
+
+def joined_first(items, copy, verbose):
+    if copy:
+        if verbose:
+            print("copying")
+        items = list(items)
+    items.append(1)
+"#;
+
+#[test]
+fn mut112_leaves_out_attributes_of_new_objects_and_copies_a_flag_picks() {
+    let p = Project::new("mut112_picked");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/picked.py", PICKED);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d("pkg/picked.py", 32, "parameter_attribute", "errors"),
+            d("pkg/picked.py", 68, "ordered", "chosen"),
+            d("pkg/picked.py", 73, "drop_cached", "ids"),
+            d("pkg/picked.py", 82, "restricted", "caps"),
+            d("pkg/picked.py", 89, "when_given", "items"),
+            d("pkg/picked.py", 97, "joined_first", "items"),
+        ]
+    );
+}
+
 /// A `MUT112` report, a suppression, and the `heki rule` page.
 const ONE: &str = "def collect(name, scopes=None):\n    use = scopes or []\n    use.append(name)  # heki: ignore[MUT112]\n    return use\n\n\ndef collect_all(name, scopes=None):\n    use = scopes or []\n    use.append(name)\n    return use\n";
 

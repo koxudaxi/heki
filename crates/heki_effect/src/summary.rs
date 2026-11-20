@@ -24,8 +24,9 @@ use crate::{
 };
 use heki_ast::Span;
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FunctionId, FunctionKind, Inst,
-    InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
+    FunctionKind, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator,
+    UnaryOpKind, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1859,14 +1860,7 @@ impl<'a> Extractor<'a> {
         if returned.is_empty() || !keeps_returned_value(&f.decorators) {
             return;
         }
-        let mut callees: FxHashMap<VarId, &Callee> = FxHashMap::default();
-        for bb in &f.blocks {
-            for (i, inst) in bb.insts.iter().enumerate() {
-                if let (Some(dst), Some(c)) = (inst.kind.dst(), self.callees.get(&(bb.id, i))) {
-                    callees.insert(dst, c);
-                }
-            }
-        }
+        let callees = self.callees_by_result();
         let phis: FxHashMap<VarId, (BlockId, &PhiNode)> = f
             .blocks
             .iter()
@@ -1885,17 +1879,7 @@ impl<'a> Extractor<'a> {
                 Some((p.var, role))
             })
             .collect();
-        let kb = self.cx.kb;
-        let source_of = |inst: &'a Inst| {
-            let callee = inst.kind.dst().and_then(|d| callees.get(&d).copied());
-            match (&inst.kind, callee) {
-                // A property read calls its getter.
-                (InstKind::AttrLoad { .. }, Some(Callee::Project(..))) => Source::Project,
-                (kind, callee) => {
-                    ownership::source(kind, callee, self.construction(kind).is_some(), kb)
-                }
-            }
-        };
+        let source_of = |inst: &'a Inst| self.ownership_source(inst, &callees);
         let slice_copies = |v: VarId| {
             ownership::slice_copies(match self.types.get(&v) {
                 Some(Val::Inst(c)) => Some(c.as_str()),
@@ -2008,6 +1992,22 @@ impl<'a> Extractor<'a> {
                 params.resize(slot + 1, ArgOrigin::default());
             }
             params[slot].origins = Some(Box::new(o));
+        }
+    }
+
+    /// [`ownership::source`] of `inst`, with the project callees of the function's calls by
+    /// their results (`callees`).
+    fn ownership_source(&self, inst: &'a Inst, callees: &FxHashMap<VarId, &Callee>) -> Source<'a> {
+        let callee = inst.kind.dst().and_then(|d| callees.get(&d).copied());
+        match (&inst.kind, callee) {
+            // A property read calls its getter.
+            (InstKind::AttrLoad { .. }, Some(Callee::Project(..))) => Source::Project,
+            (kind, callee) => {
+                let source_of = |i: &'a Inst| self.ownership_source(i, callees);
+                let made_here = |v: VarId| ownership::made_here(v, &self.defs, &source_of);
+                let constructs = self.construction(kind).is_some();
+                ownership::source(kind, callee, constructs, self.cx.kb, &made_here)
+            }
         }
     }
 
@@ -2227,6 +2227,8 @@ impl<'a> Extractor<'a> {
     }
 
     fn visit(&mut self, bb: BlockId, index: usize, kind: &'a InstKind, span: Span) {
+        // (The subscript instructions bind `index` to their key.)
+        let index_in_block = index;
         self.store_escapes(kind);
         match kind {
             InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
@@ -2264,7 +2266,7 @@ impl<'a> Extractor<'a> {
                 if !is_slice
                     && !crate::consumption::is_unpacking(self.f, *index, span)
                     && matches!(self.val(*obj), Some(Val::Inst(c)) if c == "collections.defaultdict")
-                    && !self.reads_present_key(bb, *obj, *index)
+                    && !self.key_present(bb, index_in_block, *obj, *index)
                 {
                     self.container_change(*obj, ContainerChange::Resizes, span);
                 }
@@ -2303,7 +2305,10 @@ impl<'a> Extractor<'a> {
                 value,
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, false, span);
-                self.container_change(*obj, ContainerChange::StoresItems, span);
+                // A store under a key the container holds changes no iterator's step.
+                if !self.key_present(bb, index_in_block, *obj, *index) {
+                    self.container_change(*obj, ContainerChange::StoresItems, span);
+                }
                 self.note_escape(*value);
             }
             InstKind::SubscriptDelete {
@@ -2949,31 +2954,210 @@ impl<'a> Extractor<'a> {
             .any(|(c, ops)| c == class && ops.contains(&op)))
     }
 
-    /// Whether `bb` is the branch `if index in <the container obj holds>:` enters, so that reading
-    /// `obj[index]` there finds the key (also for copies of the container).
-    fn reads_present_key(&self, bb: BlockId, obj: VarId, index: VarId) -> bool {
-        let container = self.self_attr_alias.get(&obj);
-        self.f.blocks.iter().any(|p| match &p.terminator {
-            Terminator::Branch { cond, then_bb, .. } if *then_bb == bb => matches!(
-                self.defs.get(cond).map(|i| &i.kind),
-                Some(InstKind::Compare { op: CompareOpKind::In, lhs, rhs, .. })
-                    if *lhs == index && (*rhs == obj || container.is_some() && self.self_attr_alias.get(rhs) == container)
-            ),
-            _ => false,
-        })
+    /// Whether the checked container of `self` that `obj` holds has the key `key` at instruction
+    /// `index` of `bb` (`MUT113`): the instruction is on the side of a test where the container
+    /// holds the key (inside `if key in <container>:`, past `if key not in <container>: return`
+    /// or `if <container>.get(key) is None: raise KeyError(key)`), or past a read of
+    /// `<container>[key]` in its block (not for a `Counter`). The container is `obj`, a copy of
+    /// it, or another read of the same `self.<attr>`.
+    fn key_present(&self, bb: BlockId, index: usize, obj: VarId, key: VarId) -> bool {
+        let Some(attr) = self.checked_self_container(obj) else {
+            return false;
+        };
+        let same_container = |c: VarId| c == obj || self.self_attr_alias.get(&c) == Some(attr);
+        // The same variable, or the same constant (`self.items["k"]`).
+        let same_key = |k: VarId| {
+            self.copied_from(k) == self.copied_from(key)
+                || self
+                    .constant(k)
+                    .is_some_and(|c| self.constant(key) == Some(c))
+        };
+        // A read of a missing key raises, or inserts it into a `defaultdict`; a `Counter` returns
+        // 0 without inserting it.
+        let counter = |c: &String| matches!(c.as_str(), "collections.Counter" | "typing.Counter");
+        let may_be_counter = matches!(self.val(obj), Some(Val::Inst(c)) if counter(c))
+            || matches!(self.val(obj), Some(Val::Union(cs)) if cs.iter().any(counter));
+        let read_before = !may_be_counter
+            && self.f.block(bb).insts[..index].iter().any(|i| {
+                matches!(&i.kind, InstKind::SubscriptLoad { obj: o, index: k, is_slice: false, .. }
+                    if same_container(*o) && same_key(*k))
+            });
+        read_before
+            || self.f.blocks.iter().any(|p| {
+                let Terminator::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } = p.terminator
+                else {
+                    return false;
+                };
+                let Some(on_then) = self.key_test(cond, &same_container, &same_key) else {
+                    return false;
+                };
+                let side = if on_then { then_bb } else { else_bb };
+                let entered_from_p = self
+                    .f
+                    .blocks
+                    .iter()
+                    .filter(|b| {
+                        b.terminator.successors().contains(&side) || b.exc_target == Some(side)
+                    })
+                    .count()
+                    == 1;
+                entered_from_p && guards::dominated(self.f, side)[bb.0 as usize]
+            })
+    }
+
+    /// The side of a branch on `cond` on which the container holds the key (`true`: the
+    /// `then` side): `key in c`, `key not in c`, `c.get(key)`, `c.get(key) is None`,
+    /// `c.get(key) is not None`, through `not` (`same_container` / `same_key` tell the container
+    /// and the key).
+    fn key_test(
+        &self,
+        cond: VarId,
+        same_container: &dyn Fn(VarId) -> bool,
+        same_key: &dyn Fn(VarId) -> bool,
+    ) -> Option<bool> {
+        let none = |v: VarId| self.constant(v) == Some(&ConstLiteral::None);
+        // `c.get(key)` (without a default other than `None`): `None` only for a missing key or a
+        // stored `None`.
+        let lookup = |v: VarId| {
+            matches!(self.defs.get(&self.copied_from(v)).map(|i| &i.kind), Some(InstKind::MethodCall { recv, method, args, kwargs, .. })
+                if method == "get" && kwargs.is_empty() && same_container(*recv)
+                    && args.first().is_some_and(|k| same_key(*k))
+                    && (args.len() == 1 || args.len() == 2 && none(args[1])))
+        };
+        // `not` and copies (acyclic: neither reads a phi).
+        let (mut cur, mut negated) = (self.copied_from(cond), false);
+        while let Some(InstKind::UnaryOp {
+            op: UnaryOpKind::Not,
+            operand,
+            ..
+        }) = self.defs.get(&cur).map(|i| &i.kind)
+        {
+            negated = !negated;
+            cur = self.copied_from(*operand);
+        }
+        match self.defs.get(&cur).map(|i| &i.kind) {
+            Some(InstKind::Compare {
+                op: op @ (CompareOpKind::In | CompareOpKind::NotIn),
+                lhs,
+                rhs,
+                ..
+            }) if same_key(*lhs) && same_container(*rhs) => {
+                Some((*op == CompareOpKind::In) != negated)
+            }
+            Some(InstKind::Compare {
+                op: op @ (CompareOpKind::Is | CompareOpKind::IsNot),
+                lhs,
+                rhs,
+                ..
+            }) if lookup(*lhs) && none(*rhs) || lookup(*rhs) && none(*lhs) => {
+                Some((*op == CompareOpKind::Is) == negated)
+            }
+            _ => lookup(cur).then_some(!negated),
+        }
+    }
+
+    /// The literal the constant `var` holds (through copies).
+    fn constant(&self, var: VarId) -> Option<&'a ConstLiteral> {
+        match self.defs.get(&self.copied_from(var)).map(|i| &i.kind) {
+            Some(InstKind::Const { literal, .. }) => Some(literal),
+            _ => None,
+        }
+    }
+
+    /// `var` through copies.
+    fn copied_from(&self, var: VarId) -> VarId {
+        let mut cur = var;
+        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur).map(|i| &i.kind) {
+            cur = *src;
+        }
+        cur
+    }
+
+    /// The attribute of `self` whose checked container (`MUT113`) `var` holds.
+    fn checked_self_container(&self, var: VarId) -> Option<&String> {
+        let checked = self.val(var).and_then(IteratedContainer::of_val).is_some();
+        self.self_attr_alias.get(&var).filter(|_| checked)
+    }
+
+    /// Whether the container `var` holds is a new object the function bound to `self.<attr>`
+    /// itself: `var` is a read of `self.<attr>` (through copies) that a store of a new object to
+    /// `self.<attr>` comes before on every path (`self.xref = {}`, then `self.xref[k] = v`), and
+    /// every store of the function to `self.<attr>` is of a new object. Its changes are that
+    /// object's, not those of a container an iteration started before the call steps.
+    fn rebound_before(&self, var: VarId, attr: &str) -> bool {
+        let cur = self.copied_from(var);
+        let at = |v: VarId| {
+            self.f.blocks.iter().find_map(|b| {
+                let i = b.insts.iter().position(|i| i.kind.dst() == Some(v))?;
+                Some((b.id, i))
+            })
+        };
+        let reads_attr = matches!(self.defs.get(&cur).map(|i| &i.kind),
+            Some(InstKind::AttrLoad { obj, attr: a, .. }) if a == attr && self.self_vars.contains(obj));
+        let Some((read_bb, read_index)) = at(cur).filter(|_| reads_attr) else {
+            return false;
+        };
+        let callees = self.callees_by_result();
+        let new_object =
+            |v: VarId| ownership::made_here(v, &self.defs, &|i| self.ownership_source(i, &callees));
+        let mut before = false;
+        for b in &self.f.blocks {
+            for (i, inst) in b.insts.iter().enumerate() {
+                let InstKind::AttrStore {
+                    obj,
+                    attr: a,
+                    value,
+                } = &inst.kind
+                else {
+                    continue;
+                };
+                if a != attr || !self.self_vars.contains(obj) {
+                    continue;
+                }
+                if !new_object(*value) {
+                    return false;
+                }
+                before |= if b.id == read_bb {
+                    i < read_index
+                } else {
+                    guards::dominated(self.f, b.id)[read_bb.0 as usize]
+                };
+            }
+        }
+        before
+    }
+
+    /// The project callees of the function's calls, by the variables their results go to.
+    fn callees_by_result(&self) -> FxHashMap<VarId, &Callee> {
+        let mut out: FxHashMap<VarId, &Callee> = FxHashMap::default();
+        for bb in &self.f.blocks {
+            for (i, inst) in bb.insts.iter().enumerate() {
+                if let (Some(dst), Some(c)) = (inst.kind.dst(), self.callees.get(&(bb.id, i))) {
+                    out.insert(dst, c);
+                }
+            }
+        }
+        out
     }
 
     /// An in-place change of the container `var` holds (`MUT113`): of a parameter itself, and of
-    /// `self.<attr>` of a class whose iterators check for changes.
+    /// `self.<attr>` of a class whose iterators check for changes, when it is not a new object
+    /// the function bound there before ([`Self::rebound_before`]).
     fn container_change(&mut self, var: VarId, change: ContainerChange, span: Span) {
         if let Some((i, None)) = self.param_alias.get(&var).cloned() {
             let facts = self.summary.iteration_facts_mut();
             iterations::merge_changes(&mut facts.changes_param_containers, [(i, change)]);
         }
-        let checked = self.val(var).and_then(IteratedContainer::of_val).is_some();
-        let Some(attr) = self.self_attr_alias.get(&var).filter(|_| checked) else {
+        let Some(attr) = self.checked_self_container(var) else {
             return;
         };
+        if self.rebound_before(var, attr) {
+            return;
+        }
         let attr = attr.clone();
         let facts = self.summary.iteration_facts_mut();
         iterations::merge_changes(&mut facts.changes_self_containers, [(attr.clone(), change)]);
