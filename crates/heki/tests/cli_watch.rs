@@ -295,45 +295,28 @@ fn watch_follows_stubs_deleted_callees_and_files_that_stop_being_utf8() {
 }
 
 #[test]
-fn watch_reports_check_errors_of_every_file() {
+fn watch_fails_like_check_on_invalid_rule_options() {
     let p = Project::new("watch_check_errors");
     p.write("pkg/__init__.py", "")
         .write("pkg/util.py", "def helper():\n    return 1\n")
-        .write(
-            "pkg/api.py",
-            "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n",
-        )
-        // A configuration error only the rules see: every file fails to check.
+        // A configuration error only the rules see: `heki check` fails before reporting.
         .write(
             "heki.toml",
             "[[write-owners]]\nname = \"store\"\ntargets = [\"fields\"]\n",
         );
-    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "1");
-    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 0 file(s)");
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|l| l.contains("invalid write-owners target `fields`"))
-            .count(),
-        3,
-        "{lines:#?}"
-    );
-    // The edited file fails the same way, and so does the caller its new effect reaches.
-    p.write(
-        "pkg/util.py",
-        "import time\n\n\ndef helper():\n    time.sleep(1)\n",
-    );
-    let lines = wait_for(&rx, "[heki watch]");
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|l| l.contains("invalid write-owners target `fields`"))
-            .count(),
-        2,
-        "{lines:#?}"
-    );
-    let out = child.wait_with_output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["check", "--watch"])
+        .current_dir(&p.dir)
+        .env("HEKI_WATCH_MAX_RUNS", "0")
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("heki error: invalid write-owners target `fields`"),
+        "{stderr}"
+    );
+    assert_eq!(p.check(&[]).0, 2);
 }
 
 #[test]

@@ -33,6 +33,8 @@ pub enum EngineError {
     Snapshot(SnapshotError),
     #[error("unknown rule `{0}` in lint.severity")]
     UnknownSeverityRule(String),
+    #[error(transparent)]
+    Rules(heki_rules::RuleConfigError),
 }
 
 /// The files of a project root whose change reloads the whole workspace: the configuration and
@@ -206,9 +208,7 @@ impl Workspace {
             .filter(|f| f.patches_builtins())
             .map(|f| f.path.clone())
             .collect();
-        // A configuration error is reported by every check (`check_project`); without valid
-        // contracts the summaries carry no contract facts.
-        let contracts = heki_rules::summary_contracts(env_cfg).ok().flatten();
+        let contracts = heki_rules::summary_contracts(env_cfg).map_err(EngineError::Rules)?;
         let index = analyze_project_with_reads(&project.inputs(), &project.env.kb, contracts);
         let files = project
             .files
@@ -235,8 +235,20 @@ impl Workspace {
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
             ecosystem_calls: !env_cfg.effect_boundaries.is_empty(),
         };
-        let Project { env, errors, .. } = project;
         let decls = index.decl_passes();
+        // The options of the rules (contract targets and patterns) are read by every check, and
+        // an invalid one fails them all: the workspace fails to load, as `heki check` fails
+        // before it reports anything.
+        let extras = CheckExtras {
+            soundness_kb: &project.env.soundness_kb,
+            snapshot: snapshot.as_ref(),
+            decls: Some(decls.completed()),
+            project_patches_builtins: Some(false),
+            text_of: None,
+        };
+        check_project(&[], env_cfg, &project.env.kb, &index, &selection, &extras)
+            .map_err(EngineError::Rules)?;
+        let Project { env, errors, .. } = project;
         let stats = EngineStats {
             indexed_files: index.files.len(),
             ..EngineStats::default()

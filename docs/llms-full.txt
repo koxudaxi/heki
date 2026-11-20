@@ -1354,7 +1354,9 @@ waits for its analysis, none are offered, and a client that applies versioned wo
 (`workspaceEdit.documentChanges`) gets them with that version, so it rejects them if the
 document changed meanwhile.
 
-It reads the same configuration as `heki check`. One difference is deliberate: `heki check`
+It reads the same configuration as `heki check`. A configuration `heki check` rejects (an
+unknown rule, a contract target that is not `Class.attr`, an invalid pattern) is logged as a
+warning, and the server analyzes nothing until it is fixed. One difference is deliberate: `heki check`
 reports ten or more `async def` boundaries that reach the same blocking call once, with a count,
 while the server groups them per file, so the file you edit always shows its own boundary.
 

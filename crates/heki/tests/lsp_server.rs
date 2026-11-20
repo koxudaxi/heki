@@ -640,3 +640,36 @@ fn lsp_keeps_open_documents_through_reloads_and_deletions_until_they_close() {
     assert_eq!(stats["indexed_files"], 1, "{stats}");
     lsp.stop(true);
 }
+
+#[test]
+fn lsp_reports_invalid_rule_options_as_a_failed_load() {
+    let p = Project::new("lsp_bad_targets");
+    let text = "import time\n\n\nasync def h():\n    time.sleep(1)\n";
+    p.write("a.py", text);
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}),
+    );
+    lsp.open(&a, text);
+    assert_eq!(
+        codes(&lsp.diagnostics(&a, |d| !d.is_empty())),
+        vec!["EFF101"]
+    );
+    // A write owner whose target lacks its class: `heki check` exits with 2 before reporting.
+    p.write(
+        "heki.toml",
+        "[[write-owners]]\nname = \"store\"\ntargets = [\"fields\"]\n",
+    );
+    assert_eq!(p.check(&[]).0, 2);
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes": [{"uri": uri(&p.dir.join("heki.toml")), "type": 1}]}),
+    );
+    let log = lsp.log("invalid write-owners target `fields`");
+    assert_eq!(log["params"]["type"], 2);
+    let stats = lsp.settle();
+    assert_eq!(stats["ready"], false, "{stats}");
+    assert_eq!(lsp.latest[&a], Vec::<Value>::new());
+    lsp.stop(true);
+}
