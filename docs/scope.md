@@ -200,17 +200,23 @@ Missed findings close as heki learns more:
 `setattr(obj, "fields", v)`, `getattr(obj, "fields")`, `getattr(obj, "method")(...)`, and
 `obj.__dict__["fields"]`:
 
-- **Followed** when the name is a constant: a literal, or a module-level `Final` string
-  (`KEY: Final = "_key"`), also when imported, re-exported, or bound to another `Final` name.
-- **Not followed** for a module-level name without `Final` (any code can rebind it), a
-  class-level constant, or a computed name.
+- **Followed** when the name is a constant: a literal, a module-level `Final` string
+  (`KEY: Final = "_key"`), also when imported, re-exported, or bound to another `Final` name, a
+  module-level string bound once in its module, or a class constant declared `ClassVar` or
+  `Final` and bound once (`Model.KEY`, `self.KEY`, `cls.KEY`).
+- **Not followed** for a module-level name without `Final` that another module rebinds or
+  deletes, a class constant a subclass defines again (read on an instance or `cls`), or a
+  computed name.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](rules/unresolved-guarded-write.md)).
 
 ### Objects without a known class
 
 - Reads and writes through `Any` or unannotated parameters are not tied to a class, so contracts
-  on that class do not see them.
+  on that class do not see them. A contract with `unresolved = "report"` reports them by name:
+  writes under [`MUT205`](rules/unresolved-guarded-write.md), reads under
+  [`MUT206`](rules/unresolved-guarded-read.md), and method calls under
+  [`MUT207`](rules/unresolved-guarded-call.md).
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
 - Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of

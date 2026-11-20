@@ -2,7 +2,7 @@
 
 | Item | Content |
 |---|---|
-| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (31 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
+| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (33 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
 | Date | 2026-11-20 |
 | Target language | Python (verified on CPython 3.11–3.15, including PEP 709, PEP 649 `__annotate__`, and PEP 810 `lazy import`) |
 | Implementation language | Rust: a single binary with a CLI and an incremental LSP server, distributed with `maturin`. Only the frontend uses `ruff_python_parser` / `ruff_python_ast` (`tag = "0.17.5"`), isolated in `heki_ast`. |
@@ -402,7 +402,7 @@ versions.
 The adopted, rejected, and candidate rules are fixed by the Stage 0-A measurements (339
 repositories, 18.1 million lines, all 171 samples reviewed by hand), the Wave 2 measurements
 (19 million lines), and the study of datamodel-code-generator's 20,000 lines of in-house checkers.
-The 31 rules are listed in the [rules reference](docs/rules/index.md).
+The 33 rules are listed in the [rules reference](docs/rules/index.md).
 
 ### Family 1: Mutation & State Effect (`MUT`: hardening mature production code)
 
@@ -421,6 +421,8 @@ The 31 rules are listed in the [rules reference](docs/rules/index.md).
 | **MUT203** | When configured (contract) | **Declared read ownership**: reads of the classes and attributes listed in `[[tool.heki.read-owners]]` (local aliases, `getattr`, and `__dict__` included) are limited to the allowed readers (the read side of `MUT201`) | The same patterns, subclass expansion, initializer rule, `exempt-methods`, delegation from private helpers to their callers, allowed-context rule, and `message` as `MUT201`. Read sites are kept as local facts and the rule walks the reverse call graph, so summaries do not grow with propagated reads |
 | **MUT204** | On (contract) | **Declared call ownership**: calls of the functions, methods (overrides included), and constructions of the classes listed in `[[tool.heki.call-owners]]` outside the allowed callers (or inside `forbidden-callers`), through the receiver's class, bound-method aliases, and constant `getattr` calls | Reported only when every candidate is a target; `MUT203`'s delegation, initializer, and allowed-context rules; targets may call each other; call sites are local `FileSummary` facts (`CallSite::constructs`) |
 | **MUT205** | When configured (`unresolved = "report"`) | **Writes a `write-owners` contract cannot check**: outside the write owners, an attribute named like a target written on an object of unknown class, or a computed attribute name on a guarded class (`setattr(obj, name, v)`, `obj.__dict__[name]`, `__dict__.clear()`), so a clean `MUT201` run says how much it did not check | Objects of known classes (`MUT201`'s domain), the contract's scopes and baselines |
+| **MUT206** | When configured (`unresolved = "report"`) | **Reads a `read-owners` contract cannot check**: outside the read owners, a read of an attribute named like a target (also through a local alias, a constant `getattr`, or `__dict__`) on an object of unknown class (an unannotated parameter, a loop variable, an untyped call result, `Any` / `object`, a protocol whose implementations heki cannot list), so a clean `MUT203` run says how much it did not check | `MUT203`'s allowed readers, exempt methods, allowed contexts, and `forbidden-readers`; for an untyped parameter the callers decide: not reported when every caller binds an instance of a project class outside the targets' classes. Access sites are local facts (`EffectSummary::unresolved_access_sites`) |
+| **MUT207** | When configured (`unresolved = "report"`) | **Calls a `call-owners` contract cannot check**: outside the call owners, a call of a method named like a target (its last name; also through a bound-method alias or a constant `getattr`) on a receiver of unknown class, so a clean `MUT204` run says how much it did not check | `MUT204`'s allowed callers, exempt methods, targets calling each other, allowed contexts, and `forbidden-callers`; the same caller walk as `MUT206`; a call of a value of unknown origin (`callback()`) names nothing and is not reported |
 
 *(`MUT102` (`MUT102a` deep mutation / `MUT102b` representation exposure), measured in Stage 0-A,
 is **rejected**: the hits were sparse and mostly deliberate idioms;
@@ -693,6 +695,7 @@ message = "render entry points must not mutate model state"
 | M8 | End-to-end test suite through the real binary and LSP process; 100% of reachable lines |
 | M9 | CI / release / documentation workflows and the user guide |
 | v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT109`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, the `MUT202` return flow, `MUT205`, `MUT111`, and contract keys, entries, and fresh objects (31 rules) |
+| v0.1.1 | `MUT206`, `MUT207`, string constants bound once and class constants as keys (33 rules) |
 
 ### Gates for every release (from Stage 0-B)
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.
