@@ -595,7 +595,7 @@ pub(crate) fn patterns(
 /// component; an entry with a dot or a glob is a pattern like `allowed-*`). `forbidden-*`
 /// patterns (matched like `allowed-*`) narrow where the contract applies: when set, only
 /// accesses by them are reported, and the allowed functions stay exceptions inside them.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Allowance {
     allowed: Vec<DottedPattern>,
     exempt_names: FxHashSet<String>,
@@ -608,6 +608,7 @@ pub(crate) struct Allowance {
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
 /// qualname (dotted suffixes, globs), and, for `Class.method`, the overrides of the method in
 /// the class family the class part names.
+#[derive(Debug)]
 pub(crate) struct FunctionMatcher {
     whole: DottedPattern,
     method: Option<(FxHashSet<String>, DottedPattern)>,

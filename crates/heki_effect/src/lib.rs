@@ -147,6 +147,11 @@ pub struct TypedFieldWriteSite {
     pub key: Option<String>,
     /// Whether the write is part of constructing the object it writes (`fresh-objects`).
     pub construction: Construction,
+    /// How the ownership contracts treat the functions of `via_chain`
+    /// ([`Contracts::writer_contexts`], joined over its hops): the chains of one write that
+    /// differ in it are kept apart, so a path through an allowed writer does not stand for one
+    /// around it.
+    pub contexts: u64,
 }
 
 /// How a function's new object was made: a shallow copy shares the containers of the original

@@ -60,7 +60,9 @@ A private helper (`_name`, or a comprehension, generator expression, or lambda s
 project callers hands the responsibility to its callers: the write is reported at the call
 sites of the first non-private callers, with the chain of calls as related information. One
 report stands for every write behind that call (`sites` in JSON), so a Ratchet baseline counts a
-second write inside a recorded helper.
+second write inside a recorded helper. A write reached through an allowed writer on one path and
+around it on another (or through a forbidden writer on one path only) is reported for the path
+the contract does not allow.
 Reading a `@property` or `functools.cached_property` attribute calls its getter, so a private
 getter hands its writes to the functions reading it; a read never calls a property's setter.
 

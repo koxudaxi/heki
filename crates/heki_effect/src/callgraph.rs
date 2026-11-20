@@ -480,9 +480,17 @@ fn apply_edge(
     let here = (d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site))
         .then_some(resolver);
     transfer(target, own_writes, site, bc, callee, facts, &lead, rewrite);
-    if !index.skips_typed_writes {
+    if !index.skips_typed_writes
+        && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
+    {
+        // The functions the chains gain at this call: the callee, and the one iterating it.
+        let contexts = index.contracts.as_deref().map_or(0, |c| {
+            std::iter::once(&bc.callee)
+                .chain(d.via)
+                .fold(0, |acc, k| acc | c.writer_contexts(&k.fqn(), &k.qualname))
+        });
         transfer_typed_writes(
-            target, caller, site, bc, callee, facts, &lead, rewrite, here,
+            target, caller, site, bc, callee, facts, &lead, rewrite, here, contexts,
         );
     }
     consumed
@@ -623,6 +631,7 @@ fn transfer_typed_writes(
     lead: &[Arc<CallHop>],
     rewrite: bool,
     here: Option<&Resolver<'_>>,
+    contexts: u64,
 ) {
     let origin = |k: usize| bc.params.get(k);
     for (&i, paths) in &facts.mutated_param_paths {
@@ -682,6 +691,7 @@ fn transfer_typed_writes(
                         fresh: o.fresh,
                         key: None,
                         construction,
+                        contexts,
                     },
                 );
             }
@@ -717,6 +727,7 @@ fn transfer_typed_writes(
                 }
                 _ => Construction::No,
             },
+            contexts: w.contexts | contexts,
         };
         insert_site(t, caller, site);
     }
@@ -896,6 +907,7 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         fresh: false,
         key: None,
         construction: Construction::No,
+        contexts: 0,
     };
     let existing = s
         .typed_field_write_sites
@@ -906,7 +918,12 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
                 && t.kind == site.kind
                 && t.span == site.span
         })
-        .find(|t| t.obj_params == site.obj_params && t.key == site.key && site_origin(t) == origin)
+        .find(|t| {
+            t.obj_params == site.obj_params
+                && t.key == site.key
+                && t.contexts == site.contexts
+                && site_origin(t) == origin
+        })
         .cloned();
     let mut site = site;
     if let Some(existing) = existing {

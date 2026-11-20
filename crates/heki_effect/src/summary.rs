@@ -2193,6 +2193,7 @@ impl<'a> Extractor<'a> {
             fresh: obj.fresh,
             key,
             construction: Construction::No,
+            contexts: 0,
         };
         // A site waiting for its answer joins the summary once the function is visited.
         if let Some(holder) = obj.holder.filter(|h| self.track && self.trackable(*h)) {

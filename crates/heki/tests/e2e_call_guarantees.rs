@@ -2,7 +2,9 @@
 //! path (an announcement of `MUT109`, a consumption of `MUT106`) holds at a call only when
 //! every implementation the call may run guarantees it (an abstract method never runs). And
 //! which written objects existed before a call (`MUT109`): a value merged from a new object and
-//! an existing one may be the existing one, and `super()` is the method's own `self`.
+//! an existing one may be the existing one, and `super()` is the method's own `self`. A write
+//! reached on one path through an allowed writer and on another around it (`MUT201`) is
+//! reported for the other path.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# MUT109`); every other line must not be.
@@ -61,8 +63,12 @@ fn marked(files: &[(&str, &str)], rules: &[&str]) -> Vec<(String, u64, String)> 
 }
 
 fn check_marks(name: &str, files: &[(&str, &str)], rules: &[&str]) {
+    check_marks_with(CONFIG, name, files, rules);
+}
+
+fn check_marks_with(config: &str, name: &str, files: &[(&str, &str)], rules: &[&str]) {
     let p = Project::new(name);
-    p.write("pyproject.toml", CONFIG);
+    p.write("pyproject.toml", config);
     p.write("pkg/__init__.py", "");
     for (path, text) in files {
         p.write(path, text);
@@ -246,5 +252,76 @@ fn super_is_the_methods_own_self() {
         "super_receivers",
         &[("pkg/model.py", MODEL), ("pkg/children.py", CHILDREN)],
         &["MUT109"],
+    );
+}
+
+const OWNERS: &str = r#"[project]
+name = "t"
+
+[[tool.heki.write-owners]]
+name = "allowed"
+targets = ["Model.x"]
+allowed-writers = ["pkg.paths._allowed"]
+
+[[tool.heki.write-owners]]
+name = "layer"
+targets = ["Model.items"]
+forbidden-writers = ["pkg.paths._layer*"]
+"#;
+
+/// One write reached through an allowed writer and around it, and through a forbidden writer
+/// and around it.
+const PATHS: &str = r#"from pkg.model import Model
+
+
+def _write(m: Model):
+    m.x = 1
+
+
+def _allowed(m):
+    _write(m)
+
+
+def _middle(m):
+    _write(m)
+
+
+def _bypass(m):
+    _middle(m)
+
+
+def update(m):
+    _allowed(m)
+    _bypass(m)  # MUT201
+
+
+def allowed_only(m):
+    _allowed(m)
+
+
+def _grow(m: Model):
+    m.items.append(1)
+
+
+def _layer_relay(m):
+    _relay(m)
+
+
+def _relay(m):
+    _grow(m)
+
+
+def grow(m):
+    _grow(m)
+    _layer_relay(m)  # MUT201
+"#;
+
+#[test]
+fn a_write_reached_around_an_allowed_writer_is_reported() {
+    check_marks_with(
+        OWNERS,
+        "owner_paths",
+        &[("pkg/model.py", MODEL), ("pkg/paths.py", PATHS)],
+        &["MUT201"],
     );
 }
