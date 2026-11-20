@@ -130,6 +130,77 @@ symbol = "shutil.rmtree"
 effects = ["blocking_fs"]
 opaque_to_layer3 = true
 
+# File metadata: `stat` and the existence and type tests ask the file system; `realpath` and
+# `Path.resolve` also read every symbolic link on the way.
+
+[[entries]]
+symbol = "os.stat"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.exists"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.isfile"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.isdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.realpath"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.exists"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.stat"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_file"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_dir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.resolve"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+# --- Name resolution ---
+# A host name lookup waits for the resolver (DNS); the event loop has `loop.getaddrinfo()`.
+
+[[entries]]
+symbol = "socket.getaddrinfo"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "socket.gethostbyname"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "socket.getfqdn"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
 # --- Async-safe ---
 
 [[entries]]

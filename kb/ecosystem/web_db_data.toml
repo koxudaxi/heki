@@ -99,6 +99,16 @@ async_safe = true
 offloads_blocking_arg = 0
 opaque_to_layer3 = true
 
+# --- Static files: Starlette ---
+# `StaticFiles.lookup_path(path)` resolves the path under each directory (`os.path.realpath`)
+# and stats it (`os.stat`). `get_response` runs it through `anyio.to_thread.run_sync`; a
+# subclass calling it on the event loop blocks.
+
+[[entries]]
+symbol = "starlette.staticfiles.StaticFiles.lookup_path"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
 # --- Copy sanitizers (MUT202) ---
 
 [[entries]]

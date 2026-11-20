@@ -1163,6 +1163,90 @@ fn pandas_io_and_quadratic_concatenation() {
     );
 }
 
+const METADATA: &str = r#"import asyncio
+import os
+import socket
+from pathlib import Path
+
+from starlette.staticfiles import StaticFiles
+
+
+async def tp_metadata(p: str):
+    os.stat(p)
+    os.path.exists(p)
+    os.path.isfile(p)
+    os.path.isdir(p)
+    return os.path.realpath(p)
+
+
+async def tp_paths(p: Path):
+    p.exists()
+    p.stat()
+    p.is_file()
+    p.is_dir()
+    return p.resolve()
+
+
+async def tp_lookups(host: str):
+    socket.getaddrinfo(host, 443)
+    socket.gethostbyname(host)
+    return socket.getfqdn(host)
+
+
+async def tn_offloaded(p: str, host: str):
+    await asyncio.to_thread(os.stat, p)
+    loop = asyncio.get_running_loop()
+    return await loop.getaddrinfo(host, 443)
+
+
+def tn_sync(p: str):
+    return os.path.exists(p)
+
+
+class Frontend(StaticFiles):
+    def _exists(self, path: str) -> bool:
+        full_path, stat_result = self.lookup_path(path)
+        return stat_result is not None
+
+    async def get_response(self, path, scope):
+        if self._exists(path):
+            return await super().get_response(path, scope)
+        return None
+"#;
+
+/// File metadata (`os.stat`, the `os.path` and `pathlib.Path` tests, `realpath` / `resolve`)
+/// blocks on the file system (`EFF105`, opt-in), host name lookups on the network (`EFF101`);
+/// offloaded, in a synchronous function, or through the event loop's own `getaddrinfo` they
+/// block nothing. Starlette's `StaticFiles.lookup_path` resolves and stats the path, so a
+/// subclass calling it on the event loop blocks.
+#[test]
+fn file_metadata_and_name_lookups_block() {
+    assert_eq!(
+        check("cat_metadata", "app.py", METADATA, "EFF101,EFF105"),
+        vec![
+            d(10, "EFF105", "tp_metadata", "os.stat"),
+            d(11, "EFF105", "tp_metadata", "os.path.exists"),
+            d(12, "EFF105", "tp_metadata", "os.path.isfile"),
+            d(13, "EFF105", "tp_metadata", "os.path.isdir"),
+            d(14, "EFF105", "tp_metadata", "os.path.realpath"),
+            d(18, "EFF105", "tp_paths", "pathlib.Path.exists"),
+            d(19, "EFF105", "tp_paths", "pathlib.Path.stat"),
+            d(20, "EFF105", "tp_paths", "pathlib.Path.is_file"),
+            d(21, "EFF105", "tp_paths", "pathlib.Path.is_dir"),
+            d(22, "EFF105", "tp_paths", "pathlib.Path.resolve"),
+            d(26, "EFF101", "tp_lookups", "socket.getaddrinfo"),
+            d(27, "EFF101", "tp_lookups", "socket.gethostbyname"),
+            d(28, "EFF101", "tp_lookups", "socket.getfqdn"),
+            d(
+                47,
+                "EFF105",
+                "Frontend.get_response",
+                "starlette.staticfiles.StaticFiles.lookup_path"
+            ),
+        ]
+    );
+}
+
 const OVERRIDES: &str = r#"
 [[tool.heki.ecosystem]]
 symbol = "sqlite3.connect"

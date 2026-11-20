@@ -9,7 +9,9 @@ Opt-in: blocking local filesystem I/O reachable from `async def`.
 ## What it does
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
 `pathlib.Path.read_text` / `write_text` / `read_bytes` / `write_bytes` / `open`, `os.listdir`,
-`os.scandir`, iterating `os.walk(...)`, `shutil` copies and removals, and the pandas file readers
+`os.scandir`, iterating `os.walk(...)`, `shutil` copies and removals, file metadata (`os.stat`,
+`os.path.exists` / `isfile` / `isdir` / `realpath`, `pathlib.Path.exists` / `stat` / `is_file` /
+`is_dir` / `resolve`, Starlette's `StaticFiles.lookup_path`), and the pandas file readers
 (`pd.read_csv(path)`; one given a URL literal downloads it and is `EFF101`, one given an
 `io.StringIO` / `io.BytesIO` buffer does no I/O). It follows the same boundary,
 offload, and guard rules as `EFF101`, generators and offloading decorators included: `await

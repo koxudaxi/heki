@@ -971,8 +971,23 @@ mod tests {
                     "shutil.copy2",
                     "shutil.copytree",
                     "shutil.rmtree",
+                    "os.stat",
+                    "os.path.exists",
+                    "os.path.isfile",
+                    "os.path.isdir",
+                    "os.path.realpath",
+                    "pathlib.Path.exists",
+                    "pathlib.Path.stat",
+                    "pathlib.Path.is_file",
+                    "pathlib.Path.is_dir",
+                    "pathlib.Path.resolve",
+                    "starlette.staticfiles.StaticFiles.lookup_path",
                 ]),
                 entry(&[BlockingFs]),
+            ),
+            (
+                with_prefix("socket", &["getaddrinfo", "gethostbyname", "getfqdn"]),
+                entry(&[BlockingNet]),
             ),
             (
                 with_prefix(
