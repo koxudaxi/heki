@@ -358,7 +358,12 @@ pub(crate) fn analyze(
             break;
         }
     }
-    let ipdom = post_dominators(&succ);
+    // Post-dominators only find the next call; without calls there is none to find.
+    let ipdom = if events.calls.is_empty() {
+        vec![None; n]
+    } else {
+        post_dominators(&succ)
+    };
 
     let mut calls_at: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
     for (b, i, site) in &events.calls {
@@ -637,10 +642,10 @@ pub(crate) fn propagate_facts(
             .iter()
             .fold(all, |acc, e| acc & index.covered_after(path, e, all))
     });
-    let exempt = contracts.exempt_writer(&func.fqn(), &func.qualname);
     let mut unmet: BTreeSet<UnmetWrite> = BTreeSet::new();
+    // The function's own writes leave out the contracts it is an exempt writer of already.
     for w in flows.into_iter().flat_map(|fl| &fl.writes) {
-        let mask = w.contracts & !exempt;
+        let mask = w.contracts;
         let open = mask & !index.covered_after(path, &w.flow, mask);
         for k in bits(open) {
             unmet.insert(UnmetWrite {
@@ -656,6 +661,8 @@ pub(crate) fn propagate_facts(
         }
     }
     let initializer = is_initializer(func);
+    // Matched against the patterns only when a helper passes a write up.
+    let mut exempt = None;
     for (site_path, i) in sites {
         let site = &index.files[site_path].call_sites[*i];
         let Some(flow) = site.flow else {
@@ -673,6 +680,8 @@ pub(crate) fn propagate_facts(
         for (bc, callee, d) in helpers {
             for u in &callee.unmet_invalidation {
                 let bit = 1u64 << u.contract;
+                let exempt = *exempt
+                    .get_or_insert_with(|| contracts.exempt_writer(&func.fqn(), &func.qualname));
                 if exempt & bit != 0 || u.via_chain.last().is_some_and(|h| h.callee == func.fqn()) {
                     continue;
                 }

@@ -7,7 +7,8 @@ use crate::mut_rules::ReadOnlyProducers;
 use crate::{DottedPattern, RuleConfigError};
 use heki_effect::Contracts;
 use heki_env::HekiConfig;
-use std::sync::Arc;
+use rustc_hash::FxHashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// The most `invalidation` contracts a configuration may declare (one bit each).
 pub const MAX_INVALIDATIONS: usize = 64;
@@ -51,6 +52,33 @@ impl InvalidationNames {
 pub(crate) struct ConfigContracts {
     producers: ReadOnlyProducers,
     pub(crate) invalidations: Vec<InvalidationNames>,
+    /// The masks of [`Contracts::invalidator_of`] by name.
+    invalidators: NameMasks,
+}
+
+/// Contract masks memoized by `(fqn, qualname)`: a mask depends on the name alone, and the
+/// summaries ask for the callee of every call, which would match the same names against every
+/// pattern again.
+#[derive(Debug, Default)]
+struct NameMasks(Mutex<FxHashMap<String, FxHashMap<String, u64>>>);
+
+impl NameMasks {
+    fn get(&self, fqn: &str, qualname: &str, compute: impl FnOnce() -> u64) -> u64 {
+        let known = |map: &FxHashMap<String, FxHashMap<String, u64>>| {
+            map.get(fqn).and_then(|q| q.get(qualname)).copied()
+        };
+        if let Some(mask) = known(&self.0.lock().unwrap_or_else(PoisonError::into_inner)) {
+            return mask;
+        }
+        let mask = compute();
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(fqn.to_owned())
+            .or_default()
+            .insert(qualname.to_owned(), mask);
+        mask
+    }
 }
 
 impl ConfigContracts {
@@ -93,6 +121,7 @@ impl ConfigContracts {
         Ok(Self {
             producers: ReadOnlyProducers::new(config)?,
             invalidations,
+            invalidators: NameMasks::default(),
         })
     }
 }
@@ -107,7 +136,9 @@ impl Contracts for ConfigContracts {
     }
 
     fn invalidator_of(&self, fqn: &str, qualname: &str) -> u64 {
-        mask(&self.invalidations, |c| c.names_invalidator(fqn, qualname))
+        self.invalidators.get(fqn, qualname, || {
+            mask(&self.invalidations, |c| c.names_invalidator(fqn, qualname))
+        })
     }
 
     fn exempt_writer(&self, fqn: &str, qualname: &str) -> u64 {
