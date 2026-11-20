@@ -26,12 +26,17 @@ quadratic. `deque.popleft()` is constant time.
 
 ## Example
 ```python
-def bfs(start: int) -> list[int]:
+def bfs(graph: dict[int, list[int]], start: int) -> list[int]:
     queue = [start]
+    seen = {start}
     order = []
     while queue:
         node = queue.pop(0)
         order.append(node)
+        for child in graph[node]:
+            if child not in seen:
+                seen.add(child)
+                queue.append(child)
     return order
 ```
 
@@ -40,12 +45,17 @@ Use instead:
 import collections
 
 
-def bfs(start: int) -> list[int]:
+def bfs(graph: dict[int, list[int]], start: int) -> list[int]:
     queue = collections.deque([start])
+    seen = {start}
     order = []
     while queue:
         node = queue.popleft()
         order.append(node)
+        for child in graph[node]:
+            if child not in seen:
+                seen.add(child)
+                queue.append(child)
     return order
 ```
 
