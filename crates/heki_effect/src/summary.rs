@@ -9,13 +9,13 @@ use crate::guards::{self, GuardInputs, LocalGuards};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
-    Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
+    self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
 };
 use crate::{
     ArgBinding, ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Construction,
     Contracts, EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput, NewArg, NewCond,
-    NewKind, ProjectDecls, ReadKind, ReturnsNew, SiteRole, Slot, TypedFieldReadSite,
+    NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SiteRole, Slot, TypedFieldReadSite,
     TypedFieldWriteSite, Unresolved, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
@@ -82,14 +82,23 @@ const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[
 ];
 
 /// Execution effects `EFF101` treats as blocking the event loop.
-pub const BLOCKING_EFFECTS: &[ExecEffectKind] = &[
-    ExecEffectKind::BlockingNet,
-    ExecEffectKind::BlockingDb,
-    ExecEffectKind::BlockingSubprocess,
-    ExecEffectKind::BlockingSync,
-    ExecEffectKind::Sleep,
-    ExecEffectKind::BlockingFs,
-];
+pub const BLOCKING_EFFECTS: &[ExecEffectKind] = ExecEffectKind::BLOCKING;
+
+/// The callable an offloading API runs on a worker thread at a call of `symbol`, and where the
+/// positional arguments it passes start: `asyncio.to_thread(f, a, b)` runs `f(a, b)`. `None`
+/// when `*` unpacking may move the callable.
+pub fn offloaded_callable(
+    kb: &EffectiveEcosystemKb,
+    symbol: &str,
+    args: &[VarId],
+    star_from: Option<u8>,
+) -> Option<(VarId, usize)> {
+    let k = usize::from(kb.lookup(symbol)?.offloads_blocking_arg?);
+    if star_from.is_some_and(|s| usize::from(s) <= k) {
+        return None;
+    }
+    Some((*args.get(k)?, k + 1))
+}
 
 /// Summarize every function of one module (local facts only; see `ProjectIndex::build`).
 /// Summarize one module against the project declarations. `own` is the module's own completed
@@ -718,6 +727,14 @@ impl<'a> Extractor<'a> {
             .or_else(|| self.types.get(&var))
     }
 
+    /// The class of `var` when it is an instance of one class.
+    fn instance_of(&self, var: VarId) -> Option<String> {
+        match self.val(var)? {
+            Val::Inst(class) => Some(class.clone()),
+            _ => None,
+        }
+    }
+
     /// The project class of `var`, when it is an instance of one class.
     fn project_class(&self, var: VarId) -> Option<String> {
         match self.val(var)? {
@@ -1156,9 +1173,7 @@ impl<'a> Extractor<'a> {
             Callee::External(s) => s.as_str(),
             _ => "",
         };
-        let deep = kwargs
-            .iter()
-            .any(|(k, v)| k.as_deref() == Some("deep") && self.f.const_bool(*v) == Some(true));
+        let deep = readonly::deep_copy_requested(kwargs, |v| self.f.const_bool(v) == Some(true));
         let mut out = Vec::new();
         if let Some(r) = recv
             && let Some(d) = readonly::call_derivation(method, symbol, self.cx.kb, deep)
@@ -1202,6 +1217,7 @@ impl<'a> Extractor<'a> {
         }
         self.resolve_construction();
         self.iterations();
+        self.apply_declaration();
         if self.summary.is_cached_property && f.kind == FunctionKind::Sync {
             self.summary.returns_self_attrs = self.returned_self_attrs();
         }
@@ -1957,39 +1973,39 @@ impl<'a> Extractor<'a> {
                 self.call(bb, &target, &call);
             }
             InstKind::MakeIter {
-                iterable,
-                is_async: false,
-                ..
-            } => self.iteration(bb, *iterable, span),
+                iterable, is_async, ..
+            } => self.iteration(bb, *iterable, *is_async, span),
             _ => {}
         }
     }
 
     /// The comprehension or generator expression `child` created here iterates `iterable`
-    /// (its outermost one) at once: [`Self::iteration`], unless it is asynchronous (an `async
-    /// for` runs `__aiter__`, which the catalog does not list).
+    /// (its outermost one) at once: [`Self::iteration`], unless it is asynchronous (whether its
+    /// outermost loop is an `async for` is not recorded).
     fn child_iteration(&mut self, bb: BlockId, child: FunctionId, iterable: VarId, span: Span) {
         if matches!(
             self.cx.ir().function(child).kind,
             FunctionKind::Sync | FunctionKind::Generator
         ) {
-            self.iteration(bb, iterable, span);
+            self.iteration(bb, iterable, false, span);
         }
     }
 
-    /// Iterating `iterable` with `for` runs `__iter__` of its class: the catalog's entry for it
+    /// Iterating `iterable` (a `for` loop, a comprehension, a consuming call such as `list(...)`)
+    /// runs `__iter__` of its class, `__aiter__` for an `async for`: the catalog's entry for it
     /// is a call at `span` (`for row in session.query(User):` runs the query). Project classes'
     /// `__iter__` are not followed.
-    fn iteration(&mut self, bb: BlockId, iterable: VarId, span: Span) {
+    fn iteration(&mut self, bb: BlockId, iterable: VarId, is_async: bool, span: Span) {
         let Some(Val::Inst(class)) = self.val(iterable) else {
             return;
         };
         if class.starts_with("builtins.") || self.cx.project.is_project_class(class) {
             return;
         }
-        let symbol = format!("{class}.__iter__");
+        let protocol = if is_async { "__aiter__" } else { "__iter__" };
+        let symbol = format!("{class}.{protocol}");
         if self.cx.kb.lookup(&symbol).is_some() {
-            self.external_call(bb, symbol, &[], false, span);
+            self.external_call(bb, symbol, Passed::NOTHING, false, span);
         }
     }
 
@@ -2577,7 +2593,17 @@ impl<'a> Extractor<'a> {
                         events.invalidators.push((self.pos.0, self.pos.1, mask));
                     }
                 }
-                self.external_call(bb, symbol.clone(), call.args, call.is_awaited, call.span);
+                self.external_call(
+                    bb,
+                    symbol.clone(),
+                    call.passed(),
+                    call.is_awaited,
+                    call.span,
+                );
+                // `list(query)` iterates the query as a `for` loop does.
+                for iterable in crate::consumption::iterated_args(symbol, call.args) {
+                    self.iteration(bb, iterable, false, call.span);
+                }
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
                 if let Some(class) = &call.constructs {
@@ -2596,8 +2622,10 @@ impl<'a> Extractor<'a> {
                         guards: Vec::new(),
                         once_per: None,
                         once_loops: 0,
+                        runner: Runner::Caller,
                     });
                 }
+                self.handed_callable(bb, symbol, call);
                 None
             }
             Callee::Project(keys, binds_recv) => {
@@ -2609,6 +2637,8 @@ impl<'a> Extractor<'a> {
                 let mut callees = Vec::new();
                 let mut bindings = Vec::new();
                 let mut offloaders: Vec<String> = Vec::new();
+                // The bodies an offloading decorator runs on a worker thread.
+                let mut on_worker = Vec::new();
                 let mut any_async = false;
                 let unknown = FunctionDecl::default();
                 let loops = self.loops_around(bb);
@@ -2623,19 +2653,19 @@ impl<'a> Extractor<'a> {
                 for key in keys {
                     let cx = self.cx;
                     let decl = cx.project.function_decl(key).unwrap_or(&unknown);
-                    if let Some(symbol) = &decl.offloaded_by {
-                        if !offloaders.contains(symbol) {
-                            offloaders.push(symbol.clone());
-                        }
-                        invalidates = Some(0);
-                        continue;
+                    let offloaded = decl.offloaded_by.is_some();
+                    if let Some(symbol) = &decl.offloaded_by
+                        && !offloaders.contains(symbol)
+                    {
+                        offloaders.push(symbol.clone());
                     }
-                    any_async |= decl.is_async;
+                    any_async |= decl.is_async && !offloaded;
                     if let (Some(c), Some(_)) = (self.contracts, &self.events)
                         && !decl.is_abstract
                     {
-                        // A generator's body runs only where it is iterated.
-                        let here = if decl.is_generator {
+                        // A generator's body runs only where it is iterated, an offloaded
+                        // one on another thread.
+                        let here = if decl.is_generator || offloaded {
                             0
                         } else {
                             c.invalidator_of(&key.fqn(), &key.qualname)
@@ -2730,14 +2760,19 @@ impl<'a> Extractor<'a> {
                     while params.last().is_some_and(ArgOrigin::is_empty) {
                         params.pop();
                     }
-                    if self.ownership {
+                    if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_recv, bound.clone(), offset));
                     }
-                    callees.push(BoundCallee {
+                    let bc = BoundCallee {
                         callee: key.clone(),
                         params,
-                    });
-                    bindings.push((key.clone(), bound));
+                    };
+                    if offloaded {
+                        on_worker.push(bc);
+                    } else {
+                        callees.push(bc);
+                        bindings.push((key.clone(), bound));
+                    }
                 }
                 for (decl, i, recv, bound, offset) in handovers {
                     let bound = &bound;
@@ -2752,12 +2787,19 @@ impl<'a> Extractor<'a> {
                         },
                     );
                 }
-                // `@d def f` is `f = d(f)`: the call runs `d(f)`, which offloads `f`.
+                // `@d def f` is `f = d(f)`: the call runs `d(f)`, which runs `f` on a worker.
                 for symbol in offloaders {
                     let offloaded: Vec<VarId> = call.value.into_iter().collect();
-                    self.external_call(bb, symbol, &offloaded, call.is_awaited, call.span);
+                    let passed = Passed {
+                        args: &offloaded,
+                        kwargs: &[],
+                        star_from: None,
+                    };
+                    self.external_call(bb, symbol, passed, call.is_awaited, call.span);
                 }
+                // The site the hand-overs above name comes first; the worker's follows it.
                 if callees.is_empty() {
+                    self.worker_site(bb, on_worker, call);
                     return None;
                 }
                 let drives = any_async && !call.is_awaited && self.drives_manually(call.dst);
@@ -2786,12 +2828,88 @@ impl<'a> Extractor<'a> {
                     },
                     ..site
                 });
-                Some((self.sites.len() - 1, bindings))
+                let at = self.sites.len() - 1;
+                self.worker_site(bb, on_worker, call);
+                Some((at, bindings))
             }
             Callee::TooMany | Callee::Unresolved => {
                 self.summary.unknown_calls = true;
                 None
             }
+        }
+    }
+
+    /// The site of `callees` an offloading API runs on a worker thread for `call`
+    /// (`Runner::Worker`).
+    fn worker_site(&mut self, bb: BlockId, callees: Vec<BoundCallee>, call: &Call<'_>) {
+        if callees.is_empty() {
+            return;
+        }
+        if let Some(events) = self.events.as_mut() {
+            events
+                .calls
+                .push((self.pos.0, self.pos.1, self.sites.len()));
+        }
+        let site = self.site(bb, CallTarget::Project(callees), false, call.span);
+        self.sites.push(CallSite {
+            recv_is_self: call.recv_is_self,
+            runner: Runner::Worker,
+            ..site
+        });
+    }
+
+    /// A callable a library API runs at the call, when it is a project function: an offloading
+    /// API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f, *args)`) on a worker
+    /// thread, with the positional arguments after it (keyword arguments are left unbound: some
+    /// APIs forward them, others take their own), and a sync-facade API's
+    /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and
+    /// the arguments left unbound.
+    fn handed_callable(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
+        let facade = || {
+            let k = usize::from(self.cx.kb.lookup(symbol)?.sync_facade_arg?);
+            if call.star_from.is_some_and(|s| usize::from(s) <= k) {
+                return None;
+            }
+            Some(*call.args.get(k)?)
+        };
+        let (callable, args, runner) =
+            match offloaded_callable(self.cx.kb, symbol, call.args, call.star_from) {
+                Some((callable, first)) => (callable, &call.args[first..], Runner::Worker),
+                None => match facade() {
+                    Some(callable) => (callable, &[][..], Runner::SyncFacade),
+                    None => return,
+                },
+            };
+        let (callee, recv, recv_var, recv_is_self) = match self.bound_method(callable) {
+            Some((recv, method)) => {
+                let callee = self.cx.resolve_method(self.val(recv), &method);
+                let (origin, is_self) = self.receiver(recv, bb);
+                (callee, Some(origin), Some(recv), is_self)
+            }
+            None => (self.cx.resolve_call(self.val(callable)), None, None, false),
+        };
+        let Callee::Project(..) = &callee else {
+            return;
+        };
+        let after = call.args.len() - args.len();
+        let handed = Call {
+            dst: call.dst,
+            value: Some(callable),
+            recv,
+            recv_var,
+            args,
+            kwargs: &[],
+            star_from: call
+                .star_from
+                .filter(|_| !args.is_empty())
+                .map(|s| s - u8::try_from(after).unwrap_or(u8::MAX)),
+            is_awaited: false,
+            recv_is_self,
+            constructs: None,
+            span: call.span,
+        };
+        if let Some((site, _)) = self.call(bb, &callee, &handed) {
+            self.sites[site].runner = runner;
         }
     }
 
@@ -2813,6 +2931,7 @@ impl<'a> Extractor<'a> {
             guards: self.guards.facts_at(&cx, bb),
             once_per: self.guards.once_per_at(&cx, bb),
             once_loops: self.guards.once_loops_at(&cx, bb, self.loops_around(bb)),
+            runner: Runner::Caller,
         }
     }
 
@@ -2979,10 +3098,11 @@ impl<'a> Extractor<'a> {
         &mut self,
         bb: BlockId,
         symbol: String,
-        args: &[VarId],
+        passed: Passed<'_>,
         is_awaited: bool,
         span: Span,
     ) {
+        let args = passed.args;
         if symbol == "builtins.setattr" || symbol == "builtins.object.__setattr__" {
             let Some(obj) = args.first() else { return };
             match args.get(1).and_then(|a| self.const_str(*a)) {
@@ -3009,10 +3129,15 @@ impl<'a> Extractor<'a> {
         if entry.excluded {
             return;
         }
+        let case = entry.case_for(|i, k| {
+            resolver::passed_arg(passed.args, passed.kwargs, passed.star_from, (i, k), |v| {
+                resolver::arg_fact(|d| self.defs.get(&d).copied(), |c| self.instance_of(c), v)
+            })
+        });
         // Stage 0-A filter: an awaited call never blocks the loop itself; loop-sensitive
         // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103.
         let effects: std::collections::BTreeSet<ExecEffectKind> = entry
-            .effects
+            .effects_in(case)
             .iter()
             .copied()
             .filter(|e| !(is_awaited && BLOCKING_EFFECTS.contains(e)))
@@ -3028,8 +3153,24 @@ impl<'a> Extractor<'a> {
             return;
         }
         let occurrence = self.guards.occurrence(&self.guard_inputs(), bb);
+        let flagged = match case {
+            Some(_) => None,
+            None => self.forwarded_flag(entry, passed),
+        };
         for e in &effects {
             let had = !self.summary.direct_exec_effects.insert(*e);
+            let occurrence = match flagged {
+                Some((off, param)) if !off.contains(e) => {
+                    let mut needs_flag = occurrence.clone();
+                    needs_flag.inputs.insert(crate::InputGuard {
+                        subject: GuardSubject { param, attr: None },
+                        test: crate::GuardTest::Truthy,
+                        holds: true,
+                    });
+                    needs_flag
+                }
+                _ => occurrence.clone(),
+            };
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &occurrence);
             let chain = vec![Arc::new(self.hop(symbol.clone(), span))];
             self.summary.exec_chains.insert(*e, chain);
@@ -3044,6 +3185,77 @@ impl<'a> Extractor<'a> {
         self.sites.push(site);
     }
 
+    /// A `[[tool.heki.ecosystem]]` entry naming the function declares what calling it does, as
+    /// for an external function (the built-in catalog does not apply to project code): its
+    /// `effects` run in the body, its `offloads_blocking_arg` (the receiver not counted) is a
+    /// parameter the body offloads, and `excluded` / `async_safe` keep every effect / the
+    /// blocking ones from its callers.
+    fn apply_declaration(&mut self) {
+        let fqn = self.key.fqn();
+        let Some(entry) = self.cx.kb.declared(&fqn) else {
+            return;
+        };
+        let hidden: BTreeSet<ExecEffectKind> = if entry.excluded {
+            let loop_sensitive = [
+                ExecEffectKind::UnpooledClientAlloc,
+                ExecEffectKind::DbQuery,
+                ExecEffectKind::QuadraticRealloc,
+            ];
+            BLOCKING_EFFECTS
+                .iter()
+                .copied()
+                .chain(loop_sensitive)
+                .collect()
+        } else if entry.async_safe {
+            BLOCKING_EFFECTS.iter().copied().collect()
+        } else {
+            BTreeSet::new()
+        };
+        for &e in &entry.effects {
+            let had = !self.summary.direct_exec_effects.insert(e);
+            guards::add_occurrence(
+                &mut self.summary.exec_guards,
+                e,
+                had,
+                &crate::EffectGuards::default(),
+            );
+            let chain = vec![Arc::new(self.hop(fqn.clone(), self.f.span))];
+            self.summary.exec_chains.insert(e, chain);
+        }
+        if let Some(k) = entry.offloads_blocking_arg {
+            let bound_first =
+                self.f.owner_class_qualname.is_some() && !self.f.has_decorator(&["staticmethod"]);
+            let p = u32::from(k) + u32::from(bound_first);
+            if p < 64 {
+                self.summary.offloads_blocking_params |= 1u64 << p;
+            }
+        }
+        self.summary.hide_exec_effects(&hidden);
+        self.summary.declared_hidden = hidden;
+    }
+
+    /// A flag of the catalog call that only `False` switches off (`Executor.shutdown(wait=...)`,
+    /// `Lock.acquire(blocking=...)`), passed on from a parameter of this function: the effects
+    /// besides the case's (`.0`) run only when the parameter (`.1`) is true, a guard its callers
+    /// decide (`close(wait=False)`). The flags are read for their truth, as the APIs do.
+    fn forwarded_flag<'e>(
+        &self,
+        entry: &'e heki_kb::EcosystemEntry,
+        passed: Passed<'_>,
+    ) -> Option<(&'e [ExecEffectKind], u8)> {
+        entry.cases.iter().find_map(|c| {
+            if c.equals != Some(heki_kb::ArgLiteral::Bool(false)) {
+                return None;
+            }
+            let at = (c.arg, c.param.as_deref());
+            let v = resolver::passed_var(passed.args, passed.kwargs, passed.star_from, at)?;
+            let (p, None) = self.param_alias.get(&v)? else {
+                return None;
+            };
+            Some((c.effects.as_deref()?, *p))
+        })
+    }
+
     /// The function returns (through `step`) the result of the read-only producer `producer`
     /// it calls or reads at `span` (`MUT202` return flow; `deep` as the producer is declared).
     fn seed_protected(&mut self, producer: String, deep: bool, step: ReturnStep, span: Span) {
@@ -3056,6 +3268,23 @@ impl<'a> Extractor<'a> {
             chain,
         );
     }
+}
+
+/// The arguments a call passes, as written.
+#[derive(Clone, Copy)]
+struct Passed<'c> {
+    args: &'c [VarId],
+    kwargs: &'c [(Option<String>, VarId)],
+    /// `InstKind::Call::star_from`.
+    star_from: Option<u8>,
+}
+
+impl Passed<'_> {
+    const NOTHING: Passed<'static> = Passed {
+        args: &[],
+        kwargs: &[],
+        star_from: None,
+    };
 }
 
 /// One call instruction as [`Extractor::call`] sees it.
@@ -3077,6 +3306,16 @@ struct Call<'c> {
     /// The project class the call constructs (`CallSite::constructs`).
     constructs: Option<String>,
     span: Span,
+}
+
+impl<'c> Call<'c> {
+    fn passed(&self) -> Passed<'c> {
+        Passed {
+            args: self.args,
+            kwargs: self.kwargs,
+            star_from: self.star_from,
+        }
+    }
 }
 
 /// What a call binds to one project callee's parameters ([`Extractor::hand_over`]).
@@ -3119,6 +3358,7 @@ fn role_site(
         guards: site.guards.clone(),
         once_per: site.once_per,
         once_loops: 0,
+        runner: site.runner,
     }
 }
 

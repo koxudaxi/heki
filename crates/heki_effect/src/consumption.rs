@@ -185,6 +185,15 @@ fn consumer_args(symbol: &str, args: &[VarId]) -> Vec<VarId> {
     }
 }
 
+/// The arguments a call of the external `symbol` iterates when it runs: an eager constructor's
+/// (`itertools.product(a, b)`) or a full consumer's (`list(it)`, `xs.extend(it)`).
+pub(crate) fn iterated_args(symbol: &str, args: &[VarId]) -> Vec<VarId> {
+    match constructor_args(symbol, args) {
+        Some(w) if w.eager => w.stepped,
+        _ => consumer_args(symbol, args),
+    }
+}
+
 /// One iteration of tracked values by an instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Consumption {
@@ -533,10 +542,7 @@ impl IterFlow {
                                 );
                                 continue;
                             }
-                            Callee::External(symbol) => match constructor_args(symbol, args) {
-                                Some(w) if w.eager => w.stepped,
-                                _ => consumer_args(symbol, args),
-                            },
+                            Callee::External(symbol) => iterated_args(symbol, args),
                             _ => continue,
                         }
                     }

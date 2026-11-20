@@ -15,9 +15,10 @@ use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_ir::{
-    BlockId, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId,
+    BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
+    SmallDisplay, VarId,
 };
-use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
+use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -2663,6 +2664,74 @@ pub fn aliases_of(f: &IrFunction, roots: impl IntoIterator<Item = VarId>) -> FxH
 
 // ------------------------------------------------------------------------------ type inference
 
+/// What a call passes at position `index` (the receiver not counted) or by `keyword`, for the
+/// catalog's argument cases (`heki_kb::EcosystemEntry::case_for`), as `fact` describes it.
+/// Nothing is known of an argument `*` / `**` unpacking may pass.
+pub(crate) fn passed_arg(
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    star_from: Option<u8>,
+    at: (Option<u8>, Option<&str>),
+    fact: impl Fn(VarId) -> ArgFact,
+) -> Option<ArgFact> {
+    passed_var(args, kwargs, star_from, at).map(fact)
+}
+
+/// The variable a call passes at position `index` or by `keyword` ([`passed_arg`]).
+pub(crate) fn passed_var(
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    star_from: Option<u8>,
+    (index, keyword): (Option<u8>, Option<&str>),
+) -> Option<VarId> {
+    if let Some(k) = keyword
+        && let Some((_, v)) = kwargs.iter().find(|(name, _)| name.as_deref() == Some(k))
+    {
+        return Some(*v);
+    }
+    let i = index?;
+    if star_from.is_some_and(|s| i >= s) {
+        return None;
+    }
+    args.get(usize::from(i)).copied()
+}
+
+/// The constant `var` holds (through copies), with `def` giving each variable's definition.
+pub(crate) fn literal<'i>(
+    def: impl Fn(VarId) -> Option<&'i Inst>,
+    var: VarId,
+) -> Option<LiteralValue> {
+    let mut cur = var;
+    // Copies of an SSA variable form a tree, so the walk ends.
+    loop {
+        match &def(cur)?.kind {
+            InstKind::Copy { src, .. } => cur = *src,
+            InstKind::Const { literal, .. } => {
+                return match literal {
+                    ConstLiteral::Bool(b) => Some(LiteralValue::Bool(*b)),
+                    ConstLiteral::Int(n) => Some(LiteralValue::Int(*n)),
+                    ConstLiteral::Float(f) => f.parse().ok().map(LiteralValue::Float),
+                    ConstLiteral::Str(s) => Some(LiteralValue::Str(s.clone())),
+                    _ => None,
+                };
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// [`ArgFact`] of `var`: its constant, and the class `class_of` gives it.
+pub(crate) fn arg_fact<'i>(
+    def: impl Fn(VarId) -> Option<&'i Inst>,
+    class_of: impl Fn(VarId) -> Option<String>,
+    var: VarId,
+) -> ArgFact {
+    ArgFact {
+        literal: literal(def, var),
+        class: class_of(var),
+    }
+}
+
 /// Inferred value of an SSA variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Val {
@@ -2881,16 +2950,22 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// Instance produced by calling the object `fqn`, if known.
-    pub(crate) fn call_result(&self, fqn: &str) -> Option<Ty> {
+    /// Instance produced by calling the object `fqn`, if known; `arg` tells what the call
+    /// passes (for the catalog's argument cases).
+    pub(crate) fn call_result(
+        &self,
+        fqn: &str,
+        arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<Ty> {
         match self.project.symbol(fqn) {
             Symbol::Class(_) => return Some(Ty::inst(fqn)),
             Symbol::Function(_, decl) => {
-                return decl
-                    .return_type
-                    .as_ref()
-                    .and_then(|t| self.project.declared_ty(t))
-                    .and_then(|t| t.bind_self(None));
+                return self.declared_result(fqn, arg).or_else(|| {
+                    decl.return_type
+                        .as_ref()
+                        .and_then(|t| self.project.declared_ty(t))
+                        .and_then(|t| t.bind_self(None))
+                });
             }
             Symbol::Module | Symbol::Global(_) => return None,
             Symbol::External => {}
@@ -2904,8 +2979,8 @@ impl<'a> TypeCtx<'a> {
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
         let entry = self.kb.lookup(fqn)?;
-        if let Some(rt) = &entry.return_type {
-            return Some(Ty::inst(rt.as_str()));
+        if let Some(rt) = entry.return_type_in(entry.case_for(arg)) {
+            return Some(Ty::inst(rt));
         }
         (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
             && !entry.effects.contains(&ExecEffectKind::BlockingNet))
@@ -3016,17 +3091,34 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// Value returned by a resolved call target.
-    pub(crate) fn callee_result(&self, callee: &Callee) -> Option<Ty> {
+    /// The class a `[[tool.heki.ecosystem]]` entry naming the project function `fqn` gives its
+    /// result (the declaration wins over its annotation).
+    fn declared_result(
+        &self,
+        fqn: &str,
+        arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<Ty> {
+        let entry = self.kb.declared(fqn)?;
+        entry.return_type_in(entry.case_for(arg)).map(Ty::inst)
+    }
+
+    /// Value returned by a resolved call target (`arg` as for [`Self::call_result`]).
+    pub(crate) fn callee_result(
+        &self,
+        callee: &Callee,
+        arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<Ty> {
         match callee {
             Callee::Project(keys, _) if keys.len() == 1 => {
                 let decl = self.project.function_decl(&keys[0])?;
-                decl.return_type
-                    .as_ref()
-                    .and_then(|t| self.project.declared_ty(t))
-                    .and_then(|t| t.bind_self(None))
+                self.declared_result(&keys[0].fqn(), arg).or_else(|| {
+                    decl.return_type
+                        .as_ref()
+                        .and_then(|t| self.project.declared_ty(t))
+                        .and_then(|t| t.bind_self(None))
+                })
             }
-            Callee::External(fqn) => self.call_result(fqn),
+            Callee::External(fqn) => self.call_result(fqn, arg),
             _ => None,
         }
     }

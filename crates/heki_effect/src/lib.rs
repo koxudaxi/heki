@@ -46,7 +46,7 @@ pub use resolver::{
     ReadOnlyKind, StrConstant, TypeCtx, Val, detect_src_layout, func_qualname,
     module_name_for_path, resolve_relative_module, self_aliases,
 };
-pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
+pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
 
 use heki_ast::Span;
 use heki_ir::ModuleIr;
@@ -495,6 +495,11 @@ pub struct EffectSummary {
     /// The guards every occurrence of an execution effect depends on (`guards`); an effect
     /// without an entry runs whenever the function does.
     pub exec_guards: BTreeMap<ExecEffectKind, EffectGuards>,
+
+    /// Execution effects an ecosystem entry naming the function keeps from its callers: every
+    /// one when it is `excluded`, the blocking ones when it is `async_safe` (applied to the
+    /// final summary, whatever the callees bring).
+    pub declared_hidden: BTreeSet<ExecEffectKind>,
 }
 
 /// An input of a function that a guard tests: parameter `param` itself, or its attribute
@@ -582,6 +587,21 @@ pub struct ArgBinding {
 }
 
 impl EffectSummary {
+    /// Drop the execution effects in `hidden`, with their chains and guards, here and in what
+    /// iterating the returned object runs.
+    pub(crate) fn hide_exec_effects(&mut self, hidden: &BTreeSet<ExecEffectKind>) {
+        if hidden.is_empty() {
+            return;
+        }
+        self.direct_exec_effects.retain(|e| !hidden.contains(e));
+        self.transitive_exec_effects.retain(|e| !hidden.contains(e));
+        self.exec_chains.retain(|e, _| !hidden.contains(e));
+        self.exec_guards.retain(|e, _| !hidden.contains(e));
+        if let Some(iterated) = &mut self.iterated {
+            iterated.hide_exec_effects(hidden);
+        }
+    }
+
     /// Copy with every source location zeroed: Early Cutoff compares facts, not positions,
     /// so an edit that only moves code does not notify callers.
     pub fn without_locations(&self) -> Self {
@@ -839,6 +859,35 @@ pub struct CallSite {
     /// a lazy initialization of the caller around the call is tested, on an object the loop does
     /// not construct: across them, its effects run at most once (`EFF102` / `EFF103`).
     pub once_loops: u64,
+    /// How the callees run when an API runs them for the caller (`Runner`).
+    pub runner: Runner,
+}
+
+/// How an API runs a callable it is handed ([`CallSite::runner`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Runner {
+    /// Called directly, on the caller's thread.
+    #[default]
+    Caller,
+    /// On a worker thread: an offloading API's callable (`asyncio.to_thread(f, x)`), a function
+    /// decorated with `@sync_to_async`. Everything it does happens, but its blocking effects
+    /// never block the caller's thread.
+    Worker,
+    /// On the caller's thread with a synchronous facade over an async database connection
+    /// (SQLAlchemy's `AsyncSession.run_sync(f)`, Layer 2 `sync_facade_arg`): its database I/O
+    /// through the facade is awaited for it; its other blocking calls block.
+    SyncFacade,
+}
+
+impl CallSite {
+    /// Whether the effect `e` of the callees does not block the caller's thread here.
+    pub fn hides(&self, e: ExecEffectKind) -> bool {
+        match self.runner {
+            Runner::Caller => false,
+            Runner::Worker => e.blocks(),
+            Runner::SyncFacade => e == ExecEffectKind::BlockingDb,
+        }
+    }
 }
 
 impl CallSite {
@@ -1114,6 +1163,9 @@ impl ProjectIndex {
                         .copied()
                         .collect();
                     for e in effects {
+                        if site.hides(e) {
+                            continue;
+                        }
                         // A guard the call decides against: the effect does not run here.
                         let Some(through) =
                             guards::through_call(site, bc, facts.exec_guards.get(&e))

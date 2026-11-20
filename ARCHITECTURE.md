@@ -283,7 +283,9 @@ EffectSummary(f) = {
 1. **User-defined offload wrappers**: besides `asyncio.to_thread`, thin project wrappers such as
    `await in_thread(self.open)` propagate `offloads_blocking_params` bottom-up (finding from
    datamodel-code-generator `bodies.py:112`), and functions decorated with an offloading API
-   (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`) are calls of that API.
+   (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`) are calls of that API. Such a
+   function, and an offloading API's callable, run on a worker thread: everything they do
+   counts at the call except blocking effects.
 2. **Sync-over-async relaxation**: an internal `async def` driven only through a synchronous
    driver is relaxed for `EFF101` / `EFF105` (finding from datamodel-code-generator
    `client.py:1399`).
@@ -358,7 +360,9 @@ versions.
 │  redis, boto3, pandas, numpy, ...)                                           │
 │  - declarative model of public APIs for the Advisory lane (the origin of     │
 │    every effect): effects, async safety, offloaded arguments, copy           │
-│    sanitizers, factory return types, synchronous locks and transactions      │
+│    sanitizers, factory return types, synchronous locks and transactions,     │
+│    argument cases (a literal argument selects effects or the return type),   │
+│    sync facades (`run_sync`), and lazy iterators                             │
 │  - user additions and overrides with [[tool.heki.ecosystem]]                 │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ Layer 3: on-demand analysis of unregistered dependencies (planned)           │
@@ -409,7 +413,7 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 
 | Rule ID | Default | Stage 0-A density | What it finds and how precision is controlled |
 |---|---|---|---|
-| **EFF101** | On | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators, sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
+| **EFF101** | On | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators (their queries and writes still count), sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
 | **EFF102** | On | Web/async **44.1%** / DB **48.5%** (90–93% indirect) | HTTP clients, sessions, or connection pools created in a loop (across functions too). `for.iter` excluded; `ConstSmall` / `RetryPattern` / `DaemonPolling` loops relaxed |
 | **EFF103** | On | DB **47.6%** (74% indirect) | Explicit database queries or external RPC calls in a loop (N+1, across functions too). `for.iter`, DDL, migrations, ORM internals, and bulk APIs excluded. **Implicit ORM lazy loading is out of scope (known limitation)** |
 | **EFF105** | Opt-in | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |

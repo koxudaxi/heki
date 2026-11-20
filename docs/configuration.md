@@ -297,12 +297,22 @@ excluded = true               # never reported
 | --- | ------- |
 | `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
 | `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
-| `async-safe` | Safe to call from `async def`. |
+| `async-safe` | Safe to call from `async def`: it never blocks the event loop, so blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread. |
 | `excluded` | Never reported (logging and similar). |
-| `copy-sanitizer` | Returns a copy (ends `MUT202` protection). |
+| `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too, `"shallow"` (or `true`) only the object itself, so the values below it stay protected. |
+| `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
+| `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 
-An override replaces the built-in entry for the same symbol as a whole.
+An override sets the keys it lists on the built-in entry for the same symbol; the keys it
+leaves out keep their built-in values (`effects = []` removes every effect).
+
+An entry may name a function or method of the project itself (by the module that defines it;
+the built-in catalog never describes the project's own functions):
+its `effects` add to what heki finds in its body, `excluded` keeps every effect of the body
+from its callers and `async-safe` the blocking ones, `return-type` types its result over its
+annotation, and `offloads-blocking-arg` counts the receiver out as for a library method.
+`copy-sanitizer` and `sync-lock-or-tx` are read for library symbols only.
 
 ## Inline suppressions
 

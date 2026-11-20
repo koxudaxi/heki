@@ -266,6 +266,9 @@ fn recompute(
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
+    let hidden = std::mem::take(&mut s.declared_hidden);
+    s.hide_exec_effects(&hidden);
+    s.declared_hidden = hidden;
     // Returned objects that run nothing when iterated hand nothing out.
     if s.iterated
         .as_deref()
@@ -525,6 +528,10 @@ fn transfer(
         .iter()
         .chain(&facts.transitive_exec_effects)
     {
+        // Work run on a worker thread does not block the caller's thread.
+        if site.hides(*e) {
+            continue;
+        }
         let Some(mut through) = guards::through_call(site, bc, facts.exec_guards.get(e)) else {
             continue;
         };
