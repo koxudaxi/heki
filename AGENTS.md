@@ -84,3 +84,15 @@ python3.15 scripts/build_llms_txt.py --check
   compares the server with `heki check` after each step of an editing session.
 - Rules the Stage 0-A measurements rejected (`MUT102a/b`, `DATA102`, `EFF104`, `MUT104` for
   `ALL_CAPS` constants, `MUT105`, `EFF108`) are not revived without new evidence.
+
+## 5. Names, structure, and comments
+- Say what the code does through names and structure: name functions, types, and variables
+  after what they mean, and split a long function into named steps instead of commenting its
+  paragraphs.
+- A comment explains only why: the Python semantics the code models (evaluation order, binding
+  rules), the reason a rewrite or a report is blocked, an invariant, or a constraint the code
+  cannot show.
+- A `///` comment on an item adds what its name and signature do not say. It does not restate
+  the name, and a call site does not repeat its callee's documentation.
+- No development history in code or tests: no review, lane, branch, or snapshot identifiers, and
+  no measurements of particular projects. They belong in commit messages and documents.
