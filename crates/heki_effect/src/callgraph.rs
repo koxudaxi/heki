@@ -201,6 +201,10 @@ fn store(index: &mut ProjectIndex, func: &FuncKey, summary: EffectSummary) {
     if let Some(path) = index.func_files.get(func).cloned()
         && let Some(file) = index.files.get_mut(&path)
     {
+        let summary = match file.local_functions.get(func) {
+            Some(local) if **local == summary => Arc::clone(local),
+            _ => Arc::new(summary),
+        };
         file.functions.insert(func.clone(), summary);
     }
 }
@@ -215,7 +219,7 @@ fn recompute(
     let path = &index.func_files[func];
     let file = &index.files[path];
     let local = &file.local_functions[func];
-    let mut s = local.clone();
+    let mut s = EffectSummary::clone(local);
     s.sync_driven_only = file
         .functions
         .get(func)
@@ -980,7 +984,7 @@ pub(crate) fn recompute_sync_driven_for(
                 .and_then(|f| f.functions.get_mut(&func))
             && s.sync_driven_only != want
         {
-            s.sync_driven_only = want;
+            Arc::make_mut(s).sync_driven_only = want;
             changed.push(func);
         }
     }
@@ -1008,7 +1012,7 @@ pub(crate) fn recompute_sync_driven(index: &mut ProjectIndex) -> Vec<FuncKey> {
                 && !has_route_decorator(&s.decorators)
                 && incoming.get(func).copied().unwrap_or(false);
             if s.sync_driven_only != want {
-                s.sync_driven_only = want;
+                Arc::make_mut(s).sync_driven_only = want;
                 changed.push(func.clone());
             }
         }

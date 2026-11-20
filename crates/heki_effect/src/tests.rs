@@ -735,7 +735,7 @@ fn gate_5_handbuilt_file_summaries() {
     };
     file_a
         .local_functions
-        .insert(f_helper.clone(), EffectSummary::default());
+        .insert(f_helper.clone(), EffectSummary::default().into());
     let mut index = ProjectIndex::build(vec![file_a.clone()]);
 
     let mut file_b = FileSummary {
@@ -746,7 +746,7 @@ fn gate_5_handbuilt_file_summaries() {
     };
     file_b
         .local_functions
-        .insert(f_caller.clone(), EffectSummary::default());
+        .insert(f_caller.clone(), EffectSummary::default().into());
     let span = Span { start: 0, end: 1 };
     file_b.call_sites.push(CallSite {
         caller: f_caller.clone(),
@@ -778,7 +778,7 @@ fn gate_5_handbuilt_file_summaries() {
     // Now add a BlockingNet effect to helper -> caller is affected!
     let mut sum = EffectSummary::default();
     sum.direct_exec_effects.insert(BlockingNet);
-    file_a.local_functions.insert(f_helper, sum);
+    file_a.local_functions.insert(f_helper, sum.into());
     let res2 = index.update_file(file_a);
     assert!(res2.summary_changed);
     assert_eq!(res2.affected_callers, vec![f_caller.clone()]);
@@ -1334,7 +1334,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         };
         for k in funcs {
             f.local_functions
-                .insert((*k).clone(), EffectSummary::default());
+                .insert((*k).clone(), EffectSummary::default().into());
         }
         f
     };
@@ -1413,7 +1413,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         ..EffectSummary::default()
     };
     s.direct_exec_effects.insert(BlockingNet);
-    blocking.local_functions.insert(helper.clone(), s);
+    blocking.local_functions.insert(helper.clone(), s.into());
     let res = index.update_file(blocking);
     assert!(res.summary_changed);
     assert_eq!(res.affected_callers, vec![caller.clone(), live]);

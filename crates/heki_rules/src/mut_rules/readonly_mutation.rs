@@ -66,6 +66,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             .functions
             .iter()
             .filter(|(k, _)| fields && cx.index.file_of(k) == Some(path))
+            .map(|(k, s)| (k, &**s))
             .collect();
         funcs.sort_by(|a, b| a.0.cmp(b.0));
         for (key, s) in funcs {

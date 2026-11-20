@@ -137,6 +137,7 @@ fn local_summary<'a>(cx: &CheckContext<'a>, m: &Method<'_>) -> Option<&'a Effect
         .files
         .get(m.path)
         .and_then(|f| f.local_functions.get(&m.key))
+        .map(|s| &**s)
 }
 
 /// Memo / cache dictionaries by name (`self._cache`, `self.memo`).

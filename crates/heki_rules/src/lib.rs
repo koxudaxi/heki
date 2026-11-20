@@ -596,6 +596,7 @@ impl<'a> CheckContext<'a> {
                 f.functions
                     .iter()
                     .filter(move |(k, _)| self.index.file_of(k) == Some(path.as_path()))
+                    .map(|(k, s)| (k, &**s))
             })
             .collect();
         funcs.sort_by(|a, b| a.0.cmp(b.0));

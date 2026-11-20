@@ -862,10 +862,11 @@ pub struct FileSummary {
     pub path: PathBuf,
     pub module_name: String,
     pub content_hash: String,
-    /// Final (interprocedurally propagated) summaries; filled by `ProjectIndex`.
-    pub functions: FxHashMap<FuncKey, EffectSummary>,
+    /// Final (interprocedurally propagated) summaries; filled by `ProjectIndex`. A final summary
+    /// that propagation leaves equal to the local one is that one.
+    pub functions: FxHashMap<FuncKey, Arc<EffectSummary>>,
     /// Local (one-function) summaries before propagation.
-    pub local_functions: FxHashMap<FuncKey, EffectSummary>,
+    pub local_functions: FxHashMap<FuncKey, Arc<EffectSummary>>,
     pub call_sites: Vec<CallSite>,
     /// Declarations other modules need for name and receiver resolution (shared with the
     /// project declarations built from the index).
@@ -1135,6 +1136,10 @@ impl ProjectIndex {
 
     /// Final summary of `func`, if known.
     pub fn summary(&self, func: &FuncKey) -> Option<&EffectSummary> {
+        self.shared_summary(func).map(Arc::as_ref)
+    }
+
+    fn shared_summary(&self, func: &FuncKey) -> Option<&Arc<EffectSummary>> {
         self.files
             .get(self.func_files.get(func)?)?
             .functions
@@ -1238,7 +1243,7 @@ impl ProjectIndex {
     pub fn update_file(&mut self, mut new_file: FileSummary) -> IncrementalUpdate {
         let path = new_file.path.clone();
         let old_file = self.files.remove(&path);
-        let mut previous: FxHashMap<FuncKey, EffectSummary> = FxHashMap::default();
+        let mut previous: FxHashMap<FuncKey, Arc<EffectSummary>> = FxHashMap::default();
         let mut owned_before: FxHashSet<FuncKey> = FxHashSet::default();
         if let Some(old) = &old_file {
             for (k, v) in &old.functions {
@@ -1286,9 +1291,9 @@ impl ProjectIndex {
         let mut region = callgraph::scc_closure(self, &own);
         for func in &region {
             if !own.contains(func)
-                && let Some(s) = self.summary(func)
+                && let Some(s) = self.shared_summary(func)
             {
-                previous.insert(func.clone(), s.clone());
+                previous.insert(func.clone(), Arc::clone(s));
             }
         }
         callgraph::reset_to_local(self, &region);

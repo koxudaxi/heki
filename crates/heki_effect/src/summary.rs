@@ -133,9 +133,9 @@ fn extract_module(
         file.call_sites.extend(sites);
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
-            Some(existing) => merge_duplicate(existing, summary),
+            Some(existing) => merge_duplicate(Arc::make_mut(existing), summary),
             None => {
-                file.local_functions.insert(key, summary);
+                file.local_functions.insert(key, Arc::new(summary));
             }
         }
     }
