@@ -568,7 +568,10 @@ The entries follow the public API of each package, with three conventions:
   methods) carries only a `return_type`. Iterating an object runs its class's `__iter__` entry
   (`sqlalchemy.orm.Query.__iter__`): a `for` loop, a comprehension, a generator expression, or a
   consuming call (`list(query)`, `items.extend(query)`, the `consumption` table) over a value of
-  that class is a call of it at the iterable (`async for` is not).
+  that class is a call of it at the iterable, and an `async for` runs its `__aiter__` entry. A
+  call returning a lazy iterator (`pymongo`'s `find()`, the generator function `os.walk`, whose
+  result class is named after the call: `os.walk()`) carries only that `return_type`: its I/O
+  runs where the iterator is iterated, on a worker thread when it is handed to one.
 - `db_query` is one statement sent to the database and waited for: reading the rows of an
   executed statement (`sqlite3.Cursor.fetchone`) is not one, nor is a driver's `commit()`; an ORM
   `Session.commit()` / `flush()` sends the pending writes and is. A bulk API (`bulk_create`,

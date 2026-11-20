@@ -1565,3 +1565,87 @@ fn consuming_calls_iterate_catalog_iterables() {
         ]
     );
 }
+
+const LAZY_ITERATORS: &str = r#"import asyncio
+import os
+
+from pymongo.asynchronous.collection import AsyncCollection
+from pymongo.collection import Collection
+
+
+async def tn_iterated_on_a_thread(coll: Collection, path):
+    await asyncio.to_thread(list, coll.find({}))
+    await asyncio.to_thread(list, coll.find({}).sort("x").limit(5))
+    await asyncio.to_thread(list, os.walk(path))
+
+
+async def tp_iterated_on_the_loop(coll: Collection, path):
+    for doc in coll.find({}):
+        pass
+    list(coll.find({}).sort("x"))
+    coll.find({}).to_list()
+    for entry in os.walk(path):
+        pass
+
+
+async def tn_async_cursors_collected(coll: AsyncCollection, ids):
+    cursors = []
+    for i in ids:
+        cursors.append(coll.find({"_id": i}))
+    return cursors
+
+
+async def tp_async_cursors_run_per_item(coll: AsyncCollection, ids):
+    for i in ids:
+        async for doc in coll.find({"_id": i}):
+            pass
+        await coll.find({"_id": i}).sort("x").to_list()
+"#;
+
+/// A cursor or a generator does its I/O while it is iterated, not when it is made: one handed
+/// to a thread runs there, one iterated on the event loop blocks it, and an async cursor is a
+/// query per iteration of the loop around its iteration.
+#[test]
+fn lazy_iterators_do_their_io_when_iterated() {
+    assert_eq!(
+        check(
+            "catalog_lazy_iterators",
+            "app/lazy.py",
+            LAZY_ITERATORS,
+            "EFF101,EFF103,EFF105"
+        ),
+        vec![
+            d(
+                15,
+                "EFF101",
+                "tp_iterated_on_the_loop",
+                "pymongo.cursor.Cursor.__iter__"
+            ),
+            d(
+                17,
+                "EFF101",
+                "tp_iterated_on_the_loop",
+                "pymongo.cursor.Cursor.__iter__"
+            ),
+            d(
+                18,
+                "EFF101",
+                "tp_iterated_on_the_loop",
+                "pymongo.cursor.Cursor.to_list"
+            ),
+            d(19, "EFF105", "tp_iterated_on_the_loop", "os.walk().__iter__"),
+            d(
+                32,
+                "EFF103",
+                "tp_async_cursors_run_per_item",
+                "pymongo.asynchronous.cursor.AsyncCursor.__aiter__"
+            ),
+            d(
+                34,
+                "EFF103",
+                "tp_async_cursors_run_per_item",
+                "pymongo.asynchronous.cursor.AsyncCursor.to_list"
+            ),
+        ]
+    );
+}

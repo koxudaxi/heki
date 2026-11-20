@@ -51,6 +51,8 @@ effects = ["blocking_subprocess"]
 opaque_to_layer3 = true
 
 # --- Blocking filesystem (EFF105, opt-in) ---
+# `os.walk` is a generator function: it lists directories while its result is iterated. The
+# class of such a result is named after the call (`os.walk()`), its iteration is `__iter__`.
 
 [[entries]]
 symbol = "builtins.open"
@@ -99,6 +101,11 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.walk"
+return_type = "os.walk()"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.walk().__iter__"
 effects = ["blocking_fs"]
 opaque_to_layer3 = true
 

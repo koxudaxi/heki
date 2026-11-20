@@ -761,7 +761,6 @@ mod tests {
         "sadd", "srem", "smembers", "zadd", "zrange", "publish", "keys", "eval",
     ];
     const MONGO_COLLECTION_OPS: &[&str] = &[
-        "find",
         "find_one",
         "insert_one",
         "update_one",
@@ -930,7 +929,7 @@ mod tests {
                     "pathlib.Path.open",
                     "os.listdir",
                     "os.scandir",
-                    "os.walk",
+                    "os.walk().__iter__",
                     "shutil.copy",
                     "shutil.copy2",
                     "shutil.copytree",
@@ -1552,7 +1551,65 @@ mod tests {
         ];
         required.extend(pandas_url_readers);
         required.extend(synchronous_waits());
+        required.extend(lazy_iterators());
         required
+    }
+
+    /// Calls returning an iterator that does the I/O while it is iterated.
+    fn lazy_iterators() -> Vec<(Vec<String>, EcosystemEntry)> {
+        const CURSOR_BUILDERS: &[&str] = &[
+            "sort",
+            "limit",
+            "skip",
+            "batch_size",
+            "hint",
+            "max_time_ms",
+            "max_await_time_ms",
+            "where",
+            "collation",
+            "comment",
+            "allow_disk_use",
+            "min",
+            "max",
+            "add_option",
+            "remove_option",
+            "rewind",
+            "clone",
+        ];
+        const CURSOR_RUNS: &[&str] = &["to_list", "distinct", "explain"];
+        let cursor = "pymongo.cursor.Cursor";
+        let async_cursor = "pymongo.asynchronous.cursor.AsyncCursor";
+        vec![
+            (s(&["os.walk"]), returning("os.walk()", entry(&[]))),
+            (
+                [
+                    s(&["pymongo.collection.Collection.find"]),
+                    with_prefix(cursor, CURSOR_BUILDERS),
+                ]
+                .concat(),
+                returning(cursor, entry(&[])),
+            ),
+            (
+                [s(&[&format!("{cursor}.__iter__")]), with_prefix(cursor, CURSOR_RUNS)].concat(),
+                entry(&[BlockingDb, DbQuery]),
+            ),
+            (
+                [
+                    s(&["pymongo.asynchronous.collection.AsyncCollection.find"]),
+                    with_prefix(async_cursor, CURSOR_BUILDERS),
+                ]
+                .concat(),
+                async_safe(returning(async_cursor, entry(&[]))),
+            ),
+            (
+                [
+                    s(&[&format!("{async_cursor}.__aiter__")]),
+                    with_prefix(async_cursor, CURSOR_RUNS),
+                ]
+                .concat(),
+                async_safe(entry(&[DbQuery])),
+            ),
+        ]
     }
 
     /// Waits on the calling thread, with the arguments that make them return at once.

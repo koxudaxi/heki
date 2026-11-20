@@ -2549,8 +2549,9 @@ opaque_to_layer3 = true
 # `MongoClient(...)` returns at once and connects on background threads, but with
 # `connect=True` (the default outside function-as-a-service platforms) a `mongodb+srv://` URI
 # resolves its DNS records in the constructor; `connect=False` defers that to the first
-# operation. `AsyncMongoClient` always defers it. `find()` returns a cursor that queries
-# on its first iteration; it is listed as the query. The bulk writes (`insert_many`,
+# operation. `AsyncMongoClient` always defers it. `find()` returns a lazy cursor, whose
+# builder methods (`sort`, `limit`, ...) return it again; iterating it (or `to_list()`) runs the
+# query. `aggregate()` runs its command at the call. The bulk writes (`insert_many`,
 # `bulk_write`) send many documents at once: no `db_query`.
 
 [[entries]]
@@ -2584,7 +2585,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.collection.Collection.find"
-effects = ["blocking_db", "db_query"]
+return_type = "pymongo.cursor.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2667,6 +2668,111 @@ symbol = "pymongo.collection.Collection.find_one_and_delete"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
+[[entries]]
+symbol = "pymongo.cursor.Cursor.__iter__"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.to_list"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.distinct"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.explain"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.sort"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.limit"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.skip"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.batch_size"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.hint"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.max_time_ms"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.max_await_time_ms"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.where"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.collation"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.comment"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.allow_disk_use"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.min"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.max"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.add_option"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.remove_option"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.rewind"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.cursor.Cursor.clone"
+return_type = "pymongo.cursor.Cursor"
+opaque_to_layer3 = true
+
 # --- Document DB: pymongo (asyncio) ---
 
 [[entries]]
@@ -2701,8 +2807,8 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.collection.AsyncCollection.find"
-effects = ["db_query"]
 async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2797,6 +2903,132 @@ opaque_to_layer3 = true
 symbol = "pymongo.asynchronous.collection.AsyncCollection.find_one_and_delete"
 effects = ["db_query"]
 async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.__aiter__"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.to_list"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.distinct"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.explain"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.sort"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.limit"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.skip"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.batch_size"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.hint"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.max_time_ms"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.max_await_time_ms"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.where"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.collation"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.comment"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.allow_disk_use"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.min"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.max"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.add_option"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.remove_option"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.rewind"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.cursor.AsyncCursor.clone"
+async_safe = true
+return_type = "pymongo.asynchronous.cursor.AsyncCursor"
 opaque_to_layer3 = true
 
 # --- DB transaction starters (EFF106, opt-in) ---

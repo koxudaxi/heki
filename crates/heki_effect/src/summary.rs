@@ -1310,37 +1310,37 @@ impl<'a> Extractor<'a> {
                 self.call(bb, &target, &call);
             }
             InstKind::MakeIter {
-                iterable,
-                is_async: false,
-                ..
-            } => self.iteration(bb, *iterable, span),
+                iterable, is_async, ..
+            } => self.iteration(bb, *iterable, *is_async, span),
             _ => {}
         }
     }
 
     /// The comprehension or generator expression `child` created here iterates `iterable`
-    /// (its outermost one) at once: [`Self::iteration`], unless it is asynchronous (an `async
-    /// for` runs `__aiter__`, which the catalog does not list).
+    /// (its outermost one) at once: [`Self::iteration`], unless it is asynchronous (whether its
+    /// outermost loop is an `async for` is not recorded).
     fn child_iteration(&mut self, bb: BlockId, child: FunctionId, iterable: VarId, span: Span) {
         if matches!(
             self.cx.ir().function(child).kind,
             FunctionKind::Sync | FunctionKind::Generator
         ) {
-            self.iteration(bb, iterable, span);
+            self.iteration(bb, iterable, false, span);
         }
     }
 
     /// Iterating `iterable` (a `for` loop, a comprehension, a consuming call such as `list(...)`)
-    /// runs `__iter__` of its class: the catalog's entry for it is a call at `span` (`for row in
-    /// session.query(User):` runs the query). Project classes' `__iter__` are not followed.
-    fn iteration(&mut self, bb: BlockId, iterable: VarId, span: Span) {
+    /// runs `__iter__` of its class, `__aiter__` for an `async for`: the catalog's entry for it
+    /// is a call at `span` (`for row in session.query(User):` runs the query). Project classes'
+    /// `__iter__` are not followed.
+    fn iteration(&mut self, bb: BlockId, iterable: VarId, is_async: bool, span: Span) {
         let Some(Val::Inst(class)) = self.types.get(&iterable) else {
             return;
         };
         if class.starts_with("builtins.") || self.cx.project.is_project_class(class) {
             return;
         }
-        let symbol = format!("{class}.__iter__");
+        let protocol = if is_async { "__aiter__" } else { "__iter__" };
+        let symbol = format!("{class}.{protocol}");
         if self.cx.kb.lookup(&symbol).is_some() {
             self.external_call(bb, symbol, Passed::NOTHING, false, span);
         }
@@ -1733,7 +1733,7 @@ impl<'a> Extractor<'a> {
                 self.external_call(bb, symbol.clone(), call.passed(), call.is_awaited, call.span);
                 // `list(query)` iterates the query as a `for` loop does.
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
-                    self.iteration(bb, iterable, call.span);
+                    self.iteration(bb, iterable, false, call.span);
                 }
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
