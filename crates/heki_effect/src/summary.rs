@@ -254,6 +254,8 @@ struct Extractor<'a> {
     types: FxHashMap<VarId, Val>,
     /// The values `isinstance` checks give variables in the blocks they guard.
     narrowed: FxHashMap<(BlockId, VarId), Val>,
+    /// The classes each `isinstance` check names, by its second argument.
+    isinstance_classes: FxHashMap<VarId, Vec<String>>,
     /// Defining instruction of each variable.
     defs: FxHashMap<VarId, &'a Inst>,
     /// Instructions using each variable as an operand.
@@ -330,7 +332,7 @@ impl<'a> Extractor<'a> {
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
     ) -> Self {
-        let (types, narrowed) = cx.infer_flow(f);
+        let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
         let mut stored_attrs = Vec::new();
@@ -368,6 +370,7 @@ impl<'a> Extractor<'a> {
             path,
             types,
             narrowed,
+            isinstance_classes,
             defs,
             uses,
             self_vars,
@@ -417,6 +420,7 @@ impl<'a> Extractor<'a> {
             defs: &self.defs,
             uses: &self.uses,
             types: &self.types,
+            isinstance_classes: &self.isinstance_classes,
             param_alias: &self.param_alias,
             param_slot_alias: &self.param_slot_alias,
             stored_attrs: &self.stored_attrs,

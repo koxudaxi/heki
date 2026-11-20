@@ -2683,13 +2683,22 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// [`Self::infer`], with the values `isinstance` checks give variables in the blocks they
-    /// guard.
+    /// guard and the classes each check names (by its second argument).
+    #[allow(clippy::type_complexity)]
     pub(crate) fn infer_flow(
         &self,
         f: &IrFunction,
-    ) -> (FxHashMap<VarId, Val>, FxHashMap<(BlockId, VarId), Val>) {
+    ) -> (
+        FxHashMap<VarId, Val>,
+        FxHashMap<(BlockId, VarId), Val>,
+        FxHashMap<VarId, Vec<String>>,
+    ) {
         let inferred = self.infer_types(f);
-        (inferred.vals(), inferred.narrowed_vals())
+        (
+            inferred.vals(),
+            inferred.narrowed_vals(),
+            inferred.isinstance_args(f, self.project),
+        )
     }
 
     /// Value bound by an `Import` instruction (needs the span-keyed semantic import).

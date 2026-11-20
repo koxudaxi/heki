@@ -18,7 +18,7 @@
 //! comprehension or generator expression with a scope of its own iterates the value its
 //! enclosing function hands it, so the enclosing function is inferred first.
 
-use crate::resolver::{Callee, TypeCtx, Val};
+use crate::resolver::{Callee, ProjectDecls, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
 use heki_ir::{
@@ -57,6 +57,33 @@ impl Fact {
     }
 }
 
+/// The classes `isinstance`'s second argument names when it has type `t`: a class, or a tuple
+/// of classes (sorted, deduplicated), each named canonically.
+fn isinstance_classes(project: &ProjectDecls, t: &Ty) -> Option<Vec<String>> {
+    let class = |t: &Ty| match t {
+        Ty::Ref(c) => project
+            .declared_ty(&Ty::inst(c.as_str()))
+            .and_then(|t| t.obj().map(|o| o.class.clone())),
+        _ => None,
+    };
+    let mut out = match t {
+        Ty::Inst(Obj {
+            args: Args::Tuple(es),
+            ..
+        }) => es
+            .iter()
+            .map(|e| match e {
+                Elem::Of(t) => class(t),
+                Elem::Empty | Elem::Unknown => None,
+            })
+            .collect::<Option<Vec<_>>>()?,
+        t => vec![class(t)?],
+    };
+    out.sort();
+    out.dedup();
+    Some(out)
+}
+
 /// The types of one function's variables.
 pub(crate) struct Inferred {
     facts: Vec<Fact>,
@@ -88,6 +115,32 @@ impl Inferred {
             .iter()
             .filter_map(|(k, t)| Some((*k, t.val()?)))
             .collect()
+    }
+
+    /// The classes the second argument of each `isinstance(x, C)` call of `f` names, by that
+    /// argument ([`isinstance_classes`]).
+    pub(crate) fn isinstance_args(
+        &self,
+        f: &IrFunction,
+        project: &ProjectDecls,
+    ) -> FxHashMap<VarId, Vec<String>> {
+        let mut out = FxHashMap::default();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::Call {
+                callee_var: Some(c),
+                args,
+                ..
+            } = &inst.kind
+                && args.len() >= 2
+                && matches!(self.ty(*c), Some(Ty::Ref(n)) if n == "builtins.isinstance")
+                && let Some(classes) = self
+                    .ty(args[1])
+                    .and_then(|t| isinstance_classes(project, t))
+            {
+                out.insert(args[1], classes);
+            }
+        }
+        out
     }
 
     /// The values consumers see, by variable.
@@ -650,7 +703,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             {
                 let x = args[0];
                 let current = at.get(&x).or_else(|| self.need(x).ok().flatten());
-                if let Some(classes) = self.classes_of(args[1])
+                if let Some(classes) = self
+                    .need(args[1])
+                    .ok()
+                    .flatten()
+                    .and_then(|t| isinstance_classes(self.cx.project, t))
                     && let Some(t) = self.narrow(current, &classes, truth)
                 {
                     out.insert(x, t);
@@ -659,31 +716,6 @@ impl<'e, 'a> Engine<'e, 'a> {
             _ => {}
         }
         out
-    }
-
-    /// The classes an `isinstance` argument names: a class, or a tuple display of classes.
-    fn classes_of(&self, var: VarId) -> Option<Vec<String>> {
-        let class = |t: &Ty| match t {
-            Ty::Ref(c) => self
-                .cx
-                .project
-                .declared_ty(&Ty::inst(c.as_str()))
-                .and_then(|t| t.obj().map(|o| o.class.clone())),
-            _ => None,
-        };
-        match self.need(var).ok()?? {
-            Ty::Inst(Obj {
-                args: Args::Tuple(es),
-                ..
-            }) => es
-                .iter()
-                .map(|e| match e {
-                    Elem::Of(t) => class(t),
-                    Elem::Empty | Elem::Unknown => None,
-                })
-                .collect(),
-            t => class(t).map(|c| vec![c]),
-        }
     }
 
     /// The type of a value of type `t` once `isinstance(value, classes)` is `truth`: true keeps
