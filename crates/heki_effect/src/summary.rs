@@ -2088,8 +2088,24 @@ impl<'a> Extractor<'a> {
             return;
         }
         let occurrence = self.guards.occurrence(&self.guard_inputs(), bb);
+        let flagged = match case {
+            Some(_) => None,
+            None => self.forwarded_flag(entry, passed),
+        };
         for e in &effects {
             let had = !self.summary.direct_exec_effects.insert(*e);
+            let occurrence = match flagged {
+                Some((off, param)) if !off.contains(e) => {
+                    let mut needs_flag = occurrence.clone();
+                    needs_flag.inputs.insert(crate::InputGuard {
+                        subject: GuardSubject { param, attr: None },
+                        test: crate::GuardTest::Truthy,
+                        holds: true,
+                    });
+                    needs_flag
+                }
+                _ => occurrence.clone(),
+            };
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &occurrence);
             let chain = vec![self.hop(symbol.clone(), span)];
             self.summary.exec_chains.insert(*e, chain);
@@ -2150,6 +2166,28 @@ impl<'a> Extractor<'a> {
         }
         self.summary.hide_exec_effects(&hidden);
         self.summary.declared_hidden = hidden;
+    }
+
+    /// A flag of the catalog call that only `False` switches off (`Executor.shutdown(wait=...)`,
+    /// `Lock.acquire(blocking=...)`), passed on from a parameter of this function: the effects
+    /// besides the case's (`.0`) run only when the parameter (`.1`) is true, a guard its callers
+    /// decide (`close(wait=False)`). The flags are read for their truth, as the APIs do.
+    fn forwarded_flag<'e>(
+        &self,
+        entry: &'e heki_kb::EcosystemEntry,
+        passed: Passed<'_>,
+    ) -> Option<(&'e [ExecEffectKind], u8)> {
+        entry.cases.iter().find_map(|c| {
+            if c.equals != Some(heki_kb::ArgLiteral::Bool(false)) {
+                return None;
+            }
+            let at = (c.arg, c.param.as_deref());
+            let v = resolver::passed_var(passed.args, passed.kwargs, passed.star_from, at)?;
+            let (p, None) = self.param_alias.get(&v)? else {
+                return None;
+            };
+            Some((c.effects.as_deref()?, *p))
+        })
     }
 
     /// The function returns (through `step`) the result of the read-only producer `producer`

@@ -2010,19 +2010,29 @@ pub(crate) fn passed_arg(
     args: &[VarId],
     kwargs: &[(Option<String>, VarId)],
     star_from: Option<u8>,
-    (index, keyword): (Option<u8>, Option<&str>),
+    at: (Option<u8>, Option<&str>),
     fact: impl Fn(VarId) -> ArgFact,
 ) -> Option<ArgFact> {
+    passed_var(args, kwargs, star_from, at).map(fact)
+}
+
+/// The variable a call passes at position `index` or by `keyword` ([`passed_arg`]).
+pub(crate) fn passed_var(
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    star_from: Option<u8>,
+    (index, keyword): (Option<u8>, Option<&str>),
+) -> Option<VarId> {
     if let Some(k) = keyword
         && let Some((_, v)) = kwargs.iter().find(|(name, _)| name.as_deref() == Some(k))
     {
-        return Some(fact(*v));
+        return Some(*v);
     }
     let i = index?;
     if star_from.is_some_and(|s| i >= s) {
         return None;
     }
-    args.get(usize::from(i)).map(|v| fact(*v))
+    args.get(usize::from(i)).copied()
 }
 
 /// The constant `var` holds (through copies), with `def` giving each variable's definition.

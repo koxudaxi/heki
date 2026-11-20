@@ -1980,3 +1980,40 @@ fn run_sync_callables_run_on_the_event_loop() {
         ]
     );
 }
+
+const FORWARDED_FLAGS: &str = r#"from concurrent.futures import ThreadPoolExecutor
+
+
+class Client:
+    def __init__(self):
+        self._executor = ThreadPoolExecutor()
+
+    def close(self, wait=True):
+        self._executor.shutdown(wait=wait)
+
+    async def aclose(self):
+        self.close(wait=False)
+
+    async def aclose_and_wait(self):
+        self.close()
+"#;
+
+/// A flag a helper passes on from its own parameter (`shutdown(wait=wait)`) is decided at the
+/// helper's call: `close(wait=False)` does not wait.
+#[test]
+fn forwarded_flags_are_decided_by_the_caller() {
+    assert_eq!(
+        check(
+            "catalog_forwarded_flags",
+            "app/client.py",
+            FORWARDED_FLAGS,
+            "EFF101"
+        ),
+        vec![d(
+            15,
+            "EFF101",
+            "Client.aclose_and_wait",
+            "concurrent.futures.ThreadPoolExecutor.shutdown"
+        )]
+    );
+}

@@ -562,7 +562,9 @@ argument (by position, the receiver not counted, or by keyword) is a given liter
 literal with a given prefix or not empty, or an instance of a given class (`pd.read_csv` of a
 `https://` URL is `blocking_net`, of an `io.StringIO` nothing); the first case that holds sets
 the call's `effects` and `return_type`, and an argument that is not passed, or may be passed
-through `*` / `**` unpacking, selects none. A file lists its `opaque_packages`. Projects add or
+through `*` / `**` unpacking, selects none. A boolean flag case (`equals = false`) whose argument
+is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: the effects it
+switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`): an
 override sets the keys it lists and keeps the built-in entry's others. An entry naming a project
