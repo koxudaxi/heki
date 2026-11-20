@@ -29,6 +29,30 @@ const TASK_FACTORIES: &[(&str, &str)] = &[
 /// alive up to that point (`add_done_callback`, `set_name`, ... do not).
 const LIFETIME_METHODS: &[&str] = &["cancel", "result", "exception"];
 
+/// The public methods of `asyncio.Task` and `asyncio.Future` (CPython 3.11 to 3.15): reading one
+/// from a task binds a method that holds the task. Other attributes (`task._state`,
+/// `task.__class__`) hold nothing of it.
+const TASK_METHODS: &[&str] = &[
+    "add_done_callback",
+    "cancel",
+    "cancelled",
+    "cancelling",
+    "done",
+    "exception",
+    "get_context",
+    "get_coro",
+    "get_loop",
+    "get_name",
+    "get_stack",
+    "print_stack",
+    "remove_done_callback",
+    "result",
+    "set_exception",
+    "set_name",
+    "set_result",
+    "uncancel",
+];
+
 pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.enabled("EFF107", unit) {
         return;
@@ -182,8 +206,8 @@ struct TaskFlow<'f> {
     copies: FxHashMap<VarId, Vec<VarId>>,
     /// The phis each value flows into.
     phis: FxHashMap<VarId, Vec<VarId>>,
-    /// The attributes read from each value (`task.cancel`).
-    attributes: FxHashMap<VarId, Vec<VarId>>,
+    /// The [`TASK_METHODS`] bound to each value (`task.cancel`).
+    methods: FxHashMap<VarId, Vec<VarId>>,
     /// The local name each `Copy` binds, with its source position.
     names: FxHashMap<VarId, (u32, &'f str)>,
     /// The call each value is the result of, through copies (`pending = e.wait()`).
@@ -214,8 +238,10 @@ impl<'f> TaskFlow<'f> {
                             flow.names.insert(*dst, (inst.span.start, name));
                         }
                     }
-                    InstKind::AttrLoad { dst, obj, .. } => {
-                        flow.attributes.entry(*obj).or_default().push(*dst);
+                    InstKind::AttrLoad { dst, obj, attr }
+                        if TASK_METHODS.contains(&attr.as_str()) =>
+                    {
+                        flow.methods.entry(*obj).or_default().push(*dst);
                     }
                     kind @ (InstKind::Call { dst, .. } | InstKind::MethodCall { dst, .. }) => {
                         calls.push((*dst, kind));
@@ -270,14 +296,13 @@ impl<'f> TaskFlow<'f> {
     }
 
     /// Whether an alias of the task, or a method bound to one (`task.cancel`, which holds the
-    /// task as its `__self__`; every public attribute of `asyncio.Task` is a method), is kept,
-    /// or whether an alias is ended by a [`LIFETIME_METHODS`] call on it. What is read from a
-    /// bound method (`task.cancel.__name__`) holds nothing.
+    /// task as its `__self__`), is kept, or whether an alias is ended by a [`LIFETIME_METHODS`]
+    /// call on it. What is read from a bound method (`task.cancel.__name__`) holds nothing.
     fn keeps(&self, aliases: &FxHashSet<VarId>) -> bool {
         let methods = self.aliases(
             aliases
                 .iter()
-                .flat_map(|a| self.attributes.get(a).into_iter().flatten().copied()),
+                .flat_map(|a| self.methods.get(a).into_iter().flatten().copied()),
         );
         aliases
             .iter()
