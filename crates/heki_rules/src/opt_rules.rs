@@ -12,10 +12,10 @@
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
-use heki_effect::{CONTAINER_MUTATORS, TypeCtx, Val, self_aliases};
+use heki_effect::{TypeCtx, Val};
 use heki_ir::{
-    BlockId, BuiltinKind, CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, LoopBound,
-    ModuleIr, NaturalLoop, PhiNode, Terminator, UnaryOpKind, VarId,
+    BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
+    LoopBound, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
 };
 use heki_soundness::{
     AnalysisOptions, OptCandidate, ProfitabilityTier, SafetyTier, analyze_module,
@@ -88,15 +88,106 @@ pub(crate) fn opt(
     }
 }
 
+// ============================================================================= loop sizes
+
+/// The Advisory lane's view of loop and container sizes: the shared IR facts
+/// (`heki_ir::FnIndex`: displays of this function, this module's constants, loop trip counts),
+/// extended to the small displays of other modules' globals and of instance attributes, which
+/// only the declarations know (`ProjectDecls::small_global` / `small_attr`, read through the
+/// recorded declarations so that the language server re-checks a reader when they change).
+pub(crate) struct Sizes<'a, 'c> {
+    cx: &'c CheckContext<'a>,
+    tcx: &'c TypeCtx<'a>,
+    /// Receiver types for attribute loads (empty: attributes are not resolved).
+    types: &'c FxHashMap<VarId, Val>,
+    pub ix: FnIndex<'c>,
+}
+
+impl<'a, 'c> Sizes<'a, 'c> {
+    pub(crate) fn new(
+        cx: &'c CheckContext<'a>,
+        tcx: &'c TypeCtx<'a>,
+        types: &'c FxHashMap<VarId, Val>,
+        f: &'c IrFunction,
+        unit: &'c ModuleUnit<'_>,
+    ) -> Self {
+        Self {
+            cx,
+            tcx,
+            types,
+            ix: FnIndex::new(f, &unit.input.ir.constants),
+        }
+    }
+
+    /// A data-sized loop: its trip count is not fixed by the code (`LoopBound::Unbounded`, the
+    /// IR's verdict), and it does not iterate a small display of another module or an
+    /// attribute (or a builtin wrapper of one: `enumerate(PREFIXES)`).
+    pub(crate) fn data_sized(&self, lp: &NaturalLoop) -> bool {
+        lp.bound == LoopBound::Unbounded
+            && !self.ix.loop_iterable(lp).is_some_and(|it| {
+                self.ix
+                    .iter_bound(it, &mut |inst| {
+                        let d = self.leaf_display(inst)?;
+                        self.ix.load_unchanged(inst.kind.dst()?).then_some(d.len)
+                    })
+                    .is_some()
+            })
+    }
+
+    /// `var` is a small display of `kinds` for its whole life: built in this function or bound
+    /// to a constant of this module (`FnIndex::container_bound`), or a small global of another
+    /// module or attribute display (`Self::leaf_display`) that this function does not grow.
+    pub(crate) fn small_container(&self, var: VarId, kinds: &[BuiltinKind]) -> bool {
+        if self.ix.container_bound(var).is_some() {
+            return true;
+        }
+        let mut v = var;
+        for _ in 0..16 {
+            let Some(inst) = self.ix.def_inst(v) else {
+                return false;
+            };
+            if let InstKind::Copy { src, .. } = &inst.kind {
+                v = *src;
+                continue;
+            }
+            return self
+                .leaf_display(inst)
+                .is_some_and(|d| d.is_of(kinds) && self.ix.load_unchanged(v));
+        }
+        false
+    }
+
+    /// The small display a load of a global or an attribute gives, by the declarations: a
+    /// module global (`NAME`, an imported `NAME`, `module.NAME`) or an instance attribute its
+    /// class family only ever stores such displays into (`self.preferred = [",", ";"]`, a
+    /// class attribute).
+    fn leaf_display(&self, inst: &Inst) -> Option<SmallDisplay> {
+        let decls = self.cx.decls;
+        match &inst.kind {
+            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+                let fqn = self.tcx.module.imports.get(name).map_or_else(
+                    || format!("{}.{name}", self.tcx.module_name()),
+                    |t| decls.canonical(t),
+                );
+                decls.small_global(&fqn).cloned()
+            }
+            InstKind::AttrLoad { obj, attr, .. } => match self.types.get(obj)? {
+                Val::Ref(module) => decls.small_global(&format!("{module}.{attr}")).cloned(),
+                Val::Inst(class) => decls.small_attr(class, attr),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
 // ==================================================================================== OPT112
 
 /// `list` methods that scan the whole list.
 const LINEAR_LIST_METHODS: &[&str] = &["index", "remove", "count"];
 
-/// The small constant displays a `list` receiver may be.
+/// The small displays a `list` receiver may be.
 const LIST: &[BuiltinKind] = &[BuiltinKind::List];
-/// The small constant displays a loop over a constant number of items may iterate.
-const SEQUENCES: &[BuiltinKind] = &[BuiltinKind::List, BuiltinKind::Tuple, BuiltinKind::Set];
 
 /// `OPT112`: `list.index()` / `list.remove()` / `list.count()` run again on every iteration of
 /// a data-sized loop, on a list that outlives the iteration (Advisory lane).
@@ -127,6 +218,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
         }
         let types = tcx.infer(f);
         let defs = Defs::new(f);
+        let sizes = Sizes::new(cx, &tcx, &types, f, unit);
         for (bb, span, recv, method) in calls {
             // Only a receiver that is certainly a builtin `list` (`set.remove`, `str.index`, a
             // project class's `remove`, or an unknown type are not linear scans of a list).
@@ -134,13 +226,12 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             // A data-sized loop (not a small constant range or display, a retry, or daemon
             // polling) runs the call again on the same list.
             let hot = f.loops.iter().any(|lp| {
-                lp.bound == LoopBound::Unbounded
-                    && lp.body.contains(&bb)
+                lp.body.contains(&bb)
                     && runs_again(f, lp, bb)
-                    && defs.lives_across(lp, recv, &mut FxHashSet::default())
-                    && !small_iteration(cx, &tcx, &types, &defs, lp)
+                    && sizes.ix.lives_across(lp, recv)
+                    && sizes.data_sized(lp)
             });
-            if !is_list || !hot || const_small(cx, &tcx, &types, &defs, recv, LIST) {
+            if !is_list || !hot || sizes.small_container(recv, LIST) {
                 continue;
             }
             let call = slice(unit.source, span);
@@ -189,199 +280,6 @@ fn runs_again(f: &IrFunction, lp: &NaturalLoop, bb: BlockId) -> bool {
     false
 }
 
-/// Whether `lp` iterates a small constant display (`for p in prefixes:` after `prefixes =
-/// ("a", "b")`): a constant number of iterations, as the loop bound of a literal display.
-fn small_iteration(
-    cx: &CheckContext<'_>,
-    tcx: &TypeCtx<'_>,
-    types: &FxHashMap<VarId, Val>,
-    defs: &Defs<'_>,
-    lp: &NaturalLoop,
-) -> bool {
-    defs.iterable(lp)
-        .is_some_and(|(iterable, _)| const_small(cx, tcx, types, defs, iterable, SEQUENCES))
-}
-
-/// `NotConstSmall` (as `OPT110`): every value `var` holds is a display (of `kinds`) of at most
-/// 8 constants that is never changed in place — built in this function, a module global of a
-/// checked module (`NAME`, an imported `NAME`, `module.NAME`), or an instance attribute its
-/// class only ever assigns such a display (`self.preferred = [",", ";"]`).
-fn const_small(
-    cx: &CheckContext<'_>,
-    tcx: &TypeCtx<'_>,
-    types: &FxHashMap<VarId, Val>,
-    defs: &Defs<'_>,
-    var: VarId,
-    kinds: &[BuiltinKind],
-) -> bool {
-    let global = |name: &str| {
-        tcx.module.imports.get(name).map_or_else(
-            || format!("{}.{name}", tcx.module_name()),
-            |t| cx.decls.canonical(t),
-        )
-    };
-    let mut found = Displays::default();
-    if !defs.displays(var, kinds, types, &global, &mut found) {
-        return false;
-    }
-    let alias = forward_aliases(defs.f, &found.roots);
-    // A display stored in a module global is that global: any function may change it.
-    for inst in defs.f.blocks.iter().flat_map(|b| &b.insts) {
-        if let InstKind::StoreGlobal { name, value } = &inst.kind
-            && alias.contains(value)
-        {
-            found.globals.push(global(name));
-        }
-    }
-    !changes(defs.f, &alias)
-        && found.globals.iter().all(|fqn| {
-            // A global of a module that is not checked (the LSP checks one file) is unknown:
-            // not reported.
-            fqn.rsplit_once('.').is_none_or(|(module, name)| {
-                cx.units
-                    .iter()
-                    .find(|u| u.input.module_name == module)
-                    .is_none_or(|u| global_display(u.input.ir, name, kinds))
-            })
-        })
-        && found
-            .attrs
-            .iter()
-            .all(|(class, attr)| attr_display(cx, class, attr, kinds))
-}
-
-/// Whether the module global `name` of `ir` holds a small constant display (see
-/// [`stored_display`]); its stores are the module body's and `global` statements'.
-fn global_display(ir: &ModuleIr, name: &str, kinds: &[BuiltinKind]) -> bool {
-    stored_display(&ir.functions, kinds, |g| {
-        let mut stores = Vec::new();
-        let mut loads = Vec::new();
-        for inst in g.blocks.iter().flat_map(|b| &b.insts) {
-            match &inst.kind {
-                InstKind::StoreGlobal { name: n, value } if n == name => stores.push(*value),
-                InstKind::LoadGlobal { dst, name: n, .. } | InstKind::LoadName { dst, name: n }
-                    if n == name =>
-                {
-                    loads.push(*dst);
-                }
-                _ => {}
-            }
-        }
-        (stores, loads)
-    })
-}
-
-/// Whether the attribute `attr` of instances of project class `class` holds a small constant
-/// display (see [`stored_display`]); its stores are `self.<attr> = ...` in the methods of the
-/// class and its subclasses (in the checked files) and `<attr> = ...` in their bodies.
-fn attr_display(cx: &CheckContext<'_>, class: &str, attr: &str, kinds: &[BuiltinKind]) -> bool {
-    let mut family = cx.decls.subclasses_of(class);
-    family.push(class.to_owned());
-    let methods: Vec<&IrFunction> = cx
-        .units
-        .iter()
-        .filter_map(|u| {
-            // The family's classes defined in this module, by module-relative qualname.
-            let owners: Vec<&str> = family
-                .iter()
-                .filter_map(|c| {
-                    c.strip_prefix(u.input.module_name.as_str())?
-                        .strip_prefix('.')
-                })
-                .collect();
-            (!owners.is_empty()).then_some((u, owners))
-        })
-        .flat_map(|(u, owners)| {
-            u.input.ir.functions.iter().filter(move |f| {
-                f.owner_class_qualname
-                    .as_deref()
-                    .is_some_and(|q| owners.contains(&q))
-            })
-        })
-        .collect();
-    stored_display(methods, kinds, |g| {
-        let selfs = g
-            .params
-            .first()
-            .map(|p| self_aliases(g, p.var))
-            .unwrap_or_default();
-        let mut stores = Vec::new();
-        let mut loads = Vec::new();
-        for inst in g.blocks.iter().flat_map(|b| &b.insts) {
-            match &inst.kind {
-                // A class attribute: `attr = [...]` in the class body.
-                InstKind::Copy { dst, src }
-                    if g.is_class_body && g.var_name(*dst) == Some(attr) =>
-                {
-                    stores.push(*src);
-                }
-                InstKind::AttrStore {
-                    obj,
-                    attr: a,
-                    value,
-                } if a == attr && selfs.contains(obj) => {
-                    stores.push(*value);
-                }
-                InstKind::AttrLoad { dst, obj, attr: a } if a == attr && selfs.contains(obj) => {
-                    loads.push(*dst);
-                }
-                _ => {}
-            }
-        }
-        (stores, loads)
-    })
-}
-
-/// Whether a variable (a module global, an instance attribute) holds a display (of `kinds`) of
-/// at most 8 constants that nobody changes in place: `accesses` gives the values each function
-/// stores in it and its loads of it; it is stored at least once, every store is such a
-/// display, and no function changes a stored display or a loaded value.
-fn stored_display<'f>(
-    functions: impl IntoIterator<Item = &'f IrFunction>,
-    kinds: &[BuiltinKind],
-    accesses: impl Fn(&'f IrFunction) -> (Vec<VarId>, Vec<VarId>),
-) -> bool {
-    let no_types = FxHashMap::default();
-    let mut stored = false;
-    let unchanged = functions.into_iter().all(|g| {
-        let (stores, loads) = accesses(g);
-        let defs = Defs::new(g);
-        let mut found = Displays {
-            roots: loads,
-            ..Displays::default()
-        };
-        stored |= !stores.is_empty();
-        stores
-            .iter()
-            .all(|v| defs.displays(*v, kinds, &no_types, &|n| n.to_owned(), &mut found))
-            && found.globals.is_empty()
-            && !changes(g, &forward_aliases(g, &found.roots))
-    });
-    stored && unchanged
-}
-
-/// Whether `f` may change an object held in `alias` in place: a mutating method, a subscript
-/// store or deletion, an augmented assignment.
-fn changes(f: &IrFunction, alias: &FxHashSet<VarId>) -> bool {
-    f.blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .any(|inst| match &inst.kind {
-            InstKind::MethodCall { recv, method, .. } => {
-                alias.contains(recv) && CONTAINER_MUTATORS.contains(&method.as_str())
-            }
-            InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
-                alias.contains(obj)
-            }
-            InstKind::BinOp {
-                lhs,
-                in_place: true,
-                ..
-            } => alias.contains(lhs),
-            _ => false,
-        })
-}
-
 /// `roots` plus every variable that may hold the same value: `Copy` results and phis with
 /// such an input.
 fn forward_aliases(f: &IrFunction, roots: &[VarId]) -> FxHashSet<VarId> {
@@ -406,18 +304,6 @@ fn forward_aliases(f: &IrFunction, roots: &[VarId]) -> FxHashSet<VarId> {
             return alias;
         }
     }
-}
-
-/// What a value may hold, as collected by [`Defs::displays`].
-#[derive(Default)]
-struct Displays {
-    /// The displays (and, for a stored variable, the loads of it) to check for changes.
-    roots: Vec<VarId>,
-    /// Module globals, as fqns.
-    globals: Vec<String>,
-    /// Instance attributes: `(class fqn, attribute)`.
-    attrs: Vec<(String, String)>,
-    seen: FxHashSet<VarId>,
 }
 
 /// Source text of `span`.
@@ -471,87 +357,6 @@ impl<'a> Defs<'a> {
         self.insts.get(&var).map(|(_, i)| &i.kind)
     }
 
-    /// Whether the object `var` holds outlives one iteration of `lp`: through `Copy`,
-    /// `AttrLoad`, and `SubscriptLoad` by a loop-invariant index, its base object is a
-    /// parameter, a global, defined before the loop, a loop-carried phi of the loop header, or
-    /// a phi merging only such objects. A list built in the iteration (`parts = [...]`) or an
-    /// attribute of the loop element (`row.cells`) does not.
-    fn lives_across(&self, lp: &NaturalLoop, var: VarId, seen: &mut FxHashSet<VarId>) -> bool {
-        if let Some((bb, phi)) = self.phis.get(&var) {
-            return *bb == lp.header
-                || !lp.body.contains(bb)
-                || (seen.insert(var)
-                    && phi
-                        .incoming
-                        .iter()
-                        .all(|(_, v)| self.lives_across(lp, *v, seen)));
-        }
-        match self.insts.get(&var) {
-            Some((bb, inst)) if lp.body.contains(bb) => match &inst.kind {
-                InstKind::Copy { src: v, .. } | InstKind::AttrLoad { obj: v, .. } => {
-                    self.lives_across(lp, *v, seen)
-                }
-                InstKind::SubscriptLoad { obj, index, .. } => {
-                    self.lives_across(lp, *obj, seen) && self.lives_across(lp, *index, seen)
-                }
-                InstKind::LoadGlobal { .. }
-                | InstKind::LoadDeref { .. }
-                | InstKind::LoadName { .. }
-                | InstKind::Const { .. } => true,
-                _ => false,
-            },
-            // A parameter, or defined before the loop.
-            _ => true,
-        }
-    }
-
-    /// Collect the displays of `kinds` (into `found.roots`), module globals (`found.globals`,
-    /// as fqns from `global`), and instance attributes (`found.attrs`) that `var` may hold,
-    /// through `Copy` and phis: `false` when it may hold a display of more than 8 elements or
-    /// of non-constants, or any other value.
-    fn displays(
-        &self,
-        var: VarId,
-        kinds: &[BuiltinKind],
-        types: &FxHashMap<VarId, Val>,
-        global: &dyn Fn(&str) -> String,
-        found: &mut Displays,
-    ) -> bool {
-        if let Some((_, phi)) = self.phis.get(&var) {
-            return !found.seen.insert(var)
-                || phi
-                    .incoming
-                    .iter()
-                    .all(|(_, v)| self.displays(*v, kinds, types, global, found));
-        }
-        match self.kind(var) {
-            Some(InstKind::Copy { src, .. }) => self.displays(*src, kinds, types, global, found),
-            Some(InstKind::AllocBuiltin { kind, elems, .. }) if kinds.contains(kind) => {
-                found.roots.push(var);
-                elems.len() <= 8
-                    && elems
-                        .iter()
-                        .all(|e| matches!(self.kind(*e), Some(InstKind::Const { .. })))
-            }
-            Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }) => {
-                found.globals.push(global(name));
-                true
-            }
-            Some(InstKind::AttrLoad { obj, attr, .. }) => match types.get(obj) {
-                Some(Val::Ref(module)) => {
-                    found.globals.push(format!("{module}.{attr}"));
-                    true
-                }
-                Some(Val::Inst(class)) => {
-                    found.attrs.push((class.clone(), attr.clone()));
-                    true
-                }
-                _ => false,
-            },
-            _ => false,
-        }
-    }
-
     /// Source form of a receiver: `items`, `self.items`, `config.names`.
     fn receiver_name(&self, var: VarId) -> Option<String> {
         match self.kind(var) {
@@ -590,12 +395,6 @@ impl<'a> Defs<'a> {
                 InstKind::IterNext { dst, iter, .. } => Some((*dst, *iter)),
                 _ => None,
             })
-    }
-
-    /// The iterable of the `for` loop `lp` and its span; `None` for a `while` loop.
-    fn iterable(&self, lp: &NaturalLoop) -> Option<(VarId, Span)> {
-        let (_, iter) = self.next_of(lp)?;
-        self.iterables.get(&iter).copied()
     }
 
     /// `elem` and the values derived from it: copies, unpacked components and constant-key
@@ -681,8 +480,10 @@ impl<'a> Defs<'a> {
     /// Whether the comparison `cmp` selects the pairs a join keeps: through `Copy` and `and` it
     /// decides a branch; it is never negated, never one alternative of an `or`, never picks a
     /// value for every pair (`x if a == b else y`, an `else` assigning what the `then`
-    /// assigns), and its true side never just continues the loop (`if a == b: continue` skips
-    /// the self-pairs of an all-pairs loop).
+    /// assigns), its true side never just continues the loop (`if a == b: continue` skips
+    /// the self-pairs of an all-pairs loop), and its false side does nothing: an `else` /
+    /// `elif` body, an `assert`'s failure, a `break` or a `return` there runs for the pairs an
+    /// index would skip (`if i == j: ... else: ...` and `assert a == b` check every pair).
     fn selects_pairs(&self, cmp: VarId) -> bool {
         let alias = forward_aliases(self.f, &[cmp]);
         let negated = self.f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
@@ -718,13 +519,29 @@ impl<'a> Defs<'a> {
                     && self.f.loops.iter().all(|lp| lp.header != *m)
                     && self.f.block(*m).phis.iter().any(|p| p.incoming.iter().any(|(from, _)| *from == e)))
         });
+        let preds = self.f.predecessors();
         !negated
             && !alternative
             && !picks_value
             && !branches.is_empty()
-            && branches
-                .iter()
-                .all(|&(from, then_bb, _)| !self.continues(from, then_bb))
+            && branches.iter().all(|&(from, then_bb, else_bb)| {
+                !self.continues(from, then_bb) && !self.false_side_works(&preds, else_bb)
+            })
+    }
+
+    /// Whether the false side of a branch, block `to`, does something: it is entered from the
+    /// branch only (no `if` without `else` merges there) and runs code, raises, returns, or
+    /// leaves the loop, rather than going straight on (`else: pass`, `else: continue`).
+    fn false_side_works(&self, preds: &[Vec<BlockId>], to: BlockId) -> bool {
+        if preds[to.0 as usize].len() != 1 {
+            return false;
+        }
+        let b = self.f.block(to);
+        let goes_on = b.insts.is_empty()
+            && b.phis.is_empty()
+            && matches!(b.terminator, Terminator::Jump(t)
+                if !self.f.loops.iter().any(|lp| lp.exits.contains(&t)));
+        !goes_on
     }
 
     /// Whether block `to`, entered from block `from`, only continues a loop containing `from`.
@@ -804,13 +621,12 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             continue;
         }
         let defs = Defs::new(f);
+        let sizes = Sizes::new(cx, &tcx, &no_types, f, unit);
         // Both loops are data-sized `for` loops (inlined comprehensions included).
         let fors: Vec<ForLoop<'_>> = f
             .loops
             .iter()
-            .filter(|lp| {
-                lp.bound == LoopBound::Unbounded && !small_iteration(cx, &tcx, &no_types, &defs, lp)
-            })
+            .filter(|lp| sizes.data_sized(lp))
             .filter_map(|lp| defs.for_loop(lp))
             .collect();
         for inner in &fors {

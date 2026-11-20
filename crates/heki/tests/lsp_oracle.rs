@@ -115,6 +115,18 @@ const CONFIGURE: &str = "from pkg.frozen.helpers import add_default, clear_names
 const LOOPS: &str = "def member(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n";
 const COMPAT: &str = "import builtins\n\nbuiltins.len = len\n";
 
+// Small displays other files read (`OPT112`): a module-level list another module scans in a
+// loop, and an instance attribute whose class family (a subclass in a third module) may grow it.
+const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
+const LEVELS_GROWN: &str =
+    "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";
+const LEVELS_USER: &str = "from pkg.levels import LEVELS\n\n\ndef ranks(xs):\n    out = []\n    for x in xs:\n        out.append(LEVELS.index(x))\n    return out\n";
+const SNIFF: &str =
+    "class Sniffer:\n    def __init__(self):\n        self.preferred = [\",\", \";\"]\n";
+const SNIFF_MORE: &str = "from pkg.sniff import Sniffer\n\n\nclass Wider(Sniffer):\n    pass\n";
+const SNIFF_MORE_GROWING: &str = "from pkg.sniff import Sniffer\n\n\nclass Wider(Sniffer):\n    def widen(self, d):\n        self.preferred.append(d)\n";
+const SNIFF_USER: &str = "from pkg.sniff import Sniffer\n\n\ndef guess(s: Sniffer, rows):\n    for row in rows:\n        s.preferred.index(row)\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -154,6 +166,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/frozen/configure.py", CONFIGURE),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
+        ("pkg/levels.py", LEVELS),
+        ("pkg/levels_user.py", LEVELS_USER),
+        ("pkg/sniff.py", SNIFF),
+        ("pkg/sniff_more.py", SNIFF_MORE),
+        ("pkg/sniff_user.py", SNIFF_USER),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -247,6 +264,35 @@ fn steps_mut108() -> Vec<Step> {
             vec![save("pkg/frozen/model.py", FROZEN_MODEL)],
         )
         .absent(&[("pkg/frozen/configure.py", "MUT108")]),
+    ]
+}
+
+/// `OPT112`'s small displays in other files, read through the declarations
+/// (`ModuleDecls::small_globals`, `ClassDecl::attr_displays`): the user of a module-level list
+/// is re-checked when another function starts growing the list, and the user of an attribute
+/// when a subclass in a third module starts growing it.
+fn steps_small_displays() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a module-level list another file scans in a loop starts growing",
+            vec![save("pkg/levels.py", LEVELS_GROWN)],
+        )
+        .present(&[("pkg/levels_user.py", "OPT112")]),
+        Step::new(
+            "the module-level list is a small display again",
+            vec![save("pkg/levels.py", LEVELS)],
+        )
+        .absent(&[("pkg/levels_user.py", "OPT112")]),
+        Step::new(
+            "a subclass in another module grows an attribute another file scans",
+            vec![save("pkg/sniff_more.py", SNIFF_MORE_GROWING)],
+        )
+        .present(&[("pkg/sniff_user.py", "OPT112")]),
+        Step::new(
+            "the subclass stops growing it",
+            vec![save("pkg/sniff_more.py", SNIFF_MORE)],
+        )
+        .absent(&[("pkg/sniff_user.py", "OPT112")]),
     ]
 }
 
@@ -344,6 +390,7 @@ fn steps() -> Vec<Step> {
     // 4. `MUT108`, then the place reserved for `MUT110`.
     steps.extend(steps_mut108());
     steps.extend(steps_mut110());
+    steps.extend(steps_small_displays());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(

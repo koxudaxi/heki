@@ -13,7 +13,7 @@
 
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
-use heki_ir::{FunctionKind, Inst, InstKind, IrFunction, ModuleIr, VarId};
+use heki_ir::{FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId};
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -184,6 +184,13 @@ pub struct ClassDecl {
     /// `@dataclass_transform(...)` on this class (as a base class or metaclass of the classes it
     /// builds): `Some(frozen_default)`.
     pub transform: Option<bool>,
+    /// What the class's own body and methods store in its attributes (`attr = [...]` in the
+    /// body, `self.attr = ...` in a method): `Some` when every store is a small display that
+    /// none of them grows (`heki_ir::FnIndex::stored_display`), `None` when an attribute is
+    /// stored anything else, deleted, or grown through `self` (`OPT112` / `OPT113` read the
+    /// attributes of a class family through [`ProjectDecls::small_attr`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attr_displays: BTreeMap<String, Option<SmallDisplay>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +241,11 @@ pub struct ModuleDecls {
     pub functions: BTreeMap<String, FunctionDecl>,
     /// Module global `name -> class fqn` of the instance it holds (`client = httpx.Client()`).
     pub global_types: BTreeMap<String, String>,
+    /// Module globals bound to a small display that no function of the module grows
+    /// (`heki_ir::ModuleConstants::displays`): other modules read them through
+    /// [`ProjectDecls::small_global`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub small_globals: BTreeMap<String, SmallDisplay>,
 }
 
 impl ModuleDecls {
@@ -1021,6 +1033,43 @@ impl ProjectDecls {
         self.typed_dicts.contains(class)
     }
 
+    /// The small display the module global `fqn` of a project module holds
+    /// (`ModuleDecls::small_globals`), through re-exports.
+    pub fn small_global(&self, fqn: &str) -> Option<&SmallDisplay> {
+        let fqn = self.canonical(fqn);
+        let (m, rest) = self.split_module(&fqn)?;
+        m.small_globals.get(rest)
+    }
+
+    /// The small display attribute `attr` of an instance of the project class `class` holds:
+    /// `class` and its project subclasses store it at least once and only ever small displays
+    /// that none of them grows (`ClassDecl::attr_displays`; the kinds and the longest one).
+    pub fn small_attr(&self, class: &str, attr: &str) -> Option<SmallDisplay> {
+        let class = self.canonical(class);
+        let mut family = self.subclasses_of(&class);
+        family.push(class);
+        let mut out: Option<SmallDisplay> = None;
+        for c in &family {
+            match self.class(c)?.attr_displays.get(attr) {
+                Some(Some(d)) => {
+                    let merged = out.get_or_insert_with(|| SmallDisplay {
+                        kinds: Vec::new(),
+                        len: 0,
+                    });
+                    merged.len = merged.len.max(d.len);
+                    for k in &d.kinds {
+                        if !merged.kinds.contains(k) {
+                            merged.kinds.push(*k);
+                        }
+                    }
+                }
+                Some(None) => return None,
+                None => {}
+            }
+        }
+        out
+    }
+
     /// The module-relative qualname of the project class `fqn` (`Outer.Inner`).
     pub fn class_qualname<'f>(&self, fqn: &'f str) -> Option<&'f str> {
         let (m, rest) = self.split_module(fqn)?;
@@ -1493,7 +1542,82 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         decls.functions.insert(f.qualname.clone(), decl);
     }
     readonly_metadata(input, &mut decls);
+    decls.small_globals = input.ir.constants.displays.clone();
+    attr_displays(input, &mut decls);
     decls
+}
+
+/// `ClassDecl::attr_displays` of the module's classes: the stores of their bodies and methods
+/// (through `self`), and their in-place changes, decided by the shared `heki_ir` facts.
+fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
+    for f in &input.ir.functions {
+        let (owner, selfs) = if f.is_class_body {
+            (f.qualname.as_str(), FxHashSet::default())
+        } else {
+            match (&f.owner_class_qualname, f.params.first()) {
+                (Some(owner), Some(p))
+                    if is_summarized_function(f)
+                        && !f.has_decorator(&["staticmethod", "classmethod"]) =>
+                {
+                    (owner.as_str(), self_aliases(f, p.var))
+                }
+                _ => continue,
+            }
+        };
+        let Some(class) = decls.classes.get_mut(owner) else {
+            continue;
+        };
+        let ix = FnIndex::new(f, &input.ir.constants);
+        let map = &mut class.attr_displays;
+        for bb in &f.blocks {
+            for (i, inst) in bb.insts.iter().enumerate() {
+                match &inst.kind {
+                    // A class attribute: `attr = [...]` in the class body.
+                    InstKind::Copy { dst, src } if f.is_class_body => {
+                        if let Some(attr) = f.var_name(*dst).filter(|n| !n.starts_with('.')) {
+                            note_attr(map, attr, ix.stored_display(*src, (bb.id, i)));
+                        }
+                    }
+                    InstKind::AttrStore { obj, attr, value } if selfs.contains(obj) => {
+                        note_attr(map, attr, ix.stored_display(*value, (bb.id, i)));
+                    }
+                    InstKind::AttrDelete { obj, attr } if selfs.contains(obj) => {
+                        note_attr(map, attr, None);
+                    }
+                    InstKind::AttrLoad { dst, obj, attr }
+                        if selfs.contains(obj) && !ix.load_unchanged(*dst) =>
+                    {
+                        note_attr(map, attr, None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Record one store (`Some`: of a small display) or change (`None`) of `attr`.
+fn note_attr(
+    map: &mut BTreeMap<String, Option<SmallDisplay>>,
+    attr: &str,
+    event: Option<SmallDisplay>,
+) {
+    let Some(slot) = map.get_mut(attr) else {
+        map.insert(attr.to_owned(), event);
+        return;
+    };
+    *slot = match (slot.take(), event) {
+        (Some(mut a), Some(b)) => {
+            a.len = a.len.max(b.len);
+            for k in b.kinds {
+                if !a.kinds.contains(&k) {
+                    a.kinds.push(k);
+                }
+            }
+            Some(a)
+        }
+        _ => None,
+    };
 }
 
 /// `FunctionDecl::readonly_params` and `FunctionDecl::mutable_params` of `f`.
@@ -1817,6 +1941,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     classes: BTreeMap::new(),
     functions: BTreeMap::new(),
     global_types: BTreeMap::new(),
+    small_globals: BTreeMap::new(),
 };
 
 impl<'a> TypeCtx<'a> {

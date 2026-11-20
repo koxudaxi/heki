@@ -407,3 +407,35 @@ fn watch_reports_what_check_reports() {
     let json = |text: &[u8]| -> serde_json::Value { serde_json::from_slice(text).unwrap() };
     assert_eq!(json(&watch.stdout), json(check.as_bytes()));
 }
+
+const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
+const LEVELS_GROWN: &str =
+    "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";
+const LEVELS_USER: &str = "from pkg.levels import LEVELS\n\n\ndef ranks(xs):\n    out = []\n    for x in xs:\n        out.append(LEVELS.index(x))\n    return out\n";
+
+#[test]
+fn watch_rechecks_the_user_of_a_small_display_in_another_file() {
+    // `OPT112` skips scans of a small display; whether another module's list is one comes
+    // from that module's declarations, so re-checking only the user (the watch re-checks the
+    // files a change affects) reports what checking the whole project reports.
+    let p = Project::new("watch_small_display");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/levels.py", LEVELS)
+        .write("pkg/user.py", LEVELS_USER);
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "2");
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 3 file(s)");
+    p.write("pkg/levels.py", LEVELS_GROWN);
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 3 file(s)");
+    let (code, check, _) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{check}");
+    assert!(check.starts_with("pkg/user.py:7:20: OPT112 "), "{check}");
+    p.write("pkg/levels.py", LEVELS);
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 3 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout, check,
+        "the watch's re-check of the user equals `heki check`"
+    );
+}
