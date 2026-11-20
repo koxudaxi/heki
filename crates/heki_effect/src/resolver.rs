@@ -1345,8 +1345,9 @@ impl ProjectDecls {
                 Some((f, t)) => (f, Some(t)),
                 None => (rest, None),
             };
-            // `imports` holds the names an import binds last (`rebound_imports`): a class or
-            // function of the same name is shadowed by it.
+            // `imports` holds the names an import binds once the module has run
+            // (`ModuleImport::rebound_at`): a class or function of the same name is shadowed by
+            // it.
             let Some(target) = m.imports.get(first) else {
                 break;
             };
@@ -2027,46 +2028,6 @@ pub(crate) fn project_decls_for(
 }
 
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.
-/// The imported names the module body binds again after the import, in the same straight-line
-/// code (no other block stores them): `from time import sleep` followed by `def sleep(...)`.
-/// The functions of the module run after its body, so they see the later binding. A name bound
-/// on different paths (`try: from fast import f` / `except ImportError: def f(...)`) keeps its
-/// import.
-fn rebound_imports(body: &IrFunction) -> Vec<String> {
-    let imported: FxHashSet<VarId> = body
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|inst| match &inst.kind {
-            InstKind::Import { dst, .. } => Some(*dst),
-            _ => None,
-        })
-        .collect();
-    // Per stored name: its only block (`None`: several), whether an import stores it, and
-    // whether its last store does.
-    let mut stores: BTreeMap<&str, (Option<usize>, bool, bool)> = BTreeMap::new();
-    for (i, block) in body.blocks.iter().enumerate() {
-        for inst in &block.insts {
-            if let InstKind::StoreGlobal { name, value } = &inst.kind {
-                let import = imported.contains(value);
-                let entry = stores.entry(name).or_insert((Some(i), false, false));
-                if entry.0 != Some(i) {
-                    entry.0 = None;
-                }
-                entry.1 |= import;
-                entry.2 = import;
-            }
-        }
-    }
-    stores
-        .into_iter()
-        .filter(|(_, (block, any_import, last_import))| {
-            block.is_some() && *any_import && !last_import
-        })
-        .map(|(name, _)| name.to_owned())
-        .collect()
-}
-
 fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     let semantic = input.semantic;
     let module_scope = module_scope(semantic);
@@ -2075,6 +2036,8 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         is_package: input.is_package,
         ..ModuleDecls::default()
     };
+    // Imports a later statement rebinds: `(name, target, end of the import, the rebinding)`.
+    let mut shadowed: Vec<(&str, String, u32, u32)> = Vec::new();
     for imp in &semantic.imports {
         if Some(imp.scope) != module_scope {
             continue;
@@ -2086,12 +2049,11 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls
                 .type_checking_imports
                 .insert(imp.bound_name.clone(), target);
-        } else if !imp.overridden {
+        } else if let Some(at) = imp.rebound_at {
+            shadowed.push((&imp.bound_name, target, imp.span.end, at));
+        } else {
             decls.imports.insert(imp.bound_name.clone(), target);
         }
-    }
-    for name in rebound_imports(input.ir.function(input.ir.module_fn)) {
-        decls.imports.remove(&name);
     }
     for class in &semantic.classes {
         decls
@@ -2122,12 +2084,28 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     }
     // Resolve bases, class keywords, and annotations now that local names are known.
     for class in &semantic.classes {
+        // A module-level class statement evaluates its bases before it binds its own name: a
+        // base named by an import that a later statement (this one, or one after it) rebinds
+        // is the imported class (`from pkg.base import Parser`, then `class Parser(Parser)`).
+        let imported_here = |name: &str| {
+            let at = class.span.start;
+            shadowed
+                .iter()
+                .find(|(n, _, end, rebound)| *n == name && *end < at && at <= *rebound)
+                .filter(|_| !class.qualname.contains('.'))
+                .map(|(_, target, _, _)| target)
+        };
         let bases: Vec<String> = class
             .bases
             .iter()
             .filter_map(|b| {
                 let head = b.split('[').next().unwrap_or(b).trim();
-                decls.resolve_dotted(head, false)
+                let (first, rest) = head.split_once('.').unwrap_or((head, ""));
+                match imported_here(first) {
+                    Some(target) if rest.is_empty() => Some(target.clone()),
+                    Some(target) => Some(format!("{target}.{rest}")),
+                    None => decls.resolve_dotted(head, false),
+                }
             })
             .collect();
         let keyword = |name: &str| {

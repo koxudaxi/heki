@@ -844,3 +844,99 @@ async def on_file(f: FileSink):
     );
     assert_eq!(chain(29).len(), 3);
 }
+
+/// A class statement evaluates its bases before it binds its own name: `class Parser(Parser)`
+/// derives from the `Parser` the module imported, whose methods it inherits. A base the module
+/// rebound before the class statement is the new binding.
+const SHADOWING_BASES: &str = r#"import time
+
+from pkg.parser_base import Parser
+
+
+class Mixin:
+    def extra(self):
+        time.sleep(1)
+
+
+class Parser(Parser, Mixin):
+    def own(self):
+        return 2
+
+
+async def through_both(p: Parser):
+    p.extra()  # EFF101
+    p.parse()  # EFF101
+"#;
+
+/// A base reached through a module the class's own name shadows.
+const SHADOWING_MODULE: &str = r#"from pkg import parser_base
+
+
+class parser_base(parser_base.Parser):
+    pass
+
+
+async def through_module(p: parser_base):
+    p.parse()  # EFF101
+"#;
+
+/// Classes deriving from each other (Python rejects the second statement): the MRO walks
+/// each class once.
+const CYCLE: &str = r#"import time
+
+
+class Mixin:
+    def read(self):
+        time.sleep(1)
+
+
+class A(B, Mixin):
+    pass
+
+
+class B(A):
+    pass
+
+
+async def on_cycle(a: A):
+    a.read()  # EFF101
+"#;
+
+const REBOUND_FIRST: &str = r#"from pkg.parser_base import Parser
+
+
+class Parser:
+    def parse(self):
+        return 1
+
+
+class Child(Parser):
+    pass
+
+
+async def through_local(c: Child):
+    c.parse()
+"#;
+
+const PARSER_BASE: &str = r#"import time
+
+
+class Parser:
+    def parse(self):
+        time.sleep(1)
+"#;
+
+#[test]
+fn a_class_derives_from_the_import_its_own_name_shadows() {
+    check_marks(
+        "shadowing_bases",
+        &[
+            ("pkg/parser_base.py", PARSER_BASE),
+            ("pkg/shadowing.py", SHADOWING_BASES),
+            ("pkg/shadowing_module.py", SHADOWING_MODULE),
+            ("pkg/rebound.py", REBOUND_FIRST),
+            ("pkg/cycle.py", CYCLE),
+        ],
+        &["EFF101"],
+    );
+}

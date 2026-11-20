@@ -2192,7 +2192,7 @@ if DEBUG:
 ";
     let m = dump_source("dump-semantic", "fe_overridden_imports", source, "py312");
     for name in ["APPS", "MIDDLEWARE", "ROOT", "handlers", "first", "rest"] {
-        assert_eq!(import(&m, name)["overridden"], true, "{name}");
+        assert!(import(&m, name)["rebound_at"].is_u64(), "{name}");
     }
-    assert_ne!(import(&m, "DEBUG")["overridden"], true);
+    assert!(import(&m, "DEBUG")["rebound_at"].is_null());
 }

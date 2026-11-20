@@ -71,11 +71,13 @@ pub struct ModuleImport {
     pub is_from: bool,
     pub is_lazy: bool,
     pub in_type_checking: bool,
-    /// A later statement of the module body that always runs rebinds `bound_name`
-    /// (`from time import sleep`, then `def sleep(n): ...`): once the module has run, the name
-    /// no longer holds the import.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub overridden: bool,
+    /// The start of the first later statement of the module body that always runs and rebinds
+    /// `bound_name` (`from time import sleep`, then `def sleep(n): ...`): once the module has
+    /// run, the name no longer holds the import; a statement from there on sees the new
+    /// binding, except the bases of a class statement rebinding it (`class Parser(Parser)`),
+    /// which are evaluated before it binds its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebound_at: Option<u32>,
     pub span: Span,
 }
 
@@ -468,21 +470,26 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// Mark the module-scope imports a later module-body statement always rebinds.
+    /// Mark the module-scope imports a later module-body statement always rebinds
+    /// (`ModuleImport::rebound_at`).
     fn mark_overridden_imports(&mut self, suite: &[Stmt]) {
-        let mut rebinds: FxHashMap<&str, u32> = FxHashMap::default();
+        // Per name, the starts of the statements binding it, in order.
+        let mut rebinds: FxHashMap<&str, Vec<u32>> = FxHashMap::default();
         let mut names = Vec::new();
         for stmt in suite {
             names.clear();
             unconditional_bindings(stmt, &mut names);
             for name in &names {
-                rebinds.insert(name, stmt.range().start().to_u32());
+                rebinds
+                    .entry(name)
+                    .or_default()
+                    .push(stmt.range().start().to_u32());
             }
         }
         for imp in self.imports.iter_mut().filter(|i| i.scope == ScopeId(0)) {
-            imp.overridden = rebinds
+            imp.rebound_at = rebinds
                 .get(imp.bound_name.as_str())
-                .is_some_and(|&last| last > imp.span.end);
+                .and_then(|starts| starts.iter().copied().find(|&s| s > imp.span.end));
         }
     }
 
@@ -772,7 +779,7 @@ impl<'a> Analyzer<'a> {
                         is_from: false,
                         is_lazy: imp.is_lazy,
                         in_type_checking: self.in_type_checking,
-                        overridden: false,
+                        rebound_at: None,
                         span: Span::from(alias.range),
                     });
                 }
@@ -812,7 +819,7 @@ impl<'a> Analyzer<'a> {
                         is_from: true,
                         is_lazy: imp.is_lazy,
                         in_type_checking: self.in_type_checking,
-                        overridden: false,
+                        rebound_at: None,
                         span: Span::from(alias.range),
                     });
                 }
