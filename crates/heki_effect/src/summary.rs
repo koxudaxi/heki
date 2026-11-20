@@ -15,9 +15,10 @@ use crate::resolver::{
 };
 use crate::{
     ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget,
-    Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, Items,
-    ModuleInput, NewArg, NewCond, NewKind, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner,
-    SharedLine, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
+    Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject,
+    Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, PerItem, ProjectDecls, ReadKind,
+    ReturnsNew, Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite,
+    Unresolved,
     UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
@@ -1133,13 +1134,27 @@ impl<'a> Extractor<'a> {
             .filter(|a| a.classes.len() == 1)
             .map(|a| (a.classes[0].clone(), a.attr.clone()));
         let typed_instance = self.project_class(var);
+        let implementers = typed_instance
+            .as_deref()
+            .filter(|_| self.ownership)
+            .and_then(|class| self.cx.project.protocol(class))
+            .map(|listed| match listed {
+                Some(classes) => Implementers::Listed(classes.to_vec()),
+                None => Implementers::Unlisted,
+            });
+        let instances = match &implementers {
+            Some(Implementers::Listed(classes)) => classes.as_slice(),
+            Some(Implementers::Unlisted) => &[],
+            None => typed_instance.as_slice(),
+        };
         ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
-            targets: self.arg_targets(typed_field.as_ref(), typed_instance.as_deref()),
+            targets: self.arg_targets(typed_field.as_ref(), instances),
             typed_field,
             typed_instance,
+            implementers,
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
             reach: self.reach_of(var),
@@ -1148,12 +1163,12 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// [`ArgOrigin::targets`] of an argument that is the field `field` and an instance of
-    /// `instance` (`None` without an `invalidation` contract naming either).
+    /// [`ArgOrigin::targets`] of an argument that is the field `field` and an instance of one
+    /// of `instances` (`None` without an `invalidation` contract naming either).
     fn arg_targets(
         &self,
         field: Option<&(String, String)>,
-        instance: Option<&str>,
+        instances: &[String],
     ) -> Option<Box<ArgTargets>> {
         let c = self.contracts.filter(|_| self.events.is_some())?;
         let with_bases = |class: &str| {
@@ -1162,10 +1177,12 @@ impl<'a> Extractor<'a> {
             classes
         };
         let field = field.map_or(0, |(class, attr)| c.target_of(&with_bases(class), attr));
-        let classes = instance
-            .map(with_bases)
-            .filter(|classes| c.names_class(classes))
-            .unwrap_or_default();
+        let classes: Vec<String> = instances.iter().flat_map(|c| with_bases(c)).collect();
+        let classes = if c.names_class(&classes) {
+            classes
+        } else {
+            Vec::new()
+        };
         (field != 0 || !classes.is_empty()).then(|| Box::new(ArgTargets { field, classes }))
     }
 
@@ -2357,17 +2374,17 @@ impl<'a> Extractor<'a> {
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
             None => {}
         }
-        let unknown = owner.typed_classes.is_empty();
         for class in owner.typed_classes {
             self.typed_site(class, attr, None, kind, span, written);
         }
-        if unknown && let Some(var) = owner.var.filter(|v| self.unknown_class(*v)) {
+        if let Some(var) = owner.var.filter(|v| self.unknown_class(*v)) {
             self.unresolved(Unresolved::Receiver(attr.to_owned()), var, kind, span);
         }
     }
 
-    /// Whether heki knows nothing of the class of `var`'s object here: no inferred value, or an
-    /// annotation that says nothing (`Any`, `object`) that no `isinstance` test narrows.
+    /// Whether heki knows nothing of the class of `var`'s object here: no inferred value, an
+    /// annotation that says nothing (`Any`, `object`) that no `isinstance` test narrows, or a
+    /// project protocol whose implementations heki cannot list.
     fn unknown_class(&self, var: VarId) -> bool {
         match self.val(var) {
             None => true,
@@ -2375,7 +2392,7 @@ impl<'a> Extractor<'a> {
                 matches!(
                     c.as_str(),
                     "typing.Any" | "typing_extensions.Any" | "builtins.object"
-                )
+                ) || self.cx.project.protocol(c) == Some(None)
             }
             Some(_) => false,
         }

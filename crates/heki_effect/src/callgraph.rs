@@ -936,22 +936,22 @@ pub(crate) fn indirect_writes<'a>(
                 obj_params,
             });
         }
-        if let Some(class) = &origin.typed_instance
-            && callee.typed_params >> param & 1 == 0
-        {
-            out.extend(
-                paths
-                    .iter()
-                    .filter(|p| !p.is_empty())
-                    .map(|attr| IndirectWrite {
-                        param,
-                        origin,
-                        through: Through::Instance,
-                        class,
-                        attr,
-                        obj_params: origin.may_params,
-                    }),
-            );
+        if callee.typed_params >> param & 1 == 0 {
+            for class in origin.instance_classes() {
+                out.extend(
+                    paths
+                        .iter()
+                        .filter(|p| !p.is_empty())
+                        .map(|attr| IndirectWrite {
+                            param,
+                            origin,
+                            through: Through::Instance,
+                            class,
+                            attr,
+                            obj_params: origin.may_params,
+                        }),
+                );
+            }
         }
     }
     out.retain(|w| !records_write(bc, facts, w));

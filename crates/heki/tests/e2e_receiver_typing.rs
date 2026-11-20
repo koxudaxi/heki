@@ -1055,3 +1055,76 @@ fn protocol_receivers_dispatch_to_the_classes_implementing_them() {
     // `Named` has more implementations than the candidate limit: nothing is dispatched.
     assert_eq!(found, expected);
 }
+
+/// Protocol-typed objects handed to helpers that do not type them, and protocols whose
+/// implementations heki cannot list.
+const PROTOCOL_HANDED: &str = r#"from __future__ import annotations
+
+from typing import Any, Protocol
+
+from pkg.views import FieldView, Named
+
+
+class Marker(Protocol):
+    pass
+
+
+def rewrite(field: Any) -> None:
+    field.data_type = "w"
+
+
+def rename(obj) -> None:
+    obj.name = "m"
+
+
+class Writer:
+    def write(self, view: FieldView) -> None:
+        rewrite(view)
+
+
+def rename_named(named: Named) -> None:
+    rename(named)
+
+
+def mark(marker: Marker) -> None:
+    marker.name = "k"
+"#;
+
+#[test]
+fn a_protocol_typed_argument_ties_a_helper_write_to_the_implementations() {
+    let p = Project::new("protocols_handed");
+    p.write(
+        "pyproject.toml",
+        &format!("{PROTOCOL_CONFIG}unresolved = \"report\"\n").replace(
+            "select = [\"MUT201\", \"EFF101\"]",
+            "select = [\"MUT201\", \"MUT205\"]",
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/views.py", PROTOCOL_VIEWS)
+    .write("pkg/impls.py", PROTOCOL_IMPLS)
+    .write("pkg/named.py", &many_named())
+    .write("pkg/handed.py", PROTOCOL_HANDED);
+    let expected: BTreeSet<(String, String)> = [
+        // `FieldView` is `Field`: the helper's write is the caller's, and no caller leaves the
+        // helper's object unknown.
+        ("Writer.write", "MUT201"),
+        // `Named` has more implementations than the candidate limit and `Marker` no member:
+        // their objects are of unknown class, handed on or written directly.
+        ("rename", "MUT205"),
+        ("mark", "MUT205"),
+    ]
+    .iter()
+    .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
+    .collect();
+    assert_eq!(reported(&p, &[], "pkg/handed.py"), expected);
+    let views: BTreeSet<(String, String)> = [
+        ("write_view", "MUT201"),
+        ("extend_view", "MUT201"),
+        ("rename_named", "MUT205"),
+    ]
+    .iter()
+    .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
+    .collect();
+    assert_eq!(reported(&p, &[], "pkg/views.py"), views);
+}

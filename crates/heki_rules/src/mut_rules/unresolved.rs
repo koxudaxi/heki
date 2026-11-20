@@ -163,6 +163,11 @@ fn untyped_above(
                         let Some(o) = bc.params.get(k) else {
                             return true;
                         };
+                        // A protocol whose implementations heki cannot list: no caller above
+                        // ties the object to a class.
+                        if o.of_unlisted_protocol() {
+                            return true;
+                        }
                         if o.typed_instance.is_some() {
                             continue;
                         }

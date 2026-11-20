@@ -4592,10 +4592,11 @@ write:
 - an attribute named like a target attribute (`fields` for `Model.fields`, any name for
   `Model.*`) written on an object of unknown class: an unannotated parameter that no project
   caller binds to an instance of a known class, a loop variable, the result of a call heki does
-  not resolve, a value annotated `Any` or `object`, unless an `isinstance` test around the write
-  narrows it to a class (`if isinstance(obj, Field): ...`). Rebinding (`obj.fields = []`), deleting,
-  `setattr` with a constant name, and changing the container the attribute holds
-  (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
+  not resolve, a value annotated `Any` or `object` (unless an `isinstance` test around the write
+  narrows it to a class: `if isinstance(obj, Field): ...`), or a protocol whose implementations
+  heki cannot list (one without members, or implemented by more than eight classes). Rebinding
+  (`obj.fields = []`), deleting, `setattr` with a constant name, and changing the container the
+  attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
 - an attribute name computed at run time written on an instance of a target class:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
   `__dict__` key in a name that is no constant: a module-level name bound twice or rebound by
@@ -4794,8 +4795,10 @@ annotation or from different assignments) is each of them, and an `isinstance` c
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
 also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
 classes that implement it structurally (having every member it defines; at most eight, counting
-a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
-or return, `Any`, a value of more than three classes) is not tied to the target.
+a class and not its subclasses), also when it is handed to a helper that does not type it. An
+object whose class heki cannot see (an unannotated parameter or return, `Any`, a value of more
+than three classes, a protocol without members or with more implementations) is not tied to the
+target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call

@@ -665,7 +665,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   A write a callee makes through an argument it does not type (an in-place change of `obj.attr`,
   an attribute of `obj`) is the caller's write at the call: the caller's argument binding ties
   it to a class (`ArgOrigin::targets`, the same `callgraph::indirect_writes` the ownership rules
-  use). The written object's identity (`obj_params`, the parameters it may be as itself) decides
+  use), or to the classes implementing the protocol the argument is typed with
+  (`ArgOrigin::implementers`, `ArgOrigin::instance_classes`). The written object's identity (`obj_params`, the parameters it may be as itself) decides
   an initializer's own construction: its `self`, not the objects reached through `self`.
 - Reporting: private helpers never report and pass the obligation to their callers; a public
   function is relieved when every caller path announces the change after the call (a

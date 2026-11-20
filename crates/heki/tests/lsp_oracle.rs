@@ -422,6 +422,8 @@ const FILL: &str = "from pkg.shelf import Shelf\n\n\ndef fill(shelf: Shelf, x):\
 const FILL_MAIN: &str = "from pkg.shelf import Shelf\n\n\ndef fill_main(shelf: Shelf, x):\n    shelf.again().main.entries.append(x)\n";
 // A protocol in one module, the class implementing it structurally in another.
 const VIEWS: &str = "from typing import Protocol\n\n\nclass EntriesView(Protocol):\n    entries: list\n    tag: str\n\n\ndef fill_view(view: EntriesView, x):\n    view.entries.append(x)\n";
+// A helper that does not type its parameter, handed a protocol-typed object.
+const VIEW_HANDED: &str = "from pkg.views import EntriesView\n\n\ndef add(obj, x):\n    obj.entries.append(x)\n\n\ndef fill_handed(view: EntriesView, x):\n    add(view, x)\n";
 // The class body only declares names (no function changes): only the protocol's
 // implementations change.
 const TAGGED: &str =
@@ -566,6 +568,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/fill.py", FILL),
         ("pkg/fill_main.py", FILL_MAIN),
         ("pkg/views.py", VIEWS),
+        ("pkg/view_handed.py", VIEW_HANDED),
         ("pkg/tagged.py", TAGGED),
         ("pkg/drive_a.py", DRIVE_A),
         ("pkg/drive_b.py", DRIVE_B),
@@ -765,12 +768,12 @@ fn steps_receiver_typing() -> Vec<Step> {
             "the class stops implementing the protocol",
             vec![save("pkg/tagged.py", UNTAGGED)],
         )
-        .absent(&[("pkg/views.py", "MUT201")]),
+        .absent(&[("pkg/views.py", "MUT201"), ("pkg/view_handed.py", "MUT201")]),
         Step::new(
             "the class implements the protocol again",
             vec![save("pkg/tagged.py", TAGGED)],
         )
-        .present(&[("pkg/views.py", "MUT201")]),
+        .present(&[("pkg/views.py", "MUT201"), ("pkg/view_handed.py", "MUT201")]),
     ]
 }
 

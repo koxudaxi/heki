@@ -1320,8 +1320,15 @@ impl ProjectDecls {
     /// The project classes implementing the project protocol `class` structurally
     /// (`Self::protocol_implementations`); `None` when `class` is no protocol or too many do.
     pub(crate) fn protocol_implementers(&self, class: &str) -> Option<&[String]> {
+        self.protocol(class).flatten()
+    }
+
+    /// `Some` when the project class `class` is a protocol: with the project classes
+    /// implementing it structurally, or `None` inside when heki cannot list them (too many, a
+    /// protocol without members).
+    pub(crate) fn protocol(&self, class: &str) -> Option<Option<&[String]>> {
         self.read(|k| note(&mut k.protocols, class));
-        self.protocols.get(class)?.as_deref()
+        self.protocols.get(class).map(Option::as_deref)
     }
 
     /// The frozen project classes: `ClassDecl::is_frozen` (`@dataclass(frozen=True)`,

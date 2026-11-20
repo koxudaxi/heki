@@ -873,6 +873,10 @@ pub struct ArgOrigin {
     pub typed_field: Option<(String, String)>,
     /// An instance of project class `class_fqn`.
     pub typed_instance: Option<String>,
+    /// When `typed_instance` is a project protocol: the classes the argument is an instance of
+    /// ([`ArgOrigin::instance_classes`]). Only computed when an ownership contract is declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementers: Option<Implementers>,
     /// Caller parameters the argument may be, as itself (through copies and phis).
     pub may_params: u64,
     /// The argument is an instance the caller constructs (`Model(...)`), or an attribute of one.
@@ -898,8 +902,9 @@ pub struct ArgTargets {
     /// The contracts whose targets include the field the argument is (`typed_field`): changing
     /// the value in place writes it.
     pub field: u64,
-    /// `typed_instance` and its project bases when a contract names an attribute of one of
-    /// them (empty otherwise), for [`Contracts::target_of`] with the attributes a callee writes.
+    /// The [`ArgOrigin::instance_classes`] and their project bases when a contract names an
+    /// attribute of one of them (empty otherwise), for [`Contracts::target_of`] with the
+    /// attributes a callee writes.
     pub classes: Vec<String>,
 }
 
@@ -907,6 +912,31 @@ impl ArgOrigin {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+
+    /// The project classes the ownership rules tie the argument to: `typed_instance`, or the
+    /// implementations of the protocol it is typed with.
+    pub fn instance_classes(&self) -> &[String] {
+        match &self.implementers {
+            Some(Implementers::Listed(classes)) => classes,
+            Some(Implementers::Unlisted) => &[],
+            None => self.typed_instance.as_slice(),
+        }
+    }
+
+    /// Whether the argument is typed with a protocol whose implementations heki cannot list:
+    /// its class is unknown.
+    pub fn of_unlisted_protocol(&self) -> bool {
+        self.implementers == Some(Implementers::Unlisted)
+    }
+}
+
+/// The classes a protocol-typed argument is an instance of ([`ArgOrigin::implementers`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Implementers {
+    /// The project classes implementing the protocol structurally (none: no project class does).
+    Listed(Vec<String>),
+    /// More classes than the candidate limit, or a protocol without members.
+    Unlisted,
 }
 
 /// One resolved project callee with the caller-side origin of each callee parameter.

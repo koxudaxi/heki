@@ -1194,6 +1194,17 @@ def set_x(m: Model) -> None:
 def set_x_ok(m: Model) -> None:
     _set_x(m)
     notify(m)
+
+
+import typing
+
+
+class Positioned(typing.Protocol):
+    x: int
+
+
+def set_positioned(p: Positioned) -> None:
+    _set_x(p)
 "#;
 
 #[test]
@@ -1205,14 +1216,16 @@ fn mut109_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
     let diags = diagnostics(&p, &["--select", "MUT109"]);
     let m = "pkg/models.py";
     // A helper changing an argument it does not type writes the field or the instance the
-    // caller binds to it (`fill`, `set_x`, and `other.items` in `Model.__init__`); the
-    // initializer's own fields are its construction.
+    // caller binds to it (`fill`, `set_x`, `set_positioned`, and `other.items` in
+    // `Model.__init__`); the initializer's own fields are its construction.
     assert_eq!(
         found(&diags),
         vec![
             d(m, 11, "MUT109", "Model.__init__"),
             d(m, 32, "MUT109", "fill"),
             d(m, 41, "MUT109", "set_x"),
+            // An object typed with a protocol `Model` implements.
+            d(m, 57, "MUT109", "set_positioned"),
         ],
         "{diags:#?}"
     );
