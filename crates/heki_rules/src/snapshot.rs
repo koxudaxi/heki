@@ -181,11 +181,21 @@ impl SummarySnapshot {
         Ok(snap)
     }
 
+    /// Replace the file at `path` in one step: a temporary file next to it is renamed over it,
+    /// so an interrupted write never leaves a partial snapshot.
     pub fn save(&self, path: &Path) -> Result<(), SnapshotError> {
-        std::fs::write(path, self.to_json()).map_err(|cause| SnapshotError::Write {
-            path: path.to_path_buf(),
-            cause,
-        })
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, self.to_json())
+            .and_then(|()| std::fs::rename(&tmp, path))
+            .map_err(|cause| {
+                let _ = std::fs::remove_file(&tmp);
+                SnapshotError::Write {
+                    path: path.to_path_buf(),
+                    cause,
+                }
+            })
     }
 }
 
