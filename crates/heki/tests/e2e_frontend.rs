@@ -124,6 +124,11 @@ fn binding<'a>(scope: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no binding `{name}` in `{}`", scope["name"]))
 }
 
+/// The names a scope declares `global` (`"global_decls"`) or `nonlocal` (`"nonlocal_decls"`).
+fn declared<'a>(scope: &'a Value, which: &str) -> Vec<&'a str> {
+    scope.get(which).map_or_else(Vec::new, strs)
+}
+
 fn reads(scope: &Value) -> BTreeMap<&str, &str> {
     scope["reads"]
         .as_array()
@@ -345,7 +350,7 @@ fn semantic_functions_closures_globals_and_mangling() {
 
     // `nonlocal` (twice) and free reads, also through an intermediate function.
     let bump = scope(&m, &["function closures", "function bump"]);
-    assert_eq!(binding(bump, "counter")["is_nonlocal_decl"], true);
+    assert_eq!(declared(bump, "nonlocal_decls"), ["counter"]);
     assert_eq!(reads(bump)["counter"], "enclosing");
     let later = scope(&m, &["function closures", "function reads_later"]);
     assert_eq!(reads(later)["defined_later"], "enclosing");
@@ -358,7 +363,7 @@ fn semantic_functions_closures_globals_and_mangling() {
     // `global` (twice): module-bound names read as globals, others as builtins, also from an
     // inner function of the declaring one.
     let globals = scope(&m, &["function global_forms"]);
-    assert_eq!(binding(globals, "COUNTER")["is_global_decl"], true);
+    assert!(declared(globals, "global_decls").contains(&"COUNTER"));
     assert_eq!(reads(globals)["COUNTER"], "global");
     assert_eq!(reads(globals)["FRESH_GLOBAL"], "builtin");
     let inner = scope(&m, &["function enclosing_global", "function inner"]);
@@ -404,6 +409,39 @@ fn semantic_functions_closures_globals_and_mangling() {
 }
 
 #[test]
+fn semantic_declarations_bind_nothing_by_themselves() {
+    let source = "\
+def reads_declared_global():
+    global ONLY_READ
+    return ONLY_READ
+
+def read_only_nonlocal():
+    y = 1
+    def inner():
+        nonlocal y
+        return y
+    return inner
+
+def comprehension_target_under_global(items):
+    global shadowed
+    [shadowed for shadowed in items]
+    return shadowed
+";
+    let m = dump_source("dump-semantic", "fe_declarations", source, "py312");
+    let reads_global = scope(&m, &["function reads_declared_global"]);
+    assert!(bindings(reads_global).is_empty());
+    assert_eq!(declared(reads_global, "global_decls"), ["ONLY_READ"]);
+    let inner = scope(&m, &["function read_only_nonlocal", "function inner"]);
+    assert!(bindings(inner).is_empty());
+    assert_eq!(declared(inner, "nonlocal_decls"), ["y"]);
+    assert_eq!(reads(inner)["y"], "enclosing");
+    // The inlined comprehension's target stays its own: the function only declares the name.
+    let shadow = scope(&m, &["function comprehension_target_under_global"]);
+    assert_eq!(bindings(shadow), BTreeSet::from(["items"]));
+    assert_eq!(declared(shadow, "global_decls"), ["shadowed"]);
+}
+
+#[test]
 fn semantic_comprehension_scopes_follow_pep709() {
     // Python 3.11: every comprehension is its own scope.
     let m311 = semantic(TOUR, "py311");
@@ -422,7 +460,7 @@ fn semantic_comprehension_scopes_follow_pep709() {
         .into_iter()
         .find(|s| bindings(s).contains("last"))
         .unwrap();
-    assert_eq!(binding(walrus_comp, "last")["is_nonlocal_decl"], true);
+    assert_eq!(declared(walrus_comp, "nonlocal_decls"), ["last"]);
 
     // Python 3.12+: list / set / dict comprehensions are inlined, generator expressions are not.
     let m312 = semantic(TOUR, "py312");
@@ -439,7 +477,7 @@ fn semantic_comprehension_scopes_follow_pep709() {
         .into_iter()
         .find(|s| bindings(s).contains("hit"))
         .unwrap();
-    assert_eq!(binding(twice, "hit")["is_nonlocal_decl"], true);
+    assert_eq!(declared(twice, "nonlocal_decls"), ["hit"]);
     let nested_gen = children(&m312, comps)
         .into_iter()
         .find(|s| reads(s).contains_key("cols"))
@@ -459,7 +497,8 @@ fn semantic_comprehension_scopes_follow_pep709() {
         .into_iter()
         .find(|s| s["kind"] == "comprehension")
         .unwrap();
-    assert_eq!(binding(module_gen, "seen")["is_global_decl"], true);
+    assert!(bindings(module_gen).contains("seen"));
+    assert_eq!(declared(module_gen, "global_decls"), ["seen"]);
 
     // Class-body comprehensions cannot read class-level names (CPython 3.12 symtable).
     let forms = scope(&m312, &["class ClassForms"]);

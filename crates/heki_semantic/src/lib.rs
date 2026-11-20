@@ -40,14 +40,13 @@ pub enum NameResolution {
     Builtin,
 }
 
-/// Binding metadata for a symbol within a scope.
+/// A name a scope binds: assigned, imported, deleted, defined, or a parameter. A `global` /
+/// `nonlocal` declaration alone binds nothing ([`Scope::global_decls`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
     pub name: String,
     pub span: Span,
     pub is_parameter: bool,
-    pub is_global_decl: bool,
-    pub is_nonlocal_decl: bool,
     /// True when bound by Python 3.15 PEP 810 `lazy import` / `lazy from ... import ...`.
     pub is_lazy_import: bool,
 }
@@ -91,6 +90,13 @@ pub struct Scope {
     pub name: String,
     pub line: u32,
     pub bindings: Vec<Binding>,
+    /// Names declared `global` here, sorted (a PEP 572 walrus in a comprehension declares its
+    /// target like the scope that receives it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub global_decls: Vec<String>,
+    /// Names declared `nonlocal` here, sorted (walrus targets as for `global_decls`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nonlocal_decls: Vec<String>,
     pub reads: Vec<(String, NameResolution)>,
     /// Reads occurring exclusively inside a PEP 709 inlined comprehension
     /// (CPython 3.12+ `symtable` drops `is_referenced()` on outer symbols read only there).
@@ -195,45 +201,25 @@ impl ScopeBuilder {
                 name,
                 span,
                 is_parameter,
-                is_global_decl: false,
-                is_nonlocal_decl: false,
                 is_lazy_import,
             });
         }
     }
 
-    fn add_global(&mut self, raw_name: &str, span: Span) {
+    fn add_global(&mut self, raw_name: &str) {
         let name = self.mangle(raw_name);
-        self.global_decls.insert(name.clone());
-        if self.bound_names.insert(name.clone()) {
-            self.bindings.push(Binding {
-                name,
-                span,
-                is_parameter: false,
-                is_global_decl: true,
-                is_nonlocal_decl: false,
-                is_lazy_import: false,
-            });
-        } else if let Some(b) = self.bindings.iter_mut().find(|b| b.name == name) {
-            b.is_global_decl = true;
-        }
+        self.global_decls.insert(name);
     }
 
-    fn add_nonlocal(&mut self, raw_name: &str, span: Span) {
+    fn add_nonlocal(&mut self, raw_name: &str) {
         let name = self.mangle(raw_name);
-        self.nonlocal_decls.insert(name.clone());
-        if self.bound_names.insert(name.clone()) {
-            self.bindings.push(Binding {
-                name,
-                span,
-                is_parameter: false,
-                is_global_decl: false,
-                is_nonlocal_decl: true,
-                is_lazy_import: false,
-            });
-        } else if let Some(b) = self.bindings.iter_mut().find(|b| b.name == name) {
-            b.is_nonlocal_decl = true;
-        }
+        self.nonlocal_decls.insert(name);
+    }
+
+    /// Declared `global` or `nonlocal` here: a comprehension target of the same name stays
+    /// isolated instead of becoming a local of this scope.
+    fn declares(&self, name: &str) -> bool {
+        self.global_decls.contains(name) || self.nonlocal_decls.contains(name)
     }
 
     fn add_comp_target_binding(&mut self, raw_name: &str, span: Span) {
@@ -350,7 +336,9 @@ impl<'a> Analyzer<'a> {
             // PEP 572 + PEP 709: walrus inside a module-level generator or inlined
             // comprehension writes a global dynamically without binding a static module local.
             if cur_sid != target_sid {
-                self.scopes[cur_sid.0 as usize].add_global(n.id.as_str(), Span::from(n.range));
+                let cur = &mut self.scopes[cur_sid.0 as usize];
+                cur.add_binding(n.id.as_str(), Span::from(n.range), false, false);
+                cur.add_global(n.id.as_str());
             } else {
                 let mangled = self.scopes[cur_sid.0 as usize].mangle(n.id.as_str());
                 self.scopes[cur_sid.0 as usize]
@@ -371,7 +359,9 @@ impl<'a> Analyzer<'a> {
                 false,
                 false,
             );
-            self.scopes[cur_sid.0 as usize].add_nonlocal(n.id.as_str(), Span::from(n.range));
+            let cur = &mut self.scopes[cur_sid.0 as usize];
+            cur.add_binding(n.id.as_str(), Span::from(n.range), false, false);
+            cur.add_nonlocal(n.id.as_str());
         }
     }
 
@@ -621,14 +611,12 @@ impl<'a> Analyzer<'a> {
             }
             Stmt::Global(g) => {
                 for name in &g.names {
-                    self.cur_scope_mut()
-                        .add_global(name.as_str(), Span::from(name.range));
+                    self.cur_scope_mut().add_global(name.as_str());
                 }
             }
             Stmt::Nonlocal(nl) => {
                 for name in &nl.names {
-                    self.cur_scope_mut()
-                        .add_nonlocal(name.as_str(), Span::from(name.range));
+                    self.cur_scope_mut().add_nonlocal(name.as_str());
                 }
             }
             Stmt::Expr(e) => self.visit_expr(&e.value),
@@ -1204,7 +1192,7 @@ impl<'a> Analyzer<'a> {
                 let mut effective_bindings = sc.bindings.clone();
                 let mut effective_comp_locals = FxHashSet::default();
                 for (cname, cspan) in &sc.comp_target_bindings {
-                    if sc.bound_names.contains(cname) {
+                    if sc.bound_names.contains(cname) || sc.declares(cname) {
                         continue;
                     }
                     // If the enclosing scope itself reads `cname` OUTSIDE the comprehension
@@ -1218,8 +1206,6 @@ impl<'a> Analyzer<'a> {
                         name: cname.clone(),
                         span: *cspan,
                         is_parameter: false,
-                        is_global_decl: false,
-                        is_nonlocal_decl: false,
                         is_lazy_import: false,
                     });
                 }
@@ -1262,6 +1248,8 @@ impl<'a> Analyzer<'a> {
                     name: sc.name.clone(),
                     line: sc.line,
                     bindings: effective_bindings,
+                    global_decls: sorted(&sc.global_decls),
+                    nonlocal_decls: sorted(&sc.nonlocal_decls),
                     reads,
                     inlined_comp_only_reads,
                 }
@@ -1340,6 +1328,12 @@ fn resolve_name(
     } else {
         NameResolution::Builtin
     }
+}
+
+fn sorted(names: &FxHashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = names.iter().cloned().collect();
+    out.sort();
+    out
 }
 
 fn detect_future_annotations(suite: &[Stmt]) -> bool {
