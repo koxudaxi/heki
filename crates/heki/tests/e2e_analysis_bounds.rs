@@ -6,6 +6,7 @@ mod common;
 
 use common::Project;
 use serde_json::Value;
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -18,17 +19,26 @@ fn check_within(p: &Project, limit: Duration) -> Vec<Value> {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    // Read while it runs: output larger than the pipe would otherwise block it.
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).unwrap();
+        out
+    });
     let started = Instant::now();
-    while child.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if started.elapsed() > limit {
             child.kill().unwrap();
             panic!("heki check ran past {limit:?}");
         }
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let out = child.wait_with_output().unwrap();
-    assert!(matches!(out.status.code(), Some(0 | 1)), "{:?}", out.status);
-    serde_json::from_slice(&out.stdout).unwrap()
+    };
+    assert!(matches!(status.code(), Some(0 | 1)), "{status:?}");
+    serde_json::from_slice(&reader.join().unwrap()).unwrap()
 }
 
 /// A loop over a worklist that tests its item against `checks` classes, each test followed by
@@ -317,4 +327,41 @@ fn a_branch_on_a_value_many_cases_pass_through_is_decided_once_per_depth() {
         1,
         "{found:#?}"
     );
+}
+
+/// A function of `loops` loops one after another, each with its own first-iteration flag.
+fn flagged_loops(loops: usize) -> String {
+    let mut lines = vec![
+        "import requests".to_owned(),
+        String::new(),
+        String::new(),
+        "def scan(urls):".to_owned(),
+    ];
+    for _ in 0..loops {
+        lines.extend(
+            [
+                "    first = True",
+                "    for u in urls:",
+                "        if first:",
+                "            requests.get(u)",
+                "            first = False",
+            ]
+            .map(str::to_owned),
+        );
+    }
+    lines.join("\n") + "\n"
+}
+
+/// Each lazy initialization keeps the blocks it covers, a cell per block of the function: the
+/// cells a function's lazy initializations take are bounded by its source size, and past the
+/// bound none of them is recognized, so every loop's call is reported again.
+#[test]
+fn lazy_initializations_past_their_budget_are_not_recognized() {
+    for (loops, expected) in [(4, 0), (600, 600)] {
+        let p = Project::new(&format!("bounds_flags_{loops}"));
+        p.write("m.py", &flagged_loops(loops));
+        let found = check_within(&p, Duration::from_secs(20));
+        let eff102 = found.iter().filter(|d| d["rule_code"] == "EFF102").count();
+        assert_eq!(eff102, expected, "{loops} loops");
+    }
 }

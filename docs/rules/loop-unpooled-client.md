@@ -37,8 +37,8 @@ A client created only while a local variable the loop carries is unset (`if conn
 first: ...; first = False`), is created once per run of the loop, and so is one created where
 every way on leaves the loop (`return s.get(url)`, `connect(); break`, `raise` after it). Still
 reported: a variable or flag set back in the loop (also by an `except` handler), or set there to
-a value the branch does not compute (`prev = row`, which may be `None`), a branch that does not
-always set it, a loop around that starts it unset again in each iteration, and a `break` out of
+a value the branch does not compute (`prev = row`, which may be `None`), a global the function
+also sets back to `None` (before the test, or after the initialization), a branch that does not always set it, a loop around that starts it unset again in each iteration, and a `break` out of
 an inner loop, which runs again in each iteration of the outer one.
 
 A call whose arguments switch off the branch that creates the client is not followed into

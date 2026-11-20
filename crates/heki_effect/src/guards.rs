@@ -326,6 +326,19 @@ fn through_copies(def: DefOf<'_, '_>, mut v: VarId) -> VarId {
 
 /// [`lazy_init_branches`] with the defining instruction of every variable.
 fn branches(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
+    attr_tests(f, def)
+        .into_iter()
+        .map(|t| LazyInitBranch {
+            test: t.test,
+            init: t.init,
+            obj: t.subject.0,
+            attr: t.subject.1,
+        })
+        .collect()
+}
+
+/// The branches that find an attribute unset (`obj`, `attr`).
+fn attr_tests(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<StateTest<(VarId, String)>> {
     let loads_attr = |v: &VarId| match def(&through_copies(def, *v)) {
         Some(InstKind::AttrLoad { obj, attr, .. }) => Some((*obj, attr.clone())),
         _ => None,
@@ -333,12 +346,6 @@ fn branches(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
     state_tests(f, def, loads_attr)
         .into_iter()
         .filter(|t| t.found.unset())
-        .map(|t| LazyInitBranch {
-            test: t.test,
-            init: t.init,
-            obj: t.subject.0,
-            attr: t.subject.1,
-        })
         .collect()
 }
 
@@ -358,6 +365,14 @@ impl Found {
     /// Not set yet: what a lazy initialization runs on.
     fn unset(self) -> bool {
         matches!(self, Self::None | Self::Falsy)
+    }
+
+    /// Whether the constant `c` takes this branch of the test.
+    fn takes(self, c: ConstArg) -> bool {
+        match self {
+            Self::None | Self::NotNone => (c.class == ConstClass::None) == (self == Self::None),
+            Self::Falsy | Self::Truthy => c.truthy == Some(self == Self::Truthy),
+        }
     }
 
     /// Whether the constant `c` takes the test's other branch.
@@ -483,6 +498,50 @@ enum Initialized {
     Local(u64),
 }
 
+/// The cells the lazy initializations of one function may take: a block of a region's
+/// membership, a block or a value the walks that recognize them pass. A multiple of the
+/// function's source size, as the Soundness lane's proof state; past it, none of the function's
+/// lazy initializations is recognized, so its effects count as unguarded by them.
+const REGION_CELLS_PER_SOURCE_BYTE: usize = 8;
+const MIN_REGION_CELLS: usize = 4096;
+const MAX_REGION_CELLS: usize = 250_000;
+
+/// The cells left of a function's budget ([`REGION_CELLS_PER_SOURCE_BYTE`]); `None` once a
+/// walk needed more.
+struct Cells(Option<usize>);
+
+impl Cells {
+    fn of(f: &IrFunction) -> Self {
+        let source_bytes = f.span.end.saturating_sub(f.span.start) as usize;
+        Self(Some(
+            (source_bytes * REGION_CELLS_PER_SOURCE_BYTE).clamp(MIN_REGION_CELLS, MAX_REGION_CELLS),
+        ))
+    }
+
+    /// Take `n` cells; `false` once the budget is spent.
+    fn take(&mut self, n: usize) -> bool {
+        self.0 = self.0.and_then(|left| left.checked_sub(n));
+        self.0.is_some()
+    }
+
+    fn spent(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+/// The blocks and values of every assignment of each module global in the function.
+fn global_stores(f: &IrFunction) -> FxHashMap<&str, Vec<(BlockId, VarId)>> {
+    let mut out: FxHashMap<&str, Vec<(BlockId, VarId)>> = FxHashMap::default();
+    for bb in &f.blocks {
+        for inst in &bb.insts {
+            if let InstKind::StoreGlobal { name, value } = &inst.kind {
+                out.entry(name.as_str()).or_default().push((bb.id, *value));
+            }
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------------- the local facts
 
 /// Where an object may come from: parameters (bits) and objects the function constructs.
@@ -562,24 +621,14 @@ struct LocalFacts {
 impl LocalGuards {
     fn regions(&self, cx: &GuardInputs<'_, '_>) -> &[LazyRegion] {
         self.regions.get_or_init(|| {
-            let f = cx.f;
-            let def = |v: &VarId| cx.def(*v);
-            let mut values: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
-            let mut regions: Vec<LazyRegion> = branches(f, &def)
-                .into_iter()
-                .filter(|b| initializes(f, &def, &mut values, b))
-                .map(|b| {
-                    let d = derived(cx, b.obj);
-                    LazyRegion {
-                        test: b.test,
-                        initialized: Initialized::Attr(b.obj),
-                        root: (!d.fresh).then_some(d.params),
-                        blocks: dominated(f, b.init),
-                    }
-                })
-                .collect();
-            regions.extend(global_regions(f, &def));
-            regions.extend(local_regions(cx));
+            let mut cells = Cells::of(cx.f);
+            let mut regions = attr_regions(cx, &mut cells);
+            regions.extend(global_regions(cx, &mut cells));
+            regions.extend(local_regions(cx, &mut cells));
+            // Which ones would fit depends on the order of the blocks: none is kept.
+            if cells.spent() {
+                regions.clear();
+            }
             regions
         })
     }
@@ -844,41 +893,66 @@ fn derived(cx: &GuardInputs<'_, '_>, var: VarId) -> Derived {
     out
 }
 
-/// Every path from `b.init` to a normal return, or back to the test, assigns `b.obj.attr`
+/// The lazy initializations of attributes: [`attr_tests`] branches that [`initializes`].
+fn attr_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion> {
+    let f = cx.f;
+    let def = |v: &VarId| cx.def(*v);
+    let mut values: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
+    let mut out = Vec::new();
+    for t in attr_tests(f, &def) {
+        if !initializes(cx, &mut values, &t, cells) {
+            continue;
+        }
+        let d = derived(cx, t.subject.0);
+        out.push(LazyRegion {
+            test: t.test,
+            initialized: Initialized::Attr(t.subject.0),
+            root: (!d.fresh).then_some(d.params),
+            blocks: dominated(f, t.init, cells),
+        });
+    }
+    out
+}
+
+/// Every path from `t.init` to a normal return, or back to the test, assigns `obj.attr`
 /// (stores in a block end the path; exceptions leave without a return).
 fn initializes(
-    f: &IrFunction,
-    def: DefOf<'_, '_>,
+    cx: &GuardInputs<'_, '_>,
     values: &mut FxHashMap<VarId, FxHashSet<VarId>>,
-    b: &LazyInitBranch,
+    t: &StateTest<(VarId, String)>,
+    cells: &mut Cells,
 ) -> bool {
+    let f = cx.f;
+    let def = |v: &VarId| cx.def(*v);
+    let (tested, attr) = (t.subject.0, t.subject.1.as_str());
     // The same object: an alias, or the same attribute of an alias of the same base
     // (`self.conn._sock` tested and assigned through two loads of `self.conn`).
     let base_of = |v: &VarId| match def(v) {
         Some(InstKind::AttrLoad { obj, attr, .. }) => Some((*obj, attr.as_str())),
         _ => None,
     };
-    let tested_base = base_of(&b.obj);
-    for v in [Some(b.obj), tested_base.map(|(o, _)| o)]
+    let tested_base = base_of(&tested);
+    for v in [Some(tested), tested_base.map(|(o, _)| o)]
         .into_iter()
         .flatten()
     {
         values.entry(v).or_insert_with(|| same_values(f, v));
     }
-    let aliases = &values[&b.obj];
+    let aliases = &values[&tested];
     let same = |v: &VarId| {
         aliases.contains(v)
             || matches!(
                 (tested_base, base_of(v)),
-                (Some((base, attr)), Some((o, a))) if attr == a && values[&base].contains(&o)
+                (Some((base, a)), Some((o, b))) if a == b && values[&base].contains(&o)
             )
     };
     sets_on_every_way(
         f,
-        b.test,
-        b.init,
+        t.test,
+        t.init,
         true,
-        |i| matches!(&i.kind, InstKind::AttrStore { obj, attr, .. } if *attr == b.attr && same(obj)),
+        |i| matches!(&i.kind, InstKind::AttrStore { obj, attr: a, .. } if a == attr && same(obj)),
+        cells,
     )
 }
 
@@ -891,6 +965,7 @@ fn sets_on_every_way(
     init: BlockId,
     by_return: bool,
     sets: impl Fn(&Inst) -> bool,
+    cells: &mut Cells,
 ) -> bool {
     let mut seen = FxHashSet::default();
     let mut stack = vec![init];
@@ -898,7 +973,7 @@ fn sets_on_every_way(
         if !seen.insert(cur) {
             continue;
         }
-        if cur == test {
+        if cur == test || !cells.take(1) {
             return false;
         }
         let block = f.block(cur);
@@ -916,31 +991,69 @@ fn sets_on_every_way(
 
 /// The lazy initializations of module globals (`global _client` and `if _client is None:
 /// _client = connect()`), when every path from the branch to a normal return, or back to the
-/// test, assigns the global: once per process.
-fn global_regions(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyRegion> {
-    let loads_global = |v: &VarId| match def(&through_copies(def, *v)) {
+/// test, assigns the global, and no assignment of a constant the test finds unset is followed
+/// by a normal return or the test (`_client = None` before the test, or after the
+/// initialization; one before a `raise` only undoes a failed one): once per process.
+fn global_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion> {
+    let f = cx.f;
+    let def = |v: &VarId| cx.def(*v);
+    let loads_global = |v: &VarId| match def(&through_copies(&def, *v)) {
         Some(InstKind::LoadGlobal { name, .. }) => Some(name.clone()),
         _ => None,
     };
-    state_tests(f, def, loads_global)
+    let tests: Vec<StateTest<String>> = state_tests(f, &def, loads_global)
         .into_iter()
-        .filter(|t| {
-            t.found.unset()
-                && sets_on_every_way(
-                    f,
-                    t.test,
-                    t.init,
-                    true,
-                    |i| matches!(&i.kind, InstKind::StoreGlobal { name, .. } if *name == t.subject),
-                )
-        })
-        .map(|t| LazyRegion {
-            test: t.test,
-            initialized: Initialized::Global,
-            root: Some(0),
-            blocks: dominated(f, t.init),
-        })
-        .collect()
+        .filter(|t| t.found.unset())
+        .collect();
+    if tests.is_empty() {
+        return Vec::new();
+    }
+    let stores = global_stores(f);
+    let mut out = Vec::new();
+    for t in tests {
+        let assigned = stores
+            .get(t.subject.as_str())
+            .map_or(&[][..], Vec::as_slice);
+        let resets = assigned.iter().any(|&(bb, v)| {
+            const_arg(cx, v).is_some_and(|c| t.found.takes(c))
+                && returns_or_retests(f, bb, t.test, cells)
+        });
+        let sets =
+            |i: &Inst| matches!(&i.kind, InstKind::StoreGlobal { name, .. } if *name == t.subject);
+        if !resets && sets_on_every_way(f, t.test, t.init, true, sets, cells) {
+            out.push(LazyRegion {
+                test: t.test,
+                initialized: Initialized::Global,
+                root: Some(0),
+                blocks: dominated(f, t.init, cells),
+            });
+        }
+    }
+    out
+}
+
+/// Whether a path from block `from` (itself included) reaches a normal return or `test`, along
+/// normal and exception edges.
+fn returns_or_retests(f: &IrFunction, from: BlockId, test: BlockId, cells: &mut Cells) -> bool {
+    let mut seen: FxHashSet<BlockId> = std::iter::once(from).collect();
+    let mut stack = vec![from];
+    while let Some(cur) = stack.pop() {
+        let block = f.block(cur);
+        if cur == test || matches!(block.terminator, Terminator::Return(_)) || !cells.take(1) {
+            return true;
+        }
+        for next in block
+            .terminator
+            .successors()
+            .into_iter()
+            .chain(block.exc_target)
+        {
+            if seen.insert(next) {
+                stack.push(next);
+            }
+        }
+    }
+    false
 }
 
 /// The lazy initializations of local variables: a branch of a test of a value merging paths,
@@ -948,7 +1061,7 @@ fn global_regions(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyRegion> {
 /// other branch: `if conn is None: conn = connect()`, or a first-iteration flag (`if first:
 /// ...; first = False`). They count for the loops that carry what the branch set ([`stays_set`]);
 /// never per call, as each call starts without it.
-fn local_regions(cx: &GuardInputs<'_, '_>) -> Vec<LazyRegion> {
+fn local_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion> {
     let f = cx.f;
     if f.loops.is_empty() {
         return Vec::new();
@@ -956,9 +1069,10 @@ fn local_regions(cx: &GuardInputs<'_, '_>) -> Vec<LazyRegion> {
     let def = |v: &VarId| cx.def(*v);
     let merging = |v: &VarId| {
         let p = through_copies(&def, *v);
-        (cx.phi(p).is_some() && f.var_name(p).is_some()).then_some(p)
+        cx.phi(p)?;
+        Some((p, f.var_name(p)?))
     };
-    let tests: Vec<StateTest<VarId>> = state_tests(f, &def, merging)
+    let tests: Vec<StateTest<(VarId, &str)>> = state_tests(f, &def, merging)
         .into_iter()
         .filter(|t| f.block_loop_depth(t.test) > 0)
         .collect();
@@ -970,33 +1084,35 @@ fn local_regions(cx: &GuardInputs<'_, '_>) -> Vec<LazyRegion> {
         .iter()
         .flat_map(|b| b.insts.iter().filter_map(|i| Some((i.kind.dst()?, b.id))))
         .collect();
-    tests
-        .into_iter()
-        .filter_map(|t| {
-            let name = f.var_name(t.subject)?;
-            // An assignment ends the path; a re-read of the name in an exception block is none.
-            let assigns = |i: &Inst| {
-                !matches!(i.kind, InstKind::LoadName { .. })
-                    && i.kind.dst().is_some_and(|d| f.var_name(d) == Some(name))
-            };
-            if !sets_on_every_way(f, t.test, t.init, false, assigns) {
-                return None;
+    let mut out = Vec::new();
+    for t in tests {
+        let name = t.subject.1;
+        // An assignment ends the path; a re-read of the name in an exception block is none.
+        let assigns = |i: &Inst| {
+            !matches!(i.kind, InstKind::LoadName { .. })
+                && i.kind.dst().is_some_and(|d| f.var_name(d) == Some(name))
+        };
+        if !sets_on_every_way(f, t.test, t.init, false, assigns, cells) {
+            continue;
+        }
+        let blocks = dominated(f, t.init, cells);
+        let set_here = |v: VarId| def_block.get(&v).is_some_and(|b| blocks[b.0 as usize]);
+        let mut carried = 0;
+        for lp in f.loops.iter().filter(|lp| lp.body.contains(&t.test)) {
+            if stays_set(cx, &t, lp, &set_here, cells) {
+                carried |= loop_bit(lp);
             }
-            let blocks = dominated(f, t.init);
-            let set_here = |v: VarId| def_block.get(&v).is_some_and(|b| blocks[b.0 as usize]);
-            let carried = f
-                .loops
-                .iter()
-                .filter(|lp| lp.body.contains(&t.test) && stays_set(cx, &t, lp, &set_here))
-                .fold(0, |m, lp| m | loop_bit(lp));
-            (carried != 0).then_some(LazyRegion {
+        }
+        if carried != 0 {
+            out.push(LazyRegion {
                 test: t.test,
                 initialized: Initialized::Local(carried),
                 root: None,
                 blocks,
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    out
 }
 
 /// Whether the tested local takes the other branch of `t` in every iteration of `lp` after the
@@ -1008,46 +1124,52 @@ fn local_regions(cx: &GuardInputs<'_, '_>) -> Vec<LazyRegion> {
 /// from the back edges only; the one from before the loop is that of the first iteration.
 fn stays_set(
     cx: &GuardInputs<'_, '_>,
-    t: &StateTest<VarId>,
+    t: &StateTest<(VarId, &str)>,
     lp: &NaturalLoop,
     set_here: &dyn Fn(VarId) -> bool,
+    cells: &mut Cells,
 ) -> bool {
     let inside: FxHashSet<BlockId> = lp.body.iter().copied().collect();
     let mut seen = FxHashSet::default();
-    let mut stack = vec![t.subject];
-    while let Some(v) = stack.pop() {
-        if !seen.insert(v) {
-            continue;
-        }
-        if let Some((bb, phi)) = cx.phi(v) {
-            if !inside.contains(&bb) {
-                return false;
-            }
-            let header = bb == lp.header;
-            stack.extend(
-                phi.incoming
-                    .iter()
-                    .filter(|(pred, _)| !header || inside.contains(pred))
-                    .map(|(_, w)| *w),
-            );
-            continue;
-        }
-        let keeps_off = match cx.def(v) {
-            Some(InstKind::Copy { src, .. }) => {
-                stack.push(*src);
+    let mut stack = vec![t.subject.0];
+    let kept = 'walk: {
+        while let Some(v) = stack.pop() {
+            if !seen.insert(v) {
                 continue;
             }
-            Some(InstKind::LoadName { .. }) | None => false,
-            Some(kind) => match const_arg(cx, v) {
-                Some(c) => t.found.excluded_by(c),
-                None => t.found.unset() && !matches!(kind, InstKind::Const { .. }) && set_here(v),
-            },
-        };
-        if !keeps_off {
-            return false;
+            if let Some((bb, phi)) = cx.phi(v) {
+                if !inside.contains(&bb) {
+                    break 'walk false;
+                }
+                let header = bb == lp.header;
+                stack.extend(
+                    phi.incoming
+                        .iter()
+                        .filter(|(pred, _)| !header || inside.contains(pred))
+                        .map(|(_, w)| *w),
+                );
+                continue;
+            }
+            let keeps_off = match cx.def(v) {
+                Some(InstKind::Copy { src, .. }) => {
+                    stack.push(*src);
+                    continue;
+                }
+                Some(InstKind::LoadName { .. }) | None => false,
+                Some(kind) => match const_arg(cx, v) {
+                    Some(c) => t.found.excluded_by(c),
+                    None => {
+                        t.found.unset() && !matches!(kind, InstKind::Const { .. }) && set_here(v)
+                    }
+                },
+            };
+            if !keeps_off {
+                break 'walk false;
+            }
         }
-    }
-    true
+        true
+    };
+    cells.take(inside.len() + seen.len()) && kept
 }
 
 /// `root`, its copies and phis, and the builder's re-reads of its variable in blocks only an
@@ -1066,8 +1188,10 @@ fn same_values(f: &IrFunction, root: VarId) -> FxHashSet<VarId> {
 }
 
 /// Membership (by block id) of the blocks every path from the entry to which runs through `d`
-/// (normal and exception edges).
-fn dominated(f: &IrFunction, d: BlockId) -> Vec<bool> {
+/// (normal and exception edges); it takes two cells per block of the function, for its walks
+/// and the membership kept.
+fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
+    cells.take(2 * f.blocks.len());
     let reach = |start: BlockId, avoid: Option<BlockId>| {
         let mut seen = vec![false; f.blocks.len()];
         let mut stack = vec![start];

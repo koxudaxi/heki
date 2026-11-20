@@ -181,7 +181,9 @@ A function whose model would pass its size budget (4 units per byte of its sourc
 and treats its body as one call it cannot resolve. `heki assumptions` lists it with the hazard
 `unmodeled`. A function whose proof state (a fact per variable per block) would pass 8 cells per
 byte of its source, at most 250,000, gets no `OPT` finding: heki does not try to prove a rewrite
-in it.
+in it. A function whose lazy initializations (the blocks each covers, and the walks that find
+them) would take more than 8 cells per byte of its source, at most 250,000, has none of them
+recognized: its clients and queries count as made on every iteration.
 
 Missed findings close as heki learns more:
 

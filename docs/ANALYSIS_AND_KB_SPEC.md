@@ -321,7 +321,9 @@ records that test. An effect inside a lazy initialization (`MUT107`'s branch, wh
 of it sets the attribute) runs once per object, as does every effect of a
 `functools.cached_property` getter, through any callee (its result is kept in the instance's
 `__dict__`); one under the same test of a module global the function assigns (`global _client`)
-runs once per process. At each call the callee's guards are mapped to
+runs once per process, unless the function also assigns it a constant the test finds unset on
+a way to a normal return or back to the test (`_client = None`; one before a `raise` only undoes
+a failed initialization). At each call the callee's guards are mapped to
 the caller (`through_call`, wherever a callee's facts reach a caller): a constant argument, the
 literal default of an omitted parameter, or a test the caller has made on the same value that
 decides a guard against the effect prunes it there; an undecided test of a caller input becomes
@@ -334,7 +336,9 @@ variable the loop carries lets it run only until the variable changes: every pat
 branch back to the test assigns the variable, and every value it can have there after an
 iteration takes the test's other branch (`if conn is None: conn = connect()`; a first-iteration
 flag `if first: ...; first = False`; a constant decides by its value, and another value counts
-as set only when the branch computes it, as for an attribute). A blocking wait on a future known to be done returns at once: the catalog marks the
+as set only when the branch computes it, as for an attribute). The regions and the walks that
+find them take at most 8 cells per byte of the function's source (at most 250,000); past that
+none of the function's lazy initializations is recognized. A blocking wait on a future known to be done returns at once: the catalog marks the
 waits (`waits_until_done`: `concurrent.futures.Future.result` / `exception`) and the calls
 whose awaited result finishes a future (`done_when_awaited`: `asyncio.wrap_future`), and a
 forward must-analysis with the input tests' (one atom per future, which only ever holds) knows

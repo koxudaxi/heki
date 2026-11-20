@@ -372,7 +372,9 @@ fn cached_properties_run_once_per_instance() {
 /// Reported: a variable reset in the loop (also by a handler), or set there to a value the
 /// branch does not compute (`prev = row`, which may be `None`), a branch that does not always
 /// set it, a loop that starts it unset in each iteration, a flag set again in each iteration,
-/// and a global the branch does not set.
+/// a global the branch does not set, and a global the function also sets back to `None` before
+/// the test or after the initialization (one set back before a `raise` undoes a failed
+/// initialization only).
 const LOCAL_LAZY: &str = r#"import sqlite3
 
 import requests
@@ -573,11 +575,56 @@ def inline_global(urls):
         _session.get(u)
 
 
+def reset_before():
+    global _session
+    _session = None
+    if _session is None:
+        _session = requests.Session()
+    return _session
+
+
+def reset_after():
+    global _session
+    if _session is None:
+        _session = requests.Session()
+    s = _session
+    _session = None
+    return s
+
+
+def reset_sometimes(flag):
+    global _session
+    if _session is None:
+        _session = requests.Session()
+    s = _session
+    if flag:
+        _session = None
+    return s
+
+
+_conn = None
+
+
+def connect_or_fail():
+    global _conn
+    if _conn is None:
+        try:
+            _conn = requests.Session()
+        except OSError:
+            _conn = None
+            raise
+    return _conn
+
+
 def callers(urls):
     for u in urls:
         session().get(u)
         warn_once()
+        connect_or_fail()
         unset_global()  # EFF102
+        reset_before()  # EFF102
+        reset_after()  # EFF102
+        reset_sometimes(u)  # EFF102
 "#;
 
 #[test]

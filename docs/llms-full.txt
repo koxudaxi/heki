@@ -402,7 +402,9 @@ A function whose model would pass its size budget (4 units per byte of its sourc
 and treats its body as one call it cannot resolve. `heki assumptions` lists it with the hazard
 `unmodeled`. A function whose proof state (a fact per variable per block) would pass 8 cells per
 byte of its source, at most 250,000, gets no `OPT` finding: heki does not try to prove a rewrite
-in it.
+in it. A function whose lazy initializations (the blocks each covers, and the walks that find
+them) would take more than 8 cells per byte of its source, at most 250,000, has none of them
+recognized: its clients and queries count as made on every iteration.
 
 Missed findings close as heki learns more:
 
@@ -2188,7 +2190,9 @@ follows these rules:
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without
 it, checked against a time limit: comparisons sharing an operand thirty deep, many `match`
 statements of slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many
-`continue`s and `isinstance` tests, and a long chain of assignments a loop carries.
+`continue`s and `isinstance` tests, a long chain of assignments a loop carries, and many loops
+one after another, each with a lazy initialization (the blocks each covers count toward a budget
+proportional to the source).
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -3892,8 +3896,8 @@ A client created only while a local variable the loop carries is unset (`if conn
 first: ...; first = False`), is created once per run of the loop, and so is one created where
 every way on leaves the loop (`return s.get(url)`, `connect(); break`, `raise` after it). Still
 reported: a variable or flag set back in the loop (also by an `except` handler), or set there to
-a value the branch does not compute (`prev = row`, which may be `None`), a branch that does not
-always set it, a loop around that starts it unset again in each iteration, and a `break` out of
+a value the branch does not compute (`prev = row`, which may be `None`), a global the function
+also sets back to `None` (before the test, or after the initialization), a branch that does not always set it, a loop around that starts it unset again in each iteration, and a `break` out of
 an inner loop, which runs again in each iteration of the outer one.
 
 A call whose arguments switch off the branch that creates the client is not followed into
