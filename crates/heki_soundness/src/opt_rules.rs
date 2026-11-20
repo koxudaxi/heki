@@ -198,7 +198,12 @@ impl<'a> ModuleCtx<'a> {
         }
         let module_fn = ir.function(ir.module_fn);
         let mut deque = None;
-        for inst in module_fn.blocks.iter().flat_map(|b| &b.insts) {
+        let imports = module_fn
+            .blocks
+            .iter()
+            .filter(|b| on_every_path(module_fn, b.id))
+            .flat_map(|b| &b.insts);
+        for inst in imports {
             let InstKind::Import {
                 dst, module, name, ..
             } = &inst.kind
@@ -206,7 +211,9 @@ impl<'a> ModuleCtx<'a> {
                 continue;
             };
             let bound = module_fn.var_name(*dst).unwrap_or_default();
-            let single = stores.get(bound).copied() == Some(1);
+            // `from .collections import deque` names another module.
+            let single = stores.get(bound).copied() == Some(1)
+                && !crate::imports::is_relative_from(source, inst.span);
             if module.as_deref() == Some("collections") && name == "deque" && single {
                 deque = Some(DequeRef {
                     spelling: bound.to_owned(),
@@ -2550,6 +2557,26 @@ impl<'a, 'c> Rules<'a, 'c> {
         edits.extend(type_edits);
         Some(edits)
     }
+}
+
+/// Block `b` runs whenever the function body completes (it is no branch of an `if`, such as
+/// `if TYPE_CHECKING:`): no path from the entry avoids it.
+fn on_every_path(f: &IrFunction, b: BlockId) -> bool {
+    let mut seen = FxHashSet::default();
+    let mut stack = vec![BlockId(0)];
+    while let Some(x) = stack.pop() {
+        if x == b || !seen.insert(x) {
+            continue;
+        }
+        let bb = f.block(x);
+        let next = bb.terminator.successors();
+        if next.is_empty() {
+            return false;
+        }
+        stack.extend(next);
+        stack.extend(bb.exc_target);
+    }
+    true
 }
 
 /// `list[T]` / `list` / `List[T]` / `typing.List[T]` (also quoted) spelled with `spelling`

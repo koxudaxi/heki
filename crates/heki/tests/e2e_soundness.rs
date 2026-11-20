@@ -1360,6 +1360,67 @@ fn deque_spellings_and_import_insertion() {
 }
 
 #[test]
+fn deque_import_reuse_and_placement() {
+    const INSERTED: &[&str] = &[
+        "import collections\n",
+        "collections.deque([1, 2, 3, *range(n)])",
+        "q.popleft()",
+    ];
+    // (module head, the fix's replacements, whether CPython can run the module)
+    let cases: &[(&str, &[&str], bool)] = &[
+        // An unconditional absolute import is reused.
+        (
+            "from collections import deque\n",
+            &["deque([1, 2, 3, *range(n)])", "q.popleft()"],
+            true,
+        ),
+        // A name bound only for type checkers is not there at run time.
+        (
+            "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from collections import deque\n",
+            INSERTED,
+            true,
+        ),
+        // `from .collections import deque` is another module's `deque`.
+        (
+            "from .collections import deque\n",
+            &[
+                "import collections\n\n",
+                "collections.deque([1, 2, 3, *range(n)])",
+                "q.popleft()",
+            ],
+            false,
+        ),
+        // `__future__` imports stay first, the shebang and the encoding line too.
+        (
+            "from __future__ import annotations\nfrom math import pi\n",
+            INSERTED,
+            true,
+        ),
+        ("#!/usr/bin/env python3\nimport sys\n", INSERTED, true),
+        ("# -*- coding: utf-8 -*-\nimport os\n", INSERTED, true),
+        // A non-ASCII name next to an import heki plans around.
+        ("import os as caf\u{e9}\n", INSERTED, true),
+    ];
+    for (i, (head, reps, runs)) in cases.iter().enumerate() {
+        let src = format!("{head}\n\n{DRAIN}\n\nprint(drain(3))\n");
+        let p = Project::new(&format!("sound_import_{i}"));
+        p.write("cases.py", &src);
+        let diags = opt_json(&p, &[]);
+        assert_eq!(diags.len(), 1, "{head}: {diags:#?}");
+        assert_eq!(replacements(&diags[0]), *reps, "{head}: {diags:#?}");
+        if *runs {
+            let before = run_python(&p.dir, "cases.py");
+            p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
+            let fixed = p.read("cases.py");
+            assert_eq!(before, run_python(&p.dir, "cases.py"), "{fixed}");
+            let first = head.lines().next().unwrap();
+            let must_stay_first = first.starts_with('#') || first.starts_with("from __future__");
+            assert!(!must_stay_first || fixed.starts_with(first), "{fixed}");
+        }
+    }
+}
+
+#[test]
 fn frame_introspection_blocks_the_function() {
     let src = "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    eval('1')\n    return x\n";
     check_module(

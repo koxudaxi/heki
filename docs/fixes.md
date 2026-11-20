@@ -75,7 +75,10 @@ A fix keeps the file acceptable to a type checker and to isort:
   `force-sort-within-sections`); without such a block it starts one before the other imports,
   and in a module without imports it follows the docstring and `__future__` imports, with the
   blank lines isort expects. Only imports run before it, so the rewritten function cannot run
-  before `collections` is bound.
+  before `collections` is bound. It never goes above a shebang, an encoding declaration, or a
+  `from __future__` import. An existing `from collections import deque` or `import
+  collections` is reused only when it runs unconditionally (not under `if TYPE_CHECKING:`)
+  and names the standard library's module (not `from .collections import deque`).
 
 ## Profiles
 
