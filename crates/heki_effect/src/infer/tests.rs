@@ -44,6 +44,7 @@ fn show(v: &Val) -> String {
         Val::Ref(f) => format!("ref {f}"),
         Val::Inst(c) => c.clone(),
         Val::Super(c) => format!("super {c}"),
+        Val::Union(cs) => cs.join(" | "),
     }
 }
 
@@ -218,7 +219,7 @@ def f(
     assert_eq!(of(&t, "tail"), one("builtins.list"));
     assert_eq!(of(&t, "rest"), one("builtins.tuple"));
     // Any of the items for a position past the end; nothing for what has no items.
-    assert!(of(&t, "fourth").is_empty());
+    assert_eq!(of(&t, "fourth"), one("m.Field | m.Model"));
     assert!(of(&t, "nothing").is_empty());
     assert!(of(&t, "absent").is_empty());
     assert!(of(&t, "never").is_empty());
@@ -305,9 +306,9 @@ def f(models: list[Model], by_name: dict[str, Model], fields: list[Field], neste
     assert_eq!(of(&t, "i"), one("builtins.int"));
     assert_eq!(of(&t, "z2"), one("m.Field"));
     assert_eq!(of(&t, "item"), one("builtins.tuple"));
-    // A default of another class, items of two classes, or unknown items give no type.
-    assert!(of(&t, "got_other").is_empty());
-    assert!(of(&t, "c2").is_empty());
+    // A default of another class or items of two classes give a union; unknown items, none.
+    assert_eq!(of(&t, "got_other"), one("m.Field | m.Model"));
+    assert_eq!(of(&t, "c2"), one("m.Field | m.Model"));
     assert!(of(&t, "c4").is_empty());
     assert!(of(&t, "other").is_empty());
     assert!(of(&t, "called").is_empty());
@@ -392,8 +393,8 @@ def f(models: list[Model], by_name: dict[str, Model], m: Model, field: Field, un
     assert_eq!(of(&t, "y"), one("m.Field"));
     assert_eq!(of(&t, "l"), one("m.Field"));
     assert_eq!(of(&t, "text"), one("builtins.str"));
-    // Items of two classes; an unknown mapping; an empty display.
-    assert!(of(&t, "b").is_empty());
+    // Items of two classes are a union; an unknown mapping and an empty display give none.
+    assert_eq!(of(&t, "b"), one("m.Field | m.Model"));
     assert!(of(&t, "h").is_empty());
     assert!(of(&t, "t").is_empty());
     assert_eq!(of(&t, "seen"), one("builtins.set"));
@@ -542,17 +543,35 @@ def f(unknown) -> None:
 }
 
 #[test]
-fn unassigned_locals_and_phis_waiting_on_them_stay_untyped() {
+fn phis_join_the_values_that_reach_them() {
     let src = with_classes(
         r#"
-def f(flag, models: list[Model]):
+from typing import Optional
+
+
+class Tree:
+    parent: Optional["Tree"] = None
+
+
+def f(flag, models: list[Model], by_name: dict[str, Model], tree: Tree):
     if flag:
         late = Model()
     late.fields = []
     node = models[0]
     while flag:
         node = node.fields
-    return node
+    current = tree
+    while current is not None:
+        up = current
+        current = current.parent
+    if flag and (found := by_name.get("a")):
+        found.fields = []
+    if flag or (other := by_name.get("b")) is None:
+        pass
+    else:
+        other.fields = []
+    unset = None
+    return node, up, other, unset
 
 
 x = Model()
@@ -560,10 +579,18 @@ y = x
 "#,
     );
     let t = types(&src, "f");
-    // `late` is a phi of the assignment and of no value: it waits forever.
-    assert!(of(&t, "late").len() <= 1);
-    // A phi cycle (`node = node.fields` in a loop) gets no type of its own yet.
+    // A local assigned on some paths only has the type of the assignments.
+    assert_eq!(of(&t, "late"), one("m.Model"));
+    // A variable rebound in a loop to values of its own class keeps it; to another class
+    // (`node = node.fields`), it has none.
+    assert_eq!(of(&t, "up"), one("m.Tree"));
+    assert!(of(&t, "current").iter().all(|c| c == "m.Tree"));
     assert!(!of(&t, "node").contains(&"builtins.list".to_owned()));
+    // A walrus inside `and` / `or`.
+    assert_eq!(of(&t, "found"), one("m.Model"));
+    assert_eq!(of(&t, "other"), one("m.Model"));
+    // `None` alone gives no type.
+    assert!(of(&t, "unset").is_empty());
     let module = types(&src, "<module>");
     assert_eq!(of(&module, "y"), one("m.Model"));
 }
@@ -821,6 +848,114 @@ def h(m: Model, r: Rec, pm: PM, x):
     }
 }
 
+const UNIONS: &str = r#"
+from typing import Optional, Union
+
+
+class A:
+    name: Model
+
+    def make(self) -> Field:
+        return Field()
+
+
+class B:
+    name: Model
+
+    def make(self) -> Field:
+        return Field()
+
+
+class C(A):
+    pass
+
+
+class Holder:
+    def __init__(self, flag):
+        self.part = A() if flag else B()
+
+
+EITHER = A() if Holder else B()
+
+
+def g(h: Holder):
+    held = h.part
+    either = EITHER
+    return held, either
+
+
+def f(u: A | B, o: Optional[Union[A, B]], many: A | B | Model | Field, items: list[A | B], flag):
+    x1 = u
+    x2 = o
+    x3 = many
+    for it in items:
+        x4 = it
+    pick = A() if flag else B()
+    named = u.name
+    made = u.make()
+    if isinstance(u, A):
+        n1 = u
+    else:
+        n2 = u
+    if not isinstance(u, B):
+        n3 = u
+    if isinstance(u, A) and flag:
+        n4 = u
+    if flag and isinstance(u, A):
+        n5 = u
+    if not isinstance(u, A) or flag:
+        pass
+    else:
+        n6 = u
+    while isinstance(u, A):
+        n7 = u
+        break
+    for v in items:
+        if not isinstance(v, B):
+            continue
+        n8 = v
+    if isinstance(u, (A, B)):
+        n9 = u
+    if isinstance(flag, C):
+        n10 = flag
+    only_a = [y for y in items if isinstance(y, A)]
+    for z in only_a:
+        n11 = z
+    if isinstance(u, A) or flag:
+        n12 = u
+    after = u
+    return x1, x2, x3, x4, pick, named, made, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11
+"#;
+
+#[test]
+fn unions_of_a_few_classes_and_isinstance_narrowing() {
+    let src = with_classes(UNIONS);
+    for version in [PythonVersion::PY311, PythonVersion::PY312] {
+        let t = types_at(&[("m", src.as_str())], version, "f");
+        for name in ["x1", "x2", "x4", "pick", "n9", "after"] {
+            assert_eq!(of(&t, name), one("m.A | m.B"), "{name}");
+        }
+        // More classes than a union keeps give no type.
+        assert!(of(&t, "x3").is_empty());
+        // A member of a union has the join of its classes' declarations.
+        assert_eq!(of(&t, "named"), one("m.Model"));
+        assert_eq!(of(&t, "made"), one("m.Field"));
+        for name in ["n1", "n3", "n4", "n5", "n6", "n7", "n11"] {
+            assert_eq!(of(&t, name), one("m.A"), "{name} ({version:?})");
+        }
+        for name in ["n2", "n8"] {
+            assert_eq!(of(&t, name), one("m.B"), "{name}");
+        }
+        // A check of an untyped value names the class; one that may be false narrows nothing.
+        assert_eq!(of(&t, "n10"), one("m.C"));
+        assert_eq!(of(&t, "n12"), one("m.A | m.B"));
+        // Attributes and globals keep a union of what they are assigned.
+        let g = types_at(&[("m", src.as_str())], version, "g");
+        assert_eq!(of(&g, "held"), one("m.A | m.B"));
+        assert_eq!(of(&g, "either"), one("m.A | m.B"));
+    }
+}
+
 #[test]
 fn edges_of_items_calls_and_annotations() {
     let src = with_classes(
@@ -872,9 +1007,9 @@ def f(
     assert_eq!(of(&t, "merged"), one("builtins.dict"));
     assert!(of(&t, "alias").is_empty());
     assert!(of(&t, "sliced").is_empty());
-    assert!(of(&t, "any_item").is_empty());
-    // A starred target would shift the positions: no position is trusted.
-    assert!(of(&t, "first").is_empty());
+    assert_eq!(of(&t, "any_item"), one("m.Field | m.Model"));
+    // A starred target would shift the positions: no position is trusted, any item can be there.
+    assert_eq!(of(&t, "first"), one("m.Field | m.Model"));
     assert_eq!(of(&t, "from_unknown"), one("builtins.dict"));
     assert_eq!(of(&t, "from_plain"), one("builtins.dict"));
     assert_eq!(of(&t, "c"), one("ref m.Model"));

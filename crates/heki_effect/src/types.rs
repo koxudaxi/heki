@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 /// arguments are dropped, so loops that build nested containers stay finite.
 pub(crate) const MAX_DEPTH: usize = 4;
 
+/// Most classes a union keeps (`Model | Field | Node`); a value of more classes has no tracked
+/// type.
+pub(crate) const MAX_UNION: usize = 3;
+
 /// What the Advisory lane knows about a value.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Ty {
@@ -23,6 +27,8 @@ pub enum Ty {
     SelfType,
     /// A `functools.partial(f, ...)` object: calling it calls `f`.
     Partial(Box<Ty>),
+    /// An instance of one of two or three classes (sorted by class, one entry per class).
+    Union(Vec<Obj>),
 }
 
 /// An instance of a class, with the type arguments of a known generic container.
@@ -157,11 +163,48 @@ impl Ty {
         })
     }
 
-    /// The instance a value is (`None` for named objects, `super()`, and partial objects).
+    /// The instance a value is (`None` for named objects, `super()`, partial objects, and
+    /// unions).
     pub fn obj(&self) -> Option<&Obj> {
         match self {
             Ty::Inst(o) => Some(o),
-            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => None,
+            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
+        }
+    }
+
+    /// The instances a value may be: one for an instance, two or three for a union.
+    pub(crate) fn members(&self) -> &[Obj] {
+        match self {
+            Ty::Inst(o) => std::slice::from_ref(o),
+            Ty::Union(os) => os,
+            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => &[],
+        }
+    }
+
+    /// The type of a value that is one of `objs` (joined by class): an instance, a union of at
+    /// most [`MAX_UNION`] classes, or `None` for none or more.
+    pub(crate) fn of_members(objs: impl IntoIterator<Item = Obj>) -> Option<Ty> {
+        let mut out: Vec<Obj> = Vec::new();
+        for o in objs {
+            match out.binary_search_by(|x| x.class.cmp(&o.class)) {
+                Ok(i) => out[i].args = out[i].args.join(&o.args),
+                Err(i) => out.insert(i, o),
+            }
+        }
+        match out.len() {
+            0 => None,
+            1 => out.pop().map(Ty::Inst),
+            n if n <= MAX_UNION => Some(Ty::Union(out)),
+            _ => None,
+        }
+    }
+
+    /// Maps every instance the value may be (a union member by member).
+    pub(crate) fn map_members(&self, f: impl Fn(&Obj) -> Option<Obj>) -> Option<Ty> {
+        match self {
+            Ty::Inst(o) => f(o).map(Ty::Inst),
+            Ty::Union(os) => Ty::of_members(os.iter().map(f).collect::<Option<Vec<_>>>()?),
+            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => Some(self.clone()),
         }
     }
 
@@ -170,40 +213,39 @@ impl Ty {
     pub(crate) fn bind_self(&self, recv: Option<&Ty>) -> Option<Ty> {
         match self {
             Ty::SelfType => recv.cloned(),
-            Ty::Inst(o) => {
-                let elem = |e: &Elem| match e {
-                    Elem::Of(t) => Elem::of(t.bind_self(recv)),
-                    Elem::Empty | Elem::Unknown => e.clone(),
-                };
-                let args = match &o.args {
-                    Args::None => Args::None,
-                    Args::Items(e) => Args::Items(Box::new(elem(e))),
-                    Args::Map(k, v) => Args::Map(Box::new(elem(k)), Box::new(elem(v))),
-                    Args::Tuple(es) => Args::Tuple(es.iter().map(elem).collect()),
-                };
-                Some(Ty::Inst(Obj {
+            _ => self.map_members(|o| {
+                Some(Obj {
                     class: o.class.clone(),
-                    args,
-                }))
-            }
-            Ty::Ref(_) | Ty::Super(_) | Ty::Partial(_) => Some(self.clone()),
+                    args: o.args.map_elems(|t| t.bind_self(recv)),
+                })
+            }),
         }
     }
 
-    /// The least type covering both, or `None` when no tracked type does.
+    /// The least type covering both: the instances of both (one class with joined arguments,
+    /// or a union of a few), or `None` when no tracked type does.
     pub fn join(&self, other: &Ty) -> Option<Ty> {
+        if self == other {
+            return Some(self.clone());
+        }
         match (self, other) {
             (Ty::Inst(a), Ty::Inst(b)) if a.class == b.class => Some(Ty::Inst(Obj {
                 class: a.class.clone(),
                 args: a.args.join(&b.args),
             })),
-            _ => (self == other).then(|| self.clone()),
+            _ => match (self.members(), other.members()) {
+                (a, b) if !a.is_empty() && !b.is_empty() => {
+                    Ty::of_members(a.iter().chain(b).cloned())
+                }
+                _ => None,
+            },
         }
     }
 
     fn depth(&self) -> usize {
         match self {
             Ty::Inst(o) => 1 + o.args.depth(),
+            Ty::Union(os) => 1 + os.iter().map(|o| o.args.depth()).max().unwrap_or(0),
             Ty::Partial(t) => 1 + t.depth(),
             Ty::Ref(_) | Ty::Super(_) | Ty::SelfType => 1,
         }
@@ -224,6 +266,21 @@ impl Args {
         match (key, value) {
             (Elem::Unknown, Elem::Unknown) => Args::None,
             (k, v) => Args::Map(Box::new(k), Box::new(v)),
+        }
+    }
+
+    /// The arguments with `f` applied to every tracked type (an item `f` gives none for is
+    /// unknown).
+    pub(crate) fn map_elems(&self, f: impl Fn(&Ty) -> Option<Ty>) -> Args {
+        let elem = |e: &Elem| match e {
+            Elem::Of(t) => Elem::of(f(t)),
+            Elem::Empty | Elem::Unknown => e.clone(),
+        };
+        match self {
+            Args::None => Args::None,
+            Args::Items(e) => Args::Items(Box::new(elem(e))),
+            Args::Map(k, v) => Args::Map(Box::new(elem(k)), Box::new(elem(v))),
+            Args::Tuple(es) => Args::Tuple(es.iter().map(elem).collect()),
         }
     }
 
@@ -296,7 +353,21 @@ mod tests {
         let model = Ty::inst("m.Model");
         let field = Ty::inst("m.Field");
         assert_eq!(model.join(&model), Some(model.clone()));
-        assert_eq!(model.join(&field), None);
+        // Instances of a few classes are a union, sorted by class; of more, nothing.
+        let both = model.join(&field).unwrap();
+        assert_eq!(
+            both.members()
+                .iter()
+                .map(|o| o.class.as_str())
+                .collect::<Vec<_>>(),
+            ["m.Field", "m.Model"]
+        );
+        assert_eq!(field.join(&model), Some(both.clone()));
+        assert_eq!(both.join(&model), Some(both.clone()));
+        let three = both.join(&Ty::inst("m.Node")).unwrap();
+        assert_eq!(three.members().len(), 3);
+        assert_eq!(three.join(&Ty::inst("m.Tree")), None);
+        assert_eq!(both.obj(), None);
         assert_eq!(
             Ty::Ref("m.f".into()).join(&Ty::Ref("m.f".into())),
             Some(Ty::Ref("m.f".into()))
@@ -307,7 +378,7 @@ mod tests {
         assert_eq!(list(Elem::Empty).join(&models), Some(models.clone()));
         assert_eq!(
             models.join(&list(Elem::Of(field.clone()))),
-            Some(Ty::inst("builtins.list"))
+            Some(list(Elem::Of(both)))
         );
         // Mappings join keys and values; tuples join by position, or become item lists.
         let map = |v: &Ty| {

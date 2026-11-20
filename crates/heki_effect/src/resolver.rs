@@ -14,7 +14,9 @@
 use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
-use heki_ir::{FnIndex, FunctionKind, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId};
+use heki_ir::{
+    BlockId, FnIndex, FunctionKind, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId,
+};
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -366,7 +368,7 @@ impl ModuleDecls {
         let mut parts = split_top_level(t, '|');
         if parts.len() > 1 {
             parts.retain(|p| *p != "None");
-            return self.resolve_annotation_ty(single(&parts)?);
+            return self.union_annotation(&parts);
         }
         let Some((head, inner)) = subscript(t) else {
             // `typing.Self` (also unimported, in a string annotation): the receiver's type.
@@ -389,7 +391,7 @@ impl ModuleDecls {
             "Union" => {
                 let mut members = split_top_level(inner, ',');
                 members.retain(|p| *p != "None");
-                return self.resolve_annotation_ty(single(&members)?);
+                return self.union_annotation(&members);
             }
             _ => {}
         }
@@ -416,6 +418,23 @@ impl ModuleDecls {
             },
         };
         Some(Ty::container(&class, args))
+    }
+
+    /// The members of a union annotation other than `None`: one type, or instances of at most
+    /// [`crate::types::MAX_UNION`] classes.
+    fn union_annotation(&self, members: &[&str]) -> Option<Ty> {
+        if let [one] = members {
+            return self.resolve_annotation_ty(one);
+        }
+        let mut objs = Vec::new();
+        for m in members {
+            let t = self.resolve_annotation_ty(m)?;
+            if t.members().is_empty() {
+                return None;
+            }
+            objs.extend(t.members().iter().cloned());
+        }
+        Ty::of_members(objs)
     }
 
     fn resolve_type_head(&self, head: &str) -> Option<String> {
@@ -1325,27 +1344,17 @@ impl ProjectDecls {
     /// such a type is unknown. A name below a module heki does not see (a compiled submodule of a
     /// project package) stays as it is.
     pub(crate) fn declared_ty(&self, ty: &Ty) -> Option<Ty> {
-        let Ty::Inst(o) = ty else {
-            return Some(ty.clone());
-        };
-        let class = self.canonical(&o.class);
-        if let Some((m, rest)) = self.split_module(&class)
-            && !rest.contains('.')
-            && !m.classes.contains_key(rest)
-        {
-            return None;
-        }
-        let elem = |e: &Elem| match e {
-            Elem::Of(t) => Elem::of(self.declared_ty(t)),
-            Elem::Empty | Elem::Unknown => e.clone(),
-        };
-        let args = match &o.args {
-            Args::None => Args::None,
-            Args::Items(e) => Args::Items(Box::new(elem(e))),
-            Args::Map(k, v) => Args::Map(Box::new(elem(k)), Box::new(elem(v))),
-            Args::Tuple(es) => Args::Tuple(es.iter().map(elem).collect()),
-        };
-        Some(Ty::Inst(crate::types::Obj { class, args }))
+        ty.map_members(|o| {
+            let class = self.canonical(&o.class);
+            if let Some((m, rest)) = self.split_module(&class)
+                && !rest.contains('.')
+                && !m.classes.contains_key(rest)
+            {
+                return None;
+            }
+            let args = o.args.map_elems(|t| self.declared_ty(t));
+            Some(crate::types::Obj { class, args })
+        })
     }
 
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
@@ -2080,7 +2089,7 @@ fn complete_decls(
                     (Some(d), Some(t)) if !project.narrower(t, d) => Some(d),
                     (d, t) => t.or(d),
                 };
-                if let Some(t @ Ty::Inst(_)) = stored {
+                if let Some(t @ (Ty::Inst(_) | Ty::Union(_))) = stored {
                     decls.global_types.insert(name.clone(), t.clone());
                 }
             }
@@ -2114,7 +2123,7 @@ fn complete_decls(
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let InstKind::AttrStore { obj, attr, value } = &inst.kind
                 && self_vars.contains(obj)
-                && let Some(t @ Ty::Inst(_)) = types.ty(*value)
+                && let Some(t @ (Ty::Inst(_) | Ty::Union(_))) = types.ty(*value)
             {
                 class
                     .attr_types
@@ -2194,6 +2203,8 @@ pub enum Val {
     Inst(String),
     /// `super()` inside a method of class `fqn`.
     Super(String),
+    /// An instance of one of two or three classes (sorted).
+    Union(Vec<String>),
 }
 
 /// A receiver or callee as call resolution sees it, borrowed from a [`Val`] or a [`Ty`].
@@ -2205,33 +2216,75 @@ pub(crate) enum Recv<'v> {
 }
 
 impl Val {
-    pub(crate) fn recv(&self) -> Recv<'_> {
+    /// The view call resolution takes (`None` for a union, resolved class by class).
+    pub(crate) fn recv(&self) -> Option<Recv<'_>> {
         match self {
-            Val::Ref(f) => Recv::Ref(f),
-            Val::Inst(c) => Recv::Inst(c),
-            Val::Super(c) => Recv::Super(c),
+            Val::Ref(f) => Some(Recv::Ref(f)),
+            Val::Inst(c) => Some(Recv::Inst(c)),
+            Val::Super(c) => Some(Recv::Super(c)),
+            Val::Union(_) => None,
         }
     }
 }
 
+/// The targets of a call on a value of one of `classes` (`each` resolves it on one class): the
+/// project functions of every class resolving it, or the one external function they all
+/// resolve it to; a class not resolving it adds nothing (it has no such member), and project
+/// and external targets together leave it unresolved.
+fn union_targets(classes: &[String], each: impl Fn(&str) -> Callee) -> Callee {
+    let mut keys: Vec<FuncKey> = Vec::new();
+    let mut binds = None;
+    let mut external: Option<String> = None;
+    for class in classes {
+        match each(class) {
+            Callee::Project(found, b) => {
+                if binds.is_some_and(|x| x != b) {
+                    return Callee::Unresolved;
+                }
+                binds = Some(b);
+                for k in found {
+                    if !keys.contains(&k) {
+                        keys.push(k);
+                    }
+                }
+            }
+            Callee::External(symbol) => {
+                if external.as_ref().is_some_and(|e| *e != symbol) {
+                    return Callee::Unresolved;
+                }
+                external = Some(symbol);
+            }
+            Callee::TooMany => return Callee::TooMany,
+            Callee::Unresolved => {}
+        }
+    }
+    match (binds, external) {
+        (Some(_), None) if keys.len() > CHA_CANDIDATE_LIMIT => Callee::TooMany,
+        (Some(b), None) => Callee::Project(keys, b),
+        (None, Some(symbol)) => Callee::External(symbol),
+        _ => Callee::Unresolved,
+    }
+}
+
 impl Ty {
-    /// The view call resolution takes (`None` for a partial object).
+    /// The view call resolution takes (`None` for a partial object and a union).
     pub(crate) fn recv(&self) -> Option<Recv<'_>> {
         match self {
             Ty::Ref(f) => Some(Recv::Ref(f)),
             Ty::Inst(o) => Some(Recv::Inst(&o.class)),
             Ty::Super(c) => Some(Recv::Super(c)),
-            Ty::SelfType | Ty::Partial(_) => None,
+            Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
         }
     }
 
-    /// The value consumers see: the class of an instance, the fqn of a named object (none for a
-    /// partial object).
+    /// The value consumers see: the class of an instance (the classes of a union), the fqn of a
+    /// named object (none for a partial object).
     pub(crate) fn val(&self) -> Option<Val> {
         match self {
             Ty::Ref(f) => Some(Val::Ref(f.clone())),
             Ty::Inst(o) => Some(Val::Inst(o.class.clone())),
             Ty::Super(c) => Some(Val::Super(c.clone())),
+            Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
             Ty::SelfType | Ty::Partial(_) => None,
         }
     }
@@ -2374,7 +2427,12 @@ impl<'a> TypeCtx<'a> {
 
     /// Resolve calling a value (`f(...)`).
     pub fn resolve_call(&self, callee: Option<&Val>) -> Callee {
-        self.call_targets(callee.map(Val::recv))
+        match callee {
+            Some(Val::Union(classes)) => {
+                union_targets(classes, |c| self.call_targets(Some(Recv::Inst(c))))
+            }
+            _ => self.call_targets(callee.and_then(Val::recv)),
+        }
     }
 
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
@@ -2395,7 +2453,12 @@ impl<'a> TypeCtx<'a> {
 
     /// Resolve `recv.method(...)`.
     pub fn resolve_method(&self, recv: Option<&Val>, method: &str) -> Callee {
-        self.method_call_targets(recv.map(Val::recv), method)
+        match recv {
+            Some(Val::Union(classes)) => union_targets(classes, |c| {
+                self.method_call_targets(Some(Recv::Inst(c)), method)
+            }),
+            _ => self.method_call_targets(recv.and_then(Val::recv), method),
+        }
     }
 
     pub(crate) fn method_call_targets(&self, recv: Option<Recv<'_>>, method: &str) -> Callee {
@@ -2425,6 +2488,14 @@ impl<'a> TypeCtx<'a> {
         match recv? {
             Val::Inst(class) => self.project.property_targets(class, attr, false),
             Val::Super(class) => self.project.property_targets(class, attr, true),
+            Val::Union(classes) => match union_targets(classes, |c| {
+                self.project
+                    .property_targets(c, attr, false)
+                    .unwrap_or(Callee::Unresolved)
+            }) {
+                Callee::Unresolved => None,
+                callee => Some(callee),
+            },
             Val::Ref(_) => None,
         }
     }
@@ -2451,6 +2522,16 @@ impl<'a> TypeCtx<'a> {
     /// Forward inference of `var -> Val` over `f` (the receiver typing of `crate::infer`).
     pub fn infer(&self, f: &IrFunction) -> FxHashMap<VarId, Val> {
         self.infer_types(f).vals()
+    }
+
+    /// [`Self::infer`], with the values `isinstance` checks give variables in the blocks they
+    /// guard.
+    pub(crate) fn infer_flow(
+        &self,
+        f: &IrFunction,
+    ) -> (FxHashMap<VarId, Val>, FxHashMap<(BlockId, VarId), Val>) {
+        let inferred = self.infer_types(f);
+        (inferred.vals(), inferred.narrowed_vals())
     }
 
     /// Value bound by an `Import` instruction (needs the span-keyed semantic import).

@@ -460,6 +460,77 @@ def walk(shelf: Shelf) -> Iterator[Model]:
     yield from shelf.models
 "#;
 
+/// Flow: variables rebound in loops, a walrus inside `and` / `or`, unions, `isinstance`.
+const FLOW: &str = r#"from __future__ import annotations
+
+from typing import Optional, Union
+
+from pkg.model import Model, Node, Ref
+
+
+class Other:
+    def __init__(self) -> None:
+        self.fields: list[str] = []
+
+
+class Chain:
+    model: Model
+    parent: Optional[Chain] = None
+
+
+def rebound(chain: Chain) -> None:
+    current: Chain | None = chain
+    while current is not None:
+        current.model.fields = []
+        current = current.parent
+
+
+def walrus_and(by_name: dict[str, Model], flag: bool) -> None:
+    if flag and (model := by_name.get("a")):
+        model.fields = []
+
+
+def assigned_on_one_path(flag: bool) -> None:
+    if flag:
+        model = Model("a")
+    model.fields = []
+
+
+def union_param(value: Model | Other) -> None:
+    value.fields = []
+
+
+def union_typing(value: Union[Other, Model, None]) -> None:
+    value.fields.append("x")
+
+
+def narrowed_out(value: Model | Other) -> None:
+    if isinstance(value, Other):
+        value.fields = []
+
+
+def narrowed_in(value: Model | Other) -> None:
+    if not isinstance(value, Model):
+        return
+    value.fields = []
+
+
+def narrowed_loop(values: list[Model | Other]) -> None:
+    for value in values:
+        if isinstance(value, Other) or not value.name:
+            continue
+        value.fields = []
+
+
+def narrowed_any(value: object) -> None:
+    if isinstance(value, Model):
+        value.fields = []
+
+
+def too_many(value: Model | Other | Ref | Node) -> None:
+    value.fields = []
+"#;
+
 /// Return types: properties, methods along the MRO, `Self`, copies, partial objects, casts.
 const RETURNS: &str = r#"from __future__ import annotations
 
@@ -543,7 +614,8 @@ fn project(name: &str) -> Project {
         .write("pkg/cases.py", CASES)
         .write("pkg/more.py", MORE)
         .write("pkg/shelf.py", SHELF)
-        .write("pkg/returns.py", RETURNS);
+        .write("pkg/returns.py", RETURNS)
+        .write("pkg/flow.py", FLOW);
     p
 }
 
@@ -588,6 +660,7 @@ const PROBE_REPORTED: &[&str] = &[
     "c16_optional",
     "c17_union",
     "c18_pep604",
+    "c19_isinstance",
     "c20_self_attr_init",
     "c21_self_attr_class_annotation",
     "c22_self_list_attr",
@@ -663,15 +736,17 @@ fn items_of_wrapping_builtins_displays_scopes_and_other_modules() {
             "shelved",
             "varargs",
             "nodes",
+            "mixed",
+            "shifted",
         ] {
             assert!(
                 found.contains(name),
                 "{name} not reported for {version}: {found:?}"
             );
         }
-        // A read; items of two classes; a starred target before the written one (its position
-        // is not trusted); items of `str`; an untyped parameter.
-        for name in ["e_read", "mixed", "shifted", "strings", "untyped"] {
+        // A read; items of `str`; an untyped parameter. (A starred target before the written
+        // one leaves its position untrusted: any item of the tuple may be there.)
+        for name in ["e_read", "strings", "untyped"] {
             assert!(!found.contains(name), "{name} reported for {version}");
         }
     }
@@ -830,4 +905,32 @@ fn helpers_typing_their_parameter_report_their_own_writes() {
     // A write routed through the store's operations (`rename`) stays allowed for callers passing
     // a subclass instance or the value of a guarded attribute, whose own attributes it writes.
     assert_eq!(found, expected);
+}
+
+#[test]
+fn flow_rebinding_walrus_unions_and_isinstance() {
+    let p = project("flow");
+    for version in ["py311", "py312"] {
+        let found = names(&reported(&p, &["--target-version", version], "pkg/flow.py"));
+        for name in [
+            "rebound",
+            "walrus_and",
+            "assigned_on_one_path",
+            "union_param",
+            "union_typing",
+            "narrowed_in",
+            "narrowed_loop",
+            "narrowed_any",
+        ] {
+            assert!(
+                found.contains(name),
+                "{name} not reported for {version}: {found:?}"
+            );
+        }
+        // An `isinstance` check leaving only an unguarded class; more classes than a union
+        // keeps.
+        for name in ["narrowed_out", "too_many"] {
+            assert!(!found.contains(name), "{name} reported for {version}");
+        }
+    }
 }

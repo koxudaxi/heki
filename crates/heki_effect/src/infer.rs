@@ -3,10 +3,11 @@
 //!
 //! Every variable starts unset: no value reaches it yet. A value that never arrives (a local read
 //! before any assignment on that path, `None`, an item of an empty display) leaves what is
-//! computed from it unset. Displays and the items added to a local container skip unset values;
-//! a phi waits until all its inputs are set. A type only grows (the new one is joined with the
-//! old), and classes and nesting depth are bounded, so the fixpoint ends; a function without
-//! loops needs one pass.
+//! computed from it unset. Displays, the items added to a local container, and phis skip unset
+//! values, so a variable rebound in a loop (`node = node.parent`) or assigned on some paths only
+//! (a walrus in `and` / `or`) has the type of the values that reach it. A type only grows (the
+//! new one is joined with the old), and classes and nesting depth are bounded, so the fixpoint
+//! ends; a function without loops needs one pass.
 //!
 //! Types come from parameter, local, attribute, and return annotations (with the arguments of
 //! generic containers), constructors, and imports; they flow through copies, attributes, calls,
@@ -21,8 +22,8 @@ use crate::resolver::{Callee, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
 use heki_ir::{
-    BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind, IrFunction,
-    Terminator, VarId,
+    BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
+    IrFunction, PhiNode, Terminator, UnaryOpKind, VarId,
 };
 use rustc_hash::FxHashMap;
 use std::cell::{OnceCell, RefCell};
@@ -63,6 +64,9 @@ pub(crate) struct Inferred {
     declared: FxHashMap<String, Ty>,
     /// The function builds comprehension or generator-expression scopes of its own.
     encloses: bool,
+    /// The types `isinstance` checks give variables in the blocks they guard, where they differ
+    /// from the variable's own.
+    narrowed: FxHashMap<(BlockId, VarId), Ty>,
 }
 
 impl Inferred {
@@ -76,6 +80,14 @@ impl Inferred {
             Fact::Known(t) => Some(t),
             Fact::Unset | Fact::Unknown => None,
         }
+    }
+
+    /// The values consumers see of the variables `isinstance` checks narrow, by block.
+    pub(crate) fn narrowed_vals(&self) -> FxHashMap<(BlockId, VarId), Val> {
+        self.narrowed
+            .iter()
+            .filter_map(|(k, t)| Some((*k, t.val()?)))
+            .collect()
     }
 
     /// The values consumers see, by variable.
@@ -219,6 +231,26 @@ fn item_ty(e: Elem) -> Step {
     }
 }
 
+/// The narrowed types both maps give (joined).
+fn intersect(a: FxHashMap<VarId, Ty>, b: &FxHashMap<VarId, Ty>) -> FxHashMap<VarId, Ty> {
+    a.into_iter()
+        .filter_map(|(v, t)| Some((v, t.join(b.get(&v)?)?)))
+        .collect()
+}
+
+/// The join of every type, `None` when one is unknown or none covers them all.
+fn join_all(types: impl IntoIterator<Item = Option<Ty>>) -> Option<Ty> {
+    let mut out: Option<Ty> = None;
+    for t in types {
+        let t = t?;
+        out = Some(match out {
+            None => t,
+            Some(acc) => acc.join(&t)?,
+        });
+    }
+    out
+}
+
 /// `tuple[a, b]`.
 fn pair(a: Elem, b: Elem) -> Elem {
     Elem::Of(Ty::container("builtins.tuple", Args::Tuple(vec![a, b])))
@@ -252,6 +284,20 @@ struct Engine<'e, 'a> {
     changed: bool,
     /// A pass added items to a display.
     added_changed: bool,
+    /// `isinstance` narrowing (only for functions that call a function named `isinstance`).
+    narrowing: Option<Narrowing<'e>>,
+    /// What `isinstance` checks guarding the current block give its variables.
+    cur: FxHashMap<VarId, Ty>,
+}
+
+/// The CFG facts `isinstance` narrowing needs, and the narrowed types at each block's entry
+/// (`None` until a pass reaches the block).
+struct Narrowing<'e> {
+    preds: Vec<Vec<BlockId>>,
+    defs: FxHashMap<VarId, &'e InstKind>,
+    /// Each phi with its block.
+    phis: FxHashMap<VarId, (BlockId, &'e PhiNode)>,
+    entry: Vec<Option<FxHashMap<VarId, Ty>>>,
 }
 
 impl<'e, 'a> Engine<'e, 'a> {
@@ -274,6 +320,8 @@ impl<'e, 'a> Engine<'e, 'a> {
             encloses: false,
             changed: false,
             added_changed: false,
+            narrowing: None,
+            cur: FxHashMap::default(),
         };
         engine.seed_params();
         if let Some(seed) = seed {
@@ -332,6 +380,29 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// copies, and displays.
     fn collect(&mut self) {
         let (cx, f) = (self.cx, self.f);
+        let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        if insts().any(|i| {
+            matches!(&i.kind, InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }
+                if name == "isinstance")
+        }) {
+            let mut defs = FxHashMap::default();
+            for i in insts() {
+                if let Some(d) = i.kind.dst() {
+                    defs.insert(d, &i.kind);
+                }
+            }
+            let phis = f
+                .blocks
+                .iter()
+                .flat_map(|b| b.phis.iter().map(move |p| (p.dst, (b.id, p))))
+                .collect();
+            self.narrowing = Some(Narrowing {
+                preds: f.predecessors(),
+                defs,
+                phis,
+                entry: vec![None; f.blocks.len()],
+            });
+        }
         for ann in f
             .local_annotations
             .iter()
@@ -409,18 +480,17 @@ impl<'e, 'a> Engine<'e, 'a> {
             self.added_changed = false;
             for &bb in &rpo {
                 let block = self.f.block(bb);
+                self.enter(bb);
                 for phi in &block.phis {
-                    // A phi waits for all its inputs: one that never gets a value (a cycle of
-                    // phis, an unassigned local, `None`) leaves it without a type.
-                    let mut fact = Fact::Unset;
-                    let mut pending = false;
-                    for (_, v) in phi.incoming.iter().filter(|(_, v)| *v != phi.dst) {
-                        match self.fact(*v) {
-                            Fact::Unset => pending = true,
-                            f => fact = fact.join(&f),
-                        }
-                    }
-                    self.update(phi.dst, if pending { Fact::Unset } else { fact });
+                    // A phi joins the inputs that have a value: one that never gets a value (an
+                    // unassigned local, `None`) adds none, and a loop's back edge adds its value
+                    // on the next pass.
+                    let fact = phi
+                        .incoming
+                        .iter()
+                        .filter(|(_, v)| *v != phi.dst)
+                        .fold(Fact::Unset, |acc, (_, v)| acc.join(&self.fact(*v)));
+                    self.update(phi.dst, fact);
                 }
                 for inst in &block.insts {
                     self.add_contents(inst);
@@ -438,14 +508,29 @@ impl<'e, 'a> Engine<'e, 'a> {
                 break;
             }
         }
-        let facts = (0u32..)
-            .take(self.facts.len())
-            .map(|i| self.fact(VarId(i)))
-            .collect();
+        self.cur.clear();
+        // The facts as transfers see them: a declared local has its declaration.
+        let declared: Vec<(VarId, Fact)> =
+            self.declared.keys().map(|v| (*v, self.fact(*v))).collect();
+        let mut facts = std::mem::take(&mut self.facts);
+        for (v, fact) in declared {
+            facts[v.0 as usize] = fact;
+        }
+        let mut narrowed = FxHashMap::default();
+        if let Some(n) = &self.narrowing {
+            for (b, entry) in (0u32..).zip(&n.entry) {
+                for (v, t) in entry.iter().flatten() {
+                    if facts[v.0 as usize] != Fact::Known(t.clone()) {
+                        narrowed.insert((BlockId(b), *v), t.clone());
+                    }
+                }
+            }
+        }
         Inferred {
             facts,
             declared: self.names,
             encloses: self.encloses,
+            narrowed,
         }
     }
 
@@ -462,6 +547,9 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// for a type checker, unless what it holds is narrower: an instance of a subclass
     /// (`x: Base = Sub()`), or anything for a declaration of `Any` / `object`.
     fn need(&self, var: VarId) -> Result<Option<&Ty>, Pending> {
+        if let Some(t) = self.cur.get(&var) {
+            return Ok(Some(t));
+        }
         let inferred = &self.facts[var.0 as usize];
         match (inferred, self.declared.get(&var)) {
             (Fact::Known(t), Some(d)) if !self.cx.project.narrower(t, d) => Ok(Some(d)),
@@ -472,8 +560,166 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
+    /// Start block `bb`: the narrowed types at its entry are those every reached predecessor
+    /// hands it (a predecessor's own, and what its branch condition implies on this edge).
+    fn enter(&mut self, bb: BlockId) {
+        // The predecessors' narrowed types come from their entries, not the last block's.
+        self.cur.clear();
+        let Some(n) = &self.narrowing else {
+            return;
+        };
+        let mut entry: Option<FxHashMap<VarId, Ty>> = None;
+        for &p in &n.preds[bb.0 as usize] {
+            let Some(at) = &n.entry[p.0 as usize] else {
+                continue;
+            };
+            let mut edge = at.clone();
+            if let Terminator::Branch { cond, then_bb, .. } = &self.f.block(p).terminator {
+                edge.extend(self.implied(*cond, *then_bb == bb, at, 0));
+            }
+            entry = Some(match entry {
+                None => edge,
+                Some(acc) => intersect(acc, &edge),
+            });
+        }
+        let entry = entry.unwrap_or_default();
+        self.cur.clone_from(&entry);
+        if let Some(n) = &mut self.narrowing {
+            n.entry[bb.0 as usize] = Some(entry);
+        }
+    }
+
+    /// The narrowed types that `cond` being `truth` implies, where the narrowed types `at`
+    /// hold: `isinstance(x, C)` (with `not`, and through the values `and` / `or` join).
+    fn implied(
+        &self,
+        cond: VarId,
+        truth: bool,
+        at: &FxHashMap<VarId, Ty>,
+        depth: u8,
+    ) -> FxHashMap<VarId, Ty> {
+        let mut out = FxHashMap::default();
+        let Some(n) = &self.narrowing else {
+            return out;
+        };
+        if depth > 8 {
+            return out;
+        }
+        if let Some(&(block, phi)) = n.phis.get(&cond) {
+            // `a and b` / `a or b`: the inputs that can be `truth` here, each with the narrowed
+            // types of its path.
+            let mut joined: Option<FxHashMap<VarId, Ty>> = None;
+            for (p, v) in &phi.incoming {
+                let Some(path) = &n.entry[p.0 as usize] else {
+                    return out;
+                };
+                if let Terminator::Branch {
+                    cond: c,
+                    then_bb,
+                    else_bb,
+                } = &self.f.block(*p).terminator
+                    && c == v
+                {
+                    let target = if truth { else_bb } else { then_bb };
+                    if *target == block {
+                        continue;
+                    }
+                }
+                let mut facts = path.clone();
+                facts.extend(self.implied(*v, truth, path, depth + 1));
+                joined = Some(match joined {
+                    None => facts,
+                    Some(acc) => intersect(acc, &facts),
+                });
+            }
+            return joined.unwrap_or_default();
+        }
+        match n.defs.get(&cond) {
+            Some(InstKind::UnaryOp {
+                op: UnaryOpKind::Not,
+                operand,
+                ..
+            }) => return self.implied(*operand, !truth, at, depth + 1),
+            Some(InstKind::Copy { src, .. }) => return self.implied(*src, truth, at, depth + 1),
+            Some(InstKind::Call {
+                callee_var: Some(c),
+                args,
+                ..
+            }) if args.len() >= 2
+                && matches!(self.need(*c), Ok(Some(Ty::Ref(f))) if f == "builtins.isinstance") =>
+            {
+                let x = args[0];
+                let current = at.get(&x).or_else(|| self.need(x).ok().flatten());
+                if let Some(classes) = self.classes_of(args[1])
+                    && let Some(t) = self.narrow(current, &classes, truth)
+                {
+                    out.insert(x, t);
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// The classes an `isinstance` argument names: a class, or a tuple display of classes.
+    fn classes_of(&self, var: VarId) -> Option<Vec<String>> {
+        let class = |t: &Ty| match t {
+            Ty::Ref(c) => self
+                .cx
+                .project
+                .declared_ty(&Ty::inst(c.as_str()))
+                .and_then(|t| t.obj().map(|o| o.class.clone())),
+            _ => None,
+        };
+        match self.need(var).ok()?? {
+            Ty::Inst(Obj {
+                args: Args::Tuple(es),
+                ..
+            }) => es
+                .iter()
+                .map(|e| match e {
+                    Elem::Of(t) => class(t),
+                    Elem::Empty | Elem::Unknown => None,
+                })
+                .collect(),
+            t => class(t).map(|c| vec![c]),
+        }
+    }
+
+    /// The type of a value of type `t` once `isinstance(value, classes)` is `truth`: true keeps
+    /// the instances of those classes among what it may be (or is an instance of them); false
+    /// drops them from a union.
+    fn narrow(&self, t: Option<&Ty>, classes: &[String], truth: bool) -> Option<Ty> {
+        let project = self.cx.project;
+        let is_a = |c: &str| classes.iter().any(|k| c == k || project.is_subclass(c, k));
+        let members = t.map_or(&[][..], Ty::members);
+        if truth {
+            let kept: Vec<Obj> = members.iter().filter(|o| is_a(&o.class)).cloned().collect();
+            if kept.is_empty() {
+                Ty::of_members(classes.iter().map(|c| Obj {
+                    class: c.clone(),
+                    args: Args::None,
+                }))
+            } else {
+                Ty::of_members(kept)
+            }
+        } else {
+            let kept: Vec<Obj> = members
+                .iter()
+                .filter(|o| !is_a(&o.class))
+                .cloned()
+                .collect();
+            (!kept.is_empty() && kept.len() < members.len())
+                .then(|| Ty::of_members(kept))
+                .flatten()
+        }
+    }
+
     fn update(&mut self, var: VarId, fact: Fact) {
         let slot = &mut self.facts[var.0 as usize];
+        if *slot == fact {
+            return;
+        }
         let joined = slot.join(&fact);
         if joined != *slot {
             *slot = joined;
@@ -858,13 +1104,16 @@ impl<'e, 'a> Engine<'e, 'a> {
             Ty::Ref(c) if self.cx.project.is_project_class(c) => {
                 Some((c, false, Ty::inst(c.as_str())))
             }
-            Ty::Ref(_) | Ty::SelfType | Ty::Partial(_) => None,
+            Ty::Ref(_) | Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
         }
     }
 
     /// The declared type of reading `attr` on a value of type `recv`: a property getter's
     /// return annotation or the attribute's annotation along its MRO (`Self` bound to it).
     fn member(&self, recv: &Ty, attr: &str) -> Option<Ty> {
+        if let Ty::Union(os) = recv {
+            return join_all(os.iter().map(|o| self.member(&Ty::Inst(o.clone()), attr)));
+        }
         let cx = self.cx;
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
         cx.project
@@ -879,6 +1128,12 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// method of the first external base: a copy (`model_copy`, `list.copy`) has its receiver's
     /// type.
     fn member_call(&self, recv: &Ty, method: &str) -> Option<Ty> {
+        if let Ty::Union(os) = recv {
+            return join_all(
+                os.iter()
+                    .map(|o| self.member_call(&Ty::Inst(o.clone()), method)),
+            );
+        }
         let cx = self.cx;
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
         if let Some(key) = cx.project.mro_definition(class, method, skip_self) {

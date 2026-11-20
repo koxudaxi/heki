@@ -36,8 +36,13 @@ method call or a `@property` / `cached_property` read has the return annotation 
 definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
 is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
 `model_copy`) has its original's class, calling a `functools.partial` object returns what the
-wrapped function returns, and `typing.cast` names the class. An object whose class heki cannot
-see (an unannotated parameter or return, `Any`) is not tied to the target.
+wrapped function returns, and `typing.cast` names the class. A variable rebound in a loop
+(`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
+classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
+annotation or from different assignments) is each of them, and an `isinstance` check narrows it
+in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
+also inside `and` / `or`). An object whose class heki cannot see (an unannotated parameter or
+return, `Any`, a value of more than three classes) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call
