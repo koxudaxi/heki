@@ -2059,6 +2059,13 @@ impl ProjectDecls {
         }
     }
 
+    /// The project method `name` that the MRO of the class `class` finds first (what calling it
+    /// on an instance of exactly `class` runs; overrides of subclasses do not count).
+    pub fn mro_method(&self, class: &str, name: &str) -> Option<FuncKey> {
+        let class = self.canonical(class);
+        self.definitions(&class, name, false, false, |_| true).0.pop()
+    }
+
     /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run
     /// (`FunctionDecl::is_property`), found like [`Self::method_targets`]' candidates: the MRO
     /// definition when it is a getter, plus the getters of overriding project subclasses

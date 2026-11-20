@@ -60,6 +60,11 @@ name = "seal-break"
 targets = ["Seal.break_open"]
 unresolved = "report"
 
+[[tool.heki.call-owners]]
+name = "reseal"
+targets = ["reseal"]
+unresolved = "report"
+
 [[tool.heki.effect-boundaries]]
 name = "pure"
 scopes = ["pkg.pure"]
@@ -215,6 +220,11 @@ const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 const SEAL: &str = "class Seal:\n    def __init__(self):\n        self.code = \"\"\n\n    def break_open(self):\n        return None\n";
 const SEAL_PEEK: &str = "def peek(s):\n    return s.code\n\n\ndef crack(s):\n    s.break_open()\n";
 const SEAL_USE: &str = "from pkg.seal_peek import crack, peek\n\n\nclass Plain:\n    code = \"\"\n\n    def break_open(self):\n        return None\n\n\ndef use(p: Plain):\n    peek(p)\n    crack(p)\n";
+// A call target naming no class (`reseal`): a helper that types nothing calls the method on an
+// object its caller in another module binds to a class defining it, in a third module.
+const SEALER: &str = "class Sealer:\n    def reseal(self):\n        return None\n";
+const RESEAL_HELPER: &str = "def redo(s):\n    s.reseal()\n";
+const RESEAL_USE: &str = "from pkg.reseal_helper import redo\nfrom pkg.sealer import Sealer\n\n\ndef again(s: Sealer):\n    redo(s)\n";
 const STRICT_USE: &str = "from pkg.model import Registry\nfrom pkg.strict_ops import _reset\n\n\ndef run(r: Registry):\n    _reset(r)\n";
 
 // Files: a module a caller already imports is created, then deleted; a stub, then a package of
@@ -612,6 +622,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/key_class_reader.py", KEY_CLASS_READER),
         ("pkg/seal.py", SEAL),
         ("pkg/seal_peek.py", SEAL_PEEK),
+        ("pkg/sealer.py", SEALER),
+        ("pkg/reseal_helper.py", RESEAL_HELPER),
+        ("pkg/reseal_use.py", RESEAL_USE),
         ("pkg/journal.py", JOURNAL),
         ("pkg/headline.py", HEADLINE),
         ("pkg/safe_journal.py", SAFE_JOURNAL),
@@ -1167,7 +1180,9 @@ fn steps_small_displays() -> Vec<Step> {
 /// module defines the name again or lists a base defining it first, or code rebinds it on the
 /// class or a subclass; whether a helper keeps the object its caller hands it is a summary fact
 /// of the helper; whether a parameter is typed, and with which class, is a fact of
-/// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls).
+/// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls), and
+/// whether that class defines a method a call target naming no class names is a declaration of
+/// the class's module.
 fn steps_keys_fresh_strict() -> Vec<Step> {
     let storing = FRESH_OPS.replace(
         "    r.entries.append(1)\n",
@@ -1360,6 +1375,19 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             ("pkg/seal_peek.py", "MUT206"),
             ("pkg/seal_peek.py", "MUT207"),
         ]),
+        Step::new(
+            "the class bound to the helper's object renames the method a target names",
+            vec![save(
+                "pkg/sealer.py",
+                &SEALER.replace("def reseal(self):", "def close(self):"),
+            )],
+        )
+        .absent(&[("pkg/reseal_helper.py", "MUT207")]),
+        Step::new(
+            "the class defines the method again",
+            vec![save("pkg/sealer.py", SEALER)],
+        )
+        .present(&[("pkg/reseal_helper.py", "MUT207")]),
     ]
 }
 

@@ -2289,3 +2289,108 @@ fn strict_reads_and_calls_honor_the_contract_scopes_and_values() {
         );
     }
 }
+
+const DOTLESS_MODEL: &str = r#"import codecs
+
+
+class Model:
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        pass
+
+    def rewind(self) -> None:
+        pass
+
+
+class SubModel(Model):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reset()
+
+
+class Decoder(codecs.IncrementalDecoder):
+    pass
+"#;
+
+const DOTLESS_USE: &str = r#"from pkg.model import Decoder, Model, SubModel
+
+
+def redo(obj) -> None:
+    obj.reset()
+
+
+def redo_model(model: Model) -> None:
+    redo(model)
+
+
+def redo_sub(obj) -> None:
+    obj.reset()
+
+
+def redo_submodel(sub: SubModel) -> None:
+    redo_sub(sub)
+
+
+def redo_decoder(obj) -> None:
+    obj.reset()
+
+
+def decode(decoder: Decoder) -> None:
+    redo_decoder(decoder)
+
+
+def rewind_any(obj) -> None:
+    obj.rewind()
+
+
+def rewind_model(model: Model) -> None:
+    rewind_any(model)
+
+
+def typed(model: Model) -> None:
+    model.reset()
+"#;
+
+/// A call target naming no class (`reset`) names the methods of that name: an instance of a
+/// class whose MRO finds such a method calls the target, so a helper calling it on an object
+/// its callers bind to one is reported (`MUT207`), and an initializer of such a class calling
+/// it on its own `self` initializes itself (`MUT204`). A `reset` inherited from a library base
+/// is none, and neither is a method a target naming a function (`util.rewind`) does not name.
+#[test]
+fn a_call_target_naming_no_class_covers_the_classes_defining_the_method() {
+    let p = Project::new("strict_dotless_call_target");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204", "MUT207"]
+
+[[tool.heki.call-owners]]
+name = "resets"
+targets = ["reset"]
+unresolved = "report"
+
+[[tool.heki.call-owners]]
+name = "rewinds"
+targets = ["util.rewind"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", DOTLESS_MODEL)
+    .write("pkg/util.py", "def rewind() -> None:\n    pass\n")
+    .write("pkg/use.py", DOTLESS_USE);
+    let u = "pkg/use.py";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 5, "MUT207", "redo", "reset"),
+            d(u, 13, "MUT207", "redo_sub", "reset"),
+            d(u, 37, "MUT204", "typed", "reset"),
+        ]
+    );
+}

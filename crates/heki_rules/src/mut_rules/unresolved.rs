@@ -125,11 +125,12 @@ pub(super) fn mut206(
                     .iter()
                     .flat_map(|t| t.classes.iter().cloned())
                     .collect();
+                let reads_target = |class: &str| family.contains(class);
                 let access = Unseen {
                     func: key,
                     obj: a.obj_params,
                 };
-                let callers = Callers::LeaveTargetClasses(&family);
+                let callers = Callers::LeaveTargetClasses(&reads_target);
                 if hits.is_empty()
                     || !access.counts(cx, &sites, &rule.allowance, &no_class, callers)
                 {
@@ -179,13 +180,13 @@ pub(super) fn mut207(
                     .iter()
                     .filter(|t| t.name.matches(&a.name))
                     .collect();
-                let family: FxHashSet<String> =
-                    hits.iter().flat_map(|t| t.family.iter().cloned()).collect();
+                let calls_target =
+                    |class: &str| hits.iter().any(|t| t.calls_on(cx, class, &a.name));
                 let access = Unseen {
                     func: key,
                     obj: a.obj_params,
                 };
-                let callers = Callers::LeaveTargetClasses(&family);
+                let callers = Callers::LeaveTargetClasses(&calls_target);
                 if hits.is_empty()
                     || !access.counts(cx, &sites, &rule.allowance, &no_class, callers)
                 {
@@ -251,9 +252,9 @@ enum Callers<'f> {
     /// caller.
     TieEveryClass,
     /// A read or a call, which `MUT203` / `MUT204` do not follow into a parameter heki cannot
-    /// type: an object of one of these classes leaves the access to the strict rule, one of
-    /// another known class ties it.
-    LeaveTargetClasses(&'f FxHashSet<String>),
+    /// type: an object of a class this accepts (one whose access may be of a target) leaves
+    /// the access to the strict rule, one of another known class ties it.
+    LeaveTargetClasses(&'f dyn Fn(&str) -> bool),
 }
 
 /// An access heki cannot tie to a class: in `func`, to the object of its parameters `obj`
@@ -286,7 +287,7 @@ impl Unseen<'_> {
         let leave = match callers {
             Callers::Ignored => return true,
             Callers::TieEveryClass => None,
-            Callers::LeaveTargetClasses(classes) => Some(classes),
+            Callers::LeaveTargetClasses(accepts) => Some(accepts),
         };
         self.obj == 0 || unknown_above(cx, sites, allowance, self.func, self.obj, leave)
     }
@@ -296,15 +297,15 @@ impl Unseen<'_> {
 /// (outside the contract's allowed functions), from an object heki cannot rule out: one of
 /// unknown class (a caller passes one that is not its own parameter, typed with a protocol
 /// whose implementations heki cannot list, or the path ends in a function without project
-/// callers), or an instance of a class of `leave`. Arguments of other project classes end a
-/// path.
+/// callers), or an instance of a class `leave` accepts. Arguments of other project classes end
+/// a path.
 fn unknown_above(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
     allowance: &Allowance,
     func: &FuncKey,
     obj: u64,
-    leave: Option<&FxHashSet<String>>,
+    leave: Option<&dyn Fn(&str) -> bool>,
 ) -> bool {
     let mut queue = VecDeque::from([(func.clone(), obj)]);
     let mut visited: FxHashSet<(FuncKey, u64)> = FxHashSet::default();
@@ -340,7 +341,7 @@ fn unknown_above(
                             return true;
                         }
                         if o.typed_instance.is_some() {
-                            if leave.is_some_and(|l| o.instance_classes().any(|c| l.contains(c))) {
+                            if leave.is_some_and(|l| o.instance_classes().any(|c| l(c))) {
                                 return true;
                             }
                             continue;

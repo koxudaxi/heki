@@ -25,14 +25,46 @@ pub(crate) struct CallTargetPattern {
     /// Classes the whole text names, plus their subclasses: constructing one calls the target.
     classes: FxHashSet<String>,
     /// `classes` and the method's class family: an initializer of one of them calling the
-    /// target on its own `self` initializes itself.
-    pub family: FxHashSet<String>,
+    /// target on its own `self` initializes itself. A text naming no class (`reset`) has none:
+    /// its classes are those whose methods it names ([`Self::calls_on`],
+    /// [`Self::family_at`]).
+    family: FxHashSet<String>,
     /// The last name of the text (`replace_reference` of `DataType.replace_reference`): what a
     /// call on an object of unknown class names (`MUT207`).
     pub name: DottedPattern,
 }
 
 impl CallTargetPattern {
+    /// Whether calling `name` on an instance of the project class `class` may call the target:
+    /// `class` is of the target's family, or the method `name` its MRO finds first is the
+    /// target (`Model.reset` for the target `reset`).
+    pub(crate) fn calls_on(&self, cx: &CheckContext<'_>, class: &str, name: &str) -> bool {
+        self.family.contains(class)
+            || cx
+                .decls
+                .mro_method(class, name)
+                .is_some_and(|k| self.functions.matches(&k))
+    }
+
+    /// The target's family with the classes defining the methods `site` calls that the target
+    /// names, and their subclasses: an initializer of one of them calling the method on its own
+    /// `self` initializes itself.
+    pub(crate) fn family_at(&self, cx: &CheckContext<'_>, site: &CallSite) -> FxHashSet<String> {
+        let mut family = self.family.clone();
+        for bc in site.project_callees() {
+            if let Some((owner, _)) = bc.callee.qualname.rsplit_once('.')
+                && self.functions.matches(&bc.callee)
+            {
+                let class = format!("{}.{owner}", bc.callee.module);
+                if cx.decls.is_project_class(&class) {
+                    family.extend(cx.decls.subclasses_of(&class));
+                    family.insert(class);
+                }
+            }
+        }
+        family
+    }
+
     /// Whether `site` calls the target: it constructs a class of the target's family, or every
     /// project function it may call (each candidate of the class hierarchy) is the target or
     /// an override of it. A construction is matched by its class only: its `__init__` runs as
@@ -209,7 +241,7 @@ pub(crate) fn mut204(
                     let (target, called) = group_texts(&rule.targets, &group);
                     let family: FxHashSet<String> = group
                         .iter()
-                        .flat_map(|&i| rule.targets[i].family.iter().cloned())
+                        .flat_map(|&i| rule.targets[i].family_at(cx, site))
                         .collect();
                     let found = delegated_reports(
                         cx,
