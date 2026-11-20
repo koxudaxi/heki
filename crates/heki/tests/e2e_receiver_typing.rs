@@ -1,7 +1,6 @@
-//! Receiver typing (ENG-1) end to end through the real binary: which writes and reads of
-//! guarded attributes (`MUT201` / `MUT203`) heki sees through receivers whose class comes from
-//! the items of containers, return types, flow, and structural typing. The shapes are those of
-//! the research probe `p01_receivers` plus the store examples of the study.
+//! Receiver typing end to end through the real binary: which writes and reads of guarded
+//! attributes (`MUT201` / `MUT203`) heki sees through receivers whose class comes from
+//! annotations, the items of containers, return types, flow, and structural typing.
 
 mod common;
 
@@ -86,7 +85,7 @@ class Store:
         model.fields = fields
 "#;
 
-/// The 40 shapes of the research probe `p01_receivers`, and its two reads.
+/// Ways a function gets hold of a guarded object before writing it, and two reads.
 const CASES: &str = r#"from __future__ import annotations
 
 import copy
@@ -105,143 +104,143 @@ class Holder:
         self.by_name: dict[str, Model] = {}
 
 
-def c01_annotated_param(model: Model) -> None:
+def annotated_param(model: Model) -> None:
     model.fields = []
 
 
-def c02_unannotated_param(model) -> None:
+def unannotated_param(model) -> None:
     model.fields = []
 
 
-def c03_local_ctor() -> None:
+def local_ctor() -> None:
     m = Model("a")
     m.fields = ["x"]
 
 
-def c04_return_annotation() -> None:
+def return_annotation() -> None:
     m = make_model()
     m.fields = ["x"]
 
 
-def c05_untyped_return() -> None:
+def untyped_return() -> None:
     m = make_untyped()
     m.fields = ["x"]
 
 
-def c06_method_return(model: Model) -> None:
+def method_return(model: Model) -> None:
     m = model.clone()
     m.fields = ["x"]
 
 
-def c07_classmethod_return() -> None:
+def classmethod_return() -> None:
     m = Model.make()
     m.fields = ["x"]
 
 
-def c08_property(model: Model) -> None:
+def property_read(model: Model) -> None:
     model.twin.fields = ["x"]
 
 
-def c09_copy_copy(model: Model) -> None:
+def copy_copy(model: Model) -> None:
     m = copy.copy(model)
     m.fields = ["x"]
 
 
-def c10_deepcopy(model: Model) -> None:
+def deepcopy(model: Model) -> None:
     m = deepcopy(model)
     m.fields = ["x"]
 
 
-def c11_model_copy(node: Node) -> None:
+def model_copy(node: Node) -> None:
     n = node.model_copy()
     n.kwargs = {"a": 1}
 
 
-def c12_project_copy_fn(node: Node) -> None:
+def project_copy_fn(node: Node) -> None:
     n = copied_node(node)
     n.children_types = []
 
 
-def c13_for_loop(models: list[Model]) -> None:
+def for_loop(models: list[Model]) -> None:
     for m in models:
         m.fields = []
 
 
-def c14_dict_subscript(models: dict[str, Model]) -> None:
+def dict_subscript(models: dict[str, Model]) -> None:
     models["a"].fields = []
 
 
-def c15_list_subscript(models: list[Model]) -> None:
+def list_subscript(models: list[Model]) -> None:
     models[0].fields.append("x")
 
 
-def c16_optional(model: Optional[Model]) -> None:
+def optional(model: Optional[Model]) -> None:
     if model is not None:
         model.fields = []
 
 
-def c17_union(model: Union[Model, None]) -> None:
+def union(model: Union[Model, None]) -> None:
     if model:
         model.fields.append("x")
 
 
-def c18_pep604(model: Model | None) -> None:
+def pep604(model: Model | None) -> None:
     assert model is not None
     model.fields.clear()
 
 
-def c19_isinstance(obj: Any) -> None:
+def isinstance_check(obj: Any) -> None:
     if isinstance(obj, Model):
         obj.fields = []
 
 
-def c20_self_attr_init(h: Holder) -> None:
+def self_attr_init(h: Holder) -> None:
     h.m2.fields = []
 
 
-def c21_self_attr_class_annotation(h: Holder) -> None:
+def self_attr_class_annotation(h: Holder) -> None:
     h.model.fields = []
 
 
-def c22_self_list_attr(h: Holder) -> None:
+def self_list_attr(h: Holder) -> None:
     for m in h.models:
         m.fields.append("x")
 
 
-def c23_self_dict_attr(h: Holder) -> None:
+def self_dict_attr(h: Holder) -> None:
     h.by_name["a"].fields = []
 
 
-def c24_tuple_unpack(pair: tuple[Model, int]) -> None:
+def tuple_unpack(pair: tuple[Model, int]) -> None:
     m, _ = pair
     m.fields = []
 
 
-def c25_walrus(models: list[Model]) -> None:
+def walrus(models: list[Model]) -> None:
     if (m := models[0]) is not None:
         m.fields = []
 
 
-def c26_comprehension(models: list[Model]) -> None:
+def comprehension(models: list[Model]) -> None:
     [m.fields.clear() for m in models]
 
 
-def c27_setattr_const(model: Model) -> None:
+def setattr_const(model: Model) -> None:
     setattr(model, "fields", [])
 
 
-def c28_dunder_dict(model: Model) -> None:
+def dunder_dict(model: Model) -> None:
     model.__dict__["fields"] = []
 
 
 KEY = "fields"
 
 
-def c29_dunder_dict_const_name(model: Model) -> None:
+def dunder_dict_const_name(model: Model) -> None:
     model.__dict__[KEY] = []
 
 
-def c30_alias_then_helper(model: Model) -> None:
+def alias_then_helper(model: Model) -> None:
     fields = model.fields
     _extend(fields)
 
@@ -250,37 +249,37 @@ def _extend(fields: list[str]) -> None:
     fields.append("id")
 
 
-def c31_dict_get(models: dict[str, Model]) -> None:
+def dict_get(models: dict[str, Model]) -> None:
     m = models.get("a")
     if m is not None:
         m.fields = []
 
 
-def c32_items_loop(models: dict[str, Model]) -> None:
+def items_loop(models: dict[str, Model]) -> None:
     for _, m in models.items():
         m.fields = []
 
 
-def c33_values_loop(models: dict[str, Model]) -> None:
+def values_loop(models: dict[str, Model]) -> None:
     for m in models.values():
         m.fields = []
 
 
-def c34_enumerate(models: list[Model]) -> None:
+def enumerate_loop(models: list[Model]) -> None:
     for _, m in enumerate(models):
         m.fields = []
 
 
-def c35_iter_param(models: "Iterable[Model]") -> None:
+def iter_param(models: "Iterable[Model]") -> None:
     for m in models:
         m.fields = []
 
 
-def c36_nested_attr_write(node: Node) -> None:
+def nested_attr_write(node: Node) -> None:
     node.children_types[0].kwargs = {}
 
 
-def c37_subclass_instance() -> None:
+def subclass_instance() -> None:
     class Sub(Model):
         pass
 
@@ -288,23 +287,23 @@ def c37_subclass_instance() -> None:
     s.fields = []
 
 
-def c38_augassign(model: Model) -> None:
+def augassign(model: Model) -> None:
     model.fields += ["x"]
 
 
-def c39_del(model: Model) -> None:
+def delete_item(model: Model) -> None:
     del model.fields[0]
 
 
-def c40_lambda_callback(models: list[Model]) -> None:
+def lambda_callback(models: list[Model]) -> None:
     list(map(lambda m: m.fields.clear(), models))
 
 
-def r01_read(ref: Ref) -> list[Any]:
+def read_attr(ref: Ref) -> list[Any]:
     return ref.children
 
 
-def r02_read_loop(refs: list[Ref]) -> int:
+def read_in_generator(refs: list[Ref]) -> int:
     return sum(len(r.children) for r in refs)
 "#;
 
@@ -642,73 +641,73 @@ fn names(found: &BTreeSet<(String, String)>) -> BTreeSet<String> {
     found.iter().map(|(q, _)| q.clone()).collect()
 }
 
-/// The probe shapes reported for every target version, and the ones that stay silent.
-const PROBE_REPORTED: &[&str] = &[
-    "c01_annotated_param",
-    "c03_local_ctor",
-    "c04_return_annotation",
-    "c06_method_return",
-    "c07_classmethod_return",
-    "c08_property",
-    "c09_copy_copy",
-    "c10_deepcopy",
-    "c11_model_copy",
-    "c12_project_copy_fn",
-    "c13_for_loop",
-    "c14_dict_subscript",
-    "c15_list_subscript",
-    "c16_optional",
-    "c17_union",
-    "c18_pep604",
-    "c19_isinstance",
-    "c20_self_attr_init",
-    "c21_self_attr_class_annotation",
-    "c22_self_list_attr",
-    "c23_self_dict_attr",
-    "c24_tuple_unpack",
-    "c25_walrus",
-    "c26_comprehension",
-    "c27_setattr_const",
-    "c28_dunder_dict",
-    "c30_alias_then_helper",
-    "c31_dict_get",
-    "c32_items_loop",
-    "c33_values_loop",
-    "c34_enumerate",
-    "c35_iter_param",
-    "c36_nested_attr_write",
-    "c37_subclass_instance",
-    "c38_augassign",
-    "c39_del",
-    "r01_read",
-    "r02_read_loop",
+/// The shapes reported for every target version, and the ones that stay silent.
+const REPORTED_SHAPES: &[&str] = &[
+    "annotated_param",
+    "local_ctor",
+    "return_annotation",
+    "method_return",
+    "classmethod_return",
+    "property_read",
+    "copy_copy",
+    "deepcopy",
+    "model_copy",
+    "project_copy_fn",
+    "for_loop",
+    "dict_subscript",
+    "list_subscript",
+    "optional",
+    "union",
+    "pep604",
+    "isinstance_check",
+    "self_attr_init",
+    "self_attr_class_annotation",
+    "self_list_attr",
+    "self_dict_attr",
+    "tuple_unpack",
+    "walrus",
+    "comprehension",
+    "setattr_const",
+    "dunder_dict",
+    "alias_then_helper",
+    "dict_get",
+    "items_loop",
+    "values_loop",
+    "enumerate_loop",
+    "iter_param",
+    "nested_attr_write",
+    "subclass_instance",
+    "augassign",
+    "delete_item",
+    "read_attr",
+    "read_in_generator",
 ];
 
 /// Silent: an unannotated parameter or return (no class to go by), names computed at run
 /// time, and a lambda handed to `map` (its parameter has no type).
-const PROBE_SILENT: &[&str] = &[
-    "c02_unannotated_param",
-    "c05_untyped_return",
-    "c29_dunder_dict_const_name",
-    "c40_lambda_callback",
+const SILENT_SHAPES: &[&str] = &[
+    "unannotated_param",
+    "untyped_return",
+    "dunder_dict_const_name",
+    "lambda_callback",
 ];
 
 #[test]
-fn probe_shapes_through_items_of_containers() {
-    let p = project("probe_items");
+fn shapes_of_annotated_and_derived_receivers() {
+    let p = project("receiver_shapes");
     for version in ["py311", "py312"] {
         let found = names(&reported(
             &p,
             &["--target-version", version],
             "pkg/cases.py",
         ));
-        for name in PROBE_REPORTED {
+        for name in REPORTED_SHAPES {
             assert!(
                 found.contains(*name),
                 "{name} not reported for {version}: {found:?}"
             );
         }
-        for name in PROBE_SILENT {
+        for name in SILENT_SHAPES {
             assert!(!found.contains(*name), "{name} reported for {version}");
         }
         // The comprehension writes inside its own scope (Python 3.11) or in the function
