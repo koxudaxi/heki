@@ -1373,7 +1373,10 @@ opaque_to_layer3 = true
 # `psycopg.connect` is `Connection.connect`. `Connection.execute` returns a new cursor and
 # `Cursor.execute` the cursor itself (awaited, for the async classes), so statements chain on
 # their results. A client-side cursor receives the whole result in
-# `execute`, so its `fetch*` methods do no I/O and are not listed. A pool's constructor starts
+# `execute`, so its `fetch*` methods do no I/O and are not listed. `cursor(name)` with a name
+# returns a server-side cursor instead: `execute` declares it and each fetch (an iteration
+# included) sends `FETCH`, blocking, though reading the rows of a declared statement is no new
+# query. A pool's constructor starts
 # its workers, which connect in the background (`open(wait=True)` would wait): it allocates a
 # pool of connections without blocking.
 
@@ -1392,6 +1395,9 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg.Connection.cursor"
 return_type = "psycopg.Cursor"
+cases = [
+    { arg = 0, param = "name", nonempty = true, return_type = "psycopg.ServerCursor" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1422,6 +1428,42 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "psycopg.ServerCursor.execute"
+effects = ["blocking_db", "db_query"]
+return_type = "psycopg.ServerCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.executemany"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.fetchone"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.fetchmany"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.fetchall"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.scroll"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.ServerCursor.__iter__"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "psycopg.AsyncConnection.connect"
 effects = ["unpooled_client_alloc"]
 async_safe = true
@@ -1432,6 +1474,9 @@ opaque_to_layer3 = true
 symbol = "psycopg.AsyncConnection.cursor"
 async_safe = true
 return_type = "psycopg.AsyncCursor"
+cases = [
+    { arg = 0, param = "name", nonempty = true, return_type = "psycopg.AsyncServerCursor" },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1450,6 +1495,19 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg.AsyncCursor.executemany"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncServerCursor.execute"
+effects = ["db_query"]
+async_safe = true
+return_type = "psycopg.AsyncServerCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncServerCursor.executemany"
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true

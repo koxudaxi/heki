@@ -541,6 +541,22 @@ async def tp_async_cursors_from_execute_in_loops(conn: psycopg.AsyncConnection, 
     cur = await conn.execute("SELECT 1")
     for i in ids:
         await cur.execute("SELECT %s", (i,))
+
+
+async def tp_named_cursors_fetch_from_the_server(conn: psycopg.Connection, name):
+    with conn.cursor("export") as cur:
+        cur.execute("SELECT 1")
+    named = conn.cursor(name="export")
+    named.fetchall()
+    for row in named:
+        pass
+    conn.cursor(name).fetchall()
+
+
+async def tn_async_named_cursors(conn: psycopg.AsyncConnection):
+    cur = conn.cursor(name="export")
+    await cur.execute("SELECT 1")
+    await cur.fetchall()
 "#;
 
 #[test]
@@ -654,6 +670,26 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
                 "EFF103",
                 "tp_async_cursors_from_execute_in_loops",
                 "psycopg.AsyncCursor.execute"
+            ),
+            // A named cursor is a server-side one: its fetches block, an unknown name does
+            // not make one.
+            d(
+                116,
+                "EFF101",
+                "tp_named_cursors_fetch_from_the_server",
+                "psycopg.ServerCursor.execute"
+            ),
+            d(
+                118,
+                "EFF101",
+                "tp_named_cursors_fetch_from_the_server",
+                "psycopg.ServerCursor.fetchall"
+            ),
+            d(
+                119,
+                "EFF101",
+                "tp_named_cursors_fetch_from_the_server",
+                "psycopg.ServerCursor.__iter__"
             ),
         ]
     );

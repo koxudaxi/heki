@@ -860,6 +860,17 @@ mod tests {
         }
     }
 
+    /// `cursor(name)` with a name returns a server-side cursor of `class`.
+    fn named_cursor(class: &str) -> ArgCase {
+        ArgCase {
+            arg: Some(0),
+            param: Some("name".into()),
+            nonempty: true,
+            return_type: Some(class.into()),
+            ..ArgCase::default()
+        }
+    }
+
     fn with_cases(cases: Vec<ArgCase>, e: EcosystemEntry) -> EcosystemEntry {
         EcosystemEntry { cases, ..e }
     }
@@ -1251,7 +1262,26 @@ mod tests {
             ),
             (
                 s(&["psycopg.Connection.cursor"]),
-                returning("psycopg.Cursor", entry(&[])),
+                with_cases(
+                    vec![named_cursor("psycopg.ServerCursor")],
+                    returning("psycopg.Cursor", entry(&[])),
+                ),
+            ),
+            (
+                s(&["psycopg.ServerCursor.execute"]),
+                returning("psycopg.ServerCursor", entry(&[BlockingDb, DbQuery])),
+            ),
+            (
+                s(&["psycopg.ServerCursor.executemany"]),
+                entry(&[BlockingDb, DbQuery]),
+            ),
+            (
+                // Each fetch sends `FETCH` for rows of the declared statement.
+                with_prefix(
+                    "psycopg.ServerCursor",
+                    &["fetchone", "fetchmany", "fetchall", "scroll", "__iter__"],
+                ),
+                entry(&[BlockingDb]),
             ),
             (
                 // A new cursor, or the cursor itself, holding the result.
@@ -1411,7 +1441,18 @@ mod tests {
             ),
             (
                 s(&["psycopg.AsyncConnection.cursor"]),
-                async_safe(returning("psycopg.AsyncCursor", entry(&[]))),
+                with_cases(
+                    vec![named_cursor("psycopg.AsyncServerCursor")],
+                    async_safe(returning("psycopg.AsyncCursor", entry(&[]))),
+                ),
+            ),
+            (
+                s(&["psycopg.AsyncServerCursor.execute"]),
+                async_safe(returning("psycopg.AsyncServerCursor", entry(&[DbQuery]))),
+            ),
+            (
+                s(&["psycopg.AsyncServerCursor.executemany"]),
+                async_safe(entry(&[DbQuery])),
             ),
             (
                 s(&["psycopg.AsyncConnection.execute", "psycopg.AsyncCursor.execute"]),
