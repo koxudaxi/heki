@@ -25,9 +25,10 @@ use std::path::Path;
 /// What a function changes in place: its parameter itself (`None`) or a slot of it.
 type Changed = Option<Slot>;
 
-/// Write kinds `MUT108` reports. Rebinding and deletion belong to type checkers; `setattr` /
-/// `object.__setattr__` and `__dict__` writes are deliberate bypasses.
-const IN_PLACE: &[WriteKind] = &[
+/// Write kinds that change an attribute's object in place, which `MUT108` reports and `MUT112`
+/// follows. Rebinding and deletion belong to type checkers; `setattr` / `object.__setattr__` and
+/// `__dict__` writes are deliberate bypasses.
+pub(super) const IN_PLACE: &[WriteKind] = &[
     WriteKind::ContainerMut,
     WriteKind::AliasContainerMut,
     WriteKind::IndirectHelper,

@@ -601,10 +601,15 @@ impl Workspace {
         out.into_iter().collect()
     }
 
-    /// Files defining classes whose `MUT101` / `MUT107` reports read the summaries of the
-    /// `changed` methods (class families span modules).
+    /// Files defining classes whose `MUT101` / `MUT107` / `MUT112` reports read the summaries of
+    /// the `changed` methods (class families span modules).
     fn family_files(&self, changed: &[FuncKey]) -> Vec<PathBuf> {
-        let classes = family_readers(&self.index, self.decls.completed(), changed);
+        let classes = family_readers(
+            &self.index,
+            self.decls.completed(),
+            changed,
+            self.selection.is_enabled("MUT112"),
+        );
         self.index
             .files
             .values()
