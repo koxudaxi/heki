@@ -1258,13 +1258,22 @@ impl<'a> Extractor<'a> {
     }
 
     /// The comprehension or generator expression `child` created here iterates `iterable`
-    /// (its outermost one) at once: [`Self::iteration`], unless it is asynchronous (an `async
-    /// for` runs `__aiter__`, which the catalog does not list).
+    /// (its outermost one) at once: [`Self::iteration`], unless its first clause is an
+    /// `async for` (which runs `__aiter__`, which the catalog does not list); a later
+    /// `async for` clause does not change how the first one starts.
     fn child_iteration(&mut self, bb: BlockId, child: FunctionId, iterable: VarId, span: Span) {
-        if matches!(
-            self.cx.ir().function(child).kind,
-            FunctionKind::Sync | FunctionKind::Generator
-        ) {
+        let first_is_async = self
+            .cx
+            .ir()
+            .function(child)
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .find_map(|i| match i.kind {
+                InstKind::MakeIter { is_async, .. } => Some(is_async),
+                _ => None,
+            });
+        if first_is_async == Some(false) {
             self.iteration(bb, iterable, span);
         }
     }

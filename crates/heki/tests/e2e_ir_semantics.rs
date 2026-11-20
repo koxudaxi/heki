@@ -821,3 +821,25 @@ def plain(it):
         pairs(&[("star", "MUT106")])
     );
 }
+
+#[test]
+fn a_generator_expression_starts_its_first_iteration_where_it_is_created() {
+    let src = "\
+import sqlalchemy.orm
+
+
+async def later_async_clause(query: sqlalchemy.orm.Query, stream):
+    async for y in (y for row in query async for y in stream):
+        pass
+
+
+async def plain(query: sqlalchemy.orm.Query):
+    return (row for row in query)
+";
+    // `iter(query)` runs when the generator expression is created, whatever its later
+    // clauses are: the query executes on the event loop.
+    assert_eq!(
+        reports("ir_genexpr_first_iteration", src, "EFF101"),
+        pairs(&[("later_async_clause", "EFF101"), ("plain", "EFF101")])
+    );
+}
