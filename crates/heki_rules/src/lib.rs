@@ -11,6 +11,7 @@
 mod contracts;
 mod data_rules;
 mod eff_rules;
+pub mod experimental;
 mod mut_rules;
 mod opt_rules;
 pub mod project;
@@ -832,5 +833,39 @@ mod registry_tests {
             });
             assert_eq!(r.size_dependent_fix, expected, "{}", r.code);
         }
+    }
+
+    #[test]
+    fn experimental_entries_are_well_formed_and_their_rules_opt_in() {
+        use experimental::{EXPERIMENTAL_FEATURES, ExperimentalKind, experimental_rule};
+        let mut ids = std::collections::BTreeSet::new();
+        for f in EXPERIMENTAL_FEATURES {
+            assert!(ids.insert(f.id), "{}: listed twice", f.id);
+            let kind = serde_json::to_value(f.kind).unwrap();
+            assert!(
+                f.id.starts_with(&format!("{}.", kind.as_str().unwrap())),
+                "{}",
+                f.id
+            );
+            let version: Vec<_> = f.since.split('.').collect();
+            assert!(
+                version.len() == 3 && version.iter().all(|n| n.parse::<u32>().is_ok()),
+                "{}: since {}",
+                f.id,
+                f.since
+            );
+            // `heki rule` and the pages put the reason between other sentences.
+            assert!(f.reason.ends_with('.'), "{}", f.id);
+        }
+        // An experimental rule runs only where a configuration names it.
+        for f in EXPERIMENTAL_FEATURES
+            .iter()
+            .filter(|f| f.kind == ExperimentalKind::Rule)
+        {
+            let rule = find_rule(f.target).unwrap();
+            assert_eq!((rule.code, rule.default_enabled), (f.target, false));
+            assert_eq!(experimental_rule(rule.code), Some(f));
+        }
+        assert_eq!(experimental_rule("MUT107"), None);
     }
 }
