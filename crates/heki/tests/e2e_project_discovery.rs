@@ -96,7 +96,8 @@ fn syntax_newer_than_the_target_version_is_a_syntax_error() {
     let (code, _, stderr) = p.check(&["--target-version", "py311"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("a.py:1:1: syntax error: Cannot use `lazy` import statement on Python 3.11"),
+        stderr
+            .contains("a.py:1:1: syntax error: Cannot use `lazy` import statement on Python 3.11"),
         "{stderr}"
     );
     // A stub never runs: `type` statements there are fine on 3.11.
@@ -109,4 +110,28 @@ fn syntax_newer_than_the_target_version_is_a_syntax_error() {
         "[project]\nname = \"t\"\nrequires-python = \">=3.13\"\n",
     );
     assert_eq!(p.check(&[]).0, 2);
+}
+
+#[test]
+fn requires_python_exclusions_move_the_target_version() {
+    let p = Project::new("disc_requires_python");
+    p.write(
+        "comps.py",
+        "import requests\n\n\nasync def fetch_all(urls):\n    return [requests.get(u) for u in urls]\n",
+    );
+    // Python 3.11 runs the comprehension in a frame of its own (`<listcomp>` in the report);
+    // 3.12+ inlines it (PEP 709).
+    let runs_as_py311 = |spec: &str| {
+        p.write(
+            "pyproject.toml",
+            &format!("[project]\nname = \"t\"\nrequires-python = \"{spec}\"\n"),
+        );
+        let (code, stdout, stderr) = p.check(&["--select", "EFF101"]);
+        assert_eq!(code, 1, "{spec}: {stderr}");
+        stdout.contains("<listcomp>")
+    };
+    assert!(runs_as_py311(">=3.11"));
+    assert!(!runs_as_py311(">=3.11, !=3.11.*"));
+    assert!(runs_as_py311("<3.12"));
+    assert!(runs_as_py311(">=3.9, <3.11"));
 }

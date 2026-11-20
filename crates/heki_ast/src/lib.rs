@@ -250,10 +250,16 @@ def nested():
         let src = "x = 1\nlazy import json\n";
         assert!(parse_module(src).is_ok());
         assert!(parse_module_for(src, heki_env::PythonVersion::PY315).is_ok());
-        let errs = parse_module_for(src, heki_env::PythonVersion::PY311).err().unwrap();
+        let errs = parse_module_for(src, heki_env::PythonVersion::PY311)
+            .err()
+            .unwrap();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].span.start, 6);
-        assert!(errs[0].message.contains("Python 3.11"), "{}", errs[0].message);
+        assert!(
+            errs[0].message.contains("Python 3.11"),
+            "{}",
+            errs[0].message
+        );
     }
 
     #[test]

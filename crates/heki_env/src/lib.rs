@@ -235,8 +235,9 @@ pub struct HekiConfig {
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
     pub ecosystem: Vec<EcosystemOverride>,
-    /// Lower bound of `project.requires-python` in the project's `pyproject.toml`: the
-    /// `target-version` default (read by the loaders, not a `[tool.heki]` key).
+    /// The version `project.requires-python` of the project's `pyproject.toml` selects
+    /// ([`requires_python_lower_bound`]): the `target-version` default (read by the loaders,
+    /// not a `[tool.heki]` key).
     #[serde(skip)]
     pub requires_python: Option<PythonVersion>,
 }
@@ -286,24 +287,153 @@ fn sibling_requires_python(pyproject: &Path) -> Option<PythonVersion> {
         .requires_python()
 }
 
-/// The oldest Python minor version a PEP 440 `requires-python` specifier admits (the highest
-/// lower bound of its `>=`, `>`, `~=`, `==` and `===` clauses), clamped to the supported
-/// 3.11–3.15; `None` when no clause sets a lower bound. `>3.11` admits 3.11.1, so its bound is
-/// 3.11, as for `>=3.11`.
+/// The Python version a PEP 440 `requires-python` specifier selects: the oldest supported
+/// minor version (3.11–3.15) one of whose releases satisfies every clause (exclusions and
+/// patch-level bounds included: `>=3.11, !=3.11.*` selects 3.12). A specifier admitting only
+/// older or newer releases selects the nearest end (`>=3.9, <3.11` → 3.11, `>=3.16` → 3.15).
+/// `None` (the default version) when it cannot be parsed, admits nothing, or sets no lower
+/// bound and admits the default 3.12 (`<4`).
 pub fn requires_python_lower_bound(spec: &str) -> Option<PythonVersion> {
-    spec.split(',')
-        .filter_map(|clause| {
-            let clause = clause.trim();
-            let version = ["===", "~=", "==", ">=", ">"]
-                .iter()
-                .find_map(|op| clause.strip_prefix(op))?;
-            let mut parts = version.trim().trim_end_matches(".*").split('.');
-            let major = parts.next()?.parse().ok()?;
-            let minor = parts.next().map_or(Some(0), |m| m.parse().ok())?;
-            Some(PythonVersion { major, minor })
+    let clauses = spec
+        .split(',')
+        .map(VersionClause::parse)
+        .collect::<Option<Vec<_>>>()?;
+    let admits_minor = |major: u8, minor: u8| {
+        // A clause changes its verdict only at the patch levels it names: their neighbours
+        // stand for every release in between.
+        let mut patches = vec![0u32];
+        for c in &clauses {
+            if c.release.first() == Some(&u32::from(major))
+                && c.release.get(1) == Some(&u32::from(minor))
+            {
+                let p = c.release.get(2).copied().unwrap_or(0);
+                patches.extend([p.saturating_sub(1), p, p.saturating_add(1)]);
+            }
+        }
+        let release = |p: u32| [u32::from(major), u32::from(minor), p];
+        patches
+            .iter()
+            .any(|&p| clauses.iter().all(|c| c.admits(&release(p))))
+    };
+    let supported = [
+        PythonVersion::PY311,
+        PythonVersion::PY312,
+        PythonVersion::PY313,
+        PythonVersion::PY314,
+        PythonVersion::PY315,
+    ];
+    let has_lower_bound = clauses.iter().any(|c| {
+        matches!(
+            c.op,
+            VersionOp::Ge | VersionOp::Gt | VersionOp::Eq | VersionOp::Compatible
+        )
+    });
+    if !has_lower_bound && admits_minor(3, 12) {
+        return None;
+    }
+    if let Some(v) = supported
+        .into_iter()
+        .find(|v| admits_minor(v.major, v.minor))
+    {
+        return Some(v);
+    }
+    let oldest = (2..=4u8)
+        .flat_map(|major| (0..=40u8).map(move |minor| (major, minor)))
+        .find(|&(major, minor)| admits_minor(major, minor))?;
+    Some(if oldest < (3, 11) {
+        PythonVersion::PY311
+    } else {
+        PythonVersion::PY315
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionOp {
+    /// `===`: arbitrary equality, compared here as `==`.
+    Eq,
+    Ne,
+    Ge,
+    Gt,
+    Le,
+    Lt,
+    /// `~=`.
+    Compatible,
+}
+
+/// One clause of a version specifier, compared on release segments (pre-, post-, and
+/// development-release suffixes do not move a release across a minor version).
+#[derive(Debug)]
+struct VersionClause {
+    op: VersionOp,
+    release: Vec<u32>,
+    /// `== 3.11.*` / `!= 3.11.*`: a prefix match.
+    wildcard: bool,
+}
+
+impl VersionClause {
+    fn parse(clause: &str) -> Option<Self> {
+        let clause = clause.trim();
+        let (op, rest) = [
+            ("===", VersionOp::Eq),
+            ("~=", VersionOp::Compatible),
+            ("==", VersionOp::Eq),
+            ("!=", VersionOp::Ne),
+            (">=", VersionOp::Ge),
+            ("<=", VersionOp::Le),
+            (">", VersionOp::Gt),
+            ("<", VersionOp::Lt),
+        ]
+        .into_iter()
+        .find_map(|(text, op)| clause.strip_prefix(text).map(|rest| (op, rest.trim())))?;
+        let (version, wildcard) = match rest.strip_suffix(".*") {
+            Some(v) => (v, true),
+            None => (rest, false),
+        };
+        if wildcard && !matches!(op, VersionOp::Eq | VersionOp::Ne) {
+            return None;
+        }
+        let digits = version
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .map_or(version, |end| &version[..end]);
+        let release = digits
+            .trim_end_matches('.')
+            .split('.')
+            .map(|part| part.parse().ok())
+            .collect::<Option<Vec<u32>>>()?;
+        let compatible_needs_two = op == VersionOp::Compatible && release.len() < 2;
+        (!compatible_needs_two).then_some(Self {
+            op,
+            release,
+            wildcard,
         })
-        .max()
-        .map(|v| v.clamp(PythonVersion::PY311, PythonVersion::PY315))
+    }
+
+    fn admits(&self, version: &[u32]) -> bool {
+        let segment = |r: &[u32], i: usize| r.get(i).copied().unwrap_or(0);
+        let compare = |r: &[u32]| {
+            (0..version.len().max(r.len()))
+                .map(|i| segment(version, i).cmp(&segment(r, i)))
+                .find(|o| o.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        let prefix = |r: &[u32]| (0..r.len()).all(|i| segment(version, i) == r[i]);
+        let equal = if self.wildcard {
+            prefix(&self.release)
+        } else {
+            compare(&self.release).is_eq()
+        };
+        match self.op {
+            VersionOp::Eq => equal,
+            VersionOp::Ne => !equal,
+            VersionOp::Ge => compare(&self.release).is_ge(),
+            VersionOp::Gt => compare(&self.release).is_gt(),
+            VersionOp::Le => compare(&self.release).is_le(),
+            VersionOp::Lt => compare(&self.release).is_lt(),
+            VersionOp::Compatible => {
+                compare(&self.release).is_ge() && prefix(&self.release[..self.release.len() - 1])
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -379,8 +509,8 @@ impl HekiConfig {
         Ok(Self::default())
     }
 
-    /// Resolve `RuntimeProfile` from `target-version`, else the lower bound of
-    /// `project.requires-python`, else Python 3.12.
+    /// Resolve `RuntimeProfile` from `target-version`, else the version
+    /// `project.requires-python` selects, else Python 3.12.
     pub fn runtime_profile(&self) -> RuntimeProfile {
         let ver = self
             .target_version
@@ -529,6 +659,47 @@ message = "render must not mutate model state"
         );
         assert!(cfg.ecosystem.is_empty());
         assert_eq!(cfg.lint.relax_async_in_tests, None);
+    }
+
+    #[test]
+    fn requires_python_selects_the_oldest_admitted_supported_version() {
+        let v = |minor| Some(PythonVersion { major: 3, minor });
+        for (spec, expected) in [
+            (">=3.11", v(11)),
+            (">= 3.11.2, <4", v(11)),
+            (">3.11", v(11)),
+            (">3.11.20", v(11)),
+            ("==3.11.*", v(11)),
+            ("==3.11.5", v(11)),
+            ("===3.13.1", v(13)),
+            (">=3.8", v(11)),
+            (">=3", v(11)),
+            ("~=3.12", v(12)),
+            ("~=3.12.4", v(12)),
+            (">=3.11, !=3.11.*", v(12)),
+            (">=3.11,!=3.11.*,!=3.12.*", v(13)),
+            (">=3.12.0rc1", v(12)),
+            ("!=3.12.*", v(11)),
+            ("<3.12", v(11)),
+            ("<=3.11.0", v(11)),
+            (">=3.9, <3.11", v(11)),
+            ("<3.11", v(11)),
+            (">=3.16", v(15)),
+            (">=4", v(15)),
+            // No lower bound and the default admitted: the default.
+            ("<3.14", None),
+            ("<4", None),
+            ("!=3.11.*", None),
+            // Nothing admitted, or not a specifier.
+            (">=3.12, <3.12", None),
+            (">=3.11.4, <3.11.2", None),
+            (">=three", None),
+            (">=3.*", None),
+            ("~=3", None),
+            ("3.11", None),
+        ] {
+            assert_eq!(requires_python_lower_bound(spec), expected, "{spec:?}");
+        }
     }
 
     #[test]
