@@ -260,6 +260,11 @@ pub struct ClassDecl {
     /// The names the class defines: class-body names (methods, annotations, assignments) and
     /// the attributes its methods set or annotate on `self` (structural typing, `Protocol`).
     pub members: BTreeSet<String>,
+    /// The attributes its module stores on the class object or deletes outside the class body
+    /// (`Keys.KEY = "x"`, `cls.KEY = "x"`, [`class_attrs_rebound`]): the class's own value of
+    /// the name from then on, which no string constant of the class or its bases fixes.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rebound_attrs: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1464,9 +1469,15 @@ impl ProjectDecls {
     /// The value of the class-level string constant `attr` read on an instance of the project
     /// class `class` or on the class object (`self.KEY`, `cls.KEY`, `Model.KEY`): the
     /// definition of `attr` the MRO finds first must be a constant. With `subclasses`, the
-    /// object may be of a subclass, and none may define `attr` again.
+    /// object may be of a subclass, and none may define `attr` again. A class that code stores
+    /// `attr` on (`Child.KEY = "x"`, in its module or another) defines it too: its own value
+    /// then hides the inherited constant.
     pub fn class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<&str> {
-        let defines = |c: &str| self.class(c).is_some_and(|d| d.members.contains(attr));
+        let defines = |c: &str| {
+            self.class(c)
+                .is_some_and(|d| d.members.contains(attr) || d.rebound_attrs.contains(attr))
+                || self.rebound_elsewhere(&format!("{c}.{attr}"))
+        };
         let class = self.canonical(class);
         if subclasses && self.subclasses_of(&class).iter().any(|s| defines(s)) {
             return None;
@@ -2376,6 +2387,15 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.small_globals = input.ir.constants.displays.clone();
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
     attr_displays(input, &mut decls);
+    let rebound: Vec<(String, String)> = class_attrs_rebound(input, &decls)
+        .into_iter()
+        .map(|(class, attr)| (class.to_owned(), attr.to_owned()))
+        .collect();
+    for (class, attr) in rebound {
+        if let Some(c) = decls.classes.get_mut(&class) {
+            c.rebound_attrs.insert(attr);
+        }
+    }
     decls.str_constants = str_constants(input, &decls);
     decls
 }
@@ -2553,10 +2573,9 @@ fn count_u8<T>(items: impl Iterator<Item = T>) -> u8 {
 /// name. A name stored twice (`global KEY` in a function, two branches) or deleted is no
 /// constant, and neither is a name an import statement binds: it resolves through the imports.
 /// A class attribute the module also stores or deletes outside the class body
-/// ([`class_attrs_rebound`]) is none either.
+/// (`ClassDecl::rebound_attrs`) is none either.
 fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, StrConstant> {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
-    let rebound = class_attrs_rebound(input, decls);
     // A module body reads an imported name as a copy of its `Import`.
     let imports: FxHashMap<Span, String> = input
         .semantic
@@ -2620,7 +2639,10 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
             } else {
                 let once = (q.class_var || q.is_final)
                     && class_stores.get(name) == Some(&1)
-                    && !rebound.contains(&(f.qualname.as_str(), name));
+                    && !decls
+                        .classes
+                        .get(f.qualname.as_str())
+                        .is_some_and(|c| c.rebound_attrs.contains(name));
                 (format!("{}.{name}", f.qualname), once, !q.is_final)
             };
             if !once {

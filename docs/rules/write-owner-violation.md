@@ -18,7 +18,8 @@ allowed writers:
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
   `Model.KEY`), which no subclass of the object's class defines again and no code stores on the
-  class or an instance (`Model.KEY = "x"`; another module may do so only for a `Final` one);
+  class, a subclass, or an instance (`Model.KEY = "x"`; another module may store it on the
+  defining class only for a `Final` one);
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),

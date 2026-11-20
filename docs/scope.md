@@ -207,7 +207,8 @@ Missed findings close as heki learns more:
 - **Not followed** for a module-level name without `Final` that another module rebinds or
   deletes, a class constant stored on its class or an instance outside the class body
   (`Model.KEY = "x"`; from another module, only one without `Final`), a class constant a
-  subclass defines again (read on an instance or `cls`), or a computed name.
+  subclass defines again or is given its own value (`Child.KEY = "x"`; read on that subclass,
+  or on an instance or `cls` that may be one), or a computed name.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](rules/unresolved-guarded-write.md)).
 

@@ -425,6 +425,31 @@ class Retitled:
 
 
 Retitled.KEY = "_other"
+
+
+class Base:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+class Inheriting(Base):
+    def write_own(self, field: DataModelFieldBase) -> None:
+        field.__dict__[Inheriting.KEY] = True
+
+
+class ForeignInheriting(Base):
+    def write_own(self, field: DataModelFieldBase) -> None:
+        field.__dict__[ForeignInheriting.KEY] = True
+
+
+class Untouched(Base):
+    def write_own(self, field: DataModelFieldBase) -> None:
+        field.__dict__[Untouched.KEY] = True
+
+
+Inheriting.KEY = "_other"
 "#;
 
 #[test]
@@ -456,7 +481,7 @@ unresolved = "report"
     // Another module rebinds a `ClassVar` constant on its class, and a `Final` one.
     .write(
         "pkg/settings.py",
-        "from pkg.use import Configured, Keyed\n\n\ndef configure() -> None:\n    Configured.KEY = \"_other\"\n    Keyed.FINAL_KEY = \"_other\"\n",
+        "from pkg.use import Configured, ForeignInheriting, Keyed\n\n\ndef configure() -> None:\n    Configured.KEY = \"_other\"\n    Keyed.FINAL_KEY = \"_other\"\n    ForeignInheriting.KEY = \"_other\"\n",
     )
     .write("pkg/use.py", ONCE_USE);
     let u = "pkg/use.py";
@@ -498,6 +523,13 @@ unresolved = "report"
             d(u, 83, "MUT205", "Reconfigured.write", class),
             d(u, 90, "MUT205", "Switched.write", class),
             d(u, 101, "MUT205", "Retitled.write", class),
+            // A subclass that code stores the name on holds its own value: the inherited
+            // constant does not name it there, nor on `self` of the base, whose instance may be
+            // of that subclass. One no code stores on keeps the base's constant.
+            d(u, 111, "MUT205", "Base.write", class),
+            d(u, 116, "MUT205", "Inheriting.write_own", class),
+            d(u, 121, "MUT205", "ForeignInheriting.write_own", class),
+            d(u, 126, "MUT201", "Untouched.write_own", forced),
         ]
     );
 }
