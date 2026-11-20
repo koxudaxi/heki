@@ -1400,25 +1400,30 @@ fn complete_against(
 pub(crate) fn project_decls_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
-    others: Option<Vec<(bool, ModuleDecls)>>,
+    others: Option<Vec<(u8, ModuleDecls)>>,
     track: bool,
 ) -> (ProjectDecls, Vec<(ModuleDecls, DeclKeys)>) {
-    // Process stubs before implementation `.py` files so a `.py` module always wins when both
-    // share one module name.
-    let order = |items: Vec<(bool, ModuleDecls)>| {
+    // Process lower-ranked files first so the owner of a shared module name always wins
+    // (`crate::module_rank`).
+    let order = |items: Vec<(u8, ModuleDecls)>| {
         let mut items = items;
-        items.sort_by_key(|(stub, _)| !*stub);
+        items.sort_by_key(|(rank, _)| *rank);
         items.into_iter().map(|(_, d)| d)
     };
-    let structural: Vec<(bool, ModuleDecls)> = modules
+    let structural: Vec<(u8, ModuleDecls)> = modules
         .iter()
-        .map(|m| (crate::is_stub(&m.path), structural_decls(m)))
+        .map(|m| {
+            (
+                crate::module_rank(&m.path, m.is_package),
+                structural_decls(m),
+            )
+        })
         .collect();
     let others = others.unwrap_or_default();
     let pass1 = ProjectDecls::new(order(
         others
             .iter()
-            .map(|(stub, d)| (*stub, d.structural()))
+            .map(|(rank, d)| (*rank, d.structural()))
             .chain(structural.iter().cloned())
             .collect(),
     ));
@@ -1439,7 +1444,7 @@ pub(crate) fn project_decls_for(
     let completed = structural
         .iter()
         .zip(&own)
-        .map(|((stub, _), (d, _))| (*stub, d.clone()));
+        .map(|((rank, _), (d, _))| (*rank, d.clone()));
     let decls = ProjectDecls::new(order(others.into_iter().chain(completed).collect()));
     (decls, own)
 }

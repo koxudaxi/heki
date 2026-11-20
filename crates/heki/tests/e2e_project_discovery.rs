@@ -51,3 +51,25 @@ fn src_directories_are_source_roots_unless_they_are_packages() {
     );
     assert_eq!(concise(&p), (0, String::new()));
 }
+
+#[test]
+fn a_package_owns_its_name_over_a_module_of_the_same_name() {
+    let p = Project::new("disc_package_over_module");
+    p.write("pkg/__init__.py", BLOCKING_WAIT)
+        .write("pkg.py", "def wait():\n    pass\n")
+        .write(
+            "app.py",
+            "from pkg import wait\n\n\nasync def go():\n    wait()\n",
+        );
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("app.py:5:5: EFF101 "), "{stdout}");
+    // The other way round: the package's no-op wins over the module's blocking `wait`.
+    p.write("pkg/__init__.py", "def wait():\n    pass\n")
+        .write("pkg.py", BLOCKING_WAIT);
+    assert_eq!(concise(&p), (0, String::new()));
+    // A stub package still loses to the module implementation.
+    std::fs::remove_file(p.dir.join("pkg/__init__.py")).unwrap();
+    p.write("pkg/__init__.pyi", "def wait() -> None: ...\n");
+    assert!(concise(&p).1.contains("app.py:5:5: EFF101 "));
+}

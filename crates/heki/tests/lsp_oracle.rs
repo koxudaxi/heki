@@ -130,13 +130,14 @@ const CHAIN_LOW: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Re
 const CHAIN_MID: &str = "from pkg.chain_low import book, peek, stamp\n\n\ndef relay(r, v, l):\n    stamp(r)\n    peek(v)\n    return book(l)\n";
 const CHAIN_TOP: &str = "from pkg.chain_mid import relay\n\n\nclass Store:\n    def run(self, r, v, l):\n        return relay(r, v, l)\n\n\ndef outside(r, v, l):\n    return None\n";
 
-// Files: a module a caller already imports is created, then deleted; a stub is put next to a
-// module, then removed.
+// Files: a module a caller already imports is created, then deleted; a stub, then a package of
+// the same name, is put next to a module, then removed.
 const USES_EXTRA: &str = "from pkg.extra import slow\n\n\nasync def go():\n    return slow()\n";
 const EXTRA: &str = "import time\n\n\ndef slow():\n    time.sleep(1)\n";
 const SVC: &str =
     "import requests\n\n\ndef ping():\n    return requests.get(\"https://example.com\")\n";
 const SVC_STUB: &str = "def ping() -> None: ...\n";
+const SVC_PACKAGE: &str = "def ping():\n    return None\n";
 const SVC_USER: &str = "from pkg.svc import ping\n\n\nasync def poll():\n    return ping()\n";
 
 // Declarations: a module global instance stored on `self`, a return type another module's
@@ -1057,6 +1058,22 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the stub is removed again",
             vec![Action::Delete("pkg/svc.pyi")],
+        )
+        .present(&[("pkg/svc_user.py", "EFF101")]),
+        // Python imports a package over the module of the same name.
+        Step::new(
+            "a package next to the module of the same name",
+            vec![Action::Create("pkg/svc/__init__.py", SVC_PACKAGE.to_owned())],
+        )
+        .absent(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the package's module is edited",
+            vec![save("pkg/svc.py", &format!("{SVC}# edited\n"))],
+        )
+        .absent(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the package is removed",
+            vec![Action::Delete("pkg/svc/__init__.py")],
         )
         .present(&[("pkg/svc_user.py", "EFF101")]),
         // The configuration changes while the server runs.

@@ -712,6 +712,20 @@ pub(crate) fn is_stub(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "pyi")
 }
 
+/// Which of the files sharing a module name owns it: the highest rank. Python imports a
+/// regular package over a module of the same name in one directory (`pkg/__init__.py` over
+/// `pkg.py`), and heki reads implementations over typing stubs: a stub module ranks lowest,
+/// then a stub package, a module, and a package.
+pub(crate) fn module_rank(path: &Path, is_package: bool) -> u8 {
+    u8::from(!is_stub(path)) * 2 + u8::from(is_package)
+}
+
+impl FileSummary {
+    fn module_rank(&self) -> u8 {
+        module_rank(&self.path, self.decls.is_package)
+    }
+}
+
 /// Summarize every module of a project and propagate effects to a fixpoint.
 pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
     analyze(modules, kb, false, None)
@@ -760,8 +774,8 @@ impl ProjectIndex {
 
     /// [`Self::build`] for summaries extracted with `contracts`.
     pub fn build_with(mut files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
-        // Index stubs first so a sibling `.py` implementation always owns the module's symbols.
-        files.sort_by_key(|f| !is_stub(&f.path));
+        // Index lower-ranked files first so the owner of a shared module name links last.
+        files.sort_by_key(FileSummary::module_rank);
         let mut index = Self {
             contracts,
             ..Self::default()
@@ -856,7 +870,7 @@ impl ProjectIndex {
     }
 
     /// Declarations of every indexed module (for re-summarizing an edited module), preferring
-    /// `.py` implementations over `.pyi` stubs sharing a module name.
+    /// the owner ([`module_rank`]) among the files sharing a module name.
     pub fn project_decls(&self) -> ProjectDecls {
         ProjectDecls::new(self.preferred_decls())
     }
@@ -866,28 +880,25 @@ impl ProjectIndex {
         DeclPasses::new(self.preferred_decls())
     }
 
-    /// Every module's declarations, `.pyi` stubs first (a later `.py` sharing the module name
-    /// replaces them).
+    /// Every module's declarations, lowest [`module_rank`] first (a later file sharing the
+    /// module name replaces them).
     fn preferred_decls(&self) -> Vec<ModuleDecls> {
-        let mut entries: Vec<(bool, ModuleDecls)> = self
+        let mut entries: Vec<(u8, ModuleDecls)> = self
             .files
             .values()
-            .map(|f| (is_stub(&f.path), f.decls.clone()))
+            .map(|f| (f.module_rank(), f.decls.clone()))
             .collect();
-        entries.sort_by_key(|(stub, _)| !*stub);
+        entries.sort_by_key(|(rank, _)| *rank);
         entries.into_iter().map(|(_, d)| d).collect()
     }
 
-    /// Preferred declarations currently indexed for `module_name` (`.py` over `.pyi`).
+    /// Declarations currently indexed for `module_name`, of its owner ([`module_rank`]).
     pub fn module_decls(&self, module_name: &str) -> Option<ModuleDecls> {
-        let mut stub = None;
-        for f in self.files.values().filter(|f| f.module_name == module_name) {
-            if !is_stub(&f.path) {
-                return Some(f.decls.clone());
-            }
-            stub = Some(f.decls.clone());
-        }
-        stub
+        self.files
+            .values()
+            .filter(|f| f.module_name == module_name)
+            .min_by_key(|f| (std::cmp::Reverse(f.module_rank()), &f.path))
+            .map(|f| f.decls.clone())
     }
 
     /// Re-summarize one edited module against the index's declarations and update it.
@@ -896,11 +907,11 @@ impl ProjectIndex {
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
     ) -> IncrementalUpdate {
-        let others: Vec<(bool, ModuleDecls)> = self
+        let others: Vec<(u8, ModuleDecls)> = self
             .files
             .values()
             .filter(|f| f.path != input.path)
-            .map(|f| (is_stub(&f.path), f.decls.clone()))
+            .map(|f| (f.module_rank(), f.decls.clone()))
             .collect();
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
@@ -920,11 +931,11 @@ impl ProjectIndex {
         kb: &EffectiveEcosystemKb,
         decls: &mut DeclPasses,
     ) -> (IncrementalUpdate, DeclKeys) {
-        let masked_by_impl = is_stub(&input.path)
-            && self.files.values().any(|f| {
-                f.module_name == input.module_name && f.path != input.path && !is_stub(&f.path)
-            });
-        let (changed, own) = if masked_by_impl {
+        let rank = module_rank(&input.path, input.is_package);
+        let masked = self.files.values().any(|f| {
+            f.module_name == input.module_name && f.path != input.path && f.module_rank() > rank
+        });
+        let (changed, own) = if masked {
             (
                 DeclKeys::default(),
                 resolver::own_module_decls(input, kb, decls),
@@ -981,17 +992,16 @@ impl ProjectIndex {
             }
         }
         self.files.insert(path, new_file);
-        // A function the file stopped defining falls back to another file defining it (a
-        // `.pyi` stub next to its `.py` implementation), as a full build links it.
+        // A function the file stopped defining falls back to the highest-ranked other file
+        // defining it (a `.pyi` stub next to its `.py` implementation), as a full build links it.
         for func in owned_before.iter().filter(|f| !own.contains(*f)) {
             let fallback = self
                 .files
                 .values()
                 .filter(|f| f.local_functions.contains_key(func))
-                .map(|f| (is_stub(&f.path), &f.path))
-                .min();
-            if let Some((_, other)) = fallback {
-                self.func_files.insert(func.clone(), other.clone());
+                .min_by_key(|f| (std::cmp::Reverse(f.module_rank()), &f.path));
+            if let Some(other) = fallback {
+                self.func_files.insert(func.clone(), other.path.clone());
             }
         }
 
@@ -1130,10 +1140,14 @@ impl ProjectIndex {
     }
 
     fn add_file_links(&mut self, file: &FileSummary) {
-        let file_is_stub = is_stub(&file.path);
+        let rank = file.module_rank();
         for func in file.local_functions.keys() {
-            let keep_impl = file_is_stub && self.func_files.get(func).is_some_and(|p| !is_stub(p));
-            if !keep_impl {
+            let outranked = self
+                .func_files
+                .get(func)
+                .and_then(|p| self.files.get(p))
+                .is_some_and(|owner| owner.module_rank() > rank);
+            if !outranked {
                 self.func_files.insert(func.clone(), file.path.clone());
             }
         }

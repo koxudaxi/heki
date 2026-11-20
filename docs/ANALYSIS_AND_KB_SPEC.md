@@ -135,7 +135,8 @@ the targets of write and read boundaries.
 Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
 `pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
 `src/acme/io.py` is `acme.io`, for regular and namespace packages and for modules directly under
-`src/`.
+`src/`. Of the files sharing a module name, a package owns it over a module (`pkg/__init__.py`
+over `pkg.py`, as Python imports them) and an implementation over a `.pyi` stub.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
