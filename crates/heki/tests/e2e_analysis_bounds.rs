@@ -1327,3 +1327,36 @@ fn a_loop_over_a_generator_looks_up_each_call_of_its_body_once() {
         1
     );
 }
+
+/// Loops over a container of `self` and over a private generator's result whose bodies hold
+/// `branches` conditional blocks one after another: the blocks from which each loop goes on to
+/// its next step are found by one walk back from its header, not by a walk from every block.
+#[test]
+fn a_loop_with_many_branches_finds_the_blocks_reaching_its_header_once() {
+    let branches = 8_000;
+    let body = |lines: &mut Vec<String>| {
+        for _ in 0..branches {
+            lines.push("            if k:".to_owned());
+            lines.push("                pass".to_owned());
+        }
+    };
+    let mut lines = vec![
+        "class Table:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _keys(self):".to_owned(),
+        "        yield from self.items".to_owned(),
+        String::new(),
+        "    def scan(self):".to_owned(),
+        "        for k in self.items:".to_owned(),
+    ];
+    body(&mut lines);
+    lines.push(String::new());
+    lines.push("    def scan_keys(self):".to_owned());
+    lines.push("        for k in self._keys():".to_owned());
+    body(&mut lines);
+    let p = Project::new("bounds_loop_branches");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}

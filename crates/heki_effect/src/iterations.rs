@@ -778,30 +778,32 @@ fn continuing_body(f: &IrFunction, iter: VarId) -> Option<Vec<BlockId>> {
             .any(|i| matches!(i.kind, InstKind::IterNext { iter: it, .. } if it == iter))
     })?;
     let in_loop: FxHashSet<BlockId> = lp.body.iter().copied().collect();
-    let next = |b: BlockId| {
+    // The loop's own edges reversed: one walk back from the header finds every block reaching it.
+    let mut preds: FxHashMap<BlockId, Vec<BlockId>> = FxHashMap::default();
+    for &b in &lp.body {
         let block = f.block(b);
         let mut succs = block.terminator.successors();
         succs.extend(block.exc_target);
-        succs
-    };
-    let reaches_header = |start: BlockId| {
-        let mut seen: FxHashSet<BlockId> = FxHashSet::default();
-        let mut stack = next(start);
-        while let Some(b) = stack.pop() {
-            if b == lp.header {
-                return true;
-            }
-            if in_loop.contains(&b) && seen.insert(b) {
-                stack.extend(next(b));
+        for s in succs {
+            if s == lp.header || in_loop.contains(&s) {
+                preds.entry(s).or_default().push(b);
             }
         }
-        false
-    };
+    }
+    let mut reaching: FxHashSet<BlockId> = FxHashSet::default();
+    let mut stack = vec![lp.header];
+    while let Some(b) = stack.pop() {
+        for &p in preds.get(&b).into_iter().flatten() {
+            if p != lp.header && reaching.insert(p) {
+                stack.push(p);
+            }
+        }
+    }
     Some(
         lp.body
             .iter()
             .copied()
-            .filter(|b| *b != lp.header && reaches_header(*b))
+            .filter(|b| reaching.contains(b))
             .collect(),
     )
 }
