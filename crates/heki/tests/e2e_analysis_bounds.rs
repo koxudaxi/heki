@@ -186,3 +186,135 @@ fn copies_around_a_loop_no_path_enters_form_no_cycle() {
     }
     check_within(&p, Duration::from_secs(20));
 }
+
+/// Comparisons whose two operands are one value (`b1 = b0 == b0`), under an invalidation
+/// contract: whether a branch depends on a flag, and the flag values on each edge, are decided
+/// once per value instead of once per path to it.
+#[test]
+fn comparisons_sharing_operands_decide_each_value_once() {
+    let mut lines = vec![
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.value = 0".to_owned(),
+        String::new(),
+        String::new(),
+        "def notify():".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def chain(model: Model, z):".to_owned(),
+        "    model.value = 1".to_owned(),
+        "    b0 = True".to_owned(),
+    ];
+    for i in 1..=30 {
+        lines.push(format!("    b{i} = b{} == b{}", i - 1, i - 1));
+    }
+    lines.push("    if b30:".to_owned());
+    lines.push("        notify()".to_owned());
+    let p = Project::new("bounds_shared_comparisons");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.invalidation]]\nname = \"m\"\ntargets = [\"Model.value\"]\ninvalidators = [\"m.notify\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    check_within(&p, Duration::from_secs(20));
+}
+
+/// Every case of each `match` slices the list the one before made: the objects a loop's
+/// iterable may hold are collected once per variable instead of once per path to it.
+#[test]
+fn slices_of_slices_collect_each_origin_once() {
+    let mut lines = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "def sizes(p):".to_owned(),
+        "    x = [1, 2]".to_owned(),
+    ];
+    for _ in 0..10 {
+        lines.push("    match p:".to_owned());
+        for c in 0..6 {
+            lines.push(format!("        case {c}:"));
+            lines.push(format!("            x = x[{c}:]"));
+        }
+        lines.push("        case _:".to_owned());
+        lines.push("            x = x[:1]".to_owned());
+    }
+    lines.push("    for _ in x:".to_owned());
+    lines.push("        httpx.Client()".to_owned());
+    let p = Project::new("bounds_slice_origins");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    // Two items at most: the client is made a fixed number of times.
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// Subscripts whose object and index are one value (`t1 = t0[t0]`) in a loop: whether the
+/// receiver of `t30.index(x)` outlives an iteration is decided once per variable.
+#[test]
+fn subscripts_sharing_operands_decide_each_lifetime_once() {
+    let mut lines = vec![
+        "def scan(items, s, x):".to_owned(),
+        "    for i in items:".to_owned(),
+        "        t0 = s[0]".to_owned(),
+    ];
+    for i in 1..=30 {
+        lines.push(format!("        t{i} = t{}[t{}]", i - 1, i - 1));
+    }
+    lines.push("        t30.index(x)".to_owned());
+    // An object made in the iteration does not outlive it, whatever its index.
+    lines.extend(
+        [
+            "",
+            "",
+            "def fresh(items, make, x):",
+            "    for i in items:",
+            "        t0 = make(i)",
+            "        t1 = t0[t0]",
+            "        t1.index(x)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_shared_subscripts");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    check_within(&p, Duration::from_secs(20));
+}
+
+/// Eight `match` statements of sixteen cases that pass a value through unchanged: whether a
+/// branch on it is exact on every path is decided once per value and depth, not once per
+/// path through the cases.
+#[test]
+fn a_branch_on_a_value_many_cases_pass_through_is_decided_once_per_depth() {
+    let mut lines = vec!["def decide(p, items):".to_owned(), "    x = 0".to_owned()];
+    for _ in 0..8 {
+        lines.push("    match p:".to_owned());
+        for c in 0..16 {
+            lines.push(format!("        case {c}:"));
+            // The comment keeps the function's proof state within its budget.
+            lines.push(format!(
+                "            # {}",
+                "the value passes through unchanged ".repeat(5)
+            ));
+            lines.push("            pass".to_owned());
+        }
+        lines.push("        case _:".to_owned());
+        lines.push("            x = 's'".to_owned());
+    }
+    lines.extend(
+        [
+            "    acc = []",
+            "    for i in items:",
+            "        if x:",
+            "            acc = acc + [i]",
+            "    return acc",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_exact_paths");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "OPT101").count(),
+        1,
+        "{found:#?}"
+    );
+}
