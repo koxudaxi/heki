@@ -1,5 +1,12 @@
 //! `heki` CLI — Ruff & `t-linter`-aligned interface for Python Effect & Alias semantic checking.
 
+/// `eprintln!` through [`check::log_line`] for the output format of the run.
+macro_rules! log {
+    ($format:expr, $($arg:tt)*) => {
+        $crate::check::log_line($format, &format!($($arg)*))
+    };
+}
+
 mod check;
 mod watch;
 
@@ -352,10 +359,14 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let format = match &cli.command {
+        Commands::Check(args) => args.output_format,
+        _ => OutputFormat::Full,
+    };
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("heki error: {err:#}");
+            log!(format, "heki error: {err:#}");
             ExitCode::from(2)
         }
     }

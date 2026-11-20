@@ -283,6 +283,12 @@ fn render_concise(diags: &[Diagnostic]) -> String {
     out
 }
 
+/// Text as a GitHub Actions log line or command message holds it: `%`, CR, and LF escaped, so
+/// it never starts a line of its own (a line starting with `::` is a workflow command).
+pub fn github_escape(s: &str) -> String {
+    gh_escape(s, false)
+}
+
 /// GitHub workflow-command escaping (`%`, CR, LF; plus `:` / `,` inside properties).
 fn gh_escape(s: &str, property: bool) -> String {
     let mut out = s

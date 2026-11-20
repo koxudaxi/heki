@@ -311,3 +311,27 @@ fn file_names_with_backslashes_and_uri_delimiters_are_reported_as_they_are() {
         "{diff}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn github_output_never_lets_project_text_start_a_log_line() {
+    let p = Project::new("github_logs");
+    p.write("a.py", "x = 1\n").write(
+        "b.toml",
+        "version = 2\n[[entries]]\npath = \"a.py\"\nqualname = \"f\"\nrule_code = \"EFF101\"\ntarget = \"x\\n::error file=a.py,line=1::forged\"\ncount = 1\n",
+    );
+    p.write("bad\n::error file=a.py::forged.py", "def f(:\n");
+    let (code, stdout, stderr) = p.heki(&["--baseline", "b.toml", "--output-format", "github"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    // The stale entry's note and the syntax error both stay on one line each.
+    assert_eq!(stderr.lines().count(), 2, "{stderr}");
+    assert!(stderr.lines().all(|l| !l.starts_with("::")), "{stderr}");
+    assert!(
+        stderr.contains("`x%0A::error file=a.py,line=1::forged` can shrink"),
+        "{stderr}"
+    );
+    // Other formats print the text as it is.
+    let (_, _, text) = p.heki(&["--baseline", "b.toml"]);
+    assert!(text.contains("`x\n::error"), "{text}");
+}

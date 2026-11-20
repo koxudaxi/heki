@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
-    baseline_key, path_text, render, unified_diff,
+    baseline_key, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{analyze_project, analyze_project_with};
 use heki_profile::ProfileData;
@@ -38,6 +38,7 @@ pub(crate) fn selection(args: &CheckArgs, project: &Project) -> Result<RuleSelec
 pub(crate) fn snapshot_for(
     selection: &RuleSelection,
     root: &Path,
+    format: OutputFormat,
 ) -> Result<Option<SummarySnapshot>> {
     if !selection.is_enabled("MUT103") {
         return Ok(None);
@@ -46,7 +47,8 @@ pub(crate) fn snapshot_for(
     if path.exists() {
         return Ok(Some(SummarySnapshot::load(&path)?));
     }
-    eprintln!(
+    log!(
+        format,
         "warning: `MUT103` is enabled but `{}` does not exist; run `heki snapshot --write` first",
         path.display()
     );
@@ -88,7 +90,7 @@ fn analyze(
         overrides,
     })?;
     let selection = selection(args, &project)?;
-    let snapshot = snapshot_for(&selection, &project.env.root)?;
+    let snapshot = snapshot_for(&selection, &project.env.root, args.output_format)?;
     let env = &project.env;
     let inputs = project.inputs();
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
@@ -233,7 +235,7 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         } else {
             ExitCode::from(1)
         };
-        return finish(&errors, code);
+        return finish(args.output_format, &errors, code);
     }
     if args.fix {
         let (fixes, files, _) = fix_in_memory(args, hot.as_ref())?;
@@ -280,32 +282,39 @@ pub(crate) fn report(
         let baseline =
             RatchetBaseline::from_counts(baseline_counts(&diags, &key_path, CountUnit::Sites));
         baseline.save(bp)?;
-        eprintln!(
+        log!(
+            args.output_format,
             "Wrote Ratchet baseline {} ({} entries, {} diagnostic(s)).",
             bp.display(),
             baseline.counts.len(),
             diags.len()
         );
-        return finish(&project.errors, ExitCode::SUCCESS);
+        return finish(args.output_format, &project.errors, ExitCode::SUCCESS);
     }
     if let Some(bp) = &baseline_path {
         let baseline = RatchetBaseline::load(bp)?;
         let unit = baseline.unit;
         if unit == CountUnit::Diagnostics {
-            eprintln!(
+            log!(
+                args.output_format,
                 "note: baseline {} counts diagnostics, not violation sites (written before version {BASELINE_VERSION}); `--update-baseline` rewrites it to count sites",
                 bp.display()
             );
         }
         let cmp = baseline.compare(&baseline_counts(&diags, &key_path, unit));
         for (key, allowed, cur) in &cmp.stale_entries {
-            eprintln!(
+            log!(
+                args.output_format,
                 "note: baseline entry {}::{} {} `{}` can shrink {allowed} -> {cur} (`--update-baseline`)",
-                key.path, key.qualname, key.rule_code, key.target
+                key.path,
+                key.qualname,
+                key.rule_code,
+                key.target
             );
         }
         for (key, allowed, cur) in &cmp.regressions {
-            eprintln!(
+            log!(
+                args.output_format,
                 "note: baseline entry {}::{} {} `{}` allows {allowed} {}, found {cur}",
                 key.path,
                 key.qualname,
@@ -351,7 +360,7 @@ pub(crate) fn report(
     } else {
         ExitCode::from(1)
     };
-    finish(&project.errors, code)
+    finish(args.output_format, &project.errors, code)
 }
 
 /// `heki snapshot [PATHS...] [--write]`: print or save the normalized summaries (`MUT103`).
@@ -385,7 +394,7 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     } else {
         print!("{}", snap.to_json());
     }
-    finish(&project.errors, ExitCode::SUCCESS)
+    finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS)
 }
 
 fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
@@ -401,10 +410,22 @@ fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
     }
 }
 
+/// Write one line to stderr. GitHub Actions reads every line of a job's log for workflow
+/// commands (`::error file=...::`): in `github` output CR and LF are escaped as in annotations,
+/// so text from the project (a file name, a baseline entry, an error message) never starts a
+/// line of its own.
+pub(crate) fn log_line(format: OutputFormat, line: &str) {
+    if matches!(format, OutputFormat::Github) {
+        eprintln!("{}", github_escape(line));
+    } else {
+        eprintln!("{line}");
+    }
+}
+
 /// Syntax / read errors make the run fail with exit code 2 after the report.
-pub(crate) fn finish(errors: &[String], code: ExitCode) -> Result<ExitCode> {
+pub(crate) fn finish(format: OutputFormat, errors: &[String], code: ExitCode) -> Result<ExitCode> {
     for e in errors {
-        eprintln!("error: {e}");
+        log!(format, "error: {e}");
     }
     Ok(if errors.is_empty() {
         code

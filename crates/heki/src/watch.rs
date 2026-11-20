@@ -99,7 +99,7 @@ impl Watcher<'_> {
             )
         );
         for e in errors {
-            eprintln!("error: {e}");
+            log!(self.args.output_format, "error: {e}");
         }
         if matches!(
             self.args.output_format,
