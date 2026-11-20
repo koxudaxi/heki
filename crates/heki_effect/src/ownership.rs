@@ -346,10 +346,8 @@ pub(crate) fn origins_of<'i>(
             );
             continue;
         }
-        let Some(inst) = defs.get(&var) else {
-            continue;
-        };
-        match source_of(inst) {
+        let source = defs.get(&var).map_or(Source::Unknown, |i| source_of(i));
+        match source {
             Source::New => out.new |= part == Part::Object,
             Source::Held(_) => out.held = true,
             Source::Same(v) => work.push((v, part)),

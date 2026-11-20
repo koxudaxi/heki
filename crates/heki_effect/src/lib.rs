@@ -1189,6 +1189,14 @@ impl CallSite {
             CallTarget::Layer2 { .. } => &[],
         }
     }
+
+    /// The resolved project callees, to change (`None` for a Layer 2 API).
+    pub fn project_callees_mut(&mut self) -> Option<&mut Vec<BoundCallee>> {
+        match &mut self.target {
+            CallTarget::Project(callees) => Some(callees),
+            CallTarget::Layer2 { .. } => None,
+        }
+    }
 }
 
 /// Instructions a `CallSite` can be anchored at (its `span`): calls, property reads, and the

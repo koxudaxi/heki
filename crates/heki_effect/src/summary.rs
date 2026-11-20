@@ -267,7 +267,7 @@ fn is_overload(f: &IrFunction) -> bool {
 /// stays in the index for the whole run.
 fn release_spare_capacity(file: &mut FileSummary) {
     for site in &mut file.call_sites {
-        if let CallTarget::Project(callees) = &mut site.target {
+        if let Some(callees) = site.project_callees_mut() {
             for bc in callees.iter_mut() {
                 bc.params.shrink_to_fit();
             }
@@ -1720,13 +1720,14 @@ impl<'a> Extractor<'a> {
         }
         self.summary.returns_origins = returns_origins;
         for (site, ci, slot, o) in args {
-            if let CallTarget::Project(callees) = &mut self.sites[site].target {
-                let params = &mut callees[ci].params;
-                if params.len() <= slot {
-                    params.resize(slot + 1, ArgOrigin::default());
-                }
-                params[slot].origins = Some(Box::new(o));
+            let callees = self.sites[site]
+                .project_callees_mut()
+                .expect("a project call's site has project callees");
+            let params = &mut callees[ci].params;
+            if params.len() <= slot {
+                params.resize(slot + 1, ArgOrigin::default());
             }
+            params[slot].origins = Some(Box::new(o));
         }
     }
 
@@ -1767,10 +1768,10 @@ impl<'a> Extractor<'a> {
             self.summary.unresolved_write_sites.insert(site);
         }
         for (si, ci, pi, q) in std::mem::take(&mut self.pending_args) {
-            // (Only the arguments of project callees are pending.)
-            if let (CallTarget::Project(callees), NewArg::New { .. } | NewArg::Param { .. }) =
-                (&mut self.sites[si].target, &answers[q])
-            {
+            if let NewArg::New { .. } | NewArg::Param { .. } = &answers[q] {
+                let callees = self.sites[si]
+                    .project_callees_mut()
+                    .expect("only the arguments of project callees are pending");
                 let params = &mut callees[ci].params;
                 if params.len() <= pi {
                     params.resize(pi + 1, ArgOrigin::default());
