@@ -247,7 +247,7 @@ impl Workspace {
             path,
             &self.env.root,
             text.to_owned(),
-            self.env.src_layout,
+            self.env.layout,
             self.env.runtime,
         )
     }

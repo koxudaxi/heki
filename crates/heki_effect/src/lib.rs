@@ -39,9 +39,9 @@ pub use report::{
     boundary_reports_in, group_by_root_cause,
 };
 pub use resolver::{
-    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path,
-    resolve_relative_module, self_aliases,
+    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ModuleLayout, ProjectDecls,
+    ReadOnlyAttr, ReadOnlyKind, TypeCtx, Val, detect_src_layout, func_qualname,
+    module_name_for_path, resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
 
@@ -675,6 +675,8 @@ pub struct ModuleInput<'a> {
     pub path: PathBuf,
     pub module_name: String,
     pub is_package: bool,
+    /// [`ModuleLayout::root_is_package`] of the project.
+    pub root_is_package: bool,
     pub content_hash: String,
     pub semantic: &'a SemanticModel,
     pub ir: &'a ModuleIr,

@@ -6,7 +6,7 @@ use crate::ModuleUnit;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, InlineIgnores};
-use heki_effect::{ModuleInput, detect_src_layout, module_name_for_path};
+use heki_effect::{ModuleInput, ModuleLayout, module_name_for_path};
 use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemEntry, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
@@ -71,6 +71,8 @@ pub struct ParsedFile {
     pub rel: String,
     pub module_name: String,
     pub is_package: bool,
+    /// [`ModuleLayout::root_is_package`] of the project.
+    pub root_is_package: bool,
     pub source: String,
     pub semantic: SemanticModel,
     pub ir: ModuleIr,
@@ -95,6 +97,7 @@ impl ParsedFile {
             path: self.path.clone(),
             module_name: self.module_name.clone(),
             is_package: self.is_package,
+            root_is_package: self.root_is_package,
             content_hash: String::new(),
             semantic: &self.semantic,
             ir: &self.ir,
@@ -233,7 +236,7 @@ pub fn parse_source(
     path: &Path,
     root: &Path,
     source: String,
-    src_layout: bool,
+    layout: ModuleLayout,
     runtime: RuntimeProfile,
 ) -> Result<ParsedFile, String> {
     // A typing stub is never run: it may spell annotations with newer syntax than the target.
@@ -254,7 +257,7 @@ pub fn parse_source(
         )
     })?;
     let rel = rel_posix(path, root);
-    let (module_name, is_package) = module_name_for_path(Path::new(&rel), src_layout)
+    let (module_name, is_package) = module_name_for_path(Path::new(&rel), layout.src)
         .unwrap_or_else(|| {
             let stem = path
                 .file_stem()
@@ -269,6 +272,7 @@ pub fn parse_source(
         rel,
         module_name,
         is_package,
+        root_is_package: layout.root_is_package,
         comments: parsed.comment_spans(),
         source,
         semantic,
@@ -293,7 +297,7 @@ pub struct ProjectEnv {
     pub runtime: RuntimeProfile,
     pub kb: EffectiveEcosystemKb,
     pub soundness_kb: EffectiveSoundnessKb,
-    pub src_layout: bool,
+    pub layout: ModuleLayout,
 }
 
 impl ProjectEnv {
@@ -321,14 +325,14 @@ impl ProjectEnv {
             .collect::<Result<Vec<_>, _>>()?;
         let kb = EffectiveEcosystemKb::load_builtin(&overrides)?;
         let soundness_kb = EffectiveSoundnessKb::load_builtin(runtime.python_version)?;
-        let src_layout = detect_src_layout(&root);
+        let layout = ModuleLayout::detect(&root);
         Ok(Self {
             root,
             cfg,
             runtime,
             kb,
             soundness_kb,
-            src_layout,
+            layout,
         })
     }
 }
@@ -360,7 +364,7 @@ impl Project {
                         heki_ast::read_source(p).map_err(|e| format!("{}: {e}", p.display()))?
                     }
                 };
-                parse_source(p, &env.root, source, env.src_layout, env.runtime)
+                parse_source(p, &env.root, source, env.layout, env.runtime)
             })
             .collect();
         let mut files = Vec::new();

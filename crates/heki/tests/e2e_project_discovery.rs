@@ -284,3 +284,21 @@ fn an_excluded_directory_is_never_entered() {
     assert_eq!(code, 1);
     assert!(stdout.contains("a.py:5:5: EFF101 "), "{stdout}");
 }
+
+#[test]
+fn relative_imports_may_climb_to_a_project_root_that_is_a_package() {
+    let p = Project::new("disc_root_package_relative");
+    p.write("__init__.py", "")
+        .write("blocking.py", BLOCKING_WAIT)
+        .write("pkg/__init__.py", "")
+        .write(
+            "pkg/mod.py",
+            "from ..blocking import wait\n\n\nasync def go():\n    wait()\n",
+        );
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("pkg/mod.py:5:5: EFF101 "), "{stdout}");
+    // Without the root package the same import climbs past `pkg`.
+    std::fs::remove_file(p.dir.join("__init__.py")).unwrap();
+    assert_eq!(concise(&p), (0, String::new()));
+}
