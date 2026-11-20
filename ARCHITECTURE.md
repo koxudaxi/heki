@@ -94,8 +94,9 @@ by crate boundaries, carrying three rule families.
   the certainty of a speedup (profitability) are managed as orthogonal axes; nothing without a
   reason, and nothing that can be slower for small inputs, is applied by default.
 - **G4. Gradual adoption and machine-readable output**: a line-number-independent, shrink-only
-  baseline (`heki check --baseline`) and JSON / SARIF output carrying the evidence (`evidence`),
-  the obstacle to a fix (`blocker`), and the call path (`related`), for large existing code bases
+  baseline (`heki check --baseline`) and JSON output carrying the evidence (`evidence`), the
+  obstacle to a fix (`blocker`), and the call path (`related`; SARIF carries the call path as
+  `relatedLocations`), for large existing code bases
   and for the fix loops of humans and agents in CI.
 - **G5. Coexistence with existing tools**: no overlap with Ruff, ty, mypy, Pyright, or tach;
   `# noqa` compatible.
@@ -424,7 +425,7 @@ single-expression lints.)*
 
 | Rule ID | Pattern → rewrite | Profitability | Default `heki check --fix` | Main safety obligations / profitability conditions |
 |---|---|---|---|---|
-| **OPT101** | `x = x + [e]`, `x = [*x, e]`, `x = x + y` → `x.append(e)` / `x.extend(y)` | `unconditional` | **Applied (when `safe`)** | Safety: `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe`, `EvalOrderPreserved` / Profit: `LoopCarried(x)` |
+| **OPT101** | `x = x + [e]`, `x = x + [e1, *it]` (a list display on the right) → `x.append(e)` / `x.extend([...])` | `unconditional` | **Applied (when `safe`)** | Safety: `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe`, `EvalOrderPreserved` / Profit: `LoopCarried(x)` |
 | **OPT102** | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s.add(e)`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`) / Profit: `LoopCarried` |
 | **OPT103** | Quadratic accumulation of immutable values (`tuple +=`, `bytes +=`, `self.s +=`, ...) → a buffer and one final conversion | `size-dependent` | Suggestion only | Safety: `Unique`, `ExclusiveAccessAtWrite`, `ExactType(lhs / rhs)`, no intermediate reads (`NoIntermediateReads`), `ExceptionStateSafe` / Profit: `LoopCarried`, `NotConstSmall` (local `s += x` excluded: CPython already appends in place) |
 | **OPT110** | `e in lst` in a loop → a `set` built before the loop | `size-dependent` | With `--include-size-dependent` | Safety: `ValueLoopInvariant(lst)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` / Profit: `NotConstSmall(lst)` |
@@ -681,6 +682,8 @@ message = "render entry points must not mutate model state"
      rules `MUT201` / `MUT202` show at least the coverage of datamodel-code-generator's own
      checker on its code).
 4. **Performance**: a 100,000-line repository is analyzed in a few seconds.
+5. **Release integrity**: the release workflow runs CI on the release commit and checks the tag
+   against every distribution's version before it publishes.
 
 ### Remaining for v1.0
 The conservative `SoundnessSummary` (A2), Layer 3 on-demand analysis with its disk cache,

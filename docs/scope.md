@@ -84,7 +84,7 @@ allowed-writers = ["Store.*"]
 $ heki check --output-format concise
 app/api.py:5:12: EFF101 `async def handler` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
 app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
-Found 2 diagnostic(s) in 5 file(s).
+Found 2 diagnostic(s) in 4 file(s).
 ```
 
 Ruff's async rules see `requests.get` only when it is written in the `async def` itself; ty sees a

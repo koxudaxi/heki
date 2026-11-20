@@ -26,9 +26,9 @@ The first public preview.
   - Complexity rewrites: `OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`, `OPT112`, `OPT113`,
     `OPT120`, `OPT121`, and `OPT130`.
 - Proven-safe rewrites: `heki check --fix` applies the unconditional `OPT101` / `OPT102` fixes,
-  `--include-size-dependent` adds the size-dependent ones, `--profile` limits those to the hot
-  functions of a sampling profile (CPython 3.15's profiler or py-spy), and `--diff` previews
-  them. A fix that turns a list into a `collections.deque` also rewrites its `list` annotation
+  `--include-size-dependent` adds the size-dependent ones in every function, `--profile` alone
+  applies them in the hot functions of a sampling profile (CPython 3.15's profiler or py-spy),
+  and `--diff` previews them. A fix that turns a list into a `collections.deque` also rewrites its `list` annotation
   and adds the import in sorted order to the standard-library imports.
 - Contracts in `[tool.heki]`: `write-owners` (`MUT201`), `read-owners` (`MUT203`),
   `call-owners` (`MUT204`), `readonly-returns` (`MUT202`, followed through the functions that
