@@ -27,10 +27,11 @@ use heki_rules::project::{ProjectOptions, find_root};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tower_lsp::jsonrpc::Result as RpcResult;
+use tower_lsp::jsonrpc::{Request, Result as RpcResult};
 use tower_lsp::lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionParams, CodeActionProviderCapability,
     CodeActionResponse, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
@@ -45,9 +46,6 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 /// Delay between the last `didChange` and the re-analysis of the document.
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
-
-/// Time the client gets after `shutdown` to send `exit` and close stdin.
-const EXIT_GRACE: Duration = Duration::from_secs(2);
 
 struct Doc {
     uri: Url,
@@ -352,6 +350,8 @@ pub struct Backend {
     client: Client,
     state: Arc<Mutex<State>>,
     activity: Arc<Activity>,
+    /// The client sent `shutdown`: the process exits with 0 (else 1) when the session ends.
+    shut_down: Arc<AtomicBool>,
 }
 
 impl Backend {
@@ -360,6 +360,7 @@ impl Backend {
             client,
             state: Arc::new(Mutex::new(State::default())),
             activity: Arc::default(),
+            shut_down: Arc::default(),
         }
     }
 
@@ -509,12 +510,7 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> RpcResult<()> {
-        // `exit` only ends the transport once the client closes stdin; a client that keeps it
-        // open would leave the process behind, so end it shortly after `shutdown`.
-        tokio::spawn(async {
-            tokio::time::sleep(EXIT_GRACE).await;
-            std::process::exit(0);
-        });
+        self.shut_down.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -657,20 +653,55 @@ impl LanguageServer for Backend {
     }
 }
 
-/// Serve LSP over stdin / stdout until `exit`.
-pub fn run_stdio() -> std::io::Result<()> {
+/// The service, ending the session at the `exit` notification: tower-lsp stops serving only at
+/// the next message or the end of stdin, and a client may keep stdin open after `exit`.
+struct EndAtExit<S> {
+    inner: S,
+    exit: Arc<tokio::sync::Notify>,
+}
+
+impl<S: tower_service::Service<Request>> tower_service::Service<Request> for EndAtExit<S> {
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Request) -> Self::Future {
+        let exit = request.method() == "exit";
+        let handled = self.inner.call(request);
+        if exit {
+            self.exit.notify_one();
+        }
+        handled
+    }
+}
+
+/// Serve LSP over stdin / stdout until `exit` (or the end of stdin). Returns whether the
+/// session ended as the protocol asks, after `shutdown`: the exit code is then 0, else 1.
+pub fn run_stdio() -> std::io::Result<bool> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
+    let shut_down = runtime.block_on(async {
         let (service, socket) = LspService::build(Backend::new)
             .custom_method("heki/stats", Backend::stats)
             .finish();
-        Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
-            .serve(service)
-            .await;
+        let shut_down = Arc::clone(&service.inner().shut_down);
+        let exit = Arc::new(tokio::sync::Notify::new());
+        let service = EndAtExit {
+            inner: service,
+            exit: Arc::clone(&exit),
+        };
+        tokio::select! {
+            () = Server::new(tokio::io::stdin(), tokio::io::stdout(), socket).serve(service) => {}
+            () = exit.notified() => {}
+        }
+        shut_down.load(Ordering::SeqCst)
     });
     // `tokio::io::stdin` reads on a blocking thread; do not wait for it.
     runtime.shutdown_background();
-    Ok(())
+    Ok(shut_down)
 }

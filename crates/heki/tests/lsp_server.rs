@@ -517,3 +517,39 @@ fn lsp_withholds_suppressions_that_would_land_in_a_continuation_or_a_string() {
     }
     lsp.stop(true);
 }
+
+#[test]
+fn lsp_exit_codes_follow_the_shutdown_handshake() {
+    let p = Project::new("lsp_exit");
+    let status = |lsp: &mut Lsp| {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = lsp.child.try_wait().unwrap() {
+                return status.code();
+            }
+            assert!(
+                started.elapsed() < common::lsp::TIMEOUT,
+                "the server never ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    // A client may take its time between `shutdown` and `exit`; `exit` ends the process with 0
+    // even while stdin stays open.
+    let mut lsp = ready_server(&p, json!({}));
+    assert_eq!(lsp.request("shutdown", Value::Null), Value::Null);
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    assert!(
+        lsp.child.try_wait().unwrap().is_none(),
+        "ended before `exit`"
+    );
+    lsp.notify("exit", Value::Null);
+    assert_eq!(status(&mut lsp), Some(0));
+    // `exit` without `shutdown`, or stdin closing without either: 1.
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.notify("exit", Value::Null);
+    assert_eq!(status(&mut lsp), Some(1));
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.stdin = None;
+    assert_eq!(status(&mut lsp), Some(1));
+}

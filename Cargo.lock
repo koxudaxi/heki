@@ -621,6 +621,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower-lsp",
+ "tower-service",
 ]
 
 [[package]]

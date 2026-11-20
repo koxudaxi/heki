@@ -169,10 +169,11 @@ struct DumpSemanticArgs {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Commands::Check(args) => check::run(&args),
-        Commands::Server(_args) => {
-            heki_lsp::run_stdio()?;
-            Ok(ExitCode::SUCCESS)
-        }
+        Commands::Server(_args) => Ok(if heki_lsp::run_stdio()? {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        }),
         Commands::Rule(args) => {
             let json = args.output_format == RuleFormat::Json;
             let Some(q) = args.rule.as_deref().filter(|_| !args.all) else {
