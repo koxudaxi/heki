@@ -588,6 +588,15 @@ def rebuild_tuple_of_a_tuple(n):
     return hits
 
 
+def chained_membership(n):
+    """`i in allowed in allowed`: the last name is the second comparison's operand."""
+    allowed = list(range(9))
+    out = []
+    for i in range(n):
+        out.append(i in allowed in allowed)
+    return out
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -658,6 +667,7 @@ def main() -> int:
             run(lookup_in_a_bounded_loop, n),
             run(rebuild_in_a_bounded_loop, n),
             run(rebuild_tuple_of_a_tuple, n),
+            run(chained_membership, n),
         ]
     print("\n".join(lines))
     return 0

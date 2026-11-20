@@ -1460,8 +1460,20 @@ impl<'a, 'c> Rules<'a, 'c> {
         ]
     }
 
-    /// `e in <name>` with `<name>` as the last token of the compare: its span.
+    /// `e in <name>` with `<name>` as the last token of the compare: its span. A comparison
+    /// sharing its span with another one is part of a chain (`i in a in b`): the last token
+    /// may be another comparison's operand.
     fn container_name_span(&self, cmp: Span, name: &str) -> Option<Span> {
+        let compares_here = self
+            .f()
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| matches!(i.kind, InstKind::Compare { .. }) && i.span == cmp)
+            .count();
+        if compares_here != 1 {
+            return None;
+        }
         let text = self.m.text(cmp)?;
         let head = text.strip_suffix(name)?;
         let head = head.trim_end();

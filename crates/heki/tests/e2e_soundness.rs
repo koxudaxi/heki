@@ -742,6 +742,8 @@ const HOIST: &[Expect] = &[
     ("lookup_in_a_bounded_loop", &[]),
     ("rebuild_in_a_bounded_loop", &[]),
     ("rebuild_tuple_of_a_tuple", &[]),
+    // A comparison chain shares one span: no edit can name the right operand.
+    ("chained_membership", &[("OPT110", V::Hand)]),
 ];
 
 #[test]
