@@ -263,8 +263,10 @@ is allowed. None of them follows the call into `load_user` or the alias into `ad
    `OPT113`) use annotations to learn which class an object has and which method a call reaches
    (`session: Session` makes `session.execute(...)` a database call). Calls are resolved from
    local constructors and imports first, then annotations, then attributes assigned in
-   `__init__`, then the class hierarchy (up to eight overriding methods). The rewriting rules
-   never read annotations, because a subclass can override any method; see
+   `__init__`, then the class hierarchy (up to eight overriding methods). Container item types
+   (`list[Model]`), return annotations along the MRO, `isinstance` narrowing, unions of up to
+   three classes, and project `Protocol`s are followed too. The rewriting rules never read
+   annotations, because a subclass can override any method; see
    [Fixes and Safety](fixes.md).
 
 ## When heki cannot tell
@@ -306,8 +308,8 @@ state that matters.
   of a project class runs its getter: its effects, writes, and the attributes it reads count for
   the reader, also through base classes, overriding subclasses, and `super()`. A property that
   also defines a setter or deleter (`@x.setter`) is not followed, nor is `x = property(get_x)`,
-  and the getter's return annotation does not type the value read (`self.session.execute(...)`
-  through a `session` property is not resolved).
+  and the getter's return annotation types the value read. Values declared `Any`, generics
+  substituted through `TypeVar`s, and calls of `type[C]` attributes are not typed.
 - **Read-only types.** `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the
   helpers they are handed to, any number of calls deep; a helper parameter annotated with a
   mutable type is left to the type checker, and a container inside the argument does not count.
@@ -1893,7 +1895,8 @@ count for a read.
     `sleep`, or `blocking` for all six: blocking calls of the ecosystem knowledge base
     (`requests.get`, `sqlite3`, `open`, `subprocess.run`, `time.sleep`, ...);
   - `writes-targets`: writes to the `Class.attr` entries of `write-targets` (and their
-    subclasses), in every form `MUT201` follows; a class's own initialization is no write
+    subclasses), in every form `MUT201` follows, through the receivers whose class `MUT201`
+    sees (the items of annotated containers included); a class's own initialization is no write
     (constructing a fresh object runs its `__init__`), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
@@ -2939,6 +2942,28 @@ the allowed readers:
 
 A target names a class and an attribute; it covers the class's subclasses too.
 
+The read object's class is the one heki infers for it, with annotations as hints: a
+parameter, local, attribute, or return annotation, including the items of `list[...]`,
+`Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
+`Mapping[...]`, `tuple[...]`, and `set[...]`; a constructor call; and what the object comes
+from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
+`by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
+`zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
+display, the items appended to a local list, or a comprehension or generator expression. A
+method call or a `@property` / `cached_property` read has the return annotation of the
+definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
+is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
+`model_copy`) has its original's class, calling a `functools.partial` object returns what the
+wrapped function returns, and `typing.cast` names the class. A variable rebound in a loop
+(`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
+classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
+annotation or from different assignments) is each of them, and an `isinstance` check narrows it
+in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
+also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
+classes that implement it structurally (having every member it defines; at most eight, counting
+a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
+or return, `Any`, a value of more than three classes) is not tied to the target.
+
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the read is reported at every call
 site of the first non-private callers above it, with the chain of calls as related
@@ -3010,7 +3035,8 @@ No automatic fix.
   - `message`: appended to every message of the contract.
 
 Known limitation: a read through a parameter without a project-class annotation
-(`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown.
+(`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown
+there; unlike a write, a read is not handed to the caller that knows it.
 
 
 ---
@@ -3113,9 +3139,9 @@ Mutations through attributes, subscripts, container methods, in-place operators,
 that mutate their argument are followed, also on the call result itself
 (`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)`, and the copy sanitizers of the ecosystem knowledge base clear it,
-shallow copies (`copy.copy`, `.copy()`) free the top level only: the values below stay shared.
-A wrapper that returns a copy on one path and the shared value on another still returns a
-shared value.
+shallow copies (`copy.copy`, `.copy()`, `dataclasses.replace(...)`) free the top level only: the
+values below stay shared. A wrapper that returns a copy on one path and the shared value on
+another still returns a shared value.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
@@ -3458,10 +3484,36 @@ allowed writers:
 - through a local alias (`fields = model.fields; fields.append(...)`);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
-  reported once at the outermost call site.
+  reported once at the outermost call site. A helper that sees the object's class (an annotated
+  parameter, `self` of a method) reports its own write instead, so a write it routes through
+  the allowed writers stays allowed for its callers; a helper handed the value of an attribute
+  (`helper(field.data_type)`) writes that attribute only when it changes the value in place,
+  and otherwise writes the value's own attributes.
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
 class family).
+
+The written object's class is the one heki infers for it, with annotations as hints: a
+parameter, local, attribute, or return annotation, including the items of `list[...]`,
+`Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
+`Mapping[...]`, `tuple[...]`, and `set[...]`; a constructor call; and what the object comes
+from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
+`by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
+`zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
+display, the items appended to a local list, or a comprehension or generator expression. A
+method call or a `@property` / `cached_property` read has the return annotation of the
+definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
+is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
+`model_copy`) has its original's class, calling a `functools.partial` object returns what the
+wrapped function returns, and `typing.cast` names the class. A variable rebound in a loop
+(`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
+classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
+annotation or from different assignments) is each of them, and an `isinstance` check narrows it
+in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
+also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
+classes that implement it structurally (having every member it defines; at most eight, counting
+a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
+or return, `Any`, a value of more than three classes) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call

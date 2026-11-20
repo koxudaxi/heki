@@ -174,6 +174,8 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         into.exec_chains.entry(k).or_insert(chain);
     }
     into.mutates_params |= other.mutates_params;
+    // Typed only where both definitions type it.
+    into.typed_params &= other.typed_params;
     into.escapes_params |= other.escapes_params;
     into.consumes_params |= other.consumes_params;
     into.iterates_params |= other.iterates_params;
@@ -217,7 +219,8 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
 struct Owner {
     is_self: bool,
     param: Option<(u8, Option<String>)>,
-    typed_class: Option<String>,
+    /// The project classes the object may be an instance of.
+    typed_classes: Vec<String>,
     /// Parameters the object may be, as itself.
     may_params: u64,
     /// An instance the function constructs (`TypedFieldWriteSite::fresh`).
@@ -229,7 +232,8 @@ struct Owner {
 /// `obj.<attr>` with project-class `obj` (or `obj["key"]` with a `TypedDict` `obj`).
 #[derive(Debug, Clone)]
 struct ObjAttr {
-    class: String,
+    /// The project classes `obj` may be an instance of.
+    classes: Vec<String>,
     /// The attribute (the key of a `TypedDict`).
     attr: String,
     /// The variable is the load itself (not a copy / phi of it).
@@ -248,6 +252,8 @@ struct Extractor<'a> {
     cx: &'a TypeCtx<'a>,
     path: &'a Path,
     types: FxHashMap<VarId, Val>,
+    /// The values `isinstance` checks give variables in the blocks they guard.
+    narrowed: FxHashMap<(BlockId, VarId), Val>,
     /// Defining instruction of each variable.
     defs: FxHashMap<VarId, &'a Inst>,
     /// Instructions using each variable as an operand.
@@ -324,7 +330,7 @@ impl<'a> Extractor<'a> {
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
     ) -> Self {
-        let types = cx.infer(f);
+        let (types, narrowed) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
         let mut stored_attrs = Vec::new();
@@ -361,6 +367,7 @@ impl<'a> Extractor<'a> {
             cx,
             path,
             types,
+            narrowed,
             defs,
             uses,
             self_vars,
@@ -397,6 +404,10 @@ impl<'a> Extractor<'a> {
         ex.build_aliases();
         let returned = readonly::returned_values(f, &ex.defs, |kind| ex.derivations(kind));
         ex.returned = returned;
+        ex.summary.typed_params = (0..64u32)
+            .zip(&f.params)
+            .filter(|(_, p)| ex.project_class(p.var).is_some())
+            .fold(0, |acc, (i, _)| acc | 1u64 << i);
         ex
     }
 
@@ -462,10 +473,43 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// The value of `var` in the block being read (`pos`).
+    fn val(&self, var: VarId) -> Option<&Val> {
+        self.narrowed
+            .get(&(self.pos.0, var))
+            .or_else(|| self.types.get(&var))
+    }
+
+    /// The project class of `var`, when it is an instance of one class.
     fn project_class(&self, var: VarId) -> Option<String> {
-        match self.types.get(&var)? {
+        match self.val(var)? {
             Val::Inst(c) if self.cx.project.is_project_class(c) => Some(c.clone()),
             _ => None,
+        }
+    }
+
+    /// The project classes `var` may be an instance of: one, the members of a union, or a
+    /// protocol with the classes implementing it structurally.
+    fn project_classes(&self, var: VarId) -> Vec<String> {
+        let project = self.cx.project;
+        match self.val(var) {
+            Some(Val::Inst(c)) if project.is_project_class(c) => {
+                let mut out = vec![c.clone()];
+                out.extend(
+                    project
+                        .protocol_implementers(c)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+                out
+            }
+            Some(Val::Union(cs)) => cs
+                .iter()
+                .filter(|c| project.is_project_class(c))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -487,6 +531,7 @@ impl<'a> Extractor<'a> {
                 self.dict_of.len(),
             );
             for bb in &self.f.blocks {
+                self.pos = (bb.id, 0);
                 for phi in &bb.phis {
                     let inputs: Vec<VarId> = phi
                         .incoming
@@ -535,8 +580,9 @@ impl<'a> Extractor<'a> {
                             if self.self_vars.contains(obj) {
                                 self.self_attr_alias.insert(*dst, attr.clone());
                             }
-                            if let Some(class) = self.project_class(*obj) {
-                                let load = self.obj_attr(class, *obj, attr);
+                            let classes = self.project_classes(*obj);
+                            if !classes.is_empty() {
+                                let load = self.obj_attr(classes, *obj, attr);
                                 self.obj_attr_alias.insert(*dst, load);
                             }
                         }
@@ -555,7 +601,7 @@ impl<'a> Extractor<'a> {
                             if let Some(class) = self.project_class(*obj)
                                 && self.cx.project.is_typed_dict(&class)
                             {
-                                let load = self.obj_attr(class, *obj, key);
+                                let load = self.obj_attr(vec![class], *obj, key);
                                 self.obj_attr_alias.insert(*dst, load);
                             }
                         }
@@ -577,9 +623,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// The load `obj.<attr>` (`obj["<attr>"]`) of the project-class object `obj`.
-    fn obj_attr(&self, class: String, obj: VarId, attr: &str) -> ObjAttr {
+    fn obj_attr(&self, classes: Vec<String>, obj: VarId, attr: &str) -> ObjAttr {
         ObjAttr {
-            class,
+            classes,
             attr: attr.to_owned(),
             direct: true,
             obj_params: self.may_params.get(&obj).copied().unwrap_or(0),
@@ -667,7 +713,7 @@ impl<'a> Extractor<'a> {
                 callee_var: Some(c),
                 ..
             } = &inst.kind
-                && matches!(self.types.get(c), Some(Val::Ref(fqn)) if self.cx.project.is_project_class(fqn))
+                && matches!(self.val(*c), Some(Val::Ref(fqn)) if self.cx.project.is_project_class(fqn))
             {
                 self.fresh.insert(*dst);
             }
@@ -711,7 +757,7 @@ impl<'a> Extractor<'a> {
         Owner {
             is_self: self.self_vars.contains(&var),
             param: self.param_alias.get(&var).cloned(),
-            typed_class: self.project_class(var),
+            typed_classes: self.project_classes(var),
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var),
             reach: self.reach_of(var),
@@ -724,7 +770,9 @@ impl<'a> Extractor<'a> {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
-            typed_field: field.map(|a| (a.class.clone(), a.attr.clone())),
+            typed_field: field
+                .filter(|a| a.classes.len() == 1)
+                .map(|a| (a.classes[0].clone(), a.attr.clone())),
             typed_instance: self.project_class(var),
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
@@ -763,8 +811,7 @@ impl<'a> Extractor<'a> {
                 None,
                 args,
                 kwargs,
-                self.cx
-                    .resolve_call(callee_var.and_then(|v| self.types.get(&v))),
+                self.cx.resolve_call(callee_var.and_then(|v| self.val(v))),
             ),
             InstKind::MethodCall {
                 recv,
@@ -777,7 +824,7 @@ impl<'a> Extractor<'a> {
                 Some(method.as_str()),
                 args,
                 kwargs,
-                self.cx.resolve_method(self.types.get(recv), method),
+                self.cx.resolve_method(self.val(*recv), method),
             ),
             _ => return Vec::new(),
         };
@@ -967,10 +1014,10 @@ impl<'a> Extractor<'a> {
                 InstKind::AttrStore { obj, value, .. } if !is_self(value) => Some(*obj),
                 InstKind::Copy { dst, src } if is_self(dst) => Some(*src),
                 InstKind::MethodCall { recv, method, .. }
-                    if is_self(recv) || matches!(self.types.get(recv), Some(Val::Super(_))) =>
+                    if is_self(recv) || matches!(self.val(*recv), Some(Val::Super(_))) =>
                 {
                     if !matches!(
-                        self.cx.resolve_method(self.types.get(recv), method),
+                        self.cx.resolve_method(self.val(*recv), method),
                         Callee::Project(..)
                     ) {
                         return BTreeSet::new();
@@ -1119,7 +1166,7 @@ impl<'a> Extractor<'a> {
                 self.typed_read(owner, attr, ReadKind::DirectAttr, span);
                 // A returned attribute that `readonly-returns` names (`Class.attr`).
                 if let Some(step) = self.returned.get(dst).copied()
-                    && let Some(Val::Inst(class)) = self.types.get(obj)
+                    && let Some(Val::Inst(class)) = self.val(*obj)
                     && let Some(c) = self.contracts
                 {
                     let fqn = format!("{class}.{attr}");
@@ -1188,12 +1235,12 @@ impl<'a> Extractor<'a> {
                 {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
-                let callee = self.cx.resolve_method(self.types.get(recv), method);
+                let callee = self.cx.resolve_method(self.val(*recv), method);
                 let (recv_origin, recv_is_self) = self.receiver(*recv, bb);
                 // `pkg.Model(...)`: a project class reached through a module. Through a module,
                 // only a class binds the receiver (its `__init__`); a class without a project
                 // `__init__` resolves to its own name.
-                let constructs = match (self.types.get(recv), &callee) {
+                let constructs = match (self.val(*recv), &callee) {
                     (Some(Val::Ref(fqn)), Callee::Project(_, true)) => {
                         Some(self.cx.project.canonical(&format!("{fqn}.{method}")))
                     }
@@ -1236,13 +1283,13 @@ impl<'a> Extractor<'a> {
                 {
                     self.child_iteration(bb, FunctionId(id), *iterable, span);
                 }
-                let callee_val = callee_var.and_then(|v| self.types.get(&v));
+                let callee_val = callee_var.and_then(|v| self.val(v));
                 // `m = obj.method; m(...)` and `getattr(obj, "method")(...)` call a method of
                 // the receiver, as `obj.method(...)` does.
                 if callee_val.is_none()
                     && let Some((recv, method)) = callee_var.and_then(|v| self.bound_method(v))
                 {
-                    let target = self.cx.resolve_method(self.types.get(&recv), &method);
+                    let target = self.cx.resolve_method(self.val(recv), &method);
                     let (recv_origin, recv_is_self) = self.receiver(recv, bb);
                     let call = Call {
                         dst: *dst,
@@ -1343,7 +1390,7 @@ impl<'a> Extractor<'a> {
     /// is a call at `span` (`for row in session.query(User):` runs the query). Project classes'
     /// `__iter__` are not followed.
     fn iteration(&mut self, bb: BlockId, iterable: VarId, span: Span) {
-        let Some(Val::Inst(class)) = self.types.get(&iterable) else {
+        let Some(Val::Inst(class)) = self.val(iterable) else {
             return;
         };
         if class.starts_with("builtins.") || self.cx.project.is_project_class(class) {
@@ -1361,7 +1408,7 @@ impl<'a> Extractor<'a> {
     fn receiver(&self, recv: VarId, bb: BlockId) -> (ArgOrigin, bool) {
         let mut origin = self.origin(recv);
         let mut binding = self.binding(recv, self.loops_around(bb));
-        let is_super = matches!(self.types.get(&recv), Some(Val::Super(_)));
+        let is_super = matches!(self.val(recv), Some(Val::Super(_)));
         if is_super {
             origin.param = Some((0, None));
             origin.may_params = 1;
@@ -1380,7 +1427,7 @@ impl<'a> Extractor<'a> {
     /// getter returns a coroutine). The read's own facts (`reads_self_attrs`, typed read
     /// sites) stay as they are.
     fn property_read(&mut self, bb: BlockId, dst: VarId, obj: VarId, attr: &str, span: Span) {
-        let Some(callee) = self.cx.resolve_attr_load(self.types.get(&obj), attr) else {
+        let Some(callee) = self.cx.resolve_attr_load(self.val(obj), attr) else {
             return;
         };
         let (recv, recv_is_self) = self.receiver(obj, bb);
@@ -1414,17 +1461,14 @@ impl<'a> Extractor<'a> {
         }
         match &self.defs.get(&cur)?.kind {
             InstKind::AttrLoad { obj, attr, .. } => {
-                let getter = self
-                    .cx
-                    .resolve_attr_load(self.types.get(obj), attr)
-                    .is_some();
+                let getter = self.cx.resolve_attr_load(self.val(*obj), attr).is_some();
                 (!getter).then(|| (*obj, attr.clone()))
             }
             InstKind::Call {
                 callee_var: Some(f),
                 args,
                 ..
-            } if matches!(self.types.get(f), Some(Val::Ref(s)) if s == "builtins.getattr")
+            } if matches!(self.val(*f), Some(Val::Ref(s)) if s == "builtins.getattr")
                 && (2..=3).contains(&args.len()) =>
             {
                 Some((args[0], self.const_str(args[1])?))
@@ -1545,7 +1589,7 @@ impl<'a> Extractor<'a> {
 
     /// Read of attribute `attr` on the object `owner`, when it has a project class.
     fn typed_read(&mut self, owner: Owner, attr: &str, kind: ReadKind, span: Span) {
-        if let Some(class) = owner.typed_class {
+        for class in owner.typed_classes {
             self.summary
                 .typed_field_read_sites
                 .insert(TypedFieldReadSite {
@@ -1571,7 +1615,7 @@ impl<'a> Extractor<'a> {
             Some((i, Some(path))) => self.mutate_param(i, path),
             None => {}
         }
-        if let Some(class) = owner.typed_class {
+        for class in owner.typed_classes {
             self.typed_site(
                 class,
                 attr,
@@ -1615,7 +1659,9 @@ impl<'a> Extractor<'a> {
             } else {
                 WriteKind::AliasContainerMut
             };
-            self.typed_site(a.class, &a.attr, kind, span, a.obj_params, a.fresh, a.reach);
+            for class in a.classes {
+                self.typed_site(class, &a.attr, kind, span, a.obj_params, a.fresh, a.reach);
+            }
         }
     }
 
@@ -2102,7 +2148,7 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
                 });
             }
             Some(f) => {
-                if f.class != a.class || f.attr != a.attr {
+                if f.classes != a.classes || f.attr != a.attr {
                     return;
                 }
                 f.obj_params |= a.obj_params;

@@ -112,8 +112,10 @@ is allowed. None of them follows the call into `load_user` or the alias into `ad
    `OPT113`) use annotations to learn which class an object has and which method a call reaches
    (`session: Session` makes `session.execute(...)` a database call). Calls are resolved from
    local constructors and imports first, then annotations, then attributes assigned in
-   `__init__`, then the class hierarchy (up to eight overriding methods). The rewriting rules
-   never read annotations, because a subclass can override any method; see
+   `__init__`, then the class hierarchy (up to eight overriding methods). Container item types
+   (`list[Model]`), return annotations along the MRO, `isinstance` narrowing, unions of up to
+   three classes, and project `Protocol`s are followed too. The rewriting rules never read
+   annotations, because a subclass can override any method; see
    [Fixes and Safety](fixes.md).
 
 ## When heki cannot tell
@@ -155,8 +157,8 @@ state that matters.
   of a project class runs its getter: its effects, writes, and the attributes it reads count for
   the reader, also through base classes, overriding subclasses, and `super()`. A property that
   also defines a setter or deleter (`@x.setter`) is not followed, nor is `x = property(get_x)`,
-  and the getter's return annotation does not type the value read (`self.session.execute(...)`
-  through a `session` property is not resolved).
+  and the getter's return annotation types the value read. Values declared `Any`, generics
+  substituted through `TypeVar`s, and calls of `type[C]` attributes are not typed.
 - **Read-only types.** `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the
   helpers they are handed to, any number of calls deep; a helper parameter annotated with a
   mutable type is left to the type checker, and a container inside the argument does not count.

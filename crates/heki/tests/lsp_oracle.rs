@@ -258,6 +258,33 @@ const RO_STATS: &str = "from collections.abc import Sequence\n\nfrom pkg.ro.mid 
 const RO_INIT: &str = "from pkg.ro.impl import scale\n";
 const RO_IMPL: &str = "def scale(values):\n    return [v * 2 for v in values]\n\n\ndef scale_in_place(values):\n    values[0] = 0\n";
 const RO_PLOT: &str = "from collections.abc import Sequence\n\nfrom pkg.ro import scale\n\n\ndef plot(values: Sequence[float]) -> None:\n    scale(values)\n";
+// Receiver typing: the class of a loop target comes from the element type of an attribute
+// annotation in another module.
+const SHELF: &str = r#"from typing import Self
+
+from pkg.model import Registry
+
+
+class Shelf:
+    registries: list[Registry]
+
+    @property
+    def main(self) -> Registry:
+        return self.registries[0]
+
+    def again(self) -> Self:
+        return self
+"#;
+const FILL: &str = "from pkg.shelf import Shelf\n\n\ndef fill(shelf: Shelf, x):\n    for r in shelf.registries:\n        r.entries.append(x)\n";
+const FILL_MAIN: &str = "from pkg.shelf import Shelf\n\n\ndef fill_main(shelf: Shelf, x):\n    shelf.again().main.entries.append(x)\n";
+// A protocol in one module, the class implementing it structurally in another.
+const VIEWS: &str = "from typing import Protocol\n\n\nclass EntriesView(Protocol):\n    entries: list\n    tag: str\n\n\ndef fill_view(view: EntriesView, x):\n    view.entries.append(x)\n";
+// The class body only declares names (no function changes): only the protocol's
+// implementations change.
+const TAGGED: &str =
+    "from pkg.model import Registry\n\n\nclass TaggedRegistry(Registry):\n    tag: str = \"t\"\n";
+const UNTAGGED: &str =
+    "from pkg.model import Registry\n\n\nclass TaggedRegistry(Registry):\n    label: str = \"t\"\n";
 
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
@@ -349,6 +376,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/planter.py", PLANTER),
         ("pkg/kid_gen.py", KID_GEN),
         ("pkg/kid_user.py", KID_USER),
+        ("pkg/shelf.py", SHELF),
+        ("pkg/fill.py", FILL),
+        ("pkg/fill_main.py", FILL_MAIN),
+        ("pkg/views.py", VIEWS),
+        ("pkg/tagged.py", TAGGED),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -473,6 +505,59 @@ fn steps_mut108() -> Vec<Step> {
             vec![save("pkg/frozen/model.py", FROZEN_MODEL)],
         )
         .absent(&[("pkg/frozen/configure.py", "MUT108")]),
+    ]
+}
+
+/// Receiver typing: the element types of declarations in another module type the receivers of
+/// a function, so editing those declarations re-checks it.
+fn steps_receiver_typing() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the attribute holds strings instead of registries",
+            vec![save(
+                "pkg/shelf.py",
+                &SHELF.replace("list[Registry]", "list[str]"),
+            )],
+        )
+        .absent(&[("pkg/fill.py", "MUT201")]),
+        Step::new(
+            "the attribute holds registries again",
+            vec![save("pkg/shelf.py", SHELF)],
+        )
+        .present(&[("pkg/fill.py", "MUT201")]),
+        Step::new(
+            "the property returns a string",
+            vec![save(
+                "pkg/shelf.py",
+                &SHELF.replace(") -> Registry:", ") -> str:"),
+            )],
+        )
+        .absent(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the property returns a registry again",
+            vec![save("pkg/shelf.py", SHELF)],
+        )
+        .present(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the method returns an int instead of Self",
+            vec![save("pkg/shelf.py", &SHELF.replace("-> Self:", "-> int:"))],
+        )
+        .absent(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the method returns Self again",
+            vec![save("pkg/shelf.py", SHELF)],
+        )
+        .present(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the class stops implementing the protocol",
+            vec![save("pkg/tagged.py", UNTAGGED)],
+        )
+        .absent(&[("pkg/views.py", "MUT201")]),
+        Step::new(
+            "the class implements the protocol again",
+            vec![save("pkg/tagged.py", TAGGED)],
+        )
+        .present(&[("pkg/views.py", "MUT201")]),
     ]
 }
 
@@ -876,6 +961,9 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_use.py", "EFF102"),
             ("pkg/guard_default_use.py", "EFF102"),
             ("pkg/guard_conn_use.py", "EFF102"),
+            ("pkg/fill.py", "MUT201"),
+            ("pkg/fill_main.py", "MUT201"),
+            ("pkg/views.py", "MUT201"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(
@@ -999,6 +1087,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_body_runs());
     steps.extend(steps_small_displays());
     steps.extend(steps_mut202_mut109());
+    steps.extend(steps_receiver_typing());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(

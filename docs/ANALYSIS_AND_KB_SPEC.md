@@ -127,9 +127,9 @@ the targets of write and read boundaries.
 | Priority | Source | Confidence | Example |
 |---|---|---|---|
 | 1 | Local constructors and direct imports (relative imports, `src/` layout, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
-| 2 | PEP 484 annotations (parameters, locals, return types, attributes) | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)` |
+| 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
-| 4 | Same-name methods in the class hierarchy (CHA / RTA) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
+| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
@@ -162,8 +162,13 @@ EffectSummary(f) = {
                                                            // holds by reference, read for nothing else (MUT101)
     mutates_self_attrs:       Set<AttrKeyPath>,            // reassignment or in-place change of self.<attr> (indirect too)
     invalidates_cached:       Set<AttrName>,               // del self.<prop>, self.__dict__.pop("<prop>", ...), clear
-    typed_field_write_sites:  Set<TypedFieldWriteSite>,    // writes to (class, attr) with kind, chain, and the
-                                                           // parameters the written object may be (MUT201, EFF201)
+    typed_field_write_sites:  Set<TypedFieldWriteSite>,    // own and IndirectHelper writes to (class, attr) with
+                                                           // kind, chain, and the parameters the written object
+                                                           // may be, plus the sites private callees hand over (a
+                                                           // public callee reports its own) (MUT201, EFF201)
+    typed_field_writes:       Set<(Class, Attr)>,          // every typed write reached through any callee
+    typed_params:             Bitset,                      // parameters the function types itself (its sites
+                                                           // cover their changes)
     typed_field_read_sites:   Set<TypedFieldReadSite>,     // own reads of (class, attr): attribute, getattr,
                                                            // __dict__; never propagated (MUT203)
     returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
@@ -348,7 +353,8 @@ message = "write model state through GenerationStore instead"
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
        caught across calls**).
-  2. `typed_field_write_sites` propagate bottom-up with their call chains. A write is allowed
+  2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
+     only: a public callee reports its own writes. A write is allowed
      when a function on its chain matches `allowed-writers` or `exempt-methods`, when an
      initializer of the target's class family writes its own `self`, or when the reporting
      function only runs inside allowed contexts (every path of project callers starts in one); a
@@ -375,7 +381,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      function) gets a read-only origin tag.
   2. The tag flows within the function through `Copy`, attribute reads (with `deep = true`),
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
-     `model_copy(deep=True)`, and the Layer 2 `copy_sanitizer` entries).
+     `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, and the Layer 2
+     `copy_sanitizer` entries). A copy keeps its original's class for receiver typing.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
      the call hop.

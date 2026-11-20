@@ -7,7 +7,7 @@ use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, Facts,
-    FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared, TypeCtx, Val, WriteKind,
+    FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared, TypeCtx, Val,
     self_aliases,
 };
 use heki_env::HekiConfig;
@@ -814,32 +814,6 @@ fn runs_inside_allowed(
     allowed_contexts
 }
 
-/// Whether `func`'s own summary holds the write `site` (as its caller sees it): the same write
-/// at the same location, by `func` itself (`own`) or through its callees. A function iterating a
-/// generator it is handed does not: the generator's writes reach the function that handed it
-/// over, and only that one.
-fn holds_write(
-    cx: &CheckContext<'_>,
-    func: &FuncKey,
-    site: &heki_effect::TypedFieldWriteSite,
-    own: bool,
-) -> bool {
-    let origin = site.via_chain.last().map(|h| h.callee.as_str());
-    cx.index.summary(func).is_some_and(|s| {
-        s.typed_field_write_sites.iter().any(|t| {
-            t.class_qualname == site.class_qualname
-                && t.attr == site.attr
-                && t.kind == site.kind
-                && t.span == site.span
-                && if own {
-                    t.via_chain.is_empty()
-                } else {
-                    t.via_chain.last().map(|h| h.callee.as_str()) == origin
-                }
-        })
-    })
-}
-
 /// `base`, then `: note` when the contract sets a `message`.
 pub(crate) fn with_note(base: String, note: Option<&str>) -> String {
     match note {
@@ -994,22 +968,14 @@ pub(crate) fn mut201(
                         {
                             continue;
                         }
-                        let origin = if site.kind == WriteKind::IndirectHelper && chain.len() >= 2 {
-                            chain.len() - 2
-                        } else {
-                            chain.len() - 1
-                        };
-                        // Report at the outermost function: helpers in between must be private
-                        // (they delegate) unless they do not hold the write themselves (a function
-                        // iterating a generator it is handed runs the generator's writes without
-                        // knowing them), and a delegating function leaves it to its callers.
+                        // Report at the outermost function: a write site only reaches callers
+                        // through private helpers (and the functions iterating a generator they
+                        // are handed, which run its writes without holding them), so the chain
+                        // needs no check here; a delegating function leaves it to its callers.
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let last = chain.len() - 1;
-                        if !chain[1..=origin].iter().enumerate().all(|(i, k)| {
-                            is_private(&k.qualname) || !holds_write(cx, k, site, i + 1 == last)
-                        }) || delegates(cx, sites, key)
+                        if delegates(cx, sites, key)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
                         {
                             continue;

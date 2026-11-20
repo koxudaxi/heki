@@ -220,6 +220,13 @@ direct imports, (2) PEP 484 annotations, (3) `self.attr` assignments in `__init_
 followed (the function is marked `unknown_calls`), and an external function that the Layer 2
 catalog does not list contributes no effect.
 
+Receiver types are inferred by a fixpoint over the SSA-CFG: annotations, including container
+item types (`list[Model]`, `dict[str, Model]`, `tuple[...]`, `Iterator[...]`); the items taken
+out by loops, subscripts, unpacking, dict views, and the builtins that wrap iterables; property
+getters' and methods' return annotations along the MRO, as a type checker reads them; `Self`;
+copies; `functools.partial`; `typing.cast`; unions of up to three classes; `isinstance`
+narrowing; and the structural implementations of project `Protocol`s (up to eight).
+
 Reading a property is a call: `obj.attr` on an instance of a project class whose `attr` is a
 getter-only `@property` / `cached_property` (found along the MRO and in overriding subclasses, at
 most 8) is a call site of the getter that binds the receiver, at the read. A property with a
@@ -251,7 +258,10 @@ EffectSummary(f) = {
     reads_self_attrs:         Set<AttrKeyPath>,     // reads of self.<attr> (constant dict keys included)
     mutates_self_attrs:       Set<AttrKeyPath>,     // reassignment or in-place change of self.<attr>
     invalidates_cached:       Set<AttrName>,        // del self.<prop>, self.__dict__.pop("<prop>", ...)
-    typed_field_write_sites:  Set<(Class, Attr, WriteKind, Chain)>, // direct and indirect writes (MUT201, EFF201)
+    typed_field_write_sites:  Set<(Class, Attr, WriteKind, Chain)>, // own and indirect writes, and those handed
+                                                    // over by private callees (MUT201, EFF201)
+    typed_field_writes:       Set<(Class, Attr)>,   // every typed write reached through any callee
+    typed_params:             Bitset,               // parameters the function types itself
     typed_field_read_sites:   Set<(Class, Attr, ReadKind)>,         // own reads only, never propagated (MUT203)
 
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy init

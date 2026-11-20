@@ -11,9 +11,12 @@
 //! Reading a property (`obj.attr` on a project-class instance whose `attr` is a getter) runs
 //! its getter, so `resolve_attr_load` resolves it like a method call.
 
+use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
-use heki_ir::{FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId};
+use heki_ir::{
+    BlockId, FnIndex, FunctionKind, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId,
+};
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -29,7 +32,23 @@ struct Indexes {
     property_names: FxHashSet<String>,
     frozen: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
+    protocols: FxHashMap<String, Option<Vec<String>>>,
 }
+
+/// Names every class has, which a protocol's body defines without requiring them.
+const IMPLICIT_MEMBERS: &[&str] = &[
+    "__annotations__",
+    "__class__",
+    "__classcell__",
+    "__dict__",
+    "__doc__",
+    "__firstlineno__",
+    "__init__",
+    "__module__",
+    "__qualname__",
+    "__slots__",
+    "__static_attributes__",
+];
 
 /// CHA fan-out limit: more candidates than this leave the call unresolved (`unknown_calls`).
 pub const CHA_CANDIDATE_LIMIT: usize = 8;
@@ -154,8 +173,8 @@ fn import_target(imp: &ModuleImport, module_name: &str, is_package: bool) -> Opt
 pub struct ClassDecl {
     /// Base classes, resolved within the defining module (canonicalized on lookup).
     pub bases: Vec<String>,
-    /// Priority 3 `attr -> class fqn` (instance attribute types).
-    pub attr_types: BTreeMap<String, String>,
+    /// Priority 3 `attr -> type` (instance attribute types).
+    pub attr_types: BTreeMap<String, Ty>,
     /// `@dataclass(frozen=True)` / `@dataclasses.dataclass(frozen=True)`, or a `NamedTuple`:
     /// the class promises immutable instances (`MUT108`). Classes a PEP 681
     /// `dataclass_transform(frozen_default=True)` builds are frozen too, and the subclasses of a
@@ -191,6 +210,12 @@ pub struct ClassDecl {
     /// attributes of a class family through [`ProjectDecls::small_attr`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attr_displays: BTreeMap<String, Option<SmallDisplay>>,
+    /// `typing.Protocol` is one of the bases (PEP 544: the class is a protocol, not an
+    /// implementation of one).
+    pub is_protocol: bool,
+    /// The names the class defines: class-body names (methods, annotations, assignments) and
+    /// the attributes its methods set or annotate on `self` (structural typing, `Protocol`).
+    pub members: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,8 +224,8 @@ pub struct FunctionDecl {
     pub is_staticmethod: bool,
     pub is_classmethod: bool,
     pub is_method: bool,
-    /// Resolved return annotation (class fqn), Advisory only.
-    pub return_type: Option<String>,
+    /// Resolved return annotation, Advisory only.
+    pub return_type: Option<Ty>,
     pub param_names: Vec<String>,
     /// How many leading parameters a position binds (the receiver included).
     pub positional_params: u8,
@@ -237,6 +262,9 @@ pub struct FunctionDecl {
     /// `@database_sync_to_async`, `@asyncify`). `@d def f` is `f = d(f)`: calling `f` calls
     /// `d(f)`, which offloads the body, so the body does not run at the call.
     pub offloaded_by: Option<String>,
+    /// The return annotation of the getter of a property (`@property` / `cached_property`,
+    /// with or without a setter): the type reading the attribute gives.
+    pub property_type: Option<Ty>,
 }
 
 /// Per-module declarations other modules need (stored in `FileSummary`, IR-free).
@@ -252,8 +280,8 @@ pub struct ModuleDecls {
     pub classes: BTreeMap<String, ClassDecl>,
     /// Function qualname -> declaration (module body excluded).
     pub functions: BTreeMap<String, FunctionDecl>,
-    /// Module global `name -> class fqn` of the instance it holds (`client = httpx.Client()`).
-    pub global_types: BTreeMap<String, String>,
+    /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`).
+    pub global_types: BTreeMap<String, Ty>,
     /// Module globals bound to a small display that no function of the module grows
     /// (`heki_ir::ModuleConstants::displays`): other modules read them through
     /// [`ProjectDecls::small_global`].
@@ -352,6 +380,85 @@ impl ModuleDecls {
         }
     }
 
+    /// The type an annotation names (receiver typing): a class with the arguments of a known
+    /// generic container (`list[Model]`, `Mapping[str, Model]`, `tuple[Model, int]`,
+    /// `Iterator[Model]`), after `Optional` / `| None` / `Annotated` / `Final` / `ClassVar` /
+    /// `Required` / `NotRequired` / `ReadOnly` and quotes. An unresolved name of a `typing`
+    /// generic counts as that generic (`"Iterable[Model]"` without the import).
+    pub fn resolve_annotation_ty(&self, text: &str) -> Option<Ty> {
+        let t = unquote(text);
+        let mut parts = split_top_level(t, '|');
+        if parts.len() > 1 {
+            parts.retain(|p| *p != "None");
+            return self.union_annotation(&parts);
+        }
+        let Some((head, inner)) = subscript(t) else {
+            // `typing.Self` (also unimported, in a string annotation): the receiver's type.
+            if matches!(
+                self.resolve_dotted(t, true).as_deref(),
+                Some("typing.Self" | "typing_extensions.Self") | None
+            ) && t.rsplit('.').next() == Some("Self")
+            {
+                return Some(Ty::SelfType);
+            }
+            return self
+                .resolve_type_head(t)
+                .filter(|c| !special_form(c))
+                .map(Ty::inst);
+        };
+        let last = head.rsplit('.').next().unwrap_or(head);
+        match last {
+            "Optional" | "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired"
+            | "ReadOnly" => return self.resolve_annotation_ty(first_arg(inner)),
+            "Union" => {
+                let mut members = split_top_level(inner, ',');
+                members.retain(|p| *p != "None");
+                return self.union_annotation(&members);
+            }
+            _ => {}
+        }
+        let class = self
+            .resolve_type_head(head)
+            .or_else(|| typing_generic(last))
+            .filter(|c| !special_form(c))?;
+        let args = split_top_level(inner, ',');
+        let elem = |i: usize| Elem::of(args.get(i).and_then(|a| self.resolve_annotation_ty(a)));
+        let args = match generic(&class) {
+            None => Args::None,
+            Some(Generic::Items) => Args::items(elem(0)),
+            Some(Generic::Map) => Args::map(elem(0), elem(1)),
+            Some(Generic::Pairs) => Args::items(Elem::Of(Ty::container(
+                "builtins.tuple",
+                Args::Tuple(vec![elem(0), elem(1)]),
+            ))),
+            Some(Generic::Counter) => Args::map(elem(0), Elem::Of(Ty::inst("builtins.int"))),
+            // `tuple[()]` is the empty tuple, `tuple[T, ...]` a tuple of any length.
+            Some(Generic::Tuple) => match args.as_slice() {
+                ["()"] => Args::Tuple(Vec::new()),
+                [_, "..."] => Args::items(elem(0)),
+                _ => Args::Tuple((0..args.len()).map(elem).collect()),
+            },
+        };
+        Some(Ty::container(&class, args))
+    }
+
+    /// The members of a union annotation other than `None`: one type, or instances of at most
+    /// [`crate::types::MAX_UNION`] classes.
+    fn union_annotation(&self, members: &[&str]) -> Option<Ty> {
+        if let [one] = members {
+            return self.resolve_annotation_ty(one);
+        }
+        let mut objs = Vec::new();
+        for m in members {
+            let t = self.resolve_annotation_ty(m)?;
+            if t.members().is_empty() {
+                return None;
+            }
+            objs.extend(t.members().iter().cloned());
+        }
+        Ty::of_members(objs)
+    }
+
     fn resolve_type_head(&self, head: &str) -> Option<String> {
         if head.is_empty()
             || head == "None"
@@ -381,6 +488,29 @@ impl ModuleDecls {
         }
         typing_alias(last).map(|b| format!("builtins.{b}"))
     }
+}
+
+/// A `typing` special form that names no class of instances (`Final` and `ClassVar` without an
+/// argument take their type from the value; `TypeAlias` declares a type, not an instance).
+fn special_form(class: &str) -> bool {
+    const FORMS: &[&str] = &[
+        "Annotated",
+        "ClassVar",
+        "Final",
+        "Literal",
+        "Never",
+        "NoReturn",
+        "NotRequired",
+        "Optional",
+        "ReadOnly",
+        "Required",
+        "TypeAlias",
+        "Union",
+    ];
+    class
+        .strip_prefix("typing.")
+        .or_else(|| class.strip_prefix("typing_extensions."))
+        .is_some_and(|name| FORMS.contains(&name))
 }
 
 /// Split at `sep` outside brackets / parentheses, trimming parts.
@@ -695,6 +825,10 @@ pub struct DeclKeys {
     /// Classes whose project-wide derived facts were looked up: whether they are frozen (a
     /// `dataclass_transform` or a base in another module can make them so) or a `TypedDict`.
     pub class_facts: BTreeSet<String>,
+    /// Protocols whose structural implementations were listed (a class in any module can start
+    /// or stop satisfying one).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub protocols: BTreeSet<String>,
 }
 
 impl DeclKeys {
@@ -703,6 +837,7 @@ impl DeclKeys {
             && self.subclasses.is_empty()
             && self.property_names.is_empty()
             && self.class_facts.is_empty()
+            && self.protocols.is_empty()
     }
 
     pub fn extend(&mut self, other: Self) {
@@ -710,6 +845,7 @@ impl DeclKeys {
         self.subclasses.extend(other.subclasses);
         self.property_names.extend(other.property_names);
         self.class_facts.extend(other.class_facts);
+        self.protocols.extend(other.protocols);
     }
 
     /// Whether the two share a key (an analysis that read `self` is affected by the change
@@ -719,6 +855,7 @@ impl DeclKeys {
             || !self.subclasses.is_disjoint(&other.subclasses)
             || !self.property_names.is_disjoint(&other.property_names)
             || !self.class_facts.is_disjoint(&other.class_facts)
+            || !self.protocols.is_disjoint(&other.protocols)
     }
 }
 
@@ -748,6 +885,9 @@ pub struct ProjectDecls {
     typed_dicts: FxHashSet<String>,
     /// Every frozen project class (`Self::frozen_classes`).
     frozen: FxHashSet<String>,
+    /// Every project protocol with the project classes implementing it structurally
+    /// (`Self::protocol_implementations`), `None` past `CHA_CANDIDATE_LIMIT`.
+    protocols: FxHashMap<String, Option<Vec<String>>>,
     recorder: Recorder,
 }
 
@@ -775,7 +915,7 @@ pub(crate) enum Symbol<'a> {
     Module,
     Class(&'a ClassDecl),
     Function(FuncKey, &'a FunctionDecl),
-    Global(&'a str),
+    Global(&'a Ty),
     External,
 }
 
@@ -845,6 +985,11 @@ impl ProjectDecls {
         out.class_facts = differ(&before.frozen, &self.frozen);
         out.class_facts
             .extend(differ(&before.typed_dicts, &self.typed_dicts));
+        for p in before.protocols.keys().chain(self.protocols.keys()) {
+            if before.protocols.get(p) != self.protocols.get(p) {
+                out.protocols.insert(p.clone());
+            }
+        }
         out
     }
 
@@ -854,6 +999,7 @@ impl ProjectDecls {
             property_names: self.property_names.clone(),
             frozen: self.frozen.clone(),
             typed_dicts: self.typed_dicts.clone(),
+            protocols: self.protocols.clone(),
         }
     }
 
@@ -879,7 +1025,7 @@ impl ProjectDecls {
                 }
             }
             for (qualname, f) in &m.functions {
-                if f.is_property {
+                if f.is_property || f.property_type.is_some() {
                     let name = qualname.rsplit('.').next().unwrap_or(qualname);
                     property_names.insert(name.to_owned());
                 }
@@ -896,6 +1042,77 @@ impl ProjectDecls {
             .flat_map(|b| self.subclasses_of(b))
             .collect();
         self.frozen = self.frozen_classes();
+        self.protocols = self.protocol_implementations();
+    }
+
+    /// For every project protocol, the project classes implementing it structurally: those
+    /// whose members (along their project MRO) include every member the protocol and its
+    /// protocol bases define, without a project base that implements it too (CHA reaches the
+    /// subclasses from there). An explicit subclass is one of them. `None` for more than
+    /// `CHA_CANDIDATE_LIMIT` (or a protocol without members).
+    fn protocol_implementations(&self) -> FxHashMap<String, Option<Vec<String>>> {
+        let mut protocols = Vec::new();
+        let mut classes = Vec::new();
+        for m in self.modules.values() {
+            for (q, c) in &m.classes {
+                let fqn = format!("{}.{q}", m.module_name);
+                if c.is_protocol {
+                    protocols.push(fqn);
+                } else {
+                    classes.push(fqn);
+                }
+            }
+        }
+        let mut out = FxHashMap::default();
+        if protocols.is_empty() {
+            return out;
+        }
+        // The members of each class along its project MRO (protocols: their protocol bases).
+        let closure = |fqn: &str, only_protocols: bool| -> FxHashSet<&str> {
+            let mut names = FxHashSet::default();
+            for c in self.mro(fqn) {
+                if let Some(d) = self.class(&c)
+                    && (!only_protocols || d.is_protocol)
+                {
+                    names.extend(d.members.iter().map(String::as_str));
+                }
+            }
+            names
+        };
+        let members: FxHashMap<&str, FxHashSet<&str>> = classes
+            .iter()
+            .map(|c| (c.as_str(), closure(c, false)))
+            .collect();
+        for p in &protocols {
+            let mut required = closure(p, true);
+            required.retain(|n| !IMPLICIT_MEMBERS.contains(n));
+            if required.is_empty() {
+                out.insert(p.clone(), None);
+                continue;
+            }
+            let satisfies = |c: &str| {
+                members
+                    .get(c)
+                    .is_some_and(|m| required.iter().all(|n| m.contains(n)))
+            };
+            let mut found: Vec<String> = classes
+                .iter()
+                .filter(|c| satisfies(c))
+                .filter(|c| self.mro(c).iter().skip(1).all(|b| b == p || !satisfies(b)))
+                .cloned()
+                .collect();
+            found.sort();
+            let entry = (found.len() <= CHA_CANDIDATE_LIMIT).then_some(found);
+            out.insert(p.clone(), entry);
+        }
+        out
+    }
+
+    /// The project classes implementing the project protocol `class` structurally
+    /// (`Self::protocol_implementations`); `None` when `class` is no protocol or too many do.
+    pub(crate) fn protocol_implementers(&self, class: &str) -> Option<&[String]> {
+        self.read(|k| note(&mut k.protocols, class));
+        self.protocols.get(class)?.as_deref()
     }
 
     /// The frozen project classes: `ClassDecl::is_frozen` (`@dataclass(frozen=True)`,
@@ -1157,6 +1374,11 @@ impl ProjectDecls {
             .collect()
     }
 
+    /// Whether `sub` derives (transitively) from `base`, both canonical.
+    pub(crate) fn is_subclass(&self, sub: &str, base: &str) -> bool {
+        self.mro(sub).iter().skip(1).any(|c| c == base)
+    }
+
     /// Depth-first, left-to-right base linearization (project and external classes).
     fn mro(&self, class: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -1190,11 +1412,69 @@ impl ProjectDecls {
         self.module(&key.module)?.functions.get(&key.qualname)
     }
 
-    /// Priority 3: instance attribute type through the MRO.
-    fn attr_type(&self, class: &str, attr: &str) -> Option<String> {
+    /// The declared type of reading `attr` on an instance of `class`, from the first class along
+    /// the MRO (past `class` itself with `skip_self`, for `super()`) that declares it: the
+    /// return annotation of a property getter (with or without a setter; another function of a
+    /// name some project property has gives none), or the Priority 3 attribute type. Overriding
+    /// subclasses do not count, as for a type checker. The getter's module is a declaration
+    /// read like any other (`DeclKeys::modules`).
+    pub(crate) fn member_type(&self, class: &str, attr: &str, skip_self: bool) -> Option<&Ty> {
+        self.read(|k| note(&mut k.property_names, attr));
+        let property = self.property_names.contains(attr);
+        for c in self.mro(class).iter().skip(usize::from(skip_self)) {
+            if property && let Some(key) = self.own_method(c, attr) {
+                return self.function_decl(&key)?.property_type.as_ref();
+            }
+            if let Some(t) = self.class(c).and_then(|d| d.attr_types.get(attr)) {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    /// The definition of method `name` a call on an instance of `class` finds first along the
+    /// MRO (past `class` itself with `skip_self`): what a type checker takes the call's type
+    /// from, whatever subclasses override it with.
+    pub(crate) fn mro_definition(
+        &self,
+        class: &str,
+        name: &str,
+        skip_self: bool,
+    ) -> Option<FuncKey> {
         self.mro(class)
             .iter()
-            .find_map(|c| self.class(c)?.attr_types.get(attr).cloned())
+            .skip(usize::from(skip_self))
+            .find_map(|c| self.own_method(c, name))
+    }
+
+    /// The type a declaration names (an annotation, or a type stored in the declarations), with
+    /// every class named canonically (re-exports chased): `None` when it names a module, or a name
+    /// of a project module that is no class (a type alias, a `TypeVar`, a constant); an item of
+    /// such a type is unknown. A name below a module heki does not see (a compiled submodule of a
+    /// project package) stays as it is.
+    pub(crate) fn declared_ty(&self, ty: &Ty) -> Option<Ty> {
+        ty.map_members(|o| {
+            let class = self.canonical(&o.class);
+            if let Some((m, rest)) = self.split_module(&class)
+                && !rest.contains('.')
+                && !m.classes.contains_key(rest)
+            {
+                return None;
+            }
+            let args = o.args.map_elems(|t| self.declared_ty(t));
+            Some(crate::types::Obj { class, args })
+        })
+    }
+
+    /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
+    /// keeps it: anything for a declaration of `Any` / `object`, and an instance of a project
+    /// subclass of the declared class (`x: Base = Sub()`).
+    pub(crate) fn narrower(&self, t: &Ty, declared: &Ty) -> bool {
+        declared.obj().is_some_and(|d| {
+            matches!(d.class.as_str(), "typing.Any" | "builtins.object")
+                || t.obj()
+                    .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
+        })
     }
 
     /// The project functions `name` names on an instance of the canonical project class
@@ -1487,7 +1767,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     }
     // Resolve bases, class keywords, and annotations now that local names are known.
     for class in &semantic.classes {
-        let bases = class
+        let bases: Vec<String> = class
             .bases
             .iter()
             .filter_map(|b| {
@@ -1504,10 +1784,63 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         };
         let metaclass = keyword("metaclass").and_then(|m| decls.resolve_dotted(m, false));
         let frozen_keyword = keyword("frozen").and_then(bool_literal);
+        let is_protocol = bases
+            .iter()
+            .any(|b| matches!(b.as_str(), "typing.Protocol" | "typing_extensions.Protocol"));
+        let mut members: BTreeSet<String> = class.methods.iter().cloned().collect();
+        let bindings = semantic
+            .scopes
+            .get(class.scope.0 as usize)
+            .filter(|sc| sc.id == class.scope)
+            .into_iter()
+            .flat_map(|sc| &sc.bindings);
+        members.extend(
+            bindings
+                .filter(|b| !b.is_global_decl && !b.is_nonlocal_decl)
+                .map(|b| b.name.clone()),
+        );
         if let Some(c) = decls.classes.get_mut(&class.qualname) {
             c.bases = bases;
             c.metaclass = metaclass;
             c.frozen_keyword = frozen_keyword;
+            c.is_protocol = is_protocol;
+            c.members = members;
+        }
+    }
+    // Class-body annotations without a value, and what methods set or annotate on `self`.
+    for f in &input.ir.functions {
+        if f.is_class_body {
+            if let Some(c) = decls.classes.get_mut(&f.qualname) {
+                c.members.extend(
+                    f.local_annotations
+                        .iter()
+                        .filter(|a| !a.target.contains('.'))
+                        .map(|a| a.target.clone()),
+                );
+            }
+            continue;
+        }
+        let (Some(owner), Some(first)) = (&f.owner_class_qualname, f.params.first()) else {
+            continue;
+        };
+        if f.has_decorator(&["staticmethod", "classmethod"]) {
+            continue;
+        }
+        let Some(c) = decls.classes.get_mut(owner) else {
+            continue;
+        };
+        let prefix = format!("{}.", first.name);
+        c.members.extend(f.local_annotations.iter().filter_map(|a| {
+            let attr = a.target.strip_prefix(&prefix)?;
+            (!attr.contains('.')).then(|| attr.to_owned())
+        }));
+        let self_vars = self_aliases(f, first.var);
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::AttrStore { obj, attr, .. } = &inst.kind
+                && self_vars.contains(obj)
+            {
+                c.members.insert(attr.clone());
+            }
         }
     }
     // PEP 681 `dataclass_transform` on a decorator function: any definition (an overload or the
@@ -1527,6 +1860,20 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         let slot = transforms.entry(&f.qualname).or_insert(None);
         *slot = (*slot).max(t);
     }
+    // The return annotation of a property's getter (its setter shares the qualname).
+    let mut getter_types: FxHashMap<&str, Ty> = FxHashMap::default();
+    for f in &input.ir.functions {
+        if is_summarized_function(f)
+            && f.owner_class_qualname.is_some()
+            && f.has_decorator(PROPERTY_DECORATORS)
+            && let Some(t) = f
+                .return_annotation
+                .as_deref()
+                .and_then(|a| decls.resolve_annotation_ty(a))
+        {
+            getter_types.entry(&f.qualname).or_insert(t);
+        }
+    }
     for f in &input.ir.functions {
         if !is_summarized_function(f) {
             continue;
@@ -1541,7 +1888,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             return_type: f
                 .return_annotation
                 .as_deref()
-                .and_then(|a| decls.resolve_annotation(a)),
+                .and_then(|a| decls.resolve_annotation_ty(a)),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             positional_params: count_u8(
                 f.params
@@ -1564,6 +1911,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             mutable_params,
             transform: transforms[f.qualname.as_str()],
             offloaded_by: None,
+            property_type: getter_types.get(f.qualname.as_str()).cloned(),
         };
         decls.functions.insert(f.qualname.clone(), decl);
     }
@@ -1883,7 +2231,7 @@ fn complete_decls(
                 if ann.target.contains('.') {
                     continue;
                 }
-                if let Some(t) = cx.module.resolve_annotation(&ann.annotation)
+                if let Some(t) = cx.module.resolve_annotation_ty(&ann.annotation)
                     && let Some(class) = decls.classes.get_mut(&f.qualname)
                 {
                     class.attr_types.entry(ann.target.clone()).or_insert(t);
@@ -1892,11 +2240,18 @@ fn complete_decls(
             continue;
         }
         if f.is_module_body {
-            let types = cx.infer(f);
+            let types = cx.infer_types(f);
             for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-                if let InstKind::StoreGlobal { name, value } = &inst.kind
-                    && let Some(Val::Inst(t)) = types.get(value)
-                {
+                // An annotated global has its declaration (`REGISTRY: dict[str, Model] = {}`),
+                // unless what it holds is narrower.
+                let InstKind::StoreGlobal { name, value } = &inst.kind else {
+                    continue;
+                };
+                let stored = match (types.declared(name), types.ty(*value)) {
+                    (Some(d), Some(t)) if !project.narrower(t, d) => Some(d),
+                    (d, t) => t.or(d),
+                };
+                if let Some(t @ (Ty::Inst(_) | Ty::Union(_))) = stored {
                     decls.global_types.insert(name.clone(), t.clone());
                 }
             }
@@ -1917,7 +2272,7 @@ fn complete_decls(
         for ann in &f.local_annotations {
             if let Some(attr) = ann.target.strip_prefix(&prefix)
                 && !attr.contains('.')
-                && let Some(t) = cx.module.resolve_annotation(&ann.annotation)
+                && let Some(t) = cx.module.resolve_annotation_ty(&ann.annotation)
             {
                 class.attr_types.insert(attr.to_owned(), t);
             }
@@ -1925,12 +2280,12 @@ fn complete_decls(
         if f.name != "__init__" && f.name != "__post_init__" {
             continue;
         }
-        let types = cx.infer(f);
+        let types = cx.infer_types(f);
         let self_vars = self_aliases(f, self_param.var);
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let InstKind::AttrStore { obj, attr, value } = &inst.kind
                 && self_vars.contains(obj)
-                && let Some(Val::Inst(t)) = types.get(value)
+                && let Some(t @ (Ty::Inst(_) | Ty::Union(_))) = types.ty(*value)
             {
                 class
                     .attr_types
@@ -2010,6 +2365,80 @@ pub enum Val {
     Inst(String),
     /// `super()` inside a method of class `fqn`.
     Super(String),
+    /// An instance of one of two or three classes (sorted).
+    Union(Vec<String>),
+}
+
+/// A receiver or callee as call resolution sees it, borrowed from a [`Val`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Recv<'v> {
+    Ref(&'v str),
+    Inst(&'v str),
+    Super(&'v str),
+}
+
+impl Val {
+    /// The view call resolution takes (`None` for a union, resolved class by class).
+    pub(crate) fn recv(&self) -> Option<Recv<'_>> {
+        match self {
+            Val::Ref(f) => Some(Recv::Ref(f)),
+            Val::Inst(c) => Some(Recv::Inst(c)),
+            Val::Super(c) => Some(Recv::Super(c)),
+            Val::Union(_) => None,
+        }
+    }
+}
+
+/// The targets of a call on a value of one of `classes` (`each` resolves it on one class): the
+/// project functions of every class resolving it, or the one external function they all
+/// resolve it to; a class not resolving it adds nothing (it has no such member), and project
+/// and external targets together leave it unresolved.
+fn union_targets(classes: &[String], each: impl Fn(&str) -> Callee) -> Callee {
+    let mut keys: Vec<FuncKey> = Vec::new();
+    let mut binds = None;
+    let mut external: Option<String> = None;
+    for class in classes {
+        match each(class) {
+            Callee::Project(found, b) => {
+                // A method call on an instance binds the receiver (a static method's binding
+                // is decided where the call binds its arguments).
+                binds.get_or_insert(b);
+                for k in found {
+                    if !keys.contains(&k) {
+                        keys.push(k);
+                    }
+                }
+            }
+            Callee::External(symbol) => {
+                if external.as_ref().is_some_and(|e| *e != symbol) {
+                    return Callee::Unresolved;
+                }
+                external = Some(symbol);
+            }
+            Callee::TooMany => return Callee::TooMany,
+            Callee::Unresolved => {}
+        }
+    }
+    match (binds, external) {
+        (Some(_), None) if keys.len() > CHA_CANDIDATE_LIMIT => Callee::TooMany,
+        (Some(b), None) => Callee::Project(keys, b),
+        (None, Some(symbol)) => Callee::External(symbol),
+        _ => Callee::Unresolved,
+    }
+}
+
+impl Ty {
+    /// The value consumers see: the class of an instance (the classes of a union), the fqn of a
+    /// named object (none for a partial object).
+    pub(crate) fn val(&self) -> Option<Val> {
+        match self {
+            Ty::Ref(f) => Some(Val::Ref(f.clone())),
+            Ty::Inst(o) => Some(Val::Inst(o.class.clone())),
+            Ty::Super(c) => Some(Val::Super(c.clone())),
+            Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
+            Ty::SelfType | Ty::Partial(_) => None,
+        }
+    }
 }
 
 /// Resolution of a call target.
@@ -2031,6 +2460,8 @@ pub struct TypeCtx<'a> {
     ir: &'a ModuleIr,
     /// `Import` instruction span -> bound fqn (relative imports resolved).
     import_by_span: FxHashMap<Span, String>,
+    /// Inference state shared by the functions of the module (child scopes and their parents).
+    pub(crate) scopes: crate::infer::Scopes,
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
@@ -2067,6 +2498,7 @@ impl<'a> TypeCtx<'a> {
             module_name: input.module_name.clone(),
             ir: input.ir,
             import_by_span,
+            scopes: crate::infer::Scopes::default(),
         }
     }
 
@@ -2086,81 +2518,112 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// Value of a module-level name read inside this module.
-    fn global(&self, name: &str) -> Val {
+    pub(crate) fn global(&self, name: &str) -> Ty {
         if let Some(t) = self.module.imports.get(name) {
             return self.named(t);
         }
         if self.module.classes.contains_key(name) || self.module.functions.contains_key(name) {
-            return Val::Ref(format!("{}.{name}", self.module_name()));
+            return Ty::Ref(format!("{}.{name}", self.module_name()));
         }
-        if let Some(t) = self.module.global_types.get(name) {
-            return Val::Inst(t.clone());
+        if let Some(t) = self
+            .module
+            .global_types
+            .get(name)
+            .and_then(|t| self.project.declared_ty(t))
+        {
+            return t;
         }
-        Val::Ref(format!("builtins.{name}"))
+        Ty::Ref(format!("builtins.{name}"))
     }
 
     /// A named fqn: a project global holding an instance becomes that instance.
-    fn named(&self, fqn: &str) -> Val {
+    pub(crate) fn named(&self, fqn: &str) -> Ty {
         let fqn = self.project.canonical(fqn);
         match self.project.symbol(&fqn) {
-            Symbol::Global(t) => Val::Inst(t.to_owned()),
-            _ => Val::Ref(fqn),
+            Symbol::Global(t) => self.project.declared_ty(t).unwrap_or(Ty::Ref(fqn)),
+            _ => Ty::Ref(fqn),
         }
     }
 
     /// Instance produced by calling the object `fqn`, if known.
-    fn call_result(&self, fqn: &str) -> Option<Val> {
+    pub(crate) fn call_result(&self, fqn: &str) -> Option<Ty> {
         match self.project.symbol(fqn) {
-            Symbol::Class(_) => return Some(Val::Inst(fqn.to_owned())),
+            Symbol::Class(_) => return Some(Ty::inst(fqn)),
             Symbol::Function(_, decl) => {
                 return decl
                     .return_type
                     .as_ref()
-                    .map(|t| Val::Inst(self.project.canonical(t)));
+                    .and_then(|t| self.project.declared_ty(t))
+                    .and_then(|t| t.bind_self(None));
             }
             Symbol::Module | Symbol::Global(_) => return None,
             Symbol::External => {}
         }
         if let Some(b) = fqn.strip_prefix("builtins.") {
-            return BUILTIN_TYPES
-                .contains(&b)
-                .then(|| Val::Inst(fqn.to_owned()));
+            return BUILTIN_TYPES.contains(&b).then(|| Ty::inst(fqn));
         }
         let last = fqn.rsplit('.').next().unwrap_or(fqn);
         if last.chars().next().is_some_and(char::is_uppercase) {
-            return Some(Val::Inst(fqn.to_owned()));
+            return Some(Ty::inst(fqn));
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
         let entry = self.kb.lookup(fqn)?;
         if let Some(rt) = &entry.return_type {
-            return Some(Val::Inst(rt.clone()));
+            return Some(Ty::inst(rt.as_str()));
         }
         (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
             && !entry.effects.contains(&ExecEffectKind::BlockingNet))
-        .then(|| Val::Inst(fqn.to_owned()))
+        .then(|| Ty::inst(fqn))
     }
 
     /// Resolve calling a value (`f(...)`).
     pub fn resolve_call(&self, callee: Option<&Val>) -> Callee {
+        match self.dispatch_classes(callee) {
+            Some(classes) => union_targets(classes, |c| self.call_targets(Some(Recv::Inst(c)))),
+            None => self.call_targets(callee.and_then(Val::recv)),
+        }
+    }
+
+    /// The classes a call or a property read on `value` dispatches on, class by class: the
+    /// members of a union, the structural implementations of a protocol; `None` for a value of
+    /// one class (or none) resolved as such.
+    fn dispatch_classes<'v>(&'v self, value: Option<&'v Val>) -> Option<&'v [String]> {
+        match value? {
+            Val::Union(classes) => Some(classes),
+            Val::Inst(class) => self.project.protocol_implementers(class),
+            Val::Ref(_) | Val::Super(_) => None,
+        }
+    }
+
+    pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
         match callee {
-            Some(Val::Ref(fqn)) => match self.project.symbol(fqn) {
+            Some(Recv::Ref(fqn)) => match self.project.symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
                 Symbol::Class(_) => match self.project.method_targets(fqn, "__init__", false) {
                     Callee::Project(keys, _) => Callee::Project(keys, true),
-                    _ => Callee::External(fqn.clone()),
+                    _ => Callee::External(fqn.to_owned()),
                 },
                 Symbol::Module | Symbol::Global(_) => Callee::Unresolved,
-                Symbol::External => Callee::External(fqn.clone()),
+                Symbol::External => Callee::External(fqn.to_owned()),
             },
-            Some(Val::Inst(class)) => self.project.method_targets(class, "__call__", false),
-            Some(Val::Super(_)) | None => Callee::Unresolved,
+            Some(Recv::Inst(class)) => self.project.method_targets(class, "__call__", false),
+            Some(Recv::Super(_)) | None => Callee::Unresolved,
         }
     }
 
     /// Resolve `recv.method(...)`.
     pub fn resolve_method(&self, recv: Option<&Val>, method: &str) -> Callee {
+        match self.dispatch_classes(recv) {
+            Some(classes) => union_targets(classes, |c| {
+                self.method_call_targets(Some(Recv::Inst(c)), method)
+            }),
+            None => self.method_call_targets(recv.and_then(Val::recv), method),
+        }
+    }
+
+    pub(crate) fn method_call_targets(&self, recv: Option<Recv<'_>>, method: &str) -> Callee {
         match recv {
-            Some(Val::Ref(fqn)) => {
+            Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
                     // Unbound call through the class: `Base.method(obj, ...)`.
                     return match self.project.method_targets(fqn, method, false) {
@@ -2169,10 +2632,10 @@ impl<'a> TypeCtx<'a> {
                     };
                 }
                 let target = self.project.canonical(&format!("{fqn}.{method}"));
-                self.resolve_call(Some(&Val::Ref(target)))
+                self.call_targets(Some(Recv::Ref(&target)))
             }
-            Some(Val::Inst(class)) => self.project.method_targets(class, method, false),
-            Some(Val::Super(class)) => self.project.method_targets(class, method, true),
+            Some(Recv::Inst(class)) => self.project.method_targets(class, method, false),
+            Some(Recv::Super(class)) => self.project.method_targets(class, method, true),
             None => Callee::Unresolved,
         }
     }
@@ -2182,158 +2645,55 @@ impl<'a> TypeCtx<'a> {
     /// project getter (see [`ProjectDecls::property_targets`]). Reading an attribute of a class
     /// or module object (`Val::Ref`) runs none: it yields the property object itself.
     pub fn resolve_attr_load(&self, recv: Option<&Val>, attr: &str) -> Option<Callee> {
+        if let Some(classes) = self.dispatch_classes(recv) {
+            return match union_targets(classes, |c| {
+                self.project
+                    .property_targets(c, attr, false)
+                    .unwrap_or(Callee::Unresolved)
+            }) {
+                Callee::Unresolved => None,
+                callee => Some(callee),
+            };
+        }
         match recv? {
             Val::Inst(class) => self.project.property_targets(class, attr, false),
             Val::Super(class) => self.project.property_targets(class, attr, true),
-            Val::Ref(_) => None,
+            Val::Union(_) | Val::Ref(_) => None,
         }
     }
 
     /// Value returned by a resolved call target.
-    fn callee_result(&self, callee: &Callee) -> Option<Val> {
+    pub(crate) fn callee_result(&self, callee: &Callee) -> Option<Ty> {
         match callee {
             Callee::Project(keys, _) if keys.len() == 1 => {
-                let key = &keys[0];
-                let decl = self.project.function_decl(key)?;
-                if key.qualname.ends_with(".__init__") {
-                    return None;
-                }
+                let decl = self.project.function_decl(&keys[0])?;
                 decl.return_type
                     .as_ref()
-                    .map(|t| Val::Inst(self.project.canonical(t)))
+                    .and_then(|t| self.project.declared_ty(t))
+                    .and_then(|t| t.bind_self(None))
             }
             Callee::External(fqn) => self.call_result(fqn),
             _ => None,
         }
     }
 
-    /// Forward inference of `var -> Val` over `f` (two RPO passes so loop phis settle).
+    /// Forward inference of `var -> Val` over `f` (the receiver typing of `crate::infer`).
     pub fn infer(&self, f: &IrFunction) -> FxHashMap<VarId, Val> {
-        let mut types: FxHashMap<VarId, Val> = FxHashMap::default();
-        let owner = self.owner_fqn(f);
-        let is_static = f.has_decorator(&["staticmethod"]);
-        let is_classmethod = f.has_decorator(&["classmethod"]);
-        for (i, p) in f.params.iter().enumerate() {
-            if i == 0
-                && !is_static
-                && let Some(owner) = &owner
-            {
-                let v = if is_classmethod {
-                    Val::Ref(owner.clone())
-                } else {
-                    Val::Inst(owner.clone())
-                };
-                types.insert(p.var, v);
-                continue;
-            }
-            if let Some(t) = p
-                .annotation
-                .as_deref()
-                .and_then(|a| self.module.resolve_annotation(a))
-            {
-                types.insert(p.var, Val::Inst(self.project.canonical(&t)));
-            }
-        }
-        let mut annotated: FxHashMap<&str, Val> = FxHashMap::default();
-        for ann in &f.local_annotations {
-            if ann.target.contains('.') {
-                continue;
-            }
-            if let Some(t) = self.module.resolve_annotation(&ann.annotation) {
-                annotated.insert(ann.target.as_str(), Val::Inst(self.project.canonical(&t)));
-            }
-        }
-        let rpo = f.rpo_blocks();
-        for _ in 0..2 {
-            for &bb_id in &rpo {
-                let bb = f.block(bb_id);
-                for phi in &bb.phis {
-                    let mut known = phi
-                        .incoming
-                        .iter()
-                        .filter(|(_, v)| *v != phi.dst)
-                        .map(|(_, v)| types.get(v));
-                    if let Some(Some(first)) = known.next() {
-                        let first = first.clone();
-                        if known.all(|t| t == Some(&first)) {
-                            types.insert(phi.dst, first);
-                        }
-                    }
-                }
-                for inst in &bb.insts {
-                    let Some(dst) = inst.kind.dst() else {
-                        continue;
-                    };
-                    let val = self.infer_inst(inst, &types, owner.as_deref());
-                    let val =
-                        val.or_else(|| f.var_name(dst).and_then(|n| annotated.get(n).cloned()));
-                    if let Some(v) = val {
-                        types.insert(dst, v);
-                    }
-                }
-            }
-        }
-        types
+        self.infer_types(f).vals()
     }
 
-    fn infer_inst(
+    /// [`Self::infer`], with the values `isinstance` checks give variables in the blocks they
+    /// guard.
+    pub(crate) fn infer_flow(
         &self,
-        inst: &Inst,
-        types: &FxHashMap<VarId, Val>,
-        owner: Option<&str>,
-    ) -> Option<Val> {
-        match &inst.kind {
-            InstKind::AllocBuiltin { kind, .. } => {
-                Some(Val::Inst(format!("builtins.{}", kind.name())))
-            }
-            InstKind::DictLiteral { .. } => Some(Val::Inst("builtins.dict".to_owned())),
-            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                Some(self.global(name))
-            }
-            InstKind::Import { .. } => self.import_value(inst.span),
-            InstKind::Copy { src, .. } => types.get(src).cloned(),
-            InstKind::AttrLoad { obj, attr, .. } => match types.get(obj)? {
-                Val::Ref(fqn) => Some(self.named(&format!("{fqn}.{attr}"))),
-                Val::Inst(class) => self
-                    .project
-                    .attr_type(class, attr)
-                    .map(|t| Val::Inst(self.project.canonical(&t))),
-                Val::Super(_) => None,
-            },
-            InstKind::MakeClosure {
-                func_id: Some(id), ..
-            } => {
-                let f = self.ir.function(*id);
-                Some(Val::Ref(format!("{}.{}", self.module_name(), f.qualname)))
-            }
-            InstKind::Call {
-                callee_var, args, ..
-            } => {
-                let callee_val = callee_var.and_then(|v| types.get(&v));
-                match callee_val {
-                    Some(Val::Ref(fqn)) if fqn == "builtins.super" && args.is_empty() => {
-                        owner.map(|o| Val::Super(o.to_owned()))
-                    }
-                    Some(Val::Ref(fqn)) => self.call_result(fqn),
-                    other => self.callee_result(&self.resolve_call(other)),
-                }
-            }
-            InstKind::MethodCall { recv, method, .. } => match types.get(recv) {
-                Some(Val::Ref(fqn)) if !self.project.is_project_class(fqn) => {
-                    self.call_result(&self.project.canonical(&format!("{fqn}.{method}")))
-                }
-                other => self.callee_result(&self.resolve_method(other, method)),
-            },
-            // `with C() as c` binds `C().__enter__()`; clients / sessions / files return self.
-            InstKind::EnterWith { mgr, .. } | InstKind::Await { value: mgr, .. } => {
-                types.get(mgr).cloned()
-            }
-            _ => None,
-        }
+        f: &IrFunction,
+    ) -> (FxHashMap<VarId, Val>, FxHashMap<(BlockId, VarId), Val>) {
+        let inferred = self.infer_types(f);
+        (inferred.vals(), inferred.narrowed_vals())
     }
 
     /// Value bound by an `Import` instruction (needs the span-keyed semantic import).
-    pub fn import_value(&self, span: Span) -> Option<Val> {
+    pub(crate) fn import_type(&self, span: Span) -> Option<Ty> {
         self.import_by_span.get(&span).map(|t| self.named(t))
     }
 }

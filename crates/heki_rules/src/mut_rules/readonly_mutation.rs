@@ -289,7 +289,7 @@ impl Rule<'_, '_> {
         let Some(ro) = self.cx.decls.readonly_attr(class, attr) else {
             return;
         };
-        let recorded = call.callee.typed_field_write_sites.iter().any(|t| {
+        let recorded = call.callee.typed_field_writes.iter().any(|t| {
             t.attr == attr
                 && !t.fresh
                 && self

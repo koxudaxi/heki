@@ -46,6 +46,12 @@ The first public preview.
   unpacking, `yield from`, consuming calls, lazy wrappers, project functions iterating them),
   generators returned by helpers included; a generator handed to a framework
   (`StreamingResponse(rows())`) is not reported.
+- Receiver typing for the call graph: container item types (`list[Model]`), return annotations
+  along the MRO, `Self`, copies, `functools.partial`, `typing.cast`, unions of up to three
+  classes, `isinstance` narrowing, and the structural implementations of project `Protocol`s.
+- Effect guards: a branch the caller's arguments switch off is not followed
+  (`load(name, cache=False)`), and a client created by a lazy initialization counts once per
+  object, not once per loop iteration.
 - Ratchet baselines (`--baseline`, `--update-baseline`), keyed by file, function, rule, and
   target instead of line numbers, that count violation sites (`version = 2`); older files keep
   counting reports until `--update-baseline`.
