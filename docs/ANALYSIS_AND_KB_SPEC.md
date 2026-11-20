@@ -589,16 +589,22 @@ which module imports which.
    value at phis, maps a project call's result through its callees' `returns_origins` and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it
    (`MakeClosure` captures; functions are analyzed enclosing first). It follows the blocks and
-   edges of `ownership::Live` only, and on the edge where an `is` test of a value against
-   another fails, it leaves out the object it is tested against (`if result is shared: result =
-   shared.copy()`). A new object the function stores somewhere is part of where it is stored.
-   A parameter that an `is` test against a constant, a global, or an attribute decides a branch
-   on (through copies and phis) is *defaulted*: the accumulator idiom.
+   edges of `ownership::Live` only. A side of an `is` test (of the branch it decides) is the
+   edge from the branch to that successor, and every edge from a block that a run reaches only
+   through that successor. On a phi input from the side where an `is` test of the input's value
+   failed, the input leaves out the object it is tested against (`if result is shared: result =
+   shared.copy()`). Where the test is against a constant, a global, or an attribute (`if out is
+   None: out = []`) and the phi also takes inputs from the other side, the parameter the value
+   is on the failed side is *defaulted*, and the new objects from the other side are its
+   replacements: the accumulator idiom. A test that selects no replacement (`if p is None:
+   raise ...`) leaves the parameter borrowed. A new object the function stores somewhere is
+   part of where it is stored.
 4. **Reports**: a change of a container (an item stored or deleted, a container method, an
    in-place operator on a builtin container, a project callee changing the container it is
    handed, `mutated_param_paths` entry `""`) of a value that may be new and borrowed, once per
-   value at its first change. A defaulted parameter counts only when the value is also stored on
-   `self`. Not reported: a removal when every new object the value may be starts empty, a
+   value at its first change. A defaulted parameter counts when a new object the value may be is
+   no replacement of it (`x = [] if fresh else out` after `if out is None: out = []`), or when
+   the value is also stored on `self`. Not reported: a removal when every new object the value may be starts empty, a
    conditional expression changed in place without a name, a value stored back where it borrows
    from (`self.a = self.a or []`, `d[k] = d.get(k) or []`), and memo / cache attributes (as for
    `MUT101`). Stored back means the same attribute of the same object (an attribute borrow keeps

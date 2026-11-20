@@ -2967,8 +2967,10 @@ It does not report:
   where the value is still the borrowed object (`if x is shared: x = shared.copy()`);
 - the accumulator idiom, where a parameter is replaced by a new object only when it is `None`
   or a sentinel (`if out is None: out = []`, `out = [] if out is None else out`): the function
-  fills what its caller hands it. Such a value counts when it is also stored on `self`, where
-  the instance keeps the caller's object;
+  fills what its caller hands it. Such a value counts when it may also be a new object the test
+  does not select (`x = [] if fresh else out` after it), and when it is also stored on `self`,
+  where the instance keeps the caller's object. A test that replaces nothing (`if out is None:
+  raise ...`) leaves the parameter borrowed;
 - a new object the function stores in other state before the paths meet
   (`rows = table[key] = []`, `table.setdefault(key, rows)`): it is that state's on every path;
 - a value stored back where it borrows from, the same attribute of the same object or an item

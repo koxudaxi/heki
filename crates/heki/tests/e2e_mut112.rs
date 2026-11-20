@@ -794,6 +794,16 @@ def copy_on_write_swapped(child, drop):
     return result
 
 
+def copy_on_write_logged(child, keys, log):
+    result = child
+    for key in keys:
+        if result is child:
+            result = child.copy()
+        else:
+            log(result)
+        result[key] = 1
+
+
 def tail(rows):
     return rows[1:]
 
@@ -810,6 +820,67 @@ fn mut112_exclusions() {
         .write("pkg/negatives.py", NOT_REPORTED);
     let diags = diagnostics(&p, &["--select", "MUT112"]);
     assert_eq!(found(&diags), vec![], "{diags:#?}");
+}
+
+/// The accumulator idiom replaces a parameter with a new object where an `is` test finds it is
+/// `None`, on any shape of that side (an `elif`, a conditional expression, an empty side). A
+/// new object that test does not select is another path, and a test that replaces nothing
+/// (`raise`) leaves the parameter borrowed.
+const ACCUMULATORS: &str = r#"def checked_then_chosen(shared, fresh):
+    if shared is None:
+        raise ValueError("shared is required")
+    x = [] if fresh else shared
+    x.append(1)
+
+
+def defaulted_then_chosen(out=None, fresh=False):
+    if out is None:
+        out = []
+    x = [] if fresh else out
+    x.append(1)
+
+
+def accumulate_unless(node, out=None, skip=False):
+    if out is None:
+        out = []
+    elif skip:
+        return out
+    out.append(node)
+    return out
+
+
+def accumulate_ordered(node, out=None, ordered=False):
+    if out is None:
+        out = list() if ordered else []
+    out.append(node)
+    return out
+
+
+def accumulate_into(node, out=None):
+    acc = []
+    if out is not None:
+        acc = out
+    acc.append(node)
+    return acc
+"#;
+
+#[test]
+fn mut112_accumulators_exclude_their_replacements_only() {
+    let p = Project::new("mut112_accumulators");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/accumulators.py", ACCUMULATORS);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let a = "pkg/accumulators.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(a, 5, "checked_then_chosen", "x"),
+            d(a, 12, "defaulted_then_chosen", "x"),
+        ],
+        "{diags:#?}"
+    );
+    assert!(message(at(&diags, a, 5)).ends_with("the parameter `shared` on another"));
+    assert!(message(at(&diags, a, 12)).ends_with("the parameter `out` on another"));
 }
 
 /// Values stored where they borrow from, and in the same attribute of another object. Each read
