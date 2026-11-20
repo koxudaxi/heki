@@ -690,11 +690,11 @@ fn semantic_newer_syntax() {
     // PEP 695 type aliases and generic functions / methods.
     let m = semantic(TOUR_312, "py312");
     assert!(bindings(&m["scopes"][0]).is_superset(&BTreeSet::from(["Alias", "Pair", "Variadic"])));
-    let alias = scope(&m, &["function Alias"]);
+    let alias = scope(&m, &["type_alias Alias"]);
     assert_eq!(reads(alias)["list"], "builtin");
     let pair = scope(&m, &["type_parameters Pair"]);
     assert_eq!(bindings(pair), BTreeSet::from(["K", "V"]));
-    let pair_value = scope(&m, &["type_parameters Pair", "function Pair"]);
+    let pair_value = scope(&m, &["type_parameters Pair", "type_alias Pair"]);
     assert_eq!(reads(pair_value)["K"], "enclosing");
     let variadic = scope(&m, &["type_parameters Variadic"]);
     assert_eq!(bindings(variadic), BTreeSet::from(["P", "Ts"]));
@@ -756,11 +756,10 @@ fn semantic_newer_syntax() {
     assert_eq!(reads(use_lazy)["json"], "global");
 }
 
-/// Forms where heki deliberately differs from CPython `symtable`, so they are not in the
-/// verified corpus: CPython evaluates type-parameter bounds, constraints and defaults in lazy
-/// scopes of their own and gives generic classes synthetic `.type_params` / `.generic_base`
-/// symbols; heki visits them in the type-parameter scope. Only the facts both agree on are
-/// asserted.
+/// PEP 695 / PEP 696: bounds, constraints, and defaults are evaluated lazily, each in a
+/// `type_variable` scope of its own under the type-parameter scope, and a `type` statement's value
+/// in a `type_alias` scope (`tests/symtable_verify/fixtures/type_parameters_313_315.py` holds the
+/// same shapes for the CPython comparison).
 #[test]
 fn semantic_type_parameter_bounds_defaults_and_generic_classes() {
     let source = "\
@@ -778,10 +777,44 @@ class Generic[K: Hashable, V = object](Base, metaclass=Meta):
     let m = dump_source("dump-semantic", "fe_type_params", source, "py314");
     let alias = scope(&m, &["type_parameters Constrained"]);
     assert_eq!(bindings(alias), BTreeSet::from(["P", "T", "Ts"]));
+    assert!(reads(alias).is_empty());
+    assert_eq!(
+        child_kinds(&m, alias),
+        [
+            ("type_variable", "T"),
+            ("type_variable", "Ts"),
+            ("type_variable", "P"),
+            ("type_alias", "Constrained"),
+        ]
+        .map(|(k, n)| (k.to_owned(), n.to_owned()))
+    );
+    let constraints = children(&m, alias)[0];
+    assert_eq!(reads(constraints)["int"], "builtin");
+    assert_eq!(
+        reads(scope(
+            &m,
+            &["type_parameters Constrained", "type_alias Constrained"]
+        ))["T"],
+        "enclosing"
+    );
     let bounded = scope(&m, &["type_parameters bounded"]);
     assert_eq!(bindings(bounded), BTreeSet::from(["T"]));
+    let lazy: Vec<BTreeMap<&str, &str>> = children(&m, bounded)
+        .into_iter()
+        .filter(|s| s["kind"] == "type_variable")
+        .map(reads)
+        .collect();
+    assert_eq!(
+        lazy,
+        [
+            BTreeMap::from([("Base", "builtin")]),
+            BTreeMap::from([("Default", "builtin")])
+        ]
+    );
     let generic = scope(&m, &["type_parameters Generic"]);
     assert_eq!(bindings(generic), BTreeSet::from(["K", "V"]));
+    // The bases and keywords are evaluated in the type-parameter scope.
+    assert_eq!(reads(generic)["Meta"], "builtin");
     let class_body = scope(&m, &["type_parameters Generic", "class Generic"]);
     assert_eq!(bindings(class_body), BTreeSet::from(["get"]));
     let get = scope(
@@ -792,17 +825,6 @@ class Generic[K: Hashable, V = object](Base, metaclass=Meta):
     let info = class(&m, "Generic");
     assert_eq!(strs(&info["bases"]), ["Base"]);
     assert_eq!(strs(&info["methods"]), ["get"]);
-    // The bound / default expressions are read somewhere in the model (heki: the
-    // type-parameter scope; CPython: their own lazy scopes).
-    let all_reads: BTreeSet<&str> = m["scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|s| reads(s).into_keys())
-        .collect();
-    for name in ["Base", "Default", "Hashable", "Meta", "object", "tuple"] {
-        assert!(all_reads.contains(name), "{name}");
-    }
 }
 
 // ============================================================================ IR: statements

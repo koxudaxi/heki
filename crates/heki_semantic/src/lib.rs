@@ -27,6 +27,11 @@ pub enum ScopeKind {
     Class,
     Comprehension,
     TypeParameters,
+    /// The lazily evaluated bound, constraints, or default of one PEP 695 / PEP 696 type
+    /// parameter (`T: Base`, `T = int`).
+    TypeVariable,
+    /// The lazily evaluated value of a PEP 695 `type` statement.
+    TypeAlias,
     Annotation,
 }
 
@@ -801,7 +806,7 @@ impl<'a> Analyzer<'a> {
             self.push_scope(ScopeKind::TypeParameters, alias_name.clone(), line);
             self.bind_type_params(tp);
         }
-        self.push_scope(ScopeKind::Function, alias_name, line);
+        self.push_scope(ScopeKind::TypeAlias, alias_name, line);
         self.visit_expr(&ta.value);
         self.pop_scope();
         if has_type_params {
@@ -811,43 +816,20 @@ impl<'a> Analyzer<'a> {
 
     fn bind_type_params(&mut self, tp: &ast::TypeParams) {
         for param in &tp.type_params {
-            match param {
-                TypeParam::TypeVar(tv) => {
-                    self.cur_scope_mut().add_binding(
-                        tv.name.as_str(),
-                        Span::from(tv.name.range),
-                        false,
-                        false,
-                    );
-                    if let Some(bound) = &tv.bound {
-                        self.visit_expr(bound);
-                    }
-                    if let Some(def) = &tv.default {
-                        self.visit_expr(def);
-                    }
-                }
-                TypeParam::TypeVarTuple(tvt) => {
-                    self.cur_scope_mut().add_binding(
-                        tvt.name.as_str(),
-                        Span::from(tvt.name.range),
-                        false,
-                        false,
-                    );
-                    if let Some(def) = &tvt.default {
-                        self.visit_expr(def);
-                    }
-                }
-                TypeParam::ParamSpec(ps) => {
-                    self.cur_scope_mut().add_binding(
-                        ps.name.as_str(),
-                        Span::from(ps.name.range),
-                        false,
-                        false,
-                    );
-                    if let Some(def) = &ps.default {
-                        self.visit_expr(def);
-                    }
-                }
+            let (name, bound, default) = match param {
+                TypeParam::TypeVar(tv) => (&tv.name, tv.bound.as_deref(), tv.default.as_deref()),
+                TypeParam::TypeVarTuple(tvt) => (&tvt.name, None, tvt.default.as_deref()),
+                TypeParam::ParamSpec(ps) => (&ps.name, None, ps.default.as_deref()),
+            };
+            self.cur_scope_mut()
+                .add_binding(name.as_str(), Span::from(name.range), false, false);
+            // The bound (or constraints) and the default are evaluated lazily, each in its own
+            // scope named after the parameter.
+            for lazy in [bound, default].into_iter().flatten() {
+                let line = self.lines.line(param.range().start().to_u32());
+                self.push_scope(ScopeKind::TypeVariable, name.to_string(), line);
+                self.visit_expr(lazy);
+                self.pop_scope();
             }
         }
     }
@@ -1378,6 +1360,8 @@ impl Resolver<'_> {
                 ScopeKind::Function
                 | ScopeKind::Comprehension
                 | ScopeKind::TypeParameters
+                | ScopeKind::TypeVariable
+                | ScopeKind::TypeAlias
                 | ScopeKind::Annotation => {
                     if p.global_decls.contains(name) {
                         return self.module_globals.resolve(name);
