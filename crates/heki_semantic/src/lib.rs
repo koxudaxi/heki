@@ -256,6 +256,8 @@ struct Analyzer<'a> {
     imports: Vec<ModuleImport>,
     classes: Vec<ClassInfo>,
     in_type_checking: bool,
+    /// `from m import *` (only allowed at module level).
+    has_star_import: bool,
     inlined_comp_depth: u32,
     in_inlined_class_comp: bool,
     source: &'a str,
@@ -282,6 +284,7 @@ impl<'a> Analyzer<'a> {
             imports: Vec::new(),
             classes: Vec::new(),
             in_type_checking: false,
+            has_star_import: false,
             inlined_comp_depth: 0,
             in_inlined_class_comp: false,
             source,
@@ -586,6 +589,7 @@ impl<'a> Analyzer<'a> {
                 let module = imp.module.as_ref().map(|m| m.to_string());
                 for alias in &imp.names {
                     if alias.name.as_str() == "*" {
+                        self.has_star_import = true;
                         continue;
                     }
                     let bound = alias
@@ -1182,7 +1186,7 @@ impl<'a> Analyzer<'a> {
     }
 
     fn resolve_all(self) -> SemanticModel {
-        let module_bindings: FxHashSet<String> = self.scopes[0].bound_names.clone();
+        let module_globals = ModuleGlobals::of(&self.scopes, self.has_star_import);
         let parent_map: FxHashMap<ScopeId, Option<ScopeId>> =
             self.scopes.iter().map(|s| (s.id, s.parent)).collect();
 
@@ -1233,7 +1237,7 @@ impl<'a> Analyzer<'a> {
                             NameResolution::Local
                         }
                     } else {
-                        resolve_name(sc.id, name, &self.scopes, &parent_map, &module_bindings)
+                        resolve_name(sc.id, name, &self.scopes, &parent_map, &module_globals)
                     };
                     if comp_only {
                         inlined_comp_only_reads.push(name.clone());
@@ -1268,30 +1272,57 @@ impl<'a> Analyzer<'a> {
     }
 }
 
+/// The names a module's globals may hold, for telling a module global from a builtin.
+struct ModuleGlobals {
+    bound: FxHashSet<String>,
+    /// `from m import *` binds names no static view lists: no read is known to be a builtin.
+    star_import: bool,
+}
+
+impl ModuleGlobals {
+    /// Module-scope bindings plus what nested scopes write into the module: a name declared
+    /// `global` and bound there (`global state; state = 1` in a function), and walrus targets
+    /// of module-level comprehensions.
+    fn of(scopes: &[ScopeBuilder], star_import: bool) -> Self {
+        let module = &scopes[0];
+        let mut bound = module.bound_names.clone();
+        bound.extend(module.module_walrus_globals.iter().cloned());
+        for sc in &scopes[1..] {
+            bound.extend(
+                sc.global_decls
+                    .iter()
+                    .filter(|n| sc.bound_names.contains(*n))
+                    .cloned(),
+            );
+        }
+        Self { bound, star_import }
+    }
+
+    fn resolve(&self, name: &str) -> NameResolution {
+        if self.star_import || self.bound.contains(name) {
+            NameResolution::Global
+        } else {
+            NameResolution::Builtin
+        }
+    }
+}
+
 fn resolve_name(
     scope_id: ScopeId,
     name: &str,
     scopes: &[ScopeBuilder],
     parent_map: &FxHashMap<ScopeId, Option<ScopeId>>,
-    module_bindings: &FxHashSet<String>,
+    module_globals: &ModuleGlobals,
 ) -> NameResolution {
     let sc = &scopes[scope_id.0 as usize];
     if sc.global_decls.contains(name) {
-        return if module_bindings.contains(name) {
-            NameResolution::Global
-        } else {
-            NameResolution::Builtin
-        };
+        return module_globals.resolve(name);
     }
     if sc.nonlocal_decls.contains(name) {
         return NameResolution::Enclosing;
     }
     if sc.kind == ScopeKind::Module {
-        return if module_bindings.contains(name) {
-            NameResolution::Global
-        } else {
-            NameResolution::Builtin
-        };
+        return module_globals.resolve(name);
     }
     if sc.bound_names.contains(name) {
         return NameResolution::Local;
@@ -1309,11 +1340,7 @@ fn resolve_name(
             | ScopeKind::TypeParameters
             | ScopeKind::Annotation => {
                 if p.global_decls.contains(name) {
-                    return if module_bindings.contains(name) {
-                        NameResolution::Global
-                    } else {
-                        NameResolution::Builtin
-                    };
+                    return module_globals.resolve(name);
                 }
                 if p.nonlocal_decls.contains(name)
                     || p.bound_names.contains(name)
@@ -1326,11 +1353,7 @@ fn resolve_name(
         cursor = parent_map.get(&pid).copied().flatten();
     }
 
-    if module_bindings.contains(name) {
-        NameResolution::Global
-    } else {
-        NameResolution::Builtin
-    }
+    module_globals.resolve(name)
 }
 
 fn sorted(names: &FxHashSet<String>) -> Vec<String> {

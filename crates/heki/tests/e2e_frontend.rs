@@ -360,22 +360,23 @@ fn semantic_functions_closures_globals_and_mangling() {
     );
     assert_eq!(reads(innermost)["counter"], "enclosing");
 
-    // `global` (twice): module-bound names read as globals, others as builtins, also from an
-    // inner function of the declaring one.
+    // `global` (twice): a name the module binds, or a function writes under `global`, is a
+    // module global, also from an inner function of the declaring one.
     let globals = scope(&m, &["function global_forms"]);
     assert!(declared(globals, "global_decls").contains(&"COUNTER"));
     assert_eq!(reads(globals)["COUNTER"], "global");
-    assert_eq!(reads(globals)["FRESH_GLOBAL"], "builtin");
+    assert_eq!(reads(globals)["FRESH_GLOBAL"], "global");
     let inner = scope(&m, &["function enclosing_global", "function inner"]);
     assert_eq!(reads(inner)["COUNTER"], "global");
-    assert_eq!(reads(inner)["ANOTHER_FRESH"], "builtin");
+    assert_eq!(reads(inner)["ANOTHER_FRESH"], "global");
 
     // Private name mangling: class bodies and their methods, nested classes, but not
     // all-underscore class names nor module-level names.
     let forms = scope(&m, &["class ClassForms"]);
     assert!(bindings(forms).contains("_ClassForms__private"));
     let method = scope(&m, &["class ClassForms", "function method"]);
-    assert_eq!(reads(method)["_ClassForms__class_level_name"], "builtin");
+    // The tour's `from os.path import *` may bind any name: no read of it is a known builtin.
+    assert_eq!(reads(method)["_ClassForms__class_level_name"], "global");
     let nested = scope(&m, &["class ClassForms", "class Nested"]);
     assert!(bindings(nested).contains("_Nested__inner"));
     assert!(bindings(scope(&m, &["class _"])).contains("__kept"));
@@ -439,6 +440,32 @@ def comprehension_target_under_global(items):
     let shadow = scope(&m, &["function comprehension_target_under_global"]);
     assert_eq!(bindings(shadow), BTreeSet::from(["items"]));
     assert_eq!(declared(shadow, "global_decls"), ["shadowed"]);
+}
+
+#[test]
+fn semantic_globals_written_by_functions_and_star_imports_are_not_builtins() {
+    let source = "\
+def init():
+    global state
+    state = 1
+
+def get():
+    return state, len
+
+def declares_only():
+    global never_written
+    return never_written
+";
+    let m = dump_source("dump-semantic", "fe_nested_globals", source, "py312");
+    let get = scope(&m, &["function get"]);
+    assert_eq!(reads(get)["state"], "global");
+    assert_eq!(reads(get)["len"], "builtin");
+    let only = scope(&m, &["function declares_only"]);
+    assert_eq!(reads(only)["never_written"], "builtin");
+    // A star import may bind any name: no read is known to be the builtin.
+    let starred = format!("from os.path import *\n{source}");
+    let m = dump_source("dump-semantic", "fe_star_globals", &starred, "py312");
+    assert_eq!(reads(scope(&m, &["function get"]))["len"], "global");
 }
 
 #[test]
@@ -540,14 +567,14 @@ fn semantic_annotation_scopes_follow_pep649() {
         ("annotation".to_owned(), "__annotate__".to_owned())
     );
     let annotate = children(&m314, module).last().copied().unwrap();
-    assert_eq!(reads(annotate)["int"], "builtin");
+    assert_eq!(reads(annotate)["int"], "global");
     let forms = scope(&m314, &["class ClassForms"]);
     assert_eq!(
         child_kinds(&m314, forms).last().unwrap(),
         &("annotation".to_owned(), "__annotate__".to_owned())
     );
     let class_annotate = children(&m314, forms).last().copied().unwrap();
-    assert_eq!(reads(class_annotate)["int"], "builtin");
+    assert_eq!(reads(class_annotate)["int"], "global");
 
     // 3.12: annotations are evaluated in place (module and class bodies, not function bodies).
     let m312 = semantic(TOUR, "py312");
@@ -556,7 +583,7 @@ fn semantic_annotation_scopes_follow_pep649() {
             .iter()
             .all(|(k, _)| k != "annotation")
     );
-    assert_eq!(reads(&m312["scopes"][0])["int"], "builtin");
+    assert_eq!(reads(&m312["scopes"][0])["int"], "global");
     let params = scope(&m312, &["function parameters"]);
     assert!(!reads(params).contains_key("int"));
 

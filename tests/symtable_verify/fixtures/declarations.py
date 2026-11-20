@@ -48,3 +48,15 @@ def generator_walrus_under_global():
 def inlined_walrus_under_global():
     global inlined_walrus
     return [((inlined_walrus := i), inlined_walrus) for i in range(2)]
+
+
+def init_state():
+    global module_state
+    module_state = 1
+
+
+init_state()
+
+
+def get_state():
+    return module_state
