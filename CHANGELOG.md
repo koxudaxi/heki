@@ -5,13 +5,10 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
-## [0.1.2] - 2026-11-21
+## [0.1.3] - Unreleased
 
 ### Fixed
 
-- The source distribution carries the pages, changelog, and documentation generator its tests
-  read, so `cargo test --workspace` passes in the unpacked archive (the 0.1.1 release stopped
-  there before publishing to PyPI).
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.
@@ -24,6 +21,14 @@ release can change rules, configuration keys, diagnostics, and output formats.
   longer resolves on the function's return annotation, so the rules stop following it there.
   `await` and `async with` still give the annotated type, and awaiting a future gives what it
   holds, not the future.
+
+## [0.1.2] - 2026-11-21
+
+### Fixed
+
+- The source distribution carries the pages, changelog, and documentation generator its tests
+  read, so `cargo test --workspace` passes in the unpacked archive (the 0.1.1 release stopped
+  there before publishing to PyPI).
 
 ## [0.1.1] - 2026-11-21
 
@@ -136,6 +141,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.1.3]: https://github.com/koxudaxi/heki/compare/v0.1.2...HEAD
 [0.1.2]: https://github.com/koxudaxi/heki/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/koxudaxi/heki/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/koxudaxi/heki/releases/tag/v0.1.0
