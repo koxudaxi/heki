@@ -1,9 +1,7 @@
 # Scope and Limitations
 
-heki checks what Python code does across functions and modules: which objects it mutates,
-which references it shares, and which blocking, network, or database work it reaches. This page
-says where heki fits next to a linter and a type checker, where its knowledge comes from, what
-it does when it cannot tell, and what it does not try to do.
+This page says what heki checks, what it leaves to other tools, where its knowledge comes from,
+and what it does when it cannot tell.
 
 ## Where heki fits
 
@@ -14,9 +12,9 @@ it does when it cannot tell, and what it does not try to do.
 | An import-graph checker such as [tach](https://github.com/gauge-sh/tach) or [import-linter](https://github.com/seddonym/import-linter) | Which modules may import which | `app.api` importing `app.db` when the declared layers forbid it |
 | heki | What code does, through any number of calls | an `async def` that reaches `requests.get` three helpers away; a model field written outside the store that owns it; an attribute `__hash__` reads changing after the object went into a `set` |
 
-heki's rules are built around what one file, one type, or one import cannot show. Where a Ruff
-rule already covers a case, heki leaves it to Ruff: `EFF107` reports only tasks bound to a
-variable, because Ruff's `RUF006` reports the discarded ones.
+heki takes only what one file, one type, or one import cannot show. Where another tool covers
+part of a case, heki keeps the rest: Ruff's `RUF006` reports discarded tasks, so `EFF107`
+reports only the tasks bound to a variable.
 
 ### Clean for Ruff, ty, and tach; broken all the same
 
@@ -77,8 +75,15 @@ targets = ["Model.fields"]
 allowed-writers = ["Store.*"]
 ```
 
-`ruff check --select ASYNC,B,RUF,PERF,PL,SIM,FURB,S`, `ty check`, and `tach check` (with
-`app.api` → `app.users` → `app.clients` declared) all pass. heki reports both problems:
+Each of these passes, because each tool sees one step:
+
+| Command | Sees | Does not see |
+| ------- | ---- | ------------ |
+| `ruff check --select ASYNC,B,RUF,PERF,PL,SIM,FURB,S` | `requests.get` only when it is written in the `async def` itself | the call three helpers down |
+| `ty check` | a `list[str]` passed where a `list[str]` is expected | that `add_default` changes `Model.fields` |
+| `tach check` (with `app.api` → `app.users` → `app.clients` declared) | `app.api` importing `app.users`, which is allowed | what `load_user` does |
+
+heki follows the call into `load_user` and the alias into `add_default`:
 
 ```console
 $ heki check --output-format concise
@@ -87,127 +92,227 @@ app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `
 Found 2 diagnostic(s) in 4 file(s).
 ```
 
-Ruff's async rules see `requests.get` only when it is written in the `async def` itself; ty sees a
-`list[str]` passed where a `list[str]` is expected; tach sees `app.api` importing `app.users`, which
-is allowed. None of them follows the call into `load_user` or the alias into `add_default`.
+## Where heki pays off
+
+| Code | What heki finds |
+| ---- | --------------- |
+| Async services, and web or database code written in layers of helpers | blocking calls that reach the event loop, clients and queries created inside loops (N+1), I/O while a lock or a transaction is held |
+| Large code bases that protect shared state by convention, review, or their own checkers | contract violations, followed through aliases, helpers, and subclasses |
+| Loops over growing collections | proven-safe rewrites and suggestions for quadratic patterns |
+
+In small scripts, or code that is mostly synchronous and self-contained, a linter and a type
+checker cover most of what matters, and heki reports little.
+
+## What heki does not do
+
+| Check | Use instead |
+| ----- | ----------- |
+| Style, formatting, and syntax | a linter such as Ruff |
+| Type errors | a type checker such as ty |
+| Import layering and import cycles | [tach](https://github.com/gauge-sh/tach) or [import-linter](https://github.com/seddonym/import-linter), and Python 3.15's `lazy import` |
+| Dead code and duplicated code | Ruff or [vulture](https://github.com/jendrikseipp/vulture) |
+| Constant-factor micro-optimizations, such as hoisting `re.compile` | no heki rule |
+
+- heki does not change your code's shape: it adds no decorators, contract types, or runtime
+  checks, and it does not compile or rewrite code at build time.
+- heki never runs or instruments your program. `--profile` only reads a profile you recorded
+  yourself.
 
 ## Where heki's knowledge comes from
 
-1. **Its own analysis.** heki builds an SSA representation of every function, tracks aliases
-   (copies, attributes, and the iterators and views derived from an object), summarizes what
-   each function mutates and which effects it reaches, and propagates the summaries over the
-   project's call graph until nothing changes.
-2. **A catalog of library behavior.** The effects of standard-library and third-party APIs are
-   declared, not inferred: `requests.get` blocks on the network, `asyncio.to_thread(fn)` and
-   `@sync_to_async` run a function on another thread, `logging` calls are never reported, `sqlite3.connect()` returns a
-   `Connection`, `threading.Lock` is a synchronous lock. heki does not analyze the source of
-   the standard library or of installed packages. Add your own APIs with
-   [`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem).
-3. **Contracts you declare.** What no type can say is declared once in configuration: who may
-   write or read an attribute or call a function (`write-owners`, `read-owners`,
-   `call-owners`), which returned objects are shared (`readonly-returns`), which changes must be
-   announced to an invalidator (`invalidation`), and which functions must not reach I/O or writes
-   to model state (`effect-boundaries`). heki needs no decorators, no special types, and nothing at run time.
-4. **Type annotations, as hints only.** The checking rules (`MUT`, `EFF`, `DATA`, `OPT112`,
-   `OPT113`) use annotations to learn which class an object has and which method a call reaches
-   (`session: Session` makes `session.execute(...)` a database call). Calls are resolved from
-   local constructors and imports first, then annotations, then attributes assigned in
-   `__init__`, then the class hierarchy (up to eight overriding methods). Container item types
-   (`list[Model]`), return annotations along the MRO, `isinstance` narrowing, unions of up to
-   three classes, and project `Protocol`s are followed too. The rewriting rules never read
-   annotations, because a subclass can override any method; see
-   [Fixes and Safety](fixes.md).
+| Source | What it tells heki | Extend it with |
+| ------ | ------------------ | -------------- |
+| Its own analysis | an SSA form of every function; aliases (copies, attributes, and the iterators and views derived from an object); what each function mutates and which effects it reaches, propagated over the project's call graph until nothing changes | - |
+| A catalog of library behavior | `requests.get` blocks on the network; `asyncio.to_thread(fn)` and `@sync_to_async` run a function on another thread; `logging` calls are never reported; `sqlite3.connect()` returns a `Connection`; `threading.Lock` is a synchronous lock | [`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem) |
+| Contracts you declare | who may write, read, or call (`write-owners`, `read-owners`, `call-owners`); which returned objects are shared (`readonly-returns`); which changes must be announced (`invalidation`); which functions must not reach I/O or writes (`effect-boundaries`) | [contracts](configuration.md#ownership-contracts-toolhekiwrite-owners-mut201-mut205) in the configuration |
+| Type annotations, as hints only | which class an object has and which method a call reaches: `session: Session` makes `session.execute(...)` a database call | annotations in your code |
+
+- heki does not analyze the source of the standard library or of installed packages: the
+  catalog declares their effects.
+- Contracts need no decorators, no special types, and nothing at run time.
+- The checking rules (`MUT`, `EFF`, `DATA`, `OPT112`, `OPT113`) use annotations. The rewriting
+  rules never read them, because a subclass can override any method (see
+  [Fixes and Safety](fixes.md#what-a-fix-must-prove)).
+
+### How a call is resolved
+
+heki looks for the callee in this order:
+
+1. local constructors and imports;
+2. annotations;
+3. attributes assigned in `__init__`;
+4. the class hierarchy, up to eight overriding methods.
+
+It also follows container item types (`list[Model]`), return annotations along the MRO,
+`isinstance` narrowing, unions of up to three classes, and project `Protocol`s.
 
 ## When heki cannot tell
 
 The two kinds of rules make opposite choices when information is missing:
 
-- **A rewrite needs a proof.** An `OPT` fix is applied only when every proof obligation holds.
-  Anything heki cannot see counts as shared and blocks the fix; the diagnostic then names the
-  obligation that failed (`[not auto-fixable: ...]`).
-- **A report needs evidence.** The checking rules report only what they can show. A call heki
-  cannot resolve is not followed: a value of type `Any`, an unannotated parameter, a method
-  name computed at run time, more than eight possible overrides, or a function outside the
-  checked files that the catalog does not list. heki would rather miss a finding than report
-  one it cannot back with a call chain; reports that cross functions show that chain as
-  related locations. A branch the caller's arguments switch off is not followed
-  (`load(name, cache=False)` does not reach the request under `if cache:`), and a client or
-  query created only while an attribute is unset counts once per object, not once per loop
-  iteration.
+| | A rewrite (`OPT` fix) | A report (checking rules) |
+| - | --------------------- | ------------------------- |
+| Needs | a proof | evidence |
+| What heki cannot see | counts as shared and blocks the fix | is not followed |
+| What you get | the diagnostic names the failed obligation: `[not auto-fixable: ...]` | no report: a missed finding, never a guess |
 
-The missed findings close as heki learns more: annotate values whose class it cannot see, add
-your blocking or offloading APIs to `[[tool.heki.ecosystem]]`, and declare contracts for the
-state that matters.
+A report that crosses functions shows its call chain as related locations. A call heki cannot
+resolve is not followed:
+
+- a value of type `Any`, or an unannotated parameter;
+- a method name computed at run time;
+- a call with more than eight possible overrides;
+- a function outside the checked files that the catalog does not list.
+
+Two more cases stay quiet by design:
+
+- A branch the caller's arguments switch off is not followed: `load(name, cache=False)` does not
+  reach the request under `if cache:`.
+- A client or query created only while an attribute is unset counts once per object, not once
+  per loop iteration.
+
+Missed findings close as heki learns more:
+
+| heki lacks | Add |
+| ---------- | --- |
+| the class of a value | an annotation |
+| your blocking or offloading APIs | an entry in [`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem) |
+| the rules of your shared state | a [contract](configuration.md#ownership-contracts-toolhekiwrite-owners-mut201-mut205) |
 
 ## Known limitations
 
-- **Dynamic names.** `setattr(obj, "fields", v)`, `getattr(obj, "fields")`,
-  `getattr(obj, "method")(...)`, and `obj.__dict__["fields"]` are followed only when the name is a
-  constant: a literal, or a module-level `Final` string constant (also imported). Names assigned
-  without `Final`, class-level constants, and computed names are not resolved; a `write-owners`
-  contract with `unresolved = "report"` counts the writes heki cannot tie to a class (`MUT205`).
-- **Objects without a known class.** Reads and writes through `Any` or unannotated parameters
-  are not tied to a class, so contracts on that class do not see them. A write in an
-  unannotated helper is still found where a caller passes it an object of a known class; a
-  read is not.
-- **Names the catalog does not list.** Catalog lookups are exact: a class reached through another
-  public name (`from sqlalchemy import Engine` for `sqlalchemy.engine.Engine`, `redis.StrictRedis`
-  for `redis.Redis`) or a method the catalog does not list contributes no effect, and objects
-  reached through subscripts or framework attributes (`client["app"]["users"]`, Django's
-  `Model.objects`) have no known class. Add what is missing with `[[tool.heki.ecosystem]]`.
-- **Properties with a setter or deleter.** Reading a `@property` or `functools.cached_property`
-  of a project class runs its getter: its effects, writes, and the attributes it reads count for
-  the reader, also through base classes, overriding subclasses, and `super()`. A property that
-  also defines a setter or deleter (`@x.setter`) is not followed, nor is `x = property(get_x)`,
-  and the getter's return annotation types the value read. Values declared `Any`, generics
-  substituted through `TypeVar`s, and calls of `type[C]` attributes are not typed.
-- **Read-only types.** `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the
-  helpers they are handed to, any number of calls deep; a helper parameter annotated with a
-  mutable type is left to the type checker, and a container inside the argument does not count.
-  `MUT108` (opt-in) follows frozen dataclasses, `NamedTuple`s, classes that a
+### Dynamic names
+
+`setattr(obj, "fields", v)`, `getattr(obj, "fields")`, `getattr(obj, "method")(...)`, and
+`obj.__dict__["fields"]`:
+
+- **Followed** when the name is a constant: a literal, or a module-level `Final` string
+  (`KEY: Final = "_key"`), also when imported, re-exported, or bound to another `Final` name.
+- **Not followed** for a module-level name without `Final` (any code can rebind it), a
+  class-level constant, or a computed name.
+- A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
+  class ([`MUT205`](rules/unresolved-guarded-write.md)).
+
+### Objects without a known class
+
+- Reads and writes through `Any` or unannotated parameters are not tied to a class, so contracts
+  on that class do not see them.
+- A write in an unannotated helper is still found where a caller passes it an object of a known
+  class. A read is not.
+- Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
+  `type[C]` attributes.
+
+### Names the catalog does not list
+
+Catalog lookups are exact. These contribute no effect until you add them with
+[`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem):
+
+- a class reached through another public name: `from sqlalchemy import Engine` for
+  `sqlalchemy.engine.Engine`, `redis.StrictRedis` for `redis.Redis`;
+- a method the catalog does not list;
+- objects reached through subscripts or framework attributes, which have no known class:
+  `client["app"]["users"]`, Django's `Model.objects`.
+
+### Properties
+
+- **Followed:** reading a `@property` or `functools.cached_property` of a project class runs its
+  getter. Its effects, writes, and the attributes it reads count for the reader, also through
+  base classes, overriding subclasses, and `super()`. The getter's return annotation types the
+  value read.
+- **Not followed:** a property that also defines a setter or deleter (`@x.setter`), and
+  `x = property(get_x)`.
+
+### Read-only types
+
+- `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the helpers they are
+  handed to, any number of calls deep. A helper parameter annotated with a mutable type is left
+  to the type checker, and a container inside the argument does not count.
+- `MUT108` (opt-in) follows frozen dataclasses, `NamedTuple`s, classes that a
   `dataclass_transform(frozen_default=True)` in the checked files builds, `Final` / `ReadOnly`
-  attributes, and `ReadOnly` `TypedDict` keys; transforms of installed packages (attrs,
-  Pydantic) are not seen, and an instance the function constructs itself counts as under
+  attributes, and `ReadOnly` `TypedDict` keys. It does not see the transforms of installed
+  packages (attrs, Pydantic), and an instance the function constructs itself counts as under
   construction.
-- **Generators.** A generator's body runs where it is iterated: a `for` loop or comprehension,
-  unpacking, `yield from`, a consuming call (`list(...)`, `"".join(...)`, `items.extend(...)`), a
-  lazy wrapper iterated there (`enumerate(...)`), or a project function iterating it; one a
-  function returns runs where its caller iterates it. A generator handed to anything else
-  (`StreamingResponse(rows())`, a container), only stepped with `next()`, or unpacked into a call
-  (`f(*rows())`) is not followed; a generator expression counts where it is written. A coroutine
-  runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on its own.
-  Iterating an object runs its class's `__iter__` only for classes the catalog lists (a
-  SQLAlchemy `Query`); the `__iter__` methods of project classes are not followed.
-- **Guards.** A test is followed when it checks the function's own input directly: truthiness,
-  `is None`, or `isinstance` with builtin classes. `a or b` gives no guard on either value, the
-  classes of project objects and annotated types do not decide `isinstance`, a lazy
-  initialization needs a direct test and the store in the function itself, and `EFF201` does not
-  use guards. An object a factory function returns counts as obtained once, like a pooled
-  connection.
-- **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
-  own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
-  join.
-- **Metaprogramming and frameworks.** `__getattr__` proxies, metaclasses, classes created at
-  run time, and framework machinery (validators, ORM lazy loading, dependency injection) are not
-  modeled, and heki has no framework-specific rules.
-- **The target Python version.** Results follow `target-version`. From Python 3.12, list, set,
-  and dict comprehensions run in the enclosing function (PEP 709), so a comprehension inside a
-  loop can be reported for `py312` and not for `py311`. heki infers the version from
-  `requires-python`, which keeps it at the oldest version you support. Syntax newer than the
-  target version is analyzed, not reported: that is Ruff's check.
-- **Source encodings.** Sources are read in the encoding a PEP 263 declaration names: heki reads
-  UTF-8 (with or without a BOM), Latin-1, and ASCII, and reports any other declared encoding as
-  an error instead of checking the file.
-- **Sizes known only at run time.** Whether a collection is small is decided from the code: a
-  list built from a short constant display is not reported, a list built at run time is, even
-  when it always holds three items. A container counts as small only when it is a display of at
-  most 8 items, with no `*` / `**` unpacking, that nothing grows or lets escape (shrinking it
-  and read-only builtins are fine). This holds also through local names, module constants, and
-  other modules' module-level displays and class attributes. Such rules are marked
-  size-dependent.
-- **Callers outside the checked files.** Contracts reason about the callers heki sees: a
-  private helper hands its reports to its callers, and a function called only from allowed
-  writers is not reported. Code outside the run, such as tests left out of it, is not known.
+
+### Generators and coroutines
+
+A generator's body runs where it is iterated:
+
+| Followed | Not followed |
+| -------- | ------------ |
+| a `for` loop or a comprehension | a generator handed to anything else: `StreamingResponse(rows())`, a container |
+| unpacking, `yield from` | a generator only stepped with `next()` |
+| a consuming call: `list(...)`, `"".join(...)`, `items.extend(...)` | a generator unpacked into a call: `f(*rows())` |
+| a lazy wrapper iterated there: `enumerate(...)` | |
+| a project function iterating it | |
+
+- A generator a function returns runs where its caller iterates it.
+- A generator expression counts where it is written.
+- A coroutine runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on
+  its own.
+- Iterating an object runs its class's `__iter__` only for classes the catalog lists (a
+  SQLAlchemy `Query`). The `__iter__` methods of project classes are not followed.
+
+### Guards
+
+- **Followed:** a test of the function's own input: truthiness, `is None`, or `isinstance` with
+  builtin classes.
+- **Not followed:** `a or b` (no guard on either value), and `isinstance` with project classes or
+  annotated types.
+- A lazy initialization needs a direct test and the store in the function itself.
+- `EFF201` does not use guards.
+- An object a factory function returns counts as obtained once, like a pooled connection.
+
+### Separate scopes
+
+- Generator expressions and lambdas are analyzed as functions of their own:
+  `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop join.
+- Two lambdas in one function share the qualified name `f.<locals>.<lambda>`, so heki may
+  attribute one lambda's effects to a call of the other:
+
+```python
+import requests
+
+
+async def handler(url: str) -> int:
+    fetch = lambda: requests.get(url, timeout=5)
+    size = lambda: len(url)
+    return size()  # reported as reaching `requests.get` (EFF101)
+```
+
+### Metaprogramming and frameworks
+
+`__getattr__` proxies, metaclasses, classes created at run time, and framework machinery
+(validators, ORM lazy loading, dependency injection) are not modeled. heki has no
+framework-specific rules.
+
+### The target Python version
+
+Results follow [`target-version`](configuration.md#top-level-settings), which defaults to the
+oldest version `requires-python` admits.
+
+- From Python 3.12, list, set, and dict comprehensions run in the enclosing function (PEP 709): a
+  comprehension inside a loop can be reported for `py312` and not for `py311`.
+- From Python 3.14, annotations are evaluated lazily in `__annotate__` scopes (PEP 649).
+- The parser reads Python 3.15 syntax for every target version: `lazy import` (PEP 810) is a lazy
+  import also in code for an older version.
+- Syntax newer than the target version is analyzed, not reported: that is Ruff's check.
+
+### Source encodings
+
+heki reads the encoding a PEP 263 declaration names: UTF-8 (with or without a BOM), Latin-1, and
+ASCII. A file declaring any other encoding is reported as an error and not checked.
+
+### Sizes known only at run time
+
+Whether a collection is small is decided from the code: a list built at run time counts as
+large, even when it always holds three items. The rules this affects are marked size-dependent;
+[Fixes and Safety](fixes.md#when-the-size-is-fixed) lists what counts as a fixed size.
+
+### Callers outside the checked files
+
+Contracts reason about the callers heki sees: a private helper hands its reports to its callers,
+and a function called only from allowed writers is not reported. Code outside the run, such as
+tests left out of it, is not known.
 
 ## How a rule gets into heki
 
@@ -218,9 +323,10 @@ in order:
 2. **Is it a type error, or can an annotation express it?** Then it belongs in a type checker
    such as ty.
 3. **Is it about which modules may import which?** Then it belongs in tach or import-linter.
-4. **Does it need at least one of the proofs below?** Only then is it a heki rule. It is measured
-   on a corpus and reviewed by hand before it is enabled by default, and where another tool
-   covers part of it, heki keeps only the rest (`EFF107` and Ruff's `RUF006`).
+4. **Does it need at least one of the proofs below?** Only then is it a heki rule.
+
+A heki rule is measured on a corpus and reviewed by hand before it is enabled by default. Where
+another tool covers part of it, heki keeps only the rest (`EFF107` and Ruff's `RUF006`).
 
 The proofs heki can make, on five axes:
 
@@ -231,30 +337,3 @@ The proofs heki can make, on five axes:
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT201`–`MUT204` |
-
-## What heki does not do
-
-- **Style, formatting, and syntax checks:** use a linter such as Ruff.
-- **Type errors:** use a type checker such as ty.
-- **Import layering and import cycles:** use [tach](https://github.com/gauge-sh/tach) or
-  [import-linter](https://github.com/seddonym/import-linter), and Python 3.15's
-  `lazy import`.
-- **Dead code and duplicated code:** use Ruff or [vulture](https://github.com/jendrikseipp/vulture).
-- **Constant-factor micro-optimizations**, such as hoisting `re.compile`.
-- **Changing your code's shape:** heki adds no decorators, contract types, or runtime checks,
-  and does not compile or rewrite code at build time.
-- **Running your program:** heki never runs or instruments it; `--profile` only reads a
-  profile dump you recorded yourself.
-
-## Where heki pays off
-
-- Async services and web or database code written in layers of helpers: blocking calls that
-  reach the event loop, clients and queries created inside loops (N+1), and I/O while a lock or
-  a transaction is held.
-- Large code bases that protect shared state by convention, review, or their own checkers:
-  contracts turn those conventions into checks that follow aliases, helpers, and subclasses.
-- Code with loops over growing collections: proven-safe rewrites and suggestions for quadratic
-  patterns.
-
-In small scripts, or code that is mostly synchronous and self-contained, a linter and a type
-checker cover most of what matters, and heki reports little.
