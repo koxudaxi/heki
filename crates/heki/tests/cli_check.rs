@@ -256,13 +256,13 @@ fn sarif_columns_and_carets_after_non_ascii_text() {
     let p = Project::new("non_ascii_columns");
     p.write(
         "a.py",
-        "import time\n\nasync def h():\n    label = \"é\"; time.sleep(1)\n",
+        "import time\n\nasync def h():\n    label = \"\u{e9}\"; time.sleep(1)\n",
     );
     let (_, full, _) = p.heki(&[]);
-    // Byte column 19 in text output; the caret sits under `time` (`é` is one column).
+    // Byte column 19 in text output; the caret sits under `time` (the accented letter is one column).
     assert!(full.starts_with("a.py:4:19: EFF101"), "{full}");
     assert!(
-        full.contains("4 |     label = \"é\"; time.sleep(1)\n  |                  ^\n"),
+        full.contains("4 |     label = \"\u{e9}\"; time.sleep(1)\n  |                  ^\n"),
         "{full}"
     );
     let (_, sarif, _) = p.heki(&["--output-format", "sarif"]);

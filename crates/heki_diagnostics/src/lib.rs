@@ -924,9 +924,9 @@ mod tests {
 
     #[test]
     fn carets_and_sarif_columns_after_multibyte_characters() {
-        // `é` takes two bytes, one terminal column, and one UTF-16 unit; `語` three bytes, two
-        // columns, one unit; `😀` four bytes, two columns, two units. A tab stays a tab.
-        let text = "\tx = \"é語😀\"; time.sleep(1)";
+        // U+00E9 takes two bytes, one terminal column, and one UTF-16 unit; U+8A9E three bytes,
+        // two columns, one unit; U+1F600 four bytes, two columns, two units. A tab stays a tab.
+        let text = "\tx = \"\u{e9}\u{8a9e}\u{1f600}\"; time.sleep(1)";
         let mut d = diag(4, "EFF101", "m");
         d.column = u32::try_from(text.find("time").unwrap()).unwrap() + 1;
         d.related.clear();
@@ -942,7 +942,11 @@ mod tests {
             s["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startColumn"],
             14
         );
-        assert_eq!(caret_padding("é", 99), " ", "a column past the line end");
+        assert_eq!(
+            caret_padding("\u{e9}", 99),
+            " ",
+            "a column past the line end"
+        );
         assert_eq!(display_width('\u{301}'), 0);
     }
 
