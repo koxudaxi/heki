@@ -882,3 +882,36 @@ def after_continue(pool: Pool, hosts):
         assert_eq!(phis.as_array().unwrap().len(), 0, "{name}: {phis}");
     }
 }
+
+#[test]
+fn a_comprehension_walrus_binds_where_its_function_binds_the_name() {
+    let src = "\
+latest = None
+
+
+def track(values):
+    global latest
+    return next((latest := v) for v in values)
+
+
+def cell(values):
+    found = None
+    next((found := v) for v in values)
+    return found
+";
+    let ir = dump_ir("ir_comprehension_walrus_global", src, "py315");
+    let stores = |qualname: &str, kind: &str| -> Vec<String> {
+        function(&ir, qualname)["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|b| b["insts"].as_array().unwrap())
+            .filter_map(|i| i["kind"][kind]["name"].as_str().map(str::to_owned))
+            .collect()
+    };
+    assert_eq!(
+        stores("track.<locals>.<genexpr>", "StoreGlobal"),
+        ["latest"]
+    );
+    assert_eq!(stores("cell.<locals>.<genexpr>", "StoreDeref"), ["found"]);
+}

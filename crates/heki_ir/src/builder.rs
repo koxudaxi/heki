@@ -93,6 +93,7 @@ pub fn build_module_ir(
         is_class_body: false,
         outer_locals: FxHashSet::default(),
         walrus_target: WalrusTarget::OwnScope,
+        walrus_globals: FxHashSet::default(),
         body: FunctionBody::Suite(parsed.suite()),
     });
 
@@ -263,6 +264,8 @@ struct FunctionSpec<'a> {
     is_class_body: bool,
     outer_locals: FxHashSet<String>,
     walrus_target: WalrusTarget,
+    /// The names the function an assignment expression binds in declares `global`.
+    walrus_globals: FxHashSet<String>,
     body: FunctionBody<'a>,
 }
 
@@ -353,7 +356,16 @@ impl<'a> ModuleLowerer<'a> {
         let walrus_targets = std::mem::take(&mut scope_info.assignment_expression_targets);
         match spec.walrus_target {
             WalrusTarget::OwnScope => {}
-            WalrusTarget::EnclosingFunction => scope_info.nonlocals.extend(walrus_targets),
+            WalrusTarget::EnclosingFunction => {
+                // ... unless that function declares the name `global`.
+                for name in walrus_targets {
+                    if spec.walrus_globals.contains(&name) {
+                        scope_info.globals.insert(name);
+                    } else {
+                        scope_info.nonlocals.insert(name);
+                    }
+                }
+            }
             WalrusTarget::Module => scope_info.globals.extend(walrus_targets),
         }
         // `global` and `nonlocal` remove names from true function locals.
@@ -414,6 +426,7 @@ impl<'a> ModuleLowerer<'a> {
             scope_info,
             &spec.outer_locals,
             spec.walrus_target,
+            spec.walrus_globals,
         );
 
         if let Some(params) = spec.params {
@@ -573,6 +586,7 @@ struct FnBuilder<'m, 'a> {
     /// Union of outer function locals (to recognize closure captures).
     outer_locals: FxHashSet<String>,
     walrus_target: WalrusTarget,
+    walrus_globals: FxHashSet<String>,
     /// Variables in THIS function captured by nested functions/lambdas/genexprs.
     captured_by_children: FxHashSet<String>,
     /// Free variables read by THIS function from outer scopes.
@@ -626,6 +640,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         scope: ScopeBindings,
         outer_locals: &FxHashSet<String>,
         walrus_target: WalrusTarget,
+        walrus_globals: FxHashSet<String>,
     ) -> Self {
         let entry = BasicBlock {
             id: BlockId(0),
@@ -653,6 +668,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             scope,
             outer_locals: outer_locals.clone(),
             walrus_target,
+            walrus_globals,
             captured_by_children: FxHashSet::default(),
             free_reads: FxHashSet::default(),
             blocks: vec![entry],
@@ -1453,6 +1469,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_class_body: false,
             outer_locals: child_outer,
             walrus_target: WalrusTarget::OwnScope,
+            walrus_globals: FxHashSet::default(),
             body: FunctionBody::Suite(&func.body),
         });
 
@@ -1547,6 +1564,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_class_body: true,
             outer_locals: child_outer,
             walrus_target: WalrusTarget::OwnScope,
+            walrus_globals: FxHashSet::default(),
             body: FunctionBody::Suite(&cls.body),
         });
 
@@ -1581,6 +1599,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     /// Where an assignment expression of a comprehension scope nested here binds its name.
+    /// The names the function an assignment expression of a comprehension scope nested here
+    /// binds in declares `global`.
+    fn comprehension_walrus_globals(&self) -> FxHashSet<String> {
+        match self.walrus_target {
+            WalrusTarget::OwnScope => self.scope.globals.clone(),
+            _ => self.walrus_globals.clone(),
+        }
+    }
+
     fn comprehension_walrus_target(&self) -> WalrusTarget {
         match self.walrus_target {
             WalrusTarget::OwnScope if self.is_module_body => WalrusTarget::Module,
@@ -2946,6 +2973,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     is_class_body: false,
                     outer_locals: child_outer,
                     walrus_target: WalrusTarget::OwnScope,
+                    walrus_globals: FxHashSet::default(),
                     body: FunctionBody::Expr(&lam.body),
                 });
                 let captured_names = self.collect_child_captures(child_id);
@@ -2983,6 +3011,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     is_class_body: false,
                     outer_locals: child_outer,
                     walrus_target: self.comprehension_walrus_target(),
+                    walrus_globals: self.comprehension_walrus_globals(),
                     body: FunctionBody::GenExpr(ge),
                 });
                 let captured_names = self.collect_child_captures(child_id);
@@ -3327,6 +3356,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 is_class_body: false,
                 outer_locals: child_outer,
                 walrus_target: self.comprehension_walrus_target(),
+                walrus_globals: self.comprehension_walrus_globals(),
                 body: FunctionBody::Comp {
                     generators,
                     elt,

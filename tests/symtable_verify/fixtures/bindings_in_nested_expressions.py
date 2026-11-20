@@ -45,3 +45,10 @@ def cells_through_nested_scopes(items: list) -> object:
 
     return middle, Holder, [lambda: item for item in items], [(item for _ in ()) for item in items]
 
+
+LATEST = None
+
+
+def walrus_follows_a_global_declaration(values: list) -> object:
+    global LATEST
+    return next((LATEST := v) for v in values)
