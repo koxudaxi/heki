@@ -938,8 +938,7 @@ mod tests {
                     with_prefix("sqlalchemy.orm.Session", SA_SESSION_QUERIES),
                     with_prefix("sqlalchemy.orm.Query", SA_QUERY_RUNS),
                     with_prefix("sqlmodel.Session", SQLMODEL_SESSION_QUERIES),
-                    s(&["psycopg.Connection.execute"]),
-                    with_prefix("psycopg.Cursor", &["execute", "executemany"]),
+                    s(&["psycopg.Cursor.executemany"]),
                     with_prefix("psycopg2.extensions.cursor", DBAPI_EXECUTES),
                     with_prefix("pymysql.cursors.Cursor", DBAPI_EXECUTES),
                     with_prefix("django.db.backends.utils.CursorWrapper", DBAPI_EXECUTES),
@@ -1006,6 +1005,11 @@ mod tests {
             (
                 s(&["psycopg.Connection.cursor"]),
                 returning("psycopg.Cursor", entry(&[])),
+            ),
+            (
+                // A new cursor, or the cursor itself, holding the result.
+                s(&["psycopg.Connection.execute", "psycopg.Cursor.execute"]),
+                returning("psycopg.Cursor", entry(&[BlockingDb, DbQuery])),
             ),
             (
                 s(&["psycopg_pool.ConnectionPool.connection"]),
@@ -1081,8 +1085,7 @@ mod tests {
                         "sqlmodel.ext.asyncio.session.AsyncSession",
                         SQLMODEL_SESSION_QUERIES,
                     ),
-                    s(&["psycopg.AsyncConnection.execute"]),
-                    with_prefix("psycopg.AsyncCursor", &["execute", "executemany"]),
+                    s(&["psycopg.AsyncCursor.executemany"]),
                     async_queryset_runs,
                     s(&["redis.asyncio.client.Pipeline.execute"]),
                     with_prefix("redis.asyncio.Redis", REDIS_COMMANDS),
@@ -1147,6 +1150,10 @@ mod tests {
             (
                 s(&["psycopg.AsyncConnection.cursor"]),
                 async_safe(returning("psycopg.AsyncCursor", entry(&[]))),
+            ),
+            (
+                s(&["psycopg.AsyncConnection.execute", "psycopg.AsyncCursor.execute"]),
+                async_safe(returning("psycopg.AsyncCursor", entry(&[DbQuery]))),
             ),
             (
                 s(&["psycopg_pool.AsyncConnectionPool.connection"]),

@@ -501,6 +501,19 @@ async def tp_async_pools_in_loops(dsns):
     for dsn in dsns:
         async with AsyncConnectionPool(dsn) as per_dsn:
             await per_dsn.check()
+
+
+def tp_cursors_from_execute_in_loops(conn: psycopg.Connection, ids):
+    cur = conn.execute("SELECT 1")
+    for i in ids:
+        cur.execute("SELECT %s", (i,))
+        cur.execute("SELECT %s", (i,)).execute("SELECT 2")
+
+
+async def tp_async_cursors_from_execute_in_loops(conn: psycopg.AsyncConnection, ids):
+    cur = await conn.execute("SELECT 1")
+    for i in ids:
+        await cur.execute("SELECT %s", (i,))
 "#;
 
 #[test]
@@ -588,6 +601,32 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
                 "EFF102",
                 "tp_async_pools_in_loops",
                 "psycopg_pool.AsyncConnectionPool"
+            ),
+            // `execute()` returns the cursor holding the result.
+            d(
+                104,
+                "EFF103",
+                "tp_cursors_from_execute_in_loops",
+                "psycopg.Cursor.execute"
+            ),
+            // Both statements of the chain.
+            d(
+                105,
+                "EFF103",
+                "tp_cursors_from_execute_in_loops",
+                "psycopg.Cursor.execute"
+            ),
+            d(
+                105,
+                "EFF103",
+                "tp_cursors_from_execute_in_loops",
+                "psycopg.Cursor.execute"
+            ),
+            d(
+                111,
+                "EFF103",
+                "tp_async_cursors_from_execute_in_loops",
+                "psycopg.AsyncCursor.execute"
             ),
         ]
     );
