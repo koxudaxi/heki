@@ -100,10 +100,6 @@ pub struct CallHop {
     pub path: PathBuf,
 }
 
-fn is_zero(bits: &u64) -> bool {
-    *bits == 0
-}
-
 /// A call chain kept in a summary. Propagation copies a callee's chains into its callers, so
 /// the hops are shared: a chain through a call points to the hop that call made, and extending
 /// a chain copies pointers. `Arc` compares, orders, and hashes by value, so the chains do too.
@@ -450,7 +446,6 @@ pub struct EffectSummary {
     /// a `QuadraticRealloc` call taking the parameter (`return np.append(acc, x)`,
     /// `return pd.concat([df, part])`), or of a project call doing so whose result it returns
     /// (`DATA101` follows an accumulation through such helpers).
-    #[serde(default, skip_serializing_if = "is_zero")]
     pub reallocates_params: u64,
     /// Parameters iterated to exhaustion on every path that returns normally when the body
     /// runs at the call (`MUT106`: passing a single-pass iterator consumes it).

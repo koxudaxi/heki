@@ -402,9 +402,6 @@ impl IterFlow {
                         self.root_of.entry(phi.dst).or_insert(r);
                         continue;
                     }
-                    if self.root_of.contains_key(&phi.dst) {
-                        continue;
-                    }
                     let mut may: Vec<VarId> = phi
                         .incoming
                         .iter()

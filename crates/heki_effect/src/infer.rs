@@ -787,12 +787,11 @@ impl<'e, 'a> Engine<'e, 'a> {
         self.need(var).map_or(Elem::Empty, |t| self.items(t))
     }
 
-    /// What calling special method `name` on an instance returns.
+    /// What calling special method `name` on an instance returns. The syntax calling it (`x[k]`,
+    /// `for v in x`) hands no argument facts to the catalog's argument cases.
     fn dunder(&self, o: &Obj, name: &str) -> Option<Ty> {
-        let cx = self.cx;
-        cx.callee_result(&cx.project.method_targets(&o.class, name, false), |_, _| {
-            None
-        })
+        let targets = self.cx.project.method_targets(&o.class, name, false);
+        self.cx.callee_result(&targets, |_, _| None)
     }
 
     /// What a call passes at position `index` or by `keyword`, for the catalog's argument cases

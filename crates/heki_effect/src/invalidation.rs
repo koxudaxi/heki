@@ -696,9 +696,9 @@ pub(crate) fn propagate_facts(
             let Some(d) = body_runs_at(index, site, callee) else {
                 continue;
             };
-            let Some(facts) = callee.facts(d.from) else {
-                continue;
-            };
+            let facts = callee
+                .facts(d.from)
+                .expect("the body `body_runs_at` finds is a plain function's or a generator's");
             for w in crate::callgraph::indirect_writes(bc, callee, facts) {
                 let Some(targets) = &w.origin.targets else {
                     continue;

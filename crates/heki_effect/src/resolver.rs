@@ -1832,9 +1832,6 @@ impl ProjectDecls {
     /// subclasses do not count: the class object is no subclass.
     pub(crate) fn class_targets(&self, class: &str, method: &str) -> Callee {
         let class = self.canonical(class);
-        if !self.is_project_class(&class) {
-            return Callee::External(format!("{class}.{method}"));
-        }
         match self.definitions(&class, method, false, false, |_| true) {
             (found, _) if !found.is_empty() => Callee::Project(found, true),
             (_, external) => external.map_or(Callee::Unresolved, Callee::External),
@@ -2093,10 +2090,8 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls.imports.insert(imp.bound_name.clone(), target);
         }
     }
-    if let Some(body) = input.ir.functions.iter().find(|f| f.is_module_body) {
-        for name in rebound_imports(body) {
-            decls.imports.remove(&name);
-        }
+    for name in rebound_imports(input.ir.function(input.ir.module_fn)) {
+        decls.imports.remove(&name);
     }
     for class in &semantic.classes {
         decls

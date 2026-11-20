@@ -5,7 +5,7 @@
 
 use crate::mut_rules::{Allowance, AllowanceKeys, ReadOnlyProducers};
 use crate::{DottedPattern, RuleConfigError, RuleSelection};
-use heki_effect::{Contracts, TypedWrites};
+use heki_effect::{Contracts, FuncKey, TypedWrites};
 use heki_env::HekiConfig;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -165,23 +165,12 @@ impl Contracts for ConfigContracts {
         })
     }
 
-    fn writer_contexts(&self, fqn: &str, qualname: &str) -> u64 {
-        self.writer_contexts.get(fqn, qualname, || {
-            let Some((module, _)) = fqn
-                .strip_suffix(qualname)
-                .and_then(|m| m.strip_suffix('.'))
-                .map(|m| (m, ()))
-            else {
-                return 0;
-            };
-            let key = heki_effect::FuncKey {
-                module: module.to_owned(),
-                qualname: qualname.to_owned(),
-            };
+    fn writer_contexts(&self, func: &FuncKey) -> u64 {
+        self.writer_contexts.get(&func.fqn(), &func.qualname, || {
             self.writers.iter().enumerate().fold(0, |acc, (k, a)| {
                 let bit = 2 * (k % 32);
-                let allowed = u64::from(a.allows(&key)) << bit;
-                let forbidden = u64::from(a.has_forbidden() && a.in_scope(&key)) << (bit + 1);
+                let allowed = u64::from(a.allows(func)) << bit;
+                let forbidden = u64::from(a.has_forbidden() && a.in_scope(func)) << (bit + 1);
                 acc | allowed | forbidden
             })
         })

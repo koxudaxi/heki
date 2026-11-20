@@ -78,18 +78,23 @@ pub(crate) fn reset_to_local(index: &mut ProjectIndex, region: &FxHashSet<FuncKe
         let Some(path) = index.func_files.get(func).cloned() else {
             continue;
         };
-        if let Some(file) = index.files.get_mut(&path)
-            && let Some(mut local) = file.local_functions.get(func).cloned()
+        let file = index
+            .files
+            .get_mut(&path)
+            .expect("`func_files` names an indexed file");
+        let mut local = file
+            .local_functions
+            .get(func)
+            .cloned()
+            .expect("the file `func_files` names defines the function");
+        if file
+            .functions
+            .get(func)
+            .is_some_and(|cur| cur.sync_driven_only)
         {
-            if file
-                .functions
-                .get(func)
-                .is_some_and(|cur| cur.sync_driven_only)
-            {
-                Arc::make_mut(&mut local).sync_driven_only = true;
-            }
-            file.functions.insert(func.clone(), local);
+            Arc::make_mut(&mut local).sync_driven_only = true;
         }
+        file.functions.insert(func.clone(), local);
     }
 }
 
@@ -491,7 +496,7 @@ fn apply_edge(
         let contexts = index.contracts.as_deref().map_or(0, |c| {
             std::iter::once(&bc.callee)
                 .chain(d.via)
-                .fold(0, |acc, k| acc | c.writer_contexts(&k.fqn(), &k.qualname))
+                .fold(0, |acc, k| acc | c.writer_contexts(k))
         });
         transfer_typed_writes(
             target, caller, site, bc, callee, facts, &lead, rewrite, here, contexts,

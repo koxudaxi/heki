@@ -8,6 +8,7 @@
 //! and nothing is computed for contracts a project does not declare. Without a `Contracts`, only
 //! the configuration-free half of `MUT202` (`@lru_cache` results) is summarized.
 
+use crate::FuncKey;
 use std::fmt::Debug;
 
 /// What the declared contracts say about a name, as far as the summaries need it. Masks have
@@ -38,7 +39,7 @@ pub trait Contracts: Debug + Send + Sync {
     /// contract `k` allows it (an allowed writer or an exempt method), bit `2k + 1` when the
     /// function is one of its forbidden writers. Contracts past the 32nd share the bits of
     /// contract `k % 32`: their chains are then kept apart less finely.
-    fn writer_contexts(&self, fqn: &str, qualname: &str) -> u64;
+    fn writer_contexts(&self, func: &FuncKey) -> u64;
 
     /// The contracts whose targets include attribute `attr` of an object of class `classes[0]`;
     /// `classes` lists that class and then its bases (a target class covers its subclasses).
