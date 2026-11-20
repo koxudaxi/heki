@@ -194,3 +194,54 @@ def counts(names: list[str], winners: list[str]) -> list[int]:
         "{found:?}"
     );
 }
+
+#[test]
+fn a_join_using_every_match_needs_an_index_of_all_matching_elements() {
+    let p = Project::new("opt113_all_matches");
+    p.write(
+        "app.py",
+        r#"def pairs(left: list[int], right: list[int]) -> list[tuple[int, int]]:
+    out = []
+    for a in left:
+        for b in right:
+            if a == b:
+                out.append((a, b))
+    return out
+
+
+def first(left: list[int], right: list[int]) -> list[int]:
+    out = []
+    for a in left:
+        for b in right:
+            if a == b:
+                out.append(a)
+                break
+    return out
+
+
+def by_key(orders, customers):
+    for order in orders:
+        for customer in customers:
+            if order.customer_id == customer.id:
+                order.customers.append(customer)
+"#,
+    );
+    let advice: Vec<(u64, String)> = reports(&p, "OPT113")
+        .into_iter()
+        .map(|(line, m)| (line, m.split_once("(O(n·m)); ").unwrap().1.to_owned()))
+        .collect();
+    assert_eq!(
+        advice,
+        vec![
+            (
+                5,
+                "group the elements of `right` by value in a `dict` (value → list of equal elements) before the outer loop".to_owned()
+            ),
+            (14, "build a `set` of `right` before the outer loop".to_owned()),
+            (
+                23,
+                "index `customers` in a `dict` from `customer.id` to the list of elements with that key before the outer loop".to_owned()
+            ),
+        ]
+    );
+}

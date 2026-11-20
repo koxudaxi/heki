@@ -723,6 +723,26 @@ impl<'a> Defs<'a> {
             })
     }
 
+    /// Whether a match of the comparison `cmp` leaves the inner loop `inner` (`break`,
+    /// `return`, `raise`): only the first matching element of the inner collection is used.
+    fn stops_at_first_match(&self, cmp: VarId, inner: &NaturalLoop) -> bool {
+        let alias = forward_aliases(self.f, &[cmp]);
+        let matches: Vec<BlockId> = self
+            .f
+            .blocks
+            .iter()
+            .filter_map(|b| match b.terminator {
+                Terminator::Branch { cond, then_bb, .. } if alias.contains(&cond) => Some(then_bb),
+                _ => None,
+            })
+            .collect();
+        !matches.is_empty()
+            && matches.iter().all(|&then_bb| {
+                then_bb != inner.header
+                    && !(inner.body.contains(&then_bb) && runs_again(self.f, inner, then_bb))
+            })
+    }
+
     /// Whether block `from` runs only on the false side of another branch whose true side does
     /// work: an `elif` after an `if` that handles other pairs (`if a.x == b.k: ... elif a.y ==
     /// b.k: ...` matches on two keys, so one index skips pairs the other test handles).
@@ -893,6 +913,8 @@ struct Join<'l, 'a> {
     rhs: VarId,
     /// The side derived from the inner loop's element.
     inner_side: VarId,
+    /// The comparison's result.
+    cmp: VarId,
 }
 
 /// `OPT113`: a nested-loop equi-join — `for a in A: for b in B: if a.k == b.k:` costs
@@ -953,6 +975,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                             lhs: *lhs,
                             rhs: *rhs,
                             inner_side,
+                            cmp: *dst,
                         });
                     }
                 }
@@ -975,6 +998,19 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     format!(
                         "`{key}` is an unhashable `{kind}`, so index `{inner_iter}` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
                     )
+                } else if !defs.stops_at_first_match(j.cmp, inner.lp) {
+                    // Every match is used: an index must keep each key's elements, duplicates
+                    // included.
+                    if defs.whole_element(j.inner_side) {
+                        format!(
+                            "group the elements of `{inner_iter}` by value in a `dict` (value → list of equal elements) before the outer loop"
+                        )
+                    } else {
+                        let key = defs.element_text(unit.source, j.inner_side);
+                        format!(
+                            "index `{inner_iter}` in a `dict` from `{key}` to the list of elements with that key before the outer loop"
+                        )
+                    }
                 } else if defs.whole_element(j.inner_side) {
                     format!("build a `set` of `{inner_iter}` before the outer loop")
                 } else {
