@@ -19,7 +19,8 @@ allowed writers:
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
   `Model.KEY`), which no subclass of the object's class defines again and no code stores on the
   class, a subclass, or an instance (`Model.KEY = "x"`; another module may store it on the
-  defining class only for a `Final` one);
+  defining class only for a `Final` one); on an instance of a protocol, every class
+  implementing it must hold the same constant;
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
