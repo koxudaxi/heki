@@ -158,10 +158,24 @@ impl Families {
 }
 
 /// The configured texts of a group of [`called_targets`]: the diagnostic target (`A.reset|B.reset`)
-/// and the message's name of what is called (``A.reset` or `B.reset``).
-pub(crate) fn group_texts(targets: &[CallTargetPattern], group: &[usize]) -> (String, String) {
+/// and the message's name of what is called (``A.reset` or `B.reset``). With the call `site`,
+/// a glob target is named by the function or class the site calls ([`super::matched_name`]);
+/// an `EFF201` report stands for every site of its target and names the target.
+pub(crate) fn group_texts(
+    targets: &[CallTargetPattern],
+    group: &[usize],
+    site: Option<&CallSite>,
+) -> (String, String) {
     let texts: Vec<&str> = group.iter().map(|&i| targets[i].text.as_str()).collect();
-    let named: Vec<String> = texts.iter().map(|t| format!("`{t}`")).collect();
+    let mut named: Vec<String> = texts
+        .iter()
+        .map(|t| match site {
+            Some(site) => super::matched_name(t, || site_callee(site)),
+            None => (*t).to_owned(),
+        })
+        .map(|n| format!("`{n}`"))
+        .collect();
+    named.dedup();
     (texts.join("|"), named.join(" or "))
 }
 
@@ -278,7 +292,7 @@ pub(crate) fn mut204(
         for &(path, site) in &sites[key] {
             for (rule, families) in rules.iter().zip(&mut families) {
                 for group in called_targets(&rule.targets, site) {
-                    let (target, called) = group_texts(&rule.targets, &group);
+                    let (target, called) = group_texts(&rule.targets, &group, Some(site));
                     let family = families.at(cx, &rule.targets, &group, site);
                     let found = delegated_reports(
                         cx,
@@ -297,7 +311,7 @@ pub(crate) fn mut204(
                             unit,
                             &r.func,
                             r.span,
-                            &target,
+                            (&target, &called),
                             (key.fqn(), site.span),
                             rule.note,
                             || {

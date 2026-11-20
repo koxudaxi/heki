@@ -137,6 +137,14 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - `object.__new__(Node)`, also through an alias, and `Node.__new__(Node)` where no class of the
   MRO defines `__new__` construct a `Node`: the new object has its class, and with
   `fresh-objects = "allow"` a helper filling it is no `MUT201` report.
+- A glob in the last segment of a `call-owners` target or an effect boundary's `call-targets`
+  matches within the function, method, or class name, as the attribute of a `Class.attr` target
+  does: `pkg.*._*` no longer names every function of a private module (`pkg.parser._concern.typed`),
+  so such functions are no targets that may call the others, and their calls are reported.
+- A report of a glob target names the attribute, function, or class it matched
+  (`reads `pkg.types.DataType._flag``, was `reads `pkg.*._*``), and one report standing for
+  several members lists the others; the diagnostic target, and so the baseline key, stays the
+  configured text.
 
 ## [0.1.2] - 2026-11-21
 
