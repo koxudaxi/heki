@@ -589,3 +589,240 @@ fn opt112_advice_holds_for_what_the_loop_does_with_the_list() {
         "{found:#?}"
     );
 }
+
+/// More getter shapes: what keeps an attribute held (writes to other attributes, item
+/// assignment into a returned container, `insert` / `extend`, a project method through
+/// `super()`), and what hands it, or `self`, to other code (`{**self.items}`, `self.__dict__`,
+/// `self` stored, returned, merged with another value, or tested).
+const GETTERS: &str = r#"from functools import cached_property
+
+
+class Base:
+    def zero(self) -> int:
+        return 0
+
+
+class Shapes(Base):
+    def __init__(self) -> None:
+        self.items: list[str] = []
+        self.hits = 0
+        self.tmp = None
+
+    @cached_property
+    def counted(self):
+        self.hits = 1
+        del self.tmp
+        return self.items
+
+    @cached_property
+    def inserted(self):
+        out = [1]
+        out.insert(0, self.items)
+        out.extend([2])
+        return out
+
+    @cached_property
+    def keyed(self):
+        out = {}
+        out["items"] = self.items
+        return out, super().zero()
+
+    @cached_property
+    def spread(self):
+        return {**self.items}
+
+    @cached_property
+    def through_dict(self):
+        return (self.items, self.__dict__)
+
+    @cached_property
+    def stores_self(self):
+        self.me = self
+        return self.items
+
+    @cached_property
+    def returns_self(self):
+        if self.hits:
+            return self
+        return self.items
+
+    @cached_property
+    def merges_self(self, other=None):
+        x = self if other is None else other
+        return (self.items, x)
+
+    @cached_property
+    def tests_self(self):
+        if self:
+            return self.items
+        return None
+
+    def add(self, x: str) -> None:
+        self.items.append(x)
+"#;
+
+#[test]
+fn mut101_getters_that_hold_attributes_and_getters_that_hand_them_on() {
+    let p = Project::new("regr_mut101_getters");
+    p.write("getters.py", GETTERS);
+    let found = reports(&p, "MUT101");
+    let mut properties: Vec<&str> = found
+        .iter()
+        .filter(|(line, _, _)| *line == 65)
+        .map(|(_, _, m)| m.rsplit_once("`@cached_property` `").unwrap().1)
+        .map(|rest| rest.split('`').next().unwrap())
+        .collect();
+    properties.sort_unstable();
+    assert_eq!(
+        properties,
+        vec![
+            "merges_self",
+            "returns_self",
+            "spread",
+            "stores_self",
+            "tests_self",
+            "through_dict"
+        ],
+        "{found:#?}"
+    );
+}
+
+/// More unhashable-key and display shapes.
+const DISPLAYS: &str = r#"def lists(A):
+    rows = [[1], [2], [3], [4], [5], [6], [7], [8], [9]]
+    for a in A:
+        for r in rows:
+            if a == r:
+                print(a)
+
+
+def sets(A, c):
+    rows = [{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}] if c else [{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}]
+    alias = rows
+    for a in A:
+        for r in alias:
+            if a == r:
+                print(a)
+
+
+def mixed(A):
+    rows = [[1], (2,), [3], [4], [5], [6], [7], [8], [9]]
+    for a in A:
+        for r in rows:
+            if a == r:
+                print(a)
+"#;
+
+#[test]
+fn opt113_unhashable_display_elements() {
+    let p = Project::new("regr_opt113_displays");
+    p.write("displays.py", DISPLAYS);
+    let found = reports(&p, "OPT113");
+    let advice: Vec<(u64, &str)> = found
+        .iter()
+        .map(|(line, _, m)| (*line, m.split_once("(O(n·m)); ").unwrap().1))
+        .collect();
+    assert_eq!(
+        advice,
+        vec![
+            (
+                5,
+                "`r` is an unhashable `list`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
+            ),
+            (
+                14,
+                "`r` is an unhashable `set`, so index `alias` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
+            ),
+            (22, "build a `set` of `rows` before the outer loop"),
+        ],
+        "{found:#?}"
+    );
+}
+
+/// More uses of the list in the loop: attribute paths, item assignment and `+=` (changes),
+/// a copy inside the loop, and the list returned from it (a read).
+const USES: &str = r#"class Bag:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+
+    def drop(self, xs):
+        for x in xs:
+            self.items.remove(x)
+            print(self.items[0])
+
+    def where(self, xs):
+        for x in xs:
+            i = self.items.index(x)
+            self.items[i] = 0
+
+    def grow(self, xs):
+        for x in xs:
+            if self.items.count(x):
+                self.items += [x]
+
+
+def iterated(items: list[int]):
+    for x in items:
+        if x < 0:
+            items.remove(x)
+
+
+def copied(items: list[int], xs):
+    for x in xs:
+        alias = items
+        items.remove(x)
+        if not x:
+            return alias
+    return None
+"#;
+
+#[test]
+fn opt112_reads_and_changes_through_paths_copies_and_returns() {
+    let p = Project::new("regr_opt112_uses");
+    p.write("uses.py", USES);
+    let found = reports(&p, "OPT112");
+    let advice: Vec<(u64, &str)> = found
+        .iter()
+        .map(|(line, _, m)| {
+            (
+                *line,
+                m.split_once("(O(n²)); ")
+                    .unwrap()
+                    .1
+                    .split(',')
+                    .next()
+                    .unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        advice,
+        vec![
+            (7, "the loop reads the list after each removal"),
+            (12, "the loop changes the list"),
+            (17, "the loop changes the list"),
+            (24, "the loop reads the list after each removal"),
+            (30, "the loop reads the list after each removal"),
+        ],
+        "{found:#?}"
+    );
+}
+
+/// The IR copy of a starred display element does not change how the rewriting rules name what
+/// blocks them: `[*work, *names]` is a use of `work`.
+#[test]
+fn starred_elements_keep_the_names_in_blockers() {
+    let p = Project::new("regr_starred_blocker");
+    p.write(
+        "walk.py",
+        "def walk(paths, names):\n    work = []\n    for p in paths:\n        work.insert(0, p)\n    todo = [*work, *names]\n    return todo\n",
+    );
+    let found = reports(&p, "OPT121");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(
+        found[0]
+            .2
+            .ends_with("[not auto-fixable: DequeEquivalentOps(work): `work` : this use has no `deque` equivalent (line 5)]"),
+        "{found:#?}"
+    );
+}
