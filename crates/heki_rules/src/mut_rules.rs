@@ -41,12 +41,14 @@ fn is_private(name: &str) -> bool {
     last.starts_with('_') && !(last.starts_with("__") && last.ends_with("__"))
 }
 
-pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
-    if !cx.selection.is_enabled("MUT101") {
-        return;
-    }
-    // Methods grouped by owner class fqn; nested classes keep their own qualname.
-    let mut by_class: BTreeMap<String, Vec<Method<'_>>> = BTreeMap::new();
+/// Visit every class of the checked files with its own methods, its family (its methods plus
+/// those of every project subclass), and the private methods its family's `__init__`s call on
+/// `self`. Classes are keyed by owner class fqn, so nested classes stay separate.
+fn for_each_class_family<'a>(
+    cx: &CheckContext<'a>,
+    mut visit: impl FnMut(&[Method<'a>], &[&Method<'a>], &FxHashSet<FuncKey>),
+) {
+    let mut by_class: BTreeMap<String, Vec<Method<'a>>> = BTreeMap::new();
     for unit in cx.units {
         for f in &unit.input.ir.functions {
             if f.is_class_body || f.is_module_body {
@@ -65,13 +67,48 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 });
         }
     }
-    let mut seen = FxHashSet::default();
     for (class, methods) in &by_class {
-        let mut family: Vec<&Method<'_>> = methods.iter().collect();
+        let mut family: Vec<&Method<'a>> = methods.iter().collect();
         for sub in cx.decls.subclasses_of(class) {
             family.extend(by_class.get(&sub).into_iter().flatten());
         }
         let init_called = private_methods_called_from_init(cx, &family);
+        visit(methods, &family, &init_called);
+    }
+}
+
+/// The method's own (local) summary: one write is one report, where it happens, so the
+/// writes merged up from the helpers it calls do not count.
+fn local_summary<'a>(cx: &CheckContext<'a>, m: &Method<'_>) -> Option<&'a EffectSummary> {
+    cx.index
+        .files
+        .get(&m.unit.input.path)
+        .and_then(|f| f.local_functions.get(&m.key))
+}
+
+/// Memo / cache dictionaries by name (`self._cache`, `self.memo`).
+fn is_memo_attr(attr: &str) -> bool {
+    let lower = attr.to_ascii_lowercase();
+    lower.contains("cache") || lower.contains("memo")
+}
+
+/// Disjoint constant dict keys: every read and every write names a constant key, and no key
+/// is both read and written (`self.params["outtmpl"]` vs `self.params["proxy"]`).
+fn disjoint_keys<'k>(
+    reads: impl IntoIterator<Item = &'k Option<String>>,
+    writes: impl IntoIterator<Item = &'k Option<String>>,
+) -> bool {
+    let k_read: Option<BTreeSet<&String>> = reads.into_iter().map(Option::as_ref).collect();
+    let k_write: Option<BTreeSet<&String>> = writes.into_iter().map(Option::as_ref).collect();
+    matches!((k_read, k_write), (Some(kr), Some(kw)) if kr.is_disjoint(&kw))
+}
+
+pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
+    if !cx.selection.is_enabled("MUT101") {
+        return;
+    }
+    let mut seen = FxHashSet::default();
+    for_each_class_family(cx, |methods, family, init_called| {
         for p in methods {
             let Some(ps) = cx.index.summary(&p.key) else {
                 continue;
@@ -85,8 +122,8 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     reads.entry(&r.attr).or_default().push(&r.const_key);
                 }
             }
-            for m in &family {
-                if m.key == p.key || filter1_init(m, &init_called) {
+            for m in family {
+                if m.key == p.key || filter1_init(m, init_called) {
                     continue;
                 }
                 let Some(ms) = cx.index.summary(&m.key) else {
@@ -97,14 +134,7 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 {
                     continue;
                 }
-                // One write is one report, where it happens: only the method's own writes
-                // count (its local summary), not those merged up from the helpers it calls.
-                let Some(local) = cx
-                    .index
-                    .files
-                    .get(&m.unit.input.path)
-                    .and_then(|f| f.local_functions.get(&m.key))
-                else {
+                let Some(local) = local_summary(cx, m) else {
                     continue;
                 };
                 // A private helper whose every caller invalidates the property is covered.
@@ -135,8 +165,7 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         continue;
                     }
                     // Filter 2: memo / cache dictionaries.
-                    let lower = attr.to_ascii_lowercase();
-                    if lower.contains("cache") || lower.contains("memo") {
+                    if is_memo_attr(attr) {
                         continue;
                     }
                     let own = self_attr_writes(m.f, attr);
@@ -144,13 +173,10 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         continue;
                     }
                     // Filter 3: disjoint constant dict keys.
-                    let k_read: Option<BTreeSet<&String>> =
-                        read_keys.iter().map(|k| k.as_ref()).collect();
-                    let k_write: Option<BTreeSet<&String>> =
-                        writes.iter().map(|w| w.const_key.as_ref()).collect();
-                    if let (Some(kr), Some(kw)) = (&k_read, &k_write)
-                        && kr.is_disjoint(kw)
-                    {
+                    if disjoint_keys(
+                        read_keys.iter().copied(),
+                        writes.iter().map(|w| &w.const_key),
+                    ) {
                         continue;
                     }
                     // An overriding `@cached_property` shares the instance `__dict__` slot:
@@ -176,7 +202,7 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 }
             }
         }
-    }
+    });
 }
 
 fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
@@ -215,6 +241,7 @@ fn private_methods_called_from_init(
 
 struct SelfWrite {
     span: Span,
+    block: heki_ir::BlockId,
     /// `setdefault`, or a subscript store guarded by `if k not in self.<attr>:`.
     memo_shaped: bool,
 }
@@ -283,6 +310,7 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
             if let Some(memo_shaped) = w {
                 out.push(SelfWrite {
                     span: inst.span,
+                    block: bb.id,
                     memo_shaped,
                 });
             }
@@ -951,9 +979,225 @@ impl<'a> Mut202Fn<'a> {
 
 // ==================================================================================== MUT107
 
-/// `MUT107`: attributes read by `__hash__` mutated after initialization (scaffold).
+/// `MUT107`: a method of the class (or of a subclass) mutates an attribute `__hash__` reads
+/// after initialization, so instances already stored in a `set` or as `dict` keys can no longer
+/// be found. Reported at the method's first own write of the attribute, once per method and
+/// attribute; the filters are `MUT101`'s (two-phase initialization, memo dictionaries,
+/// disjoint constant keys) plus lazy initialization and `__hash__`'s own cache.
 pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
-    let _ = (cx, out);
+    if !cx.selection.is_enabled("MUT107") {
+        return;
+    }
+    let mut seen = FxHashSet::default();
+    for_each_class_family(cx, |methods, family, init_called| {
+        let hashes: Vec<_> = methods
+            .iter()
+            .filter(|h| h.f.name == "__hash__")
+            .filter_map(|h| Some((h, cx.index.summary(&h.key)?)))
+            .collect();
+        if hashes.is_empty() {
+            return;
+        }
+        let init_helpers = private_methods_named_in_initializers(family);
+        for (h, hs) in hashes {
+            // Filter 5: what the hash computation writes itself (`self._hash = ...`, also
+            // through its `self.helper()` calls) is its cache; a write elsewhere resets it.
+            let cache: BTreeSet<&str> = hs
+                .mutates_self_attrs
+                .iter()
+                .map(|a| a.attr.as_str())
+                .collect();
+            let mut reads: BTreeMap<&str, Vec<&Option<String>>> = BTreeMap::new();
+            for r in &hs.reads_self_attrs {
+                if !cache.contains(r.attr.as_str()) {
+                    reads.entry(&r.attr).or_default().push(&r.const_key);
+                }
+            }
+            // `__init_subclass__` / `__class_getitem__` are implicit class methods: they set
+            // class attributes, not those of an instance.
+            let writers = family
+                .iter()
+                .filter(|m| {
+                    !IMPLICIT_CLASS_METHODS.contains(&m.f.name.as_str())
+                        && m.f.name != "__hash__"
+                        && !filter1_init(m, init_called)
+                        && !init_helpers.contains(&m.key)
+                })
+                .filter_map(|m| Some((m, local_summary(cx, m)?)));
+            for (m, local) in writers {
+                for (attr, read_keys) in &reads {
+                    let writes: Vec<&AttrKeyPath> = local
+                        .mutates_self_attrs
+                        .iter()
+                        .filter(|w| w.attr == *attr)
+                        .collect();
+                    // Filters 3 and 4: memo dictionaries and stored hashes (`self._hash`,
+                    // which a deserialization hook recomputes), disjoint constant keys.
+                    if writes.is_empty()
+                        || is_memo_attr(attr)
+                        || is_stored_hash(attr)
+                        || disjoint_keys(
+                            read_keys.iter().copied(),
+                            writes.iter().map(|w| &w.const_key),
+                        )
+                    {
+                        continue;
+                    }
+                    // Filters 2 and 3: lazy initialization, memo-shaped writes.
+                    let lazy = lazy_init_branches(m.f, attr);
+                    let first = self_attr_writes(m.f, attr).into_iter().find(|w| {
+                        !w.memo_shaped && !lazy.iter().any(|b| dominates(m.f, *b, w.block))
+                    });
+                    let Some(write) = first else {
+                        continue;
+                    };
+                    if !seen.insert((m.key.clone(), attr.to_string())) {
+                        continue;
+                    }
+                    let class_qualname = h.f.owner_class_qualname.as_deref().unwrap_or_default();
+                    cx.emit(
+                        out,
+                        "MUT107",
+                        m.unit,
+                        write.span,
+                        &m.key.qualname,
+                        format!("{class_qualname}.{attr}->__hash__"),
+                        format!(
+                            "`{}` mutates `self.{attr}`, which `{}` reads: instances already stored in a `set` or used as `dict` keys can no longer be found",
+                            m.key.qualname, h.key.qualname
+                        ),
+                        &[],
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Dunder methods Python makes class methods without a decorator.
+const IMPLICIT_CLASS_METHODS: &[&str] = &["__init_subclass__", "__class_getitem__"];
+
+/// A stored hash value (`self._hash`, `self._hashcode`, `self.hash_value`): the hash itself, not
+/// a field it is computed from.
+fn is_stored_hash(attr: &str) -> bool {
+    matches!(
+        attr.trim_start_matches('_').to_ascii_lowercase().as_str(),
+        "hash" | "hashcode" | "hash_code" | "hashvalue" | "hash_value"
+    )
+}
+
+/// Filter 1 (`MUT107`) also covers the private methods the family's initialization methods
+/// call by name on any receiver: `__new__` sets up the instance it allocates
+/// (`self = object.__new__(cls)`, then `self.__setstate(state)`), which is no call on its own
+/// `self`.
+fn private_methods_named_in_initializers<'m>(family: &[&'m Method<'_>]) -> FxHashSet<&'m FuncKey> {
+    let called: FxHashSet<&str> = family
+        .iter()
+        .filter(|m| INIT_METHODS.contains(&m.f.name.as_str()))
+        .flat_map(|m| m.f.blocks.iter().flat_map(|b| &b.insts))
+        .filter_map(|i| match &i.kind {
+            InstKind::MethodCall { method, .. } if is_private(method) => Some(method.as_str()),
+            _ => None,
+        })
+        .collect();
+    family
+        .iter()
+        .filter(|m| called.contains(m.f.name.as_str()))
+        .map(|m| &m.key)
+        .collect()
+}
+
+/// Filter 2 (`MUT107`): the initializing branches of the `None` / falsy guards of
+/// `self.<attr>` in `f` — the `then` block of `if self.<attr> is None:` / `== None` /
+/// `if not self.<attr>:`, the `else` block of `is not None` / `!= None` / `if self.<attr>:`.
+/// Only a block the guard alone leads to counts: an `if` without `else` falls through to a
+/// block that the other branch reaches too.
+fn lazy_init_branches(f: &IrFunction, attr: &str) -> Vec<heki_ir::BlockId> {
+    let self_vars = f
+        .params
+        .first()
+        .map(|p| self_aliases(f, p.var))
+        .unwrap_or_default();
+    let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        if let Some(d) = inst.kind.dst() {
+            defs.insert(d, &inst.kind);
+        }
+    }
+    let loads_attr = |v: &VarId| {
+        let mut v = *v;
+        while let Some(InstKind::Copy { src, .. }) = defs.get(&v) {
+            v = *src;
+        }
+        matches!(defs.get(&v), Some(InstKind::AttrLoad { obj, attr: a, .. }) if self_vars.contains(obj) && a == attr)
+    };
+    let is_none = |v: &VarId| {
+        matches!(
+            defs.get(v),
+            Some(InstKind::Const {
+                literal: ConstLiteral::None,
+                ..
+            })
+        )
+    };
+    let none_test =
+        |l: &VarId, r: &VarId| (loads_attr(l) && is_none(r)) || (is_none(l) && loads_attr(r));
+    let preds = f.predecessors();
+    let mut out = Vec::new();
+    for bb in &f.blocks {
+        let Terminator::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = &bb.terminator
+        else {
+            continue;
+        };
+        let init = match defs.get(cond) {
+            Some(InstKind::Compare {
+                op: CompareOpKind::Is | CompareOpKind::Eq,
+                lhs,
+                rhs,
+                ..
+            }) if none_test(lhs, rhs) => *then_bb,
+            Some(InstKind::Compare {
+                op: CompareOpKind::IsNot | CompareOpKind::NotEq,
+                lhs,
+                rhs,
+                ..
+            }) if none_test(lhs, rhs) => *else_bb,
+            Some(InstKind::UnaryOp {
+                op: heki_ir::UnaryOpKind::Not,
+                operand,
+                ..
+            }) if loads_attr(operand) => *then_bb,
+            _ if loads_attr(cond) => *else_bb,
+            _ => continue,
+        };
+        if preds[init.0 as usize] == [bb.id] {
+            out.push(init);
+        }
+    }
+    out
+}
+
+/// Whether every path from the entry of `f` to block `b` runs through block `d` (normal and
+/// exception edges).
+fn dominates(f: &IrFunction, d: heki_ir::BlockId, b: heki_ir::BlockId) -> bool {
+    let mut seen = FxHashSet::default();
+    let mut stack = vec![heki_ir::BlockId(0)];
+    while let Some(cur) = stack.pop() {
+        if cur == d || !seen.insert(cur) {
+            continue;
+        }
+        if cur == b {
+            return false;
+        }
+        let block = f.block(cur);
+        stack.extend(block.terminator.successors());
+        stack.extend(block.exc_target);
+    }
+    true
 }
 
 // ==================================================================================== MUT106
