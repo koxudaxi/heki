@@ -13,12 +13,48 @@ allowed writers:
 
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
 - through a local alias (`fields = model.fields; fields.append(...)`);
-- through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`;
+- through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`,
+  also with a module-level `Final` string constant for the name (`model.__dict__[FIELDS_KEY]`,
+  imported or not);
+- into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
+  `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
-  reported once at the outermost call site.
+  reported once at the outermost call site. A helper that sees the object's class (an annotated
+  parameter, `self` of a method) reports its own write instead, so a write it routes through
+  the allowed writers stays allowed for its callers; a helper handed the value of an attribute
+  (`helper(field.data_type)`) writes that attribute only when it changes the value in place,
+  and otherwise writes the value's own attributes.
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
-class family).
+class family). A target can also name one entry of the container an attribute holds,
+`Class.attr["key"]`: it matches the writes of that key (`field.extras["init"] = v`,
+`field.extras[INIT]` with a `Final` constant, `field.extras.pop("init")`,
+`del field.extras["init"]`, `field.extras["init"].append(v)`), not a write of the whole
+container (`field.extras = {}`, `field.extras.update(...)`) or with a computed key, which are
+writes of `Class.attr`. When a contract names both a container and one of its entries, a write of
+the entry is reported once, under the entry.
+
+The written object's class is the one heki infers for it, with annotations as hints: a
+parameter, local, attribute, or return annotation, including the items of `list[...]`,
+`Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
+`Mapping[...]`, `tuple[...]`, and `set[...]`; a constructor call; and what the object comes
+from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
+`by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
+`zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
+display, the items appended to a local list, or a comprehension or generator expression. A
+method call or a `@property` / `cached_property` read has the return annotation of the
+definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
+is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
+`model_copy`) has its original's class, calling a `functools.partial` object returns what the
+wrapped function returns, and `typing.cast` names the class. A variable rebound in a loop
+(`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
+classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
+annotation or from different assignments) is each of them, and an `isinstance` check narrows it
+in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
+also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
+classes that implement it structurally (having every member it defines; at most eight, counting
+a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
+or return, `Any`, a value of more than three classes) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call
@@ -49,7 +85,19 @@ family is not reported when the written object is the initializer's own `self`, 
 writes it directly, through a local alias, through `super().__init__()`, or through helpers it
 passes `self` to (`self._init_fields()`, `_setup(self)`). An object that may be `self`
 (`self if flag else other`) gets the benefit of the doubt. Writes to objects that are provably
-not `self` stay reported: another parameter, a fresh instance, an attribute of `self`.
+not `self` stay reported: another parameter, an attribute of `self`.
+
+A write that constructs the object it writes is allowed too (`fresh-objects = "allow"`, the
+default): the object was allocated in the same call chain, by calling its class, by copying
+(`copy.copy`, `copy.deepcopy`, `dataclasses.replace`, `.copy()`, `.model_copy()`), or by a
+project function that returns such an object, and nothing else can hold it yet: no store into
+another object, a container, a global, or a closure, no `yield`, and no call that may keep it
+ran before the write. A project function keeps an object it stores, yields, or hands to code
+heki does not follow or to a function that keeps it; reading or writing it keeps nothing. Writes
+that a helper makes to a new object its caller hands it count as well. A shallow copy shares its
+containers with the original, so only rebinding its attributes constructs it
+(`copied.data_types = [...]`); `copied.data_types.append(x)` changes the original's list and is
+reported. `fresh-objects = "report"` reports these writes like any other.
 
 ## Why is this bad?
 Large code bases often have one component that owns a piece of shared state (a store, a
@@ -115,3 +163,7 @@ No automatic fix.
     allowed writer or an exempt method.
   - `message`: appended to every message of the contract (`use Store.add_field() instead`).
   - `forbid-cached-property-on`: classes on which a `@cached_property` is itself reported.
+  - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
+    they write are reported.
+  - `unresolved`: `"ignore"` (default) or `"report"`: also report the writes the contract
+    cannot tie to a class, under `MUT205`.

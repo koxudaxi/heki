@@ -104,14 +104,15 @@ def pos_dict_kv(items):
 def pos_dict_multi(items):
     d = {}
     for k, v in items:
-        d = {**d, k: v, f"{k}_len": len(str(v))}
+        d = {**d, "key": k, "value": v}
     return d
 
 
 def pos_dict_merge(dicts):
     merged = {}
     for extra in dicts:
-        merged = {**merged, **extra}
+        part = dict(extra)
+        merged = {**merged, **part}
     return merged
 
 

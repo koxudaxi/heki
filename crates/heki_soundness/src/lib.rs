@@ -28,7 +28,7 @@ pub use opt_rules::{
 
 use heki_ast::{LineIndex, Span};
 use heki_ir::{BuiltinKind, VarId};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
@@ -195,6 +195,10 @@ pub struct FrameState {
     /// Element kinds of each allocated `list` / `tuple` / `set` (absent: not allocated on
     /// every path reaching this point).
     pub alloc_elems: FxHashMap<AllocId, ElemKinds>,
+    /// Variables that may hold an object no site of their `points_to` names: on some path
+    /// they come from a parameter, an unknown result, or a container element. Facts about the
+    /// objects of `points_to` (their elements) do not describe such a variable.
+    pub points_to_incomplete: FxHashSet<VarId>,
 }
 
 /// Three-valued Proof Obligation status (ADR-003 / ADR-006).

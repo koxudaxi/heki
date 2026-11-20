@@ -6,9 +6,9 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, Facts,
-    FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared, TypeCtx, Val, WriteKind,
-    self_aliases,
+    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, Construction,
+    EffectSummary, Facts, FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared,
+    TypeCtx, TypedFieldWriteSite, Val, self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -137,6 +137,7 @@ fn local_summary<'a>(cx: &CheckContext<'a>, m: &Method<'_>) -> Option<&'a Effect
         .files
         .get(m.path)
         .and_then(|f| f.local_functions.get(&m.key))
+        .map(|s| &**s)
 }
 
 /// Memo / cache dictionaries by name (`self._cache`, `self.memo`).
@@ -436,11 +437,14 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
 
 // ==================================================================================== MUT201
 
-/// A `Class.attr` contract target (`write-owners`, `read-owners`, `effect-boundaries`).
+/// A `Class.attr` contract target (`write-owners`, `read-owners`, `effect-boundaries`), or
+/// an entry of the container an attribute holds (`Class.attr["key"]`, write targets only).
 pub(crate) struct ContractTarget {
     /// The configured text (diagnostic target and baseline key).
     pub text: String,
     attr: DottedPattern,
+    /// The entry key of an item target.
+    pub key: Option<String>,
     /// Project classes (fqn) the class pattern names, plus all their subclasses: the
     /// target's class family.
     pub classes: FxHashSet<String>,
@@ -450,6 +454,53 @@ impl ContractTarget {
     pub fn matches(&self, class: &str, attr: &str) -> bool {
         self.classes.contains(class) && self.attr.matches(attr)
     }
+
+    /// Whether the attribute pattern matches `attr`, whatever the class.
+    pub fn matches_attr(&self, attr: &str) -> bool {
+        self.attr.matches(attr)
+    }
+
+    /// Whether `site` writes the target: its class and attribute, and for an item target the
+    /// entry with its key (a write of the whole container, or with a computed key, writes the
+    /// attribute only).
+    pub fn matches_write(&self, site: &TypedFieldWriteSite) -> bool {
+        self.matches(&site.class_qualname, &site.attr)
+            && self
+                .key
+                .as_ref()
+                .is_none_or(|k| site.key.as_ref() == Some(k))
+    }
+}
+
+/// The targets of one contract `site` writes (by index): the item targets naming the entry it
+/// changes when there are any, else the attribute targets, so a write of one entry is reported
+/// once, under its most specific target.
+pub(crate) fn write_hits<'t>(
+    targets: &'t [ContractTarget],
+    site: &TypedFieldWriteSite,
+) -> Vec<(usize, &'t ContractTarget)> {
+    let hits: Vec<(usize, &ContractTarget)> = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.matches_write(site))
+        .collect();
+    if hits.iter().any(|(_, t)| t.key.is_some()) {
+        hits.into_iter().filter(|(_, t)| t.key.is_some()).collect()
+    } else {
+        hits
+    }
+}
+
+/// `Class.attr["key"]` / `Class.attr['key']` -> (`Class.attr`, `key`).
+fn split_item(text: &str) -> Option<(&str, &str)> {
+    let quote = match text.as_bytes() {
+        [.., q @ (b'"' | b'\''), b']'] => char::from(*q),
+        _ => return None,
+    };
+    let open = format!("[{quote}");
+    let start = text.rfind(&open)?;
+    let key = text.get(start + 2..text.len() - 2)?;
+    (!key.contains(quote)).then_some((&text[..start], key))
 }
 
 /// Every project class (fqn), sorted.
@@ -478,8 +529,8 @@ fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> 
     out
 }
 
-/// Parse `Class.attr` targets: a target without a dot is `InvalidTarget { section }`, a bad
-/// glob `Glob { context }`.
+/// Parse `Class.attr` (and `Class.attr["key"]`) targets: a target without a dot is
+/// `InvalidTarget { section }`, a bad glob `Glob { context }`.
 pub(crate) fn parse_targets(
     cx: &CheckContext<'_>,
     all: &[String],
@@ -489,7 +540,11 @@ pub(crate) fn parse_targets(
 ) -> Result<Vec<ContractTarget>, RuleConfigError> {
     let mut out = Vec::new();
     for t in targets {
-        let Some((class, attr)) = t.rsplit_once('.') else {
+        let (base, key) = match split_item(t) {
+            Some((base, key)) => (base, Some(key.to_owned())),
+            None => (t.as_str(), None),
+        };
+        let Some((class, attr)) = base.rsplit_once('.') else {
             return Err(RuleConfigError::InvalidTarget {
                 section,
                 target: t.clone(),
@@ -499,7 +554,27 @@ pub(crate) fn parse_targets(
         out.push(ContractTarget {
             text: t.clone(),
             attr: DottedPattern::new(attr, context)?,
+            key,
             classes: class_set(cx, &class, all),
+        });
+    }
+    Ok(out)
+}
+
+/// [`parse_targets`] for reads: an item target is `ItemTarget { section }` (a read site is an
+/// attribute read).
+pub(crate) fn parse_read_targets(
+    cx: &CheckContext<'_>,
+    all: &[String],
+    targets: &[String],
+    section: &'static str,
+    context: &'static str,
+) -> Result<Vec<ContractTarget>, RuleConfigError> {
+    let out = parse_targets(cx, all, targets, section, context)?;
+    if let Some(t) = out.iter().find(|t| t.key.is_some()) {
+        return Err(RuleConfigError::ItemTarget {
+            section,
+            target: t.text.clone(),
         });
     }
     Ok(out)
@@ -814,32 +889,6 @@ fn runs_inside_allowed(
     allowed_contexts
 }
 
-/// Whether `func`'s own summary holds the write `site` (as its caller sees it): the same write
-/// at the same location, by `func` itself (`own`) or through its callees. A function iterating a
-/// generator it is handed does not: the generator's writes reach the function that handed it
-/// over, and only that one.
-fn holds_write(
-    cx: &CheckContext<'_>,
-    func: &FuncKey,
-    site: &heki_effect::TypedFieldWriteSite,
-    own: bool,
-) -> bool {
-    let origin = site.via_chain.last().map(|h| h.callee.as_str());
-    cx.index.summary(func).is_some_and(|s| {
-        s.typed_field_write_sites.iter().any(|t| {
-            t.class_qualname == site.class_qualname
-                && t.attr == site.attr
-                && t.kind == site.kind
-                && t.span == site.span
-                && if own {
-                    t.via_chain.is_empty()
-                } else {
-                    t.via_chain.last().map(|h| h.callee.as_str()) == origin
-                }
-        })
-    })
-}
-
 /// `base`, then `: note` when the contract sets a `message`.
 pub(crate) fn with_note(base: String, note: Option<&str>) -> String {
     match note {
@@ -912,21 +961,82 @@ impl<'u> MergedReports<'u> {
     }
 }
 
+/// `unresolved` values; the first is the default (writes heki cannot tie to a class are not
+/// reported).
+const UNRESOLVED: &[&str] = &["ignore", "report"];
+
+/// `fresh-objects` values; the first is the default (writes that construct an object are no
+/// violation).
+const FRESH_OBJECTS: &[&str] = &["allow", "report"];
+
+/// Whether a contract allows the writes that construct the object they write (`fresh-objects`).
+pub(crate) fn allows_fresh(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        FRESH_OBJECTS,
+        "`allow` or `report`",
+        section,
+        contract,
+        "fresh-objects",
+    )? == "allow")
+}
+
+/// The value of a contract's mode key, one of `values` (the first when unset).
+fn mode(
+    value: Option<&str>,
+    values: &'static [&'static str],
+    expected: &'static str,
+    section: &'static str,
+    contract: &str,
+    key: &'static str,
+) -> Result<&'static str, RuleConfigError> {
+    let Some(value) = value else {
+        return Ok(values[0]);
+    };
+    values
+        .iter()
+        .find(|v| **v == value)
+        .copied()
+        .ok_or_else(|| RuleConfigError::UnknownMode {
+            section,
+            contract: contract.to_owned(),
+            key,
+            value: value.to_owned(),
+            expected,
+        })
+}
+
 struct OwnerRule<'r> {
     name: &'r str,
     targets: Vec<ContractTarget>,
     allowance: Allowance,
     forbid_cached: FxHashSet<String>,
     note: Option<&'r str>,
+    /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
+    allow_fresh: bool,
+    /// `unresolved = "report"`: writes heki cannot tie to a class are reported (`MUT205`).
+    report_unresolved: bool,
 }
 
 pub(crate) fn mut201(
     cx: &CheckContext<'_>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
-    if !cx.selection.is_enabled("MUT201") || cx.config.write_owners.is_empty() {
+    let (writes, unresolved) = (
+        cx.selection.is_enabled("MUT201"),
+        cx.selection.is_enabled("MUT205"),
+    );
+    if !writes && !unresolved || cx.config.write_owners.is_empty() {
         return Ok(());
     }
+    debug_assert!(
+        cx.index.propagates_typed_writes(),
+        "`typed_writes` decides for MUT201"
+    );
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
     for rule in &cx.config.write_owners {
@@ -953,7 +1063,21 @@ pub(crate) fn mut201(
             allowance,
             forbid_cached,
             note: rule.message.as_deref(),
+            allow_fresh: allows_fresh(rule.fresh_objects.as_deref(), "write-owners", &rule.name)?,
+            report_unresolved: mode(
+                rule.unresolved.as_deref(),
+                UNRESOLVED,
+                "`ignore` or `report`",
+                "write-owners",
+                &rule.name,
+                "unresolved",
+            )? == "report",
         });
+    }
+
+    unresolved::mut205(cx, &rules, out);
+    if !writes {
+        return Ok(());
     }
 
     let mut keys_by_fqn: FxHashMap<String, FuncKey> = FxHashMap::default();
@@ -977,10 +1101,11 @@ pub(crate) fn mut201(
         for (key, s) in funcs {
             for site in &s.typed_field_write_sites {
                 for rule in &rules {
-                    for t in &rule.targets {
-                        if !t.matches(&site.class_qualname, &site.attr) {
-                            continue;
-                        }
+                    // Constructing an object is no write of its owners' state.
+                    if rule.allow_fresh && site.construction == Construction::Yes {
+                        continue;
+                    }
+                    for (_, t) in write_hits(&rule.targets, site) {
                         let mut chain: Vec<FuncKey> = vec![key.clone()];
                         chain.extend(
                             site.via_chain
@@ -994,22 +1119,14 @@ pub(crate) fn mut201(
                         {
                             continue;
                         }
-                        let origin = if site.kind == WriteKind::IndirectHelper && chain.len() >= 2 {
-                            chain.len() - 2
-                        } else {
-                            chain.len() - 1
-                        };
-                        // Report at the outermost function: helpers in between must be private
-                        // (they delegate) unless they do not hold the write themselves (a function
-                        // iterating a generator it is handed runs the generator's writes without
-                        // knowing them), and a delegating function leaves it to its callers.
+                        // Report at the outermost function: a write site only reaches callers
+                        // through private helpers (and the functions iterating a generator they
+                        // are handed, which run its writes without holding them), so the chain
+                        // needs no check here; a delegating function leaves it to its callers.
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let last = chain.len() - 1;
-                        if !chain[1..=origin].iter().enumerate().all(|(i, k)| {
-                            is_private(&k.qualname) || !holds_write(cx, k, site, i + 1 == last)
-                        }) || delegates(cx, sites, key)
+                        if delegates(cx, sites, key)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
                         {
                             continue;
@@ -1058,7 +1175,7 @@ pub(crate) fn mut201(
                                     rule.note,
                                 )
                             },
-                            || site.via_chain.clone(),
+                            || heki_effect::owned_chain(&site.via_chain),
                         );
                     }
                 }
@@ -1099,6 +1216,10 @@ pub(crate) fn mut201(
     }
     Ok(())
 }
+
+// ==================================================================================== MUT205
+
+mod unresolved;
 
 // ==================================================================================== MUT202
 
@@ -1375,7 +1496,7 @@ impl<'a> Mut202Fn<'a> {
                     span,
                     path: self.unit.input.path.clone(),
                 }];
-                via.extend(r.chain.iter().cloned());
+                via.extend(heki_effect::owned_chain(&r.chain));
                 Ro::new(r.producer.clone(), r.shared, via)
             }),
             Callee::External(sym) => self
@@ -1870,7 +1991,7 @@ pub(crate) fn mut203(
     for rule in &cx.config.read_owners {
         rules.push(ReadOwnerRule {
             name: &rule.name,
-            targets: parse_targets(
+            targets: parse_read_targets(
                 cx,
                 &all_classes,
                 &rule.targets,

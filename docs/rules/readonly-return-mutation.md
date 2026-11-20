@@ -21,11 +21,10 @@ that mutate their argument (also run on a worker thread: `asyncio.to_thread(clea
 followed, also on the call result itself
 (`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
-reference), and the deep copy sanitizers of the ecosystem knowledge base clear
-it, shallow copies (`copy.copy`, `.copy()`, a sanitizer declared `copy-sanitizer = "shallow"`)
-free the top level only: the values below stay shared.
-A wrapper that returns a copy on one path and the shared value on another still returns a
-shared value.
+reference), and the deep copy sanitizers of the ecosystem knowledge base clear it, shallow copies
+(`copy.copy`, `.copy()`, `dataclasses.replace(...)`, a sanitizer declared
+`copy-sanitizer = "shallow"`) free the top level only: the values below stay shared. A wrapper
+that returns a copy on one path and the shared value on another still returns a shared value.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone

@@ -6,7 +6,8 @@
 opaque_packages = [
     "builtins", "asyncio", "socket", "ssl", "subprocess", "time", "io", "os",
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
-    "itertools", "collections", "threading", "multiprocessing", "concurrent", "queue",
+    "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
+    "queue",
 ]
 
 # --- Sleep ---
@@ -517,6 +518,17 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "copy.copy"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+# `replace` copies its argument with some fields changed (Python 3.13 added `copy.replace`).
+[[entries]]
+symbol = "copy.replace"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "dataclasses.replace"
 copy_sanitizer = "shallow"
 opaque_to_layer3 = true
 

@@ -61,7 +61,7 @@ app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes `valu
   |     ^
   = related: app/stats.py:9:5: `median` calls `app.stats.sort_values`
 
-Found 2 diagnostic(s) in 4 file(s).
+Found 2 diagnostic(s) in 3 file(s).
 ```
 
 > **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
@@ -151,7 +151,7 @@ $ heki server                                   # LSP server for editors
 - [Getting started](https://heki.koxudaxi.dev/getting-started/)
 - [Scope and limitations](https://heki.koxudaxi.dev/scope/)
 - [Configuration](https://heki.koxudaxi.dev/configuration/)
-- [Rules](https://heki.koxudaxi.dev/rules/) (29 rules)
+- [Rules](https://heki.koxudaxi.dev/rules/) (30 rules)
 - [Fixes and safety](https://heki.koxudaxi.dev/fixes/)
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/)
 - [Editors (LSP)](https://heki.koxudaxi.dev/lsp/) and

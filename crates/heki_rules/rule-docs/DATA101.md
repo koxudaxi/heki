@@ -28,7 +28,7 @@ def load(chunks: list[pd.DataFrame]) -> pd.DataFrame:
 Use instead:
 ```python
 def load(chunks: list[pd.DataFrame]) -> pd.DataFrame:
-    return pd.concat(chunks)
+    return pd.concat(chunks) if chunks else pd.DataFrame()  # `pd.concat([])` raises
 ```
 
 ## Fix safety
