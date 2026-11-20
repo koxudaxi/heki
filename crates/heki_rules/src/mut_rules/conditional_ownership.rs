@@ -712,31 +712,9 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             else {
                 return None;
             };
-            let (mut cur, mut negated) = (cond, false);
-            for _ in 0..8 {
-                match self.defs.get(&cur).map(|i| &i.kind)? {
-                    InstKind::UnaryOp {
-                        op: UnaryOpKind::Not,
-                        operand,
-                        ..
-                    } => {
-                        negated = !negated;
-                        cur = *operand;
-                    }
-                    InstKind::Copy { src, .. } => cur = *src,
-                    InstKind::Compare { op, lhs, rhs, .. } => {
-                        let is = match op {
-                            CompareOpKind::Is => !negated,
-                            CompareOpKind::IsNot => negated,
-                            _ => return None,
-                        };
-                        let fails = if is { else_bb } else { then_bb };
-                        return (fails == side).then_some((*lhs, *rhs));
-                    }
-                    _ => return None,
-                }
-            }
-            None
+            let (same, lhs, rhs) = identity_condition(&self.defs, cond)?;
+            let fails = if same { else_bb } else { then_bb };
+            (fails == side).then_some((lhs, rhs))
         };
         test(from, to).or_else(|| {
             let b = self.f.block(from);
@@ -1035,6 +1013,37 @@ fn changes_itself(facts: &EffectSummary, pos: usize) -> bool {
         .is_some_and(|paths| paths.contains(""))
 }
 
+/// The `is` / `is not` comparison a branch condition `cond` is, through `not` and copies:
+/// whether the condition is true when its operands are the same object, and the operands. The
+/// walk ends: it follows values that instructions define, and a cycle of values passes through
+/// a phi (`heki_ir` keeps the phi of a loop no path enters rather than close its copies into a
+/// cycle).
+fn identity_condition(defs: &FxHashMap<VarId, &Inst>, cond: VarId) -> Option<(bool, VarId, VarId)> {
+    let (mut cur, mut negated) = (cond, false);
+    loop {
+        match &defs.get(&cur)?.kind {
+            InstKind::UnaryOp {
+                op: UnaryOpKind::Not,
+                operand,
+                ..
+            } => {
+                negated = !negated;
+                cur = *operand;
+            }
+            InstKind::Copy { src, .. } => cur = *src,
+            InstKind::Compare { op, lhs, rhs, .. } => {
+                let same = match op {
+                    CompareOpKind::Is => !negated,
+                    CompareOpKind::IsNot => negated,
+                    _ => return None,
+                };
+                return Some((same, *lhs, *rhs));
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// The parameters (their variables) that an `is` / `is not` comparison deciding a branch tests
 /// against a constant, a global, or an attribute, also through copies and phis: `if out is None:
 /// out = []` replaces such a parameter with a new object only when the caller passes none.
@@ -1050,31 +1059,14 @@ fn identity_tested_params(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>) -> FxH
         let Terminator::Branch { cond, .. } = b.terminator else {
             continue;
         };
-        let mut cur = cond;
-        for _ in 0..8 {
-            match defs.get(&cur).map(|i| &i.kind) {
-                Some(InstKind::UnaryOp {
-                    op: UnaryOpKind::Not,
-                    operand,
-                    ..
-                }) => cur = *operand,
-                Some(InstKind::Copy { src, .. }) => cur = *src,
-                Some(InstKind::Compare {
-                    op: CompareOpKind::Is | CompareOpKind::IsNot,
-                    lhs,
-                    rhs,
-                    ..
-                }) => {
-                    if sentinel(rhs) {
-                        tested.push(*lhs);
-                    }
-                    if sentinel(lhs) {
-                        tested.push(*rhs);
-                    }
-                    break;
-                }
-                _ => break,
-            }
+        let Some((_, lhs, rhs)) = identity_condition(defs, cond) else {
+            continue;
+        };
+        if sentinel(&rhs) {
+            tested.push(lhs);
+        }
+        if sentinel(&lhs) {
+            tested.push(rhs);
         }
     }
     let phis: FxHashMap<VarId, &heki_ir::PhiNode> = f
