@@ -89,27 +89,19 @@ fn a_typing_stub_importing_builtins_patches_nothing() {
 }
 
 #[test]
-fn syntax_newer_than_the_target_version_is_a_syntax_error() {
+fn syntax_newer_than_the_target_version_is_analyzed_not_reported() {
+    // Reporting syntax the target cannot run is Ruff's single-file check; heki analyzes the
+    // file with the newest grammar and the target's semantics.
     let p = Project::new("disc_target_syntax");
-    p.write("a.py", "lazy import json\n\n\ndef f():\n    return json\n")
-        .write("types.pyi", "type Alias = int\n");
-    let (code, _, stderr) = p.check(&["--target-version", "py311"]);
-    assert_eq!(code, 2);
-    assert!(
-        stderr
-            .contains("a.py:1:1: syntax error: Cannot use `lazy` import statement on Python 3.11"),
-        "{stderr}"
-    );
-    // A stub never runs: `type` statements there are fine on 3.11.
-    assert!(!stderr.contains("types.pyi"), "{stderr}");
-    let (code, _, stderr) = p.check(&["--target-version", "py315"]);
-    assert_eq!(code, 0, "{stderr}");
-    // The target can come from `requires-python`.
     p.write(
-        "pyproject.toml",
-        "[project]\nname = \"t\"\nrequires-python = \">=3.13\"\n",
+        "templates.py",
+        "import time\n\n\nasync def render(name):\n    time.sleep(1)\n    return t\"hello {name}\"\n",
     );
-    assert_eq!(p.check(&[]).0, 2);
+    let (code, stdout, stderr) =
+        p.check(&["--target-version", "py311", "--output-format", "concise"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.contains("templates.py:5:5: EFF101 "), "{stdout}");
+    assert!(!stderr.contains("syntax error"), "{stderr}");
 }
 
 #[test]

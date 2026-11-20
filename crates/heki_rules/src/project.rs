@@ -239,13 +239,7 @@ pub fn parse_source(
     layout: ModuleLayout,
     runtime: RuntimeProfile,
 ) -> Result<ParsedFile, String> {
-    // A typing stub is never run: it may spell annotations with newer syntax than the target.
-    let parsed = if heki_effect::is_stub(path) {
-        heki_ast::parse_module(&source)
-    } else {
-        heki_ast::parse_module_for(&source, runtime.python_version)
-    };
-    let parsed = parsed.map_err(|errs| {
+    let parsed = heki_ast::parse_module(&source).map_err(|errs| {
         let index = LineIndex::from_source(&source);
         let first = &errs[0];
         let (line, col) = index.line_col(first.span.start);

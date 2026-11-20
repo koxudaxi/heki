@@ -163,45 +163,13 @@ impl ParsedModule {
 
 /// Parse Python source text with Python 3.15 syntax enabled (including PEP 810 `lazy import`).
 pub fn parse_module(source: &str) -> Result<ParsedModule, Vec<ParseError>> {
-    parse(source, ruff_python_ast::PythonVersion::PY315, false)
-}
-
-/// Parse a module whose code runs on `target`: syntax newer than `target` (`match` before
-/// 3.10, PEP 695 before 3.12, `lazy import` before 3.15, ...) is a syntax error, as that
-/// CPython reports it.
-pub fn parse_module_for(
-    source: &str,
-    target: heki_env::PythonVersion,
-) -> Result<ParsedModule, Vec<ParseError>> {
-    let version = ruff_python_ast::PythonVersion::from((target.major, target.minor));
-    parse(source, version, true)
-}
-
-fn parse(
-    source: &str,
-    version: ruff_python_ast::PythonVersion,
-    newer_syntax_is_an_error: bool,
-) -> Result<ParsedModule, Vec<ParseError>> {
     let options = ruff_python_parser::ParseOptions::from(ruff_python_ast::PySourceType::Python)
-        .with_target_version(version);
+        .with_target_version(ruff_python_ast::PythonVersion::PY315);
     let parsed = ruff_python_parser::parse_unchecked(source, options)
         .try_into_module()
         .expect("Python source type always parses into ModModule");
     let wrapper = ParsedModule { parsed };
-    let mut errs = wrapper.errors();
-    if newer_syntax_is_an_error {
-        errs.extend(
-            wrapper
-                .parsed
-                .unsupported_syntax_errors()
-                .iter()
-                .map(|err| ParseError {
-                    span: Span::from(err.range),
-                    message: err.to_string(),
-                }),
-        );
-        errs.sort_by_key(|e| e.span);
-    }
+    let errs = wrapper.errors();
     if errs.is_empty() {
         Ok(wrapper)
     } else {
@@ -242,23 +210,6 @@ def nested():
         assert_eq!(
             imports[4].names[0],
             ("os.path".to_string(), Some("osp".to_string()))
-        );
-    }
-
-    #[test]
-    fn newer_syntax_than_the_target_is_a_syntax_error() {
-        let src = "x = 1\nlazy import json\n";
-        assert!(parse_module(src).is_ok());
-        assert!(parse_module_for(src, heki_env::PythonVersion::PY315).is_ok());
-        let errs = parse_module_for(src, heki_env::PythonVersion::PY311)
-            .err()
-            .unwrap();
-        assert_eq!(errs.len(), 1);
-        assert_eq!(errs[0].span.start, 6);
-        assert!(
-            errs[0].message.contains("Python 3.11"),
-            "{}",
-            errs[0].message
         );
     }
 
