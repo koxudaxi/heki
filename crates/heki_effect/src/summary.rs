@@ -19,7 +19,7 @@ use crate::{
 use heki_ast::Span;
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
-    InstKind, IrFunction, NaturalLoop, PhiNode, Terminator, VarId,
+    InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -145,7 +145,22 @@ fn extract_module(
             module: input.module_name.clone(),
             qualname: func_qualname(f).to_owned(),
         };
-        let (summary, mut sites, flow) = Extractor::new(f, &key, &cx, &input.path, contracts).run();
+        let (mut summary, mut sites, flow) =
+            Extractor::new(f, &key, &cx, &input.path, contracts).run();
+        // A `class` statement in a function runs its body there: the body's effects and calls
+        // are the function's (its methods run only when they are called).
+        if !f.is_module_body {
+            for body in class_bodies_run_by(input.ir, f) {
+                let (s, body_sites, _) =
+                    Extractor::new(body, &key, &cx, &input.path, contracts).run();
+                absorb_class_body(&mut summary, s);
+                sites.extend(
+                    body_sites
+                        .into_iter()
+                        .map(|site| CallSite { flow: None, ..site }),
+                );
+            }
+        }
         for site in &sites {
             if let CallTarget::Project(callees) = &site.target {
                 for c in callees {
@@ -183,6 +198,48 @@ fn extract_module(
         }
     }
     file
+}
+
+/// The class bodies the `class` statements of `f` run, nested classes included.
+fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFunction> {
+    let mut out = Vec::new();
+    let mut stack = vec![f];
+    while let Some(g) = stack.pop() {
+        for inst in g.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::MakeClosure {
+                func_id: Some(id), ..
+            } = &inst.kind
+                && ir.function(*id).is_class_body
+            {
+                out.push(ir.function(*id));
+                stack.push(ir.function(*id));
+            }
+        }
+    }
+    out
+}
+
+/// Add the facts of a class body the function runs (`body`) to the function's own: its
+/// execution effects and the project attributes it writes and reads.
+fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
+    for e in &body.direct_exec_effects {
+        let had = into.direct_exec_effects.contains(e);
+        let occ = body.exec_guards.get(e).cloned().unwrap_or_default();
+        guards::add_occurrence(&mut into.exec_guards, *e, had, &occ);
+    }
+    into.direct_exec_effects.extend(body.direct_exec_effects);
+    into.transitive_exec_effects
+        .extend(body.transitive_exec_effects);
+    for (k, chain) in body.exec_chains {
+        into.exec_chains.entry(k).or_insert(chain);
+    }
+    into.typed_field_write_sites
+        .extend(body.typed_field_write_sites);
+    into.typed_field_read_sites
+        .extend(body.typed_field_read_sites);
+    into.private_calls.extend(body.private_calls);
+    into.unknown_calls |= body.unknown_calls;
+    into.refresh_typed_field_writes();
 }
 
 /// A `@typing.overload` signature.

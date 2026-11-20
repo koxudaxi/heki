@@ -1087,9 +1087,10 @@ fn reported_and_marked(name: &str, files: &[(&str, &str)], rules: &[&str]) -> (M
     (reported, marked)
 }
 
-/// What runs where a generator is made and iterated: the implementation behind
-/// `typing.overload` signatures, stepping by `any` / `all`, a generator a property returns, and
-/// one of several generators a branch chooses.
+/// What runs where a function is called, a generator is made and iterated, and a class is
+/// defined: the implementation behind `typing.overload` signatures, stepping by `any` / `all`,
+/// a generator a property returns, one of several generators a branch chooses, and the body of
+/// a class a function defines (its methods run only when called).
 const DEFERRED: &str = r#"import time
 import typing
 
@@ -1148,10 +1149,23 @@ async def chosen_or_empty(flag):
 async def chosen_not_iterated(flag):
     it = rows(1) if flag else rows(2)
     return it
+
+
+async def local_class():
+    class Local:
+        value = time.sleep(1)  # EFF101
+
+        class Inner:
+            other = time.sleep(2)  # EFF101
+
+        def later(self):
+            time.sleep(3)
+
+    return Local
 "#;
 
 #[test]
-fn generator_bodies_run_where_their_generator_is_iterated() {
+fn bodies_run_where_python_runs_them() {
     let (reported, marked) = reported_and_marked(
         "deferred_bodies",
         &[("pkg/deferred.py", DEFERRED)],
