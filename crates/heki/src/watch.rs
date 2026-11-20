@@ -25,6 +25,12 @@ use std::time::{Duration, SystemTime};
 
 const POLL: Duration = Duration::from_millis(200);
 
+/// After a poll finds changed files, the watch polls again this long later, until a poll finds
+/// no further change (at most `SETTLE_ROUNDS` times): files saved together, or written in
+/// steps, are re-checked once, in their final state.
+const SETTLE: Duration = Duration::from_millis(100);
+const SETTLE_ROUNDS: usize = 10;
+
 /// Files whose timestamps are younger than this at a poll may still change without changing
 /// them (file systems with coarse timestamps): their content is compared too (`Stamp`).
 const RACY: Duration = Duration::from_secs(2);
@@ -439,6 +445,14 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                 // The racy files' content hashes of this poll are what the next one compares.
                 files = now_files;
                 continue;
+            }
+            let mut now_files = now_files;
+            for _ in 0..SETTLE_ROUNDS {
+                std::thread::sleep(SETTLE);
+                match w.scan(&ws.env, &now_files) {
+                    Ok(settled) if !unchanged(&now_files, &settled) => now_files = settled,
+                    _ => break,
+                }
             }
             report.failure = None;
             report.apply(ws, &files, &now_files);
