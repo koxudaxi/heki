@@ -1,5 +1,6 @@
 //! Which functions a call runs, end to end through the real binary: methods found along
-//! Python's MRO (C3 linearization).
+//! Python's MRO (C3 linearization), and constructing a named class (its own `__init__`, not a
+//! subclass's) and calling a method through it.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -103,4 +104,51 @@ async def plain(x: Plain):
 #[test]
 fn methods_are_found_along_the_c3_linearization() {
     check_marks("mro_c3", &[("pkg/diamond.py", DIAMOND)], &["EFF101"]);
+}
+
+/// A named class constructs itself and finds its own methods; `cls` in a class method may be
+/// any subclass.
+const NAMED: &str = r#"import time
+
+
+class Base:
+    def read(self):
+        return 1
+
+    @classmethod
+    def make(cls):
+        return cls()
+
+
+class Slow(Base):
+    def __init__(self):
+        time.sleep(1)
+
+    def read(self):
+        time.sleep(1)
+
+
+async def construct_base():
+    Base()
+
+
+async def construct_slow():
+    Slow()  # EFF101
+
+
+async def through_base(obj):
+    Base.read(obj)
+
+
+async def through_slow(obj):
+    Slow.read(obj)  # EFF101
+
+
+async def through_cls():
+    Base.make()  # EFF101
+"#;
+
+#[test]
+fn a_named_class_constructs_itself_and_finds_its_own_methods() {
+    check_marks("named_class", &[("pkg/named.py", NAMED)], &["EFF101"]);
 }

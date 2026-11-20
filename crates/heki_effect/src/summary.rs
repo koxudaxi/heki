@@ -717,7 +717,7 @@ impl<'a> Extractor<'a> {
                 callee_var: Some(c),
                 ..
             } = &inst.kind
-                && matches!(self.val(*c), Some(Val::Ref(fqn)) if self.cx.project.is_project_class(fqn))
+                && matches!(self.val(*c), Some(Val::Ref(fqn) | Val::Class(fqn)) if self.cx.project.is_project_class(fqn))
             {
                 self.fresh.insert(*dst);
             }
@@ -1319,11 +1319,13 @@ impl<'a> Extractor<'a> {
                         .and_then(|n| n.parse::<u32>().ok())
                         .map_or(Callee::Unresolved, |id| self.child_callee(FunctionId(id))),
                 };
-                // `Model(...)`: calling a named class binds the receiver of its `__init__`; a
+                // `Model(...)`: calling a class object binds the receiver of its `__init__`; a
                 // class without a project `__init__` resolves to its own name.
                 let constructs = match (callee_val, &target) {
-                    (Some(Val::Ref(fqn)), Callee::Project(_, true)) => Some(fqn.clone()),
-                    (Some(Val::Ref(fqn)), Callee::External(_))
+                    (Some(Val::Ref(fqn) | Val::Class(fqn)), Callee::Project(_, true)) => {
+                        Some(fqn.clone())
+                    }
+                    (Some(Val::Ref(fqn) | Val::Class(fqn)), Callee::External(_))
                         if self.cx.project.class_qualname(fqn).is_some() =>
                     {
                         Some(fqn.clone())

@@ -132,7 +132,10 @@ the targets of write and read boundaries.
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
 A method called on an instance is the definition the class's MRO (Python's C3 linearization of
-its project bases) finds first, plus the overrides of its project subclasses (Priority 4).
+its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
+named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
+`Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
+`cls()` and `cls.method()` dispatch like a call on an instance.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that

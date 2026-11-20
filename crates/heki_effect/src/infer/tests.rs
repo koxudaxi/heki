@@ -42,6 +42,7 @@ fn input(b: &Built) -> ModuleInput<'_> {
 fn show(v: &Val) -> String {
     match v {
         Val::Ref(f) => format!("ref {f}"),
+        Val::Class(c) => format!("class {c}"),
         Val::Inst(c) => c.clone(),
         Val::Super(c) => format!("super {c}"),
         Val::Union(cs) => cs.join(" | "),
@@ -645,7 +646,7 @@ class Owner:
 "#,
     );
     assert_eq!(of(&types(&src, "Owner.method"), "it"), one("m.Owner"));
-    assert_eq!(of(&types(&src, "Owner.build"), "made"), one("ref m.Owner"));
+    assert_eq!(of(&types(&src, "Owner.build"), "made"), one("class m.Owner"));
     assert!(of(&types(&src, "Owner.helper"), "same").is_empty());
     assert_eq!(
         of(&types(&src, "Owner.sup"), "parent"),

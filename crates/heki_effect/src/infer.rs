@@ -397,7 +397,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         for (i, p) in f.params.iter().enumerate() {
             let fact = match &self.owner {
                 Some(owner) if i == 0 && !is_static => Fact::Known(if is_classmethod {
-                    Ty::Ref(owner.clone())
+                    Ty::Class(owner.clone())
                 } else {
                     Ty::inst(owner.as_str())
                 }),
@@ -803,7 +803,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             | InstKind::EnterWith { mgr: src, .. }
             | InstKind::Await { value: src, .. } => self.need(*src)?.cloned(),
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
-                Some(Ty::Ref(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
+                Some(Ty::Ref(fqn) | Ty::Class(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
                 Some(recv) => self.member(recv, attr),
                 None => None,
             },
@@ -843,7 +843,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 Some(Ty::Ref(fqn)) if fqn == "builtins.super" && args.is_empty() => {
                     self.owner.clone().map(Ty::Super)
                 }
-                Some(Ty::Ref(fqn)) => return self.call_named(fqn, args),
+                Some(Ty::Ref(fqn) | Ty::Class(fqn)) => return self.call_named(fqn, args),
                 Some(callee) => self.called(callee),
                 None => None,
             },
@@ -1133,10 +1133,10 @@ impl<'e, 'a> Engine<'e, 'a> {
         match recv {
             Ty::Inst(o) => Some((&o.class, false, recv.clone())),
             Ty::Super(c) => Some((c, true, Ty::inst(c.as_str()))),
-            Ty::Ref(c) if self.cx.project.is_project_class(c) => {
+            Ty::Ref(c) | Ty::Class(c) if self.cx.project.is_project_class(c) => {
                 Some((c, false, Ty::inst(c.as_str())))
             }
-            Ty::Ref(_) | Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
+            Ty::Ref(_) | Ty::Class(_) | Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
         }
     }
 
@@ -1192,7 +1192,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// instance its `__call__`.
     fn called(&self, callee: &Ty) -> Option<Ty> {
         match callee {
-            Ty::Ref(fqn) => self.cx.call_result(fqn),
+            Ty::Ref(fqn) | Ty::Class(fqn) => self.cx.call_result(fqn),
             Ty::Partial(inner) => self.called(inner),
             other => self.member_call(other, "__call__"),
         }
@@ -1209,7 +1209,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .and_then(|t| cx.project.declared_ty(&t))
                 .and_then(|t| t.bind_self(self.self_ty.as_ref())),
             None => match self.fact(var) {
-                Fact::Known(Ty::Ref(class)) => Some(Ty::inst(class)),
+                Fact::Known(Ty::Ref(class) | Ty::Class(class)) => Some(Ty::inst(class)),
                 _ => None,
             },
         }

@@ -1570,14 +1570,15 @@ impl ProjectDecls {
 
     /// The project functions `name` names on an instance of the canonical project class
     /// `class`: the first definition along the MRO (past `class` itself with `skip_self`, for
-    /// `super()`) and, without `skip_self`, the definitions of every overriding project
-    /// subclass (Priority 4 CHA), each one kept when `keep` accepts it (sorted, deduplicated).
-    /// Also returns the first external base the MRO walk meets before a definition.
+    /// `super()`) and, with `overrides`, the definitions of every overriding project subclass
+    /// (Priority 4 CHA), each one kept when `keep` accepts it (sorted, deduplicated). Also
+    /// returns the first external base the MRO walk meets before a definition.
     fn definitions(
         &self,
         class: &str,
         name: &str,
         skip_self: bool,
+        overrides: bool,
         keep: impl Fn(&FuncKey) -> bool,
     ) -> (Vec<FuncKey>, Option<String>) {
         let mro = self.mro(class);
@@ -1595,7 +1596,7 @@ impl ProjectDecls {
                 external = Some(format!("{c}.{name}"));
             }
         }
-        if !skip_self {
+        if overrides {
             let mut stack = vec![class.to_owned()];
             let mut seen = FxHashSet::default();
             while let Some(c) = stack.pop() {
@@ -1623,7 +1624,7 @@ impl ProjectDecls {
         if !self.is_project_class(&class) {
             return Callee::External(format!("{class}.{method}"));
         }
-        let (found, external) = self.definitions(&class, method, skip_self, |_| true);
+        let (found, external) = self.definitions(&class, method, skip_self, !skip_self, |_| true);
         if found.len() > CHA_CANDIDATE_LIMIT {
             return Callee::TooMany;
         }
@@ -1631,6 +1632,20 @@ impl ProjectDecls {
             return external.map_or(Callee::Unresolved, Callee::External);
         }
         Callee::Project(found, true)
+    }
+
+    /// Resolve `class.method` on the class object `class` itself (`Base.method(obj)`, and the
+    /// `__init__` of constructing it): the definition its MRO finds first. The overrides of
+    /// subclasses do not count: the class object is no subclass.
+    pub(crate) fn class_targets(&self, class: &str, method: &str) -> Callee {
+        let class = self.canonical(class);
+        if !self.is_project_class(&class) {
+            return Callee::External(format!("{class}.{method}"));
+        }
+        match self.definitions(&class, method, false, false, |_| true) {
+            (found, _) if !found.is_empty() => Callee::Project(found, true),
+            (_, external) => external.map_or(Callee::Unresolved, Callee::External),
+        }
     }
 
     /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run
@@ -1655,7 +1670,7 @@ impl ProjectDecls {
             return None;
         }
         let is_getter = |k: &FuncKey| self.function_decl(k).is_some_and(|d| d.is_property);
-        let (found, _) = self.definitions(&class, attr, skip_self, is_getter);
+        let (found, _) = self.definitions(&class, attr, skip_self, !skip_self, is_getter);
         match found.len() {
             0 => None,
             n if n > CHA_CANDIDATE_LIMIT => Some(Callee::TooMany),
@@ -2454,6 +2469,8 @@ pub enum Val {
     Ref(String),
     /// An instance of the class `fqn`.
     Inst(String),
+    /// A class object that is `fqn` or one of its subclasses ([`Ty::Class`]).
+    Class(String),
     /// `super()` inside a method of class `fqn`.
     Super(String),
     /// An instance of one of two or three classes (sorted).
@@ -2465,6 +2482,7 @@ pub enum Val {
 pub(crate) enum Recv<'v> {
     Ref(&'v str),
     Inst(&'v str),
+    Class(&'v str),
     Super(&'v str),
 }
 
@@ -2474,6 +2492,7 @@ impl Val {
         match self {
             Val::Ref(f) => Some(Recv::Ref(f)),
             Val::Inst(c) => Some(Recv::Inst(c)),
+            Val::Class(c) => Some(Recv::Class(c)),
             Val::Super(c) => Some(Recv::Super(c)),
             Val::Union(_) => None,
         }
@@ -2524,11 +2543,21 @@ impl Ty {
     pub(crate) fn val(&self) -> Option<Val> {
         match self {
             Ty::Ref(f) => Some(Val::Ref(f.clone())),
+            Ty::Class(c) => Some(Val::Class(c.clone())),
             Ty::Inst(o) => Some(Val::Inst(o.class.clone())),
             Ty::Super(c) => Some(Val::Super(c.clone())),
             Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
             Ty::SelfType | Ty::Partial(_) => None,
         }
+    }
+}
+
+/// The targets of constructing `class` from its `__init__` targets: they bind the new
+/// instance; a class without a project `__init__` is called by its own name.
+fn constructor(class: &str, init: Callee) -> Callee {
+    match init {
+        Callee::Project(keys, _) => Callee::Project(keys, true),
+        _ => Callee::External(class.to_owned()),
     }
 }
 
@@ -2682,21 +2711,23 @@ impl<'a> TypeCtx<'a> {
         match value? {
             Val::Union(classes) => Some(classes),
             Val::Inst(class) => self.project.protocol_implementers(class),
-            Val::Ref(_) | Val::Super(_) => None,
+            Val::Ref(_) | Val::Class(_) | Val::Super(_) => None,
         }
     }
 
+    /// Calling a named class constructs exactly that class: its `__init__` is the one its MRO
+    /// finds. A class object that may be a subclass (`cls(...)`) runs any of theirs.
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
         match callee {
             Some(Recv::Ref(fqn)) => match self.project.symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
-                Symbol::Class(_) => match self.project.method_targets(fqn, "__init__", false) {
-                    Callee::Project(keys, _) => Callee::Project(keys, true),
-                    _ => Callee::External(fqn.to_owned()),
-                },
+                Symbol::Class(_) => constructor(fqn, self.project.class_targets(fqn, "__init__")),
                 Symbol::Module | Symbol::Global(_) => Callee::Unresolved,
                 Symbol::External => Callee::External(fqn.to_owned()),
             },
+            Some(Recv::Class(class)) => {
+                constructor(class, self.project.method_targets(class, "__init__", false))
+            }
             Some(Recv::Inst(class)) => self.project.method_targets(class, "__call__", false),
             Some(Recv::Super(_)) | None => Callee::Unresolved,
         }
@@ -2717,7 +2748,7 @@ impl<'a> TypeCtx<'a> {
             Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
                     // Unbound call through the class: `Base.method(obj, ...)`.
-                    return match self.project.method_targets(fqn, method, false) {
+                    return match self.project.class_targets(fqn, method) {
                         Callee::Project(keys, _) => Callee::Project(keys, false),
                         other => other,
                     };
@@ -2725,6 +2756,10 @@ impl<'a> TypeCtx<'a> {
                 let target = self.project.canonical(&format!("{fqn}.{method}"));
                 self.call_targets(Some(Recv::Ref(&target)))
             }
+            Some(Recv::Class(class)) => match self.project.method_targets(class, method, false) {
+                Callee::Project(keys, _) => Callee::Project(keys, false),
+                other => other,
+            },
             Some(Recv::Inst(class)) => self.project.method_targets(class, method, false),
             Some(Recv::Super(class)) => self.project.method_targets(class, method, true),
             None => Callee::Unresolved,
@@ -2749,7 +2784,7 @@ impl<'a> TypeCtx<'a> {
         match recv? {
             Val::Inst(class) => self.project.property_targets(class, attr, false),
             Val::Super(class) => self.project.property_targets(class, attr, true),
-            Val::Union(_) | Val::Ref(_) => None,
+            Val::Union(_) | Val::Ref(_) | Val::Class(_) => None,
         }
     }
 
