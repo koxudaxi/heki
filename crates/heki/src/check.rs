@@ -273,48 +273,45 @@ pub(crate) fn report(
         .baseline
         .clone()
         .or_else(|| project.env.cfg.baseline.clone().map(|b| root.join(b)));
-    if args.update_baseline {
-        let Some(bp) = &baseline_path else {
-            bail!(
-                "`--update-baseline` needs `--baseline <path>` or `baseline` in the configuration"
-            );
-        };
-        let baseline =
-            RatchetBaseline::from_counts(baseline_counts(&diags, &key_path, CountUnit::Sites));
-        baseline.save(bp)?;
-        log!(
-            args.output_format,
-            "Wrote Ratchet baseline {} ({} entries, {} diagnostic(s)).",
-            bp.display(),
-            baseline.counts.len(),
-            diags.len()
-        );
-        return finish(args.output_format, &project.errors, ExitCode::SUCCESS);
+    let fmt = args.output_format;
+    if args.update_baseline && baseline_path.is_none() {
+        bail!("`--update-baseline` needs `--baseline <path>` or `baseline` in the configuration");
     }
-    if let Some(bp) = &baseline_path {
-        let baseline = RatchetBaseline::load(bp)?;
+    // `--update-baseline` records the current findings into a missing baseline, and otherwise
+    // only lets it shrink: it compares like a check first.
+    let recorded = match &baseline_path {
+        Some(bp) if !args.update_baseline || bp.exists() => Some(RatchetBaseline::load(bp)?),
+        _ => None,
+    };
+    let current = baseline_counts(&diags, &key_path, CountUnit::Sites);
+    let found = diags.len();
+    let mut regressions = 0;
+    if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
         let unit = baseline.unit;
-        if unit == CountUnit::Diagnostics {
+        if unit == CountUnit::Diagnostics && !args.update_baseline {
             log!(
-                args.output_format,
+                fmt,
                 "note: baseline {} counts diagnostics, not violation sites (written before version {BASELINE_VERSION}); `--update-baseline` rewrites it to count sites",
                 bp.display()
             );
         }
+        // Legacy entries compare in their own unit, before `--update-baseline` rewrites them.
         let cmp = baseline.compare(&baseline_counts(&diags, &key_path, unit));
-        for (key, allowed, cur) in &cmp.stale_entries {
-            log!(
-                args.output_format,
-                "note: baseline entry {}::{} {} `{}` can shrink {allowed} -> {cur} (`--update-baseline`)",
-                key.path,
-                key.qualname,
-                key.rule_code,
-                key.target
-            );
+        if !args.update_baseline {
+            for (key, allowed, cur) in &cmp.stale_entries {
+                log!(
+                    fmt,
+                    "note: baseline entry {}::{} {} `{}` can shrink {allowed} -> {cur} (`--update-baseline`)",
+                    key.path,
+                    key.qualname,
+                    key.rule_code,
+                    key.target
+                );
+            }
         }
         for (key, allowed, cur) in &cmp.regressions {
             log!(
-                args.output_format,
+                fmt,
                 "note: baseline entry {}::{} {} `{}` allows {allowed} {}, found {cur}",
                 key.path,
                 key.qualname,
@@ -323,8 +320,28 @@ pub(crate) fn report(
                 unit.noun()
             );
         }
+        regressions = cmp.regressions.len();
         let regressed: FxHashSet<_> = cmp.regressions.iter().map(|(k, _, _)| k.clone()).collect();
         diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
+    }
+    if let Some(bp) = baseline_path.as_ref().filter(|_| args.update_baseline) {
+        if regressions > 0 {
+            log!(
+                fmt,
+                "error: baseline {} not updated: {regressions} entry(ies) grew, and a Ratchet baseline only shrinks (delete it to record the current findings)",
+                bp.display()
+            );
+        } else {
+            let baseline = RatchetBaseline::from_counts(current);
+            baseline.save(bp)?;
+            log!(
+                fmt,
+                "Wrote Ratchet baseline {} ({} entries, {found} diagnostic(s)).",
+                bp.display(),
+                baseline.counts.len(),
+            );
+            return finish(fmt, &project.errors, ExitCode::SUCCESS);
+        }
     }
 
     // Every format prints the paths `--diff` prints.

@@ -12,7 +12,10 @@ $ heki check --baseline heki-baseline.toml                     # fail on regress
 
 Entries are keyed by file, function, rule, and target (not by line number), so unrelated
 edits and reformatting do not break the baseline. When findings are fixed, `heki check` prints a
-note that the entry can shrink; run `--update-baseline` again to lock in the progress. Set
+note that the entry can shrink; run `--update-baseline` again to lock in the progress. On an
+existing baseline, `--update-baseline` checks first: when an entry grew or a new finding appeared,
+it reports them like `heki check`, leaves the file as it is, and exits with 1. To record new
+findings on purpose, delete the baseline and record it again. Set
 `baseline = "heki-baseline.toml"` in the configuration to use it without the flag.
 
 Each entry counts violation sites, not reports. A contract report at the caller of a private
@@ -23,7 +26,8 @@ allowed and found counts for every entry that grew.
 
 Baselines written before heki counted sites have no `version` key and keep counting reports: a
 new report is a regression, a second site behind a recorded report is not. `heki check` says so
-in a note, and `--update-baseline` rewrites the file with `version = 2`. A version this heki does
+in a note, and `--update-baseline` rewrites the file with `version = 2` (after comparing in the
+old unit, so nothing that grew is taken in). A version this heki does
 not know is an error, and so is a file listing one entry twice (a hand merge of two baselines).
 
 ## Effect snapshots (`MUT103`)

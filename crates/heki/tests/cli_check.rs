@@ -359,3 +359,36 @@ fn ratchet_baselines_listing_one_key_twice_are_rejected() {
         "{stderr}"
     );
 }
+
+#[test]
+fn update_baseline_only_shrinks_an_existing_baseline() {
+    let p = Project::new("baseline_shrinks");
+    p.write("a.py", BLOCKING);
+    let update = ["--baseline", "b.toml", "--update-baseline"];
+    assert_eq!(p.heki(&update).0, 0);
+    let recorded = std::fs::read_to_string(p.dir.join("b.toml")).unwrap();
+    // A second call in the recorded function grows its entry: reported, not taken in.
+    p.write("a.py", &format!("{BLOCKING}    time.sleep(2)\n"));
+    let (code, stdout, stderr) = p.heki(&[&update[..], &["--output-format", "concise"]].concat());
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+    assert!(
+        stderr.contains("allows 1 site(s), found 2")
+            && stderr.contains("error: baseline b.toml not updated: 1 entry(ies) grew"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.dir.join("b.toml")).unwrap(),
+        recorded
+    );
+    // A version this heki does not know is not overwritten either.
+    p.write("b.toml", &recorded.replace("version = 2", "version = 9"));
+    let (code, _, stderr) = p.heki(&update);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("has version 9"), "{stderr}");
+    assert!(
+        std::fs::read_to_string(p.dir.join("b.toml"))
+            .unwrap()
+            .contains("version = 9")
+    );
+}
