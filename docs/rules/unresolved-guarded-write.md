@@ -20,7 +20,9 @@ write:
   (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
 - an attribute name computed at run time written on an instance of a target class:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
-  `__dict__` key that is a module constant not declared `Final`.
+  `__dict__` key in a name that is no constant: a module-level name bound twice or rebound by
+  another module, a class attribute without `ClassVar` or `Final` (an instance may hold its
+  own), one a subclass defines again.
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed

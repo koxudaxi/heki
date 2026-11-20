@@ -960,7 +960,7 @@ unresolved = "report"
 
 A container entry (`Class.attr["key"]`):
 
-- matches the writes of that constant key (a literal or a `Final` constant), not a write of the
+- matches the writes of that constant key (a literal or a string constant), not a write of the
   whole container or with a computed key;
 - is reported once, under the entry, when its container is a target too.
 
@@ -2620,9 +2620,9 @@ It does not report:
 - constant dictionary keys the property never reads (`self.params["proxy"]` while the property
   reads `self.params["outtmpl"]`);
 - writes after which every path invalidates the property (`del self.prop`,
-  `self.__dict__.pop("prop", None)`, also with the key in a `Final` string constant, a `self`
-  method that does), or before which every path
-  already did and nothing read it since; an invalidation under a condition, such as
+  `self.__dict__.pop("prop", None)`, also with the key in a string constant as `MUT201` follows
+  it, a `self` method that does), or before which every path already did and nothing read it
+  since; an invalidation under a condition, such as
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
 - lazy initialization: a write where a `None` / falsy test of the attribute found it unset
@@ -4084,8 +4084,8 @@ the allowed readers:
 
 - directly (`ref.children`), also on `self` and through local aliases;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
-  with a constant name: a string literal or a module-level `Final` string constant;
-- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a `Final`
+  with a constant name: a string literal or a string constant, as for `MUT201`;
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a string
   constant for the key.
 
 A target names a class and an attribute; it covers the class's subclasses too. A container
@@ -4597,7 +4597,9 @@ write:
   (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
 - an attribute name computed at run time written on an instance of a target class:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
-  `__dict__` key that is a module constant not declared `Final`.
+  `__dict__` key in a name that is no constant: a module-level name bound twice or rebound by
+  another module, a class attribute without `ClassVar` or `Final` (an instance may hold its
+  own), one a subclass defines again.
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
@@ -4749,8 +4751,10 @@ allowed writers:
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
 - through a local alias (`fields = model.fields; fields.append(...)`);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`,
-  also with a module-level `Final` string constant for the name (`model.__dict__[FIELDS_KEY]`,
-  imported or not);
+  also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
+  a module-level name declared `Final` or bound once in its module and rebound by no other, or
+  a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
+  `Model.KEY`), which no subclass of the object's class defines again;
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
@@ -4764,7 +4768,7 @@ allowed writers:
 A target names a class and an attribute; it covers the class's subclasses too (the target's
 class family). A target can also name one entry of the container an attribute holds,
 `Class.attr["key"]`: it matches the writes of that key (`field.extras["init"] = v`,
-`field.extras[INIT]` with a `Final` constant, `field.extras.pop("init")`,
+`field.extras[INIT]` with a string constant, `field.extras.pop("init")`,
 `del field.extras["init"]`, `field.extras["init"].append(v)`), not a write of the whole
 container (`field.extras = {}`, `field.extras.update(...)`) or with a computed key, which are
 writes of `Class.attr`. When a contract names both a container and one of its entries, a write of

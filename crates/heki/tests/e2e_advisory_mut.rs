@@ -668,21 +668,24 @@ fn mut202_follows_a_call_on_a_narrowed_receiver() {
     );
 }
 
-/// A `Final` string constant names the cached property a method removes from `self.__dict__`,
-/// as for the contracts.
+/// A string constant names the cached property a method removes from `self.__dict__`, as for
+/// the contracts: a module-level name declared `Final` or bound once, a `ClassVar`.
 #[test]
-fn mut101_follows_final_constants_naming_the_property() {
+fn mut101_follows_constants_naming_the_property() {
     let p = Project::new("mut101_final_keys");
     p.write(
         "cart.py",
         r#"from functools import cached_property
-from typing import Final
+from typing import ClassVar, Final
 
 TOTAL: Final = "total"
 OTHER: Final = "other"
+ONCE = "total"
 
 
 class Cart:
+    TOTAL_KEY: ClassVar[str] = "total"
+
     def __init__(self):
         self.items = []
 
@@ -701,11 +704,19 @@ class Cart:
     def clear(self):
         self.items = []
         del self.__dict__[TOTAL]
+
+    def reset_once(self):
+        self.items = []
+        self.__dict__.pop(ONCE, None)
+
+    def reset_class_key(self):
+        self.items = []
+        self.__dict__.pop(self.TOTAL_KEY, None)
 "#,
     );
     let diags = diagnostics(&p, &["--select", "MUT101"]);
     assert_eq!(
         found(&diags),
-        vec![d("cart.py", 21, "MUT101", "Cart.reset_other")]
+        vec![d("cart.py", 24, "MUT101", "Cart.reset_other")]
     );
 }

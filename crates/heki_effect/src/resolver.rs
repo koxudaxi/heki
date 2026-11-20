@@ -363,25 +363,36 @@ pub struct ModuleDecls {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub grown_globals: BTreeSet<String>,
     /// The `grown_globals` this module rebinds or deletes (`cfg.QUEUE = []`, `del
-    /// cfg.QUEUE`): bound to another object, so not even a tuple keeps its display
-    /// ([`ProjectDecls::rebound_elsewhere`]).
+    /// cfg.QUEUE`): bound to another object, so not even a tuple keeps its display, and no
+    /// longer the string constant their own module binds ([`ProjectDecls::rebound_elsewhere`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_globals: BTreeSet<String>,
-    /// Module-level string constants declared `Final` (`KEY: Final = "_key"`), by name: a
-    /// constant names an attribute in `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and
-    /// `setattr(obj, KEY, v)`, and a key in `obj.attr[KEY]`, as its literal would.
+    /// String constants, by name: module-level names bound once (`KEY = "_key"`,
+    /// `KEY: Final = "_key"`), and class-body names declared `ClassVar` or `Final` and bound
+    /// once (`KEY: ClassVar[str] = "_key"`), under `Class.KEY`. A constant names an attribute in
+    /// `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and `setattr(obj, KEY, v)`, and a key in
+    /// `obj.attr[KEY]`, as its literal would.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub str_constants: BTreeMap<String, StrConstant>,
 }
 
-/// The value of a module-level `Final` string constant ([`ModuleDecls::str_constants`]).
+/// A string constant of a module or class ([`ModuleDecls::str_constants`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StrConstant {
-    /// `KEY: Final = "_key"`.
-    Value(String),
-    /// `KEY: Final = OTHER` / `KEY: Final = keys.OTHER`: the fully qualified name of the
-    /// constant it is bound to, resolved within the module (chased by
-    /// [`ProjectDecls::str_constant`]).
+pub struct StrConstant {
+    pub value: StrValue,
+    /// A module-level name without `Final`: another module rebinding it (`keys.KEY = "x"`,
+    /// [`ProjectDecls::rebound_elsewhere`]) makes it no constant.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rebindable: bool,
+}
+
+/// What a string constant is bound to ([`StrConstant`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StrValue {
+    /// `KEY = "_key"`.
+    Literal(String),
+    /// `KEY = OTHER` / `KEY = keys.OTHER`: the fully qualified name of the constant it is
+    /// bound to, resolved within the module (chased by [`ProjectDecls::str_constant`]).
     Alias(String),
 }
 
@@ -1224,7 +1235,8 @@ impl ProjectDecls {
         self.grown_elsewhere.contains(&fqn)
     }
 
-    /// Whether another project module rebinds or deletes the module global `fqn`.
+    /// Whether another project module rebinds or deletes the module global `fqn` (a string
+    /// its own module binds once is then no constant).
     pub fn rebound_elsewhere(&self, fqn: &str) -> bool {
         let fqn = self.canonical(fqn);
         self.read(|k| note(&mut k.grown_globals, &fqn));
@@ -1424,18 +1436,36 @@ impl ProjectDecls {
         cur
     }
 
-    /// The value of the module-level `Final` string constant `fqn` (`pkg.keys.KEY`), through
+    /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
     /// re-exports and constants bound to other constants (at most `MAX_ALIAS_CHASE` steps).
     pub fn str_constant(&self, fqn: &str) -> Option<&str> {
         let mut cur = self.canonical(fqn);
         for _ in 0..MAX_ALIAS_CHASE {
             let (m, rest) = self.split_module(&cur)?;
-            match m.str_constants.get(rest)? {
-                StrConstant::Value(v) => return Some(v),
-                StrConstant::Alias(next) => cur = self.canonical(next),
+            let constant = m.str_constants.get(rest)?;
+            if constant.rebindable && self.rebound_elsewhere(&cur) {
+                return None;
+            }
+            match &constant.value {
+                StrValue::Literal(v) => return Some(v),
+                StrValue::Alias(next) => cur = self.canonical(next),
             }
         }
         None
+    }
+
+    /// The value of the class-level string constant `attr` read on an instance of the project
+    /// class `class` or on the class object (`self.KEY`, `cls.KEY`, `Model.KEY`): the
+    /// definition of `attr` the MRO finds first must be a constant. With `subclasses`, the
+    /// object may be of a subclass, and none may define `attr` again.
+    pub fn class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<&str> {
+        let defines = |c: &str| self.class(c).is_some_and(|d| d.members.contains(attr));
+        let class = self.canonical(class);
+        if subclasses && self.subclasses_of(&class).iter().any(|s| defines(s)) {
+            return None;
+        }
+        let owner = self.mro(&class).into_iter().find(|c| defines(c))?;
+        self.str_constant(&format!("{owner}.{attr}"))
     }
 
     pub(crate) fn symbol(&self, fqn: &str) -> Symbol<'_> {
@@ -2339,7 +2369,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.small_globals = input.ir.constants.displays.clone();
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
     attr_displays(input, &mut decls);
-    decls.str_constants = final_str_constants(input, &decls);
+    decls.str_constants = str_constants(input, &decls);
     decls
 }
 
@@ -2510,44 +2540,13 @@ fn count_u8<T>(items: impl Iterator<Item = T>) -> u8 {
     u8::try_from(items.count()).unwrap_or(u8::MAX)
 }
 
-/// [`ModuleDecls::str_constants`]: module-level names annotated `Final` (`typing` /
-/// `typing_extensions`, also `Final[str]`) and bound exactly once in the module, to a string
-/// literal or to another name. A name the module stores twice (`global KEY` in a function, two
-/// branches) is no constant.
-fn final_str_constants(
-    input: &ModuleInput<'_>,
-    decls: &ModuleDecls,
-) -> BTreeMap<String, StrConstant> {
-    let mut out = BTreeMap::new();
-    let body = input.ir.functions.iter().filter(|f| f.is_module_body);
+/// [`ModuleDecls::str_constants`]: the module-level names bound exactly once in the module and
+/// the class-body names declared `ClassVar` or `Final` (`typing` / `typing_extensions`, also
+/// subscripted) bound exactly once in the class body, each to a string literal or to another
+/// name. A name stored twice (`global KEY` in a function, two branches) or deleted is no
+/// constant, and neither is a name an import statement binds: it resolves through the imports.
+fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, StrConstant> {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
-    let finals: FxHashSet<&str> = body
-        .clone()
-        .flat_map(|f| &f.local_annotations)
-        .filter(|a| !a.target.contains('.') && qualifiers(&a.annotation, &resolve).0.is_final)
-        .map(|a| a.target.as_str())
-        .collect();
-    if finals.is_empty() {
-        return out;
-    }
-    let mut stores: FxHashMap<&str, usize> = FxHashMap::default();
-    for inst in input
-        .ir
-        .functions
-        .iter()
-        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
-    {
-        if let InstKind::StoreGlobal { name, .. } | InstKind::Delete { name, .. } = &inst.kind
-            && finals.contains(name.as_str())
-        {
-            *stores.entry(name.as_str()).or_default() += 1;
-        }
-    }
-    let insts = || {
-        body.clone()
-            .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
-    };
-    let defs: FxHashMap<VarId, &Inst> = insts().filter_map(|i| Some((i.kind.dst()?, i))).collect();
     // A module body reads an imported name as a copy of its `Import`.
     let imports: FxHashMap<Span, String> = input
         .semantic
@@ -2555,19 +2554,73 @@ fn final_str_constants(
         .iter()
         .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
         .collect();
-    for inst in insts() {
-        let InstKind::StoreGlobal { name, value } = &inst.kind else {
-            continue;
-        };
-        if stores.get(name.as_str()) != Some(&1) {
-            continue;
+    let mut module_stores: FxHashMap<&str, usize> = FxHashMap::default();
+    for inst in input
+        .ir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+    {
+        if let InstKind::StoreGlobal { name, .. } | InstKind::Delete { name, .. } = &inst.kind {
+            *module_stores.entry(name.as_str()).or_default() += 1;
         }
-        let value = match constant_source(&defs, &imports, *value) {
-            Some(Ok(s)) => StrConstant::Value(s.to_owned()),
-            Some(Err(fqn)) => StrConstant::Alias(fqn),
-            None => continue,
-        };
-        out.insert(name.clone(), value);
+    }
+    let mut out = BTreeMap::new();
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| f.is_module_body || f.is_class_body)
+    {
+        let declared: FxHashMap<&str, Qualifiers> = f
+            .local_annotations
+            .iter()
+            .filter(|a| !a.target.contains('.'))
+            .map(|a| (a.target.as_str(), qualifiers(&a.annotation, &resolve).0))
+            .collect();
+        let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        // A module body binds a global by storing it; a class body binds a name as a named copy.
+        let bindings: Vec<(&str, VarId)> = insts()
+            .filter_map(|inst| match &inst.kind {
+                InstKind::StoreGlobal { name, value } if f.is_module_body => {
+                    Some((name.as_str(), *value))
+                }
+                InstKind::Copy { dst, src } if f.is_class_body => Some((f.var_name(*dst)?, *src)),
+                _ => None,
+            })
+            .collect();
+        let mut class_stores: FxHashMap<&str, usize> = FxHashMap::default();
+        if f.is_class_body {
+            for (name, _) in &bindings {
+                *class_stores.entry(name).or_default() += 1;
+            }
+            for inst in insts() {
+                if let InstKind::Delete { name, .. } = &inst.kind {
+                    *class_stores.entry(name.as_str()).or_default() += 1;
+                }
+            }
+        }
+        let defs: FxHashMap<VarId, &Inst> =
+            insts().filter_map(|i| Some((i.kind.dst()?, i))).collect();
+        for (name, value) in bindings {
+            let q = declared.get(name).copied().unwrap_or_default();
+            let (key, once, rebindable) = if f.is_module_body {
+                let once = module_stores.get(name) == Some(&1) && !decls.imports.contains_key(name);
+                (name.to_owned(), once, !q.is_final)
+            } else {
+                let once = (q.class_var || q.is_final) && class_stores.get(name) == Some(&1);
+                (format!("{}.{name}", f.qualname), once, false)
+            };
+            if !once {
+                continue;
+            }
+            let value = match constant_source(&defs, &imports, value) {
+                Some(Ok(s)) => StrValue::Literal(s.to_owned()),
+                Some(Err(fqn)) => StrValue::Alias(fqn),
+                None => continue,
+            };
+            out.insert(key, StrConstant { value, rebindable });
+        }
     }
     out
 }
@@ -3270,17 +3323,23 @@ impl<'a> TypeCtx<'a> {
         Ty::Ref(format!("builtins.{name}"))
     }
 
-    /// The value of the module-level `Final` string constant `name` read inside this module:
-    /// one of its own constants, or one it imports (`from pkg.keys import KEY`).
+    /// The value of the module-level string constant `name` read inside this module: one of
+    /// its own constants, or one it imports (`from pkg.keys import KEY`).
     pub fn global_str(&self, name: &str) -> Option<&'a str> {
-        match self.module.str_constants.get(name) {
-            Some(StrConstant::Value(v)) => Some(v),
-            Some(StrConstant::Alias(fqn)) => self.project.str_constant(fqn),
-            None => self
+        let Some(constant) = self.module.str_constants.get(name) else {
+            return self
                 .module
                 .imports
                 .get(name)
-                .and_then(|fqn| self.project.str_constant(fqn)),
+                .and_then(|fqn| self.project.str_constant(fqn));
+        };
+        let fqn = || format!("{}.{name}", self.module.module_name);
+        if constant.rebindable && self.project.rebound_elsewhere(&fqn()) {
+            return None;
+        }
+        match &constant.value {
+            StrValue::Literal(v) => Some(v),
+            StrValue::Alias(next) => self.project.str_constant(next),
         }
     }
 
@@ -3495,12 +3554,12 @@ impl<'a> TypeCtx<'a> {
         )
     }
 
-    /// The fully qualified name the import at `span` binds.
     /// The string constant `var` holds (through copies; `def` gives each variable's defining
-    /// instruction, `types` the inferred values): a string literal, or a module-level `Final`
-    /// string constant of this module or of another project module (`KEY`, `keys.KEY`,
-    /// `from pkg.keys import KEY`). The one resolution of the attribute names and keys every
-    /// rule follows (`self.__dict__.pop(TOTAL)`, `setattr(obj, KEY, v)`, `obj.__dict__[KEY]`).
+    /// instruction, `types` the inferred values): a string literal, a module-level string
+    /// constant of this module or of another project module (`KEY`, `keys.KEY`,
+    /// `from pkg.keys import KEY`), or a class-level one (`self.KEY`, `cls.KEY`, `Model.KEY`).
+    /// The one resolution of the attribute names and keys every rule follows
+    /// (`self.__dict__.pop(TOTAL)`, `setattr(obj, KEY, v)`, `obj.__dict__[KEY]`).
     pub(crate) fn str_constant_with<'i>(
         &self,
         var: VarId,
@@ -3525,13 +3584,19 @@ impl<'a> TypeCtx<'a> {
                     return self.project.str_constant(fqn).map(str::to_owned);
                 }
                 InstKind::AttrLoad { obj, attr, .. } => {
-                    let Some(Val::Ref(module)) = types.get(obj) else {
-                        return None;
+                    let project = self.project;
+                    let value = match types.get(obj)? {
+                        Val::Ref(class) if project.is_project_class(class) => {
+                            project.class_str_constant(class, attr, false)
+                        }
+                        Val::Ref(module) => project.str_constant(&format!("{module}.{attr}")),
+                        // An instance, or a class object that may be a subclass (`cls`).
+                        Val::Inst(class) | Val::Class(class) if project.is_project_class(class) => {
+                            project.class_str_constant(class, attr, true)
+                        }
+                        _ => None,
                     };
-                    return self
-                        .project
-                        .str_constant(&format!("{module}.{attr}"))
-                        .map(str::to_owned);
+                    return value.map(str::to_owned);
                 }
                 _ => return None,
             }

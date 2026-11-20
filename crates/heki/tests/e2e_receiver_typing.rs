@@ -243,6 +243,10 @@ def dunder_dict_const_name(model: Model) -> None:
     model.__dict__[KEY] = []
 
 
+def dunder_dict_computed_name(model: Model, name: str) -> None:
+    model.__dict__[name] = []
+
+
 def alias_then_helper(model: Model) -> None:
     fields = model.fields
     _extend(fields)
@@ -684,6 +688,7 @@ const REPORTED_SHAPES: &[&str] = &[
     "delete_item",
     "read_attr",
     "read_in_generator",
+    "dunder_dict_const_name",
 ];
 
 /// Silent: an unannotated parameter or return (no class to go by), names computed at run
@@ -691,7 +696,7 @@ const REPORTED_SHAPES: &[&str] = &[
 const SILENT_SHAPES: &[&str] = &[
     "unannotated_param",
     "untyped_return",
-    "dunder_dict_const_name",
+    "dunder_dict_computed_name",
     "lambda_callback",
 ];
 

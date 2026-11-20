@@ -183,6 +183,12 @@ const ASYNC_USER: &str = "from pkg.async_client import AsyncClient\n\n\nasync de
 // object its caller hands it; a helper writes a target on a parameter its caller types.
 const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
+// A class constant names the guarded attribute for the class's own methods.
+const KEY_CLASS: &str = "from typing import ClassVar\n\nfrom pkg.model import Registry\n\n\nclass Keys:\n    KEY: ClassVar[str] = \"entries\"\n\n    def mark(self, r: Registry):\n        r.__dict__[self.KEY] = []\n";
+const KEY_REBIND: &str =
+    "from pkg import key_consts\n\n\ndef reset():\n    key_consts.KEY = \"other\"\n";
+const KEY_SUBCLASS: &str =
+    "from pkg.key_class import Keys\n\n\nclass OtherKeys(Keys):\n    KEY = \"other\"\n";
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
 const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
@@ -576,6 +582,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/async_user.py", ASYNC_USER),
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
+        ("pkg/key_class.py", KEY_CLASS),
         ("pkg/journal.py", JOURNAL),
         ("pkg/headline.py", HEADLINE),
         ("pkg/safe_journal.py", SAFE_JOURNAL),
@@ -1125,8 +1132,10 @@ fn steps_small_displays() -> Vec<Step> {
     ]
 }
 
-/// Constant keys, objects under construction, and the strict mode. A `Final` key
-/// constant is a declaration another module's summary resolves names through; whether a helper
+/// Constant keys, objects under construction, and the strict mode. A key constant is a
+/// declaration another module's summary resolves names through: one without `Final` stops
+/// being one when a third module rebinds it, and a class constant when a subclass in another
+/// module defines the name again; whether a helper
 /// keeps the object its caller hands it is a summary fact of the helper; whether a parameter is
 /// typed is a fact of the callers the strict mode walks.
 fn steps_keys_fresh_strict() -> Vec<Step> {
@@ -1148,6 +1157,42 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             vec![save("pkg/key_consts.py", KEY_CONSTS)],
         )
         .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the key constant loses `Final`: bound once, it still names the attribute",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                KEY_CONSTS.replace("KEY: Final = ", "KEY = "),
+            )],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "another module rebinds the constant",
+            vec![Action::Create("pkg/key_rebind.py", KEY_REBIND.to_owned())],
+        )
+        .absent(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the module rebinding it is deleted",
+            vec![Action::Delete("pkg/key_rebind.py")],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the key constant is `Final` again",
+            vec![save("pkg/key_consts.py", KEY_CONSTS)],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "a subclass in another module defines the class constant again",
+            vec![Action::Create(
+                "pkg/key_subclass.py",
+                KEY_SUBCLASS.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/key_class.py", "MUT201")]),
+        Step::new(
+            "the subclass is deleted",
+            vec![Action::Delete("pkg/key_subclass.py")],
+        )
+        .present(&[("pkg/key_class.py", "MUT201")]),
         Step::new(
             "a helper starts storing the fresh object before writing it",
             vec![Action::Save("pkg/fresh_ops.py", storing)],

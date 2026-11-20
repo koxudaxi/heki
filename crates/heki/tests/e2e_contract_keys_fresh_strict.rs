@@ -174,12 +174,21 @@ name = "secrets"
 targets = ["DataModelFieldBase._secret"]
 "#;
 
+/// Rebinds `keys.PLAIN`, which is then no constant.
+const REBIND: &str = r#"from pkg import keys
+
+
+def reset() -> None:
+    keys.PLAIN = "_other"
+"#;
+
 fn keys_project(name: &str) -> Project {
     let p = Project::new(name);
     p.write("pyproject.toml", C2_CONFIG)
         .write("pkg/__init__.py", KEYS_INIT)
         .write("pkg/model.py", MODEL)
         .write("pkg/keys.py", KEYS)
+        .write("pkg/rebind.py", REBIND)
         .write("pkg/use.py", USE);
     p
 }
@@ -295,6 +304,134 @@ write-universe = ["DataModelFieldBase.*"]
         .find(|x| x["target"] == "pure:DataModelFieldBase.extras[\"init\"]")
         .unwrap();
     assert_eq!(pure["sites"].as_u64(), Some(3));
+}
+
+// ======================================================= constants without `Final`
+
+const ONCE_KEYS: &str = r#"ONCE = "_forced_field_assignment"
+ALIASED = ONCE
+TWICE = "_forced_field_assignment"
+TWICE = "_forced_field_assignment"
+MOVED = "_forced_field_assignment"
+"#;
+
+const ONCE_USE: &str = r#"from typing import ClassVar, Final
+
+from pkg import once
+from pkg.model import DataModelFieldBase
+from pkg.once import ALIASED, MOVED, ONCE, TWICE
+
+LOCAL = "_forced_field_assignment"
+
+
+def module_constants(field: DataModelFieldBase) -> None:
+    field.__dict__[ONCE] = True
+    field.__dict__[ALIASED] = True
+    field.__dict__[once.ONCE] = True
+    field.__dict__[LOCAL] = True
+    field.__dict__[TWICE] = True
+    field.__dict__[MOVED] = True
+
+
+def move() -> None:
+    once.MOVED = "_other"
+
+
+class Keyed:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+    FINAL_KEY: Final = "_forced_field_assignment"
+    PLAIN_KEY = "_forced_field_assignment"
+    TWICE_KEY: ClassVar[str] = "_forced_field_assignment"
+    TWICE_KEY = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+        field.__dict__[self.FINAL_KEY] = True
+        field.__dict__[Keyed.KEY] = True
+        field.__dict__[self.PLAIN_KEY] = True
+        field.__dict__[self.TWICE_KEY] = True
+
+    @classmethod
+    def write_on_class(cls, field: DataModelFieldBase) -> None:
+        field.__dict__[cls.KEY] = True
+
+
+class Child(Keyed):
+    def write_inherited(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+        field.__dict__[Child.KEY] = True
+
+
+class Overridden:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+        field.__dict__[Overridden.KEY] = True
+
+
+class Override(Overridden):
+    KEY: ClassVar[str] = "_other"
+"#;
+
+#[test]
+fn constants_bound_once_and_class_constants_name_attributes() {
+    let p = Project::new("keys_bound_once");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataModelFieldBase._forced_field_assignment"]
+allowed-writers = ["pkg.store.*"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/once.py", ONCE_KEYS)
+    // Handing a constant to a call is no rebinding of it.
+    .write(
+        "pkg/reader.py",
+        "from pkg.once import ONCE\n\n\ndef drop(d: dict) -> None:\n    d.pop(ONCE, None)\n",
+    )
+    .write("pkg/use.py", ONCE_USE);
+    let u = "pkg/use.py";
+    let forced = "DataModelFieldBase._forced_field_assignment";
+    let class = "DataModelFieldBase";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            // A module-level name bound once, also through another such name, a module
+            // attribute, and in the module itself.
+            d(u, 11, "MUT201", "module_constants", forced),
+            d(u, 12, "MUT201", "module_constants", forced),
+            d(u, 13, "MUT201", "module_constants", forced),
+            d(u, 14, "MUT201", "module_constants", forced),
+            // Bound twice, or rebound by another module: the name is computed.
+            d(u, 15, "MUT205", "module_constants", class),
+            d(u, 16, "MUT205", "module_constants", class),
+            // `ClassVar` and `Final` class constants on `self`, on the class, and on `cls`; a
+            // plain class attribute (an instance may shadow it) and one bound twice are not.
+            d(u, 31, "MUT201", "Keyed.write", forced),
+            d(u, 32, "MUT201", "Keyed.write", forced),
+            d(u, 33, "MUT201", "Keyed.write", forced),
+            d(u, 34, "MUT205", "Keyed.write", class),
+            d(u, 35, "MUT205", "Keyed.write", class),
+            d(u, 39, "MUT201", "Keyed.write_on_class", forced),
+            // Inherited along the MRO.
+            d(u, 44, "MUT201", "Child.write_inherited", forced),
+            d(u, 45, "MUT201", "Child.write_inherited", forced),
+            // A subclass defines the name again: `self` may be one, the class itself is not.
+            d(u, 52, "MUT205", "Overridden.write", class),
+            d(u, 53, "MUT201", "Overridden.write", forced),
+        ]
+    );
 }
 
 #[test]

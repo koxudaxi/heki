@@ -170,7 +170,7 @@ unresolved = "report"
 
 A container entry (`Class.attr["key"]`):
 
-- matches the writes of that constant key (a literal or a `Final` constant), not a write of the
+- matches the writes of that constant key (a literal or a string constant), not a write of the
   whole container or with a computed key;
 - is reported once, under the entry, when its container is a target too.
 
