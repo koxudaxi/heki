@@ -11,11 +11,12 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
     Facts, FuncKey, NewArg, NewCond, NewKind, ProjectIndex, ProtectedReturn, ReturnsNew, Shared,
-    SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
+    SharedChain, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Recomputations allowed per SCC member before the SCC is declared non-converged.
 const MAX_ITERATIONS_PER_SCC_MEMBER: usize = 16;
@@ -396,12 +397,12 @@ fn return_flow_edge(
     } else {
         return;
     };
-    let mut chain = vec![CallHop {
+    let mut chain = vec![Arc::new(CallHop {
         caller: caller.clone(),
         callee: bc.callee.fqn(),
         span: site.span,
         path: path.to_path_buf(),
-    }];
+    })];
     chain.extend(tail);
     ProtectedReturn::add(&mut s.returns_protected, producer, produced, step, chain);
 }
@@ -468,7 +469,7 @@ fn transfer(
     bc: &BoundCallee,
     callee: &EffectSummary,
     facts: &EffectSummary,
-    lead: &[CallHop],
+    lead: &[Arc<CallHop>],
     rewrite: bool,
     here: Option<&Resolver<'_>>,
 ) {
@@ -752,17 +753,17 @@ pub(crate) fn lead_hops(
     path: &Path,
     callee: &FuncKey,
     via: Option<&FuncKey>,
-) -> Vec<CallHop> {
+) -> SharedChain {
     match via {
-        None => vec![site_hop(site, path, callee.fqn())],
+        None => vec![Arc::new(site_hop(site, path, callee.fqn()))],
         Some(p) => vec![
-            site_hop(site, path, p.fqn()),
-            CallHop {
+            Arc::new(site_hop(site, path, p.fqn())),
+            Arc::new(CallHop {
                 caller: p.clone(),
                 callee: callee.fqn(),
                 span: site.span,
                 path: path.to_path_buf(),
-            },
+            }),
         ],
     }
 }
@@ -776,12 +777,19 @@ pub(crate) fn rewrites(callee: &EffectSummary, from: Facts) -> bool {
 
 /// `lead` followed by `chain`. With `rewrite`, the last lead hop reaches the callee of the
 /// chain's first hop directly, which it replaces.
-pub(crate) fn extend_chain(lead: &[CallHop], chain: &[CallHop], rewrite: bool) -> Vec<CallHop> {
-    let mut out = lead.to_vec();
+pub(crate) fn extend_chain(
+    lead: &[Arc<CallHop>],
+    chain: &[Arc<CallHop>],
+    rewrite: bool,
+) -> SharedChain {
+    let mut out = Vec::with_capacity(lead.len() + chain.len());
+    out.extend_from_slice(lead);
     match chain.split_first() {
         Some((first, rest)) if rewrite => {
-            if let Some(last) = out.last_mut() {
-                last.callee.clone_from(&first.callee);
+            if let Some(last) = out.last_mut()
+                && last.callee != first.callee
+            {
+                Arc::make_mut(last).callee.clone_from(&first.callee);
             }
             out.extend_from_slice(rest);
         }

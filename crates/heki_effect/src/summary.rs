@@ -2812,7 +2812,7 @@ impl<'a> Extractor<'a> {
         for e in &effects {
             let had = !self.summary.direct_exec_effects.insert(*e);
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &occurrence);
-            let chain = vec![self.hop(symbol.clone(), span)];
+            let chain = vec![Arc::new(self.hop(symbol.clone(), span))];
             self.summary.exec_chains.insert(*e, chain);
         }
         let target = CallTarget::Layer2 {
@@ -2828,7 +2828,7 @@ impl<'a> Extractor<'a> {
     /// The function returns (through `step`) the result of the read-only producer `producer`
     /// it calls or reads at `span` (`MUT202` return flow; `deep` as the producer is declared).
     fn seed_protected(&mut self, producer: String, deep: bool, step: ReturnStep, span: Span) {
-        let chain = vec![self.hop(producer.clone(), span)];
+        let chain = vec![Arc::new(self.hop(producer.clone(), span))];
         ProtectedReturn::add(
             &mut self.summary.returns_protected,
             producer,

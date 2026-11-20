@@ -746,7 +746,7 @@ impl<'a> Reach<'a> {
                             })
                     }) =>
                 {
-                    Some(hop.clone())
+                    Some(CallHop::clone(hop))
                 }
                 _ => continue,
             };

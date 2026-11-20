@@ -103,6 +103,23 @@ pub struct CallHop {
     pub path: PathBuf,
 }
 
+/// A call chain kept in a summary. Propagation copies a callee's chains into its callers, so
+/// the hops are shared: a chain through a call points to the hop that call made, and extending
+/// a chain copies pointers. `Arc` compares, orders, and hashes by value, so the chains do too.
+pub type SharedChain = Vec<Arc<CallHop>>;
+
+/// The hops of a kept chain, owned (what a report shows).
+pub fn owned_chain(chain: &[Arc<CallHop>]) -> Vec<CallHop> {
+    chain.iter().map(|hop| CallHop::clone(hop)).collect()
+}
+
+/// Zero the position of every hop of a kept chain (a hop shared with other chains is copied).
+fn zero_hop_spans(chain: &mut [Arc<CallHop>]) {
+    for hop in chain {
+        Arc::make_mut(hop).span = Span { start: 0, end: 0 };
+    }
+}
+
 /// Write site detail for MUT201.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldWriteSite {
@@ -114,7 +131,7 @@ pub struct TypedFieldWriteSite {
     /// function that performs it: the summary owner when `via_chain` is empty, else the
     /// last hop's callee.
     pub span: Span,
-    pub via_chain: Vec<CallHop>,
+    pub via_chain: SharedChain,
     /// Parameters of the summary owner the written object may be, as itself (bit 0: a
     /// method's own `self`), mapped through every hop. Empty for an object that is no
     /// parameter: a fresh instance, an attribute of one, a call result.
@@ -373,7 +390,7 @@ pub struct EffectSummary {
     pub direct_exec_effects: BTreeSet<ExecEffectKind>,
     pub transitive_exec_effects: BTreeSet<ExecEffectKind>,
     /// Shortest known call chain reaching each effect (direct or transitive).
-    pub exec_chains: BTreeMap<ExecEffectKind, Vec<CallHop>>,
+    pub exec_chains: BTreeMap<ExecEffectKind, SharedChain>,
 
     // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
     pub mutates_params: u64,
@@ -565,18 +582,14 @@ impl EffectSummary {
     pub fn without_locations(&self) -> Self {
         let mut out = self.clone();
         for chain in out.exec_chains.values_mut() {
-            for hop in chain {
-                hop.span = Span { start: 0, end: 0 };
-            }
+            zero_hop_spans(chain);
         }
         out.typed_field_write_sites = out
             .typed_field_write_sites
             .into_iter()
             .map(|mut site| {
                 site.span = Span { start: 0, end: 0 };
-                for hop in &mut site.via_chain {
-                    hop.span = Span { start: 0, end: 0 };
-                }
+                zero_hop_spans(&mut site.via_chain);
                 site
             })
             .collect();
@@ -590,9 +603,7 @@ impl EffectSummary {
             .collect();
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
-            for hop in &mut r.chain {
-                hop.span = Span { start: 0, end: 0 };
-            }
+            zero_hop_spans(&mut r.chain);
         }
         out.unresolved_write_sites = out
             .unresolved_write_sites
@@ -608,9 +619,7 @@ impl EffectSummary {
             .map(|mut w| {
                 w.span = Span { start: 0, end: 0 };
                 w.origin = Span { start: 0, end: 0 };
-                for hop in &mut w.via_chain {
-                    hop.span = Span { start: 0, end: 0 };
-                }
+                zero_hop_spans(&mut w.via_chain);
                 w
             })
             .collect();
@@ -1051,9 +1060,10 @@ impl ProjectIndex {
                             continue;
                         };
                         let tail = facts.exec_chains.get(&e).map_or(&[][..], Vec::as_slice);
+                        let chain = callgraph::extend_chain(&lead, tail, rewrite);
                         out.push(SiteEffect {
                             effect: e,
-                            chain: callgraph::extend_chain(&lead, tail, rewrite),
+                            chain: owned_chain(&chain),
                             callee: Some(bc.callee.clone()),
                             callee_is_async: callee.is_async,
                             once_loops: through.once_loops,

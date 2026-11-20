@@ -1170,7 +1170,7 @@ pub(crate) fn mut201(
                                     rule.note,
                                 )
                             },
-                            || site.via_chain.clone(),
+                            || heki_effect::owned_chain(&site.via_chain),
                         );
                     }
                 }
@@ -1451,7 +1451,7 @@ impl<'a> Mut202Fn<'a> {
                     span,
                     path: self.unit.input.path.clone(),
                 }];
-                via.extend(r.chain.iter().cloned());
+                via.extend(heki_effect::owned_chain(&r.chain));
                 Ro::new(r.producer.clone(), r.shared, via)
             }),
             Callee::External(sym) => self
