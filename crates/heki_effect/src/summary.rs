@@ -4,18 +4,20 @@
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
 use crate::consumption::{IterFlow, Roots, param_iteration};
+use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
+use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
     Callee, DeclKeys, ModuleDecls, TypeCtx, Val, func_qualname, is_generator_function, self_aliases,
 };
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, EffectSummary, FileSummary,
-    FuncKey, ModuleInput, ProjectDecls, ReadKind, SiteRole, Slot, TypedFieldReadSite,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Contracts, EffectSummary,
+    FileSummary, FuncKey, ModuleInput, ProjectDecls, ReadKind, SiteRole, Slot, TypedFieldReadSite,
     TypedFieldWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
-    BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, InstKind, IrFunction,
-    Terminator, VarId,
+    BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
+    IrFunction, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -64,12 +66,16 @@ pub(crate) fn summarize_module(
     kb: &EffectiveEcosystemKb,
     own: (ModuleDecls, DeclKeys),
     track: bool,
+    contracts: Option<&dyn Contracts>,
 ) -> FileSummary {
     let (own_decls, completion_reads) = own;
     let (mut file, reads) = if track {
-        decls.record(|| extract_module(input, decls, kb))
+        decls.record(|| extract_module(input, decls, kb, contracts))
     } else {
-        (extract_module(input, decls, kb), DeclKeys::default())
+        (
+            extract_module(input, decls, kb, contracts),
+            DeclKeys::default(),
+        )
     };
     file.decls = own_decls;
     file.decl_reads = reads;
@@ -81,6 +87,7 @@ fn extract_module(
     input: &ModuleInput<'_>,
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
+    contracts: Option<&dyn Contracts>,
 ) -> FileSummary {
     let cx = TypeCtx::new(input, decls, kb);
     let mut file = FileSummary {
@@ -97,7 +104,7 @@ fn extract_module(
             module: input.module_name.clone(),
             qualname: func_qualname(f).to_owned(),
         };
-        let (summary, sites) = Extractor::new(f, &key, &cx, &input.path).run();
+        let (summary, mut sites, flow) = Extractor::new(f, &key, &cx, &input.path, contracts).run();
         for site in &sites {
             if let CallTarget::Project(callees) = &site.target {
                 for c in callees {
@@ -105,6 +112,25 @@ fn extract_module(
                         .push((key.clone(), c.callee.clone(), site.span));
                 }
             }
+        }
+        if let Some(mut flow) = flow {
+            // Site-list indices of the function become indices into the file's call sites.
+            let offset = u32::try_from(file.call_sites.len()).unwrap_or(u32::MAX);
+            let rebase = |f: &mut SiteFlow| {
+                f.next_call = f.next_call.map(|i| i.saturating_add(offset));
+            };
+            for site in &mut sites {
+                if let Some(f) = &mut site.flow {
+                    rebase(f);
+                }
+            }
+            flow.entries.iter_mut().for_each(rebase);
+            for w in &mut flow.writes {
+                rebase(&mut w.flow);
+            }
+            let slot = file.flows.entry(key.clone()).or_default();
+            slot.entries.extend(flow.entries);
+            slot.writes.extend(flow.writes);
         }
         file.call_sites.extend(sites);
         // Same qualname defined twice (conditional definitions): keep the union of facts.
@@ -160,6 +186,20 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     into.private_calls.extend(other.private_calls);
     into.offloads_blocking_params |= other.offloads_blocking_params;
     into.unknown_calls |= other.unknown_calls;
+    if let Some(o) = other.returns_protected {
+        let ProtectedReturn {
+            producer,
+            shared,
+            chain,
+        } = o;
+        ProtectedReturn::add(
+            &mut into.returns_protected,
+            producer,
+            shared,
+            ReturnStep::ITSELF,
+            chain,
+        );
+    }
     into.refresh_typed_field_writes();
 }
 
@@ -173,6 +213,8 @@ struct Owner {
     may_params: u64,
     /// An instance the function constructs (`TypedFieldWriteSite::fresh`).
     fresh: bool,
+    /// Where the object comes from among the objects that existed before the call (`MUT109`).
+    reach: Reach,
 }
 
 /// `obj.<attr>` with project-class `obj` (or `obj["key"]` with a `TypedDict` `obj`).
@@ -187,6 +229,8 @@ struct ObjAttr {
     obj_params: u64,
     /// `obj` is an instance the function constructs (`TypedFieldWriteSite::fresh`).
     fresh: bool,
+    /// Where `obj` comes from (`MUT109`).
+    reach: Reach,
 }
 
 struct Extractor<'a> {
@@ -196,7 +240,7 @@ struct Extractor<'a> {
     path: &'a Path,
     types: FxHashMap<VarId, Val>,
     /// Defining instruction of each variable.
-    defs: FxHashMap<VarId, &'a InstKind>,
+    defs: FxHashMap<VarId, &'a Inst>,
     /// Instructions using each variable as an operand.
     uses: FxHashMap<VarId, Vec<&'a InstKind>>,
     self_vars: FxHashSet<VarId>,
@@ -223,12 +267,27 @@ struct Extractor<'a> {
     callees: FxHashMap<(BlockId, usize), Callee>,
     /// The project calls (`Call` / `MethodCall`), for the sites of the objects they return.
     project_calls: Vec<ProjectCall>,
+    contracts: Option<&'a dyn Contracts>,
+    /// Call results and attribute reads the function may return, with the step from each to the
+    /// returned value (`MUT202` return flow).
+    returned: FxHashMap<VarId, ReturnStep>,
+    /// Position (block, instruction index) of the instruction being visited.
+    pos: (BlockId, usize),
+    /// The points `MUT109` describes (`Some` when an `invalidation` contract is configured).
+    events: Option<Events>,
+    /// Contracts naming this function an exempt writer (`MUT109`).
+    exempt: u64,
+    /// Where each variable's object comes from among the objects that existed before the call
+    /// (`MUT109`; empty unless an `invalidation` contract is configured).
+    reach: FxHashMap<VarId, Reach>,
 }
 
 /// A project call, for the sites of the object it returns (`SiteRole`).
 struct ProjectCall {
     /// Index of its `Call` site in `Extractor::sites`.
     site: usize,
+    /// Its position (block, instruction index).
+    at: (BlockId, usize),
     /// The variable it defines.
     dst: VarId,
     /// Each callee with the parameter each argument variable binds.
@@ -236,13 +295,19 @@ struct ProjectCall {
 }
 
 impl<'a> Extractor<'a> {
-    fn new(f: &'a IrFunction, key: &'a FuncKey, cx: &'a TypeCtx<'a>, path: &'a Path) -> Self {
+    fn new(
+        f: &'a IrFunction,
+        key: &'a FuncKey,
+        cx: &'a TypeCtx<'a>,
+        path: &'a Path,
+        contracts: Option<&'a dyn Contracts>,
+    ) -> Self {
         let types = cx.infer(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let Some(d) = inst.kind.dst() {
-                defs.insert(d, &inst.kind);
+                defs.insert(d, inst);
             }
             for op in inst.kind.operands() {
                 uses.entry(op).or_default().push(&inst.kind);
@@ -283,10 +348,23 @@ impl<'a> Extractor<'a> {
             sites: Vec::new(),
             callees: FxHashMap::default(),
             project_calls: Vec::new(),
+            contracts,
+            returned: FxHashMap::default(),
+            pos: (BlockId(0), 0),
+            events: contracts
+                .filter(|c| c.invalidations() > 0)
+                .map(|_| Events::default()),
+            exempt: contracts.map_or(0, |c| c.exempt_writer(&key.fqn(), &key.qualname)),
+            reach: FxHashMap::default(),
         };
         ex.build_may_params();
         ex.build_fresh();
+        if ex.events.is_some() {
+            ex.build_reach();
+        }
         ex.build_aliases();
+        let returned = readonly::returned_values(f, &ex.defs, |kind| ex.derivations(kind));
+        ex.returned = returned;
         ex
     }
 
@@ -439,7 +517,78 @@ impl<'a> Extractor<'a> {
             direct: true,
             obj_params: self.may_params.get(&obj).copied().unwrap_or(0),
             fresh: self.is_fresh(obj),
+            reach: self.reach_of(obj),
         }
+    }
+
+    /// [`Self::reach`]: the parameters and module / closure state (a summarized function reads
+    /// globals with `LoadGlobal`, closure cells with `LoadDeref`), then a monotone fixpoint over
+    /// copies, phis (any input), attribute and item loads, iteration, and the methods that return
+    /// an element of their receiver. Calls reach nothing: their result is new or of unknown origin.
+    fn build_reach(&mut self) {
+        for (i, p) in self.f.params.iter().enumerate().take(64) {
+            self.reach.insert(
+                p.var,
+                Reach {
+                    params: 1u64 << i,
+                    globals: false,
+                },
+            );
+        }
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::LoadGlobal { dst, .. } | InstKind::LoadDeref { dst, .. } = &inst.kind {
+                self.reach.insert(
+                    *dst,
+                    Reach {
+                        params: 0,
+                        globals: true,
+                    },
+                );
+            }
+        }
+        loop {
+            let mut changed = false;
+            for bb in &self.f.blocks {
+                for phi in &bb.phis {
+                    let r = phi
+                        .incoming
+                        .iter()
+                        .fold(Reach::default(), |acc, (_, v)| acc.join(self.reach_of(*v)));
+                    changed |= join_reach(&mut self.reach, phi.dst, r);
+                }
+                for inst in &bb.insts {
+                    let from = match &inst.kind {
+                        InstKind::Copy { dst, src }
+                        | InstKind::AttrLoad { dst, obj: src, .. }
+                        | InstKind::SubscriptLoad { dst, obj: src, .. }
+                        | InstKind::MakeIter {
+                            dst, iterable: src, ..
+                        }
+                        | InstKind::IterNext { dst, iter: src, .. } => Some((*dst, *src)),
+                        InstKind::MethodCall {
+                            dst, recv, method, ..
+                        } if readonly::ELEMENT_ACCESSORS.contains(&method.as_str())
+                            || matches!(method.as_str(), "pop" | "popitem" | "setdefault") =>
+                        {
+                            Some((*dst, *recv))
+                        }
+                        _ => None,
+                    };
+                    if let Some((dst, src)) = from {
+                        let r = self.reach_of(src);
+                        changed |= join_reach(&mut self.reach, dst, r);
+                    }
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    /// [`Self::reach`] of `var`.
+    fn reach_of(&self, var: VarId) -> Reach {
+        self.reach.get(&var).copied().unwrap_or_default()
     }
 
     /// [`Self::fresh`]: the results of calling a project class, then a monotone fixpoint over
@@ -498,6 +647,7 @@ impl<'a> Extractor<'a> {
             typed_class: self.project_class(var),
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var),
+            reach: self.reach_of(var),
         }
     }
 
@@ -511,6 +661,7 @@ impl<'a> Extractor<'a> {
             typed_instance: self.project_class(var),
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
+            reach: self.reach_of(var),
         }
     }
 
@@ -518,7 +669,7 @@ impl<'a> Extractor<'a> {
     fn const_str(&self, var: VarId) -> Option<String> {
         let mut cur = var;
         for _ in 0..16 {
-            match self.defs.get(&cur)? {
+            match &self.defs.get(&cur)?.kind {
                 InstKind::Const {
                     literal: ConstLiteral::Str(s),
                     ..
@@ -530,10 +681,64 @@ impl<'a> Extractor<'a> {
         None
     }
 
-    fn run(mut self) -> (EffectSummary, Vec<CallSite>) {
+    /// `MUT202` derivations of a call's result from its receiver and from its first argument
+    /// (copies and element views; see [`readonly::call_derivation`]).
+    fn derivations(&self, kind: &InstKind) -> Vec<(VarId, Derivation)> {
+        let (recv, method, args, kwargs, callee) = match kind {
+            InstKind::Call {
+                callee_var,
+                args,
+                kwargs,
+                ..
+            } => (
+                None,
+                None,
+                args,
+                kwargs,
+                self.cx
+                    .resolve_call(callee_var.and_then(|v| self.types.get(&v))),
+            ),
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            } => (
+                Some(*recv),
+                Some(method.as_str()),
+                args,
+                kwargs,
+                self.cx.resolve_method(self.types.get(recv), method),
+            ),
+            _ => return Vec::new(),
+        };
+        let symbol = match &callee {
+            Callee::External(s) => s.as_str(),
+            _ => "",
+        };
+        let deep = kwargs
+            .iter()
+            .any(|(k, v)| k.as_deref() == Some("deep") && self.f.const_bool(*v) == Some(true));
+        let mut out = Vec::new();
+        if let Some(r) = recv
+            && let Some(d) = readonly::call_derivation(method, symbol, self.cx.kb, deep)
+        {
+            out.push((r, d));
+        }
+        if let Some(a) = args.first()
+            && let Some(d) = readonly::call_derivation(None, symbol, self.cx.kb, deep)
+        {
+            out.push((*a, d));
+        }
+        out
+    }
+
+    fn run(mut self) -> (EffectSummary, Vec<CallSite>, Option<FuncFlow>) {
         let f = self.f;
         for bb in &f.blocks {
             for (index, inst) in bb.insts.iter().enumerate() {
+                self.pos = (bb.id, index);
                 self.visit(bb.id, index, &inst.kind, inst.span);
             }
         }
@@ -542,7 +747,18 @@ impl<'a> Extractor<'a> {
             self.summary.returns_self_attrs = self.returned_self_attrs();
         }
         self.summary.refresh_typed_field_writes();
-        (self.summary, self.sites)
+        let flow = self.events.take().map(|events| {
+            let n = self.contracts.map_or(0, |c| c.invalidations());
+            let (entry, calls, writes) = invalidation::analyze(f, events, n);
+            for (site, flow) in calls {
+                self.sites[site].flow = Some(flow);
+            }
+            FuncFlow {
+                entries: vec![entry],
+                writes,
+            }
+        });
+        (self.summary, self.sites, flow)
     }
 
     /// Where the function iterates its parameters and the objects its project calls return
@@ -578,12 +794,14 @@ impl<'a> Extractor<'a> {
                 .collect()
         };
         // Where each call's result is iterated.
-        let mut iterated: Vec<Vec<(Span, u16)>> = vec![Vec::new(); self.project_calls.len()];
+        // With the position of the iteration (for `MUT109`'s flow at the site).
+        let mut iterated: Vec<Vec<(Span, u16, (BlockId, usize))>> =
+            vec![Vec::new(); self.project_calls.len()];
         for e in &flow.events {
-            let at = (e.span, f.block_loop_depth(e.block));
+            let (span, depth) = (e.span, f.block_loop_depth(e.block));
             for c in calls_in(&e.stepped) {
-                if !iterated[c].contains(&at) {
-                    iterated[c].push(at);
+                if !iterated[c].iter().any(|i| (i.0, i.1) == (span, depth)) {
+                    iterated[c].push((span, depth, (e.block, e.index)));
                 }
             }
         }
@@ -599,18 +817,20 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
+        // Each site with the position where the callee's body runs into this function's body
+        // (`None`: it runs where this function's result is iterated).
         let mut extra = Vec::new();
         for (c, call) in self.project_calls.iter().enumerate() {
             let site = &self.sites[call.site];
-            for &(span, depth) in &iterated[c] {
-                extra.push(role_site(site, SiteRole::Iterate, span, depth, None));
+            for &(span, depth, at) in &iterated[c] {
+                extra.push((
+                    role_site(site, SiteRole::Iterate, span, depth, None),
+                    Some(at),
+                ));
             }
             if returned[c] {
-                extra.push(role_site(
-                    site,
-                    SiteRole::Return,
-                    site.span,
-                    site.loop_depth,
+                extra.push((
+                    role_site(site, SiteRole::Return, site.span, site.loop_depth, None),
                     None,
                 ));
             }
@@ -634,31 +854,34 @@ impl<'a> Extractor<'a> {
                 {
                     let y_site = &self.sites[self.project_calls[y].site];
                     // Already iterated right there (a 3.11 comprehension frame `__comp_<id>(it)`).
-                    if !iterated[y].iter().any(|(s, _)| *s == x_site.span) {
+                    if !iterated[y].iter().any(|(s, _, _)| *s == x_site.span) {
                         let role = SiteRole::Through {
                             via: via.clone(),
                             iterated: false,
                         };
                         let flags = Some((x_site.is_awaited, x_site.drives_coroutine_manually));
-                        extra.push(role_site(
-                            y_site,
-                            role,
-                            x_site.span,
-                            x_site.loop_depth,
-                            flags,
+                        extra.push((
+                            role_site(y_site, role, x_site.span, x_site.loop_depth, flags),
+                            Some(call.at),
                         ));
                     }
-                    for &(span, depth) in &iterated[x] {
+                    for &(span, depth, at) in &iterated[x] {
                         let role = SiteRole::Through {
                             via: via.clone(),
                             iterated: true,
                         };
-                        extra.push(role_site(y_site, role, span, depth, None));
+                        extra.push((role_site(y_site, role, span, depth, None), Some(at)));
                     }
                 }
             }
         }
-        self.sites.extend(extra);
+        let base = self.sites.len();
+        for (k, (site, at)) in extra.into_iter().enumerate() {
+            if let (Some(events), Some((b, i))) = (self.events.as_mut(), at) {
+                events.calls.push((b, i, base + k));
+            }
+            self.sites.push(site);
+        }
     }
 
     /// [`EffectSummary::returns_self_attrs`] of a `@cached_property` getter, from its own body
@@ -826,6 +1049,16 @@ impl<'a> Extractor<'a> {
                 }
                 let owner = self.owner_of(*obj);
                 self.typed_read(owner, attr, ReadKind::DirectAttr, span);
+                // A returned attribute that `readonly-returns` names (`Class.attr`).
+                if let Some(step) = self.returned.get(dst).copied()
+                    && let Some(Val::Inst(class)) = self.types.get(obj)
+                    && let Some(c) = self.contracts
+                {
+                    let fqn = format!("{class}.{attr}");
+                    if let Some(deep) = c.readonly_producer(&fqn) {
+                        self.seed_protected(fqn, deep, step, span);
+                    }
+                }
                 self.property_read(bb, *dst, *obj, attr, span);
             }
             InstKind::SubscriptLoad {
@@ -1094,10 +1327,10 @@ impl<'a> Extractor<'a> {
     fn bound_method(&self, var: VarId) -> Option<(VarId, String)> {
         let mut cur = var;
         // Copies of an SSA variable form a tree, so the walk ends.
-        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur) {
+        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur).map(|i| &i.kind) {
             cur = *src;
         }
-        match self.defs.get(&cur)? {
+        match &self.defs.get(&cur)?.kind {
             InstKind::AttrLoad { obj, attr, .. } => {
                 let getter = self
                     .cx
@@ -1181,7 +1414,34 @@ impl<'a> Extractor<'a> {
         span: Span,
         obj_params: u64,
         fresh: bool,
+        reach: Reach,
     ) {
+        // `MUT109`: a write to a contract target of an object that existed before the call,
+        // unless it is the class's own initialization of `self`.
+        if let (Some(c), Some(events)) = (self.contracts, self.events.as_mut())
+            && reach.any()
+        {
+            let own_init = invalidation::is_initializer(self.key) && reach.params & 1 != 0;
+            // The class and its project bases: a target class covers its subclasses.
+            let mut classes = vec![class.clone()];
+            classes.extend(self.cx.project.ancestors_of(&class));
+            let mask = c.target_of(&classes, attr) & !self.exempt;
+            if mask != 0 && !own_init {
+                events.writes.push((
+                    self.pos.0,
+                    self.pos.1,
+                    FlowWrite {
+                        contracts: mask,
+                        class_qualname: class.clone(),
+                        attr: attr.to_owned(),
+                        kind,
+                        span,
+                        reach,
+                        flow: SiteFlow::default(),
+                    },
+                ));
+            }
+        }
         self.summary
             .typed_field_write_sites
             .insert(TypedFieldWriteSite {
@@ -1224,7 +1484,15 @@ impl<'a> Extractor<'a> {
             None => {}
         }
         if let Some(class) = owner.typed_class {
-            self.typed_site(class, attr, kind, span, owner.may_params, owner.fresh);
+            self.typed_site(
+                class,
+                attr,
+                kind,
+                span,
+                owner.may_params,
+                owner.fresh,
+                owner.reach,
+            );
         }
     }
 
@@ -1259,7 +1527,7 @@ impl<'a> Extractor<'a> {
             } else {
                 WriteKind::AliasContainerMut
             };
-            self.typed_site(a.class, &a.attr, kind, span, a.obj_params, a.fresh);
+            self.typed_site(a.class, &a.attr, kind, span, a.obj_params, a.fresh, a.reach);
         }
     }
 
@@ -1347,6 +1615,7 @@ impl<'a> Extractor<'a> {
         if let Some((site, params)) = self.call(bb, &callee, call) {
             self.project_calls.push(ProjectCall {
                 site,
+                at: (bb, index),
                 dst: call.dst,
                 params,
             });
@@ -1369,6 +1638,19 @@ impl<'a> Extractor<'a> {
         let loop_depth = self.f.block_loop_depth(bb);
         match callee {
             Callee::External(symbol) => {
+                if let Some(c) = self.contracts {
+                    if let Some(step) = self.returned.get(&call.dst).copied()
+                        && let Some(deep) = c.readonly_producer(symbol)
+                    {
+                        self.seed_protected(symbol.clone(), deep, step, call.span);
+                    }
+                    let mask = c.invalidator_of(symbol, symbol);
+                    if let Some(events) = self.events.as_mut()
+                        && mask != 0
+                    {
+                        events.invalidators.push((self.pos.0, self.pos.1, mask));
+                    }
+                }
                 self.external_call(
                     symbol.clone(),
                     call.args,
@@ -1389,11 +1671,17 @@ impl<'a> Extractor<'a> {
                         drives_coroutine_manually: false,
                         constructs: Some(class.clone()),
                         role: SiteRole::Call,
+                        returned: None,
+                        flow: None,
                     });
                 }
                 None
             }
             Callee::Project(keys, binds_recv) => {
+                // A constructor call returns the new instance, not what `__init__` returns.
+                let constructor = *binds_recv && call.recv.is_none();
+                // The contracts the callees announce, of those whose body runs at the call.
+                let mut invalidates = 0u64;
                 let mut callees = Vec::new();
                 let mut bindings = Vec::new();
                 let mut offloaders: Vec<String> = Vec::new();
@@ -1412,6 +1700,11 @@ impl<'a> Extractor<'a> {
                         continue;
                     }
                     any_async |= decl.is_async;
+                    if let (Some(c), Some(_)) = (self.contracts, &self.events)
+                        && !decl.is_generator
+                    {
+                        invalidates |= c.invalidator_of(&key.fqn(), &key.qualname);
+                    }
                     let offset = usize::from(*binds_recv && !decl.is_staticmethod);
                     let mut params: Vec<ArgOrigin> = Vec::new();
                     if offset == 1 {
@@ -1459,6 +1752,18 @@ impl<'a> Extractor<'a> {
                     return None;
                 }
                 let drives = any_async && !call.is_awaited && self.drives_manually(call.dst);
+                if let Some(events) = self.events.as_mut() {
+                    events
+                        .calls
+                        .push((self.pos.0, self.pos.1, self.sites.len()));
+                    // An `async` invalidator only runs when it is awaited or driven, and a
+                    // generator's body only where it is iterated.
+                    if invalidates != 0 && (!any_async || call.is_awaited || drives) {
+                        events
+                            .invalidators
+                            .push((self.pos.0, self.pos.1, invalidates));
+                    }
+                }
                 self.sites.push(CallSite {
                     caller: self.key.clone(),
                     target: CallTarget::Project(callees),
@@ -1469,6 +1774,12 @@ impl<'a> Extractor<'a> {
                     drives_coroutine_manually: drives,
                     constructs: call.constructs.clone(),
                     role: SiteRole::Call,
+                    returned: if constructor {
+                        None
+                    } else {
+                        self.returned.get(&call.dst).copied()
+                    },
+                    flow: None,
                 });
                 Some((self.sites.len() - 1, bindings))
             }
@@ -1548,7 +1859,22 @@ impl<'a> Extractor<'a> {
             drives_coroutine_manually: false,
             constructs: None,
             role: SiteRole::Call,
+            returned: None,
+            flow: None,
         });
+    }
+
+    /// The function returns (through `step`) the result of the read-only producer `producer`
+    /// it calls or reads at `span` (`MUT202` return flow; `deep` as the producer is declared).
+    fn seed_protected(&mut self, producer: String, deep: bool, step: ReturnStep, span: Span) {
+        let chain = vec![self.hop(producer.clone(), span)];
+        ProtectedReturn::add(
+            &mut self.summary.returns_protected,
+            producer,
+            Shared::produced(deep),
+            step,
+            chain,
+        );
     }
 }
 
@@ -1590,6 +1916,8 @@ fn role_site(
         drives_coroutine_manually: drives,
         constructs: None,
         role,
+        returned: None,
+        flow: None,
     }
 }
 
@@ -1649,6 +1977,18 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
     if let Some(a) = found {
         map.insert(dst, a);
     }
+}
+
+/// `map[var] = map[var] ∪ r`; whether it grew.
+fn join_reach(map: &mut FxHashMap<VarId, Reach>, var: VarId, r: Reach) -> bool {
+    if !r.any() {
+        return false;
+    }
+    let slot = map.entry(var).or_default();
+    let joined = slot.join(r);
+    let grown = joined != *slot;
+    *slot = joined;
+    grown
 }
 
 /// `map[var] |= bits`; whether it grew.

@@ -17,11 +17,20 @@
 
 mod callgraph;
 pub mod consumption;
+mod contracts;
+mod invalidation;
+pub mod readonly;
 mod report;
 pub mod resolver;
 mod scc;
 mod summary;
 
+pub use contracts::Contracts;
+pub use invalidation::{
+    FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
+    delegates_to_callers, is_initializer, reach_across,
+};
+pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{
     BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
     boundary_reports_in, group_by_root_cause,
@@ -41,6 +50,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Canonical function key across files (stable across line movements).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -222,6 +232,16 @@ pub struct EffectSummary {
     /// resolved or not: `MUT107` leaves the methods a class family's initializers call this
     /// way to initialization. A local fact: never propagated.
     pub private_calls: BTreeSet<String>,
+    /// The function may return a value shared with a read-only producer's other callers: it is a
+    /// producer itself (`MUT202`; seeded by the declared producers it returns from, propagated
+    /// from the project callees whose result it returns).
+    pub returns_protected: Option<ProtectedReturn>,
+    /// `invalidation` contracts (bits) whose invalidators every normal path of the function
+    /// reaches, directly or through calls (`MUT109`; propagated).
+    pub must_invalidate: u64,
+    /// Writes to `invalidation` targets that some normal path leaves unannounced: the function's
+    /// own, and those the private helpers it calls pass up (`MUT109`; propagated).
+    pub unmet_invalidation: BTreeSet<UnmetWrite>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -278,6 +298,22 @@ impl EffectSummary {
             })
             .collect();
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
+        if let Some(r) = &mut out.returns_protected {
+            for hop in &mut r.chain {
+                hop.span = Span { start: 0, end: 0 };
+            }
+        }
+        out.unmet_invalidation = out
+            .unmet_invalidation
+            .into_iter()
+            .map(|mut w| {
+                w.span = Span { start: 0, end: 0 };
+                for hop in &mut w.via_chain {
+                    hop.span = Span { start: 0, end: 0 };
+                }
+                w
+            })
+            .collect();
         out
     }
 
@@ -373,6 +409,9 @@ pub struct ArgOrigin {
     pub may_params: u64,
     /// The argument is an instance the caller constructs (`Model(...)`), or an attribute of one.
     pub fresh: bool,
+    /// Where the argument comes from among the objects that existed before the call (`MUT109`;
+    /// only computed when an `invalidation` contract is configured).
+    pub reach: Reach,
 }
 
 impl ArgOrigin {
@@ -458,6 +497,12 @@ pub struct CallSite {
     pub constructs: Option<String>,
     /// What reaching the callees here runs (`Call` for every Layer 2 site).
     pub role: SiteRole,
+    /// The calling function may return the call's result, through this step (`MUT202` return
+    /// flow: a read-only callee makes the caller a producer).
+    pub returned: Option<ReturnStep>,
+    /// What follows the call on every normal path of the caller (`MUT109`; only computed when
+    /// an `invalidation` contract is configured).
+    pub flow: Option<SiteFlow>,
 }
 
 impl CallSite {
@@ -506,6 +551,9 @@ pub struct FileSummary {
     /// for the language server's index only (`analyze_project_with_reads`, the incremental
     /// updates); empty otherwise.
     pub decl_reads: DeclKeys,
+    /// The `MUT109` flow facts of the file's functions (local, IR-free; empty unless an
+    /// `invalidation` contract is configured).
+    pub flows: FxHashMap<FuncKey, FuncFlow>,
 }
 
 /// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
@@ -549,6 +597,8 @@ pub struct ProjectIndex {
     pub reverse_call_graph: FxHashMap<FuncKey, FxHashSet<FuncKey>>,
     /// Defining file of every summarized function.
     pub(crate) func_files: FxHashMap<FuncKey, PathBuf>,
+    /// The declared contracts the summaries depend on (`None`: no contract facts).
+    pub(crate) contracts: Option<Arc<dyn Contracts>>,
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
@@ -558,34 +608,58 @@ pub(crate) fn is_stub(path: &Path) -> bool {
 
 /// Summarize every module of a project and propagate effects to a fixpoint.
 pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
-    analyze(modules, kb, false)
+    analyze(modules, kb, false, None)
 }
 
-/// [`analyze_project`] recording what each file's summary read of the project declarations
+/// [`analyze_project`] with the declared contracts the summaries depend on (`MUT202` producers,
+/// `MUT109` invalidation contracts); the index keeps them for incremental updates.
+pub fn analyze_project_with(
+    modules: &[ModuleInput<'_>],
+    kb: &EffectiveEcosystemKb,
+    contracts: Option<Arc<dyn Contracts>>,
+) -> ProjectIndex {
+    analyze(modules, kb, false, contracts)
+}
+
+/// [`analyze_project_with`] recording what each file's summary read of the project declarations
 /// (`FileSummary::decl_reads`), for an index that incremental updates keep current.
 pub fn analyze_project_with_reads(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
+    contracts: Option<Arc<dyn Contracts>>,
 ) -> ProjectIndex {
-    analyze(modules, kb, true)
+    analyze(modules, kb, true, contracts)
 }
 
-fn analyze(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb, track: bool) -> ProjectIndex {
+fn analyze(
+    modules: &[ModuleInput<'_>],
+    kb: &EffectiveEcosystemKb,
+    track: bool,
+    contracts: Option<Arc<dyn Contracts>>,
+) -> ProjectIndex {
     let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
     let files = modules
         .iter()
         .zip(own)
-        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track))
+        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts.as_deref()))
         .collect();
-    ProjectIndex::build(files)
+    ProjectIndex::build_with(files, contracts)
 }
 
 impl ProjectIndex {
     /// Build an index from local file summaries and propagate the whole project.
-    pub fn build(mut files: Vec<FileSummary>) -> Self {
+    pub fn build(files: Vec<FileSummary>) -> Self {
+        Self::build_with(files, None)
+    }
+
+    /// [`Self::build`] for summaries extracted with `contracts`.
+    pub fn build_with(mut files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
         // Index stubs first so a sibling `.py` implementation always owns the module's symbols.
         files.sort_by_key(|f| !is_stub(&f.path));
-        let mut index = Self::default();
+        let mut index = Self {
+            contracts,
+            ..Self::default()
+        };
         for mut file in files {
             file.functions = file.local_functions.clone();
             index.add_file_links(&file);
@@ -717,7 +791,8 @@ impl ProjectIndex {
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
         let own = own.into_iter().next().expect("one module in, one out");
-        let file = summary::summarize_module(input, &decls, kb, own, true);
+        let file =
+            summary::summarize_module(input, &decls, kb, own, true, self.contracts.as_deref());
         self.update_file(file)
     }
 
@@ -744,7 +819,14 @@ impl ProjectIndex {
             let (changed, own, reads) = resolver::update_module_decls(input, kb, decls);
             (changed, (own, reads))
         };
-        let file = summary::summarize_module(input, decls.completed(), kb, own, true);
+        let file = summary::summarize_module(
+            input,
+            decls.completed(),
+            kb,
+            own,
+            true,
+            self.contracts.as_deref(),
+        );
         (self.update_file(file), changed)
     }
 

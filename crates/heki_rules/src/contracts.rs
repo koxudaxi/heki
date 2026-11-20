@@ -1,0 +1,143 @@
+//! The declared contracts the summaries depend on ([`heki_effect::Contracts`]), built from the
+//! configuration: the `readonly-returns` producers (`MUT202`) and the `invalidation` contracts
+//! (`MUT109`). `heki check` and the LSP engine hand them to the analysis, so a wrapper of a
+//! producer and an invalidator reached through calls are known across files without IR.
+
+use crate::mut_rules::ReadOnlyProducers;
+use crate::{DottedPattern, RuleConfigError};
+use heki_effect::Contracts;
+use heki_env::HekiConfig;
+use std::sync::Arc;
+
+/// The most `invalidation` contracts a configuration may declare (one bit each).
+pub const MAX_INVALIDATIONS: usize = 64;
+
+/// One `invalidation` contract's patterns.
+#[derive(Debug)]
+pub(crate) struct InvalidationNames {
+    /// `targets`: the configured text and its `(class, attr)` patterns.
+    targets: Vec<(String, DottedPattern, DottedPattern)>,
+    invalidators: Vec<DottedPattern>,
+    exempt_writers: Vec<DottedPattern>,
+}
+
+fn names(patterns: &[DottedPattern], fqn: &str, qualname: &str) -> bool {
+    patterns
+        .iter()
+        .any(|p| p.matches(fqn) || p.matches(qualname))
+}
+
+impl InvalidationNames {
+    pub(crate) fn names_invalidator(&self, fqn: &str, qualname: &str) -> bool {
+        names(&self.invalidators, fqn, qualname)
+    }
+
+    pub(crate) fn names_exempt_writer(&self, fqn: &str, qualname: &str) -> bool {
+        names(&self.exempt_writers, fqn, qualname)
+    }
+
+    /// The first target naming attribute `attr` of an object of class `classes[0]` (`classes`:
+    /// the class and its project bases), as configured.
+    pub(crate) fn target(&self, classes: &[String], attr: &str) -> Option<&str> {
+        self.targets
+            .iter()
+            .find(|(_, class, a)| a.matches(attr) && classes.iter().any(|name| class.matches(name)))
+            .map(|(text, _, _)| text.as_str())
+    }
+}
+
+/// [`Contracts`] over a configuration's `readonly-returns` and `invalidation` entries.
+#[derive(Debug)]
+pub(crate) struct ConfigContracts {
+    producers: ReadOnlyProducers,
+    pub(crate) invalidations: Vec<InvalidationNames>,
+}
+
+impl ConfigContracts {
+    /// Compile the patterns: a target without a dot is `InvalidTarget`, a bad glob `Glob`, and
+    /// more than [`MAX_INVALIDATIONS`] contracts `TooManyInvalidations`.
+    pub(crate) fn new(config: &HekiConfig) -> Result<Self, RuleConfigError> {
+        if config.invalidation.len() > MAX_INVALIDATIONS {
+            return Err(RuleConfigError::TooManyInvalidations(
+                config.invalidation.len(),
+            ));
+        }
+        let mut invalidations = Vec::new();
+        for rule in &config.invalidation {
+            let mut targets = Vec::new();
+            for t in &rule.targets {
+                let Some((class, attr)) = t.rsplit_once('.') else {
+                    return Err(RuleConfigError::InvalidTarget {
+                        section: "invalidation",
+                        target: t.clone(),
+                    });
+                };
+                targets.push((
+                    t.clone(),
+                    DottedPattern::new(class, "invalidation.targets")?,
+                    DottedPattern::new(attr, "invalidation.targets")?,
+                ));
+            }
+            invalidations.push(InvalidationNames {
+                targets,
+                invalidators: crate::mut_rules::patterns(
+                    &rule.invalidators,
+                    "invalidation.invalidators",
+                )?,
+                exempt_writers: crate::mut_rules::patterns(
+                    &rule.exempt_writers,
+                    "invalidation.exempt-writers",
+                )?,
+            });
+        }
+        Ok(Self {
+            producers: ReadOnlyProducers::new(config)?,
+            invalidations,
+        })
+    }
+}
+
+impl Contracts for ConfigContracts {
+    fn readonly_producer(&self, fqn: &str) -> Option<bool> {
+        self.producers.deep_for(fqn)
+    }
+
+    fn invalidations(&self) -> usize {
+        self.invalidations.len()
+    }
+
+    fn invalidator_of(&self, fqn: &str, qualname: &str) -> u64 {
+        mask(&self.invalidations, |c| c.names_invalidator(fqn, qualname))
+    }
+
+    fn exempt_writer(&self, fqn: &str, qualname: &str) -> u64 {
+        mask(&self.invalidations, |c| {
+            c.names_exempt_writer(fqn, qualname)
+        })
+    }
+
+    fn target_of(&self, classes: &[String], attr: &str) -> u64 {
+        mask(&self.invalidations, |c| c.target(classes, attr).is_some())
+    }
+}
+
+/// Bit `i` set for every contract `i` that `has` holds for.
+fn mask(contracts: &[InvalidationNames], has: impl Fn(&InvalidationNames) -> bool) -> u64 {
+    contracts
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| has(c))
+        .fold(0, |acc, (i, _)| acc | (1u64 << i))
+}
+
+/// The contracts of `config` the summaries depend on (`None` when it declares no producer and no
+/// `invalidation` contract, so nothing is computed for them).
+pub fn summary_contracts(
+    config: &HekiConfig,
+) -> Result<Option<Arc<dyn Contracts>>, RuleConfigError> {
+    let contracts = ConfigContracts::new(config)?;
+    if contracts.producers.is_empty() && contracts.invalidations.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(contracts)))
+}

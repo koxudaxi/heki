@@ -1,0 +1,161 @@
+//! `MUT109` (`write-without-invalidation`): a write to a declared `invalidation` target that
+//! some normal path of the writing function leaves unannounced (docs/ANALYSIS_AND_KB_SPEC.md
+//! section 2.3).
+//!
+//! The summaries carry the facts (`heki_effect::invalidation`): each function's writes that no
+//! invalidator follows on every path to a normal return, directly or through calls, with the
+//! writes private helpers pass up. This rule decides where they are reported: a private helper
+//! hands them to its callers (they are in its callers' summaries when their call is not
+//! announced either), and a function every caller path of which announces the change after
+//! calling it (invalidation in bulk by a caller) is not reported.
+
+use super::{is_private, with_note};
+use crate::contracts::ConfigContracts;
+use crate::{CheckContext, RuleConfigError, SitesByCaller};
+use heki_diagnostics::Diagnostic;
+use heki_effect::{FuncKey, Reach, UnmetWrite, body_runs_at, is_initializer, reach_across};
+use rustc_hash::FxHashSet;
+use std::collections::VecDeque;
+
+pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<(), RuleConfigError> {
+    if !cx.selection.is_enabled("MUT109") || cx.config.invalidation.is_empty() {
+        return Ok(());
+    }
+    let names = ConfigContracts::new(cx.config)?;
+    let sites = cx.sites_by_caller();
+    let mut paths: Vec<_> = cx.index.files.keys().collect();
+    paths.sort();
+    let mut seen = FxHashSet::default();
+    for path in paths {
+        let Some(unit) = cx.unit(path) else {
+            continue;
+        };
+        // Every function once, from its defining file.
+        let mut funcs: Vec<_> = cx.index.files[path]
+            .functions
+            .iter()
+            .filter(|(k, s)| {
+                !s.unmet_invalidation.is_empty() && cx.index.file_of(k) == Some(path.as_path())
+            })
+            .collect();
+        funcs.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, s) in funcs {
+            // A private helper's writes are its callers' to announce: they are in the callers'
+            // summaries where a call is not announced. Without resolved callers there is nothing
+            // to check them against.
+            if is_private(&key.qualname) {
+                continue;
+            }
+            for u in &s.unmet_invalidation {
+                // The index was built with these contracts, so the contract exists.
+                let rule = &cx.config.invalidation[usize::from(u.contract)];
+                if announced_by_callers(cx, &sites, &names, key, u) {
+                    continue;
+                }
+                // The configured target that names the write, as the summary matched it.
+                let mut classes = vec![u.class_qualname.clone()];
+                classes.extend(cx.decls.ancestors_of(&u.class_qualname));
+                let contract = &names.invalidations[usize::from(u.contract)];
+                let target = contract
+                    .target(&classes, &u.attr)
+                    .map_or_else(|| format!("{}.{}", u.class_qualname, u.attr), str::to_owned);
+                // One report per call or write, contract, and target.
+                if !seen.insert((key.clone(), u.span, u.contract, target.clone())) {
+                    continue;
+                }
+                let via = u
+                    .via_chain
+                    .last()
+                    .map(|h| format!(" via `{}`", h.callee))
+                    .unwrap_or_default();
+                cx.emit(
+                    out,
+                    "MUT109",
+                    unit,
+                    u.span,
+                    &key.qualname,
+                    target.clone(),
+                    with_note(
+                        format!(
+                            "`{}` writes `{target}` ({}){via} and returns on some path without calling an invalidator of `{}`",
+                            key.qualname,
+                            u.kind.as_str(),
+                            rule.name
+                        ),
+                        rule.message.as_deref(),
+                    ),
+                    &u.via_chain,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether every caller path of `func` announces the unmet write `u` after calling it: each
+/// project caller is an exempt writer of the contract, builds the written object (its own
+/// initialization, or an instance it constructs), announces the change on every normal path
+/// after the call, or has callers that do so after calling it in turn (invalidation in bulk by a
+/// distant caller). The walk goes breadth first over `(function, written-object parameters)`
+/// states, like `MUT201`'s allowed-context walk: a function without project callers ends a path
+/// unannounced, and paths that only cycle announce nothing.
+fn announced_by_callers(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    names: &ConfigContracts,
+    func: &FuncKey,
+    u: &UnmetWrite,
+) -> bool {
+    let bit = 1u64 << u.contract;
+    let contract = &names.invalidations[usize::from(u.contract)];
+    let mut queue = VecDeque::from([(func.clone(), u.reach)]);
+    let mut visited: FxHashSet<(FuncKey, Reach)> = FxHashSet::default();
+    visited.insert((func.clone(), u.reach));
+    let mut announced = false;
+    while let Some((callee, reach)) = queue.pop_front() {
+        let Some(callers) = cx
+            .index
+            .reverse_call_graph
+            .get(&callee)
+            .filter(|c| !c.is_empty())
+        else {
+            return false;
+        };
+        let callee_summary = cx.index.summary(&callee);
+        let mut callers: Vec<&FuncKey> = callers.iter().collect();
+        callers.sort();
+        for caller in callers {
+            if contract.names_exempt_writer(&caller.fqn(), &caller.qualname) {
+                announced = true;
+                continue;
+            }
+            for (path, site) in sites.get(caller).into_iter().flatten() {
+                // The callee's body runs here: a coroutine where it is awaited or driven, a
+                // generator where it is iterated.
+                if callee_summary.is_some_and(|s| body_runs_at(cx.index, site, s).is_none()) {
+                    continue;
+                }
+                for bc in site
+                    .project_callees()
+                    .iter()
+                    .filter(|bc| bc.callee == callee)
+                {
+                    // The caller builds the written object (its own initialization, or one it
+                    // constructs, copies, or gets from a call): nothing to announce on this path.
+                    let caller_reach = reach_across(reach, bc);
+                    let builds = !caller_reach.any()
+                        || is_initializer(caller) && caller_reach.params & 1 != 0;
+                    let covered = site
+                        .flow
+                        .is_some_and(|f| cx.index.covered_after(path, &f, bit) & bit != 0);
+                    if builds || covered {
+                        announced = true;
+                    } else if visited.insert((caller.clone(), caller_reach)) {
+                        queue.push_back((caller.clone(), caller_reach));
+                    }
+                }
+            }
+        }
+    }
+    announced
+}

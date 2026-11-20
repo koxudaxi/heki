@@ -160,7 +160,10 @@ impl Workspace {
             .filter(|f| f.patches_builtins())
             .map(|f| f.path.clone())
             .collect();
-        let index = analyze_project_with_reads(&project.inputs(), &project.env.kb);
+        // A configuration error is reported by every check (`check_project`); without valid
+        // contracts the summaries carry no contract facts.
+        let contracts = heki_rules::summary_contracts(env_cfg).ok().flatten();
+        let index = analyze_project_with_reads(&project.inputs(), &project.env.kb, contracts);
         let files = project
             .files
             .iter()

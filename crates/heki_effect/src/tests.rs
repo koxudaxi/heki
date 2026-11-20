@@ -659,6 +659,8 @@ fn gate_5_handbuilt_file_summaries() {
         drives_coroutine_manually: false,
         constructs: None,
         role: crate::SiteRole::Call,
+        returned: None,
+        flow: None,
     });
     index.update_file(file_b);
 
@@ -1250,6 +1252,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         drives_coroutine_manually: false,
         constructs: None,
         role: crate::SiteRole::Call,
+        returned: None,
+        flow: None,
     });
     let live = key("c", "live");
     let mut file_c = file("c.py", "c", &[&live]);
@@ -1267,6 +1271,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         drives_coroutine_manually: true,
         constructs: None,
         role: crate::SiteRole::Call,
+        returned: None,
+        flow: None,
     });
     file_c.call_sites.push(CallSite {
         caller: live.clone(),
@@ -1281,6 +1287,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         drives_coroutine_manually: false,
         constructs: None,
         role: crate::SiteRole::Call,
+        returned: None,
+        flow: None,
     });
     let dup = file("b_alt.py", "b", &[&caller]);
     let mut index = ProjectIndex::build(vec![file_a.clone(), file_b, file_c, dup]);

@@ -1,13 +1,14 @@
-//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT110`, `MUT201`, `MUT202`, `MUT203`,
-//! `MUT204`
-//! (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
+//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT201`,
+//! `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
+use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, Facts,
-    FuncKey, ProjectDecls, ProjectIndex, TypeCtx, Val, WriteKind, self_aliases,
+    FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared, TypeCtx, Val, WriteKind,
+    self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -64,9 +65,7 @@ impl Method<'_> {
 /// (`<listcomp>`, `<genexpr>`, `<lambda>`, ...): neither is an API of its own, so either hands
 /// its reports to its callers.
 fn is_private(name: &str) -> bool {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    last.starts_with('<')
-        || last.starts_with('_') && !(last.starts_with("__") && last.ends_with("__"))
+    heki_effect::delegates_to_callers(name)
 }
 
 /// Visit every project class whose family has checked methods with its own methods, its
@@ -436,14 +435,6 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
 }
 
 // ==================================================================================== MUT201
-
-const INITIALIZERS: &[&str] = &[
-    "__init__",
-    "__post_init__",
-    "__new__",
-    "model_post_init",
-    "__setstate__",
-];
 
 /// A `Class.attr` contract target (`write-owners`, `read-owners`, `effect-boundaries`).
 pub(crate) struct ContractTarget {
@@ -1112,6 +1103,7 @@ pub(crate) fn mut201(
 // ==================================================================================== MUT202
 
 /// `readonly-returns` producers from the configuration.
+#[derive(Debug)]
 pub(crate) struct ReadOnlyProducers {
     rules: Vec<(DottedPattern, bool)>,
 }
@@ -1127,7 +1119,7 @@ impl ReadOnlyProducers {
         Ok(Self { rules })
     }
 
-    fn deep_for(&self, fqn: &str) -> Option<bool> {
+    pub(crate) fn deep_for(&self, fqn: &str) -> Option<bool> {
         let mut found = None;
         for (p, deep) in &self.rules {
             if p.matches(fqn) {
@@ -1135,6 +1127,10 @@ impl ReadOnlyProducers {
             }
         }
         found
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.rules.is_empty()
     }
 }
 
@@ -1146,6 +1142,36 @@ struct Ro {
     /// A shallow copy of a deep read-only value: its own top level may change, its
     /// elements / attributes are still shared.
     shallow_copy: bool,
+    /// How the function got the value from the producer: the call of a function that returns
+    /// it (a wrapper), then the wrapper's calls down to the producer (empty: a direct call).
+    via: Vec<CallHop>,
+}
+
+impl Ro {
+    fn new(producer: String, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
+        shared.any().then_some(Self {
+            producer,
+            deep: shared.elements,
+            shallow_copy: !shared.object,
+            via,
+        })
+    }
+
+    fn shared(&self) -> Shared {
+        Shared {
+            object: !self.shallow_copy,
+            elements: self.deep,
+        }
+    }
+
+    /// The origin of a value derived from this one by `step`.
+    fn derive(&self, step: ReturnStep) -> Option<Self> {
+        Self::new(
+            self.producer.clone(),
+            step.apply(self.shared()),
+            self.via.clone(),
+        )
+    }
 }
 
 /// One call instruction with its resolved callee.
@@ -1157,10 +1183,6 @@ struct CallParts<'i> {
     callee: Callee,
 }
 
-/// Methods returning (views of) a container's elements.
-const ELEMENT_ACCESSORS: &[&str] = &["get", "__getitem__", "values", "items"];
-/// Methods returning a copy of their receiver.
-const COPY_METHODS: &[&str] = &["copy", "model_copy", "__copy__", "__deepcopy__"];
 const MUTABLE_BUILTINS: &[&str] = &[
     "builtins.list",
     "builtins.dict",
@@ -1257,21 +1279,36 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
-    fn producer(&self, callee: &Callee) -> Option<Ro> {
-        let make = |producer: String, deep: bool| Ro {
-            producer,
-            deep,
-            shallow_copy: false,
-        };
+    /// The read-only origin of a call's (or a property read's) result: a declared producer, an
+    /// `@lru_cache` function, or a project function that returns one's value (its summary's
+    /// `returns_protected`), reached through the call at `span`.
+    fn producer(&self, callee: &Callee, span: Span) -> Option<Ro> {
+        let direct =
+            |producer: String, deep: bool| Ro::new(producer, Shared::produced(deep), vec![]);
         match callee {
             Callee::Project(keys, _) => keys.iter().find_map(|k| {
                 let fqn = k.fqn();
-                if self.cx.index.summary(k).is_some_and(|s| s.is_lru_cache) {
-                    return Some(make(fqn, true));
+                let summary = self.cx.index.summary(k);
+                if summary.is_some_and(|s| s.is_lru_cache) {
+                    return direct(fqn, true);
                 }
-                self.producers.deep_for(&fqn).map(|d| make(fqn, d))
+                if let Some(d) = self.producers.deep_for(&fqn) {
+                    return direct(fqn, d);
+                }
+                let r = summary?.returns_protected.as_ref()?;
+                let mut via = vec![CallHop {
+                    caller: self.key.clone(),
+                    callee: fqn,
+                    span,
+                    path: self.unit.input.path.clone(),
+                }];
+                via.extend(r.chain.iter().cloned());
+                Ro::new(r.producer.clone(), r.shared, via)
             }),
-            Callee::External(sym) => self.producers.deep_for(sym).map(|d| make(sym.clone(), d)),
+            Callee::External(sym) => self
+                .producers
+                .deep_for(sym)
+                .and_then(|d| direct(sym.clone(), d)),
             Callee::TooMany | Callee::Unresolved => None,
         }
     }
@@ -1282,59 +1319,39 @@ impl<'a> Mut202Fn<'a> {
             .any(|(k, v)| k.as_deref() == Some(name) && self.f.const_bool(*v) == Some(true))
     }
 
-    /// Value produced by one instruction from read-only operands.
+    /// Value produced by one instruction from read-only operands (the derivations of
+    /// `heki_effect::readonly`, which the return flow applies backward).
     fn transfer(&self, inst: &Inst) -> Option<Ro> {
-        let elem = |r: &Ro| {
-            (r.deep || r.shallow_copy).then(|| Ro {
-                producer: r.producer.clone(),
-                deep: true,
-                shallow_copy: false,
-            })
-        };
         match &inst.kind {
             InstKind::Copy { src, .. } => self.ro.get(src).cloned(),
             InstKind::SubscriptLoad { obj, index, .. } => {
-                let r = self.ro.get(obj)?;
-                // Tuple / list unpacking (`a, b = producer()`) lowers to a constant-index
-                // load spanning the target itself.
-                let unpack = matches!(
-                    self.defs.get(index),
-                    Some(Inst {
-                        kind: InstKind::Const {
-                            literal: ConstLiteral::Int(_),
-                            ..
-                        },
-                        span,
-                    }) if *span == inst.span
-                );
-                if unpack && !r.shallow_copy {
-                    return Some(Ro {
-                        shallow_copy: false,
-                        ..r.clone()
-                    });
-                }
-                elem(r)
+                let step = if readonly::is_unpacking(inst, *index, &self.defs) {
+                    ReturnStep::UNPACKED
+                } else {
+                    ReturnStep::ELEMENT
+                };
+                self.ro.get(obj)?.derive(step)
             }
             InstKind::AttrLoad { obj, attr, .. } => {
                 if let Some(r) = self.ro.get(obj) {
-                    return elem(r);
+                    return r.derive(ReturnStep::ELEMENT);
                 }
                 // `readonly-returns` may name a property: `obj.schema`.
                 if let Some(Val::Inst(class)) = self.types.get(obj) {
                     let fqn = format!("{class}.{attr}");
-                    return self.producers.deep_for(&fqn).map(|deep| Ro {
-                        producer: fqn,
-                        deep,
-                        shallow_copy: false,
-                    });
+                    if let Some(deep) = self.producers.deep_for(&fqn) {
+                        return Ro::new(fqn, Shared::produced(deep), vec![]);
+                    }
                 }
-                None
+                // A property getter that returns a read-only producer's value.
+                let getter = self.tcx.resolve_attr_load(self.types.get(obj), attr)?;
+                self.producer(&getter, inst.span)
             }
             InstKind::MakeIter { iterable, .. } => self.ro.get(iterable).cloned(),
-            InstKind::IterNext { iter, .. } => self.ro.get(iter).and_then(elem),
+            InstKind::IterNext { iter, .. } => self.ro.get(iter)?.derive(ReturnStep::ELEMENT),
             kind => {
                 let call = self.call_of(kind)?;
-                if let Some(r) = self.producer(&call.callee) {
+                if let Some(r) = self.producer(&call.callee, inst.span) {
                     return Some(r);
                 }
                 let (operand, method) = match call.recv {
@@ -1354,25 +1371,10 @@ impl<'a> Mut202Fn<'a> {
                     Callee::External(s) => s.as_str(),
                     _ => "",
                 };
-                let sanitizer = self.cx.kb.lookup(symbol).is_some_and(|e| e.copy_sanitizer)
-                    || method.is_some_and(|m| COPY_METHODS.contains(&m));
-                if sanitizer {
-                    let deep_copy = symbol.ends_with("deepcopy")
-                        || method == Some("__deepcopy__")
-                        || (method == Some("model_copy") || symbol.ends_with(".model_copy"))
-                            && self.kwarg_true(call.kwargs, "deep");
-                    if deep_copy || !(r.deep || r.shallow_copy) {
-                        return None;
-                    }
-                    return Some(Ro {
-                        producer: r.producer.clone(),
-                        deep: true,
-                        shallow_copy: true,
-                    });
-                }
-                match method {
-                    Some(m) if ELEMENT_ACCESSORS.contains(&m) => elem(r),
-                    _ => None,
+                let deep = self.kwarg_true(call.kwargs, "deep");
+                match readonly::call_derivation(method, symbol, self.cx.kb, deep)? {
+                    Derivation::DeepCopy => None,
+                    Derivation::Step(step) => r.derive(step),
                 }
             }
         }
@@ -1432,6 +1434,15 @@ impl<'a> Mut202Fn<'a> {
                 if let Some(r) = hit
                     && reported.insert(inst.span)
                 {
+                    // A value from a wrapper: the wrapper called here, then the hops down to the
+                    // producer, then the hop to the mutating helper.
+                    let through = r
+                        .via
+                        .first()
+                        .map(|h| format!(" through `{}`", h.callee))
+                        .unwrap_or_default();
+                    let mut related = r.via.clone();
+                    related.extend(chain);
                     self.cx.emit(
                         out,
                         "MUT202",
@@ -1440,10 +1451,10 @@ impl<'a> Mut202Fn<'a> {
                         &self.key.qualname,
                         r.producer.clone(),
                         format!(
-                            "`{}` mutates the shared object returned by read-only producer `{}`",
+                            "`{}` mutates the shared object returned by read-only producer `{}`{through}",
                             self.key.qualname, r.producer
                         ),
-                        &chain,
+                        &related,
                     );
                 }
             }
@@ -1782,6 +1793,19 @@ mod readonly_mutation;
 /// `Mapping` parameters handed to functions that change them), through one analysis.
 pub(crate) fn mut108_mut110(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     readonly_mutation::run(cx, out);
+}
+
+// ==================================================================================== MUT109
+
+mod invalidation;
+
+/// `MUT109`: writes to declared `invalidation` targets that some normal path leaves
+/// unannounced (no call reaches one of the contract's invalidators).
+pub(crate) fn mut109(
+    cx: &CheckContext<'_>,
+    out: &mut Vec<Diagnostic>,
+) -> Result<(), RuleConfigError> {
+    invalidation::run(cx, out)
 }
 
 // ==================================================================================== MUT106

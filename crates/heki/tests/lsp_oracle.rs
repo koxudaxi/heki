@@ -59,6 +59,15 @@ name = "pass"
 scopes = ["pkg.pure.tidy"]
 allow-writes = ["Ledger.rows"]
 write-universe = ["Ledger.*"]
+[[tool.heki.readonly-returns]]
+name = "catalog"
+producers = ["pkg.catalog.Catalog.entry"]
+deep = true
+
+[[tool.heki.invalidation]]
+name = "index"
+targets = ["Node.kids"]
+invalidators = ["Index.refresh"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -176,6 +185,22 @@ const FILLS: &str = "from pkg.model import Registry\n\n\ndef _fill(r: Registry):
 const DRAIN: &str = "def drain(g):\n    for _ in g:\n        pass\n";
 const DRAIN_RETURNING: &str = "def drain(g):\n    return g\n";
 const HANDOFF: &str = "from pkg.drain import drain\nfrom pkg.fills import _fill\nfrom pkg.model import Registry\n\n\ndef hand(r: Registry):\n    drain(_fill(r))\n";
+// `MUT202`: a wrapper in another module starts returning a declared producer's value (or an
+// `@lru_cache` result), and stops again. `MUT109`: a helper in another module stops announcing a
+// change its caller makes, and a caller in another module stops announcing after calling a
+// public writer.
+const CATALOG: &str = "from functools import lru_cache\n\n\nclass Catalog:\n    def entry(self, key) -> dict:\n        return {}\n\n    def fresh(self, key) -> dict:\n        return {}\n\n\n@lru_cache\ndef defaults() -> dict:\n    return {}\n";
+const LOOKUP: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.fresh(key)\n";
+const LOOKUP_SHARED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.entry(key)\n";
+const LOOKUP_CACHED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return defaults()\n";
+const TAGGER: &str = "from pkg.catalog import Catalog\nfrom pkg.lookup import find\n\n\ndef tag(c: Catalog):\n    find(c, \"k\")[\"tag\"] = 1\n";
+const NODES: &str = "class Node:\n    def __init__(self):\n        self.kids = []\n\n\nclass Index:\n    def refresh(self):\n        self.stale = False\n\n\ndef attach(node: Node, kid):\n    node.kids.append(kid)\n";
+const ANNOUNCE: &str =
+    "from pkg.nodes import Index\n\n\ndef announce(index: Index):\n    index.refresh()\n";
+const ANNOUNCE_SILENT: &str =
+    "from pkg.nodes import Index\n\n\ndef announce(index: Index):\n    return index\n";
+const GROW: &str = "from pkg.announce import announce\nfrom pkg.nodes import Index, Node, attach\n\n\ndef grow(index: Index, node: Node, kid):\n    node.kids.append(kid)\n    announce(index)\n\n\ndef adopt(index: Index, node: Node, kid):\n    attach(node, kid)\n    index.refresh()\n";
+const GROW_SILENT_ADOPT: &str = "from pkg.announce import announce\nfrom pkg.nodes import Index, Node, attach\n\n\ndef grow(index: Index, node: Node, kid):\n    node.kids.append(kid)\n    announce(index)\n\n\ndef adopt(index: Index, node: Node, kid):\n    attach(node, kid)\n";
 
 // Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
 // size-dependent rewrites that rely on them (`OPT110` builds a `set(...)`) are not proven.
@@ -260,6 +285,12 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/sniff.py", SNIFF),
         ("pkg/sniff_more.py", SNIFF_MORE),
         ("pkg/sniff_user.py", SNIFF_USER),
+        ("pkg/catalog.py", CATALOG),
+        ("pkg/lookup.py", LOOKUP),
+        ("pkg/tagger.py", TAGGER),
+        ("pkg/nodes.py", NODES),
+        ("pkg/announce.py", ANNOUNCE),
+        ("pkg/grow.py", GROW),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -534,6 +565,49 @@ fn steps_mut110() -> Vec<Step> {
     Vec::new()
 }
 
+/// `MUT202` return flow and `MUT109`: facts of a function in another module that a caller's
+/// report reads (the wrapper's protected return, the helper's announcement), and a caller's
+/// announcement after a call that a callee's report reads.
+fn steps_mut202_mut109() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a wrapper in another module starts returning a declared producer's value",
+            vec![save("pkg/lookup.py", LOOKUP_SHARED)],
+        )
+        .present(&[("pkg/tagger.py", "MUT202")]),
+        Step::new(
+            "the wrapper returns an `@lru_cache` result instead",
+            vec![save("pkg/lookup.py", LOOKUP_CACHED)],
+        )
+        .present(&[("pkg/tagger.py", "MUT202")]),
+        Step::new(
+            "the wrapper returns a fresh value again",
+            vec![save("pkg/lookup.py", LOOKUP)],
+        )
+        .absent(&[("pkg/tagger.py", "MUT202")]),
+        Step::new(
+            "a helper in another module stops calling the invalidator",
+            vec![save("pkg/announce.py", ANNOUNCE_SILENT)],
+        )
+        .present(&[("pkg/grow.py", "MUT109")]),
+        Step::new(
+            "the helper calls the invalidator again",
+            vec![save("pkg/announce.py", ANNOUNCE)],
+        )
+        .absent(&[("pkg/grow.py", "MUT109")]),
+        Step::new(
+            "the only caller of a public writer in another module stops announcing",
+            vec![save("pkg/grow.py", GROW_SILENT_ADOPT)],
+        )
+        .present(&[("pkg/nodes.py", "MUT109")]),
+        Step::new(
+            "the caller announces after the call again",
+            vec![save("pkg/grow.py", GROW)],
+        )
+        .absent(&[("pkg/nodes.py", "MUT109")]),
+    ]
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -624,6 +698,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut110());
     steps.extend(steps_body_runs());
     steps.extend(steps_small_displays());
+    steps.extend(steps_mut202_mut109());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(

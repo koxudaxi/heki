@@ -793,7 +793,39 @@ producers = ["pkg.parser.SchemaGraphBuilder.schema"]
 deep = true
 ```
 
-Functions decorated with `@lru_cache` / `@cache` are protected without configuration.
+| Key | Meaning |
+| --- | ------- |
+| `producers` | Functions, methods, external symbols, or attributes (`Class.attr`) whose result every caller shares (dotted names or globs). |
+| `deep` | Protect the values below the result too (its attributes, items, and elements). |
+
+Functions decorated with `@lru_cache` / `@cache` are protected without configuration, and so
+is every function that returns a protected value, or a part of it, on some path: wrappers and
+property getters need no entry of their own.
+
+## Announced changes: `[[tool.heki.invalidation]]` (`MUT109`)
+
+```toml
+[[tool.heki.invalidation]]
+name = "graph-index"
+targets = ["DataType.data_types", "DataModel.fields"]
+invalidators = ["GenerationStore.note_changed_models", "GenerationStore.refresh_now"]
+exempt-writers = ["pkg.parser.generation.*"]
+message = "tell the store which models changed"
+```
+
+| Key | Meaning |
+| --- | ------- |
+| `targets` | `Class.attr` names (fully qualified or a dotted suffix, globs allowed) whose writes must be announced; subclasses of a target class are covered too. |
+| `invalidators` | Functions or methods (dotted names or globs) whose call announces the change. A call counts when it runs on every path from the write to the function's normal return, directly, in each branch, behind a boolean flag the path sets after the write, or through a helper that calls one on every path of its own. |
+| `exempt-writers` | Functions (dotted names or globs) whose writes need no announcement of their own: the owner's operations, which announce or batch the change themselves, and construction methods. |
+| `message` | Text appended to every report of the contract. |
+
+A write is followed through local aliases, container methods, `setattr` / `__dict__`, and
+helpers. A private helper passes its unannounced writes to its callers; a function whose every
+caller announces the change after calling it is not reported. Writes to objects that did not
+exist before the call (the class's own initialization, objects the function constructs or
+copies) and to objects it gets from a call need no announcement. Only normal returns count: a
+path that ends by raising carries no obligation. At most 64 contracts can be declared.
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 
@@ -1198,9 +1230,10 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
 | MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
 | MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
+| MUT109 | [write-without-invalidation](write-without-invalidation.md) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
 | MUT110 | [readonly-param-mutation](readonly-param-mutation.md) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
-| MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`. |  |
+| MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
 | MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
 | MUT204 | [call-owner-violation](call-owner-violation.md) | Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`. |  |
 
@@ -3017,19 +3050,25 @@ Source: https://heki.koxudaxi.dev/rules/readonly-return-mutation/
 
 Family: Mutation & State (MUT) · Enabled by default · No automatic fix
 
-Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`.
+Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.
 
 ## What it does
 Checks mutations of objects returned by a shared producer:
 
 - functions decorated with `@functools.lru_cache` / `@functools.cache` (every caller receives
   the same object);
-- producers declared in `[[tool.heki.readonly-returns]]`.
+- producers declared in `[[tool.heki.readonly-returns]]`;
+- functions that return a producer's value, or a part of it, on some path: a wrapper is a
+  producer itself, without configuration, through any number of wrappers, property getters,
+  and recursion.
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
-that mutate their argument are followed. Copies end the protection: `copy.deepcopy(...)`,
+that mutate their argument are followed, also on the call result itself
+(`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)`, and the copy sanitizers of the ecosystem knowledge base clear it,
-shallow copies (`copy.copy`, `.copy()`) protect the top level only.
+shallow copies (`copy.copy`, `.copy()`) free the top level only: the values below stay shared.
+A wrapper that returns a copy on one path and the shared value on another still returns a
+shared value.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
@@ -3045,8 +3084,12 @@ def schema(name: str) -> dict[str, list[str]]:
     return {"fields": [name]}
 
 
+def schema_of(name: str) -> dict[str, list[str]]:
+    return schema(name)
+
+
 def extend(name: str) -> None:
-    s = schema(name)
+    s = schema_of(name)
     s["fields"].append("extra")  # MUT202: mutates the cached object
 ```
 
@@ -3056,10 +3099,17 @@ import copy
 
 
 def extend(name: str) -> dict[str, list[str]]:
-    s = copy.deepcopy(schema(name))
+    s = copy.deepcopy(schema_of(name))
     s["fields"].append("extra")
     return s
 ```
+
+## Known limitations
+- A shared value stored in an attribute (`self.kept = schema(...)`) and changed in another
+  method is not followed.
+- A generator's values and a coroutine's result (`await`) are not followed.
+- A method call on a shared value whose class heki cannot resolve (a producer returning a type
+  variable) is not followed; a wrapper with a concrete return annotation resolves it.
 
 ## Fix safety
 No automatic fix.
@@ -3461,3 +3511,93 @@ No automatic fix.
     allowed writer or an exempt method.
   - `message`: appended to every message of the contract (`use Store.add_field() instead`).
   - `forbid-cached-property-on`: classes on which a `@cached_property` is itself reported.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/write-without-invalidation/
+
+# write-without-invalidation (MUT109)
+
+Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+
+Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.
+
+## What it does
+Checks writes to attributes declared in an `[[tool.heki.invalidation]]` contract: after the
+write, every path to the function's normal return must call one of the contract's
+`invalidators` (the call that announces the change to whatever derives facts from the
+attribute: an index, a cache, a revision counter).
+
+A write is followed through local aliases, container methods (`.append()`, `[k] = v`),
+`setattr` / `__dict__`, and helpers: a private helper that writes without announcing the change
+passes the obligation to its callers, and the call of such a helper must be announced like a
+direct write. An invalidator counts when it is called directly, in each branch, or through
+calls (a helper that calls an invalidator on every path to its own return), also behind a
+boolean flag set after the write (`changed = True ... if changed: notify()`); one called before
+the write does not count, nor an `async` invalidator that is not awaited.
+
+It does not report:
+
+- a function named in `exempt-writers` (the owner's operations announce or batch the change
+  themselves), nor calls from one;
+- writes to objects that did not exist before the call: the class's own initialization (an
+  initializer writing its own `self`) and objects the function constructs or copies, which
+  nothing has derived facts from yet; objects it gets from a call are left alone too, since
+  heki cannot tell whether they are new;
+- a function whose every caller announces the change after calling it (invalidation in bulk by
+  a caller, at any distance);
+- paths that leave the function by raising: exception edges are not followed and only normal
+  returns count.
+
+## Why is this bad?
+Code that keeps derived facts (an index of a model graph, a memo, a cached rendering) relies on
+every writer announcing its change. A writer that forgets it on one path leaves the derived
+facts stale: nothing fails at the write, and the wrong value shows up later, on an input that
+takes that path.
+
+## Example
+```toml
+[[tool.heki.invalidation]]
+name = "graph-index"
+targets = ["DataType.data_types", "DataModel.fields"]
+invalidators = ["GenerationStore.note_changed_models", "GenerationStore.refresh_now"]
+exempt-writers = ["pkg.parser.generation.*"]
+message = "tell the store which models changed"
+```
+
+```python
+def narrow(store: GenerationStore, owner: DataModel, node: DataType, item: DataType) -> None:
+    node.data_types = [item]  # MUT109: the path where `owner.fields` is empty tells nobody
+    if owner.fields:
+        store.note_changed_models(owner)
+```
+
+Use instead:
+```python
+def narrow(store: GenerationStore, owner: DataModel, node: DataType, item: DataType) -> None:
+    node.data_types = [item]
+    store.note_changed_models(owner)
+```
+
+## Known limitations
+- Deferred modes: a context manager whose exit announces the change
+  (`with store.defer_refresh(): ...`) is not followed. List such deferred writers in
+  `exempt-writers`, or call the invalidator.
+- Two different helpers that each announce the change on one branch are not combined (two
+  direct invalidator calls are); a helper counts when it announces the change on all of its own
+  paths.
+- A branch is read as two feasible paths unless its condition is a constant or a boolean flag
+  the path sets (`changed = True` after the write, then `if changed: notify()`): a helper whose
+  result says whether it wrote (`if model.unbind(names): notify()`) is not followed.
+- Callers heki cannot resolve (a function passed as a callable, a method of a class held in a
+  variable) are not seen: a public function without visible callers announces its own changes
+  or is listed in `exempt-writers`, like a construction method; a private helper without
+  visible callers is not checked.
+
+## Fix safety
+No automatic fix: where to announce the change is a design decision.
+
+## Options
+- `[[tool.heki.invalidation]]`: `name`, `targets` (`Class.attr`, subclasses included),
+  `invalidators` (functions or methods), `exempt-writers`, `message`.

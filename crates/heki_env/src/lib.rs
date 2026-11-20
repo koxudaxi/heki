@@ -185,6 +185,23 @@ pub struct ReadOnlyReturnRule {
     pub deep: bool,
 }
 
+/// `[[tool.heki.invalidation]]` contract for `MUT109`: a write to one of `targets` must be
+/// followed, on every path to a normal return, by a call that reaches one of `invalidators`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct InvalidationRule {
+    pub name: String,
+    /// `Class.attr` targets whose writes must be announced (subclasses included).
+    pub targets: Vec<String>,
+    /// Functions or methods (dotted patterns) whose call announces the change.
+    pub invalidators: Vec<String>,
+    /// Functions (dotted patterns) whose writes need no announcement of their own: the
+    /// owner's operations, which announce or batch the change themselves.
+    pub exempt_writers: Vec<String>,
+    /// Appended to every `MUT109` message of this contract.
+    pub message: Option<String>,
+}
+
 /// `[[tool.heki.ecosystem]]` user addition / override of a Layer 2 ecosystem KB entry.
 ///
 /// `effects` holds Execution Effect names exactly as spelled in `kb/ecosystem/*.toml`
@@ -215,6 +232,7 @@ pub struct HekiConfig {
     pub read_owners: Vec<ReadOwnerRule>,
     pub call_owners: Vec<CallOwnerRule>,
     pub readonly_returns: Vec<ReadOnlyReturnRule>,
+    pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
     pub ecosystem: Vec<EcosystemOverride>,
     /// Lower bound of `project.requires-python` in the project's `pyproject.toml`: the
@@ -426,6 +444,13 @@ name = "shared-schema"
 producers = ["pkg.parser.SchemaGraphBuilder.schema"]
 deep = true
 
+[[tool.heki.invalidation]]
+name = "graph-index"
+targets = ["DataType.data_types"]
+invalidators = ["GenerationStore.note_changed_models"]
+exempt-writers = ["pkg.parser.generation.*"]
+message = "announce the change to the store"
+
 [[tool.heki.effect-boundaries]]
 name = "pure-render"
 scopes = ["*.render"]
@@ -492,6 +517,16 @@ message = "render must not mutate model state"
             }
         );
         assert!(cfg.readonly_returns[0].deep);
+        assert_eq!(
+            cfg.invalidation[0],
+            InvalidationRule {
+                name: "graph-index".into(),
+                targets: vec!["DataType.data_types".into()],
+                invalidators: vec!["GenerationStore.note_changed_models".into()],
+                exempt_writers: vec!["pkg.parser.generation.*".into()],
+                message: Some("announce the change to the store".into()),
+            }
+        );
         assert!(cfg.ecosystem.is_empty());
         assert_eq!(cfg.lint.relax_async_in_tests, None);
     }

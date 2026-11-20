@@ -8,7 +8,7 @@ use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
     baseline_key, render, unified_diff,
 };
-use heki_effect::analyze_project;
+use heki_effect::{analyze_project, analyze_project_with};
 use heki_profile::ProfileData;
 use heki_rules::project::{ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
@@ -90,7 +90,8 @@ fn analyze(
     let snapshot = snapshot_for(&selection, &project.env.root)?;
     let env = &project.env;
     let inputs = project.inputs();
-    let index = analyze_project(&inputs, &env.kb);
+    let contracts = heki_rules::summary_contracts(&env.cfg)?;
+    let index = analyze_project_with(&inputs, &env.kb, contracts);
     let units = project.units();
     let extras = CheckExtras {
         soundness_kb: &env.soundness_kb,
