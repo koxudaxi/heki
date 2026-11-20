@@ -230,45 +230,46 @@ impl<'a> CachedReads<'a> {
             }
         }
         for ((reader, attr), (span, unit, writes)) in found {
-            let named = writes.values().min_by_key(|(foreign, _)| *foreign);
-            if let Some(&(_, named)) = named {
-                let writer = &named.writer.key.qualname;
-                let class_qualname = cx
-                    .index
-                    .summary(&named.prop.key)
-                    .and_then(|ps| ps.owner_class_qualname.as_deref())
-                    .unwrap_or_default();
-                let related = writes
-                    .values()
-                    .map(|(_, w)| {
-                        cx.related_at(
-                            w.writer.path,
-                            w.span,
-                            format!(
-                                "`{}` changes `self.{}` without invalidating `{attr}`",
-                                w.writer.key.qualname, w.attr
-                            ),
-                        )
-                    })
-                    .collect();
-                if let Some(d) = cx.emit(
-                    out,
-                    "MUT111",
-                    unit,
-                    span,
-                    &reader.qualname,
-                    format!("{class_qualname}.{attr}"),
-                    format!(
-                        "`{}` reads `{attr}`, which `{writer}` can leave stale",
-                        reader.qualname
-                    ),
-                    Some(format!(
-                        "invalidate it in `{writer}` after the change, compute it without caching, or read it only before `{writer}` runs"
-                    )),
-                    &[],
-                ) {
-                    d.related = related;
-                }
+            let &(_, named) = writes
+                .values()
+                .min_by_key(|(foreign, _)| *foreign)
+                .expect("a read is recorded only with a stale write");
+            let writer = &named.writer.key.qualname;
+            let class_qualname = cx
+                .index
+                .summary(&named.prop.key)
+                .and_then(|ps| ps.owner_class_qualname.as_deref())
+                .unwrap_or_default();
+            let related = writes
+                .values()
+                .map(|(_, w)| {
+                    cx.related_at(
+                        w.writer.path,
+                        w.span,
+                        format!(
+                            "`{}` changes `self.{}` without invalidating `{attr}`",
+                            w.writer.key.qualname, w.attr
+                        ),
+                    )
+                })
+                .collect();
+            if let Some(d) = cx.emit(
+                out,
+                "MUT111",
+                unit,
+                span,
+                &reader.qualname,
+                format!("{class_qualname}.{attr}"),
+                format!(
+                    "`{}` reads `{attr}`, which `{writer}` can leave stale",
+                    reader.qualname
+                ),
+                Some(format!(
+                    "invalidate it in `{writer}` after the change, compute it without caching, or read it only before `{writer}` runs"
+                )),
+                &[],
+            ) {
+                d.related = related;
             }
         }
     }
