@@ -1,6 +1,7 @@
 //! Which functions a call runs, end to end through the real binary: methods found along
-//! Python's MRO (C3 linearization), and constructing a named class (its own `__init__`, not a
-//! subclass's) and calling a method through it.
+//! Python's MRO (C3 linearization), constructing a named class (its own `__init__`, not a
+//! subclass's) and calling a method through it, calling an instance (`__call__`), and
+//! constructions through a module.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -151,4 +152,77 @@ async def through_cls():
 #[test]
 fn a_named_class_constructs_itself_and_finds_its_own_methods() {
     check_marks("named_class", &[("pkg/named.py", NAMED)], &["EFF101"]);
+}
+
+/// Calling an instance runs its `__call__` with the instance as `self`, and returns what that
+/// returns; constructing a class returns the new instance.
+const CALLABLE: &str = r#"import functools
+
+
+@functools.cache
+def shared():
+    return []
+
+
+class Provider:
+    def __call__(self):
+        return shared()
+
+
+class Holder(Provider):
+    def __init__(self):
+        self.items = []
+
+
+def via(p: Provider):
+    return p()
+
+
+def use(p: Provider):
+    via(Provider()).clear()  # MUT202
+    p().clear()  # MUT202
+    Holder().items.clear()
+"#;
+
+#[test]
+fn calling_an_instance_runs_its_call_method_on_it() {
+    check_marks("callable", &[("pkg/callable.py", CALLABLE)], &["MUT202"]);
+}
+
+/// Constructing a frozen dataclass through its module makes a new object, as importing it does.
+const RECORDS: &str = r#"from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Record:
+    items: list
+"#;
+
+const USES: &str = r#"from pkg import records
+from pkg.records import Record
+
+
+def through_module():
+    r = records.Record([])
+    r.items.append(1)
+    return r
+
+
+def imported():
+    r = Record([])
+    r.items.append(1)
+    return r
+
+
+def given(r: records.Record):
+    r.items.append(1)  # MUT108
+"#;
+
+#[test]
+fn constructing_through_a_module_makes_a_new_object() {
+    check_marks(
+        "qualified_construction",
+        &[("pkg/records.py", RECORDS), ("pkg/uses.py", USES)],
+        &["MUT108"],
+    );
 }

@@ -708,18 +708,39 @@ impl<'a> Extractor<'a> {
         self.reach.get(&var).copied().unwrap_or_default()
     }
 
-    /// [`Self::fresh`]: the results of calling a project class, then a monotone fixpoint over
-    /// copies and phis.
-    fn build_fresh(&mut self) {
-        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::Call {
-                dst,
+    /// The project class a call constructs: a call of a class object (`Model(...)`,
+    /// `cls(...)`), or of a class reached through a module or class (`models.Model(...)`).
+    fn construction(&self, kind: &InstKind) -> Option<String> {
+        let project = self.cx.project;
+        match kind {
+            InstKind::Call {
                 callee_var: Some(c),
                 ..
-            } = &inst.kind
-                && matches!(self.val(*c), Some(Val::Ref(fqn) | Val::Class(fqn)) if self.cx.project.is_project_class(fqn))
+            } => match self.val(*c)? {
+                Val::Ref(fqn) | Val::Class(fqn) if project.is_project_class(fqn) => {
+                    Some(fqn.clone())
+                }
+                _ => None,
+            },
+            InstKind::MethodCall { recv, method, .. } => match self.val(*recv)? {
+                Val::Ref(owner) => {
+                    let fqn = project.canonical(&format!("{owner}.{method}"));
+                    project.is_project_class(&fqn).then_some(fqn)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// [`Self::fresh`]: the results of constructing a project class
+    /// ([`Self::construction`]), then a monotone fixpoint over copies and phis.
+    fn build_fresh(&mut self) {
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            if let Some(dst) = inst.kind.dst()
+                && self.construction(&inst.kind).is_some()
             {
-                self.fresh.insert(*dst);
+                self.fresh.insert(dst);
             }
         }
         loop {
@@ -1241,20 +1262,7 @@ impl<'a> Extractor<'a> {
                 }
                 let callee = self.cx.resolve_method(self.val(*recv), method);
                 let (recv_origin, recv_is_self) = self.receiver(*recv, bb);
-                // `pkg.Model(...)`: a project class reached through a module. Through a module,
-                // only a class binds the receiver (its `__init__`); a class without a project
-                // `__init__` resolves to its own name.
-                let constructs = match (self.val(*recv), &callee) {
-                    (Some(Val::Ref(fqn)), Callee::Project(_, true)) => {
-                        Some(self.cx.project.canonical(&format!("{fqn}.{method}")))
-                    }
-                    (Some(Val::Ref(_)), Callee::External(symbol))
-                        if self.cx.project.class_qualname(symbol).is_some() =>
-                    {
-                        Some(symbol.clone())
-                    }
-                    _ => None,
-                };
+                let constructs = self.construction(kind);
                 let call = Call {
                     dst: *dst,
                     value: None,
@@ -1319,19 +1327,7 @@ impl<'a> Extractor<'a> {
                         .and_then(|n| n.parse::<u32>().ok())
                         .map_or(Callee::Unresolved, |id| self.child_callee(FunctionId(id))),
                 };
-                // `Model(...)`: calling a class object binds the receiver of its `__init__`; a
-                // class without a project `__init__` resolves to its own name.
-                let constructs = match (callee_val, &target) {
-                    (Some(Val::Ref(fqn) | Val::Class(fqn)), Callee::Project(_, true)) => {
-                        Some(fqn.clone())
-                    }
-                    (Some(Val::Ref(fqn) | Val::Class(fqn)), Callee::External(_))
-                        if self.cx.project.class_qualname(fqn).is_some() =>
-                    {
-                        Some(fqn.clone())
-                    }
-                    _ => None,
-                };
+                let constructs = self.construction(kind);
                 let call = Call {
                     dst: *dst,
                     value: *callee_var,
@@ -1816,7 +1812,7 @@ impl<'a> Extractor<'a> {
             }
             Callee::Project(keys, binds_recv) => {
                 // A constructor call returns the new instance, not what `__init__` returns.
-                let constructor = *binds_recv && call.recv.is_none();
+                let constructor = call.constructs.is_some();
                 // The contracts the callees announce, of those whose body runs at the call.
                 let mut invalidates = 0u64;
                 let mut callees = Vec::new();
@@ -1843,11 +1839,16 @@ impl<'a> Extractor<'a> {
                     let offset = usize::from(*binds_recv && !decl.is_staticmethod);
                     let mut params: Vec<ArgOrigin> = Vec::new();
                     if offset == 1 {
-                        // Constructor calls bind a fresh object (`recv == None`).
-                        params.push(if decl.is_classmethod {
+                        // A constructor binds the new object and a class method the class: no
+                        // value of the caller. Calling an instance (`p()`) binds it to the
+                        // `self` of its `__call__`.
+                        params.push(if constructor || decl.is_classmethod {
                             ArgOrigin::default()
                         } else {
-                            call.recv.clone().unwrap_or_default()
+                            call.recv
+                                .clone()
+                                .or_else(|| call.value.map(|v| self.origin(v)))
+                                .unwrap_or_default()
                         });
                     }
                     // A position binds its parameter exactly before any `*` unpacking, and a
