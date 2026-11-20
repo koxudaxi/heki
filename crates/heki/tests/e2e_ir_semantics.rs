@@ -110,3 +110,39 @@ async def creates():
     assert_eq!(function(&ir, "rows.<locals>.unused")["kind"], "sync");
     assert!(reports("ir_header_yield", src, "EFF101").is_empty());
 }
+
+#[test]
+fn scopes_nested_in_a_comprehension_read_its_iteration_variable() {
+    let src = "\
+import time
+
+
+def item():
+    time.sleep(1)
+
+
+async def generator_in_comprehension(items):
+    return [list(item() for _ in (0,)) for item in items]
+
+
+async def lambda_in_comprehension(items):
+    return [(lambda: item())() for item in items]
+
+
+async def module_function(items):
+    return [list(item() for _ in (0,)) for other in items]
+";
+    // Inside the comprehension `item` is its iteration variable (a cell of the frame), not
+    // the module's blocking function.
+    assert_eq!(
+        reports("ir_comprehension_cells", src, "EFF101"),
+        pairs(&[("module_function", "EFF101")])
+    );
+    let ir = dump_ir("ir_comprehension_cells", src, "py315");
+    let captured = function(&ir, "lambda_in_comprehension")["captured_vars"].clone();
+    assert_eq!(captured.as_array().unwrap().len(), 1, "{captured}");
+    assert!(
+        captured[0].as_str().unwrap().ends_with("_item"),
+        "{captured}"
+    );
+}

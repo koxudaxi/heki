@@ -32,3 +32,15 @@ def walrus_in_generator_expressions(shared: list) -> list:
     next(next(((deep := shared) for _ in (0,)) for _ in (0,)))
     return acc + deep
 
+
+def cells_through_nested_scopes(items: list) -> object:
+    acc = []
+
+    def middle():
+        return lambda: acc
+
+    class Holder:
+        def get(self):
+            return acc
+
+    return middle, Holder, [lambda: item for item in items], [(item for _ in ()) for item in items]

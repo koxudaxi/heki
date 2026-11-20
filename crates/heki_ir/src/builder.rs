@@ -36,6 +36,7 @@ pub fn build_module_ir(
         class_by_span,
         lazy_import_names,
         functions: Vec::new(),
+        free_names: Vec::new(),
         loop_hints: Vec::new(),
         next_comp_id: 0,
         has_star_import: false,
@@ -132,6 +133,8 @@ struct ModuleLowerer<'a> {
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
     functions: Vec<IrFunction>,
+    /// The free variables of every lowered function, by `FunctionId` (sorted).
+    free_names: Vec<Vec<String>>,
     /// Syntax-level facts of every function's loops (in `IrFunction::loops` order), for the
     /// loop-bound pass that runs once the whole module is lowered.
     loop_hints: Vec<(FunctionId, Vec<LoopHint>)>,
@@ -156,6 +159,7 @@ impl<'a> ModuleLowerer<'a> {
         let mut f = placeholder;
         f.id = id;
         self.functions.push(f);
+        self.free_names.push(Vec::new());
         id
     }
 
@@ -1124,11 +1128,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     /// The names a scope nested here may read from enclosing function scopes: the enclosing
-    /// functions' locals and this function's own.
+    /// functions' locals, this function's own, and the iteration variables of the inlined
+    /// comprehensions being lowered (PEP 709 keeps those as cells of this frame).
     fn child_outer_locals(&self) -> FxHashSet<String> {
         let mut out = self.outer_locals.clone();
         if !self.is_module_body && !self.is_class_body {
             out.extend(self.scope.locals.iter().cloned());
+        }
+        for renames in &self.comp_target_renames {
+            out.extend(renames.keys().cloned());
         }
         out
     }
@@ -1142,26 +1150,22 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
+    /// The child's free variables (those it forwards to its own nested scopes included) that
+    /// are cells of this frame, by their SSA names; the others are free here too.
     fn collect_child_captures(&mut self, child_id: FunctionId) -> Vec<String> {
-        // Child's `captured_vars` contains names captured by grandchildren; we also check
-        // LoadDeref / StoreDeref instructions in the child function directly.
-        let mut names = Vec::new();
-        let child = &self.module.functions[child_id.0 as usize];
-        for bb in &child.blocks {
-            for inst in &bb.insts {
-                match &inst.kind {
-                    InstKind::LoadDeref { name, .. } | InstKind::StoreDeref { name, .. }
-                        if !names.contains(name) =>
-                    {
-                        names.push(name.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let names = self.module.free_names[child_id.0 as usize].clone();
         let mut own_captures = Vec::new();
         for name in names {
-            if self.scope.locals.contains(&name) {
+            if let Some(cell) = self.resolve_comp_rename(&name) {
+                self.captured_by_children.insert(cell.clone());
+                own_captures.push(cell);
+            } else if self.is_module_body || self.is_class_body {
+                // Module names are globals, and a class body's names are not visible to the
+                // scopes nested in it.
+                if self.outer_locals.contains(&name) {
+                    self.free_reads.insert(name);
+                }
+            } else if self.scope.locals.contains(&name) {
                 self.captured_by_children.insert(name.clone());
                 own_captures.push(name);
             } else if self.outer_locals.contains(&name) {
@@ -2771,6 +2775,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         let mut captured_vars: Vec<String> = self.captured_by_children.into_iter().collect();
         captured_vars.sort();
+        let mut free_names: Vec<String> = self.free_reads.into_iter().collect();
+        free_names.sort();
+        self.module.free_names[self.id.0 as usize] = free_names;
         self.module
             .loop_hints
             .push((self.id, std::mem::take(&mut self.finished_hints)));

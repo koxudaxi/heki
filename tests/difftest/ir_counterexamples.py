@@ -180,6 +180,83 @@ def old_walrus_in_generator_expression(items, shared):
     return len(acc)
 
 
+def cx_walrus_in_nested_generator_expressions(items, shared):
+    acc = []
+    next(next(((acc := shared) for _ in (0,)) for _ in (0,)))
+    for x in items:
+        acc = acc + [x]
+    return len(acc)
+
+
+def old_walrus_in_nested_generator_expressions(items, shared):
+    acc = []
+    next(next(((acc := shared) for _ in (0,)) for _ in (0,)))
+    for x in items:
+        acc.append(x)
+    return len(acc)
+
+
+# ------------------------------------------------------------------------------
+# A cell read only by a grandchild scope is still a cell of the function
+# ------------------------------------------------------------------------------
+def cx_capture_through_function(items):
+    acc = []
+    def middle():
+        return lambda: acc
+    old = middle()()
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_capture_through_function(items):
+    acc = []
+    def middle():
+        return lambda: acc
+    old = middle()()
+    for x in items:
+        acc.append(x)
+    return old
+
+
+def cx_capture_through_class(items):
+    acc = []
+    class Holder:
+        def get(self):
+            return acc
+    old = Holder().get()
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_capture_through_class(items):
+    acc = []
+    class Holder:
+        def get(self):
+            return acc
+    old = Holder().get()
+    for x in items:
+        acc.append(x)
+    return old
+
+
+def cx_capture_through_generator_expression(items):
+    acc = []
+    old = next((lambda: acc) for _ in (0,))()
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_capture_through_generator_expression(items):
+    acc = []
+    old = next((lambda: acc) for _ in (0,))()
+    for x in items:
+        acc.append(x)
+    return old
+
+
 def run(call, fn):
     try:
         return repr(call(fn))
@@ -219,6 +296,18 @@ def main() -> int:
             ]
         ],
         (cx_walrus_in_generator_expression, old_walrus_in_generator_expression, with_owned(list)),
+        (
+            cx_walrus_in_nested_generator_expressions,
+            old_walrus_in_nested_generator_expressions,
+            with_owned(list),
+        ),
+        (cx_capture_through_function, old_capture_through_function, lambda f: f([1])),
+        (cx_capture_through_class, old_capture_through_class, lambda f: f([1])),
+        (
+            cx_capture_through_generator_expression,
+            old_capture_through_generator_expression,
+            lambda f: f([1]),
+        ),
     ]
     lines = []
     for cx, old, call in pairs:

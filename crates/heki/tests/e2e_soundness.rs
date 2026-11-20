@@ -1192,6 +1192,11 @@ const IR_COUNTEREXAMPLES: &[Expect] = &[
     ("cx_walrus_in_subscript_target", &[]),
     // An assignment expression in a generator expression rebinds the function's cell.
     ("cx_walrus_in_generator_expression", CAPTURED),
+    ("cx_walrus_in_nested_generator_expressions", CAPTURED),
+    // Only a scope nested in the child reads the cell.
+    ("cx_capture_through_function", CAPTURED),
+    ("cx_capture_through_class", CAPTURED),
+    ("cx_capture_through_generator_expression", CAPTURED),
 ];
 
 const CAPTURED: &[(&str, V)] = &[(
