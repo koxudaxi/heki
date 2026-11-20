@@ -143,3 +143,46 @@ fn types_past_the_inference_pass_bound_are_unknown() {
     assert_eq!(blocking(4), 1);
     assert_eq!(blocking(30), 0);
 }
+
+/// A loop after a `return` has only its back edge: the names it passes around through copies
+/// keep their header phi, so no walk along copies runs in a cycle.
+#[test]
+fn copies_around_a_loop_no_path_enters_form_no_cycle() {
+    let src = "def f(x):\n    return\n    while True:\n        y = x\n        x = y\n        if y:\n            y()\n";
+    let p = Project::new("bounds_dead_copies");
+    p.write("m.py", src);
+    let (code, stdout, stderr) = p.heki(&["dump-ir", "m.py"]);
+    assert_eq!(code, 0, "{stderr}");
+    let ir: Value = serde_json::from_str(&stdout).unwrap();
+    let f = ir["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["qualname"] == "f")
+        .unwrap();
+    let copies: std::collections::HashMap<u64, u64> = f["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .filter_map(|i| {
+            let c = i["kind"].get("Copy")?;
+            Some((c["dst"].as_u64()?, c["src"].as_u64()?))
+        })
+        .collect();
+    assert!(!copies.is_empty());
+    for &start in copies.keys() {
+        let mut cur = start;
+        for _ in 0..=copies.len() {
+            match copies.get(&cur) {
+                Some(&src) => cur = src,
+                None => break,
+            }
+        }
+        assert!(
+            !copies.contains_key(&cur),
+            "a cycle of copies through {start}: {copies:?}"
+        );
+    }
+    check_within(&p, Duration::from_secs(20));
+}

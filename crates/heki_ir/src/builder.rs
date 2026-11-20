@@ -619,6 +619,8 @@ struct FnBuilder<'m, 'a> {
     current_def: FxHashMap<(BlockId, String), VarId>,
     incomplete_phis: FxHashMap<BlockId, Vec<(String, VarId)>>,
     var_replacements: FxHashMap<VarId, VarId>,
+    /// The source of each `Copy`.
+    copy_src: FxHashMap<VarId, VarId>,
 
     exc_target_stack: Vec<BlockId>,
     /// The statements around the current point that a jump out of them runs, innermost last.
@@ -701,6 +703,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             current_def: FxHashMap::default(),
             incomplete_phis: FxHashMap::default(),
             var_replacements: FxHashMap::default(),
+            copy_src: FxHashMap::default(),
             exc_target_stack: Vec::new(),
             unwind: Vec::new(),
             loop_stack: Vec::new(),
@@ -781,6 +784,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     fn emit(&mut self, kind: InstKind, span: Span) {
         self.spend_unit();
+        if let InstKind::Copy { dst, src } = kind {
+            self.copy_src.insert(dst, src);
+        }
         self.ensure_open_block();
         let bb = self.cur_bb;
         if kind.may_raise() {
@@ -1135,9 +1141,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 break;
             }
         }
+        // The one other value can be a copy of the phi: a loop no path enters has only its back
+        // edge, which passes the phi around through copies. Taking that value would close the
+        // copies into a cycle; the phi stays, with no value from outside.
         if trivial
             && let Some(s) = same
             && s != phi_var
+            && !self.copies(s, phi_var)
         {
             self.var_replacements.insert(phi_var, s);
             return s;
@@ -1173,6 +1183,19 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     fn canonical_var(&self, v: VarId) -> VarId {
         resolve_replacement(&self.var_replacements, v)
+    }
+
+    /// Whether `v` is `of` through copies. The copies form no cycle: only replacing a phi can
+    /// close one, and `finish_phi` asks this first.
+    fn copies(&self, v: VarId, of: VarId) -> bool {
+        let mut cur = v;
+        while let Some(&src) = self.copy_src.get(&cur) {
+            cur = self.canonical_var(src);
+            if cur == of {
+                return true;
+            }
+        }
+        false
     }
 
     // -------------------------------------------------------------------------
