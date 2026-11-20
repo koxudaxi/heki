@@ -141,20 +141,27 @@ impl<'a, 'c> Sizes<'a, 'c> {
         if self.ix.container_bound(var).is_some() {
             return true;
         }
+        // Copies form chains ending at their source (SSA).
         let mut v = var;
-        for _ in 0..16 {
-            let Some(inst) = self.ix.def_inst(v) else {
-                return false;
-            };
-            if let InstKind::Copy { src, .. } = &inst.kind {
-                v = *src;
-                continue;
-            }
-            return self
-                .leaf_display(inst)
-                .is_some_and(|d| d.is_of(kinds) && self.ix.load_unchanged(v));
+        while let Some(InstKind::Copy { src, .. }) = self.ix.def_inst(v).map(|i| &i.kind) {
+            v = *src;
         }
-        false
+        self.ix
+            .def_inst(v)
+            .and_then(|inst| self.leaf_display(inst))
+            .is_some_and(|d| d.is_of(kinds) && self.ix.load_unchanged(v))
+    }
+
+    /// What an imported name loaded into `var` refers to (`consts` of `from pkg import
+    /// consts`), without type inference.
+    fn imported(&self, var: VarId) -> Option<Val> {
+        match &self.ix.def_inst(var)?.kind {
+            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+                let target = self.tcx.module.imports.get(name)?;
+                Some(Val::Ref(self.cx.decls.canonical(target)))
+            }
+            _ => None,
+        }
     }
 
     /// The small display a load of a global or an attribute gives, by the declarations: a
@@ -171,13 +178,19 @@ impl<'a, 'c> Sizes<'a, 'c> {
                 );
                 decls.small_global(&fqn).cloned()
             }
-            InstKind::AttrLoad { obj, attr, .. } => match self.types.get(obj)? {
-                // A class attribute read through the class (`cls.order`).
-                Val::Ref(class) if decls.is_project_class(class) => decls.small_attr(class, attr),
-                Val::Ref(module) => decls.small_global(&format!("{module}.{attr}")).cloned(),
-                Val::Inst(class) => decls.small_attr(class, attr),
-                Val::Super(_) => None,
-            },
+            InstKind::AttrLoad { obj, attr, .. } => {
+                match self.types.get(obj).cloned().or_else(|| self.imported(*obj)) {
+                    // A class attribute read through the class (`cls.order`).
+                    Some(Val::Ref(class)) if decls.is_project_class(&class) => {
+                        decls.small_attr(&class, attr)
+                    }
+                    Some(Val::Ref(module)) => {
+                        decls.small_global(&format!("{module}.{attr}")).cloned()
+                    }
+                    Some(Val::Inst(class)) => decls.small_attr(&class, attr),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

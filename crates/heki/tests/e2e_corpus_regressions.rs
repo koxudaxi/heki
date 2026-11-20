@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{Project, run_python};
+use common::{Project, repo_file, run_python};
 use serde_json::Value;
 
 /// `heki check --output-format json <args>` in `p`.
@@ -884,4 +884,326 @@ fn module_constants_class_attributes_and_elif_comparisons() {
         "{diags:#?}"
     );
     assert_eq!(diags[1]["target"], "PUBLIC");
+}
+
+// ============================================================== the IR facts themselves
+
+#[test]
+fn loop_trip_counts_and_caps_the_code_fixes() {
+    let p = Project::new("reg_loop_facts");
+    p.write("m.py", &repo_file("tests/corpus/loop_facts.py"));
+    let (code, stdout, stderr) = p.heki(&["dump-ir", "m.py", "--target-version", "py315"]);
+    assert_eq!(code, 0, "{stderr}");
+    let ir: Value = serde_json::from_str(&stdout).unwrap();
+    // `STEP = LIMIT // 2` is not folded; `gone` is deleted.
+    assert_eq!(
+        ir["constants"],
+        serde_json::json!({"ints": {"LIMIT": 8, "WIDTH": 1}, "dynamic": false})
+    );
+    let small = |n: u64| serde_json::json!({ "const_small": n });
+    let unbounded = serde_json::json!("unbounded");
+    let expected = [
+        ("strings", small(3)),
+        ("sorted_keys", small(2)),
+        ("reversed_list", small(3)),
+        ("mapped", small(2)),
+        ("filtered", small(3)),
+        ("other_builtin", unbounded.clone()),
+        ("enumerate_start", small(2)),
+        ("zip_strict", small(2)),
+        ("negative", small(3)),
+        ("added", small(8)),
+        ("floor_division", unbounded.clone()),
+        ("local_constant", small(3)),
+        ("deleted", unbounded.clone()),
+        // Past 16 copies a range object is not followed; a long copy chain of a display
+        // still resolves to it.
+        ("deep_copies", unbounded.clone()),
+        ("deep_ints", unbounded.clone()),
+        ("deep_display", small(1)),
+    ];
+    let functions = ir["functions"].as_array().unwrap();
+    let loop_of = |name: &str| -> &Value {
+        let f = functions.iter().find(|f| f["qualname"] == name).unwrap();
+        &f["loops"][0]
+    };
+    for (name, bound) in expected {
+        assert_eq!(loop_of(name)["bound"], bound, "{name}");
+    }
+    // `10 > len(buf)` and `len(buf) <= 9` cap at 10; `!=`, `len(buf) > 0`, and a starred
+    // `len(*parts)` cap nothing.
+    for name in ["cap_gt", "cap_lte"] {
+        assert_eq!(loop_of(name)["len_caps"][0]["limit"], 10, "{name}");
+    }
+    for name in ["cap_ne", "cap_positive", "cap_starred"] {
+        assert!(loop_of(name).get("len_caps").is_none(), "{name}");
+    }
+    // `globals()` at module level: no name is fixed.
+    p.write(
+        "dynamic.py",
+        "HOSTS = [\"a\", \"b\"]\nglobals()[\"X\"] = 1\n\n\ndef each():\n    for h in HOSTS:\n        pass\n",
+    );
+    let (_, stdout, _) = p.heki(&["dump-ir", "dynamic.py", "--target-version", "py315"]);
+    let ir: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(ir["constants"], serde_json::json!({"dynamic": true}));
+}
+
+// =========================================================== sizes read across modules
+
+const CONSTS: &str = "HOSTS = [\"a.example.com\", \"b.example.com\"]\nGROWN = [\"x.example.com\"]\nLEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(host):\n    GROWN.append(host)\n";
+
+const USES: &str = r#"import urllib.request
+
+from pkg import consts
+from pkg.consts import GROWN, HOSTS, LEVELS
+
+
+def each_host():
+    for h in HOSTS:
+        urllib.request.urlopen(f"https://{h}/")
+
+
+def each_grown():
+    for h in GROWN:
+        urllib.request.urlopen(f"https://{h}/")
+
+
+def through_the_module():
+    for h in consts.HOSTS:
+        urllib.request.urlopen(f"https://{h}/")
+
+
+def via_call(make):
+    for h in make().hosts:
+        urllib.request.urlopen(f"https://{h}/")
+
+
+def ranks(xs) -> list:
+    levels = LEVELS
+    out = []
+    for x in xs:
+        out.append(levels.index(x))
+    return out
+"#;
+
+const ATTRIBUTES: &str = r#"class Base:
+    names = ["a", "b"]
+
+
+class Child(Base):
+    def scan(self, rows: list[str]) -> None:
+        for n in super().names:
+            rows.remove(n)
+
+
+class Picks:
+    def __init__(self) -> None:
+        self.order = ["a", "b"]
+
+    def reset(self) -> None:
+        self.order = ["c"]
+
+    def drop(self) -> None:
+        del self.gone
+
+    def sizes(self):
+        yield len(self.order)
+
+    def later(self):
+        items = [1]
+        return lambda: items
+
+
+def scan(p: Picks, rows) -> None:
+    for r in rows:
+        p.order.index(r)
+
+
+def captured(xs) -> list:
+    names = ["a", "b"]
+
+    def show():
+        return names
+
+    out = []
+    for x in xs:
+        out.append(names.index(x))
+    return out
+
+
+def returned(xs) -> list:
+    names = ["a", "b"]
+    for x in xs:
+        names.index(x)
+    return names
+
+
+def drain_slices() -> list:
+    q = ["a", "b"]
+    out = []
+    while q:
+        out.append(q[0])
+        q = q[1:]
+    return out
+"#;
+
+#[test]
+fn sizes_of_other_modules_attributes_and_escaping_displays() {
+    // Imported and `module.NAME` displays that nothing grows bound their loops; one another
+    // function grows does not. A class attribute stored twice with small displays stays
+    // small; `super().names` is not resolved. A display a closure captures or the function
+    // returns may grow; one the loop only slices stays small.
+    let p = Project::new("reg_cross_sizes");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/consts.py", CONSTS)
+        .write("pkg/uses.py", USES)
+        .write("pkg/attrs.py", ATTRIBUTES);
+    let diags = diagnostics(&p, &["--select", "EFF102,OPT112,OPT120"]);
+    assert_eq!(
+        reported(&diags),
+        pairs(&[
+            ("Child.scan", "OPT112"),
+            ("captured", "OPT112"),
+            ("returned", "OPT112"),
+            ("each_grown", "EFF102"),
+            ("via_call", "EFF102"),
+        ]),
+        "{diags:#?}"
+    );
+}
+
+const MORE_DEQUES: &str = r#"import collections
+
+
+def bfs(start, children) -> list:
+    queue = [start] if start else []
+    order = []
+    while queue:
+        node = queue.pop(0)
+        order.append(node)
+        queue.extend(children(node))
+    return order
+
+
+def quoted(parts) -> list:
+    out: "list[str]" = []
+    for part in parts:
+        out.insert(0, part)
+    return list(out)
+
+
+def optional(parts) -> list:
+    out: list[str] | None = []
+    for part in parts:
+        out.insert(0, part)
+    return list(out)
+
+
+print(bfs(1, lambda n: [n + 1] if n < 3 else []), quoted(["a", "b"]))
+"#;
+
+#[test]
+fn conditional_creations_and_annotation_spellings() {
+    // Both displays of a conditional creation become deques (no annotation to rewrite); a
+    // quoted annotation stays quoted; a union is not rewritten mechanically.
+    let diags = assert_reports(
+        "reg_more_deques",
+        MORE_DEQUES,
+        "OPT120,OPT121",
+        &[
+            ("bfs", "OPT120"),
+            ("quoted", "OPT121"),
+            ("optional", "OPT121"),
+        ],
+    );
+    assert_eq!(
+        replacements(&diags[0]),
+        [
+            "collections.deque([start])",
+            "collections.deque([])",
+            "queue.popleft()"
+        ]
+    );
+    assert_eq!(
+        replacements(&diags[1]),
+        [
+            "collections.deque([])",
+            "out.appendleft(part)",
+            "\"collections.deque[str]\""
+        ]
+    );
+    assert_eq!(
+        diags[2]["blocker"],
+        "DequeEquivalentOps(out): its annotation `list[str] | None` (line 22) would not accept a `collections.deque`; rewrite it by hand"
+    );
+    let p = Project::new("reg_more_deques_run");
+    p.write("case.py", MORE_DEQUES);
+    let before = run_python(&p.dir, "case.py");
+    let (_, _, stderr) = p.check(&[
+        "--select",
+        "OPT120,OPT121",
+        "--fix",
+        "--include-size-dependent",
+    ]);
+    assert!(stderr.contains("Fixed 2 issue(s)"), "{stderr}");
+    assert_eq!(
+        before,
+        run_python(&p.dir, "case.py"),
+        "{}",
+        p.read("case.py")
+    );
+}
+
+#[test]
+fn the_inserted_import_skips_comments_parenthesized_and_guarded_imports() {
+    // A comment above an import stays with it, `from os import path, sep` and a parenthesized
+    // import are one statement each, and an import inside `try:` ends the block.
+    let imports = "# standard library\nimport atexit\nfrom os import path, sep\nfrom typing import (\n    Any,\n    cast,\n)\n\ntry:\n    import ujson\nexcept ImportError:\n    ujson = None\n";
+    let p = Project::new("reg_import_shapes");
+    p.write("case.py", &format!("{imports}\n\n{IMPORT_BLOCKS}"));
+    let (_, _, stderr) = p.check(&["--select", "OPT120", "--fix", "--include-size-dependent"]);
+    assert!(stderr.contains("Fixed 1 issue(s)"), "{stderr}");
+    let fixed = p.read("case.py");
+    assert!(
+        fixed.starts_with(
+            "# standard library\nimport atexit\nimport collections\nfrom os import path, sep\n"
+        ),
+        "{fixed}"
+    );
+}
+
+#[test]
+fn absolute_paths_print_from_the_working_directory_through_links_and_stay_absolute_outside() {
+    let p = Project::new("reg_paths_absolute");
+    p.write("src/pkg/__init__.py", "")
+        .write("src/pkg/a.py", &format!("import os\n\n\n{IMPORT_BLOCKS}"))
+        .write("src/other.py", &format!("import os\n\n\n{IMPORT_BLOCKS}"));
+    let run = |cwd: &std::path::Path, arg: &std::path::Path| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_heki"))
+            .args(["check", "--output-format", "concise"])
+            .arg(arg)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    // The temporary directory may be reached through a symbolic link (`/var` on macOS): the
+    // path as given and the canonical working directory still match.
+    let src = p.dir.join("src");
+    let out = run(&src, &src);
+    assert!(
+        out.contains("\npkg/a.py:8:16: OPT120 ") || out.starts_with("other.py"),
+        "{out}"
+    );
+    assert!(out.contains("other.py:8:16: OPT120 "), "{out}");
+    // Outside the working directory a path stays absolute.
+    let out = run(&src.join("pkg"), &src);
+    assert!(out.contains("a.py:8:16: OPT120 "), "{out}");
+    let other = src.join("other.py");
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with('/') && l.contains("other.py:8:16: OPT120 ")),
+        "{out} ({})",
+        other.display()
+    );
 }

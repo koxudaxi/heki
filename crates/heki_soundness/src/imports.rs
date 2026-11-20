@@ -82,21 +82,15 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
     let anchor = after_statement.unwrap_or_else(|| after_leading_comments(source));
     // A blank line after the docstring or the `__future__` block, none below leading comments.
     let separated = after_statement.is_some();
-    let next = next_statement(source, anchor);
-    let blank_lines = match next {
-        None => 0,
-        Some(at) => {
-            let text = slice(source, at, line_end(source, at)).unwrap_or_default();
-            let opens_def = ["def ", "async def ", "class ", "@"]
-                .iter()
-                .any(|p| text.starts_with(p));
-            if opens_def { 2 } else { 1 }
-        }
-    };
-    let replaced_end = next.map_or(anchor, |at| {
-        // Only blank lines are replaced (a comment above the next statement stays put).
-        blank_run_end(source, anchor, at)
-    });
+    // The rewritten function follows: there is a next statement.
+    let next = next_statement(source, anchor)?;
+    let line = slice(source, next, line_end(source, next)).unwrap_or_default();
+    let opens_def = ["def ", "async def ", "class ", "@"]
+        .iter()
+        .any(|p| line.starts_with(p));
+    let blank_lines = if opens_def { 2 } else { 1 };
+    // Only blank lines are replaced (a comment above the next statement stays put).
+    let replaced_end = blank_run_end(source, anchor, next);
     let mut text = String::new();
     if separated {
         text.push('\n');
@@ -129,7 +123,6 @@ fn import_region(source: &str, module_fn: &IrFunction) -> (Option<u32>, u32) {
                 docstring_end = Some(next_line(source, inst.span.end));
             }
             InstKind::Import { .. } | InstKind::StoreGlobal { .. } => {}
-            InstKind::Copy { .. } => {}
             _ => {
                 region_end = line_start(source, inst.span.start);
                 break;

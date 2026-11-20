@@ -3012,8 +3012,8 @@ fn classify_while_bound(w: &ast::StmtWhile) -> LoopBound {
     LoopBound::Unbounded
 }
 
-/// The comparisons a `while` test requires that may cap a length (`len(x) < N` and its
-/// mirrored and inclusive forms), as the test itself or one operand of a top-level `and`.
+/// The single comparisons with a `len(...)` operand a `while` test requires (the test itself
+/// or one operand of a top-level `and`): `facts` decides which of them cap a length.
 fn len_cap_tests(test: &Expr) -> Vec<Span> {
     let conjuncts: Vec<&Expr> = match test {
         Expr::BoolOp(b) if matches!(b.op, ast::BoolOp::And) => b.values.iter().collect(),
@@ -3028,12 +3028,7 @@ fn len_cap_tests(test: &Expr) -> Vec<Span> {
         .into_iter()
         .filter_map(|e| match e {
             Expr::Compare(c)
-                if c.ops.len() == 1
-                    && matches!(
-                        c.ops[0],
-                        ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE
-                    )
-                    && (is_len(&c.operands[0]) || is_len(&c.operands[1])) =>
+                if c.ops.len() == 1 && (is_len(&c.operands[0]) || is_len(&c.operands[1])) =>
             {
                 Some(Span::from(c.range))
             }

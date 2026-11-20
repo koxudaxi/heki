@@ -303,17 +303,20 @@ impl<'a> FnIndex<'a> {
                 .phi_incoming(b, i)
                 .iter()
                 .all(|&(_, x)| self.origins(x, out, stack)),
-            Def::Inst(..) => self.inst_origins(v, out, stack),
+            Def::Inst(b, i) => self.inst_origins(v, &self.f.block(b).insts[i as usize], out, stack),
             Def::Param | Def::None => false,
         };
         stack.pop();
         ok
     }
 
-    fn inst_origins(&self, v: VarId, out: &mut Origins, stack: &mut Vec<VarId>) -> bool {
-        let Some(inst) = self.def_inst(v) else {
-            return false;
-        };
+    fn inst_origins(
+        &self,
+        v: VarId,
+        inst: &Inst,
+        out: &mut Origins,
+        stack: &mut Vec<VarId>,
+    ) -> bool {
         let add = |out: &mut Origins, kind: BuiltinKind, len: usize| {
             out.len = out.len.max(u32::try_from(len).unwrap_or(u32::MAX));
             if !out.kinds.contains(&kind) {
@@ -753,18 +756,15 @@ impl<'a> FnIndex<'a> {
         }
     }
 
-    /// The `len(x) < N`-shaped comparison `cmp` (`N > len(x)`, `<=`, `>=`): `x` and the bound
-    /// `len(x)` stays below while the comparison holds, when `N` is a constant of at most
-    /// [`LEN_CAP_MAX`].
-    fn len_cap(&self, cmp: &Inst) -> Option<LenCap> {
-        let InstKind::Compare { op, lhs, rhs, .. } = &cmp.kind else {
-            return None;
-        };
+    /// The comparison `lhs <op> rhs` of a `while` test as a cap: `len(x) < N` (`N > len(x)`,
+    /// `<=`, `>=`) gives `x` and the bound `len(x)` stays below while it holds, when `N` is a
+    /// constant of at most [`LEN_CAP_MAX`].
+    fn len_cap(&self, op: CompareOpKind, lhs: VarId, rhs: VarId) -> Option<LenCap> {
         let (measured, bound, inclusive) = match op {
-            CompareOpKind::Lt => (*lhs, *rhs, false),
-            CompareOpKind::LtE => (*lhs, *rhs, true),
-            CompareOpKind::Gt => (*rhs, *lhs, false),
-            CompareOpKind::GtE => (*rhs, *lhs, true),
+            CompareOpKind::Lt => (lhs, rhs, false),
+            CompareOpKind::LtE => (lhs, rhs, true),
+            CompareOpKind::Gt => (rhs, lhs, false),
+            CompareOpKind::GtE => (rhs, lhs, true),
             _ => return None,
         };
         let InstKind::Call {
@@ -1023,8 +1023,14 @@ pub(crate) fn refine_loops(
                 lp.body
                     .iter()
                     .flat_map(|b| &f.block(*b).insts)
-                    .filter(|i| hint.cap_tests.contains(&i.span))
-                    .filter_map(|i| ix.len_cap(i))
+                    .filter_map(|i| match &i.kind {
+                        InstKind::Compare { op, lhs, rhs, .. }
+                            if hint.cap_tests.contains(&i.span) =>
+                        {
+                            ix.len_cap(*op, *lhs, *rhs)
+                        }
+                        _ => None,
+                    })
                     .collect()
             };
             if bound != lp.bound || !caps.is_empty() {
