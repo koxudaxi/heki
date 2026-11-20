@@ -407,3 +407,29 @@ fn waits_on_a_future_look_up_the_awaits_before_them_once() {
         }
     }
 }
+
+/// Each list copies the one before (`x1 = list(x0)`): the size of the last is not followed
+/// past a few constructors, and each is decided once.
+#[test]
+fn chains_of_builtin_constructors_are_followed_a_bounded_depth() {
+    let mut lines = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "def copies():".to_owned(),
+        "    x0 = [1, 2]".to_owned(),
+    ];
+    for i in 1..=3000 {
+        lines.push(format!("    x{i} = list(x{})", i - 1));
+    }
+    lines.push("    for _ in x4:".to_owned());
+    lines.push("        httpx.Client()".to_owned());
+    lines.push("    for _ in x3000:".to_owned());
+    lines.push("        httpx.Client()".to_owned());
+    let p = Project::new("bounds_constructor_chain");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    // Four copies keep two items; three thousand are past the depth the sizes follow.
+    let diags = check_within(&p, Duration::from_secs(20));
+    let lines: Vec<u64> = diags.iter().map(|d| d["line"].as_u64().unwrap()).collect();
+    assert_eq!(lines, [3009], "{diags:#?}");
+}
