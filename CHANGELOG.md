@@ -14,12 +14,14 @@ release can change rules, configuration keys, diagnostics, and output formats.
   report the reads of an attribute and the calls of a method named like a target on an object of
   unknown class (an unannotated parameter, a loop variable, an untyped call result, `Any`,
   `object`, or a protocol whose implementations heki cannot list), unless every caller binds an
-  instance of a project class outside the targets' classes.
+  instance of a project class outside the targets' classes (for a call target naming no class,
+  `reset`, one whose MRO finds no `reset` the target names).
 - Contract keys and dynamic names follow module-level string constants bound once in their
   module, and class constants declared `ClassVar` or `Final` and bound once, read on the class,
   an instance, or `cls`; a constant without `Final` stops being one when another module rebinds
   or deletes it (`keys.KEY = "x"`, `Keys.KEY = "x"`), and a class constant when its own module
-  stores it on the class or an instance outside the class body.
+  stores it on the class or an instance outside the class body, or when a subclass's MRO finds
+  another definition. A `Final` field of a dataclass is no constant on an instance.
 
 ### Changed
 
@@ -60,9 +62,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `await` and `async with` still give the annotated type, and awaiting a future gives what it
   holds, not the future.
 - A value typed with a project `Protocol` and handed to a helper that does not type its
-  parameter is an instance of the protocol's implementations: the helper's writes are `MUT201`
-  writes of those classes, and `MUT205` reports a write to a protocol whose implementations heki
-  cannot list.
+  parameter is an instance of the protocol and of its implementations: the helper's writes are
+  `MUT201` writes of those classes, and `MUT205` reports a write to a protocol whose
+  implementations heki cannot list.
+- A call target naming no class (`reset`) gives `MUT204` the initialization of the classes
+  defining the methods it names: `self.reset()` in their `__init__` is no report.
 - `MUT205` uses the class an `isinstance` test around a write narrows its object to.
 - A list or set comprehension that collects the results of a call no longer binds each result to
   the call's first parameter: `[load(graph, raw) for raw in items]`, with `load` returning a
