@@ -1105,6 +1105,32 @@ def use_fresh_nested(flag):
     x.append(1)
 "#;
 
+/// A sentinel test whose sentinel side never reaches the value's phi selects no replacement:
+/// here the loop's back edge passes `if out is None: raise`, and the loop header also takes the
+/// list made before the loop, so `acc` is new on one path and the caller's `out` on another.
+const GUARDED_LOOP: &str = r#"def gather(items, out=None):
+    acc = []
+    for item in items:
+        if out is None:
+            raise ValueError(item)
+        acc = out
+    acc.append(1)
+    return acc
+"#;
+
+#[test]
+fn mut112_reports_a_loop_value_a_raising_sentinel_test_guards() {
+    let p = Project::new("mut112_guarded_loop");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/guarded.py", GUARDED_LOOP);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    assert_eq!(
+        found(&diags),
+        vec![d("pkg/guarded.py", 7, "gather", "acc")],
+        "{diags:#?}"
+    );
+}
+
 #[test]
 fn mut112_follows_returned_calls_through_nested_calls() {
     let p = Project::new("mut112_nested_calls");
