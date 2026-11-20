@@ -82,9 +82,8 @@ pub fn build_module_ir(
     }
 }
 
-/// Give back the spare capacity that building by pushes leaves in a function's containers: a
-/// module's IR stays resident until its file is checked, and about a third of its instruction,
-/// block, and variable-name arrays was spare capacity.
+/// Building by pushes leaves spare capacity in a function's containers, and a module's IR stays
+/// resident until its file is checked.
 fn release_spare_capacity(f: &mut IrFunction) {
     f.params.shrink_to_fit();
     f.decorators.shrink_to_fit();

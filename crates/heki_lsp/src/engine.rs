@@ -110,10 +110,10 @@ pub struct Workspace {
     stats: EngineStats,
 }
 
-/// What the latest check of each file read of the declarations ([`DeclKeys`]), kept compact. A
-/// check reads about every module and class of the project (on pydantic about 6,700 keys per
-/// file: 2.8 GB as strings after one check of every file), so every key is interned once and
-/// a file keeps the set of the ids of the keys its check read.
+/// What the latest check of each file read of the declarations ([`DeclKeys`]). A check reads
+/// about every module and class of the project, so the keys as strings would grow with the
+/// number of files times the number of declarations: every key is interned once, and a file
+/// keeps the ids its check read.
 #[derive(Debug, Default)]
 struct CheckReads {
     /// Key ids, per `DeclKeys` field.

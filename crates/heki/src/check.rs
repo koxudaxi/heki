@@ -254,7 +254,7 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
     } = analyze(args, hot.as_ref(), None)?;
     let code = report(args, &project, diags);
     // The process ends here: freeing the index and the parsed files one allocation at a time
-    // would only cost time (a tenth of the run on large projects).
+    // would only cost time.
     std::mem::forget(index);
     std::mem::forget(project);
     code

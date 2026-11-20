@@ -2,7 +2,7 @@
 """Peak-memory gate: run heki on a generated project and fail when its peak RSS exceeds a budget.
 
 The project is generated deterministically and shaped after what dominates heki's memory on
-real code bases (measured on datamodel-code-generator, SQLAlchemy, and pydantic):
+real code bases:
 
 - typed field writes reached through long call chains across modules: every caller keeps the
   write sites of its callees with their chains (`EffectSummary::typed_field_write_sites`);
@@ -38,9 +38,9 @@ SHAPE_MODULES = 600
 # Peak budgets in MiB per platform and mode: the lowest of three runs plus about 8 %. Lower a
 # budget when a change makes heki smaller; raise one only with the measurement that justifies it.
 BUDGETS_MIB = {
-    # Peak footprint, measured on macOS (14 cores): `check` 163, `watch` 167.
+    # Peak physical footprint.
     "darwin": {"check": 176, "watch": 181},
-    # Peak resident set size; not measured yet: calibrate from the first CI run.
+    # Peak resident set size, to calibrate from the CI runner's measurements.
     "linux": {"check": 230, "watch": 240},
 }
 RUNS = 3
