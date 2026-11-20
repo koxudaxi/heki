@@ -668,6 +668,27 @@ impl<'a> FnCtx<'a> {
         }
     }
 
+    /// Iterating `v`, or asking its length, runs no user code: an exact builtin container,
+    /// string, or `range` object.
+    pub fn iterates_without_user_code(&self, st: &FrameState, v: VarId) -> bool {
+        let range = !st.points_to_incomplete.contains(&v)
+            && st.var_type.get(&v).is_some_and(
+                |t| matches!(t, ExactTypeVal::Unknown { reason } if reason == RANGE_REASON),
+            );
+        range
+            || matches!(
+                st.exact_type(v),
+                Some(
+                    BuiltinKind::List
+                        | BuiltinKind::Tuple
+                        | BuiltinKind::Set
+                        | BuiltinKind::Dict
+                        | BuiltinKind::Str
+                        | BuiltinKind::Bytes
+                )
+            )
+    }
+
     /// Neither an exact builtin, a tracked allocation, nor a derived reference of one.
     fn is_untracked(st: &FrameState, v: VarId) -> bool {
         st.exact_type(v).is_none()

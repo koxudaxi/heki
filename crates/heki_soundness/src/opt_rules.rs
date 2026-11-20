@@ -2079,13 +2079,91 @@ impl<'a, 'c> Rules<'a, 'c> {
         changes.into_iter().find_map(|(b, i)| {
             let st = self.state((b, i))?;
             let live = self.ck.live.live_after(f, b, i);
-            let d = allocs.iter()
+            // An iterator the change itself consumes (`q.extend(reversed(q))`) runs during it.
+            let operands = f.block(b).insts[i].kind.operands();
+            let d = allocs
+                .iter()
                 .flat_map(|a| st.derived_refs.get(a).into_iter().flatten())
-                .find(|d| live.contains(**d))?;
+                .find(|d| live.contains(**d) || operands.contains(d))?;
             Some(format!(
                 "{} still iterates it when it changes at line {} (a `deque` raises `RuntimeError` there)",
                 self.ck.name(*d),
                 self.line(f.block(b).insts[i].span.start)
+            ))
+        })
+    }
+
+    /// An iterator (or view) of `allocs` used for more than drawing its elements: a `deque`'s
+    /// iterators have other types and `__reduce__` results than a list's.
+    fn iterator_used_otherwise(
+        &self,
+        st: &FrameState,
+        allocs: &[crate::AllocId],
+    ) -> Option<String> {
+        let f = self.f();
+        let cx = self.cx();
+        // Every state of the function: a derived reference made and used inside one block is
+        // in no block's entry state.
+        let mut derived: FxHashSet<VarId> = FxHashSet::default();
+        let mut collect = |s: &FrameState| {
+            for a in allocs {
+                derived.extend(s.derived_refs.get(a).into_iter().flatten().copied());
+            }
+        };
+        collect(st);
+        for &b in &cx.rpo {
+            if let Some(entry) = self.an().block_in[b.0 as usize].clone() {
+                let (out, _) = cx.transfer_block(b, entry, |_, before, _| collect(before));
+                collect(&out);
+            }
+        }
+        let consumes = |d: VarId, site: &UseSite| match *site {
+            UseSite::Phi { .. } => true,
+            UseSite::Term(_) => false,
+            UseSite::Inst(b, i) => match &f.block(b).insts[i].kind {
+                InstKind::IterNext { .. } | InstKind::MakeIter { .. } | InstKind::Copy { .. } => {
+                    true
+                }
+                InstKind::Call {
+                    dst,
+                    callee_var,
+                    callee,
+                    args,
+                    kwargs,
+                    ..
+                } => {
+                    kwargs.iter().all(|(_, v)| *v != d)
+                        && !(0..args.len()).any(|k| f.is_starred(*dst, k))
+                        && cx.builtin_callee(*callee_var, callee).is_some_and(|n| {
+                            matches!(
+                                n,
+                                "list"
+                                    | "tuple"
+                                    | "set"
+                                    | "iter"
+                                    | "enumerate"
+                                    | "zip"
+                                    | "map"
+                                    | "filter"
+                            )
+                        })
+                }
+                _ => false,
+            },
+        };
+        let mut sorted: Vec<VarId> = derived.into_iter().collect();
+        sorted.sort_unstable();
+        sorted.into_iter().find_map(|d| {
+            let site = cx.uses(d).iter().find(|u| !consumes(d, u))?;
+            let at = match *site {
+                UseSite::Inst(b, i) => f.block(b).insts[i].span.start,
+                UseSite::Term(b) => crate::interpreter::term_span(f, b).start,
+                UseSite::Phi { block, .. } => f.block(block).term_span.unwrap_or(f.span).start,
+            };
+            Some(format!(
+                "{} is used for more than its elements (line {}): a `deque` iterator is another type",
+                self.ck.name(d),
+                self.line(at)
             ))
         })
     }
@@ -2121,6 +2199,16 @@ impl<'a, 'c> Rules<'a, 'c> {
         let lp = innermost_loop(f, at.0)?;
         let inst = inst_at(f, at);
         let name = self.var(q);
+        // The IR keeps the slice's bounds only when they are constants, and not its step:
+        // `q[1:n]` and `q[1::2]` look like `q[1:]` there.
+        if let Some(FrontForm::SliceRebind { .. }) = form
+            && self
+                .m
+                .text(inst.span)
+                .is_none_or(|t| !squash(t).ends_with("[1:]"))
+        {
+            return None;
+        }
         let mut obs = self.base();
         obs.push(self.ck.exact_type(&name, &st, q, &[List]));
         obs.push(self.ck.unique(&name, &st, q));
@@ -2133,16 +2221,28 @@ impl<'a, 'c> Rules<'a, 'c> {
             let loc = self.cx().site_location(*a);
             let ai = inst_at(f, loc);
             let rewritten_slice = matches!(form, Some(FrontForm::SliceRebind { .. })) && loc == at;
-            let init = !lp.body.contains(&loc.0)
-                && match &ai.kind {
-                    InstKind::AllocBuiltin { kind: List, .. } => true,
-                    InstKind::Call {
-                        callee_var, callee, ..
-                    } => self.cx().builtin_callee(*callee_var, callee) == Some("list"),
-                    _ => false,
-                };
-            if init {
+            let (init, unpacks) = match &ai.kind {
+                InstKind::AllocBuiltin { kind: List, .. } => (true, false),
+                InstKind::Call {
+                    dst,
+                    callee_var,
+                    callee,
+                    args,
+                    kwargs,
+                    ..
+                } => (
+                    self.cx().builtin_callee(*callee_var, callee) == Some("list"),
+                    !kwargs.is_empty() || (0..args.len()).any(|i| f.is_starred(*dst, i)),
+                ),
+                _ => (false, false),
+            };
+            if init && !unpacks && !lp.body.contains(&loc.0) {
                 init_sites.push(loc);
+            } else if init && unpacks {
+                bad_alloc = Some(format!(
+                    "`list(...)` with `*` / `**` arguments (line {}) has no `deque` equivalent: `deque` reads a second argument as `maxlen`",
+                    self.line(ai.span.start)
+                ));
             } else if !rewritten_slice {
                 bad_alloc = Some(format!(
                     "it is also created at line {}",
@@ -2172,7 +2272,9 @@ impl<'a, 'c> Rules<'a, 'c> {
             }
         }
         if bad_use.is_none() {
-            bad_use = self.iterated_while_changed(&allocs);
+            bad_use = self
+                .iterated_while_changed(&allocs)
+                .or_else(|| self.iterator_used_otherwise(&st, &allocs));
         }
         // A type checker must accept the rewritten variable: its `list` annotations become
         // `deque` ones, and one that cannot be rewritten blocks the fix.
@@ -2378,9 +2480,15 @@ impl<'a, 'c> Rules<'a, 'c> {
         for &s in init_sites {
             let ii = inst_at(f, s);
             let text = self.m.text(ii.span)?;
+            // `list(it)` asks `it` for its length (`__len__` / `__length_hint__`), `deque(it)`
+            // does not: an argument that is not a builtin container keeps its `list(...)`.
+            let reads_builtin = |a: VarId| {
+                self.state(s)
+                    .is_some_and(|st| self.cx().iterates_without_user_code(&st, a))
+            };
             let wrapped = match &ii.kind {
                 InstKind::Call { args, .. } if args.is_empty() => format!("{}()", deque.spelling),
-                InstKind::Call { .. } => {
+                InstKind::Call { args, .. } if args.iter().all(|a| reads_builtin(*a)) => {
                     let inner = text.trim_start().strip_prefix("list")?.trim_start();
                     format!("{}{inner}", deque.spelling)
                 }

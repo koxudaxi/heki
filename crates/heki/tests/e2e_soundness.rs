@@ -784,11 +784,11 @@ const NOT_EMPTY: &str = "DequeEquivalentOps(q): `q[1:]` of an empty list is `[]`
 const DEQUE: &[Expect] = &[
     (
         "drain_del",
-        &[("OPT120", V::Fix(&["deque(items)", "q.popleft()"]))],
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     (
         "drain_slice",
-        &[("OPT120", V::Fix(&["deque(items)", "q.popleft()"]))],
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     (
         "drain_slice_after_change",
@@ -812,7 +812,7 @@ const DEQUE: &[Expect] = &[
     ("parameter_queue", &[]),
     (
         "drain_then_alias",
-        &[("OPT120", V::Fix(&["deque(items)", "q.popleft()"]))],
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     // The statement text is not `del q[0]` / `q = q[1:]`: rewritten by hand.
     ("drain_del_parenthesized", &[("OPT120", V::Hand)]),
@@ -895,13 +895,13 @@ const DEQUE: &[Expect] = &[
     ("rebuilt_per_iteration", &[]),
     (
         "drain_and_test",
-        &[("OPT120", V::Fix(&["deque(items)", "q.popleft()"]))],
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     (
         "annotated_queue",
         &[(
             "OPT120",
-            V::Fix(&["deque(items)", "q.popleft()", "deque[int]"]),
+            V::Fix(&["deque(list(items))", "q.popleft()", "deque[int]"]),
         )],
     ),
     (
@@ -1168,6 +1168,33 @@ const COUNTEREXAMPLES: &[Expect] = &[
             ),
         )],
     ),
+    (
+        "cx_deque_keyword_arguments",
+        &[(
+            "OPT121",
+            V::Blocked("DequeEquivalentOps(q): `list(...)` with `*` / `**` arguments"),
+        )],
+    ),
+    (
+        "cx_extended_by_its_own_iterator",
+        &[(
+            "OPT120",
+            V::Blocked(
+                "DequeEquivalentOps(q): the result of `reversed(...)` still iterates it when it changes",
+            ),
+        )],
+    ),
+    (
+        "cx_iterator_type_observed",
+        &[(
+            "OPT120",
+            V::Blocked(
+                "DequeEquivalentOps(q): the result of `iter(...)` is used for more than its elements",
+            ),
+        )],
+    ),
+    // `q[1::2]` is no front pop: not a candidate.
+    ("cx_stepped_slice", &[]),
 ];
 
 #[test]
@@ -1183,7 +1210,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 36/36"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 40/40"));
 }
 
 // ======================================================================== module-level facts

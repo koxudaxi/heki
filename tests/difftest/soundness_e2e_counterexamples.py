@@ -800,6 +800,78 @@ def old_set_declared_without_value(n):
     return hit
 
 
+# ------------------------------------------------------------------------------
+# OPT120 / OPT121: what a deque does differently while it is built, extended, or iterated
+# ------------------------------------------------------------------------------
+def options():
+    CALLS.append("options")
+    return {}
+
+
+def cx_deque_keyword_arguments(n):
+    q = list(**options())
+    for i in range(n):
+        q.insert(0, i)
+    return list(q)
+
+
+def old_deque_keyword_arguments(n):
+    q = collections.deque()
+    for i in range(n):
+        q.appendleft(i)
+    return list(q)
+
+
+def cx_extended_by_its_own_iterator(n):
+    q = list(range(n))
+    q.extend(reversed(q))
+    out = []
+    while q:
+        out.append(q.pop(0))
+    return out
+
+
+def old_extended_by_its_own_iterator(n):
+    q = collections.deque(range(n))
+    q.extend(reversed(q))
+    out = []
+    while q:
+        out.append(q.popleft())
+    return out
+
+
+def cx_iterator_type_observed(n):
+    q = list(range(n))
+    while q:
+        q.pop(0)
+    return type(iter(q)).__name__
+
+
+def old_iterator_type_observed(n):
+    q = collections.deque(range(n))
+    while q:
+        q.popleft()
+    return type(iter(q)).__name__
+
+
+def cx_stepped_slice(n):
+    q = list(range(n))
+    steps = 0
+    while q:
+        q = q[1::2]
+        steps += 1
+    return steps
+
+
+def old_stepped_slice(n):
+    q = collections.deque(range(n))
+    steps = 0
+    while q:
+        q.popleft()
+        steps += 1
+    return steps
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -863,6 +935,10 @@ def main() -> int:
         ),
         (cx_rebuild_copy_with_argument, old_rebuild_copy_with_argument, lambda f: f(0)),
         (cx_set_declared_without_value, old_set_declared_without_value, lambda f: f(3)),
+        (cx_deque_keyword_arguments, old_deque_keyword_arguments, lambda f: f(3)),
+        (cx_extended_by_its_own_iterator, old_extended_by_its_own_iterator, lambda f: f(2)),
+        (cx_iterator_type_observed, old_iterator_type_observed, lambda f: f(3)),
+        (cx_stepped_slice, old_stepped_slice, lambda f: f(9)),
     ]
     lines = []
     for cx, old, call in pairs:
