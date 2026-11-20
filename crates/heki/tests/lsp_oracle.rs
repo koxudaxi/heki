@@ -59,6 +59,11 @@ name = "pass"
 scopes = ["pkg.pure.tidy"]
 allow-writes = ["Ledger.rows"]
 write-universe = ["Ledger.*"]
+
+[[tool.heki.effect-boundaries]]
+name = "render"
+scopes = ["pkg.walk_b.walk"]
+forbid = ["sleep"]
 [[tool.heki.readonly-returns]]
 name = "catalog"
 producers = ["pkg.catalog.Catalog.entry"]
@@ -131,13 +136,16 @@ const CHAIN_MID: &str = "from pkg.chain_low import book, peek, stamp\n\n\ndef re
 const CHAIN_TOP: &str = "from pkg.chain_mid import relay\n\n\nclass Store:\n    def run(self, r, v, l):\n        return relay(r, v, l)\n\n\ndef outside(r, v, l):\n    return None\n";
 
 // The index across files: two modules drive each other's private coroutine by hand
-// (`sync_driven_only`), and a coroutine a sync function drives calls a blocking helper in
-// another module.
+// (`sync_driven_only`), a coroutine a sync function drives calls a blocking helper in another
+// module, and two functions in two modules call each other (one is a boundary's scope function).
 const DRIVE_A: &str = "from pkg.drive_b import _cb\n\n\nasync def _ca():\n    return 1\n\n\ndef drive_b():\n    _cb().send(None)\n";
 const DRIVE_B: &str = "from pkg.drive_a import _ca\n\n\nasync def _cb():\n    return 1\n\n\ndef drive_a():\n    _ca().send(None)\n";
 const SLOW_LEAF: &str = "import time\n\n\ndef block():\n    time.sleep(1)\n";
 const WORKER: &str = "from pkg.slow_leaf import block\n\n\nasync def _work():\n    block()\n";
 const WORKER_DRIVER: &str = "from pkg.worker import _work\n\n\ndef drive():\n    _work().send(None)\n";
+const WALK_A: &str = "import time\n\nfrom pkg import walk_b\n\n\ndef walk(n):\n    if n > 0:\n        walk_b.walk(n - 1)\n";
+const WALK_B: &str =
+    "from pkg import walk_a\n\n\ndef walk(n):\n    if n > 0:\n        walk_a.walk(n - 1)\n";
 
 // Files: a module a caller already imports is created, then deleted; a stub is put next to a
 // module, then removed.
@@ -395,6 +403,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/slow_leaf.py", SLOW_LEAF),
         ("pkg/worker.py", WORKER),
         ("pkg/worker_driver.py", WORKER_DRIVER),
+        ("pkg/walk_a.py", WALK_A),
+        ("pkg/walk_b.py", WALK_B),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -575,7 +585,8 @@ fn steps_receiver_typing() -> Vec<Step> {
     ]
 }
 
-/// The index across files: facts its callers decide (`sync_driven_only`).
+/// The index across files: facts its callers decide (`sync_driven_only`), and members of a call
+/// cycle in other files.
 fn steps_effect_index() -> Vec<Step> {
     vec![
         Step::new(
@@ -597,6 +608,19 @@ fn steps_effect_index() -> Vec<Step> {
             vec![save("pkg/worker.py", &format!("{WORKER}# done\n"))],
         )
         .absent(&[("pkg/worker.py", "EFF101")]),
+        Step::new(
+            "a function calling a boundary's scope function in another module starts sleeping",
+            vec![save(
+                "pkg/walk_a.py",
+                &WALK_A.replace("    if n > 0:", "    time.sleep(1)\n    if n > 0:"),
+            )],
+        )
+        .present(&[("pkg/walk_b.py", "EFF201")]),
+        Step::new(
+            "the function stops sleeping",
+            vec![save("pkg/walk_a.py", WALK_A)],
+        )
+        .absent(&[("pkg/walk_b.py", "EFF201")]),
     ]
 }
 

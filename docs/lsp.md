@@ -3,8 +3,9 @@
 `heki server` (alias `heki lsp`) is a Language Server Protocol server on stdin / stdout. It
 indexes the workspace in the background, then keeps only the per-function effect summaries in
 memory. Editing a file re-analyzes that file alone (250 ms after the last keystroke). On save, the
-files whose results depend on the edit are re-analyzed too: the callers of a function whose
-effects changed, every file that resolved names through a changed declaration (a re-exported
+files whose results depend on the edit are re-analyzed too: the files of the functions whose
+effects changed (a call cycle through the edited file spans other files) and of their callers,
+every file that resolved names through a changed declaration (a re-exported
 class, a new method or base class, a property getter, a subclass, an offloading decorator), the
 classes of a family a changed method belongs to, the generators handed to a changed function
 (whether it iterates them decides where their writes and reads are reported), the files with

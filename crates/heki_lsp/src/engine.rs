@@ -464,11 +464,12 @@ impl Workspace {
         out.into_iter().collect()
     }
 
-    /// The files an update of the index affects besides the updated file: callers of changed
-    /// summaries, readers of changed declarations, callees whose callers changed, generators
-    /// handed to changed functions, class families whose members changed, and the files with
-    /// `MUT108` / `MUT110` reports above functions whose chain facts (`chains`, before and
-    /// after) changed.
+    /// The files an update of the index affects besides the updated file: the files of the
+    /// changed functions (a call cycle through the file spans other files) and of the callers
+    /// of changed summaries, readers of changed declarations, callees whose callers changed,
+    /// generators handed to changed functions, class families whose members changed, and the
+    /// files with `MUT108` / `MUT110` reports above functions whose chain facts (`chains`,
+    /// before and after) changed.
     fn affected_by(
         &self,
         update: &heki_effect::IncrementalUpdate,
@@ -477,8 +478,9 @@ impl Workspace {
         chains: (&ChainFacts, &ChainFacts),
     ) -> FxHashSet<PathBuf> {
         let mut affected: FxHashSet<PathBuf> = update
-            .affected_callers
+            .changed
             .iter()
+            .chain(&update.affected_callers)
             .filter_map(|k: &FuncKey| self.index.file_of(k).map(Path::to_path_buf))
             .collect();
         affected.extend(self.reading(change));
