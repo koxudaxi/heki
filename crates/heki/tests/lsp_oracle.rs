@@ -2715,7 +2715,7 @@ const EDGE_CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT103"]
+extend-select = ["MUT103", "MUT113"]
 
 [[tool.heki.effect-boundaries]]
 name = "net"
@@ -2743,6 +2743,12 @@ const DUP_USER: &str = "from app.dup import two\n\n\nasync def use():\n    two()
 const SRC_UTIL: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
 const SRC_CALLER: &str = "from pkg.util import wait\n\n\nasync def call():\n    wait()\n";
 const GENERATED: &str = "import time\n\n\nasync def tick():\n    time.sleep(1)\n";
+// The private generator of `TALLY` (`MUT113`), returned by a function of a second module and
+// consumed in a third. No owner contract is declared here: the server re-checks no file below
+// an edited function for one.
+const TALLY_FORWARD: &str =
+    "from app.tally import Tally\n\n\ndef _forward(t: Tally):\n    return t._walk()\n";
+const TALLY_LISTED: &str = "from app.tally import Tally\nfrom app.tally_forward import _forward\n\n\ndef listed(t: Tally):\n    return list(_forward(t))\n";
 
 fn edge_files() -> Vec<(&'static str, String)> {
     [
@@ -2758,6 +2764,9 @@ fn edge_files() -> Vec<(&'static str, String)> {
         ("app/dup_user.py", DUP_USER),
         ("src/pkg/util.py", SRC_UTIL),
         ("caller.py", SRC_CALLER),
+        ("app/tally.py", TALLY),
+        ("app/tally_forward.py", TALLY_FORWARD),
+        ("app/tally_listed.py", TALLY_LISTED),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -2781,8 +2790,31 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_discarded_buffer());
     steps.extend(steps_src_layout());
     steps.extend(steps_ignore_files());
+    steps.extend(steps_forwarded_generator());
     steps.extend(steps_baseline());
     steps
+}
+
+/// `MUT113`: a module steps by hand, then consumes, a private generator of another module that a
+/// function of a third one returns. The generator's report follows its object through the
+/// function returning it (`heki_rules::family_readers`), while no summary changes.
+fn steps_forwarded_generator() -> Vec<Step> {
+    let stepping = TALLY_LISTED.replace(
+        "    return list(_forward(t))\n",
+        "    g = _forward(t)\n    next(g)\n    return list(g)\n",
+    );
+    vec![
+        Step::new(
+            "a module steps by hand the generator a function of another module returns",
+            vec![Action::Save("app/tally_listed.py", stepping)],
+        )
+        .present(&[("app/tally.py", "MUT113")]),
+        Step::new(
+            "the module lists the forwarded generator again",
+            vec![save("app/tally_listed.py", TALLY_LISTED)],
+        )
+        .absent(&[("app/tally.py", "MUT113")]),
+    ]
 }
 
 /// A module file and a package sharing one name: the package wins, whichever is edited.

@@ -658,15 +658,18 @@ fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
 /// and subclasses that have either, a method overriding an inherited one for its own family, and
 /// any method for its own family when a class of it has a generator suspending inside an
 /// iteration of its own containers (`MUT113` reports the generator with the methods changing
-/// them, and with what its callers run while it is suspended: a changed function is read for the
-/// families of the generators it calls). With `in_place_changes` (`MUT112` selected), every
-/// changed method is read for its own family: a store in `self.<attr>` is reported when a method
-/// of the family changes the attribute in place. A family's classes include the ancestors whose
-/// methods it inherits. A changed writer is otherwise reported in its own file only.
+/// them, and with what its callers run while it is suspended: a changed function, and one whose
+/// `calling` sites changed, is read for the families of the generators whose objects its calls
+/// may receive, also through the functions handing them on). With `in_place_changes` (`MUT112`
+/// selected), every changed method is read for its own family: a store in `self.<attr>` is
+/// reported when a method of the family changes the attribute in place. A family's classes
+/// include the ancestors whose methods it inherits. A changed writer is otherwise reported in its
+/// own file only.
 pub fn family_readers(
     index: &ProjectIndex,
     decls: &ProjectDecls,
     changed: &[FuncKey],
+    calling: &[&FuncKey],
     in_place_changes: bool,
 ) -> BTreeSet<String> {
     let has_reported_reads = |class: &String| {
@@ -675,32 +678,22 @@ pub fn family_readers(
                 || index.summary(k).is_some_and(|s| s.is_cached_property)
         })
     };
-    let suspends = |key: &FuncKey| {
-        index.summary(key).is_some_and(|s| {
-            s.iteration_facts()
-                .container_iterations
-                .iter()
-                .any(|it| it.between.suspends)
-        })
+    let has_suspending_generator = |class: &String| {
+        decls
+            .methods_of(class)
+            .iter()
+            .any(|k| iterated_mutation::suspends(index, k))
     };
-    let has_suspending_generator = |class: &String| decls.methods_of(class).iter().any(&suspends);
     let methods = changed.iter().filter_map(|key| {
         let (owner, name) = key.qualname.rsplit_once('.')?;
         let class = format!("{}.{owner}", key.module);
         decls.is_project_class(&class).then_some((key, class, name))
     });
     let mut roots = BTreeSet::new();
-    for key in changed {
-        let file = index.file_of(key).and_then(|p| index.files.get(p));
-        let generators = file
-            .into_iter()
-            .flat_map(|f| &f.call_sites)
-            .filter(|s| s.caller == *key)
-            .flat_map(CallSite::project_callees)
-            .filter(|bc| suspends(&bc.callee));
-        for bc in generators {
-            if let Some((owner, _)) = bc.callee.qualname.rsplit_once('.') {
-                roots.insert(format!("{}.{owner}", bc.callee.module));
+    for key in changed.iter().chain(calling.iter().copied()) {
+        for generator in iterated_mutation::generators_reached(index, key) {
+            if let Some((owner, _)) = generator.qualname.rsplit_once('.') {
+                roots.insert(format!("{}.{owner}", generator.module));
             }
         }
     }

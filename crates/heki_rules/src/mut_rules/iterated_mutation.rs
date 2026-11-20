@@ -28,7 +28,7 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::iterations::changed_at;
-use heki_effect::{CallSite, ContainerIteration, FileSummary, FuncKey, SiteRole};
+use heki_effect::{CallSite, ContainerIteration, FileSummary, FuncKey, ProjectIndex, SiteRole};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 
@@ -171,18 +171,12 @@ impl<'a> Exposure<'a> {
             s.iteration_facts().result_iterations.as_slice()
         });
         for call in sites.iter().filter(|s| s.role == SiteRole::Call) {
-            let in_caller = instance.and_then(|p| bound_parameter(call, func, p));
-            let returned = sites
-                .iter()
-                .any(|s| s.role == SiteRole::Return && s.span == call.span);
-            if returned {
+            if hands_on(file, caller, call.span) {
+                let in_caller = instance.and_then(|p| bound_parameter(call, func, p));
                 self.follow(cx, caller, in_caller, visited);
             }
             self.held |= call.result_held;
             for used in result_iterations.iter().filter(|u| u.call == call.span) {
-                if used.between.suspends {
-                    self.follow(cx, caller, in_caller, visited);
-                }
                 let on_instance = |i: usize| {
                     instance.is_some_and(|p| {
                         used.on_arguments
@@ -199,6 +193,71 @@ impl<'a> Exposure<'a> {
             }
         }
     }
+}
+
+/// Whether `caller`, a function of `file`, hands on the object its call at `span` returns: it
+/// returns the object, or iterates it while suspending (a generator delegating to it). Its own
+/// callers then run while a generator that object holds is suspended.
+fn hands_on(file: &FileSummary, caller: &FuncKey, span: Span) -> bool {
+    let returned = file
+        .call_sites
+        .iter()
+        .any(|s| s.caller == *caller && s.role == SiteRole::Return && s.span == span);
+    returned
+        || file.local_functions.get(caller).is_some_and(|f| {
+            f.iteration_facts()
+                .result_iterations
+                .iter()
+                .any(|u| u.call == span && u.between.suspends)
+        })
+}
+
+/// The generator methods suspending inside an iteration of their own containers whose objects
+/// the calls of `func` may receive: its project callees, and in turn the callees of the calls
+/// whose results those hand on ([`hands_on`], the relation [`Exposure::follow`] walks up).
+pub(super) fn generators_reached<'i>(index: &'i ProjectIndex, func: &FuncKey) -> Vec<&'i FuncKey> {
+    let mut stack: Vec<&FuncKey> = calls_of(index, func)
+        .into_iter()
+        .flat_map(|(_, s)| s.project_callees())
+        .map(|bc| &bc.callee)
+        .collect();
+    let mut seen: FxHashSet<&FuncKey> = FxHashSet::default();
+    let mut out = Vec::new();
+    while let Some(f) = stack.pop() {
+        if !seen.insert(f) {
+            continue;
+        }
+        if suspends(index, f) {
+            out.push(f);
+        }
+        for (file, s) in calls_of(index, f) {
+            if s.role == SiteRole::Call && hands_on(file, f, s.span) {
+                stack.extend(s.project_callees().iter().map(|bc| &bc.callee));
+            }
+        }
+    }
+    out
+}
+
+/// The call sites of `func`, with the summary of its file.
+fn calls_of<'i>(index: &'i ProjectIndex, func: &FuncKey) -> Vec<(&'i FileSummary, &'i CallSite)> {
+    let file = index.file_of(func).and_then(|p| index.files.get(p));
+    file.into_iter()
+        .flat_map(|file| {
+            let own = file.call_sites.iter().filter(|s| s.caller == *func);
+            own.map(move |s| (file, s))
+        })
+        .collect()
+}
+
+/// Whether `func` is a generator suspending inside an iteration of its own containers.
+pub(super) fn suspends(index: &ProjectIndex, func: &FuncKey) -> bool {
+    index.summary(func).is_some_and(|s| {
+        s.iteration_facts()
+            .container_iterations
+            .iter()
+            .any(|it| it.between.suspends)
+    })
 }
 
 /// The parameter of the calling function that `call` binds, as itself, to parameter `p` of
