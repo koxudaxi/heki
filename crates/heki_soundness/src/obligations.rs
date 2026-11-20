@@ -279,12 +279,13 @@ impl<'a, 'c> Checker<'a, 'c> {
     }
 
     pub fn unique(&self, subject: &str, st: &FrameState, v: VarId) -> ProofObligation {
+        let witness = st.shared_witness(v);
         let status = if st.is_unique(v) {
             ObligationStatus::Established {
                 evidence: "only local, tracked references exist".into(),
             }
         } else {
-            let why = st.shared_witness(v).map_or(UNTRACKED.to_owned(), |w| {
+            let why = witness.map_or(UNTRACKED.to_owned(), |w| {
                 format!("it may be shared: {}", w.describe(self.lines))
             });
             ObligationStatus::Blocked { blocker: why }

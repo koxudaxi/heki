@@ -240,13 +240,14 @@ pub fn interpolated_expressions(expr: &ruff_python_ast::Expr) -> Vec<&ruff_pytho
     }
 
     let mut out = Vec::new();
-    if let Expr::FString(fs) = expr {
+    if let Some(fs) = expr.as_f_string_expr() {
         for part in fs.value.iter() {
             if let FStringPartRef::FString(f) = part {
                 push(&f.elements, &mut out);
             }
         }
-    } else if let Expr::TString(ts) = expr {
+    }
+    if let Some(ts) = expr.as_t_string_expr() {
         for t in ts.value.iter() {
             push(&t.elements, &mut out);
         }

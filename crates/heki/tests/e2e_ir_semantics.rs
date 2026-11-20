@@ -337,6 +337,10 @@ def heap():
     return gc.get_objects()
 
 
+def heap_of(runtime):
+    return runtime.gc.get_objects()
+
+
 def imported():
     return currentframe(), snap_import()
 
@@ -391,6 +395,7 @@ def unrelated_here():
             "[module_alias] A1 hazard: locals",
             "[module_import_alias] A1 hazard: inspect.currentframe",
             "[heap] A1 hazard: gc.get_objects",
+            "[heap_of] A1 hazard: gc.get_objects",
             "[imported] A1 hazard: inspect.currentframe",
             "[imported] A1 hazard: locals",
             "[module_attribute] A1 hazard: inspect.currentframe",
