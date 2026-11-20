@@ -304,6 +304,19 @@ impl IterFlow {
                     InstKind::Call { dst, args, .. } | InstKind::MethodCall { dst, args, .. } => {
                         (dst, args)
                     }
+                    // A read running property getters is a call of them (`EffectSummary`
+                    // flows record it with the getters as its callee).
+                    InstKind::AttrLoad { dst, .. } => {
+                        if roots == Roots::Summary
+                            && matches!(
+                                flow.callees.get(&(bb.id, index)),
+                                Some(Callee::Project(..))
+                            )
+                        {
+                            flow.add_root(*dst, (bb.id, index), Vec::new(), Vec::new());
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 let callee = &flow.callees[&(bb.id, index)];

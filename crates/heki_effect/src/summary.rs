@@ -1243,7 +1243,7 @@ impl<'a> Extractor<'a> {
                         self.seed_protected(fqn, deep, step, span);
                     }
                 }
-                self.property_read(bb, *dst, *obj, attr, span);
+                self.property_read(bb, index, *dst, *obj, attr, span);
             }
             InstKind::SubscriptLoad {
                 obj,
@@ -1491,7 +1491,18 @@ impl<'a> Extractor<'a> {
     /// receiver, at the read, awaited when the read value is awaited directly (an `async`
     /// getter returns a coroutine). The read's own facts (`reads_self_attrs`, typed read
     /// sites) stay as they are.
-    fn property_read(&mut self, bb: BlockId, dst: VarId, obj: VarId, attr: &str, span: Span) {
+    /// A read of `obj.attr` at `(bb, index)` that runs property getters: a call of them, whose
+    /// result (`dst`) is a project call's result like any other (a generator a getter returns
+    /// runs where the caller iterates it).
+    fn property_read(
+        &mut self,
+        bb: BlockId,
+        index: usize,
+        dst: VarId,
+        obj: VarId,
+        attr: &str,
+        span: Span,
+    ) {
         let Some(callee) = self.cx.resolve_attr_load(self.val(obj), attr) else {
             return;
         };
@@ -1512,7 +1523,7 @@ impl<'a> Extractor<'a> {
             constructs: None,
             span,
         };
-        self.call(bb, &callee, &call);
+        self.call_inst(bb, index, callee, &call);
     }
 
     /// The receiver and method name of the bound method behind `var` (through copies): an
