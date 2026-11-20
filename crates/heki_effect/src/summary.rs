@@ -6,7 +6,8 @@
 use crate::resolver::{Callee, TypeCtx, Val, func_qualname, self_aliases};
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, EffectSummary, FileSummary,
-    FuncKey, ModuleInput, ProjectDecls, TypedFieldWriteSite, WriteKind,
+    FuncKey, ModuleInput, ProjectDecls, ReadKind, TypedFieldReadSite, TypedFieldWriteSite,
+    WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{BlockId, ConstLiteral, FunctionId, FunctionKind, InstKind, IrFunction, VarId};
@@ -109,6 +110,8 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     into.invalidates_cached.extend(other.invalidates_cached);
     into.typed_field_write_sites
         .extend(other.typed_field_write_sites);
+    into.typed_field_read_sites
+        .extend(other.typed_field_read_sites);
     into.offloads_blocking_params |= other.offloads_blocking_params;
     into.unknown_calls |= other.unknown_calls;
     into.refresh_typed_field_writes();
@@ -120,7 +123,13 @@ struct Owner {
     is_self: bool,
     param: Option<(u8, Option<String>)>,
     typed_class: Option<String>,
+    /// Parameters the object may be, as itself.
+    may_params: u64,
 }
+
+/// `obj.<attr>` with project-class `obj`: the class, the attribute, whether the variable is the
+/// load itself (not a copy / phi of it), and the parameters `obj` may be (as itself).
+type ObjAttr = (String, String, bool, u64);
 
 struct Extractor<'a> {
     f: &'a IrFunction,
@@ -136,10 +145,13 @@ struct Extractor<'a> {
     param_alias: FxHashMap<VarId, (u8, Option<String>)>,
     /// `self.<attr>` aliases: `var -> attr`.
     self_attr_alias: FxHashMap<VarId, String>,
-    /// `obj.<attr>` with project-class `obj`: `var -> (class, attr, direct)`.
-    obj_attr_alias: FxHashMap<VarId, (String, String, bool)>,
+    /// `obj.<attr>` with project-class `obj`: `var -> (class, attr, direct, obj params)`.
+    obj_attr_alias: FxHashMap<VarId, ObjAttr>,
     /// `x.__dict__` -> owner of `x`.
     dict_of: FxHashMap<VarId, Owner>,
+    /// Parameters (bit `i`: parameter `i < 64`) each variable may be, through copies and phis
+    /// (any input): the may-alias counterpart of `param_alias`'s `(i, None)` entries.
+    may_params: FxHashMap<VarId, u64>,
     summary: EffectSummary,
     sites: Vec<CallSite>,
 }
@@ -184,11 +196,40 @@ impl<'a> Extractor<'a> {
             self_attr_alias: FxHashMap::default(),
             obj_attr_alias: FxHashMap::default(),
             dict_of: FxHashMap::default(),
+            may_params: FxHashMap::default(),
             summary,
             sites: Vec::new(),
         };
+        ex.build_may_params();
         ex.build_aliases();
         ex
+    }
+
+    /// [`Self::may_params`]: a monotone fixpoint over copies and phis.
+    fn build_may_params(&mut self) {
+        for (i, p) in self.f.params.iter().enumerate().take(64) {
+            *self.may_params.entry(p.var).or_default() |= 1u64 << i;
+        }
+        loop {
+            let mut changed = false;
+            for bb in &self.f.blocks {
+                for phi in &bb.phis {
+                    let bits = phi.incoming.iter().fold(0, |acc, (_, v)| {
+                        acc | self.may_params.get(v).copied().unwrap_or(0)
+                    });
+                    changed |= or_bits(&mut self.may_params, phi.dst, bits);
+                }
+                for inst in &bb.insts {
+                    if let InstKind::Copy { dst, src } = &inst.kind {
+                        let bits = self.may_params.get(src).copied().unwrap_or(0);
+                        changed |= or_bits(&mut self.may_params, *dst, bits);
+                    }
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
     }
 
     fn project_class(&self, var: VarId) -> Option<String> {
@@ -224,9 +265,7 @@ impl<'a> Extractor<'a> {
                         .collect();
                     merge_phi(&mut self.param_alias, phi.dst, &inputs, |a| a.clone());
                     merge_phi(&mut self.self_attr_alias, phi.dst, &inputs, |a| a.clone());
-                    merge_phi(&mut self.obj_attr_alias, phi.dst, &inputs, |(c, a, _)| {
-                        (c.clone(), a.clone(), false)
-                    });
+                    merge_obj_attr_phi(&mut self.obj_attr_alias, phi.dst, &inputs);
                 }
                 for inst in &bb.insts {
                     match &inst.kind {
@@ -237,8 +276,8 @@ impl<'a> Extractor<'a> {
                             if let Some(a) = self.self_attr_alias.get(src).cloned() {
                                 self.self_attr_alias.insert(*dst, a);
                             }
-                            if let Some((c, a, _)) = self.obj_attr_alias.get(src).cloned() {
-                                self.obj_attr_alias.insert(*dst, (c, a, false));
+                            if let Some((c, a, _, p)) = self.obj_attr_alias.get(src).cloned() {
+                                self.obj_attr_alias.insert(*dst, (c, a, false, p));
                             }
                             if let Some(o) = self.dict_of.get(src).cloned() {
                                 self.dict_of.insert(*dst, o);
@@ -257,8 +296,9 @@ impl<'a> Extractor<'a> {
                                 self.self_attr_alias.insert(*dst, attr.clone());
                             }
                             if let Some(class) = self.project_class(*obj) {
+                                let params = self.may_params.get(obj).copied().unwrap_or(0);
                                 self.obj_attr_alias
-                                    .insert(*dst, (class, attr.clone(), true));
+                                    .insert(*dst, (class, attr.clone(), true, params));
                             }
                         }
                         _ => {}
@@ -282,6 +322,7 @@ impl<'a> Extractor<'a> {
             is_self: self.self_vars.contains(&var),
             param: self.param_alias.get(&var).cloned(),
             typed_class: self.project_class(var),
+            may_params: self.may_params.get(&var).copied().unwrap_or(0),
         }
     }
 
@@ -292,8 +333,9 @@ impl<'a> Extractor<'a> {
             typed_field: self
                 .obj_attr_alias
                 .get(&var)
-                .map(|(c, a, _)| (c.clone(), a.clone())),
+                .map(|(c, a, _, _)| (c.clone(), a.clone())),
             typed_instance: self.project_class(var),
+            may_params: self.may_params.get(&var).copied().unwrap_or(0),
         }
     }
 
@@ -326,10 +368,22 @@ impl<'a> Extractor<'a> {
 
     fn visit(&mut self, bb: BlockId, kind: &'a InstKind, span: Span) {
         match kind {
-            InstKind::AttrLoad { dst, obj, attr }
-                if self.self_vars.contains(obj) && attr != "__dict__" =>
-            {
-                self.record_self_read(*dst, attr);
+            InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
+                if self.self_vars.contains(obj) {
+                    self.record_self_read(*dst, attr);
+                }
+                let owner = self.owner_of(*obj);
+                self.typed_read(owner, attr, ReadKind::DirectAttr, span);
+            }
+            InstKind::SubscriptLoad {
+                obj,
+                key_const: Some(k),
+                ..
+            } => {
+                // `obj.__dict__["attr"]`.
+                if let Some(owner) = self.dict_of.get(obj).cloned() {
+                    self.typed_read(owner, k, ReadKind::DictDirect, span);
+                }
             }
             InstKind::AttrStore { obj, attr, value } => {
                 self.write_attr(*obj, attr, WriteKind::DirectAttr, span);
@@ -369,6 +423,13 @@ impl<'a> Extractor<'a> {
                         }
                     }
                 }
+                // `obj.__dict__.get("attr"[, default])`.
+                if method == "get"
+                    && let Some(owner) = self.dict_of.get(recv).cloned()
+                    && let Some(k) = args.first().and_then(|a| self.const_str(*a))
+                {
+                    self.typed_read(owner, &k, ReadKind::DictDirect, span);
+                }
                 let callee = self.cx.resolve_method(self.types.get(recv), method);
                 let is_super = matches!(self.types.get(recv), Some(Val::Super(_)));
                 let recv_is_self = is_super || self.self_vars.contains(recv);
@@ -376,6 +437,7 @@ impl<'a> Extractor<'a> {
                 if is_super {
                     // `super().m()` binds the calling method's own `self` (parameter 0).
                     recv_origin.param = Some((0, None));
+                    recv_origin.may_params = 1;
                 }
                 self.call(
                     bb,
@@ -486,7 +548,14 @@ impl<'a> Extractor<'a> {
             .insert(path);
     }
 
-    fn typed_site(&mut self, class: String, attr: &str, kind: WriteKind, span: Span) {
+    fn typed_site(
+        &mut self,
+        class: String,
+        attr: &str,
+        kind: WriteKind,
+        span: Span,
+        obj_params: u64,
+    ) {
         self.summary
             .typed_field_write_sites
             .insert(TypedFieldWriteSite {
@@ -495,7 +564,23 @@ impl<'a> Extractor<'a> {
                 kind,
                 span,
                 via_chain: Vec::new(),
+                obj_params,
             });
+    }
+
+    /// Read of attribute `attr` on the object `owner`, when it has a project class.
+    fn typed_read(&mut self, owner: Owner, attr: &str, kind: ReadKind, span: Span) {
+        if let Some(class) = owner.typed_class {
+            self.summary
+                .typed_field_read_sites
+                .insert(TypedFieldReadSite {
+                    class_qualname: class,
+                    attr: attr.to_owned(),
+                    kind,
+                    obj_params: owner.may_params,
+                    span,
+                });
+        }
     }
 
     /// Write of attribute `attr` on the object `owner` (AttrStore / AttrDelete / setattr / __dict__).
@@ -512,7 +597,7 @@ impl<'a> Extractor<'a> {
             None => {}
         }
         if let Some(class) = owner.typed_class {
-            self.typed_site(class, attr, kind, span);
+            self.typed_site(class, attr, kind, span, owner.may_params);
         }
     }
 
@@ -534,13 +619,13 @@ impl<'a> Extractor<'a> {
             Some((i, Some(path))) => self.mutate_param(i, path),
             None => {}
         }
-        if let Some((class, attr, direct)) = self.obj_attr_alias.get(&var).cloned() {
+        if let Some((class, attr, direct, obj_params)) = self.obj_attr_alias.get(&var).cloned() {
             let kind = if direct {
                 WriteKind::ContainerMut
             } else {
                 WriteKind::AliasContainerMut
             };
-            self.typed_site(class, &attr, kind, span);
+            self.typed_site(class, &attr, kind, span, obj_params);
         }
     }
 
@@ -710,6 +795,15 @@ impl<'a> Extractor<'a> {
             }
             return;
         }
+        if symbol == "builtins.getattr" || symbol == "builtins.object.__getattribute__" {
+            if let (Some(obj), Some(attr)) =
+                (args.first(), args.get(1).and_then(|a| self.const_str(*a)))
+            {
+                let owner = self.owner_of(*obj);
+                self.typed_read(owner, &attr, ReadKind::GetAttr, span);
+            }
+            return;
+        }
         let Some(entry) = self.cx.kb.lookup(&symbol) else {
             return;
         };
@@ -778,4 +872,43 @@ fn merge_phi<T: Clone + PartialEq>(
     if let Some(a) = found {
         map.insert(dst, a);
     }
+}
+
+/// [`merge_phi`] for `obj.<attr>` aliases: the inputs must name one class attribute; the
+/// objects' parameters are united (the merged object may be any of them). Inputs are inserted
+/// with their final parameters (`may_params` is complete before the alias pass), so the first
+/// insertion is final too.
+fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &[VarId]) {
+    if map.contains_key(&dst) {
+        return;
+    }
+    let mut found: Option<ObjAttr> = None;
+    for v in inputs {
+        let Some((c, a, _, p)) = map.get(v) else {
+            return;
+        };
+        match &mut found {
+            None => found = Some((c.clone(), a.clone(), false, *p)),
+            Some((fc, fa, _, fp)) => {
+                if fc != c || fa != a {
+                    return;
+                }
+                *fp |= p;
+            }
+        }
+    }
+    if let Some(a) = found {
+        map.insert(dst, a);
+    }
+}
+
+/// `map[var] |= bits`; whether it grew.
+fn or_bits(map: &mut FxHashMap<VarId, u64>, var: VarId, bits: u64) -> bool {
+    if bits == 0 {
+        return false;
+    }
+    let slot = map.entry(var).or_default();
+    let grown = *slot | bits != *slot;
+    *slot |= bits;
+    grown
 }

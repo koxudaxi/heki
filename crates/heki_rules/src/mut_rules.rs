@@ -1,12 +1,12 @@
 //! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT201`, `MUT202`, `MUT203`
 //! (docs/DETAILED_SPEC_M3_M7.md section 3.2).
 
-use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError};
+use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, EffectSummary, FuncKey, TypeCtx, Val,
-    WriteKind, self_aliases,
+    AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, EffectSummary, FuncKey, TypeCtx,
+    TypedFieldReadSite, Val, WriteKind, self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -302,18 +302,37 @@ const INITIALIZERS: &[&str] = &[
     "__setstate__",
 ];
 
-struct OwnerTarget {
-    text: String,
+/// A `Class.attr` contract target (`write-owners`, `read-owners`, `effect-boundaries`).
+pub(crate) struct ContractTarget {
+    /// The configured text (diagnostic target and baseline key).
+    pub text: String,
     attr: DottedPattern,
-    /// Project classes (fqn) the class pattern names, plus all their subclasses.
-    classes: FxHashSet<String>,
+    /// Project classes (fqn) the class pattern names, plus all their subclasses: the
+    /// target's class family.
+    pub classes: FxHashSet<String>,
 }
 
-struct OwnerRule<'r> {
-    name: &'r str,
-    targets: Vec<OwnerTarget>,
-    allowed: Vec<DottedPattern>,
-    forbid_cached: FxHashSet<String>,
+impl ContractTarget {
+    pub fn matches(&self, class: &str, attr: &str) -> bool {
+        self.classes.contains(class) && self.attr.matches(attr)
+    }
+}
+
+/// Every project class (fqn), sorted.
+pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<String> {
+    let mut all: Vec<String> = cx
+        .index
+        .files
+        .values()
+        .flat_map(|f| {
+            f.decls
+                .classes
+                .keys()
+                .map(move |q| format!("{}.{q}", f.module_name))
+        })
+        .collect();
+    all.sort();
+    all
 }
 
 fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> FxHashSet<String> {
@@ -325,6 +344,130 @@ fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> 
     out
 }
 
+/// Parse `Class.attr` targets: a target without a dot is `InvalidTarget { section }`, a bad
+/// glob `Glob { context }`.
+pub(crate) fn parse_targets(
+    cx: &CheckContext<'_>,
+    all: &[String],
+    targets: &[String],
+    section: &'static str,
+    context: &'static str,
+) -> Result<Vec<ContractTarget>, RuleConfigError> {
+    let mut out = Vec::new();
+    for t in targets {
+        let Some((class, attr)) = t.rsplit_once('.') else {
+            return Err(RuleConfigError::InvalidTarget {
+                section,
+                target: t.clone(),
+            });
+        };
+        let class = DottedPattern::new(class, context)?;
+        out.push(ContractTarget {
+            text: t.clone(),
+            attr: DottedPattern::new(attr, context)?,
+            classes: class_set(cx, &class, all),
+        });
+    }
+    Ok(out)
+}
+
+pub(crate) fn patterns(
+    texts: &[String],
+    context: &'static str,
+) -> Result<Vec<DottedPattern>, RuleConfigError> {
+    texts
+        .iter()
+        .map(|p| DottedPattern::new(p, context))
+        .collect()
+}
+
+/// The functions a contract lets touch its targets: `allowed-*` patterns (matched against the
+/// fqn and the qualname) and `exempt-methods` (a plain name matches the last qualname
+/// component; an entry with a dot or a glob is a pattern like `allowed-*`).
+struct Allowance {
+    allowed: Vec<DottedPattern>,
+    exempt_names: FxHashSet<String>,
+}
+
+impl Allowance {
+    fn new(
+        allowed: &[String],
+        allowed_context: &'static str,
+        exempt: &[String],
+        exempt_context: &'static str,
+    ) -> Result<Self, RuleConfigError> {
+        let mut out = Self {
+            allowed: patterns(allowed, allowed_context)?,
+            exempt_names: FxHashSet::default(),
+        };
+        for e in exempt {
+            if e.contains(['.', '*', '?', '[', '{']) {
+                out.allowed.push(DottedPattern::new(e, exempt_context)?);
+            } else {
+                out.exempt_names.insert(e.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    fn allows(&self, key: &FuncKey) -> bool {
+        let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
+        if self.exempt_names.contains(name) {
+            return true;
+        }
+        let fqn = key.fqn();
+        self.allowed
+            .iter()
+            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+    }
+}
+
+/// A private helper with project callers delegates responsibility to its callers.
+fn delegates(cx: &CheckContext<'_>, key: &FuncKey) -> bool {
+    is_private(&key.qualname)
+        && cx
+            .index
+            .reverse_call_graph
+            .get(key)
+            .is_some_and(|c| !c.is_empty())
+}
+
+/// A class's own initialization: `key` is an initializer (`INITIALIZERS`) of a class of the
+/// target's `family`, and the accessed object may be its own instance (`obj_params` bit 0,
+/// `self`): only an object that is provably not `self` (another parameter, a fresh instance,
+/// an attribute) stays reported.
+pub(crate) fn initializes_itself(
+    cx: &CheckContext<'_>,
+    key: &FuncKey,
+    family: &FxHashSet<String>,
+    obj_params: u64,
+) -> bool {
+    let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
+    obj_params & 1 != 0
+        && INITIALIZERS.contains(&name)
+        && cx
+            .index
+            .summary(key)
+            .and_then(|s| s.owner_class_qualname.as_deref())
+            .is_some_and(|owner| family.contains(&format!("{}.{owner}", key.module)))
+}
+
+/// `base`, then `: note` when the contract sets a `message`.
+pub(crate) fn with_note(base: String, note: Option<&str>) -> String {
+    match note {
+        Some(n) => format!("{base}: {n}"),
+        None => base,
+    }
+}
+
+struct OwnerRule<'r> {
+    name: &'r str,
+    targets: Vec<ContractTarget>,
+    allowance: Allowance,
+    forbid_cached: FxHashSet<String>,
+    note: Option<&'r str>,
+}
+
 pub(crate) fn mut201(
     cx: &CheckContext<'_>,
     out: &mut Vec<Diagnostic>,
@@ -332,40 +475,22 @@ pub(crate) fn mut201(
     if !cx.selection.is_enabled("MUT201") || cx.config.write_owners.is_empty() {
         return Ok(());
     }
-    let mut all_classes: Vec<String> = cx
-        .index
-        .files
-        .values()
-        .flat_map(|f| {
-            f.decls
-                .classes
-                .keys()
-                .map(move |q| format!("{}.{q}", f.module_name))
-        })
-        .collect();
-    all_classes.sort();
+    let all_classes = project_classes(cx);
     let mut rules = Vec::new();
     for rule in &cx.config.write_owners {
-        let mut targets = Vec::new();
-        for t in &rule.targets {
-            let Some((class, attr)) = t.rsplit_once('.') else {
-                return Err(RuleConfigError::InvalidTarget {
-                    section: "write-owners",
-                    target: t.clone(),
-                });
-            };
-            let class = DottedPattern::new(class, "write-owners.targets")?;
-            targets.push(OwnerTarget {
-                text: t.clone(),
-                attr: DottedPattern::new(attr, "write-owners.targets")?,
-                classes: class_set(cx, &class, &all_classes),
-            });
-        }
-        let allowed = rule
-            .allowed_writers
-            .iter()
-            .map(|p| DottedPattern::new(p, "write-owners.allowed-writers"))
-            .collect::<Result<_, _>>()?;
+        let targets = parse_targets(
+            cx,
+            &all_classes,
+            &rule.targets,
+            "write-owners",
+            "write-owners.targets",
+        )?;
+        let allowance = Allowance::new(
+            &rule.allowed_writers,
+            "write-owners.allowed-writers",
+            &rule.exempt_methods,
+            "write-owners.exempt-methods",
+        )?;
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
             let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;
@@ -374,8 +499,9 @@ pub(crate) fn mut201(
         rules.push(OwnerRule {
             name: &rule.name,
             targets,
-            allowed,
+            allowance,
             forbid_cached,
+            note: rule.message.as_deref(),
         });
     }
 
@@ -385,27 +511,6 @@ pub(crate) fn mut201(
             keys_by_fqn.insert(k.fqn(), k.clone());
         }
     }
-    let is_allowed = |rule: &OwnerRule<'_>, key: &FuncKey| {
-        let fqn = key.fqn();
-        rule.allowed
-            .iter()
-            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
-    };
-    // A private helper with project callers delegates responsibility to its callers.
-    let delegates = |key: &FuncKey| {
-        is_private(&key.qualname)
-            && cx
-                .index
-                .reverse_call_graph
-                .get(key)
-                .is_some_and(|c| !c.is_empty())
-    };
-    let is_initializer_of = |key: &FuncKey, class: &str| {
-        let Some((owner, name)) = key.qualname.rsplit_once('.') else {
-            return false;
-        };
-        INITIALIZERS.contains(&name) && format!("{}.{owner}", key.module) == class
-    };
 
     let mut paths: Vec<_> = cx.index.files.keys().collect();
     paths.sort();
@@ -421,8 +526,7 @@ pub(crate) fn mut201(
             for site in &s.typed_field_write_sites {
                 for rule in &rules {
                     for t in &rule.targets {
-                        if !t.classes.contains(&site.class_qualname) || !t.attr.matches(&site.attr)
-                        {
+                        if !t.matches(&site.class_qualname, &site.attr) {
                             continue;
                         }
                         let mut chain: Vec<FuncKey> = vec![key.clone()];
@@ -431,7 +535,8 @@ pub(crate) fn mut201(
                                 .iter()
                                 .filter_map(|h| keys_by_fqn.get(&h.callee).cloned()),
                         );
-                        if chain.iter().any(|k| is_allowed(rule, k)) {
+                        // Allowed writers and exempt methods anywhere on the chain.
+                        if chain.iter().any(|k| rule.allowance.allows(k)) {
                             continue;
                         }
                         let origin = if site.kind == WriteKind::IndirectHelper && chain.len() >= 2 {
@@ -439,14 +544,13 @@ pub(crate) fn mut201(
                         } else {
                             chain.len() - 1
                         };
-                        // A class's own initializer establishes its fields.
-                        if is_initializer_of(&chain[origin], &site.class_qualname) {
-                            continue;
-                        }
                         // Report at the outermost function: helpers in between must be private
                         // (they delegate), and a delegating function leaves it to its callers.
+                        // No initializer name is private, so on a reported chain only the
+                        // outermost function can be the initializer of the written object.
                         if !chain[1..=origin].iter().all(|k| is_private(&k.qualname))
-                            || delegates(key)
+                            || delegates(cx, key)
+                            || initializes_itself(cx, key, &t.classes, site.obj_params)
                         {
                             continue;
                         }
@@ -466,12 +570,15 @@ pub(crate) fn mut201(
                             span,
                             &key.qualname,
                             t.text.clone(),
-                            format!(
-                                "`{}` writes `{}` ({}){via} outside the write owners of `{}`",
-                                key.qualname,
-                                t.text,
-                                site.kind.as_str(),
-                                rule.name
+                            with_note(
+                                format!(
+                                    "`{}` writes `{}` ({}){via} outside the write owners of `{}`",
+                                    key.qualname,
+                                    t.text,
+                                    site.kind.as_str(),
+                                    rule.name
+                                ),
+                                rule.note,
                             ),
                             &site.via_chain,
                         );
@@ -499,9 +606,12 @@ pub(crate) fn mut201(
                     f.span,
                     &f.qualname,
                     format!("{owner}.{}", f.name),
-                    format!(
-                        "`@cached_property` `{}` is defined on `{owner}`, which `{}` forbids caching on",
-                        f.name, rule.name
+                    with_note(
+                        format!(
+                            "`@cached_property` `{}` is defined on `{owner}`, which `{}` forbids caching on",
+                            f.name, rule.name
+                        ),
+                        rule.note,
                     ),
                     &[],
                 );
@@ -965,11 +1075,206 @@ pub(crate) fn mut106(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 
 // ==================================================================================== MUT203
 
-/// `MUT203`: reads of `read-owners` targets outside their allowed readers (scaffold).
+struct ReadOwnerRule<'r> {
+    name: &'r str,
+    targets: Vec<ContractTarget>,
+    allowance: Allowance,
+    note: Option<&'r str>,
+}
+
+/// Where one read is reported.
+struct ReadReport {
+    func: FuncKey,
+    span: Span,
+    /// Hops from `func` down to the reading function (empty: `func` reads itself).
+    chain: Vec<CallHop>,
+}
+
+/// `MUT203`: reads of `read-owners` targets outside their allowed readers. Read sites are
+/// local facts; a read in a private helper with project callers is reported at the call sites
+/// of its outermost non-private callers, found by walking the reverse call graph.
 pub(crate) fn mut203(
     cx: &CheckContext<'_>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
-    let _ = (cx, out);
+    if !cx.selection.is_enabled("MUT203") || cx.config.read_owners.is_empty() {
+        return Ok(());
+    }
+    let all_classes = project_classes(cx);
+    let mut rules = Vec::new();
+    for rule in &cx.config.read_owners {
+        rules.push(ReadOwnerRule {
+            name: &rule.name,
+            targets: parse_targets(
+                cx,
+                &all_classes,
+                &rule.targets,
+                "read-owners",
+                "read-owners.targets",
+            )?,
+            allowance: Allowance::new(
+                &rule.allowed_readers,
+                "read-owners.allowed-readers",
+                &rule.exempt_methods,
+                "read-owners.exempt-methods",
+            )?,
+            note: rule.message.as_deref(),
+        });
+    }
+    let sites = cx.sites_by_caller();
+    // Every function once, from its defining file.
+    let mut funcs: Vec<(&FuncKey, &EffectSummary)> = cx
+        .index
+        .files
+        .iter()
+        .flat_map(|(path, f)| {
+            f.functions
+                .iter()
+                .filter(move |(k, _)| cx.index.file_of(k) == Some(path.as_path()))
+        })
+        .collect();
+    funcs.sort_by(|a, b| a.0.cmp(b.0));
+    let mut seen = FxHashSet::default();
+    for (key, s) in funcs {
+        for read in &s.typed_field_read_sites {
+            for rule in &rules {
+                for t in rule
+                    .targets
+                    .iter()
+                    .filter(|t| t.matches(&read.class_qualname, &read.attr))
+                {
+                    for r in read_reports(cx, &sites, &rule.allowance, &t.classes, key, read) {
+                        if !seen.insert((r.func.clone(), r.span, t.text.clone())) {
+                            continue;
+                        }
+                        let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
+                            continue;
+                        };
+                        let via = if r.chain.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" via `{}`", key.fqn())
+                        };
+                        cx.emit(
+                            out,
+                            "MUT203",
+                            unit,
+                            r.span,
+                            &r.func.qualname,
+                            t.text.clone(),
+                            with_note(
+                                format!(
+                                    "`{}` reads `{}` ({}){via} outside the read owners of `{}`",
+                                    r.func.qualname,
+                                    t.text,
+                                    read.kind.as_str(),
+                                    rule.name
+                                ),
+                                rule.note,
+                            ),
+                            &r.chain,
+                        );
+                    }
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+/// One state of the walk from a read up the reverse call graph.
+struct WalkState {
+    func: FuncKey,
+    /// Parameters of `func` the read object may be.
+    obj: u64,
+    /// The state below (towards the reader) and the hop from `func` down to it.
+    down: Option<(usize, CallHop)>,
+}
+
+/// Where a read in `reader` is reported: at the read itself, or — for a private helper with
+/// project callers — at every call site of each outermost non-private caller, found breadth
+/// first over `(function, read object parameters)` states (cycle-safe). Allowed functions end
+/// a path; an initializer reading its own instance (MUT201's rule) is not reported.
+fn read_reports(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    allowance: &Allowance,
+    family: &FxHashSet<String>,
+    reader: &FuncKey,
+    read: &TypedFieldReadSite,
+) -> Vec<ReadReport> {
+    if allowance.allows(reader) {
+        return Vec::new();
+    }
+    if !delegates(cx, reader) {
+        if initializes_itself(cx, reader, family, read.obj_params) {
+            return Vec::new();
+        }
+        return vec![ReadReport {
+            func: reader.clone(),
+            span: read.span,
+            chain: Vec::new(),
+        }];
+    }
+    let mut states = vec![WalkState {
+        func: reader.clone(),
+        obj: read.obj_params,
+        down: None,
+    }];
+    let mut visited: FxHashSet<(FuncKey, u64)> = FxHashSet::default();
+    visited.insert((reader.clone(), read.obj_params));
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < states.len() {
+        let (callee, obj) = (states[i].func.clone(), states[i].obj);
+        let mut callers: Vec<&FuncKey> = cx
+            .index
+            .reverse_call_graph
+            .get(&callee)
+            .into_iter()
+            .flatten()
+            .filter(|c| !allowance.allows(c))
+            .collect();
+        callers.sort();
+        for caller in callers {
+            for (path, site) in sites.get(caller).into_iter().flatten() {
+                for bc in site
+                    .project_callees()
+                    .iter()
+                    .filter(|bc| bc.callee == callee)
+                {
+                    let caller_obj = bc.caller_params_of(obj);
+                    let hop = CallHop {
+                        caller: caller.clone(),
+                        callee: callee.fqn(),
+                        span: site.span,
+                        path: path.to_path_buf(),
+                    };
+                    if delegates(cx, caller) {
+                        if visited.insert((caller.clone(), caller_obj)) {
+                            states.push(WalkState {
+                                func: caller.clone(),
+                                obj: caller_obj,
+                                down: Some((i, hop)),
+                            });
+                        }
+                    } else if !initializes_itself(cx, caller, family, caller_obj) {
+                        let mut chain = vec![hop];
+                        let mut j = i;
+                        while let Some((below, h)) = &states[j].down {
+                            chain.push(h.clone());
+                            j = *below;
+                        }
+                        out.push(ReadReport {
+                            func: caller.clone(),
+                            span: site.span,
+                            chain,
+                        });
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out
 }

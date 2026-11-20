@@ -1,7 +1,9 @@
-//! Shared helpers for the end-to-end tests: a throwaway project directory and the real `heki`
-//! binary.
+//! Shared helpers for the end-to-end tests: a throwaway project directory, the real `heki`
+//! binary, and an LSP client (`lsp`).
 
 #![allow(dead_code)]
+
+pub mod lsp;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
