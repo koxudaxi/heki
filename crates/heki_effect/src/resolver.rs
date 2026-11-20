@@ -1599,20 +1599,19 @@ impl ProjectDecls {
     ) -> Option<String> {
         let key = (class.to_owned(), attr.to_owned(), read);
         let recording = self.recorder.on.load(Ordering::Relaxed);
+        // An answer kept without its reads is computed again while recording, to record them.
         let known = self
             .class_constants
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
+            .filter(|k| !recording || k.reads.is_some())
             .cloned();
         if let Some(known) = known {
-            if !recording {
-                return known.value;
-            }
-            if let Some(reads) = known.reads {
+            if let Some(reads) = known.reads.filter(|_| recording) {
                 self.recorded().replayed.push(reads);
-                return known.value;
             }
+            return known.value;
         }
         let (value, reads) = if recording {
             // What this computation reads, apart from what the recording read before.
