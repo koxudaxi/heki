@@ -1,5 +1,6 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
-//! narrowing through phis, and the size of the Soundness lane's proof state.
+//! narrowing through phis, the passes of the type inference, and the size of the Soundness
+//! lane's proof state.
 
 mod common;
 
@@ -97,4 +98,48 @@ fn a_function_past_its_proof_state_budget_gets_no_finding() {
     };
     assert_eq!(opt(2), 1);
     assert_eq!(opt(200), 0);
+}
+
+/// An `async def` that calls a blocking method of a local instance after a loop passing a
+/// value back through `links` assignments, one link per pass of the type inference.
+fn chain_before_blocking_call(links: usize) -> String {
+    let mut out = vec![
+        "import time".to_owned(),
+        String::new(),
+        String::new(),
+        "class Slow:".to_owned(),
+        "    def wait(self):".to_owned(),
+        "        time.sleep(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "async def chain(items):".to_owned(),
+        "    s = Slow()".to_owned(),
+    ];
+    for k in 0..=links {
+        out.push(format!("    v{k} = None"));
+    }
+    out.push("    for i in items:".to_owned());
+    for k in 0..links {
+        out.push(format!("        v{k} = v{}", k + 1));
+    }
+    out.push(format!("        v{links} = 1"));
+    out.push("    s.wait()".to_owned());
+    out.push("    return v0".to_owned());
+    out.join("\n") + "\n"
+}
+
+/// The type inference takes a bounded number of passes: past them it keeps no type of the
+/// function, so the receiver of `s.wait()` is unknown and nothing is reported.
+#[test]
+fn types_past_the_inference_pass_bound_are_unknown() {
+    let blocking = |links: usize| -> usize {
+        let p = Project::new(&format!("bounds_passes_{links}"));
+        p.write("m.py", &chain_before_blocking_call(links));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF101")
+            .count()
+    };
+    assert_eq!(blocking(4), 1);
+    assert_eq!(blocking(30), 0);
 }

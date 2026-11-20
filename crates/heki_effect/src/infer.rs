@@ -321,6 +321,9 @@ fn pair(a: Elem, b: Elem) -> Elem {
 /// The types `isinstance` checks give variables.
 type Narrowed = FxHashMap<VarId, Ty>;
 
+/// The passes the inference takes at most; the corpora need seven at most.
+const MAX_PASSES: usize = 24;
+
 struct Engine<'e, 'a> {
     cx: &'e TypeCtx<'a>,
     f: &'e IrFunction,
@@ -545,7 +548,14 @@ impl<'e, 'a> Engine<'e, 'a> {
         // Without loops every operand is computed before its users in reverse postorder: one
         // pass is final unless it added items to a display already computed.
         let acyclic = self.f.loops.is_empty();
-        loop {
+        for pass in 1.. {
+            if pass > MAX_PASSES {
+                // A type a loop passes back through a chain of assignments takes a pass per
+                // link: past the bound the types found so far are not final, so none is kept.
+                self.facts.fill(Fact::Unknown);
+                self.narrowing = None;
+                break;
+            }
             self.changed = false;
             self.added_changed = false;
             for &bb in &rpo {
