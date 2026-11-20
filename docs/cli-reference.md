@@ -16,7 +16,7 @@ Commands:
   server       Start the incremental Language Server Protocol (LSP) server [alias: lsp]
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
-  assumptions  List Assumption A1/A2 violations across a project
+  assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection) in a project
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -117,7 +117,7 @@ Options:
 ## `heki assumptions`
 
 ```text
-List Assumption A1/A2 violations across a project
+List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection) in a project
 
 Usage: heki assumptions [OPTIONS] [PATHS]...
 

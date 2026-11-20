@@ -44,7 +44,7 @@ enum Commands {
     Rule(RuleArgs),
     /// Manage interprocedural effect summary snapshots (`MUT103`).
     Snapshot(SnapshotArgs),
-    /// List Assumption A1/A2 violations across a project.
+    /// List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection) in a project.
     Assumptions(AssumptionsArgs),
     /// Internal/testing: dump `heki_semantic` scope tree as JSON for CPython `symtable` verification.
     #[command(hide = true)]
