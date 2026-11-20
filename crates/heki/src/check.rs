@@ -125,9 +125,34 @@ const MAX_FIX_PASSES: usize = 10;
 /// One file changed by `--fix` / `--diff`.
 struct FixedFile {
     path: PathBuf,
-    rel: String,
     original: String,
     fixed: String,
+}
+
+/// How `heki check` prints a path, in every output format and in `--diff` headers (as Ruff
+/// does): relative to the working directory when it is inside it (also through a symbolic
+/// link), otherwise as given.
+pub(crate) fn shown_path(p: &Path) -> PathBuf {
+    if p.is_relative() {
+        return p.to_path_buf();
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return p.to_path_buf();
+    };
+    if let Ok(rel) = p.strip_prefix(&cwd) {
+        return rel.to_path_buf();
+    }
+    match (std::fs::canonicalize(p), std::fs::canonicalize(&cwd)) {
+        (Ok(abs), Ok(cwd)) => abs
+            .strip_prefix(&cwd)
+            .map_or_else(|_| p.to_path_buf(), Path::to_path_buf),
+        _ => p.to_path_buf(),
+    }
+}
+
+/// [`shown_path`] in `/` form.
+fn shown_text(p: &Path) -> String {
+    shown_path(p).to_string_lossy().replace('\\', "/")
 }
 
 /// Apply fixes in memory until nothing more applies. Returns the number of applied fixes,
@@ -137,7 +162,7 @@ fn fix_in_memory(
     hot: Option<&ProfileData>,
 ) -> Result<(usize, Vec<FixedFile>, Vec<String>)> {
     let mut overrides: FxHashMap<PathBuf, String> = FxHashMap::default();
-    let mut originals: BTreeMap<PathBuf, (String, String)> = BTreeMap::new();
+    let mut originals: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut total = 0;
     let mut errors;
     let mut passes = 0;
@@ -161,7 +186,7 @@ fn fix_in_memory(
             pass += applied.len();
             originals
                 .entry(file.path.clone())
-                .or_insert_with(|| (file.rel.clone(), file.source.clone()));
+                .or_insert_with(|| file.source.clone());
             overrides.insert(file.path.clone(), new);
         }
         total += pass;
@@ -172,11 +197,10 @@ fn fix_in_memory(
     }
     let files = originals
         .into_iter()
-        .filter_map(|(path, (rel, original))| {
+        .filter_map(|(path, original)| {
             let fixed = overrides.remove(&path)?;
             (fixed != original).then_some(FixedFile {
                 path,
-                rel,
                 original,
                 fixed,
             })
@@ -197,7 +221,10 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
     if args.diff {
         let (fixes, files, errors) = fix_in_memory(args, hot.as_ref())?;
         for f in &files {
-            print!("{}", unified_diff(&f.rel, &f.original, &f.fixed));
+            print!(
+                "{}",
+                unified_diff(&shown_text(&f.path), &f.original, &f.fixed)
+            );
         }
         eprintln!("Would fix {fixes} issue(s) in {} file(s).", files.len());
         let code = if fixes == 0 {
@@ -272,8 +299,20 @@ pub(crate) fn report(
         diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
     }
 
+    // Every format prints the paths `--diff` prints.
+    for d in &mut diags {
+        d.path = shown_path(&d.path);
+        for r in &mut d.related {
+            r.path = shown_path(&r.path);
+        }
+    }
+    let by_shown: FxHashMap<PathBuf, &ParsedFile> = project
+        .files
+        .iter()
+        .map(|p| (shown_path(&p.path), p))
+        .collect();
     let source_line = |p: &Path, line: u32| {
-        by_path.get(p).and_then(|f| {
+        by_shown.get(p).and_then(|f| {
             f.source
                 .lines()
                 .nth(usize::try_from(line.saturating_sub(1)).unwrap_or(usize::MAX))
