@@ -1620,6 +1620,23 @@ impl Ro {
         }
     }
 
+    /// The origin of a value that is this one on some paths and `other` on the others: what
+    /// either shares, named after the one that shares the object itself.
+    fn join(&self, other: &Self) -> Self {
+        let shared = self.shared().join(other.shared());
+        let named = if !self.shared().object && other.shared().object {
+            other
+        } else {
+            self
+        };
+        Self {
+            producer: named.producer.clone(),
+            deep: shared.elements,
+            shallow_copy: !shared.object,
+            via: named.via.clone(),
+        }
+    }
+
     /// The origin of a value derived from this one by `step`.
     fn derive(&self, step: ReturnStep) -> Option<Self> {
         Self::new(
@@ -1832,41 +1849,54 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
+    /// The read-only origins of the function's values, to a fixpoint: a phi joins the origins
+    /// of every incoming value (a shallow copy on one branch and the shared object on the other
+    /// is the shared object), and a value is derived again when its operand's origin grows. An
+    /// origin only grows (`Ro::join`), so the loop ends.
     fn propagate(&mut self) {
         let rpo = self.f.rpo_blocks();
-        for _ in 0..4 {
-            let before = self.ro.len();
+        loop {
+            let mut changed = false;
             for &bb in &rpo {
                 let block = self.f.block(bb);
                 for phi in &block.phis {
-                    if self.ro.contains_key(&phi.dst) {
-                        continue;
-                    }
-                    if let Some(r) = phi
+                    let joined = phi
                         .incoming
                         .iter()
-                        .find_map(|(_, v)| self.ro.get(v))
-                        .cloned()
-                    {
-                        self.ro.insert(phi.dst, r);
+                        .filter_map(|(_, v)| self.ro.get(v))
+                        .fold(None::<Ro>, |acc, r| {
+                            Some(acc.map_or_else(|| r.clone(), |a| a.join(r)))
+                        });
+                    if let Some(r) = joined {
+                        changed |= self.grow(phi.dst, r);
                     }
                 }
                 for inst in &block.insts {
                     let Some(dst) = inst.kind.dst() else {
                         continue;
                     };
-                    if self.ro.contains_key(&dst) {
-                        continue;
-                    }
                     if let Some(r) = self.transfer(inst) {
-                        self.ro.insert(dst, r);
+                        changed |= self.grow(dst, r);
                     }
                 }
             }
-            if self.ro.len() == before {
+            if !changed {
                 break;
             }
         }
+    }
+
+    /// Join `r` into the origin of `var`; whether it grew.
+    fn grow(&mut self, var: VarId, r: Ro) -> bool {
+        let next = match self.ro.get(&var) {
+            Some(old) => old.join(&r),
+            None => r,
+        };
+        let grew = self.ro.get(&var) != Some(&next);
+        if grew {
+            self.ro.insert(var, next);
+        }
+        grew
     }
 
     /// Read-only origin of `var` when mutating its own top level is a violation.

@@ -259,3 +259,50 @@ class C:
         ]
     );
 }
+
+const DEEP_SHARED: &str = "[[tool.heki.readonly-returns]]\nname = \"shared\"\nproducers = [\"app.shared\"]\ndeep = true\n";
+
+#[test]
+fn a_value_shared_on_one_branch_stays_shared_after_the_merge() {
+    let p = project("shared_merge", DEEP_SHARED);
+    p.write(
+        "app.py",
+        r#"CACHE = [[1], [2]]
+
+
+def shared() -> list[list[int]]:
+    return CACHE
+
+
+def copy_first(flag: bool) -> None:
+    x = shared().copy() if flag else shared()
+    x.clear()
+
+
+def copy_second(flag: bool) -> None:
+    x = shared() if flag else shared().copy()
+    x.clear()
+
+
+def in_branches(flag: bool) -> None:
+    if flag:
+        x = shared().copy()
+    else:
+        x = shared()
+    x.clear()
+
+
+def copies_only(flag: bool) -> None:
+    x = shared().copy() if flag else list(shared())
+    x.clear()
+"#,
+    );
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![
+            at("app.py", 10, "copy_first"),
+            at("app.py", 15, "copy_second"),
+            at("app.py", 23, "in_branches"),
+        ]
+    );
+}
