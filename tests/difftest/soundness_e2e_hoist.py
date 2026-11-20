@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-NINE = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+SEVENTEEN = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
 
 
 # ==============================================================================
@@ -14,7 +14,7 @@ NINE = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 # ==============================================================================
 def tuple_container(n):
     """A tuple bound outside the loop is invariant whatever happens in it."""
-    allowed = (1, 2, 3, 4, 5, 6, 7, 8, 9)
+    allowed = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     hits = []
     for p in range(n):
         if p in allowed:
@@ -24,7 +24,7 @@ def tuple_container(n):
 
 def while_loop(n):
     """No `for` statement to hoist before: proven safe, rewritten by hand."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     i = 0
     while i < n:
@@ -35,12 +35,12 @@ def while_loop(n):
 
 
 def comprehension(n):
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     return [p for p in range(n) if p in allowed]
 
 
 def split_for_header(n):
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for \
             p in range(n):
@@ -50,7 +50,7 @@ def split_for_header(n):
 
 
 def rebound_in_loop(n):
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for p in range(n):
         if p in allowed:
@@ -60,7 +60,7 @@ def rebound_in_loop(n):
 
 
 def changed_twice_in_loop(n):
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for p in range(n):
         if p in allowed:
@@ -72,7 +72,7 @@ def changed_twice_in_loop(n):
 
 def changed_in_for_header(n):
     """`allowed.pop()` runs after a hoisted `set(allowed)` would be built."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for p in range(allowed.pop() + n):
         if p in allowed:
@@ -104,7 +104,7 @@ def literal_container(n):
     """A display inside the comparison is not a candidate."""
     hits = []
     for p in range(n):
-        if p in [1, 2, 3, 4, 5, 6, 7, 8, 9]:
+        if p in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]:
             hits.append(p)
     return hits
 
@@ -127,7 +127,7 @@ def unknown_elements(items, n):
 def unbound_in_dead_code(n, c):
     """`allowed` is unbound only on a path that returns before the loop."""
     if c:
-        allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     else:
         return []
         pass
@@ -139,12 +139,12 @@ def unbound_in_dead_code(n, c):
 
 
 def call_probe(words):
-    allowed = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+    allowed = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q"]
     return [w for w in words if str(w) in allowed]
 
 
 def method_probe(words):
-    allowed = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+    allowed = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q"]
     hits = []
     for w in words:
         if w.lower() in allowed:
@@ -153,7 +153,7 @@ def method_probe(words):
 
 
 def generator_probe(words):
-    allowed = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+    allowed = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q"]
     hits = []
     for w in words:
         if (c for c in w) in allowed:
@@ -162,7 +162,7 @@ def generator_probe(words):
 
 
 def attribute_probe(points):
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for pt in points:
         if pt.real in allowed:
@@ -172,7 +172,7 @@ def attribute_probe(points):
 
 def mixed_probe(n):
     """`p` is an `int` on one path and a `str` on the other."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, "a"]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, "a"]
     hits = []
     for i in range(n):
         p = i if i % 2 else "a"
@@ -182,7 +182,7 @@ def mixed_probe(n):
 
 
 def empty_probe():
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for p in list():
         if p in allowed:
@@ -192,7 +192,7 @@ def empty_probe():
 
 def deleted_container(n):
     """`del allowed` before the test: the value is not tracked (raises `NameError`)."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for p in range(n):
         print(allowed)
@@ -204,7 +204,7 @@ def deleted_container(n):
 
 def stored_flag(n):
     """The comparison result is stored, not branched on: a plain `OPT110`."""
-    seen = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    seen = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     flags = []
     for v in range(n):
         missing = v not in seen
@@ -215,20 +215,20 @@ def stored_flag(n):
 def rebound_in_outer_loop(sizes, c):
     """`allowed` changes between outer iterations, never during the inner loop: the set is
     built before the inner `for`, once per outer iteration."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for size in sizes:
         for p in range(size):
             if p in allowed:
                 hits.append(p)
         if c:
-            allowed = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+            allowed = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     return hits
 
 
 def flag_tested_elsewhere(n):
     """The block branches on another test: still a plain `OPT110`."""
-    seen = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    seen = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     flags = []
     for v in range(n):
         missing = v not in seen
@@ -239,7 +239,7 @@ def flag_tested_elsewhere(n):
 
 def write_through_iterator(n):
     """A write through an iterator of `allowed` counts as a change of `allowed`."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     it = iter(allowed)
     hits = []
     for p in range(n):
@@ -340,7 +340,7 @@ def dedup_in_for_header(items):
 # OPT130: `e in set(keys)`
 # ==============================================================================
 def rebuild_list(n):
-    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     return [p for p in range(n) if p in list(keys)]
 
 
@@ -354,7 +354,7 @@ def rebuild_tuple_of_str(n):
 
 
 def rebuild_set_of_set(n):
-    keys = {1, 2, 3, 4, 5, 6, 7, 8, 9}
+    keys = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
     hits = 0
     for p in range(n):
         if p in set(keys):
@@ -363,7 +363,7 @@ def rebuild_set_of_set(n):
 
 
 def rebuild_set_of_copy(n):
-    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = 0
     for p in range(n):
         if p in set(keys.copy()):
@@ -391,13 +391,13 @@ def rebuild_small(n):
 def rebuild_display(n):
     hits = 0
     for p in range(n):
-        if p in set([1, 2, 3, 4, 5, 6, 7, 8, 9]):
+        if p in set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]):
             hits += 1
     return hits
 
 
 def rebuild_frozenset(n):
-    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = 0
     for p in range(n):
         if p in frozenset(keys):
@@ -414,7 +414,7 @@ def rebuild_keywords(n):
 
 
 def rebuild_choice(n, c, other):
-    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = 0
     for p in range(n):
         if p in set(keys if c else other):
@@ -466,7 +466,7 @@ def rebuild_parameter(n, keys):
 
 
 def rebuild_rebound_key(n):
-    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    keys = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = 0
     for p in range(n):
         if p in set(keys):
@@ -506,7 +506,7 @@ def bytes_display(n):
 
 def unhashable_elements(n):
     """A list of dicts: no `set` can hold its elements."""
-    table = [{"k": i} for i in range(9)]
+    table = [{"k": i} for i in range(17)]
     hits = 0
     for p in range(n):
         if {"k": p} in table:
@@ -516,7 +516,7 @@ def unhashable_elements(n):
 
 def probes_from_a_list(n):
     """Iterating a list of `int`s yields `int`s: hash-consistent probes."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     probes = list(range(n))
     hits = []
     for p in probes:
@@ -527,7 +527,7 @@ def probes_from_a_list(n):
 
 def probes_from_either_list(n, c):
     """Both lists a branch may pick hold only `int`s."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     probes = list(range(n)) if c else list(range(n, 2 * n))
     hits = []
     for p in probes:
@@ -538,7 +538,7 @@ def probes_from_either_list(n, c):
 
 def probes_measured_first(n):
     """`len` only reads the list: its elements stay known."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     probes = list(range(n))
     hits = [len(probes)]
     for p in probes:
@@ -549,7 +549,7 @@ def probes_measured_first(n):
 
 def probe_by_index(n):
     """`keys[True]` reads one `int` element."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     keys = list(range(n + 2))
     probe = keys[True]
     hits = []
@@ -580,7 +580,7 @@ def rebuild_in_a_bounded_loop(n):
 
 def rebuild_tuple_of_a_tuple(n):
     """`tuple(t)` of a tuple returns `t`: no container is built."""
-    keys = tuple(range(9))
+    keys = tuple(range(17))
     hits = 0
     for i in range(n):
         if i in tuple(keys):
@@ -590,7 +590,7 @@ def rebuild_tuple_of_a_tuple(n):
 
 def chained_membership(n):
     """`i in allowed in allowed`: the last name is the second comparison's operand."""
-    allowed = list(range(9))
+    allowed = list(range(17))
     out = []
     for i in range(n):
         out.append(i in allowed in allowed)
@@ -600,7 +600,7 @@ def chained_membership(n):
 def comprehension_clause_on_its_own_line(n):
     """The `for` clause starts a line, but it is inside the brackets: no statement to hoist
     before."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     return [p
             for p in range(n) if p in allowed]
 
@@ -644,7 +644,7 @@ def main() -> int:
             run(changed_twice_in_loop, n),
             run(changed_in_for_header, n),
             run(changed_before_and_after, n),
-            run(parameter_container, n, NINE),
+            run(parameter_container, n, SEVENTEEN),
             run(literal_container, n),
             run(string_container, n),
             run(unknown_elements, items, n),

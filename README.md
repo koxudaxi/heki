@@ -11,8 +11,8 @@ which functions may mutate state or reach I/O.
 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) ·
 📏 [Rules](https://heki.koxudaxi.dev/rules/)
 
-[![PyPI](https://img.shields.io/pypi/v/heki.svg)](https://pypi.org/project/heki/)
-[![Python versions](https://img.shields.io/pypi/pyversions/heki.svg)](https://pypi.org/project/heki/)
+[![PyPI](https://img.shields.io/pypi/v/heki)](https://pypi.org/project/heki/)
+[![Python versions](https://img.shields.io/pypi/pyversions/heki)](https://pypi.org/project/heki/)
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
 
@@ -129,7 +129,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: I/O while a lock or a database transaction is held | `EFF106` |
 | Opt-in: a generator consumed twice | `MUT106` |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | `MUT101` |
-| Opt-in: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
+| Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
 
 ### A safety net for reviews and coding agents
 

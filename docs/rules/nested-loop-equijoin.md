@@ -26,9 +26,11 @@ its first matching comparison. It does not report:
   mismatch, or statements that only the mismatches run because a match `break`s. They run for
   the pairs an index would skip, so every pair is needed; statements after the `if` that every
   pair runs do not count;
-- loops whose size the code fixes: a display of at most 8 items (`for b in ("x", "y")`, also
-  through a name or a module constant bound to one that nothing grows, and through
-  `enumerate` / `zip` / `sorted` / `.items()` ...), and `range` of integer constants.
+- joins where the code fixes the size of either loop, so that the cost grows with one side
+  only: a display of at most 16 items (`for b in ("x", "y")`, also through a name or a module
+  constant of this or another module (`NAME`, `module.NAME`) when nothing grows it, and through
+  `enumerate` / `zip` / `sorted` / `.items()` ...), and `range` of integer constants with at
+  most 16 steps (`range(10)`, `range(LIMIT)`).
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.
@@ -62,7 +64,9 @@ The advice follows how the matches are used. When a match leaves the inner loop 
 `return`, `raise`), one element per key is enough: a `set` of the elements, or a `dict` from the
 key to its first element, as above. When every match is used (`out.append((a, b))` for each
 equal pair), a `set` or a one-element `dict` would drop the repeated matches, so the help
-advises a `dict` from each key (or value) to the list of its elements.
+advises a `dict` from each key (or value) to the list of its elements. Each outer key then reads
+its list with `.get(key, [])`: a loop over the index instead would drop the outer keys that
+match no element, which the nested loops give an empty list.
 
 The keys must be hashable, and `==` must agree with their hash. When a key is known to be a
 `list`, `dict`, `set`, or `bytearray` (from its annotation, or as an element of a display of

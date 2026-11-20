@@ -13,8 +13,8 @@ which functions may mutate state or reach I/O.
   <a class="md-button" href="configuration/">Configuration</a>
 </p>
 
-[![PyPI](https://img.shields.io/pypi/v/heki.svg)](https://pypi.org/project/heki/)
-[![Python versions](https://img.shields.io/pypi/pyversions/heki.svg)](https://pypi.org/project/heki/)
+[![PyPI](https://img.shields.io/pypi/v/heki)](https://pypi.org/project/heki/)
+[![Python versions](https://img.shields.io/pypi/pyversions/heki)](https://pypi.org/project/heki/)
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
 
@@ -132,7 +132,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](rules/readonly-type-mutation.md) |
 | Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](rules/lock-or-tx-held-across-io.md) |
 | Opt-in: a generator consumed twice | [`MUT106`](rules/iterator-double-consumption.md) |
-| Opt-in: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](rules/cached-property-stale-read.md) |
+| Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](rules/cached-property-stale-read.md) |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](rules/cached-property-stale-mutation.md) |
 
 ### A safety net for reviews and coding agents

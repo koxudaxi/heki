@@ -26,7 +26,7 @@ use crate::convert;
 use crate::engine::{CONFIG_FILES, Selectors, Workspace};
 use heki_diagnostics::Diagnostic;
 use heki_effect::ModuleLayout;
-use heki_rules::project::{IGNORE_FILES, ProjectOptions, find_root};
+use heki_rules::project::{IGNORE_FILES, ProjectOptions, canonical, find_root};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -130,10 +130,10 @@ struct Publish {
 /// Absolute, symlink-resolved path of a document (the parent is resolved for unsaved files;
 /// a path whose directory does not exist either is kept as it is).
 fn normalize(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| {
+    canonical(path).unwrap_or_else(|_| {
         path.parent()
             .zip(path.file_name())
-            .and_then(|(parent, name)| std::fs::canonicalize(parent).ok().map(|p| p.join(name)))
+            .and_then(|(parent, name)| canonical(parent).ok().map(|p| p.join(name)))
             .unwrap_or_else(|| path.to_path_buf())
     })
 }
@@ -280,7 +280,10 @@ impl State {
         // Analyzed against the current index: no queued re-analysis of it is left to do.
         self.pending.remove(path);
         self.pending.extend(outcome.affected);
-        (self.publish_for(path, outcome.diagnostics), outcome.error)
+        (
+            self.publish_for(path, outcome.diagnostics),
+            outcome.error.as_ref().map(ToString::to_string),
+        )
     }
 
     /// Re-analyze every queued file and, in turn, what those re-analyses affect; a queued
@@ -300,7 +303,7 @@ impl State {
         for (path, outcome) in results {
             match outcome {
                 Some(outcome) => {
-                    errors.extend(outcome.error);
+                    errors.extend(outcome.error.as_ref().map(ToString::to_string));
                     pubs.extend(self.publish_for(&path, outcome.diagnostics));
                 }
                 None => pubs.extend(self.clear(&path)),
@@ -394,7 +397,7 @@ impl State {
                     let outcome = ws.edit(path, on_disk);
                     self.pending.remove(path);
                     self.pending.extend(outcome.affected);
-                    errors.extend(outcome.error);
+                    errors.extend(outcome.error.as_ref().map(ToString::to_string));
                 }
                 None => {
                     let affected = ws.remove(path);
@@ -536,7 +539,7 @@ impl LanguageServer for Backend {
             .map(|f| f.uri.clone())
             .or(params.root_uri)
             .and_then(|u| path_of(&u))
-            .or_else(|| std::env::current_dir().ok());
+            .or_else(|| std::env::current_dir().ok().map(|dir| normalize(&dir)));
         let workspace = params.capabilities.workspace;
         let watch_files = workspace
             .as_ref()

@@ -1,4 +1,4 @@
-use crate::facts::LoopHint;
+use crate::facts::{LoopHint, SMALL_MAX};
 use crate::{
     A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
     FunctionId, FunctionKind, Inst, InstKind, IrFunction, LocalAnnotation, LoopBound,
@@ -3956,10 +3956,10 @@ fn classify_for_bound(f: &ast::StmtFor) -> (LoopBound, bool) {
     (iter_bound, retry_body)
 }
 
-/// A literal display of at most 8 items without `*` unpacking.
+/// A literal display of at most [`SMALL_MAX`] items without `*` unpacking.
 fn fixed_display(elts: &[Expr]) -> Option<LoopBound> {
-    (elts.len() <= 8 && !elts.iter().any(|e| matches!(e, Expr::Starred(_))))
-        .then_some(LoopBound::ConstSmall(elts.len() as u32))
+    let len = u32::try_from(elts.len()).ok().filter(|n| *n <= SMALL_MAX)?;
+    (!elts.iter().any(|e| matches!(e, Expr::Starred(_)))).then_some(LoopBound::ConstSmall(len))
 }
 
 /// The bound a `for` iterable's syntax fixes: a small display. Everything a name decides

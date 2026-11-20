@@ -173,7 +173,7 @@ fn opt113_does_not_take_all_pairs_loops_for_joins() {
 /// When the keys are known to be unhashable, the advice indexes a hashable form of them; when
 /// nothing is known about them (unannotated parameters), the plain advice stays.
 const KEYS: &str = r#"def dict_rows(A):
-    rows = [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6}, {"id": 7}, {"id": 8}, {"id": 9}]
+    rows = [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6}, {"id": 7}, {"id": 8}, {"id": 9}, {"id": 10}, {"id": 11}, {"id": 12}, {"id": 13}, {"id": 14}, {"id": 15}, {"id": 16}, {"id": 17}]
     for a in A:
         for r in rows:
             if a == r:
@@ -227,7 +227,7 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
             "`r` is an unhashable `dict`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
             "`tags` is an unhashable `list`, so index `B` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
             "build a `set` of `actual` before the outer loop",
-            "group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop",
+            "group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list",
         ],
         "{found:#?}"
     );
@@ -1052,7 +1052,7 @@ fn mut101_getters_that_hold_attributes_and_getters_that_hand_them_on() {
 
 /// More unhashable-key and display shapes.
 const DISPLAYS: &str = r#"def lists(A):
-    rows = [[1], [2], [3], [4], [5], [6], [7], [8], [9]]
+    rows = [[1], [2], [3], [4], [5], [6], [7], [8], [9], [10], [11], [12], [13], [14], [15], [16], [17]]
     for a in A:
         for r in rows:
             if a == r:
@@ -1060,7 +1060,7 @@ const DISPLAYS: &str = r#"def lists(A):
 
 
 def sets(A, c):
-    rows = [{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}] if c else [{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}]
+    rows = [{1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11}, {12}, {13}, {14}, {15}, {16}, {17}] if c else [{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11}, {12}, {13}, {14}, {15}, {16}]
     alias = rows
     for a in A:
         for r in alias:
@@ -1069,7 +1069,7 @@ def sets(A, c):
 
 
 def mixed(A):
-    rows = [[1], (2,), [3], [4], [5], [6], [7], [8], [9]]
+    rows = [[1], (2,), [3], [4], [5], [6], [7], [8], [9], [10], [11], [12], [13], [14], [15], [16], [17]]
     for a in A:
         for r in rows:
             if a == r:
@@ -1077,7 +1077,7 @@ def mixed(A):
 
 
 def lists_and_sets(A):
-    rows = [{1}, [2], [3], [4], [5], [6], [7], [8], [9]]
+    rows = [{1}, [2], [3], [4], [5], [6], [7], [8], [9], [10], [11], [12], [13], [14], [15], [16], [17]]
     for a in A:
         for r in rows:
             if a == r:
@@ -1085,7 +1085,7 @@ def lists_and_sets(A):
 
 
 def classes(A):
-    rows = [int, int, int, int, int, int, int, int, int]
+    rows = [int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]
     for a in A:
         for r in rows:
             if a == r:
@@ -1114,7 +1114,7 @@ fn opt113_unhashable_display_elements() {
             ),
             (
                 22,
-                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop"
+                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
             ),
             // Elements of two unhashable classes; class objects are hashable.
             (
@@ -1123,7 +1123,7 @@ fn opt113_unhashable_display_elements() {
             ),
             (
                 38,
-                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop"
+                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
             ),
         ],
         "{found:#?}"

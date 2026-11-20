@@ -117,7 +117,8 @@ fn exit_codes_and_clean_runs() {
     p.write("pkg/broken.py", "def f(:\n");
     let (code, _, stderr) = p.heki(&[]);
     assert_eq!(code, 2);
-    assert!(stderr.contains("pkg/broken.py:1:"), "{stderr}");
+    // Errors print the paths diagnostics print.
+    assert!(stderr.contains("error: pkg/broken.py:1:7: "), "{stderr}");
 }
 
 #[test]
@@ -293,6 +294,7 @@ fn sarif_columns_and_carets_after_non_ascii_text() {
     }
 }
 
+// Unix only: on Windows `\` separates the components of a path.
 #[cfg(unix)]
 #[test]
 fn file_names_with_backslashes_and_uri_delimiters_are_reported_as_they_are() {
@@ -330,6 +332,7 @@ fn file_names_with_backslashes_and_uri_delimiters_are_reported_as_they_are() {
     );
 }
 
+// Unix only: the file name holds a line break and `:`, which Windows does not allow.
 #[cfg(unix)]
 #[test]
 fn github_output_never_lets_project_text_start_a_log_line() {

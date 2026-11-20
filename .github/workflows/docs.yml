@@ -48,7 +48,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: cargo build --release -p heki
-      - name: Generated pages are up to date (rules, CLI reference)
+      - name: Generated pages are up to date (rules, CLI reference, experimental features)
         run: python scripts/build_docs.py --heki target/release/heki --check
       - name: llms.txt is up to date
         run: python scripts/build_llms_txt.py --check

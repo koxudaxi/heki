@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{Project, repo_file, run_python};
+use common::{Project, repo_file, report_path, run_python};
 use serde_json::Value;
 
 /// `heki check --output-format json <args>` in `p`.
@@ -199,7 +199,7 @@ def data_sized(load, values) -> None:
 
 #[test]
 fn r06_small_displays_of_bytes_and_containers_are_not_reported() {
-    // A display of at most 8 items that nothing grows is small whatever its items are; `*s`
+    // A display of at most 16 items that nothing grows is small whatever its items are; `*s`
     // passes the items, not the list. The same display handed to unknown code may grow, and a
     // list built at run time is data-sized.
     assert_reports(
@@ -215,8 +215,9 @@ fn r06_small_displays_of_bytes_and_containers_are_not_reported() {
 
 const UNHASHABLE_ELEMENTS: &str = r#"def heroes(rows) -> None:
     expected = [
-        {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5},
-        {"id": 6}, {"id": 7}, {"id": 8}, {"id": 9},
+        {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6},
+        {"id": 7}, {"id": 8}, {"id": 9}, {"id": 10}, {"id": 11}, {"id": 12},
+        {"id": 13}, {"id": 14}, {"id": 15}, {"id": 16}, {"id": 17},
     ]
     for row in rows:
         assert row in expected
@@ -230,7 +231,7 @@ def collected(rows, probes) -> list:
 
 
 def ints(rows) -> None:
-    expected = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    expected = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     for row in rows:
         assert row in expected
 "#;
@@ -1250,20 +1251,17 @@ fn absolute_paths_print_from_the_working_directory_through_links_and_stay_absolu
         "{out}"
     );
     assert!(out.contains("other.py:8:16: OPT120 "), "{out}");
-    // Outside the working directory a path stays absolute.
+    // Outside the working directory a path stays absolute, as given.
     let out = run(&src.join("pkg"), &src);
     assert!(out.contains("a.py:8:16: OPT120 "), "{out}");
-    let other = src.join("other.py");
-    assert!(
-        out.lines()
-            .any(|l| l.starts_with('/') && l.contains("other.py:8:16: OPT120 ")),
-        "{out} ({})",
-        other.display()
-    );
+    let other = format!("{}:8:16: OPT120 ", report_path(&src.join("other.py")));
+    assert!(out.lines().any(|l| l.starts_with(&other)), "{out}");
 }
 
 /// A path given through a symbolic link into the working directory prints relative to it, on
 /// every platform (not only where the temporary directory itself is a link).
+// Unix only: creating a symbolic link on Windows needs a privilege (or Developer Mode) that a
+// test run cannot assume.
 #[cfg(unix)]
 #[test]
 fn absolute_paths_through_a_link_into_the_working_directory_print_relative() {
