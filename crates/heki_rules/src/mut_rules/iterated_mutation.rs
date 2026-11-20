@@ -10,15 +10,16 @@
 //!
 //! What runs while a generator is suspended depends on where its generator object goes. A
 //! private generator runs only where the project iterates it: a loop's body runs between its
-//! steps, a consuming call (`list(...)`) runs nothing, and a generator suspending inside such a
-//! loop is suspended with it. Once its object outlives one use of it (stored, handed to code heki
-//! does not follow, or stepped by `next()` or a loop that leaves early and used again), any
-//! method of the class family can run in between, apart from initialization (`MUT101`'s
-//! two-phase initialization methods run before any iteration) and private methods (they run for
-//! the methods calling them, which count). A public generator is an iteration the class offers its callers, as `dict.items()` is: its
-//! public methods changing the container are the rest of that interface, and changing it while
-//! iterating is the caller's mistake, as for a builtin container. Only the changes made by reads
-//! count there: property getters and the dunder methods of the read protocols (`__getitem__`,
+//! steps (its calls on the generator's instance count), a consuming call (`list(...)`) runs
+//! nothing, and a generator suspending inside such a loop is suspended with it. Once its object
+//! outlives one use of it (stored, handed to code heki does not follow, or stepped by `next()` or
+//! a loop that leaves early and used again), any method of the class family can run in between,
+//! apart from initialization (`MUT101`'s two-phase initialization methods run before any
+//! iteration) and private methods (they run for the methods calling them, which count). A public
+//! generator is an iteration the class offers its callers, as `dict.items()` is: its public
+//! methods changing the container are the rest of that interface, and changing it while iterating
+//! is the caller's mistake, as for a builtin container. Only the changes made by reads count
+//! there: property getters and the dunder methods of the read protocols (`__getitem__`,
 //! `__len__`, `__contains__`, ...). The project's own uses of a public generator count as for a
 //! private one.
 
@@ -111,14 +112,19 @@ struct Exposure<'a> {
     /// Callers outside the project can iterate it: it is public, or a public function hands it on
     /// or iterates it while suspending. The reads of the class family can run.
     offered: bool,
-    /// The call sites in the bodies of the project's loops iterating it: `(caller, file, span)`.
+    /// The call sites in the bodies of the project's loops iterating it that run on the
+    /// generator's own instance: `(caller, file, span)`.
     loop_calls: Vec<(&'a FuncKey, &'a Path, Span)>,
 }
+
+/// A function the object of a generator method reaches, and which of its parameters holds the
+/// generator's instance (`None`: none of them is known to).
+type Reached = (FuncKey, Option<u8>);
 
 impl<'a> Exposure<'a> {
     fn of(cx: &CheckContext<'a>, generator: &FuncKey) -> Self {
         let mut out = Self::default();
-        out.follow(cx, generator, &mut FxHashSet::default());
+        out.follow(cx, generator, Some(0), &mut FxHashSet::default());
         out
     }
 
@@ -126,8 +132,15 @@ impl<'a> Exposure<'a> {
     /// it, by the uses its caller records: returned, iterated (`IterationFacts::result_iterations`;
     /// by a generator suspending inside the iteration, too), and whether it outlives one of these
     /// uses (`CallSite::result_held`). A project function it is passed to is not followed.
-    fn follow(&mut self, cx: &CheckContext<'a>, func: &FuncKey, visited: &mut FxHashSet<FuncKey>) {
-        if visited.insert(func.clone()) {
+    /// `instance` is the parameter of `func` holding the generator's instance.
+    fn follow(
+        &mut self,
+        cx: &CheckContext<'a>,
+        func: &FuncKey,
+        instance: Option<u8>,
+        visited: &mut FxHashSet<Reached>,
+    ) {
+        if visited.insert((func.clone(), instance)) {
             self.offered |= !is_private(&func.qualname);
             let callers = cx.index.reverse_call_graph.get(func).into_iter().flatten();
             let callers = callers.filter_map(|caller| {
@@ -135,18 +148,20 @@ impl<'a> Exposure<'a> {
                 Some((caller, path.as_path(), file))
             });
             for (caller, path, file) in callers {
-                self.follow_calls(cx, func, (caller, path, file), visited);
+                self.follow_calls(cx, (func, instance), (caller, path, file), visited);
             }
         }
     }
 
-    /// [`Self::follow`] at the calls of `func` in `caller`, a function of `file` (at `path`).
+    /// [`Self::follow`] at the calls of `func` in `caller`, a function of `file` (at `path`). A
+    /// loop over a call's result runs its calls on the generator's instance where they bind the
+    /// object the call binds to `instance` (`ResultIteration::on_arguments`).
     fn follow_calls(
         &mut self,
         cx: &CheckContext<'a>,
-        func: &FuncKey,
+        (func, instance): (&FuncKey, Option<u8>),
         (caller, path, file): (&'a FuncKey, &'a Path, &'a FileSummary),
-        visited: &mut FxHashSet<FuncKey>,
+        visited: &mut FxHashSet<Reached>,
     ) {
         let calling = |s: &&CallSite| {
             s.caller == *caller && s.project_callees().iter().any(|bc| bc.callee == *func)
@@ -156,21 +171,46 @@ impl<'a> Exposure<'a> {
             s.iteration_facts().result_iterations.as_slice()
         });
         for call in sites.iter().filter(|s| s.role == SiteRole::Call) {
+            let in_caller = instance.and_then(|p| bound_parameter(call, func, p));
             let returned = sites
                 .iter()
                 .any(|s| s.role == SiteRole::Return && s.span == call.span);
             if returned {
-                self.follow(cx, caller, visited);
+                self.follow(cx, caller, in_caller, visited);
             }
             self.held |= call.result_held;
             for used in result_iterations.iter().filter(|u| u.call == call.span) {
                 if used.between.suspends {
-                    self.follow(cx, caller, visited);
+                    self.follow(cx, caller, in_caller, visited);
                 }
-                self.loop_calls
-                    .extend(used.between.calls.iter().map(|s| (caller, path, *s)));
+                let on_instance = |i: usize| {
+                    instance.is_some_and(|p| {
+                        used.on_arguments
+                            .get(i)
+                            .is_some_and(|bits| (bits >> p) & 1 == 1)
+                    })
+                };
+                let calls = used.between.calls.iter().enumerate();
+                self.loop_calls.extend(
+                    calls
+                        .filter(|(i, _)| on_instance(*i))
+                        .map(|(_, s)| (caller, path, *s)),
+                );
             }
         }
+    }
+}
+
+/// The parameter of the calling function that `call` binds, as itself, to parameter `p` of
+/// `func`.
+fn bound_parameter(call: &CallSite, func: &FuncKey, p: u8) -> Option<u8> {
+    let bound = call
+        .project_callees()
+        .iter()
+        .find(|bc| bc.callee == *func)?;
+    match bound.params.get(usize::from(p))?.param {
+        Some((i, None)) => Some(i),
+        _ => None,
     }
 }
 

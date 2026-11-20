@@ -287,6 +287,13 @@ pub struct ResultIteration {
     /// The call.
     pub call: Span,
     pub between: BetweenSteps,
+    /// For each call in `between.calls`, the parameters of the iterated call's callees (bit `p`)
+    /// bound to the object the call binds to its own callees' first parameter (a method's
+    /// `self`, a property's object): the same value through copies (`super()` is `self`), or the
+    /// same attribute of one. A generator iterating a container of that parameter's object runs
+    /// the call on its own instance. Empty when no call is on such an object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_arguments: Vec<u64>,
 }
 
 /// What runs between two steps of an iteration.
