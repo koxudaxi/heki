@@ -761,6 +761,106 @@ fn mut113_counts_loop_calls_on_the_generators_own_instance_only() {
     assert_eq!(output.lines().collect::<Vec<_>>(), expected);
 }
 
+/// A method returning its generator or its own call on another instance (`walk_all`): the
+/// generator's instance is its receiver on one path and its argument on the other, and following
+/// the recursion reaches `walk_all` again.
+const WALKER: &str = r#"class Walker:
+    def __init__(self) -> None:
+        self.entries: dict[str, int] = {}
+
+    def _walk(self):
+        for k in self.entries:
+            yield k
+
+    def remove(self, k: str) -> None:
+        del self.entries[k]
+
+    def discard(self, k: str) -> None:
+        self.entries.pop(k, None)
+
+    def forget(self, k: str) -> None:
+        self.entries.pop(k)
+
+    def walk_all(self, other: "Walker | None" = None):
+        if other is None:
+            return self._walk()
+        return other.walk_all()
+
+
+def prune(w: Walker):
+    for k in w.walk_all():
+        w.remove(k)
+
+
+def prune_other(w: Walker, v: Walker):
+    for k in w.walk_all(v):
+        v.discard(k)
+
+
+def copy_over(w: Walker, v: Walker):
+    for k in w.walk_all():
+        v.forget(k)
+"#;
+
+const WALKER_RUN: &str = r#"from pkg.walker import Walker, copy_over, prune, prune_other
+
+
+def filled():
+    w = Walker()
+    w.entries.update(a=1, b=2)
+    return w
+
+
+def attempt(name, fn):
+    try:
+        fn()
+        print(name, "ok")
+    except RuntimeError as e:
+        print(name, e)
+
+
+attempt("prune", lambda: prune(filled()))
+attempt("prune_other", lambda: prune_other(filled(), filled()))
+attempt("copy_over", lambda: copy_over(filled(), filled()))
+"#;
+
+#[test]
+fn mut113_follows_a_generator_through_a_method_returning_its_own_recursive_call() {
+    let p = Project::new("mut113_recursive");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/walker.py", WALKER)
+        .write("run.py", WALKER_RUN);
+    let diags = diagnostics(&p, &["--extend-select", "MUT113"]);
+    assert_eq!(
+        reports(&diags),
+        vec![d("pkg/walker.py", 6, "Walker._walk", "Walker.entries")]
+    );
+    // The receiver's own `remove`, and `discard` on the argument whose generator `walk_all`
+    // returns; not `forget` on another instance.
+    assert_eq!(
+        related(&diags, "pkg/walker.py", 6),
+        vec![
+            (
+                31,
+                "`prune_other` calls `Walker.discard` while iterating `Walker._walk`".to_owned()
+            ),
+            (
+                26,
+                "`prune` calls `Walker.remove` while iterating `Walker._walk`".to_owned()
+            ),
+        ]
+    );
+    let raised = "dictionary changed size during iteration";
+    assert_eq!(
+        run_python(&p.dir, "run.py").lines().collect::<Vec<_>>(),
+        vec![
+            format!("prune {raised}"),
+            format!("prune_other {raised}"),
+            "copy_over ok".to_owned(),
+        ]
+    );
+}
+
 /// The container classes whose iterators check for changes, and the changes each checks.
 const CONTAINERS: &str = r#"import collections
 from collections import OrderedDict, deque
