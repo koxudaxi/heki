@@ -337,6 +337,12 @@ fn apply_edge(
         }
     }
     s.escapes_params |= caller_params(callee.escapes_params, bc);
+    // d. Single-pass consumption (`MUT106`): a callee iterating its parameter k to exhaustion
+    //    consumes the caller's parameter passed as argument k when the callee's body runs here,
+    //    provided every call receiving that parameter runs on each normal path of the caller.
+    if runs_at_call(callee, site) {
+        s.consumes_params |= caller_params(callee.consumes_params, bc) & s.unconditional_forwards;
+    }
     for t in &callee.typed_field_write_sites {
         let mut site = t.clone();
         site.via_chain.insert(0, hop.clone());

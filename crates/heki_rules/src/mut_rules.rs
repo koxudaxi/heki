@@ -958,9 +958,11 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
 
 // ==================================================================================== MUT106
 
-/// `MUT106`: a single-pass iterator consumed twice (scaffold).
+mod iter_consumption;
+
+/// `MUT106` (opt-in): a single-pass iterator or generator consumed a second time.
 pub(crate) fn mut106(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
-    let _ = (cx, unit, out);
+    iter_consumption::run(cx, unit, out);
 }
 
 // ==================================================================================== MUT203

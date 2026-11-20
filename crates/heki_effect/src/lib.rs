@@ -16,6 +16,7 @@
 //! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
 
 mod callgraph;
+pub mod consumption;
 mod report;
 pub mod resolver;
 mod scc;
@@ -132,6 +133,12 @@ pub struct EffectSummary {
     // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
     pub mutates_params: u64,
     pub escapes_params: u64,
+    /// Parameters iterated to exhaustion on every path that returns normally when the body
+    /// runs at the call (`MUT106`: passing a single-pass iterator consumes it).
+    pub consumes_params: u64,
+    /// Parameters passed (as themselves) to project calls only where the call runs on every
+    /// path that returns normally: `consumes_params` propagates through those calls alone.
+    pub unconditional_forwards: u64,
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
