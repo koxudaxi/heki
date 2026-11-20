@@ -406,3 +406,56 @@ def consumed(xs: Sequence[int], rec: Record) -> None:
     assert_eq!(reports(&p, "MUT108"), vec![at("app.py", 30, "consumed")]);
     assert_eq!(reports(&p, "MUT202"), vec![at("app.py", 32, "consumed")]);
 }
+
+#[test]
+fn any_and_all_stop_early_and_leave_the_rest_of_an_iterator() {
+    let p = project("short_circuit_consumers", "");
+    p.write(
+        "app.py",
+        r#"import time
+
+
+def after_any() -> list[int]:
+    it = iter([1, 2])
+    if any(it):
+        return list(it)
+    return []
+
+
+def after_all() -> list[int]:
+    it = iter([1, 2])
+    all(it)
+    return list(it)
+
+
+def after_sum() -> list[int]:
+    it = iter([1, 2])
+    sum(it)
+    return list(it)
+
+
+def any_after_list() -> bool:
+    it = iter([1, 2])
+    list(it)
+    return any(it)
+
+
+def slow():
+    time.sleep(1)
+    yield 1
+
+
+async def handler() -> bool:
+    return any(slow())
+"#,
+    );
+    let (code, stdout, stderr) =
+        p.check(&["--select", "MUT106,EFF101", "--output-format", "concise"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    // `any` still runs the generator's body on the event loop.
+    assert_eq!(lines.len(), 3, "{stdout}");
+    assert!(lines[0].starts_with("app.py:20:12: MUT106"), "{stdout}");
+    assert!(lines[1].starts_with("app.py:26:12: MUT106"), "{stdout}");
+    assert!(lines[2].starts_with("app.py:35:12: EFF101"), "{stdout}");
+}

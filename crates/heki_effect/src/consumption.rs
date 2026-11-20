@@ -95,8 +95,6 @@ const FULL_CONSUMERS: &[(&str, Consumes)] = &[
     ("builtins.bytes", Consumes::First),
     ("builtins.bytearray", Consumes::First),
     ("builtins.sum", Consumes::First),
-    ("builtins.any", Consumes::First),
-    ("builtins.all", Consumes::First),
     ("builtins.min", Consumes::Sole),
     ("builtins.max", Consumes::Sole),
     ("builtins.sorted", Consumes::First),
@@ -123,6 +121,11 @@ const FULL_CONSUMERS: &[(&str, Consumes)] = &[
     ("math.prod", Consumes::First),
     ("math.fsum", Consumes::First),
 ];
+
+/// Calls stepping their first argument until a condition decides the result: `any` stops at
+/// the first true item and `all` at the first false one. The items after it are left for the
+/// next pass, but the steps run a generator's body.
+const SHORT_CIRCUIT_CONSUMERS: &[&str] = &["builtins.any", "builtins.all"];
 
 /// Annotations naming a single-pass iterator (`Iterable`, `Sequence`, ... may be re-iterable).
 const ITERATOR_TYPES: &[&str] = &[
@@ -462,6 +465,14 @@ impl IterFlow {
                     }
                     InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => {
                         match &self.callees[&(bb.id, index)] {
+                            Callee::External(symbol)
+                                if SHORT_CIRCUIT_CONSUMERS.contains(&symbol.as_str()) =>
+                            {
+                                let first: Vec<VarId> = args.first().copied().into_iter().collect();
+                                let done = (bb.id, index + 1);
+                                self.push(bb.id, index, inst.span, &first, false, done);
+                                continue;
+                            }
                             Callee::External(symbol) => match constructor_args(symbol, args) {
                                 Some(w) if w.eager => w.stepped,
                                 _ => consumer_args(symbol, args),

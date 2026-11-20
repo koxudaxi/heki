@@ -314,10 +314,12 @@ which module imports which.
   and the single-pass `itertools` functions (never `tee`, `repeat`, `cycle`, `count`); project
   generator functions; and `Iterator` / `Generator` annotations (not `Iterable` / `Sequence`).
 - Consumers: `for` loops and comprehensions, unpacking, `yield from`, and the calls that
-  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `any` / `all`
-  / `min` / `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
+  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `min` /
+  `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
   `heapq.nlargest`, `functools.reduce`, ...: one table, `consumption::FULL_CONSUMERS`, which also
-  decides where a generator's body runs), also through wrappers over one iterable; `next()` is
+  decides where a generator's body runs), also through wrappers over one iterable; `any` / `all`
+  step it but may stop early (`SHORT_CIRCUIT_CONSUMERS`: a generator's body runs, the iterator is
+  not exhausted); `next()` is
   stepping, not consumption. A project function consumes its argument when `consumes_params` says
   so, and its body runs at the call.
 - The first pass must be full (a loop that can `break`, `return`, or `raise` is partial); the
