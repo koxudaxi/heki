@@ -1,15 +1,22 @@
-//! `MUT205` (`unresolved-guarded-write`): the strict mode of `write-owners` contracts
-//! (`unresolved = "report"`). `MUT201` reports the writes it can tie to a target class; this
-//! rule counts the ones it cannot: an attribute named like a target written on an object of
-//! unknown class (a parameter no caller types, a loop variable, an untyped call result), and an
-//! attribute name computed at run time written on an instance of a target class. Each is one
-//! finding at the write, so a baseline ratchets them down as annotations and refactorings make
-//! the writes visible to `MUT201`.
+//! The strict modes of the ownership contracts (`unresolved = "report"`): `MUT205`
+//! (`unresolved-guarded-write`, `write-owners`), `MUT206` (`unresolved-guarded-read`,
+//! `read-owners`), and `MUT207` (`unresolved-guarded-call`, `call-owners`). `MUT201`, `MUT203`,
+//! and `MUT204` report the accesses they can tie to a target class; these rules count the ones
+//! they cannot: an attribute or method named like a target, accessed on an object of unknown
+//! class (a parameter no caller types, a loop variable, an untyped call result, `Any`, a
+//! protocol whose implementations heki cannot list), and an attribute name computed at run time
+//! written on an instance of a target class. Each is one finding at the access, so a baseline
+//! ratchets them down as annotations and refactorings make the accesses visible to the typed
+//! rules.
 
-use super::{MergedReports, OwnerRule, initializes_itself, runs_inside_allowed};
+use super::call_owners::CallOwnerRule;
+use super::{
+    Allowance, MergedReports, OwnerRule, ReadOwnerRule, initializes_itself, runs_inside_allowed,
+};
 use crate::{CheckContext, SitesByCaller};
+use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
-use heki_effect::{Construction, FuncKey, Unresolved};
+use heki_effect::{Access, Construction, FuncKey, Unresolved};
 use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
 
@@ -24,12 +31,6 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
     let sites = cx.sites_by_caller();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
-        if s.unresolved_write_sites.is_empty() {
-            continue;
-        }
-        let Some(unit) = cx.index.file_of(key).and_then(|p| cx.unit(p)) else {
-            continue;
-        };
         for w in &s.unresolved_write_sites {
             for rule in &strict {
                 let hits: Vec<_> = rule
@@ -40,33 +41,27 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                         Unresolved::Name(class) => t.classes.contains(class),
                     })
                     .collect();
-                if hits.is_empty()
-                    || rule.allowance.allows(key)
-                    || !rule.allowance.in_scope(key)
-                    || rule.allow_fresh && w.construction == Construction::Yes
-                {
+                if hits.is_empty() || rule.allow_fresh && w.construction == Construction::Yes {
                     continue;
                 }
-                let family: FxHashSet<String> = match &w.what {
-                    Unresolved::Name(_) => hits
-                        .iter()
-                        .flat_map(|t| t.classes.iter().cloned())
-                        .collect(),
-                    Unresolved::Receiver(_) => FxHashSet::default(),
+                // A computed name on a target class may be a class's own initialization
+                // (`setattr(self, name, v)` in `__init__`), as for `MUT201`; an attribute on an
+                // object of unknown class is tied to the classes its callers bind, which
+                // `MUT201` reports at those callers.
+                let (family, callers) = match &w.what {
+                    Unresolved::Name(_) => (
+                        hits.iter()
+                            .flat_map(|t| t.classes.iter().cloned())
+                            .collect(),
+                        Callers::Ignored,
+                    ),
+                    Unresolved::Receiver(_) => (FxHashSet::default(), Callers::TieEveryClass),
                 };
-                // A class's own initialization (`setattr(self, name, v)` in `__init__`), and a
-                // function that only runs inside the owner's operations, as for `MUT201`.
-                if initializes_itself(cx, key, &family, w.obj_params)
-                    || runs_inside_allowed(cx, &sites, &rule.allowance, &family, key, w.obj_params)
-                {
-                    continue;
-                }
-                // A parameter every caller path binds to an object of a known class is tied to
-                // it there (`MUT201` reports the typed callers).
-                if matches!(w.what, Unresolved::Receiver(_))
-                    && w.obj_params != 0
-                    && !untyped_above(cx, &sites, rule, key, w.obj_params)
-                {
+                let access = Unseen {
+                    func: key,
+                    obj: w.obj_params,
+                };
+                if !access.counts(cx, &sites, &rule.allowance, &family, callers) {
                     continue;
                 }
                 let target = match &w.what {
@@ -76,40 +71,165 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                     }
                 };
                 let guarded = listed(hits.iter().map(|t| t.text.as_str()));
-                reports.add(
-                    unit,
-                    key,
-                    w.span,
-                    &target,
-                    (key.fqn(), w.span),
-                    rule.note,
-                    || {
-                        let what = match &w.what {
-                            Unresolved::Receiver(attr) => format!(
-                                "writes `{attr}` ({}) on an object of unknown class",
-                                w.kind.as_str()
-                            ),
-                            Unresolved::Name(_) => format!(
-                                "writes an attribute named at run time ({}) on `{target}`",
-                                w.kind.as_str()
-                            ),
-                        };
-                        format!(
-                            "`{}` {what} {}: heki cannot tell whether it writes {guarded}",
-                            key.qualname,
-                            rule.allowance.where_text(
-                                "write owners",
-                                "forbidden writers",
-                                rule.name
-                            )
-                        )
-                    },
-                    Vec::new,
-                );
+                let what = match &w.what {
+                    Unresolved::Receiver(attr) => format!(
+                        "writes `{attr}` ({}) on an object of unknown class",
+                        w.kind.as_str()
+                    ),
+                    Unresolved::Name(_) => format!(
+                        "writes an attribute named at run time ({}) on `{target}`",
+                        w.kind.as_str()
+                    ),
+                };
+                add(cx, &mut reports, key, w.span, &target, rule.note, || {
+                    format!(
+                        "`{}` {what} {}: heki cannot tell whether it writes {guarded}",
+                        key.qualname,
+                        rule.allowance
+                            .where_text("write owners", "forbidden writers", rule.name)
+                    )
+                });
             }
         }
     }
     reports.emit(cx, "MUT205", out);
+}
+
+/// `MUT206`: reads of an attribute named like a target of a strict `read-owners` contract on
+/// an object of unknown class.
+pub(super) fn mut206(
+    cx: &CheckContext<'_>,
+    rules: &[ReadOwnerRule<'_>],
+    out: &mut Vec<Diagnostic>,
+) {
+    let strict: Vec<&ReadOwnerRule<'_>> = rules.iter().filter(|r| r.report_unresolved).collect();
+    if !cx.selection.is_enabled("MUT206") || strict.is_empty() {
+        return;
+    }
+    let sites = cx.sites_by_caller();
+    // An object of unknown class is no class's own `self`.
+    let no_class = FxHashSet::default();
+    let mut reports = MergedReports::default();
+    for (key, s) in cx.defined_functions() {
+        for a in &s.unresolved_access_sites {
+            let Access::Read(kind) = a.access else {
+                continue;
+            };
+            for rule in &strict {
+                let hits: Vec<_> = rule
+                    .targets
+                    .iter()
+                    .filter(|t| t.matches_attr(&a.name))
+                    .collect();
+                let family: FxHashSet<String> = hits
+                    .iter()
+                    .flat_map(|t| t.classes.iter().cloned())
+                    .collect();
+                let access = Unseen {
+                    func: key,
+                    obj: a.obj_params,
+                };
+                let callers = Callers::LeaveTargetClasses(&family);
+                if hits.is_empty()
+                    || !access.counts(cx, &sites, &rule.allowance, &no_class, callers)
+                {
+                    continue;
+                }
+                let guarded = listed(hits.iter().map(|t| t.text.as_str()));
+                add(cx, &mut reports, key, a.span, &a.name, rule.note, || {
+                    format!(
+                        "`{}` reads `{}` ({}) on an object of unknown class {}: heki cannot tell whether it reads {guarded}",
+                        key.qualname,
+                        a.name,
+                        kind.as_str(),
+                        rule.allowance
+                            .where_text("read owners", "forbidden readers", rule.name)
+                    )
+                });
+            }
+        }
+    }
+    reports.emit(cx, "MUT206", out);
+}
+
+/// `MUT207`: calls of a method named like a target of a strict `call-owners` contract on an
+/// object of unknown class.
+pub(super) fn mut207(
+    cx: &CheckContext<'_>,
+    rules: &[CallOwnerRule<'_>],
+    out: &mut Vec<Diagnostic>,
+) {
+    let strict: Vec<&CallOwnerRule<'_>> = rules.iter().filter(|r| r.report_unresolved).collect();
+    if !cx.selection.is_enabled("MUT207") || strict.is_empty() {
+        return;
+    }
+    let sites = cx.sites_by_caller();
+    // An object of unknown class is no class's own `self`.
+    let no_class = FxHashSet::default();
+    let mut reports = MergedReports::default();
+    for (key, s) in cx.defined_functions() {
+        for a in s
+            .unresolved_access_sites
+            .iter()
+            .filter(|a| a.access == Access::Call)
+        {
+            for rule in &strict {
+                let hits: Vec<_> = rule
+                    .targets
+                    .iter()
+                    .filter(|t| t.name.matches(&a.name))
+                    .collect();
+                let family: FxHashSet<String> =
+                    hits.iter().flat_map(|t| t.family.iter().cloned()).collect();
+                let access = Unseen {
+                    func: key,
+                    obj: a.obj_params,
+                };
+                let callers = Callers::LeaveTargetClasses(&family);
+                if hits.is_empty()
+                    || !access.counts(cx, &sites, &rule.allowance, &no_class, callers)
+                {
+                    continue;
+                }
+                let guarded = listed(hits.iter().map(|t| t.text.as_str()));
+                add(cx, &mut reports, key, a.span, &a.name, rule.note, || {
+                    format!(
+                        "`{}` calls `{}` on an object of unknown class {}: heki cannot tell whether it calls {guarded}",
+                        key.qualname,
+                        a.name,
+                        rule.allowance
+                            .where_text("call owners", "forbidden callers", rule.name)
+                    )
+                });
+            }
+        }
+    }
+    reports.emit(cx, "MUT207", out);
+}
+
+/// One report at the access itself, its target the name accessed (or the class written).
+fn add<'u>(
+    cx: &CheckContext<'u>,
+    reports: &mut MergedReports<'u>,
+    key: &FuncKey,
+    span: Span,
+    target: &str,
+    note: Option<&str>,
+    message: impl FnOnce() -> String,
+) {
+    let Some(unit) = cx.index.file_of(key).and_then(|p| cx.unit(p)) else {
+        return;
+    };
+    reports.add(
+        unit,
+        key,
+        span,
+        target,
+        (key.fqn(), span),
+        note,
+        message,
+        Vec::new,
+    );
 }
 
 /// `a`, `a` and `b`, `a`, `b` and 3 more.
@@ -122,16 +242,69 @@ fn listed<'t>(texts: impl Iterator<Item = &'t str>) -> String {
     }
 }
 
-/// Whether the object of `func`'s parameters `obj` comes from an object of unknown class on
-/// some path of project callers (outside the contract's allowed functions): a caller passes one
-/// that is not its own parameter, or the path ends in a function without project callers.
-/// Arguments of a project class end a path: the write is tied to that class there.
-fn untyped_above(
+/// What the callers binding a parameter tell about an access to its object.
+#[derive(Clone, Copy)]
+enum Callers<'f> {
+    /// Nothing: the access is the function's own.
+    Ignored,
+    /// A write: an object of a known class ties it to that class, and `MUT201` reports the
+    /// caller.
+    TieEveryClass,
+    /// A read or a call, which `MUT203` / `MUT204` do not follow into a parameter heki cannot
+    /// type: an object of one of these classes leaves the access to the strict rule, one of
+    /// another known class ties it.
+    LeaveTargetClasses(&'f FxHashSet<String>),
+}
+
+/// An access heki cannot tie to a class: in `func`, to the object of its parameters `obj`
+/// (none: not a parameter on every path).
+struct Unseen<'k> {
+    func: &'k FuncKey,
+    obj: u64,
+}
+
+impl Unseen<'_> {
+    /// Whether the access is a finding of the strict rule, under `MUT201`'s rules for what is
+    /// allowed: allowed functions and exempt methods, `forbidden-*`, a class's own
+    /// initialization (of `family`), a function that only runs inside allowed functions, and
+    /// what the callers bind to the object.
+    fn counts(
+        &self,
+        cx: &CheckContext<'_>,
+        sites: &SitesByCaller<'_>,
+        allowance: &Allowance,
+        family: &FxHashSet<String>,
+        callers: Callers<'_>,
+    ) -> bool {
+        if allowance.allows(self.func)
+            || !allowance.in_scope(self.func)
+            || initializes_itself(cx, self.func, family, self.obj)
+            || runs_inside_allowed(cx, sites, allowance, family, self.func, self.obj)
+        {
+            return false;
+        }
+        let leave = match callers {
+            Callers::Ignored => return true,
+            Callers::TieEveryClass => None,
+            Callers::LeaveTargetClasses(classes) => Some(classes),
+        };
+        self.obj == 0 || unknown_above(cx, sites, allowance, self.func, self.obj, leave)
+    }
+}
+
+/// Whether the object of `func`'s parameters `obj` comes, on some path of project callers
+/// (outside the contract's allowed functions), from an object heki cannot rule out: one of
+/// unknown class (a caller passes one that is not its own parameter, typed with a protocol
+/// whose implementations heki cannot list, or the path ends in a function without project
+/// callers), or an instance of a class of `leave`. Arguments of other project classes end a
+/// path.
+fn unknown_above(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
-    rule: &OwnerRule<'_>,
+    allowance: &Allowance,
     func: &FuncKey,
     obj: u64,
+    leave: Option<&FxHashSet<String>>,
 ) -> bool {
     let mut queue = VecDeque::from([(func.clone(), obj)]);
     let mut visited: FxHashSet<(FuncKey, u64)> = FxHashSet::default();
@@ -148,7 +321,7 @@ fn untyped_above(
         let mut callers: Vec<&FuncKey> = callers.iter().collect();
         callers.sort();
         for caller in callers {
-            if rule.allowance.allows(caller) {
+            if allowance.allows(caller) {
                 continue;
             }
             for (_, site) in sites.get(caller).into_iter().flatten() {
@@ -163,12 +336,14 @@ fn untyped_above(
                         let Some(o) = bc.params.get(k) else {
                             return true;
                         };
-                        // A protocol whose implementations heki cannot list: no caller above
-                        // ties the object to a class.
                         if o.of_unlisted_protocol() {
                             return true;
                         }
                         if o.typed_instance.is_some() {
+                            let classes = o.instance_classes();
+                            if leave.is_some_and(|l| classes.iter().any(|c| l.contains(c))) {
+                                return true;
+                            }
                             continue;
                         }
                         let Some((p, None)) = o.param else {

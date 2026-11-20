@@ -339,6 +339,28 @@ pub enum Unresolved {
     Name(String),
 }
 
+/// A read or a call heki cannot tie to a class (`MUT206`, `MUT207`): an attribute read, or a
+/// method called, on an object of unknown class, named like a target of a `read-owners` or
+/// `call-owners` contract with `unresolved = "report"`. A local fact, never propagated.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct UnresolvedAccessSite {
+    /// The attribute read or the method called.
+    pub name: String,
+    pub access: Access,
+    pub span: Span,
+    /// Parameters of the accessing function the object is on every path (bit 0: `self`).
+    pub obj_params: u64,
+}
+
+/// What an [`UnresolvedAccessSite`] does with its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    Read(ReadKind),
+    /// `obj.name(...)`, also through a bound-method alias or `getattr(obj, "name")(...)`.
+    Call,
+}
+
 /// Typed field read site for declarative Read Ownership (`MUT203`). A local fact: it is never
 /// propagated to callers (the rule walks the reverse call graph instead), so every final
 /// summary keeps exactly its own reads.
@@ -532,6 +554,9 @@ pub struct EffectSummary {
     pub returns_new: ReturnsNew,
     /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
     pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
+    /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
+    /// propagated).
+    pub unresolved_access_sites: BTreeSet<UnresolvedAccessSite>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -719,6 +744,14 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.unresolved_access_sites = out
+            .unresolved_access_sites
+            .into_iter()
+            .map(|mut site| {
+                site.span = Span { start: 0, end: 0 };
+                site
+            })
+            .collect();
         out.unmet_invalidation = out
             .unmet_invalidation
             .into_iter()
@@ -739,12 +772,14 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites, parameter changes, and unresolved writes are left out: those are never propagated.
+    /// sites, parameter changes, and unresolved accesses are left out: those are never
+    /// propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
             param_change_sites: BTreeMap::new(),
             unresolved_write_sites: BTreeSet::new(),
+            unresolved_access_sites: BTreeSet::new(),
             ..s.clone()
         };
         without_local(self) == without_local(other) && self.same_facts(other)
@@ -874,7 +909,7 @@ pub struct ArgOrigin {
     /// An instance of project class `class_fqn`.
     pub typed_instance: Option<String>,
     /// When `typed_instance` is a project protocol: the classes the argument is an instance of
-    /// ([`ArgOrigin::instance_classes`]). Only computed when an ownership contract is declared.
+    /// ([`ArgOrigin::instance_classes`]). Only computed when a contract is declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implementers: Option<Implementers>,
     /// Caller parameters the argument may be, as itself (through copies and phis).

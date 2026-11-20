@@ -1,7 +1,8 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`,
+//!   `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -208,6 +209,26 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Strict mode of a `write-owners` contract (`unresolved = \"report\"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class.",
         doc: include_str!("../rule-docs/MUT205.md"),
+    },
+    RuleMeta {
+        code: "MUT206",
+        slug: "unresolved-guarded-read",
+        family: RuleFamily::Mut,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Strict mode of a `read-owners` contract (`unresolved = \"report\"`): reading an attribute named like a target on an object of unknown class.",
+        doc: include_str!("../rule-docs/MUT206.md"),
+    },
+    RuleMeta {
+        code: "MUT207",
+        slug: "unresolved-guarded-call",
+        family: RuleFamily::Mut,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Strict mode of a `call-owners` contract (`unresolved = \"report\"`): calling a method named like a target on an object of unknown class.",
+        doc: include_str!("../rule-docs/MUT207.md"),
     },
     RuleMeta {
         code: "EFF101",

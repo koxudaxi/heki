@@ -312,6 +312,9 @@ EffectSummary(f) = {
                                                            // holding it (fresh-objects)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes (MUT205)
+    unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
+                                                           // contract's target on objects of unknown class;
+                                                           // never propagated (MUT206, MUT207)
 
     // Guards: when an effect runs
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy
@@ -345,6 +348,9 @@ when no subclass defines the name again (`ProjectDecls::class_str_constant`). Co
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
 invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
+`unresolved_access_sites` hold only the names a `read-owners` or `call-owners` contract with
+`unresolved = "report"` ends a target with (`Contracts::unresolved_read`,
+`Contracts::unresolved_call`), so a summary keeps no read or call no rule asks for.
 
 `CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
 invalidation contracts announced after the call on every normal path, and the next call; set on

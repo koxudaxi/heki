@@ -19,7 +19,7 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 31 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 33 rules in four families
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 
 ## Integrations
@@ -60,6 +60,8 @@
 - [readonly-type-mutation (MUT108)](https://heki.koxudaxi.dev/rules/readonly-type-mutation/): Family: Mutation & State (MUT) · Opt-in · Severity error · No automatic fix
 - [set-dict-quadratic-merge (OPT102)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Safe fix (--fix)
 - [summary-effect-regression (MUT103)](https://heki.koxudaxi.dev/rules/summary-effect-regression/): Family: Mutation & State (MUT) · Opt-in · Severity error · No automatic fix
+- [unresolved-guarded-call (MUT207)](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+- [unresolved-guarded-read (MUT206)](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
 - [unresolved-guarded-write (MUT205)](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
 - [unretained-async-task (EFF107)](https://heki.koxudaxi.dev/rules/unretained-async-task/): Family: Execution Effects (EFF) · Opt-in · Severity error · No automatic fix
 - [write-owner-violation (MUT201)](https://heki.koxudaxi.dev/rules/write-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix

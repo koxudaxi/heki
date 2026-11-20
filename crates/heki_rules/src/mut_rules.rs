@@ -1539,6 +1539,22 @@ const UNRESOLVED: &[&str] = &["ignore", "report"];
 /// violation).
 const FRESH_OBJECTS: &[&str] = &["allow", "report"];
 
+/// Whether a contract reports the accesses heki cannot tie to a class (`unresolved`).
+pub(crate) fn reports_unresolved(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        UNRESOLVED,
+        "`ignore` or `report`",
+        section,
+        contract,
+        "unresolved",
+    )? == "report")
+}
+
 /// Whether a contract allows the writes that construct the object they write (`fresh-objects`).
 pub(crate) fn allows_fresh(
     value: Option<&str>,
@@ -1634,14 +1650,11 @@ pub(crate) fn mut201(
             forbid_cached,
             note: rule.message.as_deref(),
             allow_fresh: allows_fresh(rule.fresh_objects.as_deref(), "write-owners", &rule.name)?,
-            report_unresolved: mode(
+            report_unresolved: reports_unresolved(
                 rule.unresolved.as_deref(),
-                UNRESOLVED,
-                "`ignore` or `report`",
                 "write-owners",
                 &rule.name,
-                "unresolved",
-            )? == "report",
+            )?,
         });
     }
 
@@ -2612,6 +2625,8 @@ struct ReadOwnerRule<'r> {
     targets: Vec<ContractTarget>,
     allowance: Allowance,
     note: Option<&'r str>,
+    /// `unresolved = "report"`: reads heki cannot tie to a class are reported (`MUT206`).
+    report_unresolved: bool,
 }
 
 /// Where one access (a read, a call) is reported.
@@ -2629,7 +2644,11 @@ pub(crate) fn mut203(
     cx: &CheckContext<'_>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
-    if !cx.selection.is_enabled("MUT203") || cx.config.read_owners.is_empty() {
+    let (reads, unresolved) = (
+        cx.selection.is_enabled("MUT203"),
+        cx.selection.is_enabled("MUT206"),
+    );
+    if !reads && !unresolved || cx.config.read_owners.is_empty() {
         return Ok(());
     }
     let all_classes = project_classes(cx);
@@ -2650,7 +2669,16 @@ pub(crate) fn mut203(
                 exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
             })?,
             note: rule.message.as_deref(),
+            report_unresolved: reports_unresolved(
+                rule.unresolved.as_deref(),
+                "read-owners",
+                &rule.name,
+            )?,
         });
+    }
+    unresolved::mut206(cx, &rules, out);
+    if !reads {
+        return Ok(());
     }
     let sites = cx.sites_by_caller();
     let mut reports = MergedReports::default();

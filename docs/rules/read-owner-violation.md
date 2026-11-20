@@ -112,7 +112,10 @@ No automatic fix.
     name matches any function or method of that name, an entry with a dot or a glob is matched
     like `allowed-readers`.
   - `message`: the help of every report of the contract.
+  - `unresolved`: `"ignore"` (default) or `"report"`: also report the reads the contract cannot
+    tie to a class, under `MUT206`.
 
 Known limitation: a read through a parameter without a project-class annotation
 (`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown
-there; unlike a write, a read is not handed to the caller that knows it.
+there; unlike a write, a read is not handed to the caller that knows it. With
+`unresolved = "report"`, `MUT206` reports it.

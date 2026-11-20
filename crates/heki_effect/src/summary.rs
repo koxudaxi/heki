@@ -14,12 +14,11 @@ use crate::resolver::{
     is_generator_function, self_aliases,
 };
 use crate::{
-    ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget,
-    Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject,
-    Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, PerItem, ProjectDecls, ReadKind,
-    ReturnsNew, Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite,
-    Unresolved,
-    UnresolvedWriteSite, WriteKind,
+    Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
+    CallTarget, Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey,
+    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, PerItem,
+    ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite,
+    TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
@@ -360,6 +359,8 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     };
     into.unresolved_write_sites
         .extend(other.unresolved_write_sites);
+    into.unresolved_access_sites
+        .extend(other.unresolved_access_sites);
     into.refresh_typed_field_writes();
 }
 
@@ -1136,7 +1137,7 @@ impl<'a> Extractor<'a> {
         let typed_instance = self.project_class(var);
         let implementers = typed_instance
             .as_deref()
-            .filter(|_| self.ownership)
+            .filter(|_| self.contracts.is_some())
             .and_then(|class| self.cx.project.protocol(class))
             .map(|listed| match listed {
                 Some(classes) => Implementers::Listed(classes.to_vec()),
@@ -1898,6 +1899,7 @@ impl<'a> Extractor<'a> {
                     self.summary.private_calls.insert(method.clone());
                 }
                 let callee = self.cx.resolve_method(self.val(*recv), method);
+                self.unresolved_access(method, Access::Call, *recv, span);
                 // A container method changes its receiver in place, unless the receiver's
                 // class defines the method itself: then what that method does is in its
                 // summary (`Stats.clear()` may change nothing).
@@ -1962,6 +1964,7 @@ impl<'a> Extractor<'a> {
                     && let Some((recv, method)) = callee_var.and_then(|v| self.bound_method(v))
                 {
                     let target = self.cx.resolve_method(self.val(recv), &method);
+                    self.unresolved_access(&method, Access::Call, recv, span);
                     let (recv_origin, recv_is_self) = self.receiver(recv, bb);
                     let call = Call {
                         dst: *dst,
@@ -2347,6 +2350,9 @@ impl<'a> Extractor<'a> {
 
     /// Read of attribute `attr` on the object `owner`, when it has a project class.
     fn typed_read(&mut self, owner: Owner, attr: &str, kind: ReadKind, span: Span) {
+        if let Some(var) = owner.var {
+            self.unresolved_access(attr, Access::Read(kind), var, span);
+        }
         for class in owner.typed_classes {
             self.summary
                 .typed_field_read_sites
@@ -2396,6 +2402,34 @@ impl<'a> Extractor<'a> {
             }
             Some(_) => false,
         }
+    }
+
+    /// Record a read or a call of `name` heki cannot tie to a class (`MUT206`, `MUT207`) on the
+    /// object `obj` holds, when a strict contract names it: the object counts as a parameter
+    /// only when it is one on every path.
+    fn unresolved_access(&mut self, name: &str, access: Access, obj: VarId, span: Span) {
+        let Some(c) = self.contracts else {
+            return;
+        };
+        let named = match access {
+            Access::Read(_) => c.unresolved_read(name),
+            Access::Call => c.unresolved_call(name),
+        };
+        if !named || !self.unknown_class(obj) {
+            return;
+        }
+        let obj_params = match self.param_alias.get(&obj) {
+            Some((i, None)) => 1u64 << i,
+            _ => 0,
+        };
+        self.summary
+            .unresolved_access_sites
+            .insert(UnresolvedAccessSite {
+                name: name.to_owned(),
+                access,
+                span,
+                obj_params,
+            });
     }
 
     /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds: the

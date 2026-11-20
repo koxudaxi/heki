@@ -1813,3 +1813,227 @@ write-universe = ['DataModel.meta["kw"]']
     let pass = diags.iter().find(|x| x["rule_code"] == "EFF201").unwrap();
     assert_eq!(pass["sites"].as_u64(), Some(2));
 }
+
+// ==================================================== strict reads and calls (MUT206, MUT207)
+
+const STRICT_ACCESS_MODEL: &str = r#"class Reference:
+    def __init__(self) -> None:
+        self.children: list["Reference"] = []
+
+
+class DataType:
+    def __init__(self) -> None:
+        self.ref: Reference | None = None
+
+    def replace_reference(self, ref: Reference) -> None:
+        self.ref = ref
+
+
+class Other:
+    def __init__(self) -> None:
+        self.children: list[str] = []
+
+    def replace_reference(self, ref: Reference) -> None:
+        pass
+"#;
+
+const STRICT_ACCESS_USE: &str = r#"from typing import Any, Protocol
+
+from pkg.model import DataType, Other, Reference
+
+
+class Opaque(Protocol):
+    pass
+
+
+def kids(ref):
+    return ref.children
+
+
+def kids_any(ref: Any):
+    return getattr(ref, "children"), ref.__dict__["children"]
+
+
+def kids_typed(ref: Reference):
+    return ref.children
+
+
+def kids_of_other(obj):
+    return obj.children
+
+
+def call_kids_of_other(o: Other) -> None:
+    kids_of_other(o)
+
+
+def kids_handed(ref):
+    return ref.children
+
+
+def call_kids_handed(r: Reference) -> None:
+    kids_handed(r)
+
+
+def kids_opaque(ref: Opaque):
+    return ref.children
+
+
+def swap(dt, ref: Reference) -> None:
+    dt.replace_reference(ref)
+
+
+def swap_alias(dt, ref: Reference) -> None:
+    replace = dt.replace_reference
+    replace(ref)
+
+
+def swap_getattr(dt, ref: Reference) -> None:
+    getattr(dt, "replace_reference")(ref)
+
+
+def swap_typed(dt: DataType, ref: Reference) -> None:
+    dt.replace_reference(ref)
+
+
+def swap_other(o: Other, ref: Reference) -> None:
+    o.replace_reference(ref)
+
+
+def call_unknown(callback) -> None:
+    callback()
+
+
+def narrowed(obj: object, ref: Reference) -> None:
+    if isinstance(obj, DataType):
+        obj.replace_reference(ref)
+"#;
+
+const STRICT_ACCESS_STORE: &str = r#"class GenerationStore:
+    def swap(self, dt, ref) -> None:
+        dt.replace_reference(ref)
+
+    def kids(self, ref):
+        return ref.children
+"#;
+
+fn strict_access_project(name: &str, mode: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204", "MUT206", "MUT207"]
+
+[[tool.heki.read-owners]]
+name = "children"
+targets = ["Reference.children"]
+allowed-readers = ["pkg.store.*"]
+{mode}
+[[tool.heki.call-owners]]
+name = "mutators"
+targets = ["DataType.replace_reference"]
+allowed-callers = ["pkg.store.*"]
+{mode}"#
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", STRICT_ACCESS_MODEL)
+    .write("pkg/use.py", STRICT_ACCESS_USE)
+    .write("pkg/store.py", STRICT_ACCESS_STORE);
+    p
+}
+
+#[test]
+fn strict_modes_report_the_reads_and_calls_heki_cannot_tie_to_a_class() {
+    let u = "pkg/use.py";
+    let typed = vec![
+        d(u, 19, "MUT203", "kids_typed", "Reference.children"),
+        d(u, 56, "MUT204", "swap_typed", "DataType.replace_reference"),
+        d(u, 69, "MUT204", "narrowed", "DataType.replace_reference"),
+    ];
+    // Off by default: the typed rules alone.
+    let p = strict_access_project("strict_access_off", "");
+    assert_eq!(found(&diagnostics(&p, &[])), typed);
+    let p = strict_access_project("strict_access_on", "unresolved = \"report\"\n");
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            // An unannotated parameter, `Any` (also through `getattr` and `__dict__`).
+            d(u, 11, "MUT206", "kids", "children"),
+            d(u, 15, "MUT206", "kids_any", "children"),
+            d(u, 15, "MUT206", "kids_any", "children"),
+            typed[0].clone(),
+            // A parameter its only caller binds to a `Reference`: no other rule sees that read.
+            // One bound to an `Other` reads no target.
+            d(u, 31, "MUT206", "kids_handed", "children"),
+            // A protocol without members.
+            d(u, 39, "MUT206", "kids_opaque", "children"),
+            // A method call, a bound-method alias, `getattr`; not a typed call (`MUT204`), a
+            // method of another class, a value of unknown origin, or a narrowed receiver.
+            d(u, 43, "MUT207", "swap", "replace_reference"),
+            d(u, 48, "MUT207", "swap_alias", "replace_reference"),
+            d(u, 52, "MUT207", "swap_getattr", "replace_reference"),
+            typed[1].clone(),
+            typed[2].clone(),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 11),
+        "`kids` reads `children` (direct_attr) on an object of unknown class outside the read owners of `children`: heki cannot tell whether it reads `Reference.children`"
+    );
+    assert_eq!(
+        message_at(&diags, u, 43),
+        "`swap` calls `replace_reference` on an object of unknown class outside the call owners of `mutators`: heki cannot tell whether it calls `DataType.replace_reference`"
+    );
+    // The rules can be ignored like any other.
+    assert_eq!(
+        found(&diagnostics(&p, &["--ignore", "MUT206,MUT207"])),
+        typed
+    );
+}
+
+#[test]
+fn strict_reads_and_calls_honor_the_contract_scopes_and_values() {
+    let p = strict_access_project("strict_access_scopes", "unresolved = \"report\"\n");
+    // `forbidden-*`: only the functions they name report.
+    p.write(
+        "pyproject.toml",
+        &p.read("pyproject.toml").replace(
+            "allowed-readers = [\"pkg.store.*\"]\n",
+            "allowed-readers = [\"pkg.store.*\"]\nforbidden-readers = [\"pkg.use.kids_any\"]\n",
+        ),
+    );
+    let reads: Vec<_> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|x| x.2 == "MUT206")
+        .collect();
+    assert_eq!(
+        reads,
+        vec![
+            d("pkg/use.py", 15, "MUT206", "kids_any", "children"),
+            d("pkg/use.py", 15, "MUT206", "kids_any", "children"),
+        ]
+    );
+    let strict = p.read("pyproject.toml");
+    for (section, contract) in [("read-owners", "children"), ("call-owners", "mutators")] {
+        let at = strict.find(&format!("name = \"{contract}\"")).unwrap();
+        let (head, tail) = strict.split_at(at);
+        let config = format!(
+            "{head}{}",
+            tail.replacen("unresolved = \"report\"", "unresolved = \"maybe\"", 1)
+        );
+        p.write("pyproject.toml", &config);
+        let (code, stdout, stderr) = p.check(&[]);
+        assert_eq!(code, 2, "{stdout}{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "unknown `unresolved` value `maybe` in {section} `{contract}` (expected `ignore` or `report`)"
+            )),
+            "{stderr}"
+        );
+    }
+}

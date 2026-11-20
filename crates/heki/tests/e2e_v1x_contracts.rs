@@ -862,7 +862,8 @@ fn contract_configuration_errors_exit_2() {
         "[[tool.heki.write-owners]]\nname = \"w\"\ntargets = [\"Model.fields\"]\nexempt-methods = [\"[bad\"]\n",
         "invalid glob `[bad` in write-owners.exempt-methods",
     );
-    // A contract whose rule does not run is not validated (as for `write-owners`).
+    // A contract whose rules do not run (`MUT203`, and its strict mode `MUT206`) is not
+    // validated (as for `write-owners`).
     p.write(
         "pyproject.toml",
         &format!(
@@ -870,7 +871,7 @@ fn contract_configuration_errors_exit_2() {
             readers("targets = [\"children\"]\n")
         ),
     );
-    assert_eq!(p.check(&["--ignore", "MUT203"]).0, 0);
+    assert_eq!(p.check(&["--ignore", "MUT203,MUT206"]).0, 0);
 }
 
 const SILENT_SRC: &str = r#"import time

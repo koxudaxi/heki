@@ -50,6 +50,16 @@ name = "ledger"
 targets = ["Ledger.post", "Receipt"]
 allowed-callers = ["Store.*"]
 
+[[tool.heki.read-owners]]
+name = "seal"
+targets = ["Seal.code"]
+unresolved = "report"
+
+[[tool.heki.call-owners]]
+name = "seal-break"
+targets = ["Seal.break_open"]
+unresolved = "report"
+
 [[tool.heki.effect-boundaries]]
 name = "pure"
 scopes = ["pkg.pure"]
@@ -192,6 +202,12 @@ const KEY_SUBCLASS: &str =
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
 const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
+// The strict reads and calls: helpers that type nothing read and call a guarded attribute and
+// method; a caller in another module binds their object to another class, then to the guarded
+// one.
+const SEAL: &str = "class Seal:\n    def __init__(self):\n        self.code = \"\"\n\n    def break_open(self):\n        return None\n";
+const SEAL_PEEK: &str = "def peek(s):\n    return s.code\n\n\ndef crack(s):\n    s.break_open()\n";
+const SEAL_USE: &str = "from pkg.seal_peek import crack, peek\n\n\nclass Plain:\n    code = \"\"\n\n    def break_open(self):\n        return None\n\n\ndef use(p: Plain):\n    peek(p)\n    crack(p)\n";
 const STRICT_USE: &str = "from pkg.model import Registry\nfrom pkg.strict_ops import _reset\n\n\ndef run(r: Registry):\n    _reset(r)\n";
 
 // Files: a module a caller already imports is created, then deleted; a stub, then a package of
@@ -586,6 +602,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
         ("pkg/key_class.py", KEY_CLASS),
+        ("pkg/seal.py", SEAL),
+        ("pkg/seal_peek.py", SEAL_PEEK),
         ("pkg/journal.py", JOURNAL),
         ("pkg/headline.py", HEADLINE),
         ("pkg/safe_journal.py", SAFE_JOURNAL),
@@ -1135,12 +1153,12 @@ fn steps_small_displays() -> Vec<Step> {
     ]
 }
 
-/// Constant keys, objects under construction, and the strict mode. A key constant is a
+/// Constant keys, objects under construction, and the strict modes. A key constant is a
 /// declaration another module's summary resolves names through: one without `Final` stops
 /// being one when a third module rebinds it, and a class constant when a subclass in another
-/// module defines the name again; whether a helper
-/// keeps the object its caller hands it is a summary fact of the helper; whether a parameter is
-/// typed is a fact of the callers the strict mode walks.
+/// module defines the name again; whether a helper keeps the object its caller hands it is a
+/// summary fact of the helper; whether a parameter is typed, and with which class, is a fact of
+/// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls).
 fn steps_keys_fresh_strict() -> Vec<Step> {
     let storing = FRESH_OPS.replace(
         "    r.entries.append(1)\n",
@@ -1221,6 +1239,46 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         )
         .present(&[("pkg/strict_use.py", "MUT201")])
         .absent(&[("pkg/strict_ops.py", "MUT205")]),
+        Step::new(
+            "a caller in another module binds the helpers' object to another class",
+            vec![Action::Create("pkg/seal_use.py", SEAL_USE.to_owned())],
+        )
+        .absent(&[
+            ("pkg/seal_peek.py", "MUT206"),
+            ("pkg/seal_peek.py", "MUT207"),
+        ]),
+        Step::new(
+            "the caller binds a guarded object",
+            vec![Action::Save(
+                "pkg/seal_use.py",
+                SEAL_USE
+                    .replace("def use(p: Plain):", "def use(p: Seal):")
+                    .replace(
+                        "import crack, peek\n",
+                        "import crack, peek\nfrom pkg.seal import Seal\n",
+                    ),
+            )],
+        )
+        .present(&[
+            ("pkg/seal_peek.py", "MUT206"),
+            ("pkg/seal_peek.py", "MUT207"),
+        ]),
+        Step::new(
+            "the caller binds the other class again",
+            vec![save("pkg/seal_use.py", SEAL_USE)],
+        )
+        .absent(&[
+            ("pkg/seal_peek.py", "MUT206"),
+            ("pkg/seal_peek.py", "MUT207"),
+        ]),
+        Step::new(
+            "the caller is deleted",
+            vec![Action::Delete("pkg/seal_use.py")],
+        )
+        .present(&[
+            ("pkg/seal_peek.py", "MUT206"),
+            ("pkg/seal_peek.py", "MUT207"),
+        ]),
     ]
 }
 

@@ -1128,8 +1128,8 @@ fn extension_configuration_errors_exit_2() {
         "[[tool.heki.read-owners]]\nname = \"r\"\ntargets = [\"Model.fields\"]\nforbidden-readers = [\"[r\"]\n",
         "invalid glob `[r` in read-owners.forbidden-readers",
     );
-    // A contract whose rule does not run is not validated (as for the other contracts); a
-    // target that names nothing reports nothing.
+    // A contract whose rules do not run (`MUT204`, and its strict mode `MUT207`) is not
+    // validated (as for the other contracts); a target that names nothing reports nothing.
     p.write(
         "pyproject.toml",
         &format!(
@@ -1137,7 +1137,7 @@ fn extension_configuration_errors_exit_2() {
             owners("targets = [\"Store.[save\"]\n")
         ),
     );
-    assert_eq!(p.check(&["--ignore", "MUT204"]).0, 0);
+    assert_eq!(p.check(&["--ignore", "MUT204,MUT207"]).0, 0);
     p.write(
         "pyproject.toml",
         &format!(
