@@ -144,7 +144,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   candidate; no function with a candidate in the corpora passes it.
 - **`LoopBound`** (never a Soundness premise; used for profitability and Advisory noise only):
   - `ConstSmall(k)`: a `for` over a small display (below) or `range(...)` (the builtin, by
-    name resolution) spanning at most 8, also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
+    name resolution) spanning at most 16 (`SMALL_MAX`), also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
     `filter`, and `.items()` / `.keys()` / `.values()`, and with range bounds that are constant
     integer expressions (`+`, `-`, `*`, module constants included).
   - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
@@ -158,7 +158,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `Unbounded`: everything else.
 - **Size facts** (`heki_ir::facts`, the one home of size and trip-count facts; profitability and
   Advisory noise only, never Soundness premises):
-  - A **small display** (`SmallDisplay`) is a list, tuple, set, or dict display of at most 8
+  - A **small display** (`SmallDisplay`) is a list, tuple, set, or dict display of at most 16
     items (`SMALL_MAX`) without `*` / `**` unpacking that nothing grows or lets escape.
     Shrinking it and passing it to read-only builtins are fine; a store at an unknown index
     (`xs[k] = v`, possibly a slice) counts as growth.

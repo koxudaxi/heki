@@ -48,11 +48,12 @@ Two independent questions decide whether heki offers the rewrite:
 
 A size-dependent rule reports nothing when the code fixes the size:
 
-- the container is a display of at most 8 items, without `*` / `**` unpacking, that nothing
+- the container is a display of at most 16 items, without `*` / `**` unpacking, that nothing
   grows or lets escape. Shrinking it (`expected.pop(0)` on `expected = [b"a", b""]`) and
   read-only builtins are fine. This holds also through local names, module constants, and other
   modules' module-level displays and class attributes;
-- the loop runs a fixed number of times: over a small display or a `range` of constants;
+- the loop runs a fixed number of times: over a small display or a `range` of constants with
+  at most 16 steps;
 - the list is rebuilt in every iteration;
 - the loop's own test caps the accumulator: `while len(buf) < 10`.
 

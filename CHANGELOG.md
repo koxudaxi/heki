@@ -14,6 +14,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   CPython 3.15's sampling profiler, whose format can still change. The new
   [Experimental Features](https://heki.koxudaxi.dev/experimental/) page lists every experimental
   feature, and `heki rule` says when a rule is experimental.
+- Small displays and loop bounds now go up to 16 items (8 before), so loops whose fixed trip
+  count is 9 to 16 and containers of 9 to 16 items no longer get size-dependent reports
+  (`OPT103`, `OPT110`, `OPT111`, `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`, `EFF102`,
+  `EFF103`).
 
 ### Fixed
 
@@ -31,6 +35,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - The language server, when the client names no workspace folder, indexes the working directory
   in the form it compares document paths in; on Windows a document could otherwise be missed
   as part of the project.
+- `OPT113` (`nested-loop-equijoin`) no longer reports a join when the code fixes the size of
+  either loop, such as a module tuple of operation names or `range(10)`: the cost then grows
+  with the other side only. Its help for the grouped index now says to read each outer key with
+  `.get(key, [])`, so that a key with no element keeps its empty list.
 
 ## [0.1.0] - 2026-11-21
 
