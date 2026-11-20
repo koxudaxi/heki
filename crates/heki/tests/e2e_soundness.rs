@@ -1249,6 +1249,15 @@ const IR_COUNTEREXAMPLES: &[Expect] = &[
             ),
         )],
     ),
+    // `locals` / `eval` reached through an alias or a call of `map` run in this frame.
+    (
+        "cx_locals_through_alias",
+        &[("OPT101", V::Blocked("A1HazardFree: A1 hazard: `locals`"))],
+    ),
+    (
+        "cx_eval_called_by_map",
+        &[("OPT101", V::Blocked("A1HazardFree: A1 hazard: `eval`"))],
+    ),
 ];
 
 const CAPTURED: &[(&str, V)] = &[(

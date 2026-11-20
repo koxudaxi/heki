@@ -265,3 +265,86 @@ fn patterns_bind_the_matched_items() {
     let value = def_of(&copy_of("value")).unwrap();
     assert_eq!(value["SubscriptLoad"]["key_const"], "k");
 }
+
+// ===================================================================== frame introspection
+
+#[test]
+fn a_reference_to_an_introspection_function_is_an_a1_hazard() {
+    let src = "\
+import inspect as ins
+from inspect import currentframe
+from builtins import locals as snap_import
+
+snap = locals
+
+
+def alias(items):
+    snapshot = locals
+    return snapshot()
+
+
+def module_alias():
+    return snap()
+
+
+def imported():
+    return currentframe(), snap_import()
+
+
+def module_attribute():
+    frame = ins.currentframe
+    return frame()
+
+
+def passed(codes):
+    return list(map(eval, codes))
+
+
+def vars_alias():
+    v = vars
+    return v()
+
+
+def local_named_locals():
+    locals = {}
+    return locals
+
+
+def vars_of(obj):
+    return vars(obj)
+
+
+def local_import():
+    from builtins import locals as here
+    return here()
+
+
+def unrelated_here():
+    return here()
+";
+    let p = Project::new("ir_a1_references");
+    p.write("m.py", src);
+    let (_, stdout, _) = p.heki(&["assumptions", "."]);
+    let hazards: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("A1 hazard:"))
+        .map(|l| l.split_once(' ').unwrap().1)
+        .collect();
+    // A variable named `locals`, `vars(obj)`, and another function's local `here` read no
+    // frame.
+    assert_eq!(
+        hazards,
+        [
+            "[<module>] A1 hazard: locals",
+            "[alias] A1 hazard: locals",
+            "[module_alias] A1 hazard: locals",
+            "[imported] A1 hazard: inspect.currentframe",
+            "[imported] A1 hazard: locals",
+            "[module_attribute] A1 hazard: inspect.currentframe",
+            "[passed] A1 hazard: eval",
+            "[vars_alias] A1 hazard: vars()",
+            "[local_import] A1 hazard: locals",
+        ],
+        "{stdout}"
+    );
+}

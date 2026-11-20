@@ -35,10 +35,35 @@ pub fn build_module_ir(
         }
     }
 
+    let mut introspection_imports = FxHashMap::default();
+    let mut module_aliases = FxHashMap::default();
+    let module_scope = semantic.scopes.first().map(|s| s.id);
+    for imp in semantic
+        .imports
+        .iter()
+        .filter(|i| Some(i.scope) == module_scope)
+    {
+        match (&imp.module, imp.is_from) {
+            (Some(module), true) => {
+                if let Some(kind) =
+                    introspection_kind(&format!("{module}.{}", imp.imported_name), true)
+                {
+                    introspection_imports.insert(imp.bound_name.clone(), kind);
+                }
+            }
+            (None, false) if imp.imported_name.split('.').next() != Some(&imp.bound_name) => {
+                module_aliases.insert(imp.bound_name.clone(), imp.imported_name.clone());
+            }
+            _ => {}
+        }
+    }
+
     let mut ctx = ModuleLowerer {
         source,
         profile,
         future_annotations: semantic.has_future_annotations,
+        introspection_imports,
+        module_aliases,
         class_by_span,
         lazy_import_names,
         functions: Vec::new(),
@@ -71,6 +96,7 @@ pub fn build_module_ir(
     });
 
     let mut functions = ctx.functions;
+    record_module_introspection_aliases(&mut functions, module_fn, &ctx.introspection_imports);
     let constants = crate::facts::refine_loops(
         &mut functions,
         module_fn,
@@ -83,6 +109,77 @@ pub fn build_module_ir(
         has_future_annotations: semantic.has_future_annotations,
         has_star_import: ctx.has_star_import,
         constants,
+    }
+}
+
+/// Module globals bound to a frame-introspection function (`snapshot = locals` at module
+/// level): a function reading one may call it in its own frame (Assumption A1(a)). The names
+/// an import binds (`imported`) were recorded where they are read.
+fn record_module_introspection_aliases(
+    functions: &mut [IrFunction],
+    module_fn: FunctionId,
+    imported: &FxHashMap<String, &'static str>,
+) {
+    let module = &functions[module_fn.0 as usize];
+    let hazard_at: FxHashMap<Span, &str> = module
+        .a1_hazards
+        .iter()
+        .map(|h| (h.span, h.kind.as_str()))
+        .collect();
+    let defs: FxHashMap<VarId, &Inst> = module
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| Some((i.kind.dst()?, i)))
+        .collect();
+    let mut aliases: FxHashMap<String, String> = FxHashMap::default();
+    for inst in module.blocks.iter().flat_map(|b| &b.insts) {
+        let InstKind::StoreGlobal { name, value } = &inst.kind else {
+            continue;
+        };
+        if imported.contains_key(name) {
+            continue;
+        }
+        let mut v = *value;
+        while let Some(def) = defs.get(&v) {
+            match &def.kind {
+                InstKind::Copy { src, .. } => v = *src,
+                InstKind::Import {
+                    module: Some(m),
+                    name: imported,
+                    ..
+                } => {
+                    if let Some(kind) = introspection_kind(&format!("{m}.{imported}"), true) {
+                        aliases.insert(name.clone(), kind.to_owned());
+                    }
+                    break;
+                }
+                _ => {
+                    if let Some(kind) = hazard_at.get(&def.span) {
+                        aliases.insert(name.clone(), (*kind).to_owned());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if aliases.is_empty() {
+        return;
+    }
+    for f in functions.iter_mut().filter(|f| f.id != module_fn) {
+        let reads: Vec<A1Hazard> = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(|i| match &i.kind {
+                InstKind::LoadGlobal { name, .. } => aliases.get(name).map(|kind| A1Hazard {
+                    kind: kind.clone(),
+                    span: i.span,
+                }),
+                _ => None,
+            })
+            .collect();
+        f.a1_hazards.extend(reads);
     }
 }
 
@@ -138,6 +235,12 @@ struct ModuleLowerer<'a> {
     profile: RuntimeProfile,
     /// `from __future__ import annotations`: annotations stay strings.
     future_annotations: bool,
+    /// Module globals bound by importing a frame-introspection function (`from sys import
+    /// _getframe as frame`), with its `A1Hazard` kind.
+    introspection_imports: FxHashMap<String, &'static str>,
+    /// Modules the module body imports under another name (`import inspect as ins`): bound
+    /// name -> module.
+    module_aliases: FxHashMap<String, String>,
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
     functions: Vec<IrFunction>,
@@ -153,6 +256,15 @@ struct ModuleLowerer<'a> {
 }
 
 impl<'a> ModuleLowerer<'a> {
+    /// `dotted` with an import alias as its first name replaced by the module it names.
+    fn resolve_module_alias(&self, dotted: &str) -> String {
+        let (head, rest) = dotted.split_once('.').unwrap_or((dotted, ""));
+        match self.module_aliases.get(head) {
+            Some(module) if !rest.is_empty() => format!("{module}.{rest}"),
+            _ => dotted.to_owned(),
+        }
+    }
+
     fn slice_text(&self, span: Span) -> String {
         let start = span.start as usize;
         let end = span.end as usize;
@@ -404,6 +516,8 @@ struct FnBuilder<'m, 'a> {
     a1_hazards: Vec<A1Hazard>,
     /// `*x` operands of displays and calls (`IrFunction::starred`).
     starred: Vec<(VarId, u32)>,
+    /// Local names bound by importing a frame-introspection function, with its kind.
+    introspection_locals: FxHashMap<String, &'static str>,
 
     /// Lexical isolation map for PEP 709 inlined comprehension targets: `raw_name -> isolated_ssa_name`.
     comp_target_renames: Vec<FxHashMap<String, String>>,
@@ -471,6 +585,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             finished_hints: Vec::new(),
             a1_hazards: Vec::new(),
             starred: Vec::new(),
+            introspection_locals: FxHashMap::default(),
             comp_target_renames: Vec::new(),
         }
     }
@@ -999,6 +1114,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                         .as_ref()
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| alias.name.to_string());
+                    if !self.is_module_body
+                        && let Some(kind) = module
+                            .as_ref()
+                            .and_then(|m| introspection_kind(&format!("{m}.{}", alias.name), true))
+                    {
+                        self.introspection_locals.insert(bound.clone(), kind);
+                    }
                     let dst = self.fresh_var(Some(bound.clone()));
                     self.emit(
                         InstKind::Import {
@@ -2194,7 +2316,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     fn lower_expr(&mut self, expr: &'a Expr) -> VarId {
         let span = Span::from(expr.range());
         match expr {
-            Expr::Name(n) => self.read_var(n.id.as_str(), span),
+            Expr::Name(n) => {
+                let name = n.id.as_str();
+                let global_name = self.resolves_to_global(name);
+                self.record_a1_reference(name, global_name, span);
+                self.read_var(name, span)
+            }
             Expr::Named(named) => {
                 let val = self.lower_expr(&named.value);
                 // PEP 572: walrus writes into the enclosing scope, bypassing comprehension target
@@ -2388,6 +2515,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 let obj = self.lower_expr(&attr.value);
                 let attr_name = attr.attr.to_string();
                 self.record_a1_attr_if_hazard(&attr_name, span);
+                if let Some(dotted) = expr_dotted_name(expr) {
+                    self.record_a1_reference(&dotted, false, span);
+                }
                 let dst = self.fresh_var(None);
                 self.emit(
                     InstKind::AttrLoad {
@@ -2727,7 +2857,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 call.arguments.keywords.len(),
                 span,
             );
-            let callee_var = Some(self.lower_expr(&call.func));
+            // The call itself is the hazard (above), not the read of its callee.
+            let callee_var = Some(match call.func.as_ref() {
+                Expr::Name(n) => self.read_var(n.id.as_str(), Span::from(n.range)),
+                other => self.lower_expr(other),
+            });
             let args: Vec<VarId> = call
                 .arguments
                 .args
@@ -3022,6 +3156,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     // -------------------------------------------------------------------------
     // A1 Hazard Detection
     // -------------------------------------------------------------------------
+    /// A call of a frame-introspection function, by the callee's spelling.
     fn record_a1_call_if_hazard(
         &mut self,
         callee: &str,
@@ -3029,29 +3164,53 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         kwarg_count: usize,
         span: Span,
     ) {
-        let hazard = match callee {
-            "eval" | "builtins.eval" => Some("eval"),
-            "exec" | "builtins.exec" => Some("exec"),
-            "locals" | "builtins.locals" => Some("locals"),
-            "vars" | "builtins.vars" if arg_count == 0 && kwarg_count == 0 => Some("vars()"),
-            "sys._getframe" | "_getframe" => Some("sys._getframe"),
-            "inspect.currentframe" => Some("inspect.currentframe"),
-            "gc.get_objects" => Some("gc.get_objects"),
-            "gc.get_referrers" => Some("gc.get_referrers"),
-            "ctypes.pythonapi" => Some("ctypes.pythonapi"),
-            _ if callee.ends_with("._getframe") => Some("sys._getframe"),
-            _ if callee.ends_with(".currentframe") => Some("inspect.currentframe"),
-            _ if callee.ends_with(".get_objects") && callee.contains("gc.") => {
-                Some("gc.get_objects")
-            }
-            _ => None,
-        };
-        if let Some(kind) = hazard {
+        let kind = self.introspection_binding(callee).or_else(|| {
+            introspection_kind(
+                &self.module.resolve_module_alias(callee),
+                arg_count == 0 && kwarg_count == 0,
+            )
+        });
+        self.push_a1_hazard(kind, span);
+    }
+
+    /// The `A1Hazard` kind of the introspection function an import bound `name` to, in the
+    /// scope a read of it here resolves to.
+    fn introspection_binding(&self, name: &str) -> Option<&'static str> {
+        if self.is_module_body || self.resolves_to_global(name) {
+            self.module.introspection_imports.get(name).copied()
+        } else {
+            self.introspection_locals.get(name).copied()
+        }
+    }
+
+    /// A reference to a frame-introspection function that is not a call of it (`snapshot =
+    /// locals`, `map(eval, codes)`): whatever calls it later runs it in this frame or reads
+    /// this frame's state. `global_name` is a name that resolves to a global or builtin.
+    fn record_a1_reference(&mut self, spelling: &str, global_name: bool, span: Span) {
+        let kind = self.introspection_binding(spelling).or_else(|| {
+            (global_name || spelling.contains('.'))
+                .then(|| introspection_kind(&self.module.resolve_module_alias(spelling), true))
+                .flatten()
+        });
+        self.push_a1_hazard(kind, span);
+    }
+
+    fn push_a1_hazard(&mut self, kind: Option<&str>, span: Span) {
+        if let Some(kind) = kind {
             self.a1_hazards.push(A1Hazard {
                 kind: kind.to_string(),
                 span,
             });
         }
+    }
+
+    /// Whether a read of `name` here resolves to a module global or a builtin.
+    fn resolves_to_global(&self, name: &str) -> bool {
+        self.resolve_comp_rename(name).is_none()
+            && (self.scope.globals.contains(name)
+                || (!self.scope.nonlocals.contains(name)
+                    && !self.is_true_local(name)
+                    && !self.outer_locals.contains(name)))
     }
 
     fn record_a1_attr_if_hazard(&mut self, attr: &str, span: Span) {
@@ -3961,6 +4120,28 @@ fn collect_inlined_comprehension(
 // =============================================================================
 // Helpers
 // =============================================================================
+/// The `A1Hazard` kind of a frame-introspection function (Assumption A1(a)) by its spelling: a
+/// builtin's name, or `module.attr`. `vars` reads the caller's locals only without an argument.
+fn introspection_kind(spelling: &str, without_args: bool) -> Option<&'static str> {
+    match spelling {
+        "eval" | "builtins.eval" => Some("eval"),
+        "exec" | "builtins.exec" => Some("exec"),
+        "locals" | "builtins.locals" => Some("locals"),
+        "vars" | "builtins.vars" if without_args => Some("vars()"),
+        "sys._getframe" | "_getframe" => Some("sys._getframe"),
+        "inspect.currentframe" => Some("inspect.currentframe"),
+        "gc.get_objects" => Some("gc.get_objects"),
+        "gc.get_referrers" => Some("gc.get_referrers"),
+        "ctypes.pythonapi" => Some("ctypes.pythonapi"),
+        _ if spelling.ends_with("._getframe") => Some("sys._getframe"),
+        _ if spelling.ends_with(".currentframe") => Some("inspect.currentframe"),
+        _ if spelling.ends_with(".get_objects") && spelling.contains("gc.") => {
+            Some("gc.get_objects")
+        }
+        _ => None,
+    }
+}
+
 fn expr_dotted_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Name(n) => Some(n.id.to_string()),

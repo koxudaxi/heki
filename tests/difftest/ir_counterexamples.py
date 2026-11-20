@@ -562,6 +562,43 @@ def old_template_keeps_value(items):
     return template.interpolations[0].value
 
 
+# ------------------------------------------------------------------------------
+# Frame introspection through an alias still reads this frame (Assumption A1)
+# ------------------------------------------------------------------------------
+def cx_locals_through_alias(items):
+    acc = []
+    snapshot = locals
+    old = snapshot()["acc"]
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_locals_through_alias(items):
+    acc = []
+    snapshot = locals
+    old = snapshot()["acc"]
+    for x in items:
+        acc.append(x)
+    return old
+
+
+def cx_eval_called_by_map(items):
+    acc = []
+    old = list(map(eval, ["acc"]))[0]
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_eval_called_by_map(items):
+    acc = []
+    old = list(map(eval, ["acc"]))[0]
+    for x in items:
+        acc.append(x)
+    return old
+
+
 def run(call, fn):
     try:
         return repr(call(fn))
@@ -638,6 +675,8 @@ def main() -> int:
         (cx_mapping_pattern_capture, old_mapping_pattern_capture, with_owned(dict)),
         (cx_slice_bound_reaches_getitem, old_slice_bound_reaches_getitem, lambda f: f([1])),
         (cx_template_keeps_value, old_template_keeps_value, lambda f: f([1])),
+        (cx_locals_through_alias, old_locals_through_alias, lambda f: f([1])),
+        (cx_eval_called_by_map, old_eval_called_by_map, lambda f: f([1])),
     ]
     lines = []
     for cx, old, call in pairs:

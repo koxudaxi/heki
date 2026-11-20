@@ -1459,6 +1459,8 @@ fn ir_records_a1_hazards() {
             "gc.get_objects",
             "gc.get_objects",
             "gc.get_referrers",
+            // `ctypes.pythonapi.Py_IncRef(ns)` reads `ctypes.pythonapi`.
+            "ctypes.pythonapi",
             "sys._getframe",
             ".f_globals",
             ".f_locals",
@@ -1493,7 +1495,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     let (code, stdout, stderr) = p.heki(&["assumptions", "pkg"]);
     assert_eq!(code, 0, "{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 17, "{stdout}");
+    assert_eq!(lines.len(), 18, "{stdout}");
     assert!(lines.iter().all(|l| l.starts_with("pkg/tour.py:")));
     assert!(
         lines[0].ends_with("[a1_hazards] A1 hazard: eval"),
@@ -1502,7 +1504,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     );
     assert!(
         stderr.contains("Checked 4 file(s)")
-            && stderr.contains("17 A1 hazard(s), 2 parse/read error(s)"),
+            && stderr.contains("18 A1 hazard(s), 2 parse/read error(s)"),
         "{stderr}"
     );
     assert!(
@@ -1522,7 +1524,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     let records: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(records.len(), 17);
+    assert_eq!(records.len(), 18);
     assert_eq!(records[0]["kind"], "eval");
     assert_eq!(records[0]["qualname"], "a1_hazards");
     assert_eq!(records[0]["path"], "pkg/tour.py");
@@ -1549,7 +1551,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
         assert_eq!(code, 0);
         assert_eq!(
             serde_json::from_str::<Vec<Value>>(&stdout).unwrap().len(),
-            17
+            18
         );
     }
     let (_, _, stderr311) = p.heki(&["assumptions", "pkg/tour.py", "--target-version", "py311"]);

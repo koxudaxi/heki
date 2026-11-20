@@ -95,6 +95,12 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 - **Comprehensions and generator expressions**: when
   `RuntimeProfile.pep709_inlined_comprehensions` is true (3.12+), comprehensions are inlined into
   the enclosing frame; generator expressions are separate functions created by `MakeGenExpr`.
+- **A1 hazards** are references to a frame-introspection function, not only calls of it: a
+  read of `eval` / `exec` / `locals` / `vars` (the builtin, or a name an import binds to one,
+  in the scope the read resolves to), of `sys._getframe` and the like (through `import m as
+  alias` too), and of a module global the module body binds to one (`snapshot = locals`) are
+  hazards of the function that reads them, since whatever calls the value runs it in that
+  frame (`map(eval, codes)`); `vars(x)` with an argument reads no frame.
 - **A1 fallback**: a function with `a1_hazards` is excluded **from `heki_soundness` only**;
   **`heki_effect` (family 1 `MUT`, family 2 `EFF` / `DATA`) continues**.
 - **`LoopBound`** (never a Soundness premise; used for profitability and Advisory noise only):
