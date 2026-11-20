@@ -345,3 +345,70 @@ fn a_with_target_is_what_the_manager_enters() {
         &["EFF101"],
     );
 }
+
+/// A module-level name is what its module binds last: a definition after an import of the same
+/// name shadows it (also for the modules importing the name), and an import after a definition
+/// shadows the definition. A name bound on different paths keeps its import.
+const SHADOWS: &str = r#"import time
+from time import sleep
+
+import requests
+from pkg.slow import helper
+
+
+def sleep(delay):
+    pass
+
+
+def helper():
+    return None
+
+
+def fetch(url):
+    return None
+
+
+from requests import get as fetch
+
+try:
+    from requests import post
+except ImportError:
+    def post(url):
+        return None
+
+
+async def local(url):
+    sleep(1)
+    helper()
+    fetch(url)  # EFF101
+"#;
+
+const SLOW: &str = r#"import time
+
+
+def helper():
+    time.sleep(1)
+"#;
+
+const SHADOW_USERS: &str = r#"from pkg.shadows import fetch, helper, post, sleep
+
+
+async def handler(url):
+    sleep(1)
+    helper()
+    fetch(url)  # EFF101
+    post(url)  # EFF101
+"#;
+
+#[test]
+fn a_module_name_is_what_its_module_binds_last() {
+    check_marks(
+        "shadowed_imports",
+        &[
+            ("pkg/shadows.py", SHADOWS),
+            ("pkg/slow.py", SLOW),
+            ("pkg/users.py", SHADOW_USERS),
+        ],
+        &["EFF101"],
+    );
+}

@@ -1216,9 +1216,8 @@ impl ProjectDecls {
                 Some((f, t)) => (f, Some(t)),
                 None => (rest, None),
             };
-            if m.classes.contains_key(first) || m.functions.contains_key(first) {
-                break;
-            }
+            // `imports` holds the names an import binds last (`rebound_imports`): a class or
+            // function of the same name is shadowed by it.
             let Some(target) = m.imports.get(first) else {
                 break;
             };
@@ -1830,6 +1829,46 @@ pub(crate) fn project_decls_for(
 }
 
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.
+/// The imported names the module body binds again after the import, in the same straight-line
+/// code (no other block stores them): `from time import sleep` followed by `def sleep(...)`.
+/// The functions of the module run after its body, so they see the later binding. A name bound
+/// on different paths (`try: from fast import f` / `except ImportError: def f(...)`) keeps its
+/// import.
+fn rebound_imports(body: &IrFunction) -> Vec<String> {
+    let imported: FxHashSet<VarId> = body
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|inst| match &inst.kind {
+            InstKind::Import { dst, .. } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    // Per stored name: its only block (`None`: several), whether an import stores it, and
+    // whether its last store does.
+    let mut stores: BTreeMap<&str, (Option<usize>, bool, bool)> = BTreeMap::new();
+    for (i, block) in body.blocks.iter().enumerate() {
+        for inst in &block.insts {
+            if let InstKind::StoreGlobal { name, value } = &inst.kind {
+                let import = imported.contains(value);
+                let entry = stores.entry(name).or_insert((Some(i), false, false));
+                if entry.0 != Some(i) {
+                    entry.0 = None;
+                }
+                entry.1 |= import;
+                entry.2 = import;
+            }
+        }
+    }
+    stores
+        .into_iter()
+        .filter(|(_, (block, any_import, last_import))| {
+            block.is_some() && *any_import && !last_import
+        })
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
 fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     let semantic = input.semantic;
     let module_scope = module_scope(semantic);
@@ -1851,6 +1890,11 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .insert(imp.bound_name.clone(), target);
         } else {
             decls.imports.insert(imp.bound_name.clone(), target);
+        }
+    }
+    if let Some(body) = input.ir.functions.iter().find(|f| f.is_module_body) {
+        for name in rebound_imports(body) {
+            decls.imports.remove(&name);
         }
     }
     for class in &semantic.classes {

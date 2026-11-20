@@ -146,7 +146,7 @@ def copy_copy(model: Model) -> None:
     m.fields = ["x"]
 
 
-def deepcopy(model: Model) -> None:
+def deep_copy(model: Model) -> None:
     m = deepcopy(model)
     m.fields = ["x"]
 
@@ -650,7 +650,7 @@ const REPORTED_SHAPES: &[&str] = &[
     "classmethod_return",
     "property_read",
     "copy_copy",
-    "deepcopy",
+    "deep_copy",
     "model_copy",
     "project_copy_fn",
     "for_loop",
