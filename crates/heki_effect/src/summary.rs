@@ -210,9 +210,10 @@ fn extract_module(
     file
 }
 
-/// The class bodies the `class` statements of `f` run, nested classes included.
+/// The class bodies the `class` statements of `f` run, nested classes included, each once (a
+/// `class` statement in a `finally` body is made once per way out of its `try`).
 fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFunction> {
-    let mut out = Vec::new();
+    let mut out: Vec<&IrFunction> = Vec::new();
     let mut stack = vec![f];
     while let Some(g) = stack.pop() {
         for inst in g.blocks.iter().flat_map(|b| &b.insts) {
@@ -220,6 +221,7 @@ fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFun
                 func_id: Some(id), ..
             } = &inst.kind
                 && ir.function(*id).is_class_body
+                && out.iter().all(|c| c.id != *id)
             {
                 out.push(ir.function(*id));
                 stack.push(ir.function(*id));

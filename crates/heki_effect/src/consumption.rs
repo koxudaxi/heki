@@ -386,9 +386,16 @@ impl IterFlow {
         self.unpackable.insert(var);
     }
 
-    /// `Copy` and agreeing-phi aliases of the roots, to a fixpoint.
+    /// `Copy` and agreeing-phi aliases of the roots, to a fixpoint. A phi's may-roots are
+    /// replaced, not joined, so the sizes the stop test compares need not grow: the passes are
+    /// bounded by the phis and copies there are.
     fn alias(&mut self, f: &IrFunction) {
-        loop {
+        let links = f
+            .blocks
+            .iter()
+            .map(|b| b.phis.len() + b.insts.len())
+            .sum::<usize>();
+        for _ in 0..=links {
             let before = (
                 self.root_of.len(),
                 self.may_roots.values().map(Vec::len).sum::<usize>(),
