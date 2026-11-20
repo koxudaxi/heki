@@ -13,7 +13,7 @@
 ## Usage
 
 - [Configuration](https://heki.koxudaxi.dev/configuration/): heki reads [tool.heki] from pyproject.toml, or a heki.toml / .heki.toml file (same keys without the tool.heki prefix)
-- [Fixes and Safety](https://heki.koxudaxi.dev/fixes/): Every OPT rule detects a quadratic or linear-per-iteration pattern and knows a faster equivalent
+- [Fixes and Safety](https://heki.koxudaxi.dev/fixes/): heki check --fix rewrites an OPT finding only when heki proves that the rewrite keeps what the program does
 - [Adopting heki in a Code Base](https://heki.koxudaxi.dev/adoption/): An existing code base usually has findings you cannot fix at once
 - [CLI Reference](https://heki.koxudaxi.dev/cli-reference/): Exit codes: 0 no diagnostics, 1 diagnostics (or Ratchet regressions, or pending --diff changes), 2 configuration / I/O / syntax errors
 
