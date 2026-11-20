@@ -206,6 +206,11 @@ const GRAFT: &str =
     "from pkg.nodes import Node\n\n\ndef graft(node: Node, kid):\n    node.kids.append(kid)\n";
 const RELAY: &str = "from pkg.graft import graft\nfrom pkg.nodes import Node\n\n\ndef forward(node: Node, kid):\n    graft(node, kid)\n";
 const PLANTER: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n    index.refresh()\n";
+// A private helper of another module becomes a generator: its write moves from its call, before
+// the invalidator, to the iteration after it.
+const KID_GEN: &str = "from pkg.nodes import Node\n\n\ndef _grow_kids(node: Node, kid):\n    node.kids.append(kid)\n    return [kid]\n";
+const KID_GEN_GENERATOR: &str = "from pkg.nodes import Node\n\n\ndef _grow_kids(node: Node, kid):\n    node.kids.append(kid)\n    yield kid\n";
+const KID_USER: &str = "from pkg.kid_gen import _grow_kids\nfrom pkg.nodes import Index, Node\n\n\ndef plant_all(index: Index, node: Node, kid):\n    pending = _grow_kids(node, kid)\n    index.refresh()\n    for _ in pending:\n        pass\n";
 const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n";
 
 // Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
@@ -300,6 +305,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/graft.py", GRAFT),
         ("pkg/relay.py", RELAY),
         ("pkg/planter.py", PLANTER),
+        ("pkg/kid_gen.py", KID_GEN),
+        ("pkg/kid_user.py", KID_USER),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -624,6 +631,16 @@ fn steps_mut202_mut109() -> Vec<Step> {
             vec![save("pkg/planter.py", PLANTER)],
         )
         .absent(&[("pkg/graft.py", "MUT109")]),
+        Step::new(
+            "a helper in another module becomes a generator iterated after the invalidator",
+            vec![save("pkg/kid_gen.py", KID_GEN_GENERATOR)],
+        )
+        .present(&[("pkg/kid_user.py", "MUT109")]),
+        Step::new(
+            "the helper returns a list again",
+            vec![save("pkg/kid_gen.py", KID_GEN)],
+        )
+        .absent(&[("pkg/kid_user.py", "MUT109")]),
     ]
 }
 

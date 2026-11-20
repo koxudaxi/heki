@@ -481,7 +481,7 @@ impl IterFlow {
 /// unpacking (`a, b = it` reads `it[0]` and `it[1]`): a constant integer index lowered at the
 /// target element's own location. A subscript written in the source (`it["row"]`, `it[0]`)
 /// lowers its index at the index expression.
-fn is_unpacking(f: &IrFunction, index: VarId, span: Span) -> bool {
+pub fn is_unpacking(f: &IrFunction, index: VarId, span: Span) -> bool {
     matches!(
         f.def_inst(index),
         Some((_, Inst { kind: InstKind::Const { literal: ConstLiteral::Int(_), .. }, span: at, .. }))

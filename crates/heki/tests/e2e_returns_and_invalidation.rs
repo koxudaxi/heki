@@ -277,6 +277,19 @@ def either(parser: Parser, raw: object, whole: bool) -> object:
 
 def either_wrapper(parser: Parser, raw: object) -> None:
     either(parser, raw, False).append(1)
+
+
+def schema_task(parser: Parser, raw: object):
+    yield None
+    return parser.graph.schema(raw)
+
+
+def task_of(parser: Parser, raw: object):
+    return schema_task(parser, raw)
+
+
+def generator_return_ok(parser: Parser, raw: object) -> None:
+    task_of(parser, raw).items.pop()
 "#;
 const CACHED: &str = r#"from functools import lru_cache
 
@@ -355,8 +368,9 @@ fn mut202_follows_protected_values_through_returns() {
     // Not reported: a deep copy of a wrapper's value (`reader_ok`), a wrapper that copies on
     // every path, an element of a shallow producer's value, a shallow copy's own attribute
     // (line 80), a generator's values, a value stored in an attribute and changed in another
-    // method (`Keeper`: not followed), a read of a cached value, and a coroutine's result (also
-    // an `@lru_cache` coroutine returned without `await`). A value returned on two paths, an
+    // method (`Keeper`: not followed), a read of a cached value, a coroutine's result (also an
+    // `@lru_cache` coroutine returned without `await`), and a generator's `return` value (it
+    // ends the iteration; calling the generator hands out the generator). A value returned on two paths, an
     // item of an unpacked cached pair, and a producer wrapped by both definitions of a
     // conditionally defined function are followed.
     assert_eq!(
@@ -833,6 +847,51 @@ def many_flags(store: GenerationStore, node: DataType, c0: bool, c1: bool, c2: b
         f12 = True
     if f0 and all([f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12]):
         store.refresh_now()
+
+
+def _fill_kids(node: DataType, items: list[DataType]):
+    for item in items:
+        node.data_types.append(item)
+        yield item
+
+
+def iterate_fill(node: DataType, items: list[DataType]) -> None:
+    for _ in _fill_kids(node, items):
+        pass
+
+
+def iterate_fill_ok(store: GenerationStore, node: DataType, items: list[DataType]) -> None:
+    for _ in _fill_kids(node, items):
+        pass
+    store.refresh_now()
+
+
+def _drain(values) -> None:
+    for _ in values:
+        pass
+
+
+def drain_fill(node: DataType, items: list[DataType]) -> None:
+    _drain(_fill_kids(node, items))
+
+
+def announce_before_iterating(store: GenerationStore, node: DataType, items: list[DataType]) -> None:
+    pending = _fill_kids(node, items)
+    store.refresh_now()
+    for _ in pending:
+        pass
+
+
+def fill_kids(node: DataType, items: list[DataType]):
+    for item in items:
+        node.data_types.append(item)
+        yield item
+
+
+def consume_fill_ok(store: GenerationStore, node: DataType, items: list[DataType]) -> None:
+    for _ in fill_kids(node, items):
+        pass
+    store.refresh_now()
 "#;
 
 fn inv_project(name: &str) -> Project {
@@ -862,7 +921,12 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
     // writes leave unset, an invalidator behind `if False:`, the caller of an `async` writer that
     // does not await it (`awrite`), mutually recursive private writers (`recurse`), two writes of
     // one helper (one report at the call), an object reached through an item of a parameter, and
-    // a function with more flag combinations than the path search follows are reported.
+    // a function with more flag combinations than the path search follows are reported. A
+    // private generator's write runs where it is iterated: reported at the iteration (also
+    // after an invalidator called between the generator's call and its iteration) or at the
+    // call of a helper that iterates it, and not when the change is announced after the loop
+    // (`iterate_fill_ok`); a public generator whose caller announces after iterating it is not
+    // reported (`consume_fill_ok`).
     assert_eq!(
         found(&diags),
         vec![
@@ -885,6 +949,9 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
             d(s, 288, "MUT109", "reset_twice"),
             d(s, 293, "MUT109", "by_key"),
             d(s, 297, "MUT109", "many_flags"),
+            d(s, 348, "MUT109", "iterate_fill"),
+            d(s, 364, "MUT109", "drain_fill"),
+            d(s, 370, "MUT109", "announce_before_iterating"),
         ],
         "{diags:#?}"
     );
@@ -927,6 +994,14 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
         })
         .collect();
     assert_eq!(sites, vec![("reset_twice", 2)], "{diags:#?}");
+    // A generator handed to a helper that iterates it: the chain goes through the helper.
+    assert_eq!(
+        related(by_name("drain_fill")),
+        vec![
+            ("`drain_fill` calls `pkg.passes._drain`".to_owned(), 364),
+            ("`_drain` calls `pkg.passes._fill_kids`".to_owned(), 364),
+        ]
+    );
     // Without a contract the rule reports nothing.
     p.write("pyproject.toml", "[project]\nname = \"t\"\n");
     assert!(diagnostics(&p, &["--select", "MUT109"]).is_empty());
