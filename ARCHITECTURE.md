@@ -306,9 +306,10 @@ EffectSummary(f) = {
    - `DATA101` requires an SSA **`LoopCarried`** value (accumulation through reassignment) and
      excludes one-off concatenation or padding in a loop.
    - `MUT101` excludes (1) two-phase initialization hooks (`__init__` / `__post_init__` /
-     `model_post_init` / `_init_*` / `_configure_*` / `_open`, ...), (2) memo dictionaries
-     (`_cache[k] = v`), (3) disjoint constant dict keys (`params["proxy"]` vs
-     `params["outtmpl"]`), and (4) the separate `__init__` of a nested class.
+     `model_post_init` / `_init_*` / `_configure_*` / `setup_*` / `_open`, ...), (2) memo
+     dictionaries (`_cache[k] = v`), (3) disjoint constant dict keys (`params["proxy"]` vs
+     `params["outtmpl"]`), (4) the separate `__init__` of a nested class, and (5) lazy
+     initializations that the cached property runs itself.
 4. **Staged `EFF101` and duplicate aggregation**: the default covers `BlockingNet` / `BlockingDb`
    / `BlockingSubprocess` / `BlockingSync` / `Sleep`; `BlockingFs` is the opt-in `EFF105`;
    `logging` / `print` are excluded. An `async` chain is reported only at its boundary, and
@@ -398,7 +399,7 @@ The 31 rules are listed in the [rules reference](docs/rules/index.md).
 
 | Rule ID | Default | What it finds | Main noise control and configuration |
 |---|---|---|---|
-| **MUT101** | On (strict) | **Mutation of attributes a `@cached_property` depends on, without invalidation**: a method other than the initialization hooks (inherited ones included; directly or through calls) reassigns or changes in place a `self.<attr>` that a `@cached_property` reads (through calls and property reads too), without clearing the cache on every path after the write | Two-phase initialization hooks (`model_post_init` / `_init_*` / `_configure_*` / `_open`, ...), memo dicts (`_cache[k] = v`), disjoint constant dict keys, and the separate `__init__` of nested classes are excluded (Stage 0-A findings) |
+| **MUT101** | On (strict) | **Mutation of attributes a `@cached_property` depends on, without invalidation**: a method other than the initialization hooks (inherited ones included; directly or through calls) reassigns or changes in place a `self.<attr>` that a `@cached_property` reads (through calls and property reads too), without clearing the cache on every path after the write | Two-phase initialization hooks (`model_post_init` / `_init_*` / `_configure_*` / `setup_*` / `_open`, ...), memo dicts (`_cache[k] = v`), disjoint constant dict keys, the separate `__init__` of nested classes, and lazy initializations the cached property runs itself are excluded (Stage 0-A findings) |
 | **MUT103** | With a snapshot | **Cross-function effect and mutability regressions in CI (`heki snapshot summary`)**: a pull request adds new parameter mutations, escapes, or execution effects (direct or transitive) to a function fixed in the snapshot | Zero-config snapshot comparison |
 | **MUT106** | Opt-in | **A single-pass `Iterator` / `Generator` consumed twice**: an iterator that SSA does not rebind (generator expressions, `iter` / `zip` / `map` / ..., project generator functions, `Iterator` / `Generator` annotations) is consumed a second time and silently yields nothing | Reported only when the second consumption is reachable in the CFG from the first (exclusive branches never are); a partial first pass (`break`, `any` / `all`) and `next()` stepping do not count; an iterator created outside a loop and consumed inside it is found too; consumption by a called function is followed through the summary |
 | **MUT107** | On | **Attributes `__hash__` depends on changing**: a method other than the initialization hooks (subclasses included) changes a `self.<attr>` that `__hash__` reads (instances already stored in a `set` or as `dict` keys can no longer be found) | The `MUT101` filters (two-phase initialization, memo dicts, disjoint constant keys), plus lazy initialization under a `None` guard and the cache attributes of `__hash__` itself (`self._hash`, ...) (Wave 2: 21.2% of mature projects) |
