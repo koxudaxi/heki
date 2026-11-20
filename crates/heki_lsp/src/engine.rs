@@ -100,7 +100,7 @@ pub struct EditOutcome {
     /// project starts or stops patching `builtins`.
     pub affected: Vec<PathBuf>,
     /// Why the file has no diagnostics: a syntax error (the file then leaves the index, as a
-    /// file `heki check` cannot parse is not part of the project) or an invalid rule option.
+    /// file `heki check` cannot parse is not part of the project).
     pub error: Option<String>,
 }
 
@@ -448,7 +448,7 @@ impl Workspace {
     /// Diagnostics of one parsed file against the current index and, as `heki check` reports
     /// them, against the Ratchet baseline; records which other files they point into and what
     /// the check read of the declarations.
-    fn check(&mut self, parsed: &ParsedFile) -> Result<Vec<Diagnostic>, String> {
+    fn check(&mut self, parsed: &ParsedFile) -> Vec<Diagnostic> {
         let unit = parsed.unit();
         let extras = CheckExtras {
             soundness_kb: &self.env.soundness_kb,
@@ -457,8 +457,8 @@ impl Workspace {
             project_patches_builtins: Some(!self.patching_builtins.is_empty()),
             text_of: Some(&|p: &Path| heki_ast::read_source(p).ok()),
         };
-        let (checked, reads) = self.decls.completed().record(|| {
-            check_project(
+        let (mut diags, reads) = self.decls.completed().record(|| {
+            let mut diags = check_project(
                 std::slice::from_ref(&unit),
                 &self.env.cfg,
                 &self.env.kb,
@@ -466,23 +466,19 @@ impl Workspace {
                 &self.selection,
                 &extras,
             )
-            .map_err(|e| e.to_string())
-            .map(|mut diags| {
-                retain_unsuppressed(&mut diags, [parsed]);
-                diags
-            })
+            .expect("a check fails only on invalid rule options, which fail `Workspace::load`");
+            retain_unsuppressed(&mut diags, [parsed]);
+            diags
         });
-        let shown = checked
+        let shown = diags
             .iter()
-            .flatten()
             .flat_map(|d| &d.related)
             .filter(|r| r.path != parsed.path)
             .map(|r| r.path.clone())
             .collect();
         self.shown.insert(parsed.path.clone(), shown);
-        let chains = checked
+        let chains = diags
             .iter()
-            .flatten()
             .any(|d| CHAIN_RULES.contains(&d.rule_code.as_str()));
         if chains {
             self.chain_reports.insert(parsed.path.clone());
@@ -491,18 +487,16 @@ impl Workspace {
         }
         self.check_reads.insert(parsed.path.clone(), &reads);
         // Baseline keys name the file, so the counts of one file are the counts of its keys.
-        checked.map(|mut diags| {
-            if let Some((_, baseline)) = &self.baseline {
-                baseline.keep_regressions(&mut diags, &|_| parsed.rel.clone());
-            }
-            diags
-        })
+        if let Some((_, baseline)) = &self.baseline {
+            baseline.keep_regressions(&mut diags, &|_| parsed.rel.clone());
+        }
+        diags
     }
 
     /// Diagnostics of `text` as `path` against the current index (the summaries are unchanged).
     pub fn diagnose(&mut self, path: &Path, text: &str) -> Result<Vec<Diagnostic>, String> {
         let parsed = self.parse(path, text)?;
-        self.check(&parsed)
+        Ok(self.check(&parsed))
     }
 
     /// Files other than `path` whose latest diagnostics point into `path`.
@@ -875,14 +869,10 @@ impl Workspace {
         affected.remove(&parsed.path);
         let mut affected: Vec<PathBuf> = affected.into_iter().collect();
         affected.sort();
-        let (diagnostics, error) = match self.check(&parsed) {
-            Ok(diagnostics) => (diagnostics, None),
-            Err(e) => (Vec::new(), Some(e)),
-        };
         let outcome = EditOutcome {
-            diagnostics,
+            diagnostics: self.check(&parsed),
             affected,
-            error,
+            error: None,
         };
         (outcome, Some((update.summary_changed, !change.is_empty())))
     }

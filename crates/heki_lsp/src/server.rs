@@ -36,12 +36,12 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tower_lsp::jsonrpc::{Request, Result as RpcResult};
 use tower_lsp::lsp_types::{
-    CodeActionKind, CodeActionOptions, CodeActionParams, CodeActionProviderCapability,
-    CodeActionResponse, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
-    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, FileChangeType, FileEvent,
-    FileSystemWatcher, GlobPattern, InitializeParams, InitializeResult, InitializedParams,
-    MessageType, Registration, SaveOptions, ServerCapabilities, ServerInfo,
+    CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CodeActionResponse, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidChangeWatchedFilesRegistrationOptions,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    FileChangeType, FileEvent, FileSystemWatcher, GlobPattern, InitializeParams, InitializeResult,
+    InitializedParams, MessageType, Registration, SaveOptions, ServerCapabilities, ServerInfo,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
     TextDocumentSyncSaveOptions, Url,
 };
@@ -755,13 +755,14 @@ impl LanguageServer for Backend {
             uri: &doc.uri,
             version: st.versioned_edits.then_some(doc.version),
         };
-        Ok(Some(convert::code_actions(
-            &target,
-            &doc.text,
-            &published.diags,
-            &lsp,
-            &params.range,
-        )))
+        let actions =
+            convert::code_actions(&target, &doc.text, &published.diags, &lsp, &params.range);
+        Ok(Some(
+            actions
+                .into_iter()
+                .map(CodeActionOrCommand::CodeAction)
+                .collect(),
+        ))
     }
 }
 

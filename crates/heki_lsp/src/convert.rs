@@ -13,10 +13,9 @@ use heki_rules::find_rule;
 use std::collections::HashMap;
 use std::path::Path;
 use tower_lsp::lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, DiagnosticRelatedInformation,
-    DiagnosticSeverity, DocumentChanges, Location, NumberOrString, OneOf,
-    OptionalVersionedTextDocumentIdentifier, Position, Range, TextDocumentEdit, TextEdit, Url,
-    WorkspaceEdit,
+    CodeAction, CodeActionKind, DiagnosticRelatedInformation, DiagnosticSeverity, DocumentChanges,
+    Location, NumberOrString, OneOf, OptionalVersionedTextDocumentIdentifier, Position, Range,
+    TextDocumentEdit, TextEdit, Url, WorkspaceEdit,
 };
 
 /// Code action kind of size-dependent `OPT` rewrites.
@@ -152,7 +151,7 @@ pub fn code_actions(
     diags: &[Diagnostic],
     lsp_diags: &[tower_lsp::lsp_types::Diagnostic],
     request: &Range,
-) -> Vec<CodeActionOrCommand> {
+) -> Vec<CodeAction> {
     let mut out = Vec::new();
     let lines = LineIndex::from_source(text);
     let parsed = heki_ast::parse_module(text).ok();
@@ -169,7 +168,7 @@ pub fn code_actions(
                     new_text: e.replacement.clone(),
                 })
                 .collect();
-            out.push(CodeActionOrCommand::CodeAction(CodeAction {
+            out.push(CodeAction {
                 title: if unconditional {
                     format!("Apply the safe {} fix", d.rule_code)
                 } else {
@@ -187,12 +186,12 @@ pub fn code_actions(
                 edit: Some(target.edit(edits)),
                 is_preferred: Some(unconditional),
                 ..Default::default()
-            }));
+            });
         }
         let Some(at) = suppression_point(text, &lines, parsed.as_ref(), d.line) else {
             continue;
         };
-        out.push(CodeActionOrCommand::CodeAction(CodeAction {
+        out.push(CodeAction {
             title: format!(
                 "Suppress {} with `# heki: ignore[{}]`",
                 d.rule_code, d.rule_code
@@ -204,7 +203,7 @@ pub fn code_actions(
                 new_text: format!("  # heki: ignore[{}]", d.rule_code),
             }])),
             ..Default::default()
-        }));
+        });
     }
     out
 }
@@ -275,10 +274,7 @@ mod tests {
                 &lsp.range,
             )
             .into_iter()
-            .map(|a| match a {
-                CodeActionOrCommand::CodeAction(a) => a.title,
-                CodeActionOrCommand::Command(c) => c.title,
-            })
+            .map(|a| a.title)
             .collect();
             titles
         };
