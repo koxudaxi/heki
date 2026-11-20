@@ -12,9 +12,13 @@ synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), databas
 (`sqlite3`, `psycopg`, `pymongo`, ...), subprocesses waiting for completion, `time.sleep`, and
 other blocking synchronization.
 
-The rule reports the boundary: the call inside the `async def` that leads to the blocking
-operation, with the call chain as related information. Several boundaries reaching the same
-blocking call are grouped once ten or more of them exist.
+Reading a `@property` or `functools.cached_property` attribute of a project class runs its
+getter, so the read counts as a call of the getter (`self.client` whose getter opens a
+connection). A property that also defines a setter or deleter is not followed.
+
+The rule reports the boundary: the call (or property read) inside the `async def` that leads to
+the blocking operation, with the call chain as related information. Several boundaries reaching
+the same blocking call are grouped once ten or more of them exist.
 
 It does not report:
 

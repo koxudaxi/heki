@@ -8,7 +8,7 @@
 //! - Separates Safety (`ProofObligation` / `SafetyVerdict`) orthogonally from
 //!   Profitability (`Unconditional` vs `SizeDependent`).
 //!
-//! Pipeline (docs/DETAILED_SPEC_M3_M7.md section 4): [`interpreter`] runs the RPO worklist
+//! Pipeline (docs/ANALYSIS_AND_KB_SPEC.md section 3): [`interpreter`] runs the RPO worklist
 //! abstract interpretation, [`liveness`] the backward liveness (with `exc_target` edges),
 //! [`obligations`] evaluates the three-valued Proof Obligations, and [`opt_rules`] matches the
 //! eight `OPT` patterns and builds their minimal byte-span [`TextEdit`]s.
@@ -141,7 +141,7 @@ impl KindMask {
     }
 
     /// Kinds whose `==` agrees with `hash()` and whose values are hashable: `int`, `str`,
-    /// `bytes`, `bool`, `float` (DETAILED_SPEC section 4.5, `OPT110` / S22).
+    /// `bytes`, `bool`, `float` (`OPT110` / S22).
     pub fn hash_consistent() -> Self {
         [
             BuiltinKind::Int,

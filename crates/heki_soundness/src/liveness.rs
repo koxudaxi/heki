@@ -1,4 +1,4 @@
-//! Backward liveness over the SSA-CFG (docs/DETAILED_SPEC_M3_M7.md section 4.3).
+//! Backward liveness over the SSA-CFG (docs/ANALYSIS_AND_KB_SPEC.md section 3.3).
 //!
 //! Successors include `exc_target` edges: a handler can be entered from any point of a
 //! protected block, so everything live at the handler is live throughout the block.

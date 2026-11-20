@@ -7,7 +7,7 @@ Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pend
 ## `heki`
 
 ```text
-Effect & Alias semantic checker for Python (the 3rd layer alongside Ruff and ty)
+Experimental Effect & Alias semantic checker for Python (the 3rd layer alongside Ruff and ty)
 
 Usage: heki <COMMAND>
 

@@ -1,4 +1,4 @@
-//! Rule selection (docs/DETAILED_SPEC_M3_M7.md section 3.3, Ruff precedence).
+//! Rule selection (docs/configuration.md, Ruff precedence).
 //!
 //! - Default: every `CORE_RULES` entry with `default_enabled`.
 //! - `select` (CLI over config) replaces the default set; `extend-select` adds; `ignore` and

@@ -16,7 +16,7 @@ use std::process::ExitCode;
 #[command(
     name = "heki",
     version,
-    about = "Effect & Alias semantic checker for Python (the 3rd layer alongside Ruff and ty)"
+    about = "Experimental Effect & Alias semantic checker for Python (the 3rd layer alongside Ruff and ty)"
 )]
 struct Cli {
     #[command(subcommand)]

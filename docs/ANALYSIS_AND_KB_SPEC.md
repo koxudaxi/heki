@@ -1,122 +1,210 @@
-# 解析エンジン・IR・Proof Obligation・KB 詳細仕様（`heki` Baseline v4.1 補足資料）
+# Analysis Engine, IR, Proof Obligations, and Knowledge Bases
 
-> **このドキュメントの位置づけ**
-> [ARCHITECTURE.md](../ARCHITECTURE.md)（Baseline v4.1：正式名称 `heki`）で定義した **「単一の Effect & Alias 統一理論による 2 レーン・3 族アーキテクチャ ＋ 増分 LSP（Early Cutoff）」** の技術補足仕様である。コード上のクレート名は `heki_*`（`crates/heki_ast`〜`crates/heki_lsp`）、設定キーは `[tool.heki]`（kebab-case）に統一されている。具体的な実装マイルストーンは [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) を参照。
+> **What this document is**
+> The technical supplement to [ARCHITECTURE.md](../ARCHITECTURE.md): the frontend and IR, the
+> Advisory lane's summaries and rules, the Soundness lane's abstract domain and proof
+> obligations, the knowledge bases, the Ratchet baseline, profile dumps, and the Stage 0-A
+> measurements. Crates are named `heki_*` (`crates/heki_ast` to `crates/heki_lsp`), and
+> configuration keys live under `[tool.heki]` in kebab-case. Parts marked **(planned)** are
+> designed but not implemented.
 
 ---
 
-## 1. フロントエンド・意味解析・SSA-CFG IR 仕様（`heki_ast` / `heki_semantic` / `heki_ir`）
+## 1. Frontend, semantic analysis, and the SSA-CFG IR (`heki_ast` / `heki_semantic` / `heki_ir`)
 
-### 1.1 Python バージョン別スコープ・構文モデル（`heki_semantic`）
-`ruff_python_parser` / `ruff_python_ast` は `heki_ast` 内に完全隔離し、スコープ・束縛・モジュール解決は `heki_semantic` で自作する。
+### 1.1 Scopes and syntax by Python version (`heki_semantic`)
+`ruff_python_parser` / `ruff_python_ast` are isolated in `heki_ast`; scopes, bindings, and module
+resolution are heki's own (`heki_semantic`).
 
-- **バージョン依存スコープ規則（`RuntimeProfile` 駆動）**：
-  - **3.12+ PEP 709**：`list`/`set`/`dict` 内包表記は外側の関数・モジュールスコープへインライン展開（クラス本体直下など例外ケースを厳密に区別）。
-  - **3.14+ PEP 649**：`from __future__ import annotations` なしの型注釈は `__annotate__` 遅延評価スコープとして扱う。
-  - **3.15+ PEP 810（実機 CPython 3.15.0 で確認済み）**：`lazy import m` / `lazy from m import x`（`Import(is_lazy=1)` / `ImportFrom(is_lazy=1)`）を認識し、モジュールロード時の即時実行ではなく「当該シンボル名の初回評価時に実体化される束縛」として表現する。
-- **CPython `symtable` 双方向突合テスト（QA 基盤）**：
-  - `dcg` の `scripts/_source_model.py:verify()` に倣い、スコープ木（種別・行）・束縛名・`global`/`nonlocal`・参照種別（local / enclosing / global / builtin）を実 CPython 3.12〜3.15 の `symtable` と自動突合し、言語仕様との乖離を構造的にゼロに保つ。
+- **Version-dependent scope rules (driven by `RuntimeProfile`)**:
+  - **3.12+ PEP 709**: `list` / `set` / `dict` comprehensions are inlined into the enclosing
+    function or module scope (with the exact exceptions, such as directly in a class body).
+    Before 3.12 a comprehension is a function of its own.
+  - **3.14+ PEP 649**: annotations without `from __future__ import annotations` are evaluated
+    lazily in `__annotate__` scopes.
+  - **3.15+ PEP 810 (checked on CPython 3.15.0)**: `lazy import m` / `lazy from m import x`
+    (`Import(is_lazy=1)` / `ImportFrom(is_lazy=1)`) are recognized and modeled as bindings
+    materialized when the name is first evaluated, not when the module loads.
+- **Bidirectional comparison with CPython `symtable` (quality assurance)**:
+  - Following datamodel-code-generator's `scripts/_source_model.py:verify()`, the scope tree
+    (kind and line), bound names, `global` / `nonlocal`, and the kind of every reference (local /
+    enclosing / global / builtin) are compared automatically with the real `symtable` of CPython
+    3.11–3.15, which keeps the divergence from the language at zero
+    (`tests/symtable_verify/verify_symtable.py`).
 
-### 1.2 `IrFunction` 基本構造
-関数（`def` / `async def` / ラムダ / クラス本体 / モジュールトップレベル）ごとに 1 つの `IrFunction` を構築する。ネストクラス内のメソッド（特に `__init__`）は親クラスのメソッド空間と完全に分離する（Stage 0-A `MUT101` 誤検出対策）。
+### 1.2 `IrFunction`
+One `IrFunction` is built per function (`def`, `async def`, lambda, generator expression, a
+comprehension before 3.12), per class body, and for the module's top level. The methods of a
+nested class (its `__init__` in particular) are kept apart from the methods of the outer class
+(against the `MUT101` false positives found in Stage 0-A).
 
 ```text
 IrFunction {
-    id:            FunctionId,
-    owner_class:   Option<ClassId>,      // ネストクラスを親クラスと厳密分離
-    kind:          Sync | Async | Generator | AsyncGenerator,
-    params:        Vec<ParamInfo>,       // 名前・デフォルト有無・PEP 484 型注釈（Advisory レーン専用）
-    decorators:    Vec<DecoratorInfo>,   // @cached_property / @lru_cache / @property / CLI / Web ルート / lifespan 等
-    blocks:        Vec<BasicBlock>,      // RPO 順に整列可能
-    loops:         Vec<NaturalLoop>,     // ヘッダ・ボディ・出口・バックエッジ・LoopBound
-    a1_hazards:    Vec<A1Hazard>,        // eval / exec / locals() / sys._getframe 等（スパン付き）
-    captured_vars: SmallBitSet,          // ネスト関数・lambda・ジェネレータ式が捕捉する自由変数
+    id, name, qualname,
+    owner_class, owner_class_qualname,   // nested classes kept apart from their outer class
+    kind:               Sync | Async | Generator | AsyncGenerator,
+    params:             Vec<ParamInfo>,  // name, default, *args / **kwargs, PEP 484 annotation (Advisory lane only)
+    return_annotation:  Option<String>,  // Advisory lane only
+    decorators:         Vec<String>,     // @cached_property, @lru_cache, @property, CLI and web routes, lifespan, ...
+    local_annotations:  Vec<LocalAnnotation>, // annotated locals and self.attr (Advisory lane only)
+    var_names:          Vec<Option<String>>,  // source name of every SSA variable
+    captured_vars:      Vec<String>,     // free variables captured by nested functions, lambdas, generator expressions
+    blocks:             Vec<BasicBlock>, // can be ordered in reverse postorder
+    loops:              Vec<NaturalLoop>,// header, preheader, body, exits, back edges, LoopBound, depth
+    loop_carried:       Vec<LoopCarriedInfo>, // loop-header phis and whether they accumulate
+    a1_hazards:         Vec<A1Hazard>,   // eval / exec / locals() / sys._getframe ..., with spans
+    span, is_module_body, is_class_body,
 }
 
 BasicBlock {
-    id:            BlockId,
-    phis:          Vec<PhiNode>,
-    insts:         Vec<Inst>,            // 各命令は元 AST の TextRange (start..end) を保持
-    terminator:    Terminator,
-    exc_target:    Option<BlockId>,      // このブロック内で例外発生時の遷移先
+    id, phis: Vec<PhiNode>,
+    insts:      Vec<Inst>,               // every instruction keeps its byte span in the source
+    terminator: Jump | Branch | Return | Raise | Unreachable,
+    exc_target: Option<BlockId>,         // where an exception raised in this block goes
 }
 ```
 
-### 1.3 主要命令セット（概要）
-複合式はすべて**左から右の評価順序を明示する基本命令列**へフラット化する。
+### 1.3 Instruction set
+Compound expressions are flattened into **basic instructions in explicit left-to-right order**.
 
-| 命令カテゴリ | 命令例 | 備考 |
+| Category | Instructions | Notes |
 |---|---|---|
-| 生成・定数 | `Const(Literal)`, `AllocBuiltin(BuiltinKind, args)` | `list`/`dict`/`set`/`tuple`/`bytes`/`str` リテラル・内包表記・隠されていない組み込みコンストラクタ |
-| 変数・別名 | `Copy(dst, src)`, `Delete(var)` | `Copy` は直接別名集合への追加、`Delete` は Strong Update による除去 |
-| 演算 | `BinOp(op, lhs, rhs)`, `UnaryOp(op, val)`, `AugAssign(op, target, rhs)` | 型が厳密確定するまでは「任意特殊メソッド呼び出し可能」として扱う |
-| コンテナ・属性 | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete`, `Contains` | `AttrStore`/`SubscriptStore` は格納値を `Shared` へ降格、`AttrDelete` は `@cached_property` 無効化（`del self.prop`）認識および `MUT201` 書き込み検出に利用 |
-| 呼び出し | `Call(callee, args, kwargs)`, `MethodCall(recv, name, args, kwargs)` | `is_awaited: bool` を保持し、`await` 済み呼び出しと同期呼び出しを厳密分離 |
-| 反復・ジェネレータ | `MakeIter(dst, obj)`, `IterNext(iter)`, `MakeGenExpr(dst, outer_iter, captured)` | `MakeIter` と `MakeGenExpr` は `obj` / `outer_iter` に対する **派生参照（`derived_refs`）** を明示 SSA 変数 `dst` に束縛 |
-| 非同期・中断 | `Await(expr)`, `Yield(expr)`, `YieldFrom(expr)` | `Await` は他タスク干渉あり（`Unique` は不変）。`Yield` は送出値を `Shared` へ降格 |
-| コンテキスト | `EnterWith(mgr)`, `ExitWith(mgr, exc)` | `with` / `async with` の例外抑制可能性・ロック／トランザクション区間（`EFF106` 候補）を明示 |
-| 制御・例外 | `Branch`, `Jump`, `Return`, `Raise`, `Reraise` | 例外ハンドラ入口は `CatchException(types)` で開始 |
+| Constants and allocation | `Const`, `AllocBuiltin(kind, elems)`, `DictLiteral(entries)` | `list` / `dict` / `set` / `tuple` / `str` / `bytes` / number literals, comprehensions, unshadowed builtin constructors; `DictLiteral` keeps the order of `**` unpacking (`{**d, ...}` vs `{**other, **d}`) |
+| Names | `LoadGlobal`, `LoadName`, `LoadDeref`, `StoreGlobal`, `StoreDeref`, `Copy`, `Delete`, `Import` | `Copy` adds to the direct alias set, `Delete` removes by strong update; `Import` / `LoadGlobal` carry the PEP 810 `is_lazy` flag |
+| Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; until types are exact, any special method may run |
+| Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds |
+| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones |
+| Iteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable |
+| Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique); `Yield` makes the yielded value `Shared` |
+| Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
+| Exceptions | `CatchException(types)` | Starts an exception handler |
 
-### 1.4 Python 特有構文の展開方針・フォールバック粒度・`LoopBound`
-- **`for` / `async for` ループのヘッダ分離**：`for x in expr:` において、**`expr`（`for.iter`）および `it = MakeIter(expr)` はループ入口前ブロック（ループ深度 `d`）に配置**し、ループ本体（深度 `d + 1`）には `IterNext(it)` 以降のみを置く（Stage 0-A で `for.iter` の 1 回のみ実行をループ内誤認した `EFF102`/`EFF103` の 7 件の偽陽性を構造的に根絶）。
-- **内包表記・ジェネレータ式**：`RuntimeProfile.pep709_inlined_comprehensions == true`（3.12+）のとき内包表記を外フレーム展開。ジェネレータ式は `MakeGenExpr` で外側イテラブルの派生参照を生成。
-- **A1 違反のフォールバック**：`a1_hazards` 非空の関数は **`heki_soundness` のみ対象外**とし、**`heki_effect`（族 1 `MUT`・族 2 `EFF`/`DATA`）は継続**する。
-- **`LoopBound`**：`ConstSmall(u32)`（長さ $\le 8$ の定数リテラル / `range(k)`）、`RetryPattern`（定数小回数＋`try`/`except`＋`break`/`return` または backoff `sleep`）、`DaemonPolling`（`while self._running:` / `while True:` の常駐ワーカ／再接続ポーリングループ）、`Unbounded`。Soundness には使わず Profitability および Advisory ノイズ抑制のみに使う。
+### 1.4 Lowering, fallbacks, and `LoopBound`
+- **`for` / `async for` headers**: for `for x in expr:`, **`expr` (`for.iter`) and `it =
+  MakeIter(expr)` are placed in the block before the loop (loop depth `d`)**; the loop body
+  (depth `d + 1`) starts with `IterNext(it)` (this removed, by construction, the 7 Stage 0-A
+  false positives of `EFF102` / `EFF103` that took the one-time `for.iter` call for a call in the
+  loop).
+- **Comprehensions and generator expressions**: when
+  `RuntimeProfile.pep709_inlined_comprehensions` is true (3.12+), comprehensions are inlined into
+  the enclosing frame; generator expressions are separate functions created by `MakeGenExpr`.
+- **A1 fallback**: a function with `a1_hazards` is excluded **from `heki_soundness` only**;
+  **`heki_effect` (family 1 `MUT`, family 2 `EFF` / `DATA`) continues**.
+- **`LoopBound`** (never a Soundness premise; used for profitability and Advisory noise only):
+  - `ConstSmall(k)`: a `for` over a literal tuple, list, or set of at most 8 elements, or over
+    `range(k)` / `range(a, b)` spanning at most 8.
+  - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
+    handler) over a small constant range or a target named like `retry` / `attempt`, or a
+    `while` loop with a retry body that sleeps.
+  - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops, and
+    `while True:` with a retry body that sleeps (resident workers and reconnect loops).
+  - `Unbounded`: everything else.
 
 ---
 
-## 2. Advisory / Effect レーン詳細仕様（`heki_effect`）— 族 1 & 族 2
+## 2. Advisory / Effect lane (`heki_effect`): families 1 and 2
 
-### 2.1 軽量レシーバ型解決（Call-Graph 専用）
-型エラー報告は一切行わず、呼び出し先候補・属性対象クラス・書き込み境界ターゲットの解決に特化する。
+### 2.1 Light receiver type resolution (for the call graph only)
+No type errors are reported; resolution only finds call targets, the classes of attributes, and
+the targets of write and read boundaries.
 
-| 優先度 | 解決ソース | 信頼度 | 例 |
+| Priority | Source | Confidence | Example |
 |---|---|---|---|
-| 1 | ローカル生成・直接インポート解決 | `Exact` | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
-| 2 | PEP 484 型注釈（引数・変数・戻り値・属性注釈） | `Typed` | `def f(repo: UserRepo, db: Session): db.execute(...)` |
-| 3 | クラス `__init__` 等での `self.attr = Cls(...)` 推論 | `Typed` | `self.http = httpx.Client()` → 別メソッドの `self.http.get(...)` |
-| 4 | クラス継承階層（CHA / RTA）での同名メソッド解決 | `Heuristic` | 抽象基底クラスからの具象サブクラス解決（候補上限 8 件超は未解決） |
+| 1 | Local constructors and direct imports (relative imports, `src/` layout, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
+| 2 | PEP 484 annotations (parameters, locals, return types, attributes) | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)` |
+| 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
+| 4 | Same-name methods in the class hierarchy (CHA / RTA) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
-### 2.2 統一 `EffectSummary` の Tarjan SCC ボトムアップ伝播
-コールグラフの Tarjan SCC 逆トポロジカル順で Worklist 不動点計算を行い、**Execution Effect（族 2）**、**Mutation & State Effect（`MUT1xx`）**、**Write Ownership / Read-Only Return（`MUT2xx`）** を単一の Summary で同時計算する。
+Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
+`sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
+cannot be resolved is not followed (`unknown_calls`); an external function that Layer 2 does not
+list has no effect.
+
+### 2.2 One `EffectSummary`, propagated bottom-up over Tarjan SCCs
+A worklist fixpoint in reverse topological order of the call graph's Tarjan SCCs computes
+**execution effects (family 2)**, **mutation and state effects (`MUT1xx`)**, and **write and read
+ownership facts (`MUT2xx`)** in one summary. A component's members are visited callees first
+(Tarjan pop order); a component exceeding 16 recomputations per member is stopped and its
+members are marked `unknown_calls`.
 
 ```text
 EffectSummary(f) = {
-    // 族 2: Execution Effect
-    direct_exec_effects:      ExecEffectBitset,
-    transitive_exec_effects:  Map<ExecEffect, ShortestCallChain>,
+    // Family 2: execution effects
+    direct_exec_effects, transitive_exec_effects: Set<ExecEffect>,
+    exec_chains:              Map<ExecEffect, ShortestCallChain>,
 
-    // 族 1: Mutation & State Effect（MUT1xx / MUT2xx 共通）
-    mutates_params:           SmallBitSet,                 // 引数 i 本体または内部要素の変更
-    mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// 引数 i 経由で変更される属性・コンテナパス（MUT201/MUT202）
-    escapes_params:           SmallBitSet,                 // 引数 i の属性・コンテナ格納・グローバル保存・戻り値返却
-    reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> および self.<dict>[const_key] の読み取り
-    mutates_self_attrs:       Set<AttrKeyPath>,            // self.<attr> への再代入またはインプレース変更（間接含む）
-    invalidates_cached:       Set<AttrName>,               // del self.<prop> / self.__dict__.pop("<prop>", ...) / clear 等
-    typed_field_writes:       Set<(ClassId, AttrName, WriteSite)>, // 任意のレシーバ型・属性への直接・間接書込（MUT201）
+    // Family 1: mutation and state effects (MUT1xx / MUT2xx)
+    mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
+    mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i
+    escapes_params:           Bitset,                      // stored in an attribute / container / global, or returned
+    consumes_params:          Bitset,                      // iterated to exhaustion on every normal path (MUT106)
+    unconditional_forwards:   Bitset,                      // passed on at calls that run on every normal path
+    reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
+    mutates_self_attrs:       Set<AttrKeyPath>,            // reassignment or in-place change of self.<attr> (indirect too)
+    invalidates_cached:       Set<AttrName>,               // del self.<prop>, self.__dict__.pop("<prop>", ...), clear
+    typed_field_write_sites:  Set<TypedFieldWriteSite>,    // writes to (class, attr) with kind, chain, and the
+                                                           // parameters the written object may be (MUT201, EFF201)
+    typed_field_read_sites:   Set<TypedFieldReadSite>,     // own reads of (class, attr): attribute, getattr,
+                                                           // __dict__; never propagated (MUT203)
 
-    // オフロード・同期駆動コンテキスト伝播
-    offloads_blocking_params: SmallBitSet,                 // 引数 i の callable を別スレッドへ逃がすラッパーか
-    sync_driven_only:         bool,                        // 同期ドライバ経由でのみ呼ばれる内部 async def か
+    // Offloading and the sync-driven context
+    offloads_blocking_params: Bitset,                      // wrapper running the callable in parameter i on a thread
+    sync_driven_only:         bool,                        // internal async def driven only by a sync driver
     unknown_calls:            bool,
+
+    // Metadata
+    is_async, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
 ```
 
-### 2.3 族 1（`MUT101` / `MUT103` / `MUT201` / `MUT202`）の判定仕様
+Early Cutoff compares summaries without their source positions, so an edit that only moves code
+does not notify callers.
 
-#### `MUT101`：`@cached_property` 依存属性の無効化なし書き換え（Stage 0-A 厳格版）
-1. クラス `C`（継承階層含む。ネストクラスは別 `ClassId` として厳密分離）の各 `@cached_property` メソッド `p` について、`reads_self_attrs(p)`（`p` が直接および `self.helper()` 経由で読む `self.<attr>` と定数添字 `self.<dict>["k"]` の集合、ただし `p` 自身を除く）を抽出する。
-2. `C`（およびサブクラス）の全メソッド `m` のうち、以下を **除外** したものについて `mutates_self_attrs(m)` を抽出する：
-   - **初期化・2 段初期化フック**：`__init__`, `__post_init__`, `model_post_init`, `__setstate__`, `__enter__`, `_init_*`, `postinit`, `_configure_*`, `_open`, `setup` 等（かつ `m` が `__init__` から直接呼ばれるプライベート初期化ヘルパーである場合も除外）。
-   - **メモ／キャッシュ辞書への追記**：対象属性名が `_cache`/`_memo`/`cache` 系または `setdefault`/`if k not in self._xxx:` 形式の遅延キャッシュ充填である場合を除外。
-   - **互いに素な定数 dict キー**：`p` が読むキー集合 `K_read`（例：`self.params["outtmpl"]`）と `m` が書くキー集合 `K_write`（例：`self.params["proxy"]`）がいずれも定数キーかつ `K_read ∩ K_write == ∅` の場合は除外。
-3. 残る依存属性 `a ∈ reads_self_attrs(p) ∩ mutates_self_attrs(m)` があり、かつ **`p ∉ invalidates_cached(m)`**（`self.__dict__.clear()` 等の全無効化ヘルパーがない）場合に **`MUT101`** を報告する。
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT201` / `MUT202` / `MUT203`)
 
-#### `MUT103`：関数間副作用スナップショット（`heki snapshot summary`）
-- モジュール公開関数・指定境界関数の `EffectSummary`（`mutates_params`, `escapes_params`, `mutates_self_attrs`, `transitive_exec_effects`）を正規化フォーマットでロックファイルへ保存し、PR 差分で副作用・可変性が単調増加した関数を検出する。
+#### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
+1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
+   a class of its own), take `reads_self_attrs(p)`: the `self.<attr>` and constant-key
+   `self.<dict>["k"]` reads of `p`, directly and through `self.helper()` calls, without `p`
+   itself.
+2. For every method `m` of `C` and its subclasses, take the writes in `m`'s own body, **except**:
+   - **initialization and two-phase initialization hooks**: `__init__`, `__post_init__`,
+     `model_post_init`, `__setstate__`, `__enter__`, `__new__`, `setup`, `setUp`, `postinit`,
+     `_open`, `_setup`, `_init_*`, `_configure_*`, and private helpers that an initializer calls;
+   - **memo and cache dictionaries**: attributes named like `_cache` / `_memo`, `setdefault`, and
+     lazy filling under `if k not in self._xxx:`;
+   - **disjoint constant dict keys**: when the keys `p` reads (`self.params["outtmpl"]`) and the
+     keys `m` writes (`self.params["proxy"]`) are all constant and disjoint.
+3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains and **`p ∉
+   invalidates_cached(m)`** (and `m` has no full invalidation such as `self.__dict__.clear()`; a
+   private helper all of whose callers invalidate is covered).
 
-#### `MUT201`：宣言的 Write Ownership（書き込み境界）
-`pyproject.toml` に以下のように宣言する（デコレータ不要・実行時オーバーヘッド 0）：
+#### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
+- The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,
+  and `direct_exec_effects ∪ transitive_exec_effects`) are saved in a normalized form
+  (`.heki-summary-snapshot.json`); a pull request whose functions gained effects or mutability is
+  reported.
+
+#### `MUT106`: single-pass iterators consumed twice (opt-in)
+- Sources: generator expressions; `iter` / `zip` / `map` / `filter` / `enumerate` / `reversed`
+  and the single-pass `itertools` functions (never `tee`, `repeat`, `cycle`, `count`); project
+  generator functions; and `Iterator` / `Generator` annotations (not `Iterable` / `Sequence`).
+- Consumers: `for` loops and comprehensions, and `list` / `tuple` / `set` / `frozenset` / `dict` /
+  `sum` / `any` / `all` / `min` / `max` / `sorted` / `str.join`, also through wrappers over one
+  iterable; `next()` is stepping, not consumption. A project function consumes its argument when
+  `consumes_params` says so.
+- The first pass must be full (a loop that can `break`, `return`, or `raise` is partial); the
+  second pass must be reachable from it on normal CFG paths; an iterator created outside a loop
+  and consumed inside it is reported unless the loop runs at most once.
+
+#### `MUT107`: attributes `__hash__` depends on
+- `reads_self_attrs` of `__hash__` (with its `self` helpers) against the own writes of every other
+  method of the class and its subclasses, with `MUT101`'s initialization, memo, and constant-key
+  filters, writes directly under a `None` / falsy guard of the same attribute (lazy
+  initialization), the attributes `__hash__` caches itself (`self._hash`), and stored-hash names.
+
+#### `MUT201`: declared write ownership
+Declared in `pyproject.toml` (no decorators, no run-time overhead):
 
 ```toml
 [[tool.heki.write-owners]]
@@ -126,24 +214,37 @@ targets = [
     "datamodel_code_generator.model.base.DataModel.base_classes",
     "datamodel_code_generator.types.DataType.data_types",
 ]
-allowed_writers = [
-    "datamodel_code_generator.parser.generation.*",
-    "datamodel_code_generator.model.base.DataModel.__init__",
-]
-# 任意：指定クラス上での @cached_property や __dict__ 直接操作も禁止可能
-forbid_cached_property_on = ["datamodel_code_generator.model.base.DataModel"]
+allowed-writers = ["datamodel_code_generator.parser.generation.*"]
+exempt-methods = ["__deepcopy__", "copy_deep", "create_reuse_model"]
+# Optional: a @cached_property defined on these classes is reported too.
+forbid-cached-property-on = ["datamodel_code_generator.model.base.DataModel"]
+message = "write model state through GenerationStore instead"
 ```
 
-- **解析アルゴリズム**（`dcg` の `check_generation_store_usage.py` の弱点＝ローカル別名漏れ・間接 helper 漏れ 13 件を SSA-CFG ＋ Call Graph で解消）：
-  1. 対象クラス `C`（およびサブクラス）の属性 `a` に対する以下すべての操作を **Write 起点** とする：
-     - 属性再代入・削除・拡張代入（`obj.a = ...`, `del obj.a`, `obj.a += ...`）
-     - `setattr(obj, "a", ...)` / `object.__setattr__(obj, "a", ...)` / `obj.__dict__["a"] = ...`
-     - **別名経由コンテナ破壊**：`xs = obj.a; xs.append(...)` / `xs[i] = ...` / `xs.clear()` / `xs.sort()` / `xs |= ...`（`heki_effect` 内の関数内 alias 追跡と `mutated_param_paths` により、**別関数 `helper(obj.a)` に渡して先で `.append()` するケースも推移的に捕捉**）。
-  2. `EffectSummary.typed_field_writes` および `mutated_param_paths` を Tarjan SCC でボトムアップ伝播し、書き込み起点から到達元（`allowed_writers` に含まれない関数・モジュール）へ違反を報告する。
-  3. 既存コードベースの段階移行には **`heki check --baseline`** を併用し、`(path, qualname, "MUT201", "Class.attr")` キーで件数凍結・片道縮小を行う。
+- **Algorithm** (removes the weaknesses of datamodel-code-generator's
+  `check_generation_store_usage.py`, local aliases and indirect helpers, 13 misses, with the
+  SSA-CFG and the call graph):
+  1. Every operation on attribute `a` of a target class `C` (and its subclasses) is a **write
+     origin**:
+     - reassignment, deletion, and augmented assignment (`obj.a = ...`, `del obj.a`,
+       `obj.a += ...`);
+     - `setattr(obj, "a", ...)` / `object.__setattr__(obj, "a", ...)` /
+       `obj.__dict__["a"] = ...`;
+     - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
+       `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
+       `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
+       caught across calls**).
+  2. `typed_field_write_sites` propagate bottom-up with their call chains. A write is allowed
+     when a function on its chain matches `allowed-writers` or `exempt-methods`, when an
+     initializer of the target's class family writes its own `self`, or when the reporting
+     function only runs inside allowed contexts (every path of project callers starts in one); a
+     private helper with project callers hands its report to them. Otherwise the outermost
+     function is reported, with `message` appended.
+  3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
+     `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 
-#### `MUT202`：宣言的 Read-Only Return（共有オブジェクト不変性）
-`pyproject.toml` に以下のように宣言する：
+#### `MUT202`: declared read-only returns
+Declared in `pyproject.toml`:
 
 ```toml
 [[tool.heki.readonly-returns]]
@@ -152,118 +253,195 @@ producers = [
     "datamodel_code_generator.parser._schema_graph.SchemaGraphBuilder.schema",
     "datamodel_code_generator.parser._schema_documents.load_document",
 ]
-deep = true   # 配下の属性・ネストコンテナへの変更も禁止
+deep = true   # changes to attributes and nested containers below are forbidden too
 ```
 
-- **解析アルゴリズム**：
-  1. `producers` に一致する呼び出しの戻り値 SSA 変数に `ReadOnlyOrigin(producer_name)` タグを付与する。
-  2. タグは `Copy`、属性読み取り（`deep = true` 時）、添字読み取り、タプル／リスト展開を通じて関数内に伝播する（`deepcopy(...)` / `.copy()` / `model_copy(deep=True)` 等の Layer 1/2 複製 API で遮断）。
-  3. タグ付き値に対して直接の属性書換・コンテナ破壊が行われるか、`mutates_params` に該当する引数位置へ渡された場合に **`MUT202`**（＋最短 `call_chain`）を報告する。
+- **Algorithm**:
+  1. The SSA value returned by a call to a `producers` entry (or to an `@lru_cache` / `@cache`
+     function) gets a read-only origin tag.
+  2. The tag flows within the function through `Copy`, attribute reads (with `deep = true`),
+     subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
+     `model_copy(deep=True)`, and the Layer 2 `copy_sanitizer` entries).
+  3. A direct attribute write or container mutation of a tagged value, or passing it in a
+     parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
+     the call hop.
 
-### 2.4 族 2（`EFF101`〜`103`, `EFF105`, `DATA101`）の精度・サニタイザ・重複集約
-1. **`OffloadsBlocking` のラッパー伝播（dcg `bodies.py:112` 対策）**：
-   - 関数 `w(fn, *args)` が内部で `asyncio.to_thread(fn, ...)`（`offloads_blocking_arg = 0`）等を呼んでいる場合、`w` の `EffectSummary.offloads_blocking_params` に `fn` の引数インデックスを記録し上位へ伝播。`await in_thread(self.open)` 等のブロッキング伝播を遮断する。
-2. **Sync-over-Async パターンの緩和（dcg `client.py:1399` 対策）**：
-   - 同期ドライバ経由でのみ駆動され通常イベントループから `await` されない内部 `async def` は `sync_driven_only = true` として緩和。
-3. **Stage 0-A 確定フィルタ（4 点）**：
-   - **`EFF101`**：`is_awaited == true` の呼び出しを除外、`subprocess.Popen(...)` 本体（非ブロッキング spawn）を除外（`.wait()`/`.communicate()` はブロッキング維持）。
-   - **`EFF102`**：`for.iter` ヘッダを除外、`DaemonPolling` ループ内のクライアント再接続を緩和、ローカル `dict` 変数名 `requests` 等を型／名前解決で誤認識しない。
-   - **`EFF103`**：`for.iter` ヘッダを除外、SQL 文字列リテラルが DDL（`CREATE`/`ALTER`/`DROP`）やマイグレーション関数内のものを除外、ORM ライブラリ自身の内部実装を除外。
-   - **`DATA101`**：`df = pd.concat([df, ...])` や `arr = np.vstack([arr, ...])` のように **SSA の `PhiNode` でループバックエッジ経由の自己累積（`LoopCarried`）になっているもののみ** を検出し、ループ内での単発結合・パディングを除外する。
-4. **重複集約（Boundary-Only Reporting + Root-Cause Grouping）**：
-   - `async A → await async B → sync C → blocking D` では同期世界への最初の越境点（`async B`）のみ報告。同一原因への到達元が閾値（既定 10 件）を超えた場合は代表＋到達元件数へ集約。
-5. **コンテキスト緩和**：`click.command` / `typer.command`、`__main__` の `asyncio.run` 直下、FastAPI `lifespan` 起動フック、`LoopBound::ConstSmall` / `RetryPattern`、テストコードは既定で抑止・緩和。
+#### `MUT203`: declared read ownership
+- `[[tool.heki.read-owners]]` (`targets`, `allowed-readers`, `exempt-methods`, `message`): reads of
+  the targets (attributes, local aliases, constant-name `getattr` / `object.__getattribute__`,
+  `__dict__["a"]` / `__dict__.get("a")`) outside the allowed readers. Read sites are local facts;
+  the rule walks the reverse call graph from private helpers to their outermost non-private
+  callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
+  parameters without a project-class type are not seen.
 
-### 2.5 Layer 3 オンデマンド外部解析の境界とキャッシュキー
-- **適用境界（厳守）**：**標準ライブラリ全体および Layer 2 登録済みパッケージ内部へは絶対に潜らない**（A.7：`asyncio.StreamWriter.write` → `socket.send` 誤爆防止）。
-- **打ち切り上限**：探索深さ最大 3 ホップ、1 モジュール最大 10,000 行、外部解析合計上限 200 モジュール。
-- **ディスクキャッシュキー**：`(heki_version, effective_kb_digest, env_packages_digest, package_name, package_version, rel_path, blake3_file_hash)`。
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+1. **Offload wrapper propagation** (from datamodel-code-generator `bodies.py:112`):
+   - When a function `w(fn, *args)` calls `asyncio.to_thread(fn, ...)` (`offloads_blocking_arg =
+     0`) or similar, the parameter index of `fn` is recorded in `w`'s `offloads_blocking_params`
+     and propagated upward, which stops `await in_thread(self.open)` from counting as blocking.
+2. **Sync-over-async relaxation** (from datamodel-code-generator `client.py:1399`):
+   - A private `async def` without route decorators that is only driven by synchronous drivers
+     (`.send(None)`, `run_sync`) and never awaited from the event loop is `sync_driven_only` and
+     relaxed.
+3. **Stage 0-A filters**:
+   - **`EFF101`**: calls with `is_awaited == true` excluded; `subprocess.Popen(...)` itself (a
+     non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
+   - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
+     dict named `requests` is not mistaken for the package (type and name resolution).
+   - **`EFF103`**: `for.iter` headers excluded; SQL literals that are DDL (`CREATE` / `ALTER` /
+     `DROP` / `PRAGMA`) and queries in migration functions excluded; the internals of ORM
+     libraries excluded.
+   - **`DATA101`**: only `df = pd.concat([df, ...])` / `arr = np.vstack([arr, ...])` whose SSA
+     `PhiNode` accumulates across the back edge (`LoopCarried`); one-off concatenation and padding
+     in a loop are excluded.
+4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
+   - In `async A → await async B → sync C → blocking D`, only the first crossing into the
+     synchronous world (`async B`) is reported; when more than a threshold (10) of callers reach
+     the same root cause, they are grouped into one representative with the count.
+5. **Context relaxation**: `click` / `typer` commands (`@command`), ASGI lifespan hooks,
+   `LoopBound::ConstSmall` / `RetryPattern` loops, and test code (`lint.relax-async-in-tests`,
+   default true) are relaxed by default.
+6. **`EFF106`** (opt-in): a forward must-hold dataflow over the CFG for `with` regions of
+   synchronous locks (Layer 2 `sync_lock_or_tx` classes: `threading.Lock` / `RLock` / `Semaphore`
+   / `BoundedSemaphore` / `Condition`) and transaction starters (`Session.begin()`,
+   `Connection.begin()`, `Engine.begin()`, `transaction.atomic()`, `psycopg.Connection.transaction()`,
+   ...); an `await` or a call site reaching `BlockingNet` inside the region is reported.
+7. **`EFF107`** (opt-in): a `create_task` / `ensure_future` result bound to a named local is
+   reported when no alias of it is awaited, returned, yielded, stored, put in a container, passed
+   to a call, or captured; being only the receiver of `add_done_callback` / `set_name` does not
+   keep it, `cancel()` / `result()` / `exception()` do.
+8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+   function finds the shortest chain to each forbidden effect, without entering
+   `allowed-callees`, other scope functions, or `async def` bodies that do not run at the call.
+
+### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
+- **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**
+  (A.7: avoids the `asyncio.StreamWriter.write` → `socket.send` misfire).
+- **Limits**: at most 3 hops of exploration, 10,000 lines per module, 200 analyzed modules in
+  total.
+- **Disk cache key**: `(heki_version, effective_kb_digest, env_packages_digest, package_name,
+  package_version, rel_path, file_hash)`.
 
 ---
 
-## 3. Soundness / Alias レーン詳細仕様（`heki_soundness`）— 族 3
+## 3. Soundness / Alias lane (`heki_soundness`): family 3
 
-### 3.1 Provenance 付き抽象ドメイン（複数 `alloc_id`・派生参照対応）
+### 3.1 Abstract domain with provenance (several `alloc_id`s, derived references)
 ```text
 const MAX_JOIN_ALLOC_IDS: usize = 4;
 
 enum ExactTypeVal {
-    Exact { ty: BuiltinType, origin: Origin },
-    Unknown { reason: TypeUnknownReason },
+    Exact { ty: BuiltinKind, origin: Span },
+    Unknown { reason: String },
 }
 
 enum UniqueState {
-    Unique {
-        alloc_ids: SmallVec<[AllocId; 2]>,   // CFG 合流で上限 4 超過時は Shared 降格
-        origins:   SmallVec<[Origin; 2]>,
-    },
-    Shared {
-        witness:   EscapeWitness,
-    },
+    Unique { alloc_ids: SmallVec<[AllocId; 2]> },   // more than 4 after a CFG merge: Shared
+    Shared { witness: EscapeWitness },              // PassedToUnknownCall, StoredInContainerOrAttr,
+                                                    // DerivedRefEscapedAt, JoinAllocOverflow, ParameterInput,
+                                                    // CapturedByClosure, ExternalValue, ReturnedOrRaised
 }
 
 struct FrameState {
     var_type:     Map<VarId, ExactTypeVal>,
     var_unique:   Map<VarId, UniqueState>,
-    alias_sets:   Map<AllocId, SmallBitSet<VarId>>,
-    derived_refs: Map<AllocId, SmallBitSet<VarId>>,   // MakeIter / MakeGenExpr / retained_in_return
+    alias_sets:   Map<AllocId, Vec<VarId>>,
+    derived_refs: Map<AllocId, Vec<VarId>>,          // MakeIter / MakeGenExpr / retained_in_return
     derives_from: Map<VarId, SmallVec<[AllocId; 2]>>,
+    points_to:    Map<VarId, SmallVec<[AllocId; 2]>>,// kept when the variable becomes Shared
+    alloc_elems:  Map<AllocId, ElemKinds>,           // element kinds of list / tuple / set allocations
 }
 ```
 
-### 3.2 遷移規則・派生参照・合流・`ValueLoopInvariant`・A2 用 `SoundnessSummary`
-- **Strong Update**：再束縛・`Delete(x)` は全 `alias_sets` / `derived_refs` から `x` を除去。
-- **派生参照の生成と推移的エスケープ**：`MakeIter(r, x)` / `MakeGenExpr(r, x, ...)` / Layer 1 の `retained_in_return` は `r` を `x` の全 `alloc_id` の `derived_refs` へ追加（連鎖も推移的に引き継ぐ）。`r` がエスケープした場合は、元の全 `alloc_id` の全 `alias_sets` も `Shared { witness: DerivedRefEscapedAt(span) }` へ降格する。
-- **CFG 合流**：一方が `Shared` なら `Shared`。双方が `Unique` なら `alloc_ids` 和集合（`|Us| <= 4` なら維持、超過なら `Shared { witness: JoinAllocOverflow }`）。
-- **`ValueLoopInvariant(v, loop)`**：`BindingLoopInvariant` に加え、不変組み込み型（`tuple` は要素もハッシュ整合組み込み型）、または可変組み込み型がループ全体を通じて `Unique` かつループ内に該当 `alloc_id`（別名・派生参照含む）への変更操作が一切ないこと（S27〜S28 対策）。
-- **保守的 `SoundnessSummary`（A2・v1.0 用）**：`heki_effect` に依存せず、`heki_soundness` 内で静的束縛関数（モジュール直下 1 回定義・デコレータなし・モック対象外）のみを対象に計算する。
+### 3.2 Transfer rules, derived references, merges, `ValueLoopInvariant`, and the A2 `SoundnessSummary`
+- **Strong update**: rebinding and `Delete(x)` remove `x` from every `alias_sets` /
+  `derived_refs` entry.
+- **Derived references and transitive escape**: `MakeIter(r, x)` / `MakeGenExpr(r, x, ...)` /
+  Layer 1 `retained_in_return` add `r` to the `derived_refs` of every `alloc_id` of `x` (chains
+  are inherited transitively). When `r` escapes, every alias of every original `alloc_id` becomes
+  `Shared { witness: DerivedRefEscapedAt(span) }`.
+- **CFG merges**: `Shared` on either side gives `Shared`; two `Unique` values give the union of
+  their `alloc_ids` (kept when at most 4, otherwise `Shared { witness: JoinAllocOverflow }`).
+- **`ValueLoopInvariant(v, loop)`**: besides `BindingLoopInvariant`, the value is an immutable
+  builtin (a `tuple` whose elements are hash-consistent builtins too), or a mutable builtin that
+  stays `Unique` for the whole loop and whose `alloc_id` (aliases and derived references included)
+  is never changed inside the loop (against S27–S28).
+- **Conservative `SoundnessSummary` for A2 (planned)**: computed inside `heki_soundness`, without
+  depending on `heki_effect`, only for statically bound functions (defined once at module level,
+  undecorated, not mocked). Until then every call into project code counts as unknown.
 
-### 3.3 族 3 ルール別 Proof Obligation マトリクス（Safety × Profitability 分離）
+### 3.3 Proof obligations per family-3 rule (safety and profitability kept apart)
+Every candidate also needs `A1HazardFree` (no frame introspection in the function) and
+`AnalysisConverged` (the abstract interpretation reached a fixpoint).
 
-| Rule | Profitability | Safety Proof Obligation（意味保存） | Profitability 条件 | 主な反例 |
+| Rule | Profitability | Safety obligations (behavior preservation) | Profitability condition | Main counterexamples |
 |---|---|---|---|---|
-| **OPT101** | `unconditional` | `Unique(x)`, `ExclusiveAccessAtWrite(x)`（全別名・全派生参照 Dead）, `ExactType(x/rhs, list)`, `ExceptionStateSafe(x)`, `EvalOrderPreserved` | `LoopCarried(x)` | S1〜S5, S14, S23〜S25 |
-| **OPT102** | `unconditional` | `Unique(target)`, `ExclusiveAccessAtWrite(target)`, `ExactType(target/rhs, set\|dict)`, **辞書アンパック時は累積変数 `d` が先頭（`{**d, ...}`）であること**, `ExceptionStateSafe`, `EvalOrderPreserved` | `LoopCarried(target)` | S26, S26b, **dcg `_target_binding.py:465`（`{**other, **found}` 右側累積は上書き優先順が逆転）** |
-| **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc/rhs)`, ループ内他参照なし, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall`（ローカル `str +=` 除外） | A.8（小反復劣化）, `self.s +=`, 右辺 `__radd__` |
-| **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list\|tuple)`, ハッシュ整合組み込み型要素, `ZeroTripExceptionSafe` | `NotConstSmall(lst)` | S9a, S9b, S22, S27 |
-| **OPT111** | `size-dependent` | `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, ハッシュ整合組み込み型要素, 削除・置換なし | `NotConstSmall` | `seen.remove`, 非ハッシュ要素 |
-| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)`（非エスケープ・非返却）, `ExactType(q, list)`, `deque` 等価操作集合内 | `NotConstSmall`, **両端（`0`, `-1`）以外の任意添字 `q[i]` なし** | S12, `sort()`, 中間添字 $O(n)$ 劣化 |
-| **OPT130** | `size-dependent` | 全引数 `ValueLoopInvariant`, 副作用なし, `ZeroTripExceptionSafe`, 生成コンテナ変更なし | `NotConstSmall`（$m=0$ 回ループで 100 倍劣化: A.8） | S22, S28, A.8 |
+| **OPT101** | `unconditional` | `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe(x)`, `EvalOrderPreserved` | `LoopCarried(x)` | S1–S5, S14, S23–S25 |
+| **OPT102** | `unconditional` | `Unique(target)`, `ExclusiveAccessAtWrite(target)`, `ExactType(target / rhs, set \| dict)`, **for dict unpacking the accumulated `d` comes first (`{**d, ...}`): `DictUnpackLeading`**, `ExceptionStateSafe`, `EvalOrderPreserved` | `LoopCarried(target)` | S26, S26b, **datamodel-code-generator `_target_binding.py:465` (`{**other, **found}` accumulates on the right and reverses the override order)** |
+| **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc / rhs)`, `NoIntermediateReads`, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall` (local `str +=` excluded) | A.8 (slower for small loops), `self.s +=`, `__radd__` on the right |
+| **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` | `NotConstSmall(lst)` | S9a, S9b, S22, S27 |
+| **OPT111** | `size-dependent` | `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, only the appends the set mirrors (`OnlyPairedAppends`) | `NotConstSmall` | `seen.remove`, unhashable elements |
+| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes |
+| **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree`, `ZeroTripExceptionSafe`, the built container never changed | `NotConstSmall` (100 times slower when the loop runs zero times: A.8) | S22, S28, A.8 |
 
 ---
 
-## 4. 3 層 KB・Ratchet ベースライン・任意ダンプ連携仕様
+## 4. Knowledge bases, the Ratchet baseline, and profile dumps
 
-### 4.1 Layer 1（`kb/soundness/*.toml` — Soundness 完全専用）
-Advisory 用の `effects` フィールドは一切持たず、`return_kind` / `param_effects`（`read_only`, `mutated`, `retained_in_return`, `escaped`）/ `dunders_invoked` / `verified_max_python` のみを保持する。`verified_max_python` 超過時は起動時射影で自動 `Unknown` 降格。
+### 4.1 Layer 1 (`kb/soundness/*.toml`, Soundness lane only)
+No advisory `effects` field at all: an entry has only `symbol`, `return_exact_type`,
+`param_effects` (`read_only`, `mutated`, `retained_in_return`, `escaped`; for methods index 0 is
+`self`), and `verified_max_python`. Entries whose `verified_max_python` is older than the target
+version become `Unknown` when the knowledge base is projected at start-up. `#[serde(
+deny_unknown_fields)]` rejects a Layer 2 field written into a Layer 1 file and the other way
+round; `tests/sentinel/verify_soundness_kb.py` checks every claim on real CPython.
 
-### 4.2 Layer 2（`kb/ecosystem/*.toml` — 標準ライブラリ公開 API ＋ 主要 OSS）
-すべての Execution Effect 起点、`async_safe = true`（例：`asyncio.StreamWriter.write`）、`offloads_blocking_arg`（例：`asyncio.to_thread`）、`excluded = true`（例：`logging.Logger.*`）、`opaque_to_layer3 = true`、複製サニタイザ（`copy.deepcopy`, `BaseModel.model_copy`：`MUT202` 用）を一元定義する。プロジェクト側からのカスタム追加（`pyproject.toml` `[tool.heki.ecosystem]`）に対応。
+### 4.2 Layer 2 (`kb/ecosystem/*.toml`: public standard-library APIs and major packages)
+The single place for every execution-effect origin. An entry has `symbol`, `effects`
+(`blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`,
+`unpooled_client_alloc`, `db_query`, `quadratic_realloc`), `async_safe` (`asyncio.StreamWriter.write`),
+`offloads_blocking_arg` (`asyncio.to_thread`), `excluded` (`logging.Logger.*`), `copy_sanitizer`
+(`copy.deepcopy`, `BaseModel.model_copy`: `MUT202`), `return_type` (factories such as
+`sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
+`opaque_to_layer3` (reserved for Layer 3). A file lists its `opaque_packages`. Projects add or
+override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
+`offloads-blocking-arg`, `excluded`, `copy-sanitizer`).
 
-### 4.3 行番号非依存 Ratchet ベースライン仕様（`heki_diagnostics`）
-- **キー構造**：`BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count: u32`。行番号を持たないため、無関係な編集・リフォーマットでベースラインが壊れない。
-- **検証ルール（片道縮小）**：
-  - 現在の検出件数がベースラインを **上回る** キーがある → **FAIL**（新規違反の混入）。
-  - 現在の検出件数がベースラインを **下回る**（またはエントリが消滅した） → **stale baseline 通知**（`--strict-ratchet` 時は FAIL とし `heki check --update-baseline` で縮小更新を要求）。
+### 4.3 Line-number-independent Ratchet baseline (`heki_diagnostics`)
+- **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`.
+  Without line numbers, unrelated edits and reformatting do not break the baseline.
+- **Rules (shrink only)**:
+  - a key whose current count **exceeds** the baseline **fails** (a new violation);
+  - a key whose current count is **below** the baseline (or has disappeared) prints a note asking
+    to shrink the file with `heki check --update-baseline`.
 
-### 4.4 任意プロファイルダンプ読込仕様（`heki_profile`）
-- **オフライン読込専用（実行介入なし）**：`py-spy` の `--collapsed` テキスト、CPython 3.15 Tachyon の `--gecko` JSON / `--pstats` バイナリ、`cProfile` の `pstats` を統一の `(file, line, func, self_pct, cum_pct)` テーブルへ読み込む。
-- **実機確認済みの制約**：CPython 3.15 Tachyon は `--opcodes` と `--jsonl` の併用不可（`--gecko` / `--binary` 等が必要）、かつ macOS では外部メモリ読取りに `sudo` が必要。そのためプロファイル連携はコア必須要件にはせず、チューニング時の任意アドオンに限定する。
+### 4.4 Optional profile dumps (`heki_profile`)
+- **Offline reading only (the program is never run or touched)**: collapsed stacks (CPython 3.15
+  Tachyon `--collapsed`: `tid:N;file.py:func:line;... count`; py-spy: `func (file.py:line);...
+  count`) and Tachyon `--gecko` JSON are read into one table of hot functions; `heki check
+  --profile` uses it to apply proven size-dependent rewrites in hot functions.
+- **Constraints checked on real tools**: Tachyon on CPython 3.15 cannot combine `--opcodes` with
+  `--jsonl` (`--gecko` / `--binary` are needed), and macOS needs `sudo` to read another process's
+  memory. Profile integration is therefore never required, only an optional add-on for tuning.
 
 ---
 
-## 5. Stage 0-A 実測結果サマリ（完了実績：2026-11-19）
+## 5. Stage 0-A measurement results (completed 2026-11-19)
 
-339 リポジトリ（成熟 OSS 118 リポジトリ / 1,242 万行 ＋ 2026 年新規 GitHub 221 リポジトリ / 568 万行、合計 56,629 ファイル / 18,108,143 行）を 8 並列スキャン（62.8 秒）し、全 8 ルール・計 171 サンプルを目視精査した結果：
+339 repositories (118 mature open-source repositories with 12.42 million lines and 221 new GitHub
+repositories of 2026 with 5.68 million lines; 56,629 files, 18,108,143 lines in total) were
+scanned with 8 workers (62.8 s), and all 171 samples of the 8 rules were reviewed by hand:
 
-| Rule | 対象ドメイン別ヒット率 | 間接呼び出し比率 | 171 件目視監査の結論 | Baseline v4.0 での処置 |
+| Rule | Hit rate by domain | Indirect share | Conclusion of the 171-sample review | Decision in Baseline v4.0 |
 |---|---|---|---|---|
-| **EFF101** | Web/Async **37.6%** (35/93) / DB 29.1% | **82.3%** (436/530) | **68% 実害**（`redis-py` `cluster.py:1613` の実 `time.sleep`、4〜5 ホップ到達含む） | **主力採用**（`await` 済み・`Popen` 除外を実装） |
-| **EFF102** | Web/Async **44.1%** (41/93) / DB **48.5%** (50/103) | **90〜93%** | `for.iter` 修正後 **~75〜80% 実害**（`NeMo`・`OmniAgent`・`luigi` 等） | **主力採用**（`for.iter`・`DaemonPolling` 対応） |
-| **EFF103** | DB **47.6%** (49/103) / Web 31.2% | **74.2%** (630/849) | N+1 多数。DDL・マイグレーション・ORM 内部がノイズ源 | **主力採用**（`for.iter`・DDL・ORM 内部除外） |
-| **DATA101** | Data/ML **19.5%** (24/123) | — | 素朴 AST の 60% FP は全件非 `LoopCarried` パディング。`LoopCarried` 適用で **~90% 精度** | **主力採用**（SSA `LoopCarried` 必須） |
-| **MUT101** | 成熟 OSS **16.1%** (19/118) / 新規 0.9% | — | `dcg` 0.86.0 実バグ・`mkdocs`・`wagtail`・`textual` 等に的中。素朴版の ~64% ノイズは 3 原因に集約 | **厳格版で採用**（2 段初期化・メモ dict・互いに素な dict キー除外） |
-| **MUT102a/b** | 成熟 OSS 4.2% / 新規 0.5〜1.4% | — | 低密度かつ大半が意図的イディオム（ゼロコピー `Sequence`・`frozen` 蓄積 list） | **実測により不採用**（代わりに dcg 由来の **`MUT201`/`MUT202`** を採用） |
-| **DATA102** | Data/ML 12.2% / 成熟 OSS 2.5% | — | 単一式構文チェックであり Ruff / pandas-vet と重複 | **不採用** |
+| **EFF101** | Web/async **37.6%** (35/93) / DB 29.1% | **82.3%** (436/530) | **68% real harm** (including the real `time.sleep` in redis-py `cluster.py:1613`, reached in 4–5 hops) | **Core** (awaited calls and `Popen` excluded) |
+| **EFF102** | Web/async **44.1%** (41/93) / DB **48.5%** (50/103) | **90–93%** | **About 75–80% real harm** after the `for.iter` fix (NeMo, OmniAgent, luigi, ...) | **Core** (`for.iter` and `DaemonPolling` handled) |
+| **EFF103** | DB **47.6%** (49/103) / web 31.2% | **74.2%** (630/849) | Many N+1 queries; DDL, migrations, and ORM internals cause noise | **Core** (`for.iter`, DDL, ORM internals excluded) |
+| **DATA101** | Data/ML **19.5%** (24/123) | — | All 60% false positives of a naive AST check were non-`LoopCarried` padding; with `LoopCarried` **about 90% precise** | **Core** (SSA `LoopCarried` required) |
+| **MUT101** | Mature **16.1%** (19/118) / new 0.9% | — | Hit a real bug in datamodel-code-generator 0.86.0, and in mkdocs, wagtail, textual, ...; the about 64% noise of the naive version came from 3 causes | **Adopted in its strict form** (two-phase initialization, memo dicts, disjoint dict keys excluded) |
+| **MUT102a/b** | Mature 4.2% / new 0.5–1.4% | — | Sparse and mostly deliberate idioms (zero-copy `Sequence`, `frozen` accumulating lists) | **Rejected by measurement** (datamodel-code-generator's **`MUT201` / `MUT202`** adopted instead) |
+| **DATA102** | Data/ML 12.2% / mature 2.5% | — | A single-expression syntax check that duplicates Ruff / pandas-vet | **Rejected** |
 
-*(次期候補ルール `MUT104`–`107`, `EFF106`–`108`, `OPT112`–`113`, `OPT131` も、v1.0 組込み前に同一のコーパス計測・目視精査プロトコルを通して採否を決定する。)*
+*(The Wave 2 candidates were measured the same way: `MUT107`, `OPT112`, `OPT113`, `EFF106`,
+`MUT106`, and `EFF107` are implemented; `MUT104` for `ALL_CAPS` constants, `EFF108`, and `MUT105`
+were rejected; `OPT131` still waits for its measurement.)*

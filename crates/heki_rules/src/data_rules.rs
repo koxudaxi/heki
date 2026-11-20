@@ -1,4 +1,4 @@
-//! Family 2 data rule: `DATA101` (docs/DETAILED_SPEC_M3_M7.md section 3.2).
+//! Family 2 data rule: `DATA101` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::eff_rules::shortest;
 use crate::{CheckContext, ModuleUnit};

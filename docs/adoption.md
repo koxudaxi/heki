@@ -29,6 +29,29 @@ $ heki check --extend-select MUT103            # reports functions that gained e
 Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
 same pull request; the diff of the JSON file shows reviewers what changed.
 
+## pre-commit
+
+heki ships as one binary on PyPI, so a hook needs no Rust toolchain. Its checks follow calls
+across files, so the hook checks the whole project instead of the staged files only (about 1.5
+seconds for 200,000 lines):
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: local
+    hooks:
+      - id: heki
+        name: heki
+        entry: uvx heki check
+        language: system   # needs uv on PATH
+        types: [python]
+        pass_filenames: false
+```
+
+With a Ratchet baseline configured (`baseline = "heki-baseline.toml"`), the hook fails only on new
+findings. Without uv, use `language: python` with `additional_dependencies: [heki]` and
+`entry: heki check` instead.
+
 ## Continuous integration
 
 GitHub Actions annotations:

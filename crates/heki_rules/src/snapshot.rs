@@ -1,5 +1,5 @@
-//! `heki snapshot` and `MUT103` (`summary-effect-regression`, docs/DETAILED_SPEC_M3_M7.md
-//! section 4.7).
+//! `heki snapshot` and `MUT103` (`summary-effect-regression`, docs/ANALYSIS_AND_KB_SPEC.md
+//! section 2.3).
 //!
 //! The snapshot stores, for every public function (`(module, qualname)` whose name does not
 //! start with `_`), its normalized interprocedural summary: mutated parameters, escaping

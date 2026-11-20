@@ -1,4 +1,4 @@
-//! `heki_soundness` gates (docs/DETAILED_SPEC_M3_M7.md section 4.8):
+//! `heki_soundness` gates (ARCHITECTURE.md section 10):
 //! 1. the seven counterexamples are `Blocked` / `Disproved` (never `Safe`);
 //! 2. obligation stripping: disabling one obligation lets exactly its counterexample through;
 //! 3. the `OPT101` / `OPT102` positives are `Safe` + `Unconditional` with byte-exact edits

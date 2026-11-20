@@ -1,5 +1,5 @@
 //! The eight Family 3 (`OPT`) rules: IR patterns, Proof Obligations, Profitability, and minimal
-//! byte-span [`TextEdit`]s (docs/DETAILED_SPEC_M3_M7.md section 4.5).
+//! byte-span [`TextEdit`]s (docs/ANALYSIS_AND_KB_SPEC.md section 3.3).
 //!
 //! A candidate is produced for every pattern occurrence; [`OptCandidate::is_reportable`]
 //! decides whether it becomes a diagnostic (not `Disproved`, profitable, and the container's

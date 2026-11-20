@@ -1,4 +1,4 @@
-//! `heki_effect` tests. The five M4 gates (docs/DETAILED_SPEC_M3_M7.md section 2.9) are
+//! `heki_effect` tests. The five gates of the effect engine (milestone M4) are
 //! marked `gate_1` .. `gate_5`; the rest pin the resolver and local-extraction rules.
 
 use super::*;

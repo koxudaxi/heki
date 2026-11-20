@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Layer 1 sentinel: verify `kb/soundness/*.toml` against the running CPython (3.11-3.15).
 
-Checks (docs/DETAILED_SPEC_M3_M7.md section 1.5):
+Checks (docs/ANALYSIS_AND_KB_SPEC.md section 4.1):
   1. No advisory (Layer 2) field and no unknown field appears in a Layer 1 file.
   2. Every `retained_in_return` API returns a derived reference that observes a later mutation of
      the retained argument, and the KB marks exactly the argument positions the scenario retains.
