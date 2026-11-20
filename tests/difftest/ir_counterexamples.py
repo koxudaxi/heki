@@ -452,7 +452,7 @@ def old_chained_comparison_short_circuits(items, acc):
 
 
 def cx_membership_in_chained_comparison(n):
-    keys = list(range(9))
+    keys = list(range(17))
     hit = None
     for i in range(n):
         hit = i in keys in keys
@@ -460,7 +460,7 @@ def cx_membership_in_chained_comparison(n):
 
 
 def old_membership_in_chained_comparison(n):
-    keys = list(range(9))
+    keys = list(range(17))
     hit = None
     keys_set = set(keys)
     for i in range(n):
@@ -603,7 +603,7 @@ def old_eval_called_by_map(items):
 # A name deleted on one path is unbound after the merge
 # ------------------------------------------------------------------------------
 def cx_deleted_on_one_branch(n):
-    keys = list(range(9))
+    keys = list(range(17))
     if not n:
         del keys
     hit = None
@@ -613,7 +613,7 @@ def cx_deleted_on_one_branch(n):
 
 
 def old_deleted_on_one_branch(n):
-    keys = list(range(9))
+    keys = list(range(17))
     if not n:
         del keys
     hit = None

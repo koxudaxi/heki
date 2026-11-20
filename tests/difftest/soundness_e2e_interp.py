@@ -120,7 +120,7 @@ def byte_codes(n):
 def mixed_tuple_probe(n):
     """`pair[k]` of a tuple with `int` and `str` elements is an `int` or a `str`."""
     pair = (1, "a")
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, "a"]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, "a"]
     out = []
     for i in range(n):
         e = pair[i % 2]
@@ -154,7 +154,7 @@ def unknown_subscripts(rows):
 
 def subscript_writes(n, sink):
     """`lst[0] = v` changes an exact list; `d[k] = v` stores into a dict; `del` on both."""
-    allowed = [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    allowed = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     allowed[0] = 9
     table = {"a": 1, "b": 2}
     table["c"] = 3
@@ -261,7 +261,7 @@ def maybe_unbound(items, c):
 
 def long_copy_chain(n):
     """A probe copied through ten names keeps its exact type."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
     for i in range(n):
         a1 = i
@@ -281,7 +281,7 @@ def long_copy_chain(n):
 
 def long_copy_chain_mixed(n):
     """Past eight copies the element kinds of a mixed iterator are no longer followed."""
-    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, "a"]
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, "a"]
     hits = []
     mixed = list(range(n))
     mixed.append("a")
@@ -452,7 +452,7 @@ def in_place_updates(n, extra):
     s -= {1}
     d = {"a": 1}
     d |= {"b": 2}
-    allowed = [10, 11, 12, 13, 14, 15, 16, 17, 18]
+    allowed = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
     hits = []
     for p in range(n):
         if p in allowed:

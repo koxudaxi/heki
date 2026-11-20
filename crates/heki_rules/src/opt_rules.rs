@@ -948,15 +948,17 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     )
                 } else if !defs.stops_at_first_match(j.cmp, inner.lp) {
                     // Every match is used: an index must keep each key's elements, duplicates
-                    // included.
+                    // included, and an outer key that matches nothing still gets its empty
+                    // list (a lookup with a default, not a loop over the index).
+                    let empty_groups = "then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list";
                     if defs.whole_element(j.inner_side) {
                         format!(
-                            "group the elements of `{inner_iter}` by value in a `dict` (value → list of equal elements) before the outer loop"
+                            "group the elements of `{inner_iter}` by value in a `dict` (value → list of equal elements) before the outer loop, {empty_groups}"
                         )
                     } else {
                         let key = defs.element_text(unit.source, j.inner_side);
                         format!(
-                            "index `{inner_iter}` in a `dict` from `{key}` to the list of elements with that key before the outer loop"
+                            "index `{inner_iter}` in a `dict` from `{key}` to the list of elements with that key before the outer loop, {empty_groups}"
                         )
                     }
                 } else if defs.whole_element(j.inner_side) {

@@ -385,7 +385,7 @@ fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
 // ==================================================================================== OPT112
 
 const CONSTS: &str = r#"LEVELS = ["low", "mid", "high"]
-SIZES = ["xs", "s", "m", "l", "xl", "2xl", "3xl", "4xl", "5xl"]
+SIZES = ["xs", "s", "m", "l", "xl", "2xl", "3xl", "4xl", "5xl", "6xl", "7xl", "8xl", "9xl", "10xl", "11xl", "12xl", "13xl"]
 "#;
 
 const LOOKUPS: &str = r#"import time
@@ -452,7 +452,7 @@ def displays(xs, first, last):
     added = ["a"]
     other = added
     pair = [first, last]
-    nine = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    seventeen = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     for x in xs:
         small.index(x)
         grow.count(x)
@@ -462,7 +462,7 @@ def displays(xs, first, last):
         added.index(x)
         other += [x]
         pair.index(x)
-        nine.index(x)
+        seventeen.index(x)
 
 
 def one_shot(items: list[int], xs):
@@ -658,14 +658,14 @@ fn opt112_reports_linear_scans_of_long_lived_lists_in_data_sized_loops() {
     let l = "lookups.py";
     // Reported: annotated parameters (`list[str]`, `List[int]`, through an alias), `list(...)`,
     // a module global another function appends to or rebinds to another global (no known
-    // display), a 9-element module constant, displays that grow (append, `+=` through an
-    // alias, stored where other code may grow them) or of more than 8 elements, a conditional
+    // display), a 17-element module constant, displays that grow (append, `+=` through an
+    // alias, stored where other code may grow them) or of more than 16 elements, a conditional
     // `break`, `self.attr` lists (from `__init__`, from a class annotation, an instance or
     // class attribute another method appends to), a list behind a constant subscript, a
     // comprehension, phis of long-lived lists (in the loop and before it), a loop-carried
     // rebinding, an inner loop over a list of the outer iteration, a `while` condition and
     // body, and module-level code.
-    // Not reported: small lists (displays of at most 8 items that nothing grows, also when
+    // Not reported: small lists (displays of at most 16 items that nothing grows, also when
     // their items are not constants or are replaced in place: local, module global, imported,
     // `module.NAME`, an instance attribute its class only assigns one, also on another
     // instance, a class attribute), displays built per iteration, one-shot calls (`break` /
@@ -713,7 +713,7 @@ fn opt112_reports_linear_scans_of_long_lived_lists_in_data_sized_loops() {
             "consts.SIZES",
             "grow",
             "added",
-            "nine",
+            "seventeen",
             "items",
             "self.items",
             "self.names",
@@ -1094,19 +1094,123 @@ fn opt113_reports_nested_loop_equijoins_but_not_traversals_or_all_pairs_loops() 
         (message(6), help(6)),
         (
             "nested loops join `xs` and `ys` on `x == y` (O(n·m))",
-            "group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop"
+            "group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
         )
     );
     assert_eq!(
         (message(8), help(8)),
         (
             "nested loops join `A` and `C` on `c.k == a.k` (O(n·m))",
-            "index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop"
+            "index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
         )
     );
     assert_eq!(diags[0]["column"], 16);
     assert_eq!(diags[0]["rule_slug"], "nested-loop-equijoin");
     assert_no_fix(&diags);
+}
+
+const NATIVE: &str = r#"_OPERATIONS = ("open", "close", "read", "write", "seek", "tell", "flush", "stat", "list", "remove")
+
+
+class Native:
+    def __init__(self, config):
+        self.config = config
+        self.responses = {name: [call for call in config["calls"] if call["op"] == name] for name in _OPERATIONS}
+
+    def reload(self):
+        self.responses = {name: [call for call in self.config["calls"] if call["op"] == name] for name in _OPERATIONS}
+
+
+def unknown(config, operations):
+    return {name: [call for call in config["calls"] if call["op"] == name] for name in operations}
+"#;
+
+const KINDS: &str = r#"KINDS = ("file", "dir", "link", "fifo", "socket", "block", "char", "door", "port", "whiteout")
+"#;
+
+const FIXED_JOINS: &str = r#"from kinds import KINDS
+
+LIMIT = 10
+SIXTEEN = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p")
+SEVENTEEN = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q")
+
+
+class Table:
+    COLUMNS = ("id", "name", "kind", "size", "owner", "group", "mode", "created", "updated", "path")
+
+    def __init__(self):
+        self.levels = ["trace", "debug", "info", "notice", "warning", "error", "critical", "alert", "fatal"]
+
+    def by_column(self, cells):
+        return {c: [cell for cell in cells if cell.column == c] for c in self.COLUMNS}
+
+    def by_level(self, records):
+        return {lv: [r for r in records if r.level == lv] for lv in self.levels}
+
+
+def small_list(rows):
+    out = {}
+    for name in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]:
+        out[name] = [r for r in rows if r.name == name]
+    return out
+
+
+def ranges(rows):
+    first = [[r for r in rows if r.k == i] for i in range(10)]
+    second = [[r for r in rows if r.k == i] for i in range(LIMIT)]
+    return first, second
+
+
+def imported(rows):
+    return {k: [r for r in rows if r.kind == k] for k in KINDS}
+
+
+def fixed_inner(rows):
+    for r in rows:
+        for name in SIXTEEN:
+            if r.name == name:
+                print(r)
+
+
+def too_long(rows):
+    first = {n: [r for r in rows if r.name == n] for n in SEVENTEEN}
+    second = [[r for r in rows if r.k == i] for i in range(17)]
+    return first, second
+"#;
+
+#[test]
+fn opt113_skips_joins_whose_loop_size_the_code_fixes() {
+    let p = Project::new("v1x_opt113_fixed");
+    p.write("native.py", NATIVE)
+        .write("kinds.py", KINDS)
+        .write("fixed.py", FIXED_JOINS);
+    let diags = diagnostics(&p, &["--select", "OPT113"]);
+    // Reported: an outer loop over a parameter, over a class attribute or an instance
+    // attribute, and fixed sizes past 16 (a 17-item module constant, `range(17)`).
+    // Not reported: one side fixed by the code, so the cost grows with the other side only: a
+    // module constant tuple of string literals (outer loop of a dict comprehension filtering a
+    // dict's list, also of `self.config`), a list display, `range(10)` and `range` of a module
+    // constant, a constant of another module, and a fixed inner loop.
+    assert_eq!(
+        found(&diags),
+        vec![
+            d("fixed.py", 15, "OPT113", "Table.by_column"),
+            d("fixed.py", 18, "OPT113", "Table.by_level"),
+            d("fixed.py", 46, "OPT113", "too_long"),
+            d("fixed.py", 47, "OPT113", "too_long"),
+            d("native.py", 14, "OPT113", "unknown"),
+        ],
+        "{diags:#?}"
+    );
+    let native = &diags[4];
+    assert_eq!(
+        native["message"],
+        "nested loops join `operations` and `config[\"calls\"]` on `call[\"op\"] == name` (O(n·m))"
+    );
+    assert_eq!(
+        native["help"],
+        "index `config[\"calls\"]` in a `dict` from `call[\"op\"]` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+    );
 }
 
 // ================================================================== baseline, `heki rule`

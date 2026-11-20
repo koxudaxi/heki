@@ -25,8 +25,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The most items a container display, or a loop's fixed trip count, may have to count as
-/// small.
-pub const SMALL_MAX: u32 = 8;
+/// small: enough for the tables code spells out by hand (the months, the HTTP methods, a list
+/// of operation names), so that a loop over one is not data-sized and a scan of one costs a
+/// fixed factor.
+pub const SMALL_MAX: u32 = 16;
 
 /// The largest constant `N` of a `while len(acc) < N` test that caps `acc` (one page: the
 /// accumulator never re-copies more than that).
