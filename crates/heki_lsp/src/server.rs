@@ -227,7 +227,7 @@ impl State {
             .as_ref()
             .map(|ws| ws.indexed().cloned().collect());
         let (mut ws, errors) = match loaded {
-            Ok(loaded) => loaded,
+            Ok((ws, errors)) => (ws, errors.iter().map(ToString::to_string).collect()),
             Err(e) => {
                 self.workspace = None;
                 let pubs = files.iter().filter_map(|p| self.clear(p)).collect();

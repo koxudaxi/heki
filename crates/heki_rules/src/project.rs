@@ -365,12 +365,25 @@ impl ProjectEnv {
     }
 }
 
+/// A file that could not be read or parsed (the CLI exits with 2 after its report).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileError {
+    /// Keyed like [`ParsedFile::path`].
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl std::fmt::Display for FileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// A discovered, parsed project.
 pub struct Project {
     pub env: ProjectEnv,
     pub files: Vec<ParsedFile>,
-    /// Read / syntax errors (the CLI exits with 2 after its report).
-    pub errors: Vec<String>,
+    pub errors: Vec<FileError>,
 }
 
 impl Project {
@@ -392,16 +405,21 @@ impl Project {
             found.extend(unsaved.cloned());
             found.sort();
         }
-        let results: Vec<Result<ParsedFile, String>> = found
+        let results: Vec<Result<ParsedFile, FileError>> = found
             .par_iter()
             .map(|p| {
                 let source = match opts.overrides.and_then(|o| o.get(&display_path(p))) {
-                    Some(text) => text.clone(),
-                    None => {
-                        std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?
-                    }
+                    Some(text) => Ok(text.clone()),
+                    None => std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display())),
                 };
-                parse_source(p, &env.root, source, env.src_layout, env.runtime)
+                source
+                    .and_then(|source| {
+                        parse_source(p, &env.root, source, env.src_layout, env.runtime)
+                    })
+                    .map_err(|message| FileError {
+                        path: display_path(p),
+                        message,
+                    })
             })
             .collect();
         let mut files = Vec::new();

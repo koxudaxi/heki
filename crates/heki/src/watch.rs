@@ -12,7 +12,9 @@ use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
 use heki_effect::detect_src_layout;
 use heki_lsp::{CONFIG_FILES, EditOutcome, Selectors, Workspace};
 use heki_profile::ProfileData;
-use heki_rules::project::{ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set};
+use heki_rules::project::{
+    FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
+};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -47,7 +49,7 @@ impl Watcher<'_> {
 
     /// Modification times first (a change during the analysis shows up on the next poll),
     /// then the workspace.
-    fn load(&self) -> Result<(Workspace, Vec<String>, Stamps)> {
+    fn load(&self) -> Result<(Workspace, Vec<FileError>, Stamps)> {
         let stamps = self.scan(&ProjectEnv::load(&self.opts())?)?;
         let selectors = Selectors {
             select: self.args.select.clone(),
@@ -82,7 +84,7 @@ impl Watcher<'_> {
         Ok((files, stamps))
     }
 
-    fn print(&self, diags: &BTreeMap<PathBuf, Vec<Diagnostic>>, errors: &[String]) -> bool {
+    fn print(&self, diags: &BTreeMap<PathBuf, Vec<Diagnostic>>, errors: &Errors) -> bool {
         let mut all: Vec<Diagnostic> = diags.values().flatten().cloned().collect();
         crate::check::annotate_hot(&mut all, self.hot);
         // The paths `heki check` prints.
@@ -109,7 +111,7 @@ impl Watcher<'_> {
                 &source_line
             )
         );
-        for e in errors {
+        for e in errors.values() {
             log!(self.args.output_format, "error: {e}");
         }
         if matches!(
@@ -126,14 +128,23 @@ impl Watcher<'_> {
     }
 }
 
+/// The error of each file that could not be read, parsed, or checked when it was last looked at:
+/// it is reported after every re-check until the file changes.
+type Errors = BTreeMap<PathBuf, String>;
+
+fn errors_of(errors: Vec<FileError>) -> Errors {
+    errors.into_iter().map(|e| (e.path, e.message)).collect()
+}
+
 /// Keep the latest result of one re-analyzed file: its diagnostics, or none when it does not
 /// parse or check (the error is reported) or left the project (`None`).
 fn record(
     diags: &mut BTreeMap<PathBuf, Vec<Diagnostic>>,
-    errors: &mut Vec<String>,
+    errors: &mut Errors,
     path: &Path,
     outcome: Option<EditOutcome>,
 ) {
+    errors.remove(path);
     match outcome {
         Some(EditOutcome {
             diagnostics,
@@ -144,7 +155,7 @@ fn record(
         }
         Some(EditOutcome { error: Some(e), .. }) => {
             diags.remove(path);
-            errors.push(e);
+            errors.insert(path.to_path_buf(), e);
         }
         None => {
             diags.remove(path);
@@ -162,9 +173,10 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
     let max_runs: Option<usize> = std::env::var(MAX_RUNS_ENV)
         .ok()
         .and_then(|v| v.parse().ok());
-    let (mut ws, mut errors, (mut files, mut config)) = w.load()?;
+    let (mut ws, errors, (mut files, mut config)) = w.load()?;
     let (mut diags, more) = ws.diagnose_all();
-    errors.extend(more);
+    let mut errors = errors_of(errors);
+    errors.extend(errors_of(more));
     let mut dirty = w.print(&diags, &errors);
     let mut runs = 0;
     while max_runs.is_none_or(|m| runs < m) {
@@ -178,18 +190,18 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
             ws = fresh;
             let (d, more) = ws.diagnose_all();
             diags = d;
-            errors = errs;
-            errors.extend(more);
+            errors = errors_of(errs);
+            errors.extend(errors_of(more));
             (files, config) = stamps;
             runs += 1;
             dirty = w.print(&diags, &errors);
             continue;
         } else if now_files != files {
-            errors.clear();
             let mut affected: Vec<PathBuf> = Vec::new();
             for gone in files.keys().filter(|p| !now_files.contains_key(*p)) {
                 affected.extend(ws.remove(gone));
                 diags.remove(gone);
+                errors.remove(gone);
             }
             let changed: Vec<&PathBuf> = now_files
                 .iter()
@@ -203,9 +215,13 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                         affected.extend(out.affected.iter().cloned());
                         record(&mut diags, &mut errors, p, Some(out));
                     }
+                    // A file that cannot be read is no longer part of the project, as for
+                    // `heki check`: its facts leave the index, and what they affected is
+                    // re-analyzed.
                     Err(e) => {
+                        affected.extend(ws.remove(p));
                         diags.remove(*p);
-                        errors.push(format!("{}: {e}", p.display()));
+                        errors.insert((*p).clone(), format!("{}: {e}", p.display()));
                     }
                 }
             }

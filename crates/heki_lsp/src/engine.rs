@@ -10,8 +10,8 @@ use heki_effect::{
     CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, analyze_project_with_reads,
 };
 use heki_rules::project::{
-    ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, discovers, exclude_set,
-    parse_source, retain_unsuppressed,
+    FileError, ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, discovers,
+    exclude_set, parse_source, retain_unsuppressed,
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
@@ -183,7 +183,7 @@ impl Workspace {
         opts: &ProjectOptions<'_>,
         selectors: &Selectors,
         baseline: Option<&Path>,
-    ) -> Result<(Self, Vec<String>), EngineError> {
+    ) -> Result<(Self, Vec<FileError>), EngineError> {
         let project = Project::load(opts).map_err(EngineError::Project)?;
         let env_cfg = &project.env.cfg;
         let selection = RuleSelection::resolve(
@@ -831,23 +831,22 @@ impl Workspace {
     }
 
     /// Diagnostics of every indexed file, read from the disk.
-    pub fn diagnose_all(&mut self) -> (BTreeMap<PathBuf, Vec<Diagnostic>>, Vec<String>) {
+    pub fn diagnose_all(&mut self) -> (BTreeMap<PathBuf, Vec<Diagnostic>>, Vec<FileError>) {
         let mut out = BTreeMap::new();
         let mut errors = Vec::new();
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in &paths {
-            let text = match std::fs::read_to_string(path) {
-                Ok(t) => t,
-                Err(e) => {
-                    errors.push(format!("{}: {e}", path.display()));
-                    continue;
-                }
-            };
-            match self.diagnose(path, &text) {
+            let diagnosed = std::fs::read_to_string(path)
+                .map_err(|e| format!("{}: {e}", path.display()))
+                .and_then(|text| self.diagnose(path, &text));
+            match diagnosed {
                 Ok(d) => {
                     out.insert(path.clone(), d);
                 }
-                Err(e) => errors.push(e),
+                Err(message) => errors.push(FileError {
+                    path: path.clone(),
+                    message,
+                }),
             }
         }
         (out, errors)
@@ -884,15 +883,20 @@ mod tests {
         );
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
-            errors[0].starts_with(&format!("{}: ", dir.join("b.py").display()))
-                && errors[0].contains("valid UTF-8"),
+            errors[0]
+                .message
+                .starts_with(&format!("{}: ", dir.join("b.py").display()))
+                && errors[0].message.contains("valid UTF-8"),
             "{errors:?}"
         );
         assert!(
-            errors[1].starts_with(&format!("{}:1:", dir.join("c.py").display()))
-                && errors[1].contains("syntax error"),
+            errors[1]
+                .message
+                .starts_with(&format!("{}:1:", dir.join("c.py").display()))
+                && errors[1].message.contains("syntax error"),
             "{errors:?}"
         );
+        assert_eq!(errors[1].path, dir.join("c.py"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

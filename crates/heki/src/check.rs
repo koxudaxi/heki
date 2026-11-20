@@ -11,7 +11,7 @@ use heki_diagnostics::{
 };
 use heki_effect::{analyze_project, analyze_project_with};
 use heki_profile::ProfileData;
-use heki_rules::project::{ParsedFile, Project, ProjectOptions, retain_unsuppressed};
+use heki_rules::project::{FileError, ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
     fold_root_causes,
@@ -166,7 +166,7 @@ fn shown_text(p: &Path) -> String {
 fn fix_in_memory(
     args: &CheckArgs,
     hot: Option<&ProfileData>,
-) -> Result<(usize, Vec<FixedFile>, Vec<String>)> {
+) -> Result<(usize, Vec<FixedFile>, Vec<FileError>)> {
     let mut overrides: FxHashMap<PathBuf, String> = FxHashMap::default();
     let mut originals: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut applied_to: FxHashMap<PathBuf, usize> = FxHashMap::default();
@@ -260,14 +260,17 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
 /// that changed meanwhile (an editor saved it during the analysis) is left as it is: writing
 /// the fixed text would replace that save. Returns the fixes and files written and an error
 /// for each file left.
-fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<String>)> {
+fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
     let (mut fixes, mut written, mut conflicts) = (0, 0, Vec::new());
     for f in files {
         if std::fs::read_to_string(&f.path).ok().as_ref() != Some(&f.original) {
-            conflicts.push(format!(
-                "{}: changed on disk while heki was fixing it; its fixes were not written (run `heki check --fix` again)",
-                f.path.display()
-            ));
+            conflicts.push(FileError {
+                path: f.path.clone(),
+                message: format!(
+                    "{}: changed on disk while heki was fixing it; its fixes were not written (run `heki check --fix` again)",
+                    f.path.display()
+                ),
+            });
             continue;
         }
         std::fs::write(&f.path, &f.fixed)
@@ -490,7 +493,11 @@ pub(crate) fn log_line(format: OutputFormat, line: &str) {
 }
 
 /// Syntax / read errors make the run fail with exit code 2 after the report.
-pub(crate) fn finish(format: OutputFormat, errors: &[String], code: ExitCode) -> Result<ExitCode> {
+pub(crate) fn finish(
+    format: OutputFormat,
+    errors: &[impl std::fmt::Display],
+    code: ExitCode,
+) -> Result<ExitCode> {
     for e in errors {
         log!(format, "error: {e}");
     }
@@ -535,7 +542,9 @@ mod tests {
         assert_eq!((fixes, written), (1, 1));
         assert_eq!(conflicts.len(), 1, "{conflicts:?}");
         assert!(
-            conflicts[0].starts_with(&format!("{}: changed on disk", kept.display())),
+            conflicts[0]
+                .message
+                .starts_with(&format!("{}: changed on disk", kept.display())),
             "{conflicts:?}"
         );
         assert_eq!(

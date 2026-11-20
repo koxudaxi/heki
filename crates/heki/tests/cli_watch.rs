@@ -515,3 +515,49 @@ fn watch_compares_with_the_ratchet_baseline_like_check() {
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(0));
 }
+
+#[test]
+fn watch_keeps_reporting_errors_of_unchanged_files_and_forgets_unreadable_ones() {
+    let p = Project::new("watch_persistent_errors");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/bad.py", "def f(:\n")
+        .write(
+            "pkg/util.py",
+            "import time\n\n\ndef helper():\n    time.sleep(1)\n",
+        )
+        .write(
+            "pkg/api.py",
+            "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n",
+        );
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "2");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 3 file(s)");
+    // Another file changes: the syntax error of the unchanged one is still there.
+    p.write(
+        "pkg/api.py",
+        "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n    helper()\n",
+    );
+    let lines = wait_for(&rx, "[heki watch] 2 diagnostic(s) in 3 file(s)");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("pkg/bad.py:1:7: syntax error")),
+        "{lines:#?}"
+    );
+    // The helper can no longer be read: like `heki check`, the project goes on without it, and
+    // the caller no longer reaches the blocking call.
+    std::fs::write(p.dir.join("pkg/util.py"), b"\xff\xfe").unwrap();
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    assert!(
+        lines.iter().any(|l| l.starts_with("error: pkg/util.py: ")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("pkg/bad.py:1:7: syntax error")),
+        "{lines:#?}"
+    );
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(p.check(&["--output-format", "concise"]).1, "");
+}
