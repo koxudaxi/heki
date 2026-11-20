@@ -544,7 +544,7 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
 `asgiref.sync.sync_to_async`), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
-deeply: `MUT202`), `return_type` (factories such as
+deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
 `opaque_to_layer3` (reserved for Layer 3). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,

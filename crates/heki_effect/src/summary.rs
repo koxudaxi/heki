@@ -778,9 +778,7 @@ impl<'a> Extractor<'a> {
             Callee::External(s) => s.as_str(),
             _ => "",
         };
-        let deep = kwargs
-            .iter()
-            .any(|(k, v)| k.as_deref() == Some("deep") && self.f.const_bool(*v) == Some(true));
+        let deep = readonly::deep_copy_requested(kwargs, |v| self.f.const_bool(v) == Some(true));
         let mut out = Vec::new();
         if let Some(r) = recv
             && let Some(d) = readonly::call_derivation(method, symbol, self.cx.kb, deep)

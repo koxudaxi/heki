@@ -1276,3 +1276,60 @@ fn copy_sanitizers_copy_as_deeply_as_declared() {
         )]
     );
 }
+
+const MODEL_COPIES: &str = r#"import functools
+
+from pydantic import BaseModel
+
+
+class Settings(BaseModel):
+    items: list[int] = []
+
+
+@functools.cache
+def cached() -> Settings:
+    return Settings()
+
+
+def tn_deep_copy():
+    copied = cached().model_copy(deep=True)
+    copied.items.clear()
+
+
+def tp_update_values_are_kept_by_reference():
+    shared = cached()
+    copied = shared.model_copy(deep=True, update={"items": shared.items})
+    copied.items.clear()
+
+
+def tp_returned_update_values_are_kept_by_reference():
+    shared = cached()
+    return shared.model_copy(update={"name": "x"}, deep=True)
+
+
+def tp_caller_of_the_update_copy():
+    tp_returned_update_values_are_kept_by_reference().items.clear()
+"#;
+
+/// `model_copy(deep=True)` copies deeply, but the values of `update` are assigned to the copy
+/// by reference after copying: with `update` it is a shallow copy.
+#[test]
+fn model_copy_with_update_is_a_shallow_copy() {
+    assert_eq!(
+        check("catalog_model_copy", "app/models.py", MODEL_COPIES, "MUT202"),
+        vec![
+            d(
+                23,
+                "MUT202",
+                "tp_update_values_are_kept_by_reference",
+                "app.models.cached"
+            ),
+            d(
+                32,
+                "MUT202",
+                "tp_caller_of_the_update_copy",
+                "app.models.cached"
+            ),
+        ]
+    );
+}

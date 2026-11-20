@@ -147,6 +147,21 @@ pub fn call_derivation(
         .map(|_| Derivation::Step(ReturnStep::ELEMENT))
 }
 
+/// Whether a copy call asks for a deep copy (`model_copy(deep=True)`, `is_true` deciding a
+/// keyword's value). Pydantic assigns the values of `update` to the copy by reference after
+/// copying, so a copy with `update` (or with a `**` mapping that may hold it) is a shallow one.
+pub fn deep_copy_requested(
+    kwargs: &[(Option<String>, VarId)],
+    is_true: impl Fn(VarId) -> bool,
+) -> bool {
+    let deep = kwargs
+        .iter()
+        .any(|(k, v)| k.as_deref() == Some("deep") && is_true(*v));
+    deep && kwargs
+        .iter()
+        .all(|(k, _)| k.as_deref().is_some_and(|k| k != "update"))
+}
+
 /// A function that may return (on some path) a value shared with a read-only producer's other
 /// callers: a declared `readonly-returns` producer's or an `@lru_cache` function's result, or a
 /// part of one, directly or through other such functions.

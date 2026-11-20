@@ -1347,12 +1347,6 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
-    fn kwarg_true(&self, kwargs: &[(Option<String>, VarId)], name: &str) -> bool {
-        kwargs
-            .iter()
-            .any(|(k, v)| k.as_deref() == Some(name) && self.f.const_bool(*v) == Some(true))
-    }
-
     /// Value produced by one instruction from read-only operands (the derivations of
     /// `heki_effect::readonly`, which the return flow applies backward).
     fn transfer(&self, inst: &Inst) -> Option<Ro> {
@@ -1408,7 +1402,9 @@ impl<'a> Mut202Fn<'a> {
                     Callee::External(s) => s.as_str(),
                     _ => "",
                 };
-                let deep = self.kwarg_true(call.kwargs, "deep");
+                let deep = readonly::deep_copy_requested(call.kwargs, |v| {
+                    self.f.const_bool(v) == Some(true)
+                });
                 match readonly::call_derivation(method, symbol, self.cx.kb, deep)? {
                     Derivation::DeepCopy => None,
                     Derivation::Step(step) => r.derive(step),
