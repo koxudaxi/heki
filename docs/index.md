@@ -87,8 +87,8 @@ Found 2 diagnostic(s) in 4 file(s).
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of
   [`[tool.heki]` configuration](configuration.md): `write-owners`, `read-owners`, `call-owners`,
-  `readonly-returns`, and `effect-boundaries`. heki checks them through aliases, helpers, and
-  subclasses, with no decorators and nothing running at run time.
+  `readonly-returns`, `invalidation`, and `effect-boundaries`. heki checks them through aliases,
+  helpers, and subclasses, with no decorators and nothing running at run time.
 - **A safety net for reviews and coding agents.** The [language server](lsp.md) shows the
   findings while you edit and re-checks only what an edit can affect.
   [`heki snapshot`](adoption.md#effect-snapshots-mut103) records what every public function does
@@ -124,7 +124,7 @@ CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive 
 the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
 the obligation instead of offering a fix. See [Fixes and safety](fixes.md).
 
-See the [rules reference](rules/index.md) for all 28 rules.
+See the [rules reference](rules/index.md) for all 29 rules.
 
 ## Next steps
 

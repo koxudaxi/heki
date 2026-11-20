@@ -105,9 +105,9 @@ is allowed. None of them follows the call into `load_user` or the alias into `ad
    [`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem).
 3. **Contracts you declare.** What no type can say is declared once in configuration: who may
    write or read an attribute or call a function (`write-owners`, `read-owners`,
-   `call-owners`), which returned objects are
-   shared (`readonly-returns`), and which functions must not reach I/O or writes to model state
-   (`effect-boundaries`). heki needs no decorators, no special types, and nothing at run time.
+   `call-owners`), which returned objects are shared (`readonly-returns`), which changes must be
+   announced to an invalidator (`invalidation`), and which functions must not reach I/O or writes
+   to model state (`effect-boundaries`). heki needs no decorators, no special types, and nothing at run time.
 4. **Type annotations, as hints only.** The checking rules (`MUT`, `EFF`, `DATA`, `OPT112`,
    `OPT113`) use annotations to learn which class an object has and which method a call reaches
    (`session: Session` makes `session.execute(...)` a database call). Calls are resolved from
@@ -209,11 +209,11 @@ The proofs heki can make, on five axes:
 
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
-| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT201`, `MUT203`, `MUT204` |
+| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT201`–`MUT204` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT201`–`MUT203` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT201`–`MUT204` |
 
 ## What heki does not do
 

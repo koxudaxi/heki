@@ -1,12 +1,19 @@
 name: Docs
 
 # Builds the documentation site and checks that the generated pages (rules reference, CLI
-# reference, llms.txt) match the sources. Deployment is configured separately.
+# reference, llms.txt) match the sources, then deploys it to Cloudflare Pages (project `heki`,
+# custom domain heki.koxudaxi.dev):
+# - a published release, or a manual run, deploys the production site, so the site documents
+#   the released version; pushes to main only build and check;
+# - a pull request from this repository deploys a preview (branch `pr-<number>`); pull requests
+#   from forks and from dependabot have no access to the Cloudflare secrets and only build.
 
 on:
   pull_request:
   push:
     branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -24,7 +31,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The production deploy (release, manual run) publishes what it builds, so it never
+      # restores a cache; zizmor does not read the step condition.
+      - if: github.event_name == 'pull_request' || github.event_name == 'push'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3 # zizmor: ignore[cache-poisoning]
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -40,3 +50,17 @@ jobs:
         with:
           name: site
           path: site
+      - name: Deploy to Cloudflare Pages
+        if: >-
+          github.repository == 'koxudaxi/heki' && (
+            github.event_name == 'release' || github.event_name == 'workflow_dispatch' || (
+              github.event_name == 'pull_request'
+              && github.event.pull_request.head.repo.full_name == github.repository
+              && github.actor != 'dependabot[bot]'))
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy site --project-name=heki
+            --branch=${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'main' }}

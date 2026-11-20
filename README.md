@@ -81,8 +81,9 @@ Found 2 diagnostic(s) in 4 file(s).
 - **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of `[tool.heki]` configuration: `write-owners`,
-  `read-owners`, `call-owners`, `readonly-returns`, and `effect-boundaries`. heki checks them through aliases,
-  helpers, and subclasses, with no decorators and nothing running at run time.
+  `read-owners`, `call-owners`, `readonly-returns`, `invalidation`, and `effect-boundaries`. heki
+  checks them through aliases, helpers, and subclasses, with no decorators and nothing running at
+  run time.
 - **A safety net for reviews and coding agents.** The language server shows the findings while
   you edit and re-checks only what an edit can affect. `heki snapshot` records what every public
   function does (what it mutates, which I/O it reaches), and `MUT103` reports a function that
@@ -150,7 +151,7 @@ $ heki server                                   # LSP server for editors
 - [Getting started](https://heki.koxudaxi.dev/getting-started/)
 - [Scope and limitations](https://heki.koxudaxi.dev/scope/)
 - [Configuration](https://heki.koxudaxi.dev/configuration/)
-- [Rules](https://heki.koxudaxi.dev/rules/) (28 rules)
+- [Rules](https://heki.koxudaxi.dev/rules/) (29 rules)
 - [Fixes and safety](https://heki.koxudaxi.dev/fixes/)
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/)
 - [Editors (LSP)](https://heki.koxudaxi.dev/lsp/) and
