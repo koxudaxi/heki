@@ -183,11 +183,12 @@ and what it does when it cannot tell.
 | A linter such as [Ruff](https://docs.astral.sh/ruff/) | Syntax and style, one file at a time | `time.sleep()` written directly in an `async def`; a discarded `asyncio.create_task(...)` |
 | A type checker such as [ty](https://github.com/astral-sh/ty) | Whether values match their declared types | a `str` passed where an `int` is expected |
 | An import-graph checker such as [tach](https://github.com/gauge-sh/tach) or [import-linter](https://github.com/seddonym/import-linter) | Which modules may import which | `app.api` importing `app.db` when the declared layers forbid it |
-| heki | What code does, through any number of calls | an `async def` that reaches `requests.get` three helpers away; a model field written outside the store that owns it; an attribute `__hash__` reads changing after the object went into a `set` |
+| heki | What code does, not what types it has: effects and aliases, through any number of calls | an `async def` that reaches `requests.get` three helpers away; a model field written outside the store that owns it; an attribute `__hash__` reads changing after the object went into a `set` |
 
-heki takes only what one file, one type, or one import cannot show. Where another tool covers
-part of a case, heki keeps the rest: Ruff's `RUF006` reports discarded tasks, so `EFF107`
-reports only the tasks bound to a variable.
+The difference is the model, not reaching across files: heki models effects and aliases, and
+leaves syntax, types, and imports to the tools that model them, also as they grow. Where another
+tool covers part of a case, heki keeps the rest: Ruff's `RUF006` reports discarded tasks, so
+`EFF107` reports only the tasks bound to a variable.
 
 ### Clean for Ruff, ty, and tach; broken all the same
 
