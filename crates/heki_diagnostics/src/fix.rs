@@ -55,6 +55,39 @@ pub fn apply_fixes(source: &str, groups: &[&[TextEdit]]) -> (String, Vec<usize>)
     (out, applied)
 }
 
+/// One `--fix` pass over a Python file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonFixPass {
+    pub text: String,
+    pub applied: Vec<usize>,
+    /// Set when the fixes together would not parse: a fix must never break a file, so nothing
+    /// is applied (the message names the file and the first syntax error).
+    pub refused: Option<String>,
+}
+
+/// [`apply_fixes`] to a Python source, refusing every fix of the pass when the result would
+/// not parse. `shown_path` names the file in the refusal.
+pub fn fix_python_source(shown_path: &str, source: &str, groups: &[&[TextEdit]]) -> PythonFixPass {
+    let (text, applied) = apply_fixes(source, groups);
+    match heki_ast::parse_module(&text) {
+        Ok(_) => PythonFixPass {
+            text,
+            applied,
+            refused: None,
+        },
+        Err(errors) => PythonFixPass {
+            text: source.to_owned(),
+            applied: Vec::new(),
+            refused: Some(format!(
+                "{shown_path}: the fixes would make the file invalid Python ({}); it was left unchanged. This is a heki bug: please report it",
+                errors
+                    .first()
+                    .map_or("syntax error", |e| e.message.as_str())
+            )),
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     Equal(usize, usize),
@@ -223,6 +256,25 @@ mod tests {
         // Two insertions at one position are ambiguous: the later group waits for a rerun.
         let (out, applied) = apply_fixes("ab", &[&[edit(1, 1, "1")], &[edit(1, 1, "2")]]);
         assert_eq!((out.as_str(), applied), ("a1b", vec![0]));
+    }
+
+    #[test]
+    fn fixes_that_break_the_syntax_are_refused_together() {
+        let src = "x = 1\ny = 2\n";
+        let good = [edit(4, 5, "10")];
+        let broken = [edit(10, 11, "(")];
+        let pass = fix_python_source("m.py", src, &[&good]);
+        assert_eq!(
+            (pass.text.as_str(), pass.applied, pass.refused),
+            ("x = 10\ny = 2\n", vec![0], None)
+        );
+        let pass = fix_python_source("m.py", src, &[&good, &broken]);
+        assert_eq!((pass.text.as_str(), pass.applied), (src, vec![]));
+        let why = pass.refused.unwrap();
+        assert!(
+            why.starts_with("m.py: the fixes would make the file invalid Python ("),
+            "{why}"
+        );
     }
 
     #[test]

@@ -58,7 +58,9 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
 
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
-reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. `--diff`
+reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. When the
+fixes of a pass would leave a file that does not parse, none of them is applied to that file and
+the run exits with code 2 (a heki bug to report). `--diff`
 prints the paths every other output format prints (relative to the working directory), so
 `patch -p1` applies it where heki ran.
 
