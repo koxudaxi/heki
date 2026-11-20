@@ -267,7 +267,8 @@ A write is followed through local aliases, container methods, `setattr` / `__dic
 helpers. A private helper passes its unannounced writes to its callers, where one report at
 the call stands for every write behind it and a Ratchet baseline counts each of them (`sites`
 in JSON output); a function whose every caller announces the change after calling it is not
-reported. Writes to objects that did not exist before the call (an initializer's own `self`,
+reported. A helper changing an argument it does not type writes the field or instance its caller
+binds to it. Writes to objects that did not exist before the call (an initializer's own `self`,
 not the objects reached through its attributes; objects the function constructs or copies) and
 to objects it gets from a call need no announcement. Only normal returns count: a
 path that ends by raising carries no obligation. At most 64 contracts can be declared.

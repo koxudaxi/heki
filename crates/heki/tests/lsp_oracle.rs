@@ -233,6 +233,11 @@ const PLANTER: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import 
 // the invalidator, to the iteration after it.
 const KID_GEN: &str = "from pkg.nodes import Node\n\n\ndef _grow_kids(node: Node, kid):\n    node.kids.append(kid)\n    return [kid]\n";
 const KID_GEN_GENERATOR: &str = "from pkg.nodes import Node\n\n\ndef _grow_kids(node: Node, kid):\n    node.kids.append(kid)\n    yield kid\n";
+// A helper of another module starts changing the argument it does not type in place: the
+// caller's argument is a target field, so the caller writes it.
+const KID_COUNT: &str = "def _count(xs):\n    return len(xs)\n";
+const KID_COUNT_APPENDING: &str = "def _count(xs):\n    xs.append(0)\n    return len(xs)\n";
+const KID_STOCK: &str = "from pkg.kid_count import _count\nfrom pkg.nodes import Node\n\n\ndef stock(node: Node):\n    return _count(node.kids)\n";
 const KID_USER: &str = "from pkg.kid_gen import _grow_kids\nfrom pkg.nodes import Index, Node\n\n\ndef plant_all(index: Index, node: Node, kid):\n    pending = _grow_kids(node, kid)\n    index.refresh()\n    for _ in pending:\n        pass\n";
 const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n";
 
@@ -387,6 +392,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/planter.py", PLANTER),
         ("pkg/kid_gen.py", KID_GEN),
         ("pkg/kid_user.py", KID_USER),
+        ("pkg/kid_count.py", KID_COUNT),
+        ("pkg/kid_stock.py", KID_STOCK),
         ("pkg/shelf.py", SHELF),
         ("pkg/fill.py", FILL),
         ("pkg/fill_main.py", FILL_MAIN),
@@ -1016,6 +1023,16 @@ fn steps_mut202_mut109() -> Vec<Step> {
             vec![save("pkg/kid_gen.py", KID_GEN)],
         )
         .absent(&[("pkg/kid_user.py", "MUT109")]),
+        Step::new(
+            "a helper in another module starts changing its untyped argument in place",
+            vec![save("pkg/kid_count.py", KID_COUNT_APPENDING)],
+        )
+        .present(&[("pkg/kid_stock.py", "MUT109")]),
+        Step::new(
+            "the helper only reads its argument again",
+            vec![save("pkg/kid_count.py", KID_COUNT)],
+        )
+        .absent(&[("pkg/kid_stock.py", "MUT109")]),
     ]
 }
 

@@ -724,11 +724,27 @@ pub struct ArgOrigin {
     /// Where the argument comes from among the objects that existed before the call (`MUT109`;
     /// only computed when an `invalidation` contract is configured).
     pub reach: Reach,
+    /// The `invalidation` targets a callee may write through the argument without knowing them
+    /// (`MUT109`; `None` unless a contract names `typed_field`, or an attribute of
+    /// `typed_instance`'s class).
+    pub targets: Option<Box<ArgTargets>>,
     /// What the caller knows about the parameter's value (`None`: not bound exactly).
     pub binding: Option<ArgBinding>,
     /// The argument (for `typed_field`, the object holding the attribute) is a new object of the
     /// caller, or its parameter, that nothing kept before this call (`fresh-objects`).
     pub new_object: NewArg,
+}
+
+/// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
+/// contracts, which propagation cannot look up (it has no class hierarchy).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgTargets {
+    /// The contracts whose targets include the field the argument is (`typed_field`): changing
+    /// the value in place writes it.
+    pub field: u64,
+    /// `typed_instance` and its project bases when a contract names an attribute of one of
+    /// them (empty otherwise), for [`Contracts::target_of`] with the attributes a callee writes.
+    pub classes: Vec<String>,
 }
 
 impl ArgOrigin {

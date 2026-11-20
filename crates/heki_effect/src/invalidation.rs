@@ -13,6 +13,7 @@
 //! constant (`while True:`) takes its one feasible edge, and one on a boolean flag the path sets
 //! after the point (`changed = True ... if changed: notify()`) too (see [`Flags`]).
 
+use crate::callgraph::Through;
 use crate::{
     CallSite, Delivery, EffectSummary, Facts, FuncKey, ProjectIndex, SharedChain, WriteKind,
 };
@@ -669,13 +670,56 @@ pub(crate) fn propagate_facts(
         }
     }
     let initializer = is_initializer(func);
-    // Matched against the patterns only when a helper passes a write up.
+    // Matched against the patterns only when a call writes a target.
     let mut exempt = None;
+    let mut exempt_of =
+        || *exempt.get_or_insert_with(|| contracts.exempt_writer(&func.fqn(), &func.qualname));
     for (site_path, i) in sites {
         let site = &index.files[site_path].call_sites[*i];
         let Some(flow) = site.flow else {
             continue;
         };
+        // Targets a callee writes through the arguments, which only this binding ties to a
+        // class: the function's own writes, at the call.
+        for bc in site.project_callees() {
+            let Some(callee) = index.summary(&bc.callee) else {
+                continue;
+            };
+            let Some(d) = body_runs_at(index, site, callee) else {
+                continue;
+            };
+            let Some(facts) = callee.facts(d.from) else {
+                continue;
+            };
+            for w in crate::callgraph::indirect_writes(bc, callee, facts) {
+                let Some(targets) = &w.origin.targets else {
+                    continue;
+                };
+                let mask = match w.through {
+                    Through::Field => targets.field,
+                    Through::Instance => contracts.target_of(&targets.classes, w.attr),
+                };
+                let reach = w.origin.reach;
+                if mask == 0 || builds_written_object(initializer, reach, w.obj_params) {
+                    continue;
+                }
+                let mask = mask & !exempt_of();
+                let open = mask & !index.covered_after(site_path, &flow, mask);
+                for k in bits(open) {
+                    unmet.insert(UnmetWrite {
+                        contract: k,
+                        class_qualname: w.class.to_owned(),
+                        attr: w.attr.to_owned(),
+                        kind: WriteKind::IndirectHelper,
+                        span: site.span,
+                        origin: site.span,
+                        via_chain: crate::callgraph::lead_hops(site, site_path, &bc.callee, d.via),
+                        reach,
+                        obj_params: w.obj_params,
+                    });
+                }
+            }
+        }
         // Private helpers whose body runs here pass their unannounced writes up.
         let helpers = site
             .project_callees()
@@ -688,9 +732,9 @@ pub(crate) fn propagate_facts(
         for (bc, callee, d) in helpers {
             for u in &callee.unmet_invalidation {
                 let bit = 1u64 << u.contract;
-                let exempt = *exempt
-                    .get_or_insert_with(|| contracts.exempt_writer(&func.fqn(), &func.qualname));
-                if exempt & bit != 0 || u.via_chain.last().is_some_and(|h| h.callee == func.fqn()) {
+                if exempt_of() & bit != 0
+                    || u.via_chain.last().is_some_and(|h| h.callee == func.fqn())
+                {
                     continue;
                 }
                 let reach = reach_across(u.reach, bc);
