@@ -476,7 +476,7 @@ def rebuild_rebound_key(n):
 
 
 def rebuild_dict(n):
-    table = {1: "a", 2: "b"}
+    table = {1: "a", 2: "b", **{p: "c" for p in range(n)}}
     hits = 0
     for p in range(n):
         if p in dict(table):
@@ -490,6 +490,26 @@ def rebuild_number(n):
     hits = 0
     for p in range(n):
         if p in list(five):
+            hits += 1
+    return hits
+
+
+def bytes_display(n):
+    """A display of 3 `bytes` constants: a scan costs no more than hashing."""
+    allowed = [b"1", b"2", b"3"]
+    hits = 0
+    for p in range(n):
+        if str(p).encode() in allowed:
+            hits += 1
+    return hits
+
+
+def unhashable_elements(n):
+    """A list of dicts: no `set` can hold its elements."""
+    table = [{"k": i} for i in range(9)]
+    hits = 0
+    for p in range(n):
+        if {"k": p} in table:
             hits += 1
     return hits
 
@@ -555,6 +575,8 @@ def main() -> int:
             run(rebuild_rebound_key, n),
             run(rebuild_dict, n),
             run(rebuild_number, n),
+            run(bytes_display, n),
+            run(unhashable_elements, n),
         ]
     print("\n".join(lines))
     return 0
