@@ -77,8 +77,9 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 &key.qualname,
                 var.clone(),
                 format!(
-                    "`{var}` is rebuilt from itself with `{root}` on every loop iteration (quadratic copying); collect the parts in a list and combine them once after the loop"
+                    "`{var}` is rebuilt from itself with `{root}` on every loop iteration (quadratic copying)"
                 ),
+                Some("collect the parts in a list and combine them once after the loop".to_owned()),
                 &chain,
             );
         }

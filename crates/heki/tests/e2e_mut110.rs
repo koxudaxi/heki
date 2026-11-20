@@ -218,10 +218,14 @@ fn mut110_readonly_parameters_handed_to_helpers() {
             d(f, 51, "Collector.collect", "items"),
         ]
     );
-    let one = message(at(&diags, c, 21));
+    let one = at(&diags, c, 21);
     assert_eq!(
-        one,
-        "`one_call` passes `items` to `pkg.fill.push`, which changes it in place: `items` is annotated read-only (`Sequence` / `Mapping`), so the caller was promised that its argument is only read, but the helper changes the caller's object; pass a copy (`list(items)` / `dict(items)`), or annotate the helper's parameter with a mutable type so that the type checker shows the mismatch"
+        message(one),
+        "`one_call` passes its read-only parameter `items` to `pkg.fill.push`, which changes it in place"
+    );
+    assert_eq!(
+        one["help"],
+        "pass a copy (`list(items)` / `dict(items)`), or annotate the helper's parameter with a mutable type"
     );
     assert_eq!(chain(at(&diags, c, 21)), vec![(c.into(), 21)]);
     // Two calls deep: the chain ends at the function that changes the argument.

@@ -288,7 +288,7 @@ fn execution_effects_run_property_getters() {
     assert_eq!(direct["column"], 12, "at the read itself");
     assert_eq!(
         direct["message"],
-        "`async def direct` calls `pkg.api.Client.text`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API"
+        "`direct` reaches the blocking call `requests.get` on the event loop"
     );
     assert_eq!(
         related_of(&diags, "direct"),

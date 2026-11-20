@@ -9,7 +9,7 @@
 //! announced either), and a function every caller path of which announces the change after
 //! calling it (invalidation in bulk by a caller) is not reported.
 
-use super::{MergedReports, is_private, with_note};
+use super::{MergedReports, is_private};
 use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
 use heki_diagnostics::Diagnostic;
@@ -87,15 +87,13 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     u.span,
                     &report_target,
                     (writer, u.origin),
+                    rule.message.as_deref(),
                     || {
-                        with_note(
-                            format!(
-                                "`{}` writes `{target}` ({}){via} and returns on some path without calling an invalidator of `{}`",
-                                key.qualname,
-                                u.kind.as_str(),
-                                rule.name
-                            ),
-                            rule.message.as_deref(),
+                        format!(
+                            "`{}` writes `{target}` ({}){via} and returns on some path without calling an invalidator of `{}`",
+                            key.qualname,
+                            u.kind.as_str(),
+                            rule.name
                         )
                     },
                     || heki_effect::owned_chain(&u.via_chain),

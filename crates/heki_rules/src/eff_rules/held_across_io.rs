@@ -77,8 +77,12 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
                     && let Some(offense) = offense(cx, unit, sites, &key.qualname, inst)
                 {
                     let line = unit.lines.line_col(taken.start).0;
-                    let (target, message, chain) =
-                        describe(&key.qualname, &held[&mgr], line, offense);
+                    let Report {
+                        target,
+                        message,
+                        help,
+                        chain,
+                    } = describe(&key.qualname, &held[&mgr], line, offense);
                     cx.emit(
                         out,
                         "EFF106",
@@ -87,6 +91,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
                         &key.qualname,
                         target,
                         message,
+                        Some(help.to_owned()),
                         &chain,
                     );
                 }
@@ -132,14 +137,15 @@ fn offense(
     }
 }
 
-/// `(target, message, related chain)` of a report in `qualname` while `held` (taken at `line`)
-/// is held.
-fn describe(
-    qualname: &str,
-    held: &Held,
-    line: u32,
-    offense: Offense,
-) -> (String, String, Vec<CallHop>) {
+struct Report {
+    target: String,
+    message: String,
+    help: &'static str,
+    chain: Vec<CallHop>,
+}
+
+/// The report of `offense` in `qualname` while `held` (taken at `line`) is held.
+fn describe(qualname: &str, held: &Held, line: u32, offense: Offense) -> Report {
     let holding = if held.transaction {
         format!(
             "the database transaction from `{}` (line {line}) is open",
@@ -152,18 +158,16 @@ fn describe(
         )
     };
     match offense {
-        Offense::Await => {
-            let cost = if held.transaction {
-                "the transaction and its pooled connection stay held while the coroutine is suspended"
+        Offense::Await => Report {
+            target: format!("{}->await", held.symbol),
+            message: format!("`async def {qualname}` awaits while {holding}"),
+            help: if held.transaction {
+                "move the `await` before or after the transaction"
             } else {
-                "other threads block and the event loop can deadlock"
-            };
-            (
-                format!("{}->await", held.symbol),
-                format!("`async def {qualname}` awaits while {holding}; {cost}"),
-                Vec::new(),
-            )
-        }
+                "move the `await` out of the `with` block and hold the lock only for the update"
+            },
+            chain: Vec::new(),
+        },
         Offense::Net(chain) => {
             let root = &chain[chain.len() - 1].callee;
             let call = if chain.len() == 1 {
@@ -174,16 +178,16 @@ fn describe(
                     chain[0].callee
                 )
             };
-            let cost = if held.transaction {
-                "the transaction and its pooled connection stay held for the whole request"
-            } else {
-                "every thread waiting for the lock stalls for the whole request"
-            };
-            (
-                format!("{}->{root}", held.symbol),
-                format!("`{qualname}` {call} while {holding}; {cost}"),
+            Report {
+                target: format!("{}->{root}", held.symbol),
+                message: format!("`{qualname}` {call} while {holding}"),
+                help: if held.transaction {
+                    "make the request before or after the transaction"
+                } else {
+                    "make the request before taking the lock and hold it only for the update"
+                },
                 chain,
-            )
+            }
         }
     }
 }

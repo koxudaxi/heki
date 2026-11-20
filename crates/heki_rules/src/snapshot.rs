@@ -264,9 +264,13 @@ pub(crate) fn mut103(cx: &CheckContext<'_>, snapshot: &SummarySnapshot, out: &mu
                 func_qualname(f),
                 target.join("|"),
                 format!(
-                    "`{}` gained side effects since the summary snapshot: {}; if intended, refresh it with `heki snapshot --write`",
+                    "`{}` gained side effects since the summary snapshot: {}",
                     func_qualname(f),
                     parts.join("; ")
+                ),
+                Some(
+                    "if the change is intended, refresh the snapshot with `heki snapshot --write`"
+                        .to_owned(),
                 ),
                 &[],
             );

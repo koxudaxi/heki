@@ -1,6 +1,8 @@
 //! heki diagnostics → LSP diagnostics and code actions (docs/lsp.md).
 //!
-//! - `Diagnostic.related` → `DiagnosticRelatedInformation` (every call-chain hop).
+//! - `Diagnostic.message` → the LSP message; `Diagnostic.related` →
+//!   `DiagnosticRelatedInformation` (every call-chain hop), then `Diagnostic.help` as one more
+//!   entry at the diagnostic's own range (`help: ...`), as rust-analyzer shows a `help:` child.
 //! - `Diagnostic.fix` of `safe` + `unconditional` rules → `quickfix`; size-dependent `OPT`
 //!   suggestions → `refactor.rewrite.heki`; a fix whose result would not parse is withheld.
 //! - Every diagnostic → a `quickfix` appending `# heki: ignore[CODE]` to its line, unless no
@@ -58,6 +60,16 @@ pub fn diagnostic(
     text: &str,
     text_of: &dyn Fn(&Path) -> Option<String>,
 ) -> tower_lsp::lsp_types::Diagnostic {
+    let own_range = range(text, d.span);
+    let help = d.help.as_ref().and_then(|help| {
+        Some(DiagnosticRelatedInformation {
+            location: Location {
+                uri: Url::from_file_path(&d.path).ok()?,
+                range: own_range,
+            },
+            message: format!("help: {help}"),
+        })
+    });
     let related: Vec<DiagnosticRelatedInformation> = d
         .related
         .iter()
@@ -72,13 +84,14 @@ pub fn diagnostic(
                 message: r.message.clone(),
             })
         })
+        .chain(help)
         .collect();
     tower_lsp::lsp_types::Diagnostic {
-        range: range(text, d.span),
+        range: own_range,
         severity: Some(severity(d.severity)),
         code: Some(NumberOrString::String(d.rule_code.clone())),
         source: Some("heki".into()),
-        message: format!("{} ({})", d.message, d.rule_slug),
+        message: d.message.clone(),
         related_information: (!related.is_empty()).then_some(related),
         ..Default::default()
     }
@@ -249,6 +262,7 @@ mod tests {
             target: "x".into(),
             severity: Severity::Error,
             message: "m".into(),
+            help: None,
             evidence: None,
             blocker: None,
             related: Vec::new(),

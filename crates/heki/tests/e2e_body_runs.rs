@@ -57,6 +57,16 @@ fn message<'a>(diags: &'a [Value], path: &str, line: u64) -> &'a str {
         .unwrap()
 }
 
+/// The message of the first hop of the call chain of the diagnostic at `path:line`.
+fn first_hop<'a>(diags: &'a [Value], path: &str, line: u64) -> &'a str {
+    diags
+        .iter()
+        .find(|d| d["path"] == path && d["line"] == line)
+        .unwrap_or_else(|| panic!("no diagnostic at {path}:{line}"))["related"][0]["message"]
+        .as_str()
+        .unwrap()
+}
+
 /// `path:line` of each related location (the call chain) of the diagnostic at `path:line`.
 fn chain(diags: &[Value], path: &str, line: u64) -> Vec<String> {
     diags
@@ -134,11 +144,11 @@ fn generators_run_where_iterated_and_offloaded_functions_never_on_the_loop() {
     );
     assert_eq!(
         message(&diags, s, 16),
-        "`async def iterate_on_loop` iterates `app.streaming.rows`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API"
+        "`iterate_on_loop` reaches the blocking call `requests.get` on the event loop by iterating `app.streaming.rows`"
     );
-    assert!(
-        message(&diags, v, 18)
-            .starts_with("`async def view_blocking` calls `app.django_view.fetch_plain`"),
+    assert_eq!(
+        first_hop(&diags, v, 18),
+        "`view_blocking` calls `app.django_view.fetch_plain`",
         "{diags:#?}"
     );
     assert_eq!(
@@ -280,18 +290,16 @@ fn consumers_wrappers_and_escapes() {
         ],
         "{diags:#?}"
     );
-    assert!(
-        message(&diags, g, 39).starts_with("`async def helper_consumes` calls `app.gens.consume`")
+    assert_eq!(
+        first_hop(&diags, g, 39),
+        "`helper_consumes` calls `app.gens.consume`"
     );
     // The helper is on the chain: the generator runs inside it.
     assert_eq!(
         chain(&diags, g, 39),
         vec!["app/gens.py:39", "app/gens.py:39", "app/gens.py:7"]
     );
-    assert!(
-        message(&diags, g, 56)
-            .starts_with("`async def project_generator_over_it` iterates `app.gens.chunked`")
-    );
+    assert!(message(&diags, g, 56).ends_with("on the event loop by iterating `app.gens.chunked`"));
 }
 
 const COMPREHENSION: &str = r#"import requests
@@ -371,10 +379,7 @@ fn a_returned_generator_runs_where_the_caller_iterates_it() {
         "{diags:#?}"
     );
     // The generator is called from the iterating loop, not from the factory that returned it.
-    assert!(
-        message(&diags, f, 17)
-            .starts_with("`async def iterate_factory` iterates `app.factory.rows`")
-    );
+    assert!(message(&diags, f, 17).ends_with("on the event loop by iterating `app.factory.rows`"));
     assert_eq!(
         chain(&diags, f, 24),
         vec!["app/factory.py:24", "app/factory.py:5"]
@@ -1001,7 +1006,9 @@ fn watch_follows_a_generator_through_the_factory_returning_it() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.contains("pkg/api.py:5:16: EFF101 `async def handler` iterates `pkg.rows.rows`"),
+        stdout.contains(
+            "pkg/api.py:5:16: EFF101 `handler` reaches the blocking call `time.sleep` on the event loop by iterating `pkg.rows.rows`"
+        ),
         "{stdout}"
     );
 }
@@ -1048,11 +1055,11 @@ fn iterator_double_consumption_shares_the_consuming_calls() {
     );
     assert_eq!(
         message(&diags, "app.py", 5),
-        "`it` is a single-pass iterator already consumed at line 4; this pass sees no items"
+        "`it` is a single-pass iterator already consumed at line 4, so this pass sees no items"
     );
     assert_eq!(
         message(&diags, "app.py", 11),
-        "`it` is a single-pass iterator already consumed at line 10; this pass sees no items"
+        "`it` is a single-pass iterator already consumed at line 10, so this pass sees no items"
     );
 }
 

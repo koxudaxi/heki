@@ -17,6 +17,15 @@ fn diagnostics(p: &Project, args: &[&str]) -> Vec<Value> {
 
 /// `(line, qualname, message)` of every diagnostic of `rule`.
 fn reports(p: &Project, rule: &str) -> Vec<(u64, String, String)> {
+    reports_with(p, rule, "message")
+}
+
+/// `(line, qualname, help)` of every diagnostic of `rule`.
+fn helps(p: &Project, rule: &str) -> Vec<(u64, String, String)> {
+    reports_with(p, rule, "help")
+}
+
+fn reports_with(p: &Project, rule: &str, field: &str) -> Vec<(u64, String, String)> {
     diagnostics(p, &["--select", rule])
         .iter()
         .map(|d| {
@@ -24,7 +33,7 @@ fn reports(p: &Project, rule: &str) -> Vec<(u64, String, String)> {
             (
                 d["line"].as_u64().unwrap(),
                 d["qualname"].as_str().unwrap().to_owned(),
-                d["message"].as_str().unwrap().to_owned(),
+                d[field].as_str().unwrap().to_owned(),
             )
         })
         .collect()
@@ -203,10 +212,22 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
     assert_eq!(
         messages,
         vec![
-            "nested loops join `A` and `rows` on `a == r` (O(n·m)); `r` is an unhashable `dict`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
-            "nested loops join `A` and `B` on `a.tags == tags` (O(n·m)); `tags` is an unhashable `list`, so index `B` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
-            "nested loops join `expected` and `actual` on `actual_item == expected_item` (O(n·m)); build a `set` of `actual` before the outer loop",
-            "nested loops join `A` and `rows + rows` on `a == r` (O(n·m)); group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop",
+            "nested loops join `A` and `rows` on `a == r` (O(n·m))",
+            "nested loops join `A` and `B` on `a.tags == tags` (O(n·m))",
+            "nested loops join `expected` and `actual` on `actual_item == expected_item` (O(n·m))",
+            "nested loops join `A` and `rows + rows` on `a == r` (O(n·m))",
+        ],
+        "{found:#?}"
+    );
+    let found = helps(&p, "OPT113");
+    let advice: Vec<&str> = found.iter().map(|(_, _, h)| h.as_str()).collect();
+    assert_eq!(
+        advice,
+        vec![
+            "`r` is an unhashable `dict`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
+            "`tags` is an unhashable `list`, so index `B` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
+            "build a `set` of `actual` before the outer loop",
+            "group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop",
         ],
         "{found:#?}"
     );
@@ -479,7 +500,7 @@ fn eff103_counts_executed_and_iterated_queries_not_built_ones() {
         .collect();
     assert_eq!(
         messages[0],
-        "`sqlalchemy.orm.Query.all` runs a database query (`sqlalchemy.orm.Query.all`) on every loop iteration (N+1); batch it or load the data once before the loop"
+        "`sqlalchemy.orm.Query.all` runs a database query on every loop iteration (N+1)"
     );
 }
 
@@ -497,7 +518,12 @@ fn eff101_sees_a_query_iterated_on_the_event_loop() {
     assert!(
         found[0]
             .2
-            .contains("`sqlalchemy.orm.Query.__iter__` (blocking_db)"),
+            .contains("the blocking call `sqlalchemy.orm.Query.__iter__`"),
+        "{found:#?}"
+    );
+    // The help of a database call names an async driver.
+    assert!(
+        helps(&p, "EFF101")[0].2.ends_with("or use an async driver"),
         "{found:#?}"
     );
 }
@@ -558,10 +584,10 @@ def positions(names: list[str], wanted):
 fn opt112_advice_holds_for_what_the_loop_does_with_the_list() {
     let p = Project::new("regr_opt112_advice");
     p.write("scans.py", SCANS);
-    let found = reports(&p, "OPT112");
+    let found = helps(&p, "OPT112");
     let advice: Vec<(u64, &str)> = found
         .iter()
-        .map(|(line, _, m)| (*line, m.split_once("(O(n²)); ").unwrap().1))
+        .map(|(line, _, h)| (*line, h.as_str()))
         .collect();
     let keep = "the loop reads the list after each removal, so keep its values in a `set` or a `dict` (`dict.fromkeys(...)` keeps their order) and delete them from it";
     let defer =
@@ -733,10 +759,10 @@ def classes(A):
 fn opt113_unhashable_display_elements() {
     let p = Project::new("regr_opt113_displays");
     p.write("displays.py", DISPLAYS);
-    let found = reports(&p, "OPT113");
+    let found = helps(&p, "OPT113");
     let advice: Vec<(u64, &str)> = found
         .iter()
-        .map(|(line, _, m)| (*line, m.split_once("(O(n·m)); ").unwrap().1))
+        .map(|(line, _, h)| (*line, h.as_str()))
         .collect();
     assert_eq!(
         advice,
@@ -808,20 +834,10 @@ def copied(items: list[int], xs):
 fn opt112_reads_and_changes_through_paths_copies_and_returns() {
     let p = Project::new("regr_opt112_uses");
     p.write("uses.py", USES);
-    let found = reports(&p, "OPT112");
+    let found = helps(&p, "OPT112");
     let advice: Vec<(u64, &str)> = found
         .iter()
-        .map(|(line, _, m)| {
-            (
-                *line,
-                m.split_once("(O(n²)); ")
-                    .unwrap()
-                    .1
-                    .split(',')
-                    .next()
-                    .unwrap(),
-            )
-        })
+        .map(|(line, _, h)| (*line, h.split(',').next().unwrap()))
         .collect();
     assert_eq!(
         advice,
@@ -845,7 +861,7 @@ fn starred_elements_keep_the_names_in_blockers() {
         "walk.py",
         "def walk(paths, names):\n    work = []\n    for p in paths:\n        work.insert(0, p)\n    todo = [*work, *names]\n    return todo\n",
     );
-    let found = reports(&p, "OPT121");
+    let found = helps(&p, "OPT121");
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(
         found[0]

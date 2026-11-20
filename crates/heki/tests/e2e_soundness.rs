@@ -86,7 +86,7 @@ fn assert_verdicts(diags: &[Value], expect: &[Expect]) {
                     assert_eq!(blocker, None, "{function}: {d:#}");
                     assert!(d["fix"].is_null(), "{function}: {d:#}");
                     assert!(
-                        d["message"]
+                        d["help"]
                             .as_str()
                             .unwrap()
                             .ends_with("[proven safe; rewrite it by hand]"),

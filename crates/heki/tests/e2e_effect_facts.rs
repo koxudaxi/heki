@@ -9,7 +9,8 @@ use common::Project;
 use serde_json::Value;
 
 /// `(line, message)` of every diagnostic of `rule`.
-fn reports(p: &Project, rule: &str) -> Vec<(u64, String)> {
+/// `(line, field)` of every `rule` report, `field` being `message` or `help`.
+fn reports_with(p: &Project, rule: &str, field: &str) -> Vec<(u64, String)> {
     let (code, stdout, stderr) = p.check(&["--select", rule, "--output-format", "json"]);
     assert!(code == 0 || code == 1, "{stdout}{stderr}");
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
@@ -19,10 +20,18 @@ fn reports(p: &Project, rule: &str) -> Vec<(u64, String)> {
             assert_eq!(d["rule_code"], rule, "{d:#}");
             (
                 d["line"].as_u64().unwrap(),
-                d["message"].as_str().unwrap().to_owned(),
+                d[field].as_str().unwrap().to_owned(),
             )
         })
         .collect()
+}
+
+fn reports(p: &Project, rule: &str) -> Vec<(u64, String)> {
+    reports_with(p, rule, "message")
+}
+
+fn helps(p: &Project, rule: &str) -> Vec<(u64, String)> {
+    reports_with(p, rule, "help")
 }
 
 fn lines(p: &Project, rule: &str) -> Vec<u64> {
@@ -193,7 +202,7 @@ def narrowed(names: list[str], winners: list[str], s) -> list[int]:
     return out
 "#,
     );
-    let found = reports(&p, "OPT112");
+    let found = helps(&p, "OPT112");
     assert_eq!(found.len(), 3, "{found:?}");
     // A helper method of the class an `isinstance` test narrows the receiver to.
     assert_eq!(found[2].0, 35);
@@ -246,10 +255,7 @@ def by_key(orders, customers):
                 order.customers.append(customer)
 "#,
     );
-    let advice: Vec<(u64, String)> = reports(&p, "OPT113")
-        .into_iter()
-        .map(|(line, m)| (line, m.split_once("(O(n·m)); ").unwrap().1.to_owned()))
-        .collect();
+    let advice = helps(&p, "OPT113");
     assert_eq!(
         advice,
         vec![

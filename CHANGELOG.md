@@ -59,6 +59,11 @@ The first public preview.
 - Ratchet baselines (`--baseline`, `--update-baseline`), keyed by file, function, rule, and
   target instead of line numbers, that count violation sites (`version = 2`); older files keep
   counting reports until `--update-baseline`.
+- Every diagnostic is one sentence saying what happens, and what to do about it is a separate
+  help text: a `= help:` line in the `full` output, a `help` field in JSON (`null` when a rule
+  has no advice for the report), `properties.help` in SARIF, and the last related-information
+  entry in the language server; `concise` and `github` print the message only. A contract's
+  `message` is the help of its reports.
 - `heki snapshot` saves the effect summaries of public functions for `MUT103`.
 - `heki server` (alias `heki lsp`), an incremental language server: call chains as related
   information, quick fixes for the proven-safe rewrites, and suppression quick fixes.

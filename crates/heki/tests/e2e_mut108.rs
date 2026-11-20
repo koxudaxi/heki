@@ -326,24 +326,19 @@ fn mut108_frozen_fields_directly_through_aliases_and_helpers() {
             d(u, 48, "subclass", "Point.xs"),
         ]
     );
-    let own = message(at(&diags, u, 21));
-    assert!(
-        own.starts_with(
-            "`direct` changes the field `Config.tags` of a frozen instance in place (container_mut): the class promises immutable instances, so they get shared"
-        ),
-        "{own}"
+    let own = at(&diags, u, 21);
+    assert_eq!(
+        message(own),
+        "`direct` changes the field `Config.tags` of a frozen instance in place (container_mut)"
     );
-    assert!(
-        own.contains("different `==` results") && !own.contains("hash"),
-        "{own}"
-    );
-    assert!(
-        own.ends_with("copy it first or store an immutable type such as `tuple` / `frozenset`")
+    assert_eq!(
+        own["help"],
+        "copy it first or store an immutable type such as `tuple` / `frozenset`"
     );
     assert!(message(at(&diags, u, 27)).contains("in place (alias_container_mut)"));
-    assert!(
-        message(at(&diags, u, 34))
-            .starts_with("`via_helpers` changes the field `Config.tags` of a frozen instance in place via `pkg.helpers.reset` (indirect_helper): ")
+    assert_eq!(
+        message(at(&diags, u, 34)),
+        "`via_helpers` changes the field `Config.tags` of a frozen instance in place via `pkg.helpers.reset` (indirect_helper)"
     );
     // The calls down to the change are related locations.
     assert_eq!(chain(at(&diags, u, 31)), vec![(u.into(), 31)]);
@@ -482,15 +477,13 @@ fn mut108_final_readonly_attributes_and_typed_dict_keys() {
             d(run, 28, "boxes", "Record.rows"),
         ]
     );
-    let key = message(at(&diags, run, 13));
-    assert!(
-        key.starts_with("`movies` changes the `ReadOnly` key `names` of `Movie` in place (container_mut): the declaration promises that the value is only read once it is set, but every holder of the object sees the change"),
-        "{key}"
+    assert_eq!(
+        message(at(&diags, run, 13)),
+        "`movies` changes the `ReadOnly` key `names` of `Movie` in place (container_mut)"
     );
-    assert!(
-        message(at(&diags, decl, 33)).starts_with(
-            "`Box.push` changes `Box.items`, declared read-only (`Final` / `ReadOnly`), in place (container_mut): "
-        )
+    assert_eq!(
+        message(at(&diags, decl, 33)),
+        "`Box.push` changes `Box.items`, declared read-only (`Final` / `ReadOnly`), in place (container_mut)"
     );
     assert_eq!(chain(at(&diags, run, 18)), vec![(run.into(), 18)]);
 }

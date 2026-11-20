@@ -1,7 +1,7 @@
 //! Execution effects end to end (`EFF101` / `EFF102` / `DATA101`): receiver and callee
 //! resolution (imports, re-exports, module globals, annotations, MRO / CHA, `super()`,
 //! class methods), local effect extraction (conditional definitions, comprehensions,
-//! generator expressions), and `sync_driven_only` coroutine drivers.
+//! generator expressions), `sync_driven_only` coroutine drivers, and the help of each effect.
 
 mod common;
 
@@ -451,11 +451,9 @@ fn eff101_merges_conditional_definitions_and_follows_python_311_comprehensions()
     let eff101 = &diags[0];
     assert_eq!(eff101["rule_code"], "EFF101");
     assert_eq!(eff101["column"], 12, "at the comprehension call");
-    assert!(
-        eff101["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("`async def fetch_all` calls `pkg.comps.fetch_all.<locals>.<listcomp>`"),
+    assert_eq!(
+        eff101["related"][0]["message"],
+        "`fetch_all` calls `pkg.comps.fetch_all.<locals>.<listcomp>`",
         "{diags:#?}"
     );
 }
@@ -705,5 +703,142 @@ def via_psycopg_and_sa(ids):
             ),
         ],
         "{diags:#?}"
+    );
+}
+
+// ================================================================= one sentence, then the help
+
+const EFFECTS: &str = r#"import sqlite3
+import subprocess
+import threading
+import time
+
+import requests
+
+LOCK = threading.Lock()
+
+
+async def sleeps():
+    time.sleep(1)
+
+
+async def fetches():
+    return requests.get("https://example.com", timeout=5)
+
+
+async def queries(path):
+    return sqlite3.connect(path)
+
+
+async def runs():
+    return subprocess.run(["ls"], check=True)
+
+
+async def waits():
+    LOCK.acquire()
+
+
+async def reads(path):
+    with open(path) as f:
+        return f.read()
+
+
+def get(url):
+    return requests.get(url, timeout=5)
+
+
+def clients(urls):
+    for url in urls:
+        requests.get(url, timeout=5)
+        get(url)
+
+
+def lookup(cursor: sqlite3.Cursor, i):
+    cursor.execute("SELECT name FROM users WHERE id = ?", (i,))
+
+
+def names(cursor: sqlite3.Cursor, ids):
+    for i in ids:
+        cursor.execute("SELECT name FROM users WHERE id = ?", (i,))
+        lookup(cursor, i)
+"#;
+
+/// The message says what happens and the help what to do: each blocking effect gets the
+/// replacement that fits it, and a loop's report names the call with the effect only when a
+/// helper reaches it.
+#[test]
+fn each_effect_has_its_own_help() {
+    let p = Project::new("effects_help");
+    p.write("app.py", EFFECTS);
+    let diags = diagnostics(&p, &["--extend-select", "EFF105"]);
+    let reports: Vec<(u64, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["message"].as_str().unwrap(),
+                d["help"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let offload = "offload it with `asyncio.to_thread`, or";
+    let client = "create one client or session before the loop and reuse it";
+    let batch = "batch the queries, or load the data once before the loop";
+    assert_eq!(
+        reports,
+        vec![
+            (
+                12,
+                "`sleeps` reaches the blocking call `time.sleep` on the event loop",
+                "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`"
+            ),
+            (
+                16,
+                "`fetches` reaches the blocking call `requests.get` on the event loop",
+                &format!("{offload} use an async client")
+            ),
+            (
+                20,
+                "`queries` reaches the blocking call `sqlite3.connect` on the event loop",
+                &format!("{offload} use an async driver")
+            ),
+            (
+                24,
+                "`runs` reaches the blocking call `subprocess.run` on the event loop",
+                &format!("{offload} use `asyncio.create_subprocess_exec`")
+            ),
+            (
+                28,
+                "`waits` reaches the blocking call `threading.Lock.acquire` on the event loop",
+                &format!(
+                    "{offload} use the `asyncio` primitive (`asyncio.Lock`, `asyncio.Event`, `asyncio.Queue`)"
+                )
+            ),
+            (
+                32,
+                "`reads` reaches the blocking filesystem call `builtins.open` on the event loop",
+                &format!("{offload} use an async file API")
+            ),
+            (
+                42,
+                "`requests.get` allocates an unpooled client on every loop iteration",
+                client
+            ),
+            (
+                43,
+                "`app.get` allocates an unpooled client (`requests.get`) on every loop iteration",
+                client
+            ),
+            (
+                52,
+                "`sqlite3.Cursor.execute` runs a database query on every loop iteration (N+1)",
+                batch
+            ),
+            (
+                53,
+                "`app.lookup` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)",
+                batch
+            ),
+        ]
     );
 }

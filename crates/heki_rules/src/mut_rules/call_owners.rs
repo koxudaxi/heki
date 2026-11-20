@@ -7,7 +7,6 @@
 
 use super::{
     Allowance, AllowanceKeys, FunctionMatcher, MergedReports, delegated_reports, project_classes,
-    with_note,
 };
 use crate::{CheckContext, RuleConfigError};
 use heki_diagnostics::Diagnostic;
@@ -208,6 +207,7 @@ pub(crate) fn mut204(
                             r.span,
                             &target,
                             (key.fqn(), site.span),
+                            rule.note,
                             || {
                                 let what = if site.constructs.is_some() {
                                     "constructs"
@@ -219,17 +219,14 @@ pub(crate) fn mut204(
                                 } else {
                                     format!(" via `{}`", key.fqn())
                                 };
-                                with_note(
-                                    format!(
-                                        "`{}` {what} {called}{via} {}",
-                                        r.func.qualname,
-                                        rule.allowance.where_text(
-                                            "call owners",
-                                            "forbidden callers",
-                                            rule.name
-                                        )
-                                    ),
-                                    rule.note,
+                                format!(
+                                    "`{}` {what} {called}{via} {}",
+                                    r.func.qualname,
+                                    rule.allowance.where_text(
+                                        "call owners",
+                                        "forbidden callers",
+                                        rule.name
+                                    )
                                 )
                             },
                             || {

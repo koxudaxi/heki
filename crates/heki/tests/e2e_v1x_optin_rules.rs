@@ -37,10 +37,18 @@ fn d(path: &str, line: u64, rule: &str, target: &str) -> (String, u64, String, S
 }
 
 fn message<'a>(diags: &'a [Value], path: &str, line: u64) -> &'a str {
+    field(diags, path, line, "message")
+}
+
+fn help<'a>(diags: &'a [Value], path: &str, line: u64) -> &'a str {
+    field(diags, path, line, "help")
+}
+
+fn field<'a>(diags: &'a [Value], path: &str, line: u64, name: &str) -> &'a str {
     diags
         .iter()
         .find(|d| d["path"] == path && d["line"] == line)
-        .unwrap_or_else(|| panic!("no diagnostic at {path}:{line}"))["message"]
+        .unwrap_or_else(|| panic!("no diagnostic at {path}:{line}"))[name]
         .as_str()
         .unwrap()
 }
@@ -541,16 +549,20 @@ fn mut106_reports_second_passes_over_single_pass_iterators() {
     );
     assert_eq!(
         message(&diags, u, 27),
-        "`rows` is a single-pass iterator already consumed at line 26; this pass sees no items"
+        "`rows` is a single-pass iterator already consumed at line 26, so this pass sees no items"
+    );
+    assert_eq!(
+        help(&diags, u, 27),
+        "build a `list` once to iterate it more than once, or create a new iterator for each pass"
     );
     assert_eq!(
         message(&diags, u, 93),
-        "`it` is a single-pass iterator consumed by the previous iteration of the loop at line 92; this pass sees no items"
+        "`it` is a single-pass iterator consumed by the previous iteration of the loop at line 92, so this pass sees no items"
     );
     // `while batches:` evaluates nothing on the loop's own line.
     assert_eq!(
         message(&diags, u, 96),
-        "`pending` is a single-pass iterator consumed by the previous iteration of its loop; this pass sees no items"
+        "`pending` is a single-pass iterator consumed by the previous iteration of its loop, so this pass sees no items"
     );
     for d in &diags {
         assert!(d["fix"].is_null(), "{d}");
@@ -811,19 +823,35 @@ fn eff106_reports_awaits_and_network_io_while_a_lock_or_transaction_is_held() {
     );
     assert_eq!(
         message(&diags, l, 36),
-        "`async def Syncer.sync_all` awaits while holding the synchronous `threading.Lock` taken at line 34; other threads block and the event loop can deadlock"
+        "`async def Syncer.sync_all` awaits while holding the synchronous `threading.Lock` taken at line 34"
+    );
+    assert_eq!(
+        help(&diags, l, 36),
+        "move the `await` out of the `with` block and hold the lock only for the update"
     );
     assert_eq!(
         message(&diags, l, 37),
-        "`Syncer.sync_all` calls `pkg.locks.fetch`, which reaches blocking network I/O `requests.get`, while holding the synchronous `threading.Lock` taken at line 34; every thread waiting for the lock stalls for the whole request"
+        "`Syncer.sync_all` calls `pkg.locks.fetch`, which reaches blocking network I/O `requests.get`, while holding the synchronous `threading.Lock` taken at line 34"
+    );
+    assert_eq!(
+        help(&diags, l, 37),
+        "make the request before taking the lock and hold it only for the update"
     );
     assert_eq!(
         message(&diags, l, 81),
-        "`orm` calls `requests.post` (blocking network I/O) while the database transaction from `sqlalchemy.orm.Session.begin` (line 79) is open; the transaction and its pooled connection stay held for the whole request"
+        "`orm` calls `requests.post` (blocking network I/O) while the database transaction from `sqlalchemy.orm.Session.begin` (line 79) is open"
+    );
+    assert_eq!(
+        help(&diags, l, 81),
+        "make the request before or after the transaction"
     );
     assert_eq!(
         message(&diags, l, 87),
-        "`async def orm_await` awaits while the database transaction from `sqlalchemy.orm.Session.begin_nested` (line 86) is open; the transaction and its pooled connection stay held while the coroutine is suspended"
+        "`async def orm_await` awaits while the database transaction from `sqlalchemy.orm.Session.begin_nested` (line 86) is open"
+    );
+    assert_eq!(
+        help(&diags, l, 87),
+        "move the `await` before or after the transaction"
     );
     // Indirect I/O carries the shortest call chain; a direct call its own hop.
     assert_eq!(
@@ -1024,7 +1052,11 @@ fn eff107_reports_bound_tasks_that_nothing_retains() {
     );
     assert_eq!(
         message(&diags, t, 18),
-        "the task from `asyncio.create_task` is bound to `task` but never awaited, returned, or stored; the event loop keeps only a weak reference, so it can be garbage-collected before it finishes (keep it in a set and discard it in a done callback, or await it)"
+        "the task from `asyncio.create_task` is bound to `task` but never awaited, returned, or stored, so it can be garbage-collected before it finishes"
+    );
+    assert_eq!(
+        help(&diags, t, 18),
+        "keep it in a set and discard it in a done callback, or await it"
     );
     for d in &diags {
         assert!(d["fix"].is_null(), "{d}");

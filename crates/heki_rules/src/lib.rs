@@ -671,7 +671,8 @@ impl<'a> CheckContext<'a> {
     }
 
     /// Build a diagnostic (severity from `lint.severity`, default `error`); `None` when `code`
-    /// does not run on `unit`.
+    /// does not run on `unit`. `message` is one sentence saying what happens; what to do about
+    /// it goes into `help`, never into the message.
     #[allow(clippy::too_many_arguments)]
     pub fn emit<'o>(
         &self,
@@ -682,6 +683,7 @@ impl<'a> CheckContext<'a> {
         qualname: &str,
         target: String,
         message: String,
+        help: Option<String>,
         chain: &[CallHop],
     ) -> Option<&'o mut Diagnostic> {
         if !self.enabled(code, unit) {
@@ -708,6 +710,7 @@ impl<'a> CheckContext<'a> {
             target,
             severity,
             message,
+            help,
             evidence: None,
             blocker: None,
             related: self.related(chain),

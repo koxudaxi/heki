@@ -153,7 +153,8 @@ fn watch_full_output_idle_polls_and_a_clean_exit() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [error]")
-            && stdout.contains("5 |     time.sleep(1)"),
+            && stdout.contains("5 |     time.sleep(1)")
+            && stdout.contains("\n  = help: use `await asyncio.sleep(...)`"),
         "full output with the source line:\n{stdout}"
     );
 }
@@ -181,7 +182,7 @@ fn watch_rechecks_a_coroutine_that_stops_being_sync_driven() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.contains("pkg/jobs.py:17:5: EFF101 `async def _job` calls `time.sleep`"),
+        stdout.contains("pkg/jobs.py:17:5: EFF101 `_job` reaches the blocking call `time.sleep`"),
         "{stdout}"
     );
 }

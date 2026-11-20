@@ -33,6 +33,7 @@ const IN_PLACE: &[WriteKind] = &[
     WriteKind::IndirectHelper,
 ];
 
+/// The help of every `MUT108` report.
 const FIX: &str = "copy it first or store an immutable type such as `tuple` / `frozenset`";
 
 pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
@@ -139,12 +140,11 @@ impl Rule<'_, '_> {
             }
             let (target, what) = self.what(&ro, &w.attr);
             let message = format!(
-                "`{}` changes {what} in place ({}): {}; {FIX}",
+                "`{}` changes {what} in place ({})",
                 key.qualname,
-                w.kind.as_str(),
-                why(ro.kind)
+                w.kind.as_str()
             );
-            self.emit(out, "MUT108", unit, key, w.span, target, message, &[]);
+            self.emit(out, "MUT108", unit, key, w.span, target, message, FIX, &[]);
         }
     }
 
@@ -256,9 +256,12 @@ impl Rule<'_, '_> {
                 {
                     let name = &decl.param_names[usize::from(*p)];
                     let message = format!(
-                        "`{}` passes `{name}` to `{}`, which changes it in place: `{name}` is annotated read-only (`Sequence` / `Mapping`), so the caller was promised that its argument is only read, but the helper changes the caller's object; pass a copy (`list({name})` / `dict({name})`), or annotate the helper's parameter with a mutable type so that the type checker shows the mismatch",
+                        "`{}` passes its read-only parameter `{name}` to `{}`, which changes it in place",
                         site.caller.qualname,
                         bc.callee.fqn()
+                    );
+                    let help = format!(
+                        "pass a copy (`list({name})` / `dict({name})`), or annotate the helper's parameter with a mutable type"
                     );
                     let chain = self.chain(&call, k, None);
                     let (caller, span) = (&site.caller, site.span);
@@ -270,6 +273,7 @@ impl Rule<'_, '_> {
                         span,
                         name.clone(),
                         message,
+                        &help,
                         &chain,
                     );
                 }
@@ -306,14 +310,15 @@ impl Rule<'_, '_> {
         }
         let (target, named) = self.what(&ro, attr);
         let message = format!(
-            "`{}` changes {named} in place via `{}` (indirect_helper): {}; {FIX}",
+            "`{}` changes {named} in place via `{}` (indirect_helper)",
             call.site.caller.qualname,
-            call.bc.callee.fqn(),
-            why(ro.kind)
+            call.bc.callee.fqn()
         );
         let chain = self.chain(call, k, what);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
-        self.emit(out, "MUT108", unit, caller, span, target, message, &chain);
+        self.emit(
+            out, "MUT108", unit, caller, span, target, message, FIX, &chain,
+        );
     }
 
     /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
@@ -407,12 +412,15 @@ impl Rule<'_, '_> {
         span: Span,
         target: String,
         message: String,
+        help: &str,
         chain: &[CallHop],
     ) {
         if self.seen.insert((code, func.clone(), span, target.clone())) {
             let qualname = &func.qualname;
-            self.cx
-                .emit(out, code, unit, span, qualname, target, message, chain);
+            let help = Some(help.to_owned());
+            self.cx.emit(
+                out, code, unit, span, qualname, target, message, help, chain,
+            );
         }
     }
 }
@@ -483,17 +491,5 @@ fn changes(s: &EffectSummary, j: u8, what: &Changed) -> bool {
             .inplace_param_slots
             .get(&j)
             .is_some_and(|slots| slots.contains(slot)),
-    }
-}
-
-/// Why an in-place change of a read-only attribute matters.
-fn why(kind: ReadOnlyKind) -> &'static str {
-    match kind {
-        ReadOnlyKind::Frozen => {
-            "the class promises immutable instances, so they get shared (module-level defaults, caches, the same value handed to several owners), and every holder sees the change and different `==` results"
-        }
-        ReadOnlyKind::Declared => {
-            "the declaration promises that the value is only read once it is set, but every holder of the object sees the change"
-        }
     }
 }

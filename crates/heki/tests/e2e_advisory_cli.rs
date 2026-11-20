@@ -201,7 +201,15 @@ fn ecosystem_overrides_add_and_exclude_blocking_apis() {
         diags[0]["message"]
             .as_str()
             .unwrap()
-            .contains("blocking call `mylib.locks.acquire` (blocking_sync)"),
+            .contains("blocking call `mylib.locks.acquire`"),
+        "{stdout}"
+    );
+    // The help of a `blocking_sync` wait names the `asyncio` primitives.
+    assert!(
+        diags[0]["help"]
+            .as_str()
+            .unwrap()
+            .contains("or use the `asyncio` primitive"),
         "{stdout}"
     );
 }
@@ -562,7 +570,7 @@ fn opt_rules_without_edits_and_per_rule_selection() {
     // Hoisting out of a `while` loop has no edit: the rewrite is proven safe but manual.
     assert_eq!(diags[0]["rule_code"], "OPT110");
     assert!(
-        diags[0]["message"]
+        diags[0]["help"]
             .as_str()
             .unwrap()
             .ends_with("[proven safe; rewrite it by hand]"),

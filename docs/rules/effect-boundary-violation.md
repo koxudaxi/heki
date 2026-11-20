@@ -138,4 +138,4 @@ No automatic fix.
     they write count, as for `[[tool.heki.write-owners]]`.
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
-  - `message`: appended to every message of the boundary.
+  - `message`: the help of every report of the boundary.

@@ -6,7 +6,7 @@
 //! finding at the write, so a baseline ratchets them down as annotations and refactorings make
 //! the writes visible to `MUT201`.
 
-use super::{MergedReports, OwnerRule, initializes_itself, runs_inside_allowed, with_note};
+use super::{MergedReports, OwnerRule, initializes_itself, runs_inside_allowed};
 use crate::{CheckContext, SitesByCaller};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{Construction, FuncKey, Unresolved};
@@ -82,6 +82,7 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                     w.span,
                     &target,
                     (key.fqn(), w.span),
+                    rule.note,
                     || {
                         let what = match &w.what {
                             Unresolved::Receiver(attr) => format!(
@@ -93,17 +94,14 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                                 w.kind.as_str()
                             ),
                         };
-                        with_note(
-                            format!(
-                                "`{}` {what} {}: heki cannot tell whether it writes {guarded}",
-                                key.qualname,
-                                rule.allowance.where_text(
-                                    "write owners",
-                                    "forbidden writers",
-                                    rule.name
-                                )
-                            ),
-                            rule.note,
+                        format!(
+                            "`{}` {what} {}: heki cannot tell whether it writes {guarded}",
+                            key.qualname,
+                            rule.allowance.where_text(
+                                "write owners",
+                                "forbidden writers",
+                                rule.name
+                            )
                         )
                     },
                     Vec::new,

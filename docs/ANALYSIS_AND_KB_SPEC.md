@@ -478,7 +478,7 @@ message = "write model state through GenerationStore instead"
      initializer of the target's class family writes its own `self`, or when the reporting
      function only runs inside allowed contexts (every path of project callers starts in one); a
      private helper with project callers hands its report to them. Otherwise the outermost
-     function is reported, with `message` appended.
+     function is reported, with `message` as the report's help.
   3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
      `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 

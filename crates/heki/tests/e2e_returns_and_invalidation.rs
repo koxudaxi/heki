@@ -960,8 +960,9 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
     assert_eq!(narrow["target"], "graph-index:DataType.data_types");
     assert_eq!(
         narrow["message"],
-        "`narrow` writes `DataType.data_types` (direct_attr) and returns on some path without calling an invalidator of `graph-index`: tell the store which models changed"
+        "`narrow` writes `DataType.data_types` (direct_attr) and returns on some path without calling an invalidator of `graph-index`"
     );
+    assert_eq!(narrow["help"], "tell the store which models changed");
     // A helper write is reported at the call, with the hops down to the write.
     let two = by_name("two_level_helper");
     assert!(

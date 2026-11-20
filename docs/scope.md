@@ -88,7 +88,7 @@ heki follows the call into `load_user` and the alias into `add_default`:
 
 ```console
 $ heki check --output-format concise
-app/api.py:5:12: EFF101 `async def handler` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
+app/api.py:5:12: EFF101 `handler` reaches the blocking call `requests.get` on the event loop
 app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
 ```

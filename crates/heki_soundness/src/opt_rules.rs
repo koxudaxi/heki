@@ -90,7 +90,10 @@ pub struct OptCandidate {
     pub span: Span,
     /// The accumulator / container (baseline key target).
     pub target: String,
+    /// What the pattern costs, in one sentence.
     pub message: String,
+    /// The rewrite that removes the cost, in words.
+    pub help: String,
     pub verdict: SafetyVerdict,
     pub profitability: ProfitabilityTier,
     /// Why the rewrite would not pay off here (small constant input, bounded loop).
@@ -818,6 +821,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         span: Span,
         target: String,
         message: String,
+        help: String,
         obligations: Vec<ProofObligation>,
         not_profitable: Option<String>,
         cost_evidence: Option<String>,
@@ -830,6 +834,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             span,
             target,
             message,
+            help,
             verdict: SafetyVerdict::evaluate(obligations, a1),
             profitability: rule.profitability(),
             not_profitable,
@@ -1037,7 +1042,10 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt101,
             span,
             name.clone(),
-            format!("`{name} = {name} + [...]` copies the whole list on every iteration (quadratic); append in place with `{name}.append(...)` / `{name}.extend(...)`"),
+            format!(
+                "`{name} = {name} + [...]` copies the whole list on every iteration (quadratic)"
+            ),
+            format!("append in place with `{name}.append(...)` / `{name}.extend(...)`"),
             obs,
             None,
             self.init_evidence(&st, acc, &[List]),
@@ -1107,7 +1115,10 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt102,
             span,
             name.clone(),
-            format!("`{name} = {{**{name}, ...}}` copies the whole dict on every iteration (quadratic); update it in place"),
+            format!(
+                "`{name} = {{**{name}, ...}}` copies the whole dict on every iteration (quadratic)"
+            ),
+            format!("update `{name}` in place"),
             obs,
             None,
             self.init_evidence(&st, acc, &[Dict]),
@@ -1285,7 +1296,10 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt102,
             span,
             name.clone(),
-            format!("`{name} = {name} | ...` copies the whole container on every iteration (quadratic); update it in place with `{name} |= ...`"),
+            format!(
+                "`{name} = {name} | ...` copies the whole container on every iteration (quadratic)"
+            ),
+            format!("update it in place with `{name} |= ...`"),
             obs,
             None,
             self.init_evidence(&st, acc, &[Set, Dict]),
@@ -1405,7 +1419,8 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt103,
             span,
             name.clone(),
-            format!("`{name}` grows by `{what}` concatenation on every iteration (quadratic); collect the pieces in a list and join them once after the loop"),
+            format!("`{name}` grows by `{what}` concatenation on every iteration (quadratic)"),
+            "collect the pieces in a list and join them once after the loop".to_owned(),
             obs,
             capped.or_else(|| loop_bound_note(lp)),
             self.init_evidence(&st, acc, &[Bytes, Tuple]),
@@ -1464,16 +1479,20 @@ impl<'a, 'c> Rules<'a, 'c> {
                     k.name()
                 )
             });
-        Some(self.candidate(
-            OptRule::Opt103,
-            binop.span,
-            target.clone(),
-            format!("`{target} += ...` re-copies the attribute on every iteration (quadratic); accumulate in a local list and assign the joined result once"),
-            obs,
-            fresh_receiver.or_else(|| loop_bound_note(lp)),
-            cost,
-            Vec::new(),
-        ))
+        Some(
+            self.candidate(
+                OptRule::Opt103,
+                binop.span,
+                target.clone(),
+                format!("`{target} += ...` re-copies the attribute on every iteration (quadratic)"),
+                "accumulate in a local list and assign the joined result once after the loop"
+                    .to_owned(),
+                obs,
+                fresh_receiver.or_else(|| loop_bound_note(lp)),
+                cost,
+                Vec::new(),
+            ),
+        )
     }
 
     // ------------------------------------------------------------------- hoisting helpers
@@ -1646,7 +1665,8 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt110,
             cmp.span,
             name.clone(),
-            format!("`... in {name}` scans the list on every iteration; build `set({name})` once before the loop"),
+            format!("`... in {name}` scans the list on every iteration"),
+            format!("build `set({name})` once before the loop"),
             obs,
             not_profitable,
             self.exact_evidence(&st, lst, &[List, Tuple]),
@@ -1774,10 +1794,13 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt130,
             cmp.span,
             target,
-            format!("`{callee}(...)` rebuilds the same container on every iteration; build it once before the loop"),
+            format!("`{callee}(...)` rebuilds the same container on every iteration"),
+            "build it once before the loop".to_owned(),
             obs,
             not_profitable,
-            Some(format!("`{callee}(...)` builds a new container on every iteration")),
+            Some(format!(
+                "`{callee}(...)` builds a new container on every iteration"
+            )),
             edits,
         ))
     }
@@ -1958,7 +1981,8 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt111,
             cmp.span,
             name.clone(),
-            format!("`if ... not in {name}: {name}.append(...)` scans the list on every iteration; keep an auxiliary set next to it"),
+            format!("`if ... not in {name}: {name}.append(...)` scans the list on every iteration"),
+            format!("keep a `set` of the items next to `{name}` and test membership in it"),
             obs,
             loop_bound_note(lp),
             self.exact_evidence(&st, seen, &[List]),
@@ -2347,29 +2371,28 @@ impl<'a, 'c> Rules<'a, 'c> {
         let edits = self
             .front_edits(at, &name, form, &init_sites, type_edits)
             .unwrap_or_default();
-        let (msg, span) = match form {
+        let popleft = || format!("use `collections.deque` and `{name}.popleft()`");
+        let (msg, help, span) = match form {
             Some(FrontForm::SliceRebind { copy }) => (
                 format!(
-                    "`{name} = {name}[1:]` copies the list to drop one element (O(n) per iteration); use `collections.deque` and `{name}.popleft()`"
+                    "`{name} = {name}[1:]` copies the list to drop one element (O(n) per iteration)"
                 ),
+                popleft(),
                 self.assignment_span(copy, inst.span).unwrap_or(inst.span),
             ),
             Some(FrontForm::DelIndex) => (
-                format!(
-                    "`del {name}[0]` shifts every element (O(n) per iteration); use `collections.deque` and `{name}.popleft()`"
-                ),
+                format!("`del {name}[0]` shifts every element (O(n) per iteration)"),
+                popleft(),
                 inst.span,
             ),
             Some(FrontForm::PopCall) => (
-                format!(
-                    "`{name}.pop(0)` shifts every element (O(n) per iteration); use `collections.deque` and `{name}.popleft()`"
-                ),
+                format!("`{name}.pop(0)` shifts every element (O(n) per iteration)"),
+                popleft(),
                 inst.span,
             ),
             None => (
-                format!(
-                    "`{name}.insert(0, ...)` shifts every element (O(n) per iteration); use `collections.deque` and `{name}.appendleft(...)`"
-                ),
+                format!("`{name}.insert(0, ...)` shifts every element (O(n) per iteration)"),
+                format!("use `collections.deque` and `{name}.appendleft(...)`"),
                 inst.span,
             ),
         };
@@ -2388,6 +2411,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             span,
             name.clone(),
             msg,
+            help,
             obs,
             not_profitable,
             evidence,

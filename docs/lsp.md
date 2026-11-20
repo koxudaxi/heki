@@ -61,7 +61,9 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
 ## What the server provides
 
 - Diagnostics for open files, with every hop of a call chain (for example the path from an
-  `async def` to `time.sleep`) as related information you can jump to.
+  `async def` to `time.sleep`) as related information you can jump to. The message is the
+  report's one sentence; its help, what to do about it, is the last related-information entry
+  (`help: ...`) at the diagnostic's own range, the way rust-analyzer shows a `help:` note.
 - Quick fixes for the safe `OPT101` / `OPT102` rewrites.
 - `refactor.rewrite.heki` code actions for the proven-safe size-dependent rewrites. A fix whose
   result would not parse is never offered, as `heki check --fix` refuses it.

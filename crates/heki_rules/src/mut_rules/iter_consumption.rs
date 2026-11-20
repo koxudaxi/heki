@@ -197,7 +197,11 @@ fn report(
                 c2.span,
                 &qualname,
                 name.clone(),
-                format!("`{name}` is a single-pass iterator {how}; this pass sees no items"),
+                format!("`{name}` is a single-pass iterator {how}, so this pass sees no items"),
+                Some(
+                    "build a `list` once to iterate it more than once, or create a new iterator for each pass"
+                        .to_owned(),
+                ),
                 &[],
             );
         }

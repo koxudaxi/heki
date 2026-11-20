@@ -199,22 +199,20 @@ fn mut201_exempt_methods_messages_and_class_family_initializers() {
         found(&diagnostics(&strict, &["--select", "MUT201"])),
         with_fresh
     );
-    let note = ": use GenerationStore.set_fields() instead";
+    // The contract's `message` is the help of every report, not part of the message.
     assert!(
-        messages(&diags).iter().all(|m| m.ends_with(note)),
+        diags
+            .iter()
+            .all(|d| d["help"] == "use GenerationStore.set_fields() instead"),
         "{diags:#?}"
     );
     assert_eq!(
         diags[0]["message"],
-        format!(
-            "`DataModel.reset` writes `DataModel.fields` (direct_attr) outside the write owners of `generation-store`{note}"
-        )
+        "`DataModel.reset` writes `DataModel.fields` (direct_attr) outside the write owners of `generation-store`"
     );
     assert_eq!(
         diags[1]["message"],
-        format!(
-            "`@cached_property` `size` is defined on `PydanticModel`, which `generation-store` forbids caching on{note}"
-        )
+        "`@cached_property` `size` is defined on `PydanticModel`, which `generation-store` forbids caching on"
     );
     assert!(
         diags[3]["message"]
@@ -394,12 +392,15 @@ fn mut203_reads_aliases_getattr_dict_and_private_delegation() {
         ],
         "{diags:#?}"
     );
-    let note = ": read children through GenerationIndex instead";
+    assert!(
+        diags
+            .iter()
+            .all(|d| d["help"] == "read children through GenerationIndex instead"),
+        "{diags:#?}"
+    );
     assert_eq!(
         diags[0]["message"],
-        format!(
-            "`direct` reads `Reference.children` (direct_attr) outside the read owners of `reference-children`{note}"
-        )
+        "`direct` reads `Reference.children` (direct_attr) outside the read owners of `reference-children`"
     );
     let kinds: Vec<&str> = messages(&diags)
         .iter()
@@ -420,9 +421,7 @@ fn mut203_reads_aliases_getattr_dict_and_private_delegation() {
     let deep = &diags[8];
     assert_eq!(
         deep["message"],
-        format!(
-            "`build` reads `Reference.children` (direct_attr) via `pkg.app._kids` outside the read owners of `reference-children`{note}"
-        )
+        "`build` reads `Reference.children` (direct_attr) via `pkg.app._kids` outside the read owners of `reference-children`"
     );
     assert_eq!(
         related(deep),
@@ -614,21 +613,17 @@ fn eff201_reaches_forbidden_effects_through_calls() {
         ],
         "{diags:#?}"
     );
-    let note = ": render entry points must stay pure";
     let page = &diags[7];
+    assert_eq!(page["help"], "render entry points must stay pure");
     assert_eq!(
         page["message"],
-        format!(
-            "`Page.render` reaches blocking_net (`requests.get`), which effect boundary `pure-render` forbids{note}"
-        )
+        "`Page.render` reaches blocking_net (`requests.get`), which effect boundary `pure-render` forbids"
     );
     assert_eq!(related(page), ["`Page.render` calls `requests.get`"]);
     let card = &diags[8];
     assert_eq!(
         card["message"],
-        format!(
-            "`Card.render` reaches blocking_net (`requests.get` via `pkg.views.Card.body`), which effect boundary `pure-render` forbids{note}"
-        )
+        "`Card.render` reaches blocking_net (`requests.get` via `pkg.views.Card.body`), which effect boundary `pure-render` forbids"
     );
     assert_eq!(
         related(card),

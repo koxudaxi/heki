@@ -112,6 +112,18 @@ fn lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries() {
         related[1]["location"]["range"]["start"],
         json!({"line": 4, "character": 4})
     );
+    // The message is the sentence alone; the help follows the hops, at the diagnostic itself.
+    assert_eq!(
+        eff["message"],
+        "`handler` reaches the blocking call `time.sleep` on the event loop"
+    );
+    assert_eq!(related.len(), 3, "{related:#?}");
+    assert_eq!(related[2]["location"]["uri"], api);
+    assert_eq!(related[2]["location"]["range"], eff["range"]);
+    assert_eq!(
+        related[2]["message"],
+        "help: use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`"
+    );
     let stats = lsp.request("heki/stats", Value::Null);
     assert!(
         stats["dependent_reanalyses"].as_u64().unwrap() >= 1,

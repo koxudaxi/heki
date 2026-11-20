@@ -166,7 +166,7 @@ No automatic fix.
     dot or a glob (`Model.copy_deep`, `create_*`) is matched like `allowed-writers`. A write is
     allowed when any function on its chain (the writer and the private helpers between) is an
     allowed writer or an exempt method.
-  - `message`: appended to every message of the contract (`use Store.add_field() instead`).
+  - `message`: the help of every report of the contract (`use Store.add_field() instead`).
   - `forbid-cached-property-on`: classes on which a `@cached_property` is itself reported.
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write are reported.

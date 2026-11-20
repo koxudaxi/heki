@@ -23,7 +23,7 @@ use heki_soundness::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// Suffix explaining what `--fix` does with one candidate.
+/// Suffix of the help saying what `--fix` does with one candidate.
 fn fix_note(c: &OptCandidate) -> String {
     match (c.verdict.tier, c.fix().is_some(), c.profitability) {
         (SafetyTier::Safe, true, ProfitabilityTier::Unconditional) => {
@@ -58,7 +58,7 @@ pub(crate) fn opt(
         if !c.is_reportable() {
             continue;
         }
-        let message = format!("{}{}", c.message, fix_note(&c));
+        let help = format!("{}{}", c.help, fix_note(&c));
         let Some(d) = cx.emit(
             out,
             c.rule.code(),
@@ -66,7 +66,8 @@ pub(crate) fn opt(
             c.span,
             &c.function,
             c.target.clone(),
-            message,
+            c.message.clone(),
+            Some(help),
             &[],
         ) else {
             // This `OPT` rule is not selected for the file.
@@ -303,8 +304,9 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 heki_effect::func_qualname(f),
                 target.clone(),
                 format!(
-                    "`{target}.{method}()` scans the whole list on every iteration of the loop (O(n²)); {advice}"
+                    "`{target}.{method}()` scans the whole list on every iteration of the loop (O(n²))"
                 ),
+                Some(advice),
                 &[],
             );
         }
@@ -971,8 +973,9 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     heki_effect::func_qualname(f),
                     format!("{lhs}=={rhs}"),
                     format!(
-                        "nested loops join `{outer_iter}` and `{inner_iter}` on `{lhs} == {rhs}` (O(n·m)); {index}"
+                        "nested loops join `{outer_iter}` and `{inner_iter}` on `{lhs} == {rhs}` (O(n·m))"
                     ),
+                    Some(index),
                     &[],
                 );
             }

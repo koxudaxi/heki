@@ -222,23 +222,40 @@ fn output_formats_and_config_selection() {
             "pyproject.toml",
             "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"src/pkg/legacy.py\" = [\"EFF\"] }\n\n[tool.heki.lint.severity]\nEFF101 = \"warning\"\n",
         );
+    // The message is one sentence; the help is a line of its own in `full`, a field in JSON,
+    // the result's `properties.help` in SARIF, and left out of `concise` and `github`.
+    let message = "`handler` reaches the blocking call `time.sleep` on the event loop";
+    let help = "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`";
     let (code, stdout, _) = p.heki(&["--output-format", "github"]);
     assert_eq!(code, 1);
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
-        vec![
-            "::warning file=src/pkg/api.py,line=4,col=5,title=heki EFF101::`async def handler` calls `time.sleep`, which reaches a blocking call `time.sleep` (sleep) on the event loop; offload it (`asyncio.to_thread`) or use an async API"
-        ]
+        vec![format!(
+            "::warning file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}"
+        )]
+    );
+    let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(stdout, format!("src/pkg/api.py:4:5: EFF101 {message}\n"));
+    let (_, stdout, _) = p.heki(&[]);
+    assert!(
+        stdout.ends_with(&format!(
+            "  = related: src/pkg/api.py:4:5: `handler` calls `time.sleep`\n  = help: {help}\n\n"
+        )),
+        "{stdout}"
     );
     let (_, stdout, _) = p.heki(&["--output-format", "sarif"]);
     let sarif: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "heki");
     assert_eq!(sarif["runs"][0]["results"][0]["level"], "warning");
+    assert_eq!(sarif["runs"][0]["results"][0]["message"]["text"], message);
+    assert_eq!(sarif["runs"][0]["results"][0]["properties"]["help"], help);
 
     // `src/` layout: the module is `pkg.api`, so the qualname and summaries resolve there.
     let (_, stdout, _) = p.heki(&["--output-format", "json"]);
     let diags: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
     assert_eq!(diags[0]["qualname"], "handler");
+    assert_eq!(diags[0]["message"], message);
+    assert_eq!(diags[0]["help"], help);
 
     // EFF105 is opt-in.
     p.write(

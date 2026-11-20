@@ -50,7 +50,12 @@ pub struct Diagnostic {
     pub rule_slug: String,
     pub target: String,
     pub severity: Severity,
+    /// One sentence saying what happens, without advice.
     pub message: String,
+    /// What to do about it (`= help:` in the full output); `None` when the rule has no advice
+    /// for the report.
+    #[serde(default)]
+    pub help: Option<String>,
     pub evidence: Option<String>,
     pub blocker: Option<String>,
     pub related: Vec<RelatedLocation>,
@@ -198,6 +203,9 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
                 r.message
             );
         }
+        if let Some(help) = &d.help {
+            let _ = writeln!(out, "  = help: {help}");
+        }
         out.push('\n');
     }
     out
@@ -326,7 +334,9 @@ fn render_github(diags: &[Diagnostic]) -> String {
 
 /// SARIF 2.1.0 log with one run (`runs[0].tool.driver.name = "heki"`). Columns are in UTF-16
 /// code units (SARIF's default `columnKind`), converted from the byte columns of diagnostics
-/// with `source_line(path, line)`.
+/// with `source_line(path, line)`. A result's help goes into its property bag
+/// (`properties.help`): `reportingDescriptor.help` is one text per rule, while help may name
+/// the reported object, and a result has no help property of its own.
 pub fn sarif(
     diags: &[Diagnostic],
     source_line: &dyn Fn(&Path, u32) -> Option<String>,
@@ -361,7 +371,7 @@ pub fn sarif(
                     loc
                 })
                 .collect();
-            json!({
+            let mut result = json!({
                 "ruleId": d.rule_code,
                 "level": severity_word(d.severity),
                 "message": { "text": d.message },
@@ -370,7 +380,11 @@ pub fn sarif(
                 "partialFingerprints": {
                     "hekiBaselineKey/v1": format!("{}|{}|{}|{}", path_text(&d.path), d.qualname, d.rule_code, d.target)
                 }
-            })
+            });
+            if let Some(help) = &d.help {
+                result["properties"] = json!({ "help": help });
+            }
+            result
         })
         .collect();
     json!({
@@ -743,6 +757,7 @@ mod tests {
             target: "DataModel.fields".into(),
             severity: Severity::Error,
             message: message.into(),
+            help: None,
             evidence: None,
             blocker: None,
             related: vec![RelatedLocation {
@@ -959,13 +974,17 @@ mod tests {
 
     #[test]
     fn formats_render_every_style() {
-        let diags = vec![diag(2, "MUT201", "write, outside: owners\nsecond")];
+        let mut diags = vec![diag(2, "MUT201", "write, outside: owners\nsecond")];
+        diags[0].help = Some("use the store".into());
         let line = |_: &Path, n: u32| (n == 2).then(|| "    model.fields.append(x)".to_owned());
         let full = render(&diags, OutputFormat::Full, &line);
         assert!(full.starts_with("src/a.py:2:5: MUT201 (write-owner-violation) [error] write"));
         assert!(full.contains("2 |     model.fields.append(x)"));
         assert!(full.contains("  |     ^"));
-        assert!(full.contains("= related: src/b.py:3:1: calls helper"));
+        assert!(
+            full.ends_with("  = related: src/b.py:3:1: calls helper\n  = help: use the store\n\n"),
+            "{full}"
+        );
         assert_eq!(
             render(&diags, OutputFormat::Concise, &line),
             "src/a.py:2:5: MUT201 write, outside: owners\nsecond\n"
@@ -989,6 +1008,30 @@ mod tests {
         assert_eq!(
             s["runs"][0]["results"][0]["relatedLocations"][0]["message"]["text"],
             "calls helper"
+        );
+        assert_eq!(
+            s["runs"][0]["results"][0]["properties"]["help"],
+            "use the store"
+        );
+    }
+
+    #[test]
+    fn a_report_without_help_has_no_help_line_and_a_null_field() {
+        let diags = vec![diag(2, "MUT201", "m")];
+        let full = render(&diags, OutputFormat::Full, &|_, _| None);
+        assert!(!full.contains("= help:"), "{full}");
+        let json: serde_json::Value =
+            serde_json::from_str(&render(&diags, OutputFormat::Json, &|_, _| None)).unwrap();
+        assert_eq!(
+            json[0].get("help"),
+            Some(&serde_json::Value::Null),
+            "{json}"
+        );
+        let s: serde_json::Value =
+            serde_json::from_str(&render(&diags, OutputFormat::Sarif, &|_, _| None)).unwrap();
+        assert!(
+            s["runs"][0]["results"][0].get("properties").is_none(),
+            "{s}"
         );
     }
 }

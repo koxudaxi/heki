@@ -281,25 +281,25 @@ fn mut204_calls_constructions_and_delegation() {
         "{diags:#?}"
     );
     assert_eq!(sites(&diags), [1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1]);
-    let note = ": use a GenerationStore operation instead";
+    // The contract's `message` is the help of each report, not part of its message.
+    for d in &diags {
+        assert_eq!(
+            d["help"], "use a GenerationStore operation instead",
+            "{d:#}"
+        );
+    }
     assert_eq!(
         diags[0]["message"],
-        format!(
-            "`swap` calls `DataType.replace_reference` outside the call owners of `reference-mutators`{note}"
-        )
+        "`swap` calls `DataType.replace_reference` outside the call owners of `reference-mutators`"
     );
     assert_eq!(
         by_qualname(&diags, "build")["message"],
-        format!(
-            "`build` constructs `FinalFacts` outside the call owners of `reference-mutators`{note}"
-        )
+        "`build` constructs `FinalFacts` outside the call owners of `reference-mutators`"
     );
     let public = by_qualname(&diags, "public");
     assert_eq!(
         public["message"],
-        format!(
-            "`public` calls `DataType.replace_reference` via `pkg.app._helper` outside the call owners of `reference-mutators`{note}"
-        )
+        "`public` calls `DataType.replace_reference` via `pkg.app._helper` outside the call owners of `reference-mutators`"
     );
     // The chain ends at the first call of the target inside the helper.
     assert_eq!(
@@ -540,12 +540,19 @@ fn eff201_reads_calls_and_allowed_writes() {
     );
     // One report per scope function and target; it counts every site the function reaches.
     assert_eq!(sites(&diags), [1, 2, 1, 1, 1, 1, 1, 1, 2, 1]);
-    let note = ": decisions read final facts only";
+    // The boundary's `message` is the help of each report of it.
+    for d in &diags {
+        if d["target"].as_str().unwrap().starts_with("decisions:") {
+            assert_eq!(d["help"], "decisions read final facts only", "{d:#}");
+        } else {
+            assert!(d["help"].is_null(), "a boundary without a `message`: {d:#}");
+        }
+    }
     let forbids = "which effect boundary `decisions` forbids";
     assert_eq!(
         diags[0]["message"],
         format!(
-            "`decide` reads `DataType.is_optional` (direct_attr via `pkg.helpers.nullable`), {forbids}{note}"
+            "`decide` reads `DataType.is_optional` (direct_attr via `pkg.helpers.nullable`), {forbids}"
         )
     );
     assert_eq!(
@@ -557,15 +564,15 @@ fn eff201_reads_calls_and_allowed_writes() {
     );
     assert_eq!(
         diags[3]["message"],
-        format!("`decide_getattr` reads `Model.class_name` (getattr), {forbids}{note}")
+        format!("`decide_getattr` reads `Model.class_name` (getattr), {forbids}")
     );
     assert_eq!(
         diags[5]["message"],
-        format!("`seal` calls `DataType.replace_reference`, {forbids}{note}")
+        format!("`seal` calls `DataType.replace_reference`, {forbids}")
     );
     assert_eq!(
         diags[6]["message"],
-        format!("`seal` constructs `FinalFacts`, {forbids}{note}")
+        format!("`seal` constructs `FinalFacts`, {forbids}")
     );
     assert_eq!(related(&diags[6]), ["`seal` calls `pkg.model.FinalFacts`"]);
     assert_eq!(

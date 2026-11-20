@@ -68,11 +68,11 @@ value and raises `ValueError` for a missing one, and the values must be hashable
 The advice follows what the loop does with the list. Removals can wait for one rebuild after
 the loop only when the loop reads the list nowhere else (a membership test guarding the removal,
 `if x in items: items.remove(x)`, aside); when it iterates, tests, indexes, or passes on the list
-after a removal (a greedy match over the remaining values), the message advises a `set` or a
+after a removal (a greedy match over the remaining values), the help advises a `set` or a
 `dict` with constant-time deletion instead. An index or a count built once before the loop stays
 right only while the loop does not change the list, in place or through a project function it
 hands the list to (`change(names)` where `change` calls `names.reverse()`); otherwise the
-message advises keeping it up to date with each change.
+help advises keeping it up to date with each change.
 
 ## Fix safety
 No automatic fix.

@@ -128,7 +128,9 @@ With SARIF:
 - findings (exit code `1`) become code-scanning alerts and keep the step green;
 - a configuration, read, or syntax error (exit code `2`) still fails the step: heki then writes
   SARIF only for the files it could analyze, which would hide the others;
-- results carry the message, the location, and the call chain (`relatedLocations`).
+- results carry the message, the location, the call chain (`relatedLocations`), and the help
+  (`properties.help`; SARIF's `rules[].help` is one text per rule, and a report's help can name
+  the object it is about).
 
 For custom tooling, `--output-format json` gives every field: see
 [Coding Agents](coding-agents.md#use-the-cli-in-the-agents-loop).

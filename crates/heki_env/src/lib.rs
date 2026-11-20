@@ -111,7 +111,7 @@ pub struct WriteOwnerRule {
     /// Construction / copy methods allowed to write the targets (`__deepcopy__`,
     /// `Model.copy_deep`): a method name or a dotted pattern.
     pub exempt_methods: Vec<String>,
-    /// Appended to every `MUT201` message of this contract (`use Store.set_fields() instead`).
+    /// The help of every `MUT201` report of this contract (`use Store.set_fields() instead`).
     pub message: Option<String>,
     /// `"allow"` (default) or `"report"`: whether writes that construct the object they write
     /// (allocated in the same call chain, held by nobody else yet) are reported.
@@ -133,7 +133,7 @@ pub struct ReadOwnerRule {
     pub forbidden_readers: Vec<String>,
     /// Methods allowed to read the targets: a method name or a dotted pattern.
     pub exempt_methods: Vec<String>,
-    /// Appended to every `MUT203` message of this contract.
+    /// The help of every `MUT203` report of this contract.
     pub message: Option<String>,
 }
 
@@ -151,7 +151,7 @@ pub struct CallOwnerRule {
     pub forbidden_callers: Vec<String>,
     /// Methods allowed to call the targets: a method name or a dotted pattern.
     pub exempt_methods: Vec<String>,
-    /// Appended to every `MUT204` message of this contract.
+    /// The help of every `MUT204` report of this contract.
     pub message: Option<String>,
 }
 
@@ -184,7 +184,7 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
     /// the object they write count as writes of the boundary.
     pub fresh_objects: Option<String>,
-    /// Appended to every `EFF201` message of this contract.
+    /// The help of every `EFF201` report of this contract.
     pub message: Option<String>,
 }
 
@@ -210,7 +210,7 @@ pub struct InvalidationRule {
     /// Functions (dotted patterns) whose writes need no announcement of their own: the
     /// owner's operations, which announce or batch the change themselves.
     pub exempt_writers: Vec<String>,
-    /// Appended to every `MUT109` message of this contract.
+    /// The help of every `MUT109` report of this contract.
     pub message: Option<String>,
 }
 

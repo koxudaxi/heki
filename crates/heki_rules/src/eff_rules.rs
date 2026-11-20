@@ -4,7 +4,7 @@
 use crate::mut_rules::{
     CallTargetPattern, ContractTarget, SiteId, allows_fresh, called_targets, group_texts,
     helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
-    parse_targets, patterns, project_classes, site_callee, with_note, write_hits,
+    parse_targets, patterns, project_classes, site_callee, write_hits,
 };
 use crate::opt_rules::Sizes;
 use crate::{
@@ -82,21 +82,20 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     for (code, reports) in [("EFF101", eff101), ("EFF105", eff105)] {
         for r in &reports {
             let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
-            let first = r
-                .chain
-                .first()
-                .map_or(r.root_cause.as_str(), |h| h.callee.as_str());
             let what = if code == "EFF105" {
-                "blocking filesystem I/O"
+                "the blocking filesystem call"
             } else {
-                "a blocking call"
+                "the blocking call"
             };
-            let verb = if r.iterates { "iterates" } else { "calls" };
+            // A call chain starts at a call or a property read; an iteration is named, as the
+            // hop shows it as a call of the generator function.
+            let iterating = match r.chain.first() {
+                Some(h) if r.iterates => format!(" by iterating `{}`", h.callee),
+                _ => String::new(),
+            };
             let message = format!(
-                "`async def {}` {verb} `{first}`, which reaches {what} `{}` ({}) on the event loop; offload it (`asyncio.to_thread`) or use an async API",
-                r.function.qualname,
-                r.root_cause,
-                effect_name(r.effect)
+                "`{}` reaches {what} `{}` on the event loop{iterating}",
+                r.function.qualname, r.root_cause
             );
             if let Some(d) = cx.emit(
                 out,
@@ -106,6 +105,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 &r.function.qualname,
                 r.root_cause.clone(),
                 message,
+                Some(unblocking_help(r.effect).to_owned()),
                 &r.chain,
             ) {
                 d.fold_key = Some(format!("{}|{}", r.root_cause, effect_name(r.effect)));
@@ -156,6 +156,27 @@ pub fn fold_root_causes(diags: &mut Vec<Diagnostic>) {
         .collect();
 }
 
+/// What keeps the event loop running instead of a blocking call of effect `e`.
+fn unblocking_help(e: ExecEffectKind) -> &'static str {
+    match e {
+        ExecEffectKind::Sleep => {
+            "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`"
+        }
+        ExecEffectKind::BlockingDb => "offload it with `asyncio.to_thread`, or use an async driver",
+        ExecEffectKind::BlockingSubprocess => {
+            "offload it with `asyncio.to_thread`, or use `asyncio.create_subprocess_exec`"
+        }
+        ExecEffectKind::BlockingSync => {
+            "offload it with `asyncio.to_thread`, or use the `asyncio` primitive (`asyncio.Lock`, `asyncio.Event`, `asyncio.Queue`)"
+        }
+        ExecEffectKind::BlockingFs => {
+            "offload it with `asyncio.to_thread`, or use an async file API"
+        }
+        // Network I/O; the other effects never block (`ExecEffectKind::BLOCKING`).
+        _ => "offload it with `asyncio.to_thread`, or use an async client",
+    }
+}
+
 pub(crate) fn effect_name(e: ExecEffectKind) -> &'static str {
     match e {
         ExecEffectKind::BlockingNet => "blocking_net",
@@ -167,6 +188,15 @@ pub(crate) fn effect_name(e: ExecEffectKind) -> &'static str {
         ExecEffectKind::UnpooledClientAlloc => "unpooled_client_alloc",
         ExecEffectKind::DbQuery => "db_query",
         ExecEffectKind::QuadraticRealloc => "quadratic_realloc",
+    }
+}
+
+/// The call with the effect, in parentheses, when the call a loop makes reaches it through
+/// helpers (a direct call names it already).
+fn through_helpers(chain: &[CallHop]) -> String {
+    match chain {
+        [_, .., last] => format!(" (`{}`)", last.callee),
+        _ => String::new(),
     }
 }
 
@@ -267,18 +297,22 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if want102 && let Some(chain) = per_iteration(ExecEffectKind::UnpooledClientAlloc) {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
-                            out,
-                            "EFF102",
-                            unit,
-                            inst.span,
-                            &key.qualname,
-                            root.clone(),
-                            format!(
-                                "`{}` allocates an unpooled client (`{root}`) on every loop iteration; create one client / session before the loop and reuse it",
-                                chain[0].callee
-                            ),
-                            chain,
-                        );
+                        out,
+                        "EFF102",
+                        unit,
+                        inst.span,
+                        &key.qualname,
+                        root.clone(),
+                        format!(
+                            "`{}` allocates an unpooled client{} on every loop iteration",
+                            chain[0].callee,
+                            through_helpers(chain)
+                        ),
+                        Some(
+                            "create one client or session before the loop and reuse it".to_owned(),
+                        ),
+                        chain,
+                    );
                 }
                 if want103
                     && !migration_fn
@@ -286,18 +320,20 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
-                            out,
-                            "EFF103",
-                            unit,
-                            inst.span,
-                            &key.qualname,
-                            root.clone(),
-                            format!(
-                                "`{}` runs a database query (`{root}`) on every loop iteration (N+1); batch it or load the data once before the loop",
-                                chain[0].callee
-                            ),
-                            chain,
-                        );
+                        out,
+                        "EFF103",
+                        unit,
+                        inst.span,
+                        &key.qualname,
+                        root.clone(),
+                        format!(
+                            "`{}` runs a database query{} on every loop iteration (N+1)",
+                            chain[0].callee,
+                            through_helpers(chain)
+                        ),
+                        Some("batch the queries, or load the data once before the loop".to_owned()),
+                        chain,
+                    );
                 }
             }
         }
@@ -906,12 +942,8 @@ impl<'a> Reach<'a> {
         key: &FuncKey,
         out: &mut Vec<Diagnostic>,
     ) {
-        let forbids = |what: String| {
-            with_note(
-                format!("{what}, which effect boundary `{}` forbids", b.name),
-                b.note,
-            )
-        };
+        let forbids = |what: String| format!("{what}, which effect boundary `{}` forbids", b.name);
+        let help = || b.note.map(str::to_owned);
         let mut emit = |found: &Found, target: String, message: String| {
             let span = found.chain.first().map_or(found.span, |h| h.span);
             if let Some(d) = cx.emit(
@@ -922,6 +954,7 @@ impl<'a> Reach<'a> {
                 &key.qualname,
                 format!("{}:{target}", b.name),
                 message,
+                help(),
                 &found.chain,
             ) {
                 d.sites = u32::try_from(found.sites.len()).unwrap_or(u32::MAX);
@@ -956,12 +989,9 @@ impl<'a> Reach<'a> {
                     emit(found, target.clone(), message);
                 }
                 WriteBucket::Undeclared(attr) => {
-                    let message = with_note(
-                        format!(
-                            "`{}` writes `{attr}` ({}{via}), which effect boundary `{}` does not allow",
-                            key.qualname, found.kind, b.name
-                        ),
-                        b.note,
+                    let message = format!(
+                        "`{}` writes `{attr}` ({}{via}), which effect boundary `{}` does not allow",
+                        key.qualname, found.kind, b.name
                     );
                     emit(found, attr.clone(), message);
                 }
@@ -1010,6 +1040,7 @@ impl<'a> Reach<'a> {
                         key.qualname,
                         names.join(", ")
                     )),
+                    help(),
                     &[],
                 ) {
                     d.sites = u32::try_from(sites.len().max(1)).unwrap_or(u32::MAX);

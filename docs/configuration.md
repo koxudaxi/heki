@@ -130,7 +130,7 @@ unresolved = "report"
 | `forbidden-writers` | `[]` | When set, only writes by these functions are reported: see [Allowed and forbidden functions](#allowed-and-forbidden-functions). |
 | `exempt-methods` | `[]` | Construction and copy methods allowed to write the targets. A plain name (`__deepcopy__`) matches any method of that name; a name with a dot or a glob (`DataModel.copy_deep`, `create_*`) is a pattern, as in `allowed-writers`. |
 | `forbid-cached-property-on` | `[]` | Classes on which defining a `@cached_property` is itself reported. |
-| `message` | none | Text appended to every report of the contract: where to write instead. |
+| `message` | none | The help of every report of the contract: where to write instead. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md). |
 
@@ -179,7 +179,7 @@ The read side of `write-owners`. A read is `ref.children`, a read through a loca
 | `allowed-readers` | `[]` | Functions allowed to read the targets. |
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
-| `message` | none | Text appended to every report of the contract. |
+| `message` | none | The help of every report of the contract. |
 
 Reads through a parameter without a project-class annotation are not seen.
 
@@ -203,7 +203,7 @@ The call side of `write-owners`.
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
-| `message` | none | Text appended to every report of the contract. |
+| `message` | none | The help of every report of the contract. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -277,7 +277,7 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
-| `message` | none | Text appended to every report of the boundary. |
+| `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
 | -------------- | ------- |
@@ -330,7 +330,7 @@ message = "tell the store which models changed"
 | `targets` | `[]` | `Class.attr` attributes whose writes must be announced. |
 | `invalidators` | `[]` | Functions or methods whose call announces the change. |
 | `exempt-writers` | `[]` | Functions whose writes need no announcement of their own: the owner's operations, which announce or batch the change themselves, and construction methods. |
-| `message` | none | Text appended to every report of the contract. |
+| `message` | none | The help of every report of the contract. |
 
 An invalidator call counts when it runs on every path from the write to the function's normal
 return:

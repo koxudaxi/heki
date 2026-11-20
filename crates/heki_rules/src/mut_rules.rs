@@ -287,9 +287,12 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         &m.key.qualname,
                         format!("{class_qualname}.{attr}->{p_name}"),
                         format!(
-                            "`{}` mutates `self.{attr}`, read by `@cached_property` `{p_name}`, without invalidating it (`del self.{p_name}`)",
+                            "`{}` mutates `self.{attr}`, read by `@cached_property` `{p_name}`, without invalidating it",
                             m.key.qualname
                         ),
+                        Some(format!(
+                            "invalidate it after the change with `del self.{p_name}`, or `self.__dict__.pop(\"{p_name}\", None)` when it may not be computed yet"
+                        )),
                         &[],
                     );
                 }
@@ -1399,19 +1402,11 @@ pub(crate) fn facts_run_at<'s>(
         .flatten()
 }
 
-/// `base`, then `: note` when the contract sets a `message`.
-pub(crate) fn with_note(base: String, note: Option<&str>) -> String {
-    match note {
-        Some(n) => format!("{base}: {n}"),
-        None => base,
-    }
-}
-
 /// One violation site: the function holding the write, read, or call (fqn) and its span there.
 pub(crate) type SiteId = (String, Span);
 
 /// The reports of a contract rule, merged by `(reporting function, span, target)`: the first
-/// report of a key gives the message and the related chain, and every distinct violation site
+/// report of a key gives the message, the help, and the related chain, and every distinct violation site
 /// behind the key counts (`Diagnostic::sites`), so a second write inside a private helper that is
 /// reported at its caller is visible to the Ratchet baseline.
 #[derive(Default)]
@@ -1422,13 +1417,15 @@ pub(crate) struct MergedReports<'u> {
 struct MergedReport<'u> {
     unit: &'u ModuleUnit<'u>,
     message: String,
+    help: Option<String>,
     chain: Vec<CallHop>,
     sites: BTreeSet<SiteId>,
 }
 
 impl<'u> MergedReports<'u> {
-    /// Add a report of `func` at `span` for `target`, standing for `site`; `message` and
-    /// `chain` are only built for the first report of the key.
+    /// Add a report of `func` at `span` for `target`, standing for `site`, with the contract's
+    /// `message` as its help (`note`); `message` and `chain` are only built for the first
+    /// report of the key.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add(
         &mut self,
@@ -1437,6 +1434,7 @@ impl<'u> MergedReports<'u> {
         span: Span,
         target: &str,
         site: SiteId,
+        note: Option<&str>,
         message: impl FnOnce() -> String,
         chain: impl FnOnce() -> Vec<CallHop>,
     ) {
@@ -1445,6 +1443,7 @@ impl<'u> MergedReports<'u> {
             .or_insert_with(|| MergedReport {
                 unit,
                 message: message(),
+                help: note.map(str::to_owned),
                 chain: chain(),
                 sites: BTreeSet::new(),
             })
@@ -1463,6 +1462,7 @@ impl<'u> MergedReports<'u> {
                 &func.qualname,
                 target,
                 r.message,
+                r.help,
                 &r.chain,
             ) {
                 d.sites = sites;
@@ -1684,25 +1684,23 @@ pub(crate) fn mut201(
                             span,
                             &t.text,
                             (writer, site.span),
+                            rule.note,
                             || {
                                 let via = site
                                     .via_chain
                                     .last()
                                     .map(|h| format!(" via `{}`", h.callee))
                                     .unwrap_or_default();
-                                with_note(
-                                    format!(
-                                        "`{}` writes `{}` ({}){via} {}",
-                                        key.qualname,
-                                        t.text,
-                                        site.kind.as_str(),
-                                        rule.allowance.where_text(
-                                            "write owners",
-                                            "forbidden writers",
-                                            rule.name
-                                        )
-                                    ),
-                                    rule.note,
+                                format!(
+                                    "`{}` writes `{}` ({}){via} {}",
+                                    key.qualname,
+                                    t.text,
+                                    site.kind.as_str(),
+                                    rule.allowance.where_text(
+                                        "write owners",
+                                        "forbidden writers",
+                                        rule.name
+                                    )
                                 )
                             },
                             || heki_effect::owned_chain(&site.via_chain),
@@ -1736,13 +1734,11 @@ pub(crate) fn mut201(
                     f.span,
                     &f.qualname,
                     format!("{owner}.{}", f.name),
-                    with_note(
-                        format!(
-                            "`@cached_property` `{}` is defined on `{owner}`, which `{}` forbids caching on",
-                            f.name, rule.name
-                        ),
-                        rule.note,
+                    format!(
+                        "`@cached_property` `{}` is defined on `{owner}`, which `{}` forbids caching on",
+                        f.name, rule.name
                     ),
+                    rule.note.map(str::to_owned),
                     &[],
                 );
             }
@@ -2288,6 +2284,7 @@ impl<'a> Mut202Fn<'a> {
                             "`{}` mutates the shared object returned by read-only producer `{}`{through}",
                             self.key.qualname, r.producer
                         ),
+                        Some("change a copy (`copy.deepcopy(...)`) instead".to_owned()),
                         &related,
                     );
                 }
@@ -2444,8 +2441,12 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         &m.key.qualname,
                         format!("{class_qualname}.{attr}->__hash__"),
                         format!(
-                            "`{}` mutates `self.{attr}`, which `{}` reads: instances already stored in a `set` or used as `dict` keys can no longer be found",
+                            "`{}` mutates `self.{attr}`, which `{}` reads, so instances already stored in a `set` or used as `dict` keys can no longer be found",
                             m.key.qualname, h.key.qualname
+                        ),
+                        Some(
+                            "hash only attributes that never change, and return a changed copy instead (`dataclasses.replace`)"
+                                .to_owned(),
                         ),
                         &[],
                     );
@@ -2635,25 +2636,23 @@ pub(crate) fn mut203(
                             r.span,
                             &t.text,
                             (key.fqn(), read.span),
+                            rule.note,
                             || {
                                 let via = if r.chain.is_empty() {
                                     String::new()
                                 } else {
                                     format!(" via `{}`", key.fqn())
                                 };
-                                with_note(
-                                    format!(
-                                        "`{}` reads `{}` ({}){via} {}",
-                                        r.func.qualname,
-                                        t.text,
-                                        read.kind.as_str(),
-                                        rule.allowance.where_text(
-                                            "read owners",
-                                            "forbidden readers",
-                                            rule.name
-                                        )
-                                    ),
-                                    rule.note,
+                                format!(
+                                    "`{}` reads `{}` ({}){via} {}",
+                                    r.func.qualname,
+                                    t.text,
+                                    read.kind.as_str(),
+                                    rule.allowance.where_text(
+                                        "read owners",
+                                        "forbidden readers",
+                                        rule.name
+                                    )
                                 )
                             },
                             || r.chain.clone(),

@@ -15,6 +15,13 @@ fn concise(p: &Project) -> (i32, String) {
     (code, stdout)
 }
 
+/// `heki check` of the project in the full format, which shows each call chain.
+fn full(p: &Project) -> String {
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_ne!(code, 2, "{stderr}");
+    stdout
+}
+
 #[test]
 fn src_directories_are_source_roots_unless_they_are_packages() {
     // A namespace package under `src/` (no `__init__.py`): `acme.io` links.
@@ -26,7 +33,11 @@ fn src_directories_are_source_roots_unless_they_are_packages() {
     let (code, stdout) = concise(&p);
     assert_eq!(code, 1);
     assert!(stdout.contains("src/acme/api.py:5:5: EFF101 "), "{stdout}");
-    assert!(stdout.contains("`acme.io.wait`"), "{stdout}");
+    let chain = full(&p);
+    assert!(
+        chain.contains("= related: src/acme/api.py:5:5: `go` calls `acme.io.wait`"),
+        "{chain}"
+    );
 
     // Modules directly under `src/` are top-level modules.
     let p = Project::new("disc_src_modules");
@@ -44,7 +55,7 @@ fn src_directories_are_source_roots_unless_they_are_packages() {
             "src/main.py",
             "from src.helpers import wait\n\n\nasync def go():\n    wait()\n",
         );
-    assert!(concise(&p).1.contains("`src.helpers.wait`"));
+    assert!(full(&p).contains("`go` calls `src.helpers.wait`"));
     p.write(
         "src/main.py",
         "from helpers import wait\n\n\nasync def go():\n    wait()\n",
@@ -154,9 +165,11 @@ fn an_alias_spelling_the_first_component_binds_the_submodule() {
         );
     let (code, stdout) = concise(&p);
     assert_eq!(code, 1);
+    assert!(stdout.contains("app.py:5:5: EFF101 "), "{stdout}");
+    let chain = full(&p);
     assert!(
-        stdout.contains("app.py:5:5: EFF101 `async def go` calls `pkg.io.wait`"),
-        "{stdout}"
+        chain.contains("= related: app.py:5:5: `go` calls `pkg.io.wait`"),
+        "{chain}"
     );
     // Without the alias `import pkg.io` binds `pkg`: its no-op `wait`.
     p.write(

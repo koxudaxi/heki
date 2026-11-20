@@ -8,7 +8,8 @@
 //! watcher report it (`workspace/didChangeWatchedFiles`). After it, the harness waits until the
 //! server is idle ([`Lsp::settle`]: `heki/stats` reports no work in flight, and every
 //! publication it counts has arrived; no sleeps) and compares, file by file, the range, code,
-//! severity, message, and related locations of every diagnostic. A step also names diagnostics
+//! severity, message, related locations, and help (the last related entry, at the diagnostic's
+//! own range) of every diagnostic. A step also names diagnostics
 //! the CLI must (or must not) report, so it exercises what it describes, and a step marked
 //! `cutoff` must stop at the edited files (Early Cutoff). A new step is a few lines.
 
@@ -32,6 +33,7 @@ name = "registry"
 targets = ["Registry.entries"]
 allowed-writers = ["Store.*"]
 unresolved = "report"
+message = "add entries through `Store`"
 
 [[tool.heki.read-owners]]
 name = "vault"
@@ -1533,9 +1535,9 @@ fn steps() -> Vec<Step> {
         .present(&[("pkg/svc_user.py", "EFF101")]),
         // The configuration changes while the server runs.
         Step::new(
-            "the configuration gains a write owner",
+            "the configuration gains a write owner with a message",
             vec![Action::Configure(format!(
-                "{CONFIG}\n[[tool.heki.write-owners]]\nname = \"boxes\"\ntargets = [\"Box.items\"]\n"
+                "{CONFIG}\n[[tool.heki.write-owners]]\nname = \"boxes\"\ntargets = [\"Box.items\"]\nmessage = \"fill boxes in their constructor\"\n"
             ))],
         )
         .present(&[("pkg/shapes.py", "MUT201")]),
@@ -1726,6 +1728,10 @@ fn cli(p: &Project) -> BTreeMap<String, Vec<Diag>> {
     let mut by_file: BTreeMap<String, Vec<Diag>> = BTreeMap::new();
     for d in diags {
         let file = d["path"].as_str().unwrap().to_owned();
+        let range = cli_range(p, &file, &d["span"]);
+        let help = d["help"]
+            .as_str()
+            .map(|h| (range.clone(), format!("help: {h}")));
         let related = d["related"]
             .as_array()
             .unwrap()
@@ -1736,20 +1742,17 @@ fn cli(p: &Project) -> BTreeMap<String, Vec<Diag>> {
                     r["message"].as_str().unwrap().to_owned(),
                 )
             })
+            .chain(help)
             .collect();
         by_file.entry(file.clone()).or_default().push(Diag {
-            range: cli_range(p, &file, &d["span"]),
+            range,
             code: d["rule_code"].as_str().unwrap().to_owned(),
             severity: match d["severity"].as_str().unwrap() {
                 "error" => 1,
                 "warning" => 2,
                 other => panic!("severity {other}"),
             },
-            message: format!(
-                "{} ({})",
-                d["message"].as_str().unwrap(),
-                d["rule_slug"].as_str().unwrap()
-            ),
+            message: d["message"].as_str().unwrap().to_owned(),
             related,
         });
     }

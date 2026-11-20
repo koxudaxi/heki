@@ -92,8 +92,9 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
                 &qualname,
                 format!("{symbol}->{name}"),
                 format!(
-                    "the task from `{symbol}` is bound to `{name}` but never awaited, returned, or stored; the event loop keeps only a weak reference, so it can be garbage-collected before it finishes (keep it in a set and discard it in a done callback, or await it)"
+                    "the task from `{symbol}` is bound to `{name}` but never awaited, returned, or stored, so it can be garbage-collected before it finishes"
                 ),
+                Some("keep it in a set and discard it in a done callback, or await it".to_owned()),
                 &[],
             );
         }

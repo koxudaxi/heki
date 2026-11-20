@@ -360,7 +360,7 @@ fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
     );
     assert_eq!(
         diags[1]["message"],
-        "`Tagged.rename` mutates `self.name`, which `Tagged.__hash__` reads: instances already stored in a `set` or used as `dict` keys can no longer be found"
+        "`Tagged.rename` mutates `self.name`, which `Tagged.__hash__` reads, so instances already stored in a `set` or used as `dict` keys can no longer be found"
     );
     assert_eq!(diags[1]["rule_slug"], "hash-attr-mutation");
     assert_no_fix(&diags);
@@ -732,17 +732,27 @@ fn opt112_reports_linear_scans_of_long_lived_lists_in_data_sized_loops() {
         ]
     );
     let message = |i: usize| diags[i]["message"].as_str().unwrap();
+    let help = |i: usize| diags[i]["help"].as_str().unwrap();
     assert_eq!(
-        message(0),
-        "`names.index()` scans the whole list on every iteration of the loop (O(n²)); build a `dict` (value → index) or a `set` once before the loop"
+        (message(0), help(0)),
+        (
+            "`names.index()` scans the whole list on every iteration of the loop (O(n²))",
+            "build a `dict` (value → index) or a `set` once before the loop"
+        )
     );
     assert_eq!(
-        message(1),
-        "`alias.remove()` scans the whole list on every iteration of the loop (O(n²)); collect the values to drop in a `set` and rebuild the list once with a comprehension"
+        (message(1), help(1)),
+        (
+            "`alias.remove()` scans the whole list on every iteration of the loop (O(n²))",
+            "collect the values to drop in a `set` and rebuild the list once with a comprehension"
+        )
     );
     assert_eq!(
-        message(2),
-        "`items.count()` scans the whole list on every iteration of the loop (O(n²)); count once before the loop with `collections.Counter(items)`"
+        (message(2), help(2)),
+        (
+            "`items.count()` scans the whole list on every iteration of the loop (O(n²))",
+            "count once before the loop with `collections.Counter(items)`"
+        )
     );
     assert_eq!(diags[0]["rule_slug"], "loop-linear-list-lookup");
     assert_no_fix(&diags);
@@ -1072,17 +1082,27 @@ fn opt113_reports_nested_loop_equijoins_but_not_traversals_or_all_pairs_loops() 
         ]
     );
     let message = |i: usize| diags[i]["message"].as_str().unwrap();
+    let help = |i: usize| diags[i]["help"].as_str().unwrap();
     assert_eq!(
-        message(0),
-        "nested loops join `orders` and `customers` on `order.customer_id == customer.id` (O(n·m)); index `customers` by `customer.id` in a `dict` before the outer loop"
+        (message(0), help(0)),
+        (
+            "nested loops join `orders` and `customers` on `order.customer_id == customer.id` (O(n·m))",
+            "index `customers` by `customer.id` in a `dict` before the outer loop"
+        )
     );
     assert_eq!(
-        message(6),
-        "nested loops join `xs` and `ys` on `x == y` (O(n·m)); group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop"
+        (message(6), help(6)),
+        (
+            "nested loops join `xs` and `ys` on `x == y` (O(n·m))",
+            "group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop"
+        )
     );
     assert_eq!(
-        message(8),
-        "nested loops join `A` and `C` on `c.k == a.k` (O(n·m)); index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop"
+        (message(8), help(8)),
+        (
+            "nested loops join `A` and `C` on `c.k == a.k` (O(n·m))",
+            "index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop"
+        )
     );
     assert_eq!(diags[0]["column"], 16);
     assert_eq!(diags[0]["rule_slug"], "nested-loop-equijoin");

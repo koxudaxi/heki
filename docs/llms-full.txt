@@ -57,19 +57,21 @@ that lead to them:
 
 ```console
 $ heki check
-app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `get_user` reaches the blocking call `requests.get` on the event loop
   |
 5 |     return load_user(user_id)  # blocks the event loop two calls down
   |            ^
   = related: app/api.py:5:12: `get_user` calls `app.users.load_user`
   = related: app/users.py:9:41: `load_user` calls `app.users.fetch_name`
   = related: app/users.py:5:12: `fetch_name` calls `requests.get`
+  = help: offload it with `asyncio.to_thread`, or use an async client
 
-app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes `values` to `app.stats.sort_values`, which changes it in place: `values` is annotated read-only (`Sequence` / `Mapping`), so the caller was promised that its argument is only read, but the helper changes the caller's object; pass a copy (`list(values)` / `dict(values)`), or annotate the helper's parameter with a mutable type so that the type checker shows the mismatch
+app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes its read-only parameter `values` to `app.stats.sort_values`, which changes it in place
   |
 9 |     sort_values(values)  # reorders the caller's list
   |     ^
   = related: app/stats.py:9:5: `median` calls `app.stats.sort_values`
+  = help: pass a copy (`list(values)` / `dict(values)`), or annotate the helper's parameter with a mutable type
 
 Found 2 diagnostic(s) in 3 file(s).
 ```
@@ -278,7 +280,7 @@ heki follows the call into `load_user` and the alias into `add_default`:
 
 ```console
 $ heki check --output-format concise
-app/api.py:5:12: EFF101 `async def handler` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
+app/api.py:5:12: EFF101 `handler` reaches the blocking call `requests.get` on the event loop
 app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
 ```
@@ -632,12 +634,13 @@ $ heki check src/ tests/test_api.py
 ## Read a diagnostic
 
 ```console
-app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def handler` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `handler` reaches the blocking call `requests.get` on the event loop
   |
 5 |     user = load_user(user_id)
   |            ^
   = related: app/api.py:5:12: `handler` calls `app.users.load_user`
   = related: app/users.py:5:12: `load_user` calls `requests.get`
+  = help: offload it with `asyncio.to_thread`, or use an async client
 ```
 
 | Part | Meaning |
@@ -645,8 +648,9 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def handler` calls 
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
 | `[error]` | its severity |
-| the message | what heki proved: here, a chain of calls from an `async def` to a blocking network call |
-| `related` lines | the hops of that chain, to follow it across files; editors show them as related information you can jump to |
+| the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
+| `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
+| `help` line | what to do about it |
 
 `heki rule EFF101` explains the rule, its exclusions, and what to do instead. The
 [rules reference](https://heki.koxudaxi.dev/rules/) has the same text for every rule.
@@ -674,12 +678,17 @@ Fixed 1 issue(s) in 1 file(s).
 
 `--fix` then reports what is left, such as the `EFF101` above, which has no automatic fix.
 
-When heki cannot prove a fix safe, the diagnostic says why and nothing is rewritten. Here the
-list is also handed to other code inside the loop:
+When heki cannot prove a fix safe, the help says why and nothing is rewritten. Here the list is
+also handed to other code inside the loop:
 
 ```console
-$ heki check app/shared.py --output-format concise
-app/shared.py:4:9: OPT101 `rows = rows + [...]` copies the whole list on every iteration (quadratic); append in place with `rows.append(...)` / `rows.extend(...)` [not auto-fixable: Unique(rows): it may be shared: passed to code heki cannot see (line 5)]
+$ heki check app/shared.py
+app/shared.py:4:9: OPT101 (list-quadratic-concat) [error] `rows = rows + [...]` copies the whole list on every iteration (quadratic)
+  |
+4 |         rows = rows + [item]
+  |         ^
+  = help: append in place with `rows.append(...)` / `rows.extend(...)` [not auto-fixable: Unique(rows): it may be shared: passed to code heki cannot see (line 5)]
+
 Found 1 diagnostic(s) in 1 file(s).
 ```
 
@@ -715,11 +724,11 @@ $ heki check --output-format json
 
 | Format | Prints |
 | ------ | ------ |
-| `full` (default) | each diagnostic with its source line and call chain |
-| `concise` | one line per diagnostic |
-| `json` | every field: also the evidence, the blocker that stops a fix, and the fix edits ([fields](https://heki.koxudaxi.dev/coding-agents/#use-the-cli-in-the-agents-loop)) |
-| `github` | GitHub Actions annotations ([CI](https://heki.koxudaxi.dev/adoption/#continuous-integration)) |
-| `sarif` | the message, the location, and the call chain, for code-scanning dashboards (no evidence or blocker) |
+| `full` (default) | each diagnostic with its source line, call chain, and help |
+| `concise` | one line per diagnostic: the message, without the help |
+| `json` | every field: also the help, the evidence, the blocker that stops a fix, and the fix edits ([fields](https://heki.koxudaxi.dev/coding-agents/#use-the-cli-in-the-agents-loop)) |
+| `github` | GitHub Actions annotations with the message ([CI](https://heki.koxudaxi.dev/adoption/#continuous-integration)) |
+| `sarif` | the message, the location, the call chain, and the help (`properties.help`), for code-scanning dashboards (no evidence or blocker) |
 
 ## Exit codes
 
@@ -866,7 +875,7 @@ unresolved = "report"
 | `forbidden-writers` | `[]` | When set, only writes by these functions are reported: see [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions). |
 | `exempt-methods` | `[]` | Construction and copy methods allowed to write the targets. A plain name (`__deepcopy__`) matches any method of that name; a name with a dot or a glob (`DataModel.copy_deep`, `create_*`) is a pattern, as in `allowed-writers`. |
 | `forbid-cached-property-on` | `[]` | Classes on which defining a `@cached_property` is itself reported. |
-| `message` | none | Text appended to every report of the contract: where to write instead. |
+| `message` | none | The help of every report of the contract: where to write instead. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/). |
 
@@ -915,7 +924,7 @@ The read side of `write-owners`. A read is `ref.children`, a read through a loca
 | `allowed-readers` | `[]` | Functions allowed to read the targets. |
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
-| `message` | none | Text appended to every report of the contract. |
+| `message` | none | The help of every report of the contract. |
 
 Reads through a parameter without a project-class annotation are not seen.
 
@@ -939,7 +948,7 @@ The call side of `write-owners`.
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
-| `message` | none | Text appended to every report of the contract. |
+| `message` | none | The help of every report of the contract. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -1013,7 +1022,7 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
-| `message` | none | Text appended to every report of the boundary. |
+| `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
 | -------------- | ------- |
@@ -1066,7 +1075,7 @@ message = "tell the store which models changed"
 | `targets` | `[]` | `Class.attr` attributes whose writes must be announced. |
 | `invalidators` | `[]` | Functions or methods whose call announces the change. |
 | `exempt-writers` | `[]` | Functions whose writes need no announcement of their own: the owner's operations, which announce or batch the change themselves, and construction methods. |
-| `message` | none | Text appended to every report of the contract. |
+| `message` | none | The help of every report of the contract. |
 
 An invalidator call counts when it runs on every path from the write to the function's normal
 return:
@@ -1467,7 +1476,9 @@ With SARIF:
 - findings (exit code `1`) become code-scanning alerts and keep the step green;
 - a configuration, read, or syntax error (exit code `2`) still fails the step: heki then writes
   SARIF only for the files it could analyze, which would hide the others;
-- results carry the message, the location, and the call chain (`relatedLocations`).
+- results carry the message, the location, the call chain (`relatedLocations`), and the help
+  (`properties.help`; SARIF's `rules[].help` is one text per rule, and a report's help can name
+  the object it is about).
 
 For custom tooling, `--output-format json` gives every field: see
 [Coding Agents](https://heki.koxudaxi.dev/coding-agents/#use-the-cli-in-the-agents-loop).
@@ -1788,7 +1799,9 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
 ## What the server provides
 
 - Diagnostics for open files, with every hop of a call chain (for example the path from an
-  `async def` to `time.sleep`) as related information you can jump to.
+  `async def` to `time.sleep`) as related information you can jump to. The message is the
+  report's one sentence; its help, what to do about it, is the last related-information entry
+  (`help: ...`) at the diagnostic's own range, the way rust-analyzer shows a `help:` note.
 - Quick fixes for the safe `OPT101` / `OPT102` rewrites.
 - `refactor.rewrite.heki` code actions for the proven-safe size-dependent rewrites. A fix whose
   result would not parse is never offered, as `heki check --fix` refuses it.
@@ -1905,7 +1918,8 @@ every diagnostic says what was proven, where the evidence is, and what blocks a 
 A typical instruction for the agent:
 
 > After changing Python files, run `heki check --output-format json`. For each diagnostic,
-> read `heki rule <rule_code>`, follow `related` to the root cause, and fix it there. Apply
+> read its `help` and `heki rule <rule_code>`, follow `related` to the root cause, and fix it
+> there. Apply
 > `heki check --fix` for the safe rewrites. Never silence a diagnostic with `# heki: ignore`
 > unless the rule's documentation describes the case as intended.
 
@@ -1918,7 +1932,8 @@ Each diagnostic has:
 | Field | Content |
 | ----- | ------- |
 | `path`, `line`, `column`, `span` | location (byte span in the file) |
-| `rule_code`, `rule_slug`, `severity`, `message` | the finding |
+| `rule_code`, `rule_slug`, `severity`, `message` | the finding: `message` is one sentence saying what happens |
+| `help` | what to do about it (`null` when the rule has no advice for the report) |
 | `qualname`, `target` | the function and the object involved |
 | `related` | every hop of the call chain behind the finding |
 | `evidence` | what was established (for `OPT` rules: the proof obligations) |
@@ -2432,7 +2447,7 @@ No automatic fix.
   - `exempt-methods`: methods allowed to call the targets (`__deepcopy__`); a plain name matches
     any function or method of that name, an entry with a dot or a glob is matched like
     `allowed-callers`.
-  - `message`: appended to every message of the contract.
+  - `message`: the help of every report of the contract.
 
 
 ---
@@ -2577,7 +2592,7 @@ No automatic fix.
     they write count, as for `[[tool.heki.write-owners]]`.
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
-  - `message`: appended to every message of the boundary.
+  - `message`: the help of every report of the boundary.
 
 
 ---
@@ -3361,11 +3376,11 @@ value and raises `ValueError` for a missing one, and the values must be hashable
 The advice follows what the loop does with the list. Removals can wait for one rebuild after
 the loop only when the loop reads the list nowhere else (a membership test guarding the removal,
 `if x in items: items.remove(x)`, aside); when it iterates, tests, indexes, or passes on the list
-after a removal (a greedy match over the remaining values), the message advises a `set` or a
+after a removal (a greedy match over the remaining values), the help advises a `set` or a
 `dict` with constant-time deletion instead. An index or a count built once before the loop stays
 right only while the loop does not change the list, in place or through a project function it
 hands the list to (`change(names)` where `change` calls `names.reverse()`); otherwise the
-message advises keeping it up to date with each change.
+help advises keeping it up to date with each change.
 
 ## Fix safety
 No automatic fix.
@@ -3559,12 +3574,12 @@ def attach(orders, customers):
 The advice follows how the matches are used. When a match leaves the inner loop (`break`,
 `return`, `raise`), one element per key is enough: a `set` of the elements, or a `dict` from the
 key to its first element, as above. When every match is used (`out.append((a, b))` for each
-equal pair), a `set` or a one-element `dict` would drop the repeated matches, so the message
+equal pair), a `set` or a one-element `dict` would drop the repeated matches, so the help
 advises a `dict` from each key (or value) to the list of its elements.
 
 The keys must be hashable, and `==` must agree with their hash. When a key is known to be a
 `list`, `dict`, `set`, or `bytearray` (from its annotation, or as an element of a display of
-such displays), the message advises indexing a hashable form of it instead (a `tuple` or
+such displays), the help advises indexing a hashable form of it instead (a `tuple` or
 `frozenset` of its items).
 
 ## Fix safety
@@ -3686,7 +3701,7 @@ No automatic fix.
   - `exempt-methods`: methods allowed to read the targets (`__repr__`, `__deepcopy__`); a plain
     name matches any function or method of that name, an entry with a dot or a glob is matched
     like `allowed-readers`.
-  - `message`: appended to every message of the contract.
+  - `message`: the help of every report of the contract.
 
 Known limitation: a read through a parameter without a project-class annotation
 (`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown
@@ -4393,7 +4408,7 @@ No automatic fix.
     dot or a glob (`Model.copy_deep`, `create_*`) is matched like `allowed-writers`. A write is
     allowed when any function on its chain (the writer and the private helpers between) is an
     allowed writer or an exempt method.
-  - `message`: appended to every message of the contract (`use Store.add_field() instead`).
+  - `message`: the help of every report of the contract (`use Store.add_field() instead`).
   - `forbid-cached-property-on`: classes on which a `@cached_property` is itself reported.
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write are reported.

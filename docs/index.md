@@ -48,19 +48,21 @@ that lead to them:
 
 ```console
 $ heki check
-app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
+app/api.py:5:12: EFF101 (async-blocking-call) [error] `get_user` reaches the blocking call `requests.get` on the event loop
   |
 5 |     return load_user(user_id)  # blocks the event loop two calls down
   |            ^
   = related: app/api.py:5:12: `get_user` calls `app.users.load_user`
   = related: app/users.py:9:41: `load_user` calls `app.users.fetch_name`
   = related: app/users.py:5:12: `fetch_name` calls `requests.get`
+  = help: offload it with `asyncio.to_thread`, or use an async client
 
-app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes `values` to `app.stats.sort_values`, which changes it in place: `values` is annotated read-only (`Sequence` / `Mapping`), so the caller was promised that its argument is only read, but the helper changes the caller's object; pass a copy (`list(values)` / `dict(values)`), or annotate the helper's parameter with a mutable type so that the type checker shows the mismatch
+app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes its read-only parameter `values` to `app.stats.sort_values`, which changes it in place
   |
 9 |     sort_values(values)  # reorders the caller's list
   |     ^
   = related: app/stats.py:9:5: `median` calls `app.stats.sort_values`
+  = help: pass a copy (`list(values)` / `dict(values)`), or annotate the helper's parameter with a mutable type
 
 Found 2 diagnostic(s) in 3 file(s).
 ```
