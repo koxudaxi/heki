@@ -430,7 +430,10 @@ Missed findings close as heki learns more:
   (`Model.KEY = "x"`; from another module, only one without `Final`), a class constant a
   subclass defines again, is given its own value (`Child.KEY = "x"`), or inherits first from
   another base it lists before the class (`class Child(Other, Model)`; read on that subclass,
-  or on an instance or `cls` that may be one), or a computed name.
+  or on an instance or `cls` that may be one), a `Final` field of a dataclass or of a class a
+  `dataclass_transform` builds read on an instance (`Keys("x").KEY` is `"x"`), or on a class
+  object whose default a class with `slots=True` or built by a transform replaces, or a
+  computed name.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/)).
 
@@ -2825,7 +2828,8 @@ coroutine's where it is awaited. Not reported either:
   callers above it starts in an allowed caller, an exempt method, or a class's own
   initialization (as for `MUT201`);
 - a class's own initialization: an initializer (`__init__`, `__post_init__`, ...) of a class of
-  the target's family calling a guarded method on its own `self`;
+  the target's family calling a guarded method on its own `self` (for a target naming no class,
+  `reset`, the family is the classes defining the methods it names and their subclasses);
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
   guarded operation is checked where it is called, so what it does inside is part of it.
@@ -2877,7 +2881,8 @@ No automatic fix.
   - `targets`: functions, methods, or classes, as dotted names or globs matched against the fully
     qualified name and any dotted suffix (`DataType.replace_reference`, `pkg.util.reset_cache`,
     `FinalFacts`, `Parser._*`). A `Class.method` target covers the method's overrides in
-    subclasses; a class target covers constructing the class and its subclasses.
+    subclasses; a class target covers constructing the class and its subclasses; a target
+    naming no class (`reset`) covers every project function and method of that name.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`pkg.store.*`).
   - `forbidden-callers`: when set, only calls by these functions are reported (matched like
@@ -4631,8 +4636,10 @@ The rules of `MUT204` for what is allowed apply: allowed callers, exempt methods
 themselves (they may call each other), functions that only run inside allowed callers, and
 `forbidden-callers` (the calling function must be one). `MUT204` does not follow a call into a
 parameter that its function does not type, so the callers decide for such a receiver: the call is
-reported unless every caller path binds an instance of a project class outside the targets'
-classes to it.
+reported unless every caller path binds to it an instance of a project class whose method of that
+name is no target: a class outside the target's family (`DataType` and its subclasses for
+`DataType.replace_reference`) whose MRO finds no method the target names either (for the target
+`reset`, any project class's `reset`; a `reset` inherited from a library base is none).
 
 ## Why is this bad?
 `MUT204` reports a call only when every function it may call is a target, which needs the
@@ -4773,8 +4780,9 @@ write:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
   `__dict__` key in a name that is no constant: a module-level name bound twice or rebound by
   another module, a class attribute without `ClassVar` or `Final` (an instance may hold its
-  own), one a subclass defines again, and one stored on its class, a subclass, or an instance
-  outside the class body (`Model.KEY = "x"`).
+  own), one a subclass defines again or inherits first from another base, a `Final` field of a
+  dataclass read on an instance (or on a class object with `slots=True` along the way), and one
+  stored on its class, a subclass, or an instance outside the class body (`Model.KEY = "x"`).
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
@@ -4929,10 +4937,15 @@ allowed writers:
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
-  `Model.KEY`), which no subclass of the object's class defines again and no code stores on the
-  class, a subclass, or an instance (`Model.KEY = "x"`; another module may store it on the
-  defining class only for a `Final` one); on an instance of a protocol, every class
-  implementing it must hold the same constant;
+  `Model.KEY`), which every subclass of the object's class finds along its MRO in the same
+  class (none defines it again or lists another base defining it first,
+  `class Child(Other, Model)`) and no code stores on the class, a subclass, or an instance
+  (`Model.KEY = "x"`; another module may store it on the defining class only for a `Final`
+  one); on an instance of a protocol, every class implementing it must hold the same constant.
+  A `Final` name of a dataclass (or of a class a `dataclass_transform` builds) is a field, which
+  each instance holds itself (`Keys("x").KEY`): it names an attribute only when read on the
+  class object of a dataclass whose default no class along the way replaces (one with
+  `slots=True` or built by a transform);
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
@@ -4969,9 +4982,10 @@ wrapped function returns, and `typing.cast` names the class. A variable rebound 
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
-also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
-classes that implement it structurally (having every member it defines; at most eight, counting
-a class and not its subclasses), also when it is handed to a helper that does not type it. An
+also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the protocol
+and of the project classes that implement it structurally (having every member it defines; at
+most eight, counting a class and not its subclasses), also when it is handed to a helper that
+does not type it: a target on the protocol and one on an implementation both cover its writes. An
 object whose class heki cannot see (an unannotated parameter or return, `Any`, a value of more
 than three classes, a protocol without members or with more implementations) is not tied to the
 target.

@@ -17,10 +17,15 @@ allowed writers:
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
-  `Model.KEY`), which no subclass of the object's class defines again and no code stores on the
-  class, a subclass, or an instance (`Model.KEY = "x"`; another module may store it on the
-  defining class only for a `Final` one); on an instance of a protocol, every class
-  implementing it must hold the same constant;
+  `Model.KEY`), which every subclass of the object's class finds along its MRO in the same
+  class (none defines it again or lists another base defining it first,
+  `class Child(Other, Model)`) and no code stores on the class, a subclass, or an instance
+  (`Model.KEY = "x"`; another module may store it on the defining class only for a `Final`
+  one); on an instance of a protocol, every class implementing it must hold the same constant.
+  A `Final` name of a dataclass (or of a class a `dataclass_transform` builds) is a field, which
+  each instance holds itself (`Keys("x").KEY`): it names an attribute only when read on the
+  class object of a dataclass whose default no class along the way replaces (one with
+  `slots=True` or built by a transform);
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
@@ -57,9 +62,10 @@ wrapped function returns, and `typing.cast` names the class. A variable rebound 
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
-also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
-classes that implement it structurally (having every member it defines; at most eight, counting
-a class and not its subclasses), also when it is handed to a helper that does not type it. An
+also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the protocol
+and of the project classes that implement it structurally (having every member it defines; at
+most eight, counting a class and not its subclasses), also when it is handed to a helper that
+does not type it: a target on the protocol and one on an implementation both cover its writes. An
 object whose class heki cannot see (an unannotated parameter or return, `Any`, a value of more
 than three classes, a protocol without members or with more implementations) is not tied to the
 target.
