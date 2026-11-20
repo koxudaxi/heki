@@ -76,3 +76,14 @@ pub(crate) fn opt(
         });
     }
 }
+
+/// `OPT112`: `list.index` / `list.remove` / `list.count` inside a loop (Advisory lane,
+/// scaffold).
+pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    let _ = (cx, unit, out);
+}
+
+/// `OPT113`: nested-loop equi-joins (Advisory lane, scaffold).
+pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    let _ = (cx, unit, out);
+}

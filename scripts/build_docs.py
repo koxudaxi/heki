@@ -67,7 +67,7 @@ def run(heki: Path, *args: str) -> str:
 def fix_label(rule: dict) -> str:
     if rule["auto_fix_default"]:
         return "Safe fix (`--fix`)"
-    if rule["family"] == "Opt" and rule["code"] != "OPT103":
+    if rule["size_dependent_fix"]:
         return "Proven-safe suggestion (`--fix --include-size-dependent`)"
     return "No automatic fix"
 
@@ -76,7 +76,7 @@ def badges(rule: dict) -> str:
     marks = []
     if rule["auto_fix_default"]:
         marks.append("🛠️")
-    elif rule["family"] == "Opt" and rule["code"] != "OPT103":
+    elif rule["size_dependent_fix"]:
         marks.append("🔧")
     if not rule["default_enabled"]:
         marks.append("🔌")

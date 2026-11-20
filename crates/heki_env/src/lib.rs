@@ -99,6 +99,44 @@ pub struct WriteOwnerRule {
     pub targets: Vec<String>,
     pub allowed_writers: Vec<String>,
     pub forbid_cached_property_on: Vec<String>,
+    /// Construction / copy methods allowed to write the targets (`__deepcopy__`,
+    /// `Model.copy_deep`): a method name or a dotted pattern.
+    pub exempt_methods: Vec<String>,
+    /// Appended to every `MUT201` message of this contract (`use Store.set_fields() instead`).
+    pub message: Option<String>,
+}
+
+/// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ReadOwnerRule {
+    pub name: String,
+    pub targets: Vec<String>,
+    pub allowed_readers: Vec<String>,
+    /// Methods allowed to read the targets: a method name or a dotted pattern.
+    pub exempt_methods: Vec<String>,
+    /// Appended to every `MUT203` message of this contract.
+    pub message: Option<String>,
+}
+
+/// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
+/// directly or through calls, from the functions of `scopes`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct EffectBoundaryRule {
+    pub name: String,
+    /// Modules, classes, or functions (dotted patterns) whose functions are checked.
+    pub scopes: Vec<String>,
+    /// Forbidden effects: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
+    /// `blocking-sync`, `sleep`, `blocking` (all six), `mutates-params`, `writes-targets`.
+    pub forbid: Vec<String>,
+    /// `Class.attr` targets of `writes-targets`.
+    pub write_targets: Vec<String>,
+    /// Callees (dotted patterns) whose effects are allowed: paths through them are not
+    /// followed.
+    pub allowed_callees: Vec<String>,
+    /// Appended to every `EFF201` message of this contract.
+    pub message: Option<String>,
 }
 
 /// `[[tool.heki.readonly-returns]]` contract for `MUT202`.
@@ -137,7 +175,9 @@ pub struct HekiConfig {
     pub baseline: Option<PathBuf>,
     pub lint: LintConfig,
     pub write_owners: Vec<WriteOwnerRule>,
+    pub read_owners: Vec<ReadOwnerRule>,
     pub readonly_returns: Vec<ReadOnlyReturnRule>,
+    pub effect_boundaries: Vec<EffectBoundaryRule>,
     pub ecosystem: Vec<EcosystemOverride>,
     /// Lower bound of `project.requires-python` in the project's `pyproject.toml`: the
     /// `target-version` default (read by the loaders, not a `[tool.heki]` key).
@@ -323,17 +363,60 @@ MUT101 = "warning"
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields"]
 allowed-writers = ["pkg.parser.generation.*"]
+exempt-methods = ["__deepcopy__"]
+message = "use Store.set_fields() instead"
+
+[[tool.heki.read-owners]]
+name = "reference-children"
+targets = ["Reference.children"]
+allowed-readers = ["*GenerationIndex*"]
+exempt-methods = ["__deepcopy__"]
+message = "read children through GenerationIndex instead"
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
 producers = ["pkg.parser.SchemaGraphBuilder.schema"]
 deep = true
+
+[[tool.heki.effect-boundaries]]
+name = "pure-render"
+scopes = ["*.render"]
+forbid = ["writes-targets", "blocking"]
+write-targets = ["DataModel.*"]
+allowed-callees = ["pkg.logging.*"]
+message = "render must not mutate model state"
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
         assert!(cfg.runtime_profile().pep810_lazy_imports);
         assert_eq!(cfg.lint.severity.get("MUT101"), Some(&Severity::Warning));
         assert_eq!(cfg.write_owners.len(), 1);
+        assert_eq!(cfg.write_owners[0].exempt_methods, ["__deepcopy__"]);
+        assert_eq!(
+            cfg.write_owners[0].message.as_deref(),
+            Some("use Store.set_fields() instead")
+        );
+        assert_eq!(
+            cfg.read_owners[0],
+            ReadOwnerRule {
+                name: "reference-children".into(),
+                targets: vec!["Reference.children".into()],
+                allowed_readers: vec!["*GenerationIndex*".into()],
+                exempt_methods: vec!["__deepcopy__".into()],
+                message: Some("read children through GenerationIndex instead".into()),
+            }
+        );
+        assert_eq!(
+            cfg.effect_boundaries[0],
+            EffectBoundaryRule {
+                name: "pure-render".into(),
+                scopes: vec!["*.render".into()],
+                forbid: vec!["writes-targets".into(), "blocking".into()],
+                write_targets: vec!["DataModel.*".into()],
+                allowed_callees: vec!["pkg.logging.*".into()],
+                message: Some("render must not mutate model state".into()),
+            }
+        );
         assert!(cfg.readonly_returns[0].deep);
         assert!(cfg.ecosystem.is_empty());
         assert_eq!(cfg.lint.relax_async_in_tests, None);
