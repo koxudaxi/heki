@@ -994,7 +994,36 @@ async def never_awaited(pool: Pool):
     other.save()
 "#;
 
+/// A project coroutine and a catalogued awaitable (typed by what awaiting it gives) merged
+/// before the `await`: the awaited connection runs a query per item either way.
+const MIXED_AWAITED: &str = r#"import psycopg
+
+
+async def connect() -> psycopg.AsyncConnection:
+    return await psycopg.AsyncConnection.connect("dbname=t")
+
+
+async def load(ids, flag):
+    pending = connect() if flag else psycopg.AsyncConnection.connect("dbname=t")
+    conn = await pending
+    for i in ids:
+        await conn.execute("SELECT 1")  # EFF103
+
+
+async def each_awaited(ids, flag):
+    conn = await connect() if flag else await psycopg.AsyncConnection.connect("dbname=t")
+    for i in ids:
+        await conn.execute("SELECT 1")  # EFF103
+"#;
+
 #[test]
 fn a_call_of_an_async_def_is_a_coroutine_of_what_awaiting_it_gives() {
-    check_marks("awaited", &[("pkg/awaited.py", AWAITED)], &["EFF101"]);
+    check_marks(
+        "awaited",
+        &[
+            ("pkg/awaited.py", AWAITED),
+            ("pkg/mixed_awaited.py", MIXED_AWAITED),
+        ],
+        &["EFF101", "EFF103"],
+    );
 }

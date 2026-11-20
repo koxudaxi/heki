@@ -259,6 +259,8 @@ impl Ty {
             }
             // Either coroutine may be awaited: the result is either declared result.
             (Ty::Coroutine(a), Ty::Coroutine(b)) => a.join(b).map(|t| Ty::Coroutine(Box::new(t))),
+            // Catalog awaitables carry their awaited result: join by it (EFF107 only misses).
+            (Ty::Coroutine(a), b) | (b, Ty::Coroutine(a)) => a.join(b),
             _ => match (self.members(), other.members()) {
                 (a, b) if !a.is_empty() && !b.is_empty() => {
                     Ty::of_members(a.iter().chain(b).cloned())
@@ -409,7 +411,9 @@ mod tests {
             coroutine(&three).join(&coroutine(&Ty::inst("m.Tree"))),
             None
         );
-        assert_eq!(coroutine(&model).join(&model), None);
+        // A coroutine and another value join by the coroutine's result.
+        assert_eq!(coroutine(&model).join(&model), Some(model.clone()));
+        assert_eq!(field.join(&coroutine(&model)), Some(both.clone()));
         // An empty display has no items: it takes the other side's items.
         let models = list(Elem::Of(model.clone()));
         assert_eq!(list(Elem::Empty).join(&models), Some(models.clone()));
