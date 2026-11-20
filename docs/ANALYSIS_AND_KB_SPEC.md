@@ -598,7 +598,9 @@ which module imports which.
    (`MakeClosure` captures; functions are analyzed enclosing first). It follows the blocks and
    edges of `ownership::Live` only. A side of an `is` test (of the branch it decides) is the
    edge from the branch to that successor, and every edge from a block that a run reaches only
-   through that successor. On a phi input from the side where an `is` test of the input's value
+   through that successor: the walk up the dominator tree from an edge's source to the
+   dominator of its target finds them, once per edge, and the test a condition is (through
+   `not` and copies) and the value a copy copies are each found once per value. On a phi input from the side where an `is` test of the input's value
    failed, the input leaves out the object it is tested against (`if result is shared: result =
    shared.copy()`). Where the test is against a constant, a global, or an attribute (`if out is
    None: out = []`) and the phi also takes inputs from the other side, the parameter the value

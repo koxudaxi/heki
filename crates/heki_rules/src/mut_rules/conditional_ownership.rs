@@ -329,6 +329,10 @@ struct IdentityTest {
     rhs: VarId,
 }
 
+/// The tests (by position) an edge is on a side of, each with whether its operands are the same
+/// object on that side.
+type Sides = Vec<(usize, bool)>;
+
 /// A change in place of a value: where, the value, and the calls down to a helper making it.
 struct Change {
     span: Span,
@@ -358,6 +362,8 @@ struct FnCheck<'a, 'u> {
     sites: Option<&'u FxHashMap<Span, Vec<&'a CallSite>>>,
     types: FxHashMap<VarId, Val>,
     defs: FxHashMap<VarId, &'a Inst>,
+    /// The value each copy copies ([`Self::copied_from`]).
+    copy_roots: FxHashMap<VarId, VarId>,
     /// What the parameters hold when the function starts.
     initial: FxHashMap<VarId, Own>,
     own: FxHashMap<VarId, Own>,
@@ -423,6 +429,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             types: u.tcx.infer(f),
             u,
             f,
+            copy_roots: copy_roots(&defs),
             defs,
             initial: own.clone(),
             own,
@@ -439,9 +446,47 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     }
 
     /// Where the `is` tests deciding the function's branches tell its phi inputs apart
-    /// ([`Self::not_same`], [`Self::callers`], [`Self::replacements`]).
+    /// ([`Self::not_same`], [`Self::callers`], [`Self::replacements`]). A phi input is on a side
+    /// of a test when its edge leaves the test's branch to that successor, or leaves a block that
+    /// successor dominates, entered by the branch alone: the walk up the dominator tree from the
+    /// edge's source to the phi's dominator finds them, once per edge.
     fn identity_sides(&mut self) {
         let tests = self.identity_tests();
+        if tests.is_empty() {
+            return;
+        }
+        let idom = immediate_dominators(self.f, &self.live, &self.preds);
+        let test_at: FxHashMap<BlockId, usize> =
+            tests.iter().enumerate().map(|(i, t)| (t.at, i)).collect();
+        let mut heads: FxHashMap<BlockId, (usize, bool)> = FxHashMap::default();
+        for (i, t) in tests.iter().enumerate() {
+            for (side, same) in [(t.same, true), (t.differs, false)] {
+                if self.preds[side.0 as usize] == [t.at] {
+                    heads.insert(side, (i, same));
+                }
+            }
+        }
+        // The tests the edge `from -> to` is on a side of, and whether its operands are the same
+        // object there.
+        let sides_of = |from: BlockId, to: BlockId| {
+            let mut out: Sides = Vec::new();
+            if let Some(&i) = test_at.get(&from) {
+                let t = &tests[i];
+                out.extend(
+                    [(t.same, true), (t.differs, false)]
+                        .into_iter()
+                        .filter(|(side, _)| *side == to)
+                        .map(|(_, same)| (i, same)),
+                );
+            }
+            let stop = idom[to.0 as usize];
+            let mut cur = from;
+            while Some(cur) != stop {
+                out.extend(heads.get(&cur).copied());
+                cur = idom[cur.0 as usize].expect("a block a run reaches has a dominator");
+            }
+            out
+        };
         let sentinel = |v: VarId| {
             matches!(
                 self.defs.get(&v).map(|i| &i.kind),
@@ -452,14 +497,27 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 )
             )
         };
+        let mut edge_sides: FxHashMap<(BlockId, BlockId), Sides> = FxHashMap::default();
         let mut not_same: FxHashMap<(VarId, BlockId), Vec<VarId>> = FxHashMap::default();
         let mut callers = FxHashSet::default();
         let mut replacements = FxHashSet::default();
         for b in self.f.blocks.iter().filter(|b| self.live.block(b.id)) {
             for phi in &b.phis {
-                for &(from, v) in &phi.incoming {
-                    let root = self.copied_from(v);
-                    for t in &tests {
+                let inputs: Vec<(BlockId, VarId, Sides)> = phi
+                    .incoming
+                    .iter()
+                    .filter(|(from, _)| self.live.edge(*from, b.id))
+                    .map(|&(from, v)| {
+                        let sides = edge_sides
+                            .entry((from, b.id))
+                            .or_insert_with(|| sides_of(from, b.id));
+                        (from, v, sides.clone())
+                    })
+                    .collect();
+                for (from, v, sides) in &inputs {
+                    let root = self.copied_from(*v);
+                    for &(i, _) in sides.iter().filter(|(_, same)| !same) {
+                        let t = &tests[i];
                         let other = if self.copied_from(t.lhs) == root {
                             t.rhs
                         } else if self.copied_from(t.rhs) == root {
@@ -467,21 +525,17 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                         } else {
                             continue;
                         };
-                        if !self.on_side(from, b.id, t.at, t.differs) {
-                            continue;
-                        }
-                        not_same.entry((phi.dst, from)).or_default().push(other);
+                        not_same.entry((phi.dst, *from)).or_default().push(other);
                         if !sentinel(other) {
                             continue;
                         }
-                        let replaced: Vec<BlockId> = phi
-                            .incoming
+                        let replaced: Vec<BlockId> = inputs
                             .iter()
-                            .map(|(f, _)| *f)
-                            .filter(|f| self.on_side(*f, b.id, t.at, t.same))
+                            .filter(|(_, _, s)| s.contains(&(i, true)))
+                            .map(|(f, _, _)| *f)
                             .collect();
                         if !replaced.is_empty() {
-                            callers.insert((phi.dst, from));
+                            callers.insert((phi.dst, *from));
                             replacements.extend(replaced.into_iter().map(|f| (phi.dst, f)));
                         }
                     }
@@ -495,6 +549,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
 
     /// The `is` / `is not` tests deciding the branches a run reaches.
     fn identity_tests(&self) -> Vec<IdentityTest> {
+        let mut known = FxHashMap::default();
         self.f
             .blocks
             .iter()
@@ -508,7 +563,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 else {
                     return None;
                 };
-                let (same_when_true, lhs, rhs) = identity_condition(&self.defs, cond)?;
+                let (same_when_true, lhs, rhs) = identity_condition(&self.defs, cond, &mut known)?;
                 let (same, differs) = if same_when_true {
                     (then_bb, else_bb)
                 } else {
@@ -523,37 +578,6 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 })
             })
             .collect()
-    }
-
-    /// Whether a run takes the edge `from -> to` only after the branch ending `at` went to
-    /// `side`: the edge itself, or one from a block every run reaches through `side` alone.
-    fn on_side(&self, from: BlockId, to: BlockId, at: BlockId, side: BlockId) -> bool {
-        if from == at {
-            return to == side;
-        }
-        self.preds[side.0 as usize] == [at] && self.passes_through(from, side)
-    }
-
-    /// Whether every run that reaches block `b` passes through block `head` on the way.
-    fn passes_through(&self, b: BlockId, head: BlockId) -> bool {
-        let entry = self.f.blocks[0].id;
-        let mut seen: FxHashSet<BlockId> = FxHashSet::default();
-        let mut stack = vec![b];
-        while let Some(x) = stack.pop() {
-            if x == head || !seen.insert(x) {
-                continue;
-            }
-            if x == entry {
-                return false;
-            }
-            stack.extend(
-                self.preds[x.0 as usize]
-                    .iter()
-                    .copied()
-                    .filter(|p| self.live.edge(*p, x)),
-            );
-        }
-        true
     }
 
     fn sites_at(&self, span: Span) -> &[&'a CallSite] {
@@ -652,11 +676,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
 
     /// The value `v` copies, through any number of copies (`v` itself when it is no copy).
     fn copied_from(&self, v: VarId) -> VarId {
-        let mut cur = v;
-        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur).map(|i| &i.kind) {
-            cur = *src;
-        }
-        cur
+        self.copy_roots.get(&v).copied().unwrap_or(v)
     }
 
     /// What a project call's result holds: what its callees return, with the arguments bound
@@ -1137,34 +1157,133 @@ fn changes_itself(facts: &EffectSummary, pos: usize) -> bool {
 }
 
 /// The `is` / `is not` comparison a branch condition `cond` is, through `not` and copies:
-/// whether the condition is true when its operands are the same object, and the operands. The
-/// walk ends: it follows values that instructions define, and a cycle of values passes through
-/// a phi (`heki_ir` keeps the phi of a loop no path enters rather than close its copies into a
-/// cycle).
-fn identity_condition(defs: &FxHashMap<VarId, &Inst>, cond: VarId) -> Option<(bool, VarId, VarId)> {
-    let (mut cur, mut negated) = (cond, false);
-    loop {
-        match &defs.get(&cur)?.kind {
-            InstKind::UnaryOp {
+/// whether the condition is true when its operands are the same object, and the operands. Each
+/// value the walk passes keeps its answer in `known`, so a chain of copies is walked once for
+/// all the branches on it. The walk ends: it follows values that instructions define, and a
+/// cycle of values passes through a phi (`heki_ir` keeps the phi of a loop no path enters rather
+/// than close its copies into a cycle).
+fn identity_condition(
+    defs: &FxHashMap<VarId, &Inst>,
+    cond: VarId,
+    known: &mut FxHashMap<VarId, Option<(bool, VarId, VarId)>>,
+) -> Option<(bool, VarId, VarId)> {
+    // The values passed on the way to an answer, and whether each negates the one it reads.
+    let mut passed: Vec<(VarId, bool)> = Vec::new();
+    let mut cur = cond;
+    let mut answer = loop {
+        if let Some(answer) = known.get(&cur) {
+            break *answer;
+        }
+        match defs.get(&cur).map(|i| &i.kind) {
+            Some(InstKind::UnaryOp {
                 op: UnaryOpKind::Not,
                 operand,
                 ..
-            } => {
-                negated = !negated;
+            }) => {
+                passed.push((cur, true));
                 cur = *operand;
             }
-            InstKind::Copy { src, .. } => cur = *src,
-            InstKind::Compare { op, lhs, rhs, .. } => {
-                let same = match op {
-                    CompareOpKind::Is => !negated,
-                    CompareOpKind::IsNot => negated,
-                    _ => return None,
-                };
-                return Some((same, *lhs, *rhs));
+            Some(InstKind::Copy { src, .. }) => {
+                passed.push((cur, false));
+                cur = *src;
             }
-            _ => return None,
+            Some(InstKind::Compare { op, lhs, rhs, .. }) => {
+                break match op {
+                    CompareOpKind::Is => Some((true, *lhs, *rhs)),
+                    CompareOpKind::IsNot => Some((false, *lhs, *rhs)),
+                    _ => None,
+                };
+            }
+            _ => break None,
+        }
+    };
+    known.insert(cur, answer);
+    for (v, negates) in passed.into_iter().rev() {
+        if negates {
+            answer = answer.map(|(same, lhs, rhs)| (!same, lhs, rhs));
+        }
+        known.insert(v, answer);
+    }
+    answer
+}
+
+/// The value each copy among `defs` copies, through any number of copies: each chain is walked
+/// once (`heki_ir` closes no cycle of copies).
+fn copy_roots(defs: &FxHashMap<VarId, &Inst>) -> FxHashMap<VarId, VarId> {
+    let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
+    for (&start, inst) in defs {
+        if !matches!(inst.kind, InstKind::Copy { .. }) {
+            continue;
+        }
+        let mut passed = Vec::new();
+        let mut cur = start;
+        let root = loop {
+            if let Some(&root) = roots.get(&cur) {
+                break root;
+            }
+            match defs.get(&cur).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => {
+                    passed.push(cur);
+                    cur = *src;
+                }
+                _ => break cur,
+            }
+        };
+        for v in passed {
+            roots.insert(v, root);
         }
     }
+    roots
+}
+
+/// The immediate dominator of each block a run reaches over the edges it can take (`None` for
+/// the other blocks), from one pass in reverse postorder. One pass is exact: in the reducible
+/// graphs Python's statements make, an edge to an earlier block goes back to a loop header that
+/// dominates the edge's source, and leaving such an edge out changes no dominator.
+fn immediate_dominators(
+    f: &IrFunction,
+    live: &ownership::Live,
+    preds: &[Vec<BlockId>],
+) -> Vec<Option<BlockId>> {
+    let rpo: Vec<BlockId> = f
+        .rpo_blocks()
+        .into_iter()
+        .filter(|b| live.block(*b))
+        .collect();
+    let mut order = vec![usize::MAX; f.blocks.len()];
+    for (i, b) in rpo.iter().enumerate() {
+        order[b.0 as usize] = i;
+    }
+    let mut idom: Vec<Option<BlockId>> = vec![None; f.blocks.len()];
+    idom[rpo[0].0 as usize] = Some(rpo[0]);
+    let up = |b: BlockId, idom: &[Option<BlockId>]| {
+        idom[b.0 as usize].expect("a block before in reverse postorder has a dominator")
+    };
+    for &b in &rpo[1..] {
+        let mut found: Option<BlockId> = None;
+        for &p in &preds[b.0 as usize] {
+            if idom[p.0 as usize].is_none() || !live.edge(p, b) {
+                continue;
+            }
+            found = Some(match found {
+                None => p,
+                Some(mut d) => {
+                    let mut q = p;
+                    while d != q {
+                        while order[d.0 as usize] > order[q.0 as usize] {
+                            d = up(d, &idom);
+                        }
+                        while order[q.0 as usize] > order[d.0 as usize] {
+                            q = up(q, &idom);
+                        }
+                    }
+                    d
+                }
+            });
+        }
+        idom[b.0 as usize] = found;
+    }
+    idom
 }
 
 /// Whether the new object `kind` makes starts empty: an empty display, or a container
