@@ -1294,3 +1294,32 @@ fn iterated_containers_past_their_budget_are_unknown() {
     assert_eq!(iterated_mutations("bounds_merges_3", &merging(3)), 1);
     assert_eq!(iterated_mutations("bounds_merges_2000", &merging(2000)), 0);
 }
+
+/// A loop over a private generator whose body makes `calls` calls of a method changing the
+/// container it iterates: what each call runs on (the iterated call's arguments, a method of the
+/// family) is looked up by its span once, not by a scan of the function's calls per call.
+#[test]
+fn a_loop_over_a_generator_looks_up_each_call_of_its_body_once() {
+    let calls = 20_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _walk(self):".to_owned(),
+        "        for k in self.items:".to_owned(),
+        "            yield k".to_owned(),
+        String::new(),
+        "    def touch(self) -> None:".to_owned(),
+        "        self.items.pop(\"x\", None)".to_owned(),
+        String::new(),
+        String::new(),
+        "def visit(n: Node):".to_owned(),
+        "    for k in n._walk():".to_owned(),
+    ];
+    lines.extend((0..calls).map(|_| "        n.touch()".to_owned()));
+    assert_eq!(
+        iterated_mutations("bounds_loop_calls", &(lines.join("\n") + "\n")),
+        1
+    );
+}

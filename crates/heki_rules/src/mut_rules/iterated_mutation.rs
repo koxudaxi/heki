@@ -113,8 +113,8 @@ struct Exposure<'a> {
     /// or iterates it while suspending. The reads of the class family can run.
     offered: bool,
     /// The call sites in the bodies of the project's loops iterating it that run on the
-    /// generator's own instance: `(caller, file, span)`.
-    loop_calls: Vec<(&'a FuncKey, &'a Path, Span)>,
+    /// generator's own instance, with the files they are in.
+    loop_calls: Vec<(&'a Path, &'a CallSite)>,
 }
 
 /// A function the object of a generator method reaches, and which of its parameters holds the
@@ -170,6 +170,7 @@ impl<'a> Exposure<'a> {
         let result_iterations = file.local_functions.get(caller).map_or(&[][..], |s| {
             s.iteration_facts().result_iterations.as_slice()
         });
+        let mut caller_sites: Option<FxHashMap<Span, Vec<&'a CallSite>>> = None;
         for call in sites.iter().filter(|s| s.role == SiteRole::Call) {
             if hands_on(file, caller, call.span) {
                 let in_caller = instance.and_then(|p| bound_parameter(call, func, p));
@@ -185,14 +186,26 @@ impl<'a> Exposure<'a> {
                     })
                 };
                 let calls = used.between.calls.iter().enumerate();
-                self.loop_calls.extend(
-                    calls
-                        .filter(|(i, _)| on_instance(*i))
-                        .map(|(_, s)| (caller, path, *s)),
-                );
+                for (_, span) in calls.filter(|(i, _)| on_instance(*i)) {
+                    let at = caller_sites.get_or_insert_with(|| sites_by_span(file, caller));
+                    let found = at.get(span).into_iter().flatten();
+                    self.loop_calls.extend(found.map(|site| (path, *site)));
+                }
             }
         }
     }
+}
+
+/// The call sites of `caller`, a function of `file`, by span.
+fn sites_by_span<'f>(
+    file: &'f FileSummary,
+    caller: &FuncKey,
+) -> FxHashMap<Span, Vec<&'f CallSite>> {
+    let mut out: FxHashMap<Span, Vec<&CallSite>> = FxHashMap::default();
+    for site in file.call_sites.iter().filter(|s| s.caller == *caller) {
+        out.entry(site.span).or_default().push(site);
+    }
+    out
 }
 
 /// Whether `caller`, a function of `file`, hands on the object its call at `span` returns: it
@@ -325,24 +338,19 @@ fn changing_methods<'m, 'a: 'm>(
     }
     let members: FxHashMap<&FuncKey, &'m Method<'a>> =
         family.iter().map(|m| (&m.key, *m)).collect();
-    for &(caller, path, span) in &exposure.loop_calls {
-        let file = &cx.index.files[path];
-        let at = file
-            .call_sites
-            .iter()
-            .filter(|s| s.caller == *caller && s.span == span);
-        for bc in at.flat_map(CallSite::project_callees) {
+    for &(path, site) in &exposure.loop_calls {
+        for bc in site.project_callees() {
             let Some(m) = members.get(&bc.callee) else {
                 continue;
             };
             if m.key != g.key && breaks(&m.key) && seen.insert(&m.key) {
                 let message = format!(
                     "`{}` calls `{}` while iterating `{}`",
-                    caller.qualname, m.key.qualname, g.key.qualname
+                    site.caller.qualname, m.key.qualname, g.key.qualname
                 );
                 out.push(Changing {
                     key: &m.key,
-                    place: Some((path, span, message)),
+                    place: Some((path, site.span, message)),
                 });
             }
         }
