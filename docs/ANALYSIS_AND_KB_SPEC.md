@@ -91,7 +91,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   loop).
 - **Unreachable code** (after a `return`, `break`, `continue`, or `raise`, or after a `try`
   every path of which leaves) is lowered into blocks without predecessors that end in
-  `Unreachable`: no merge, back edge, or handler takes a value from it.
+  `Unreachable`: no merge, back edge, or handler takes a value from it. A loop there has no
+  entry edge: the SSA lookup of a name gives a phi to a block with one predecessor that it
+  reaches again, as to a join, so its walk around such a cycle ends.
 - **Exception edges carry the bindings of the point that raised**: inside a `try` or `with`
   body a name is never rebound after an instruction that may raise in the same block
   (`InstKind::may_raise`; the binding starts a new block), so a handler's phi merges the

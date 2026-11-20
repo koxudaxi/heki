@@ -993,6 +993,10 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     /// Every `Read` leaves one value on the value stack; the result is the last one.
     fn resolve_ssa(&mut self, name: &str, span: Span, mut tasks: Vec<SsaTask>) -> VarId {
         let mut values: Vec<VarId> = Vec::new();
+        // Blocks with one predecessor the lookup has passed. One reached again is on a cycle,
+        // and gets a phi like a join, which ends the walk: a cycle of such blocks alone has no
+        // join, and no path enters it (dead code such as a loop after `return`).
+        let mut passed: FxHashSet<BlockId> = FxHashSet::default();
         while let Some(task) = tasks.pop() {
             match task {
                 SsaTask::Read(bb) => {
@@ -1021,7 +1025,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                                 self.write_local(name, bb, dst);
                                 values.push(dst);
                             }
-                            [pred] => {
+                            [pred] if passed.insert(bb) => {
                                 tasks.push(SsaTask::Define(bb));
                                 tasks.push(SsaTask::Read(*pred));
                             }
