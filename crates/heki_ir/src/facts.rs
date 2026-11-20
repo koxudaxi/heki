@@ -98,6 +98,17 @@ const NON_GROWING_METHODS: &[&str] = &[
     "values",
 ];
 
+/// Builtins whose result yields at most the items of their one iterable argument.
+const SAME_ITEMS: &[&str] = &[
+    "reversed",
+    "iter",
+    "list",
+    "tuple",
+    "set",
+    "frozenset",
+    "dict",
+];
+
 /// A display (or several, merged by control flow) that nothing grows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmallDisplay {
@@ -461,14 +472,7 @@ impl<'a> FnIndex<'a> {
                 obj, index, value, ..
             } => {
                 out.push(*value);
-                let item_store = list_only
-                    && matches!(
-                        self.def_inst(*index).map(|i| &i.kind),
-                        Some(InstKind::Const {
-                            literal: ConstLiteral::Int(_),
-                            ..
-                        })
-                    );
+                let item_store = list_only && self.is_int_constant(*index);
                 if !item_store {
                     out.push(*obj);
                 }
@@ -561,6 +565,18 @@ impl<'a> FnIndex<'a> {
             | InstKind::ExitWith { mgr: v, .. } => out.push(*v),
             InstKind::Yield { value, .. } => out.extend(*value),
         }
+    }
+
+    /// `v` is an integer literal (an item store `xs[0] = v` keeps a list's size).
+    fn is_int_constant(&self, v: VarId) -> bool {
+        let kind = self.def_inst(v).map(|i| &i.kind);
+        matches!(
+            kind,
+            Some(InstKind::Const {
+                literal: ConstLiteral::Int(_),
+                ..
+            })
+        )
     }
 
     /// The variables whose object something in this function may grow, directly or through an
@@ -669,9 +685,7 @@ impl<'a> FnIndex<'a> {
                     "sorted" if args.len() == 1 && keywords(&["key", "reverse"]) => {
                         self.iter_bound_depth(plain(0)?, leaf, depth + 1)
                     }
-                    "reversed" | "iter" | "list" | "tuple" | "set" | "frozenset" | "dict"
-                        if args.len() == 1 && kwargs.is_empty() =>
-                    {
+                    n if SAME_ITEMS.contains(&n) && args.len() == 1 && kwargs.is_empty() => {
                         self.iter_bound_depth(plain(0)?, leaf, depth + 1)
                     }
                     "map" | "filter" if args.len() == 2 && kwargs.is_empty() => {
@@ -799,10 +813,8 @@ impl<'a> FnIndex<'a> {
         let InstKind::IterNext { iter, .. } = first.kind else {
             return None;
         };
-        match self.def_inst(iter)?.kind {
-            InstKind::MakeIter { iterable, .. } => Some(iterable),
-            _ => None,
-        }
+        // The iterator is a `MakeIter`, whose one operand is the iterable.
+        self.def_inst(iter)?.kind.operands().first().copied()
     }
 
     // --------------------------------------------------------------------------- lifetimes

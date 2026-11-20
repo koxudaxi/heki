@@ -57,6 +57,11 @@ def added():
         pass
 
 
+def unary_plus():
+    for i in range(+LIMIT - 5):
+        pass
+
+
 def floor_division():
     for i in range(STEP):
         pass
