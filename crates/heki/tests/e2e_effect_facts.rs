@@ -149,3 +149,48 @@ async def own_function() -> None:
     );
     assert_eq!(lines(&p, "EFF107"), vec![14, 18, 22]);
 }
+
+#[test]
+fn a_list_a_helper_changes_in_the_loop_needs_an_index_kept_up_to_date() {
+    let p = Project::new("opt112_helper_changes");
+    p.write(
+        "app.py",
+        r#"def change(xs):
+    xs.reverse()
+
+
+def look(xs):
+    return len(xs)
+
+
+def positions(names: list[str], winners: list[str]) -> list[int]:
+    out = []
+    for winner in winners:
+        change(names)
+        out.append(names.index(winner))
+    return out
+
+
+def counts(names: list[str], winners: list[str]) -> list[int]:
+    out = []
+    for winner in winners:
+        look(names)
+        out.append(names.count(winner))
+    return out
+"#,
+    );
+    let found = reports(&p, "OPT112");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].0, 13);
+    assert!(
+        found[0].1.ends_with("the loop changes the list, so keep a `dict` (value → index) up to date with each change"),
+        "{found:?}"
+    );
+    assert_eq!(found[1].0, 21);
+    assert!(
+        found[1]
+            .1
+            .ends_with("count once before the loop with `collections.Counter(names)`"),
+        "{found:?}"
+    );
+}

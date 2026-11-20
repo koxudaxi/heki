@@ -1240,6 +1240,36 @@ fn changes_param<'s>(
     false
 }
 
+/// The arguments of a call of the project function `decl` by the callee's parameter positions:
+/// a bound method's receiver at 0 (not for a class method's class or a static method),
+/// positional arguments after it, keyword arguments by name.
+pub(crate) fn bind_arguments(
+    decl: &heki_effect::FunctionDecl,
+    binds_recv: bool,
+    recv: Option<VarId>,
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+) -> Vec<(usize, VarId)> {
+    let offset = usize::from(binds_recv && !decl.is_staticmethod);
+    let mut bound: Vec<(usize, VarId)> = Vec::new();
+    if offset == 1
+        && !decl.is_classmethod
+        && let Some(r) = recv
+    {
+        bound.push((0, r));
+    }
+    bound.extend(args.iter().enumerate().map(|(i, v)| (i + offset, *v)));
+    for (name, v) in kwargs {
+        if let Some(pos) = name
+            .as_ref()
+            .and_then(|n| decl.param_names.iter().position(|p| p == n))
+        {
+            bound.push((pos, *v));
+        }
+    }
+    bound
+}
+
 /// The facts of `callee` that run in the body of `site`'s caller
 /// ([`heki_effect::ProjectIndex::delivery`]): its body where the call runs it, or what iterating
 /// the object it returns runs where that object is iterated or handed to a function iterating
@@ -2038,24 +2068,7 @@ impl<'a> Mut202Fn<'a> {
                 .function_decl(key)
                 .cloned()
                 .unwrap_or_default();
-            let offset = usize::from(binds_recv && !decl.is_staticmethod);
-            let mut bound: Vec<(usize, VarId)> = Vec::new();
-            if offset == 1
-                && !decl.is_classmethod
-                && let Some(r) = recv
-            {
-                bound.push((0, r));
-            }
-            bound.extend(args.iter().enumerate().map(|(i, v)| (i + offset, *v)));
-            for (name, v) in kwargs {
-                if let Some(pos) = name
-                    .as_ref()
-                    .and_then(|n| decl.param_names.iter().position(|p| p == n))
-                {
-                    bound.push((pos, *v));
-                }
-            }
-            for (pos, var) in bound {
+            for (pos, var) in bind_arguments(&decl, binds_recv, recv, args, kwargs) {
                 let Some(r) = self.ro.get(&var) else {
                     continue;
                 };
