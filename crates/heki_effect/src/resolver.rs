@@ -1422,12 +1422,13 @@ impl ProjectDecls {
     }
 
     /// The small display the module global `fqn` of a project module holds
-    /// (`ModuleDecls::small_globals`), through re-exports.
+    /// (`ModuleDecls::small_globals`), through re-exports: a tuple or a string whatever other
+    /// modules do with it, another display when none of them grows it.
     pub fn small_global(&self, fqn: &str) -> Option<&SmallDisplay> {
         let fqn = self.canonical(fqn);
         let (m, rest) = self.split_module(&fqn)?;
         let display = m.small_globals.get(rest)?;
-        (!self.grown_elsewhere(&fqn)).then_some(display)
+        (display.is_immutable() || !self.grown_elsewhere(&fqn)).then_some(display)
     }
 
     /// The small display attribute `attr` of an instance of the project class `class` holds:
@@ -3425,7 +3426,9 @@ impl<'a> TypeCtx<'a> {
         self.str_constant_with(var, &|v| f.def_inst(v).map(|(_, inst)| inst), types)
     }
 
-    pub(crate) fn import_target(&self, span: Span) -> Option<&str> {
+    /// The fqn the import statement at `span` binds (what a module body's copy of its
+    /// `Import` refers to).
+    pub fn import_target(&self, span: Span) -> Option<&str> {
         self.import_by_span.get(&span).map(String::as_str)
     }
 

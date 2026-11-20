@@ -586,11 +586,14 @@ impl<'a> CheckContext<'a> {
         let own = &unit.input.ir.constants;
         let grown: Vec<&String> = own
             .displays
-            .keys()
-            .filter(|n| {
-                self.decls
-                    .grown_elsewhere(&format!("{}.{n}", unit.input.module_name))
+            .iter()
+            .filter(|(n, d)| {
+                !d.is_immutable()
+                    && self
+                        .decls
+                        .grown_elsewhere(&format!("{}.{n}", unit.input.module_name))
             })
+            .map(|(n, _)| n)
             .collect();
         if grown.is_empty() {
             return Cow::Borrowed(own);
