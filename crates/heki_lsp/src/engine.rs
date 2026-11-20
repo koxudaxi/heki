@@ -108,8 +108,9 @@ pub struct Workspace {
 /// What the configured contracts read across functions besides the summaries of callees.
 #[derive(Debug, Clone, Copy, Default)]
 struct ContractReach {
-    /// An owner contract (`write-owners`, `read-owners`, `call-owners`): whether a function only
-    /// runs inside allowed callers is decided by walking every caller above it, so a change of
+    /// An owner contract (`write-owners`, `read-owners`, `call-owners`) or an `invalidation`
+    /// contract: whether a function only runs inside allowed callers, or whether every caller
+    /// path announces its write, is decided by walking every caller above it, so a change of
     /// the calls of a function can change the reports of everything below it.
     owners: bool,
     /// A contract on calls (`call-owners`, an effect boundary forbidding `calls`): a call of a
@@ -179,7 +180,8 @@ impl Workspace {
         let reach = ContractReach {
             owners: !env_cfg.write_owners.is_empty()
                 || !env_cfg.read_owners.is_empty()
-                || !env_cfg.call_owners.is_empty(),
+                || !env_cfg.call_owners.is_empty()
+                || !env_cfg.invalidation.is_empty(),
             calls: !env_cfg.call_owners.is_empty()
                 || env_cfg
                     .effect_boundaries
@@ -482,7 +484,8 @@ impl Workspace {
 
     /// Files of every function below the `changed` callers (their callees before and after
     /// the edit, and transitively the callees of those): the allowed-context walk of the owner
-    /// contracts reads the calls of every caller above a function.
+    /// contracts and the announcement walk of `invalidation` contracts read the calls of every
+    /// caller above a function.
     fn below_files(
         &self,
         changed: &[&FuncKey],
