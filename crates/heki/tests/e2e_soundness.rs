@@ -336,6 +336,7 @@ const INTERP: &[Expect] = &[
             ),
         )],
     ),
+    ("consumed_before_the_loop", &[("OPT101", V::Fix(&[ONE]))]),
 ];
 
 #[test]
@@ -953,6 +954,18 @@ const COUNTEREXAMPLES: &[Expect] = &[
         )],
     ),
     ("cx_slice_of_empty", &[("OPT120", V::Blocked(NOT_EMPTY))]),
+    // `pop`'s default and `map`'s function stay live in the result: `Disproved`.
+    ("cx_kept_by_pop_default", &[]),
+    (
+        "cx_compared_by_remove",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
+    ("cx_function_kept_by_map", &[]),
 ];
 
 #[test]
@@ -968,7 +981,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 17/17"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 20/20"));
 }
 
 // ======================================================================== module-level facts

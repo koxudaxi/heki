@@ -557,6 +557,17 @@ def run(fn, *args):
         return f"{type(e).__name__}"
 
 
+def consumed_before_the_loop(items):
+    """`pop`'s default, `map`'s iterable, and `remove`'s receiver are not live in the loop."""
+    x = [0]
+    {}.pop("missing", x)
+    names = list(map(str, x))
+    x.remove(0)
+    for i in items:
+        x = x + [i]
+    return x, names
+
+
 def main() -> int:
     async def fetch(i):
         return i * 10
@@ -606,6 +617,7 @@ def main() -> int:
             run(returned_in_try, items),
             run(stale_handler_alias, items, int),
             run(many_sites, n, n % 5),
+            run(consumed_before_the_loop, items),
         ]
     lines.append(f"CACHE = {CACHE}")
     print("\n".join(lines))

@@ -378,6 +378,63 @@ def old_slice_of_empty(n):
     return len(q)
 
 
+# ------------------------------------------------------------------------------
+# OPT101 (default `--fix`): builtins that keep the accumulator or hand it to other code
+# ------------------------------------------------------------------------------
+def cx_kept_by_pop_default(items):
+    acc = []
+    snapshot = {}.pop("missing", acc)
+    for v in items:
+        acc = acc + [v]
+    return snapshot
+
+
+def old_kept_by_pop_default(items):
+    acc = []
+    snapshot = {}.pop("missing", acc)
+    for v in items:
+        acc.append(v)
+    return snapshot
+
+
+class Keeps:
+    def __eq__(self, other):
+        CALLS.append(other)
+        return True
+
+
+def cx_compared_by_remove(items):
+    acc = []
+    [Keeps()].remove(acc)
+    for v in items:
+        acc = acc + [v]
+    return len(acc)
+
+
+def old_compared_by_remove(items):
+    acc = []
+    [Keeps()].remove(acc)
+    for v in items:
+        acc.append(v)
+    return len(acc)
+
+
+def cx_function_kept_by_map(items):
+    acc = []
+    m = map(acc, items)
+    for v in items:
+        acc = acc + [v]
+    return m.__reduce__()[1][0]
+
+
+def old_function_kept_by_map(items):
+    acc = []
+    m = map(acc, items)
+    for v in items:
+        acc.append(v)
+    return m.__reduce__()[1][0]
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -414,6 +471,9 @@ def main() -> int:
         (cx_two_pops, old_two_pops, lambda f: f(4)),
         (cx_iterated_while_popped, old_iterated_while_popped, lambda f: f(4)),
         (cx_slice_of_empty, old_slice_of_empty, lambda f: f(5)),
+        (cx_kept_by_pop_default, old_kept_by_pop_default, lambda f: f([1, 2])),
+        (cx_compared_by_remove, old_compared_by_remove, lambda f: f([1, 2])),
+        (cx_function_kept_by_map, old_function_kept_by_map, lambda f: f([1, 2])),
     ]
     lines = []
     for cx, old, call in pairs:
