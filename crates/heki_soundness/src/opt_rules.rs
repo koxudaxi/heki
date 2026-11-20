@@ -1439,7 +1439,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             .union(KindMask::of(Set));
         let not_profitable = self.small_note(&name, lst).or_else(|| {
             self.cx()
-                .elems_of_bases(&st, &st.allocs_of(lst))
+                .elems_of(&st, lst)
                 .filter(|m| *m != KindMask::EMPTY && m.is_subset_of(unhashable))
                 .map(|m| {
                     format!(
@@ -1549,7 +1549,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             ("set" | "frozenset", [a]) if matches!(st.exact_type(*a), Some(Set | Str | Bytes)) => {
                 None
             }
-            ("set" | "frozenset", [a]) => match self.cx().elems_of_bases(&st, &st.allocs_of(*a)) {
+            ("set" | "frozenset", [a]) => match self.cx().elems_of(&st, *a) {
                 Some(m) if m.is_subset_of(KindMask::hash_consistent()) => None,
                 _ => Some(
                     "its elements may be unhashable: hoisting raises `TypeError` even when the loop runs zero times",

@@ -472,6 +472,68 @@ def old_generator_over_ints(n):
     return out
 
 
+# ------------------------------------------------------------------------------
+# OPT110 / OPT130: a variable that may also hold an object from outside the function
+# ------------------------------------------------------------------------------
+def cx_ints_or_parameter(flag, arg):
+    keys = list(range(9))
+    source = [0] if flag else arg
+    out = []
+    for p in source:
+        out.append(p in keys)
+    return out
+
+
+def old_ints_or_parameter(flag, arg):
+    keys = list(range(9))
+    source = [0] if flag else arg
+    out = []
+    keys_set = set(keys)
+    for p in source:
+        out.append(p in keys_set)
+    return out
+
+
+def cx_range_or_parameter(flag, arg):
+    keys = list(range(9))
+    source = arg if flag else range(3)
+    out = []
+    for p in source:
+        out.append(p in keys)
+    return out
+
+
+def old_range_or_parameter(flag, arg):
+    keys = list(range(9))
+    source = arg if flag else range(3)
+    out = []
+    keys_set = set(keys)
+    for p in source:
+        out.append(p in keys_set)
+    return out
+
+
+def cx_tuple_or_element(flag, n):
+    pairs = [([],), (1,)]
+    keys = (0,) if flag else pairs[0]
+    hits = 0
+    for i in range(n):
+        if i in set(keys):
+            hits += 1
+    return hits
+
+
+def old_tuple_or_element(flag, n):
+    pairs = [([],), (1,)]
+    keys = (0,) if flag else pairs[0]
+    hits = 0
+    keys_set = set(keys)
+    for i in range(n):
+        if i in keys_set:
+            hits += 1
+    return hits
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -513,6 +575,9 @@ def main() -> int:
         (cx_function_kept_by_map, old_function_kept_by_map, lambda f: f([1, 2])),
         (cx_map_over_ints, old_map_over_ints, lambda f: f(2)),
         (cx_generator_over_ints, old_generator_over_ints, lambda f: f(2)),
+        (cx_ints_or_parameter, old_ints_or_parameter, lambda f: f(False, [[]])),
+        (cx_range_or_parameter, old_range_or_parameter, lambda f: f(True, [[]])),
+        (cx_tuple_or_element, old_tuple_or_element, lambda f: f(False, 0)),
     ]
     lines = []
     for cx, old, call in pairs:

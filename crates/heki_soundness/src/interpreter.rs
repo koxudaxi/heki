@@ -136,6 +136,7 @@ struct VarValue {
     ty: Option<ExactTypeVal>,
     unique: Option<UniqueState>,
     points_to: Allocs,
+    points_to_incomplete: bool,
     derives_from: Allocs,
 }
 
@@ -216,6 +217,8 @@ pub(crate) fn join_into(st: &mut FrameState, other: &FrameState) {
             }
         }
     }
+    st.points_to_incomplete
+        .extend(other.points_to_incomplete.iter().copied());
 }
 
 impl FrameState {
@@ -239,6 +242,7 @@ impl FrameState {
     fn kill(&mut self, v: VarId) {
         self.var_type.remove(&v);
         self.var_unique.remove(&v);
+        self.points_to_incomplete.remove(&v);
         if let Some(pts) = self.points_to.remove(&v) {
             for a in pts {
                 if let Some(m) = self.alias_sets.get_mut(&a) {
@@ -260,6 +264,7 @@ impl FrameState {
             ty: self.var_type.get(&v).cloned(),
             unique: self.var_unique.get(&v).cloned(),
             points_to: self.allocs_of(v),
+            points_to_incomplete: self.points_to_incomplete.contains(&v),
             derives_from: self.derives_from.get(&v).cloned().unwrap_or_default(),
         }
     }
@@ -278,6 +283,9 @@ impl FrameState {
         if !val.points_to.is_empty() {
             self.points_to.insert(v, val.points_to);
         }
+        if val.points_to_incomplete {
+            self.points_to_incomplete.insert(v);
+        }
         for &a in &val.derives_from {
             sorted_insert(self.derived_refs.entry(a).or_default(), v);
         }
@@ -286,12 +294,14 @@ impl FrameState {
         }
     }
 
+    /// A value defined without an allocation site of this frame comes from outside it.
     fn define(&mut self, v: VarId, ty: ExactTypeVal, unique: UniqueState, points_to: Allocs) {
         self.assign(
             v,
             VarValue {
                 ty: Some(ty),
                 unique: Some(unique),
+                points_to_incomplete: points_to.is_empty(),
                 points_to,
                 derives_from: Allocs::new(),
             },
@@ -564,7 +574,7 @@ impl<'a> FnCtx<'a> {
                 Some(BuiltinKind::List | BuiltinKind::Tuple)
             ) =>
             {
-                self.elems_of_bases(st, &st.allocs_of(*obj))
+                self.elems_of(st, *obj)
             }
             _ => None,
         }
@@ -583,8 +593,16 @@ impl<'a> FnCtx<'a> {
         }
     }
 
+    /// Element kinds of every object `v` may hold (`None` when one of them is unknown).
+    pub fn elems_of(&self, st: &FrameState, v: VarId) -> Option<KindMask> {
+        if st.points_to_incomplete.contains(&v) {
+            return None;
+        }
+        Self::elems_of_bases(st, &st.allocs_of(v))
+    }
+
     /// Union of the element kinds of `bases` (`None` if any is unknown).
-    pub fn elems_of_bases(&self, st: &FrameState, bases: &[AllocId]) -> Option<KindMask> {
+    fn elems_of_bases(st: &FrameState, bases: &[AllocId]) -> Option<KindMask> {
         if bases.is_empty() {
             return None;
         }
@@ -607,20 +625,18 @@ impl<'a> FnCtx<'a> {
     fn iterable_elems(&self, st: &FrameState, v: VarId) -> ElemKinds {
         match st.exact_type(v) {
             Some(BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Set) => self
-                .elems_of_bases(st, &st.allocs_of(v))
+                .elems_of(st, v)
                 .map_or(ElemKinds::Unknown, ElemKinds::Known),
             Some(BuiltinKind::Str) => ElemKinds::Known(KindMask::of(BuiltinKind::Str)),
             Some(BuiltinKind::Bytes) => ElemKinds::Known(KindMask::of(BuiltinKind::Int)),
             _ => {
-                // A range object (fresh alloc with known `int` elements) or a derived iterator.
-                let pts = st.allocs_of(v);
-                if !pts.is_empty()
-                    && st.var_type.get(&v).is_some_and(
-                        |t| matches!(t, ExactTypeVal::Unknown { reason } if reason == RANGE_REASON),
-                    )
-                {
+                // A range object (fresh alloc with known `int` elements), possibly merged with
+                // other tracked objects whose elements are known.
+                if st.var_type.get(&v).is_some_and(
+                    |t| matches!(t, ExactTypeVal::Unknown { reason } if reason == RANGE_REASON),
+                ) {
                     return self
-                        .elems_of_bases(st, &pts)
+                        .elems_of(st, v)
                         .map_or(ElemKinds::Unknown, ElemKinds::Known);
                 }
                 ElemKinds::Unknown
@@ -885,7 +901,7 @@ impl<'a> FnCtx<'a> {
                             Self::escape_all(st, [*lhs, *rhs], span);
                         } else if !plain(lt)
                             && !self
-                                .elems_of_bases(st, &st.allocs_of(*rhs))
+                                .elems_of(st, *rhs)
                                 .is_some_and(|m| m.is_subset_of(KindMask::hash_consistent()))
                         {
                             // Elements' `__eq__` may run user code that receives the probe.
@@ -943,7 +959,7 @@ impl<'a> FnCtx<'a> {
                         true,
                     ) => {
                         let elems = self
-                            .elems_of_bases(st, &st.allocs_of(*obj))
+                            .elems_of(st, *obj)
                             .map_or(ElemKinds::Unknown, ElemKinds::Known);
                         self.fresh(st, *dst, k, site, span, elems);
                     }
@@ -955,7 +971,7 @@ impl<'a> FnCtx<'a> {
                     }
                     (Some(BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Dict), false) => {
                         let single = self
-                            .elems_of_bases(st, &st.allocs_of(*obj))
+                            .elems_of(st, *obj)
                             .and_then(KindMask::single)
                             .filter(|k| !is_mutable(*k));
                         st.define(
@@ -1160,10 +1176,10 @@ impl<'a> FnCtx<'a> {
                 let kind = binop_result(op, l, r).unwrap_or(BuiltinKind::Int);
                 let elems = if tracks_elems(kind) {
                     let mut e = self
-                        .elems_of_bases(st, &st.allocs_of(lhs))
+                        .elems_of(st, lhs)
                         .map_or(ElemKinds::Unknown, ElemKinds::Known);
                     e = e.join(
-                        self.elems_of_bases(st, &st.allocs_of(rhs))
+                        self.elems_of(st, rhs)
                             .map_or(ElemKinds::Unknown, ElemKinds::Known),
                     );
                     e
@@ -1308,7 +1324,7 @@ impl<'a> FnCtx<'a> {
         {
             Some(kind) => {
                 let elems = if tracks_elems(kind) {
-                    self.elems_of_bases(st, &st.allocs_of(recv))
+                    self.elems_of(st, recv)
                         .map_or(ElemKinds::Unknown, ElemKinds::Known)
                 } else {
                     ElemKinds::Unknown
@@ -1405,6 +1421,7 @@ impl<'a> FnCtx<'a> {
                     .zip(other.unique)
                     .map(|(a, b)| join_unique(&a, &b));
                 allocs_union(&mut joined.points_to, &other.points_to);
+                joined.points_to_incomplete |= other.points_to_incomplete;
                 allocs_union(&mut joined.derives_from, &other.derives_from);
             }
             for v in present {

@@ -689,6 +689,13 @@ const HOIST: &[Expect] = &[
             V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
         )],
     ),
+    (
+        "probes_from_either_list",
+        &[(
+            "OPT110",
+            V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
+        )],
+    ),
 ];
 
 #[test]
@@ -987,6 +994,27 @@ const COUNTEREXAMPLES: &[Expect] = &[
             V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
         )],
     ),
+    (
+        "cx_ints_or_parameter",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_range_or_parameter",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_tuple_or_element",
+        &[(
+            "OPT130",
+            V::Blocked("ZeroTripExceptionSafe(set(...)): its elements may be unhashable"),
+        )],
+    ),
 ];
 
 #[test]
@@ -1002,7 +1030,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 22/22"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 25/25"));
 }
 
 // ======================================================================== module-level facts
