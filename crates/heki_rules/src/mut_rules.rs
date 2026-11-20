@@ -10,7 +10,7 @@ use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, Delivery,
     EffectSummary, Facts, FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared,
-    TypeCtx, TypedFieldWriteSite, Val, WriteKind, self_aliases,
+    SiteRole, TypeCtx, TypedFieldWriteSite, Val, WriteKind, self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -1240,6 +1240,23 @@ fn changes_param<'s>(
     false
 }
 
+/// The facts of `callee` that run in the body of `site`'s caller
+/// ([`heki_effect::ProjectIndex::delivery`]): its body where the call runs it, or what iterating
+/// the object it returns runs where that object is iterated or handed to a function iterating
+/// it. A generator function's body runs there, never at its call; `None` where nothing of it
+/// runs in the caller (a generator never iterated, a coroutine never awaited, an object the
+/// caller returns).
+pub(crate) fn facts_run_at<'s>(
+    index: &ProjectIndex,
+    site: &CallSite,
+    callee: &'s EffectSummary,
+) -> Option<&'s EffectSummary> {
+    let d = index.delivery(site, callee)?;
+    (d.into == Facts::Body)
+        .then(|| callee.facts(d.from))
+        .flatten()
+}
+
 /// `base`, then `: note` when the contract sets a `message`.
 pub(crate) fn with_note(base: String, note: Option<&str>) -> String {
     match note {
@@ -1690,6 +1707,8 @@ struct Mut202Fn<'a> {
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
     ro: FxHashMap<VarId, Ro>,
+    /// The function's call sites in the index, every role (built on the first need).
+    sites: std::cell::OnceCell<Vec<&'a CallSite>>,
 }
 
 impl<'a> Mut202Fn<'a> {
@@ -1709,7 +1728,44 @@ impl<'a> Mut202Fn<'a> {
             key: CheckContext::key(unit, f),
             types: tcx.infer(f),
             ro: FxHashMap::default(),
+            sites: std::cell::OnceCell::new(),
         }
+    }
+
+    /// The facts of `callee` that the call at `span` runs in this function: at the call, and
+    /// where the object it returns is iterated ([`facts_run_at`]); the summary itself when the
+    /// index has no site for the call.
+    fn facts_run_by_call(
+        &self,
+        span: Span,
+        key: &FuncKey,
+        callee: &'a EffectSummary,
+    ) -> Vec<&'a EffectSummary> {
+        let sites = self.sites.get_or_init(|| {
+            self.cx
+                .index
+                .files
+                .get(&self.unit.input.path)
+                .into_iter()
+                .flat_map(|f| &f.call_sites)
+                .filter(|s| s.caller == self.key)
+                .collect()
+        });
+        let calls_key = |s: &&&CallSite| s.project_callees().iter().any(|bc| bc.callee == *key);
+        let Some(call) = sites
+            .iter()
+            .filter(calls_key)
+            .find(|s| s.role == SiteRole::Call && s.span == span)
+        else {
+            return vec![callee];
+        };
+        // The other sites of the object the call returns copy its target.
+        sites
+            .iter()
+            .filter(|s| s.target == call.target)
+            .filter(calls_key)
+            .filter_map(|s| facts_run_at(self.cx.index, s, callee))
+            .collect()
     }
 
     /// The parts of a call instruction (`None` for any other instruction).
@@ -2004,14 +2060,19 @@ impl<'a> Mut202Fn<'a> {
                     continue;
                 };
                 // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
-                let paths = u8::try_from(pos)
-                    .ok()
-                    .and_then(|p| callee.mutated_param_paths.get(&p));
-                let mutates = if r.shallow_copy {
-                    paths.is_some_and(|p| p.iter().any(|path| !path.is_empty()))
-                } else {
-                    pos < 64 && callee.mutates_params & (1u64 << pos) != 0
-                };
+                let mutates = self
+                    .facts_run_by_call(inst.span, key, callee)
+                    .iter()
+                    .any(|facts| {
+                        let paths = u8::try_from(pos)
+                            .ok()
+                            .and_then(|p| facts.mutated_param_paths.get(&p));
+                        if r.shallow_copy {
+                            paths.is_some_and(|p| p.iter().any(|path| !path.is_empty()))
+                        } else {
+                            pos < 64 && facts.mutates_params & (1u64 << pos) != 0
+                        }
+                    });
                 if mutates {
                     let hop = CallHop {
                         caller: self.key.clone(),

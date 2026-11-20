@@ -359,3 +359,50 @@ def through_wrapper() -> None:
         ]
     );
 }
+
+#[test]
+fn a_generator_changes_what_it_is_handed_only_where_it_is_iterated() {
+    let p = project(
+        "generator_changes",
+        "[[tool.heki.readonly-returns]]\nname = \"shared\"\nproducers = [\"app.shared\"]\n",
+    );
+    p.write(
+        "app.py",
+        r#"from collections.abc import Sequence
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Record:
+    items: list[int]
+
+
+CACHE = [1]
+
+
+def shared() -> list[int]:
+    return CACHE
+
+
+def wipe(xs):
+    xs.clear()
+    yield 1
+
+
+def made_only(xs: Sequence[int], rec: Record) -> None:
+    wipe(xs)
+    wipe(rec.items)
+    wipe(shared())
+
+
+def consumed(xs: Sequence[int], rec: Record) -> None:
+    list(wipe(xs))
+    for _ in wipe(rec.items):
+        pass
+    sum(wipe(shared()))
+"#,
+    );
+    assert_eq!(reports(&p, "MUT110"), vec![at("app.py", 29, "consumed")]);
+    assert_eq!(reports(&p, "MUT108"), vec![at("app.py", 30, "consumed")]);
+    assert_eq!(reports(&p, "MUT202"), vec![at("app.py", 32, "consumed")]);
+}
