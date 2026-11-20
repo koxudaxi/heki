@@ -137,6 +137,26 @@ impl ParsedModule {
             .collect()
     }
 
+    /// Whether a `#` comment inserted at byte `offset` of `source`, the end of a line before its
+    /// line break, is a comment of that line and changes nothing else: the offset is inside no
+    /// token (a string or f-string spanning lines would take the text in), and the line does not
+    /// end with a `\` continuation, which the comment would swallow, so that the next line
+    /// stops continuing this one.
+    pub fn takes_comment_at(&self, source: &str, offset: u32) -> bool {
+        let token_around = |starts_before: &dyn Fn(u32) -> bool, at: u32| {
+            self.parsed
+                .tokens()
+                .iter()
+                .any(|t| starts_before(t.start().to_u32()) && at < t.end().to_u32())
+        };
+        // A backslash inside a token (a comment, a string) continues nothing.
+        let continued = offset.checked_sub(1).is_some_and(|before| {
+            source.as_bytes().get(before as usize) == Some(&b'\\')
+                && !token_around(&|start| start <= before, before)
+        });
+        !continued && !token_around(&|start| start < offset, offset)
+    }
+
     /// Extract top-level import records (used to verify PEP 810 `is_lazy` support).
     pub fn top_level_imports(&self) -> Vec<ImportRecord> {
         let mut out = Vec::new();
@@ -245,6 +265,26 @@ def nested():
         );
         // A final line break starts an empty last line.
         assert_eq!(LineIndex::from_source("a\r").line_text("a\r", 2), Some(""));
+    }
+
+    #[test]
+    fn comments_fit_at_line_ends_outside_strings_and_continuations() {
+        let src = "a = f(1)\nb = 1 + \\\n    2\nc = \"\"\"x\ny\"\"\"\nd = 1  # see \\\ne = (1,\n     2)\n";
+        let parsed = parse_module(src).unwrap();
+        let end_of = |line: &str| u32::try_from(src.find(line).unwrap() + line.len()).unwrap();
+        let fits = |line: &str| parsed.takes_comment_at(src, end_of(line));
+        assert!(fits("a = f(1)"));
+        assert!(
+            !fits("b = 1 + \\"),
+            "a comment would swallow the continuation"
+        );
+        assert!(!fits("c = \"\"\"x"), "the line ends inside a string");
+        assert!(
+            fits("d = 1  # see \\"),
+            "a backslash in a comment continues nothing"
+        );
+        assert!(fits("e = (1,"), "comments are fine inside brackets");
+        assert!(fits("y\"\"\""));
     }
 
     #[test]

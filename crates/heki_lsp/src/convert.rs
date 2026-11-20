@@ -3,7 +3,8 @@
 //! - `Diagnostic.related` → `DiagnosticRelatedInformation` (every call-chain hop).
 //! - `Diagnostic.fix` of `safe` + `unconditional` rules → `quickfix`; size-dependent `OPT`
 //!   suggestions → `refactor.rewrite.heki`.
-//! - Every diagnostic → a `quickfix` appending `# heki: ignore[CODE]` to its line.
+//! - Every diagnostic → a `quickfix` appending `# heki: ignore[CODE]` to its line, unless no
+//!   comment fits there (the line ends inside a string or with a `\` continuation).
 
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
@@ -87,6 +88,25 @@ fn touches(a: &Range, b: &Range) -> bool {
     le(&a.start, &b.end) && le(&b.start, &a.end)
 }
 
+/// Where `# heki: ignore[CODE]` goes to suppress a diagnostic on 1-based `line`: the end of the
+/// line, when a comment fits there (`ParsedModule::takes_comment_at`). `None` when it does not:
+/// the line ends inside a string or with a `\` continuation, or the text does not parse. A
+/// suppression applies to its own line only, so no other place would do.
+fn suppression_point(
+    text: &str,
+    lines: &LineIndex,
+    parsed: Option<&heki_ast::ParsedModule>,
+    line: u32,
+) -> Option<Position> {
+    let start = lines.line_start(line)?;
+    let line_text = lines.line_text(text, line)?;
+    let end = start + u32::try_from(line_text.len()).ok()?;
+    parsed?.takes_comment_at(text, end).then(|| Position {
+        line: line - 1,
+        character: line_text.encode_utf16().count() as u32,
+    })
+}
+
 /// Code actions for the diagnostics of `uri` touching `range`.
 pub fn code_actions(
     uri: &Url,
@@ -96,6 +116,8 @@ pub fn code_actions(
     request: &Range,
 ) -> Vec<CodeActionOrCommand> {
     let mut out = Vec::new();
+    let lines = LineIndex::from_source(text);
+    let parsed = heki_ast::parse_module(text).ok();
     for (d, ld) in diags.iter().zip(lsp_diags) {
         if !touches(&ld.range, request) {
             continue;
@@ -132,12 +154,8 @@ pub fn code_actions(
                 ..Default::default()
             }));
         }
-        let end = LineIndex::from_source(text)
-            .line_text(text, d.line)
-            .map_or(0, |l| l.encode_utf16().count() as u32);
-        let at = Position {
-            line: d.line.saturating_sub(1),
-            character: end,
+        let Some(at) = suppression_point(text, &lines, parsed.as_ref(), d.line) else {
+            continue;
         };
         out.push(CodeActionOrCommand::CodeAction(CodeAction {
             title: format!(

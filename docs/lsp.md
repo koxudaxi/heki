@@ -32,7 +32,8 @@ The server provides:
   `async def` to `time.sleep`) as related information you can jump to;
 - quick fixes for the safe `OPT101` / `OPT102` rewrites;
 - `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites;
-- a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic.
+- a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a
+  comment cannot go there (the line ends inside a string or with a `\` continuation).
 
 It reads the same configuration as `heki check`. One difference is deliberate: `heki check`
 reports ten or more `async def` boundaries that reach the same blocking call once, with a count,

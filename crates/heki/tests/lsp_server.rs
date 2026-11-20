@@ -498,3 +498,22 @@ fn lsp_positions_and_suppressions_in_documents_with_cr_line_breaks() {
     );
     lsp.stop(true);
 }
+
+#[test]
+fn lsp_withholds_suppressions_that_would_land_in_a_continuation_or_a_string() {
+    let p = Project::new("lsp_suppress_where");
+    let text = "import time\n\n\nasync def a():\n    return time.sleep(1) \\\n        or 0\n\n\nasync def b():\n    return time.sleep(2) or \"\"\"x\n    y\"\"\"\n\n\nasync def c():\n    return (time.sleep(3),\n            0)\n";
+    p.write("a.py", text);
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.open(&a, text);
+    let diags = lsp.diagnostics(&a, |d| d.len() == 3);
+    assert_eq!(codes(&diags), vec!["EFF101", "EFF101", "EFF101"]);
+    // A comment after the `\` would end the statement there; one on the `"""` line would be
+    // part of the string. Inside brackets a comment is fine.
+    for (d, offered) in diags.iter().zip([false, false, true]) {
+        let actions = lsp.code_actions(&a, &d["range"], std::slice::from_ref(d));
+        assert_eq!(!actions.is_empty(), offered, "{d}: {actions:#?}");
+    }
+    lsp.stop(true);
+}
