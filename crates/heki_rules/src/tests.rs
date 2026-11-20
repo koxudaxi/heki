@@ -272,7 +272,6 @@ fn mut101_filters() {
     let expected: BTreeSet<(String, String)> = [
         ("Conf.overwrite", "Conf.raw->view"),
         ("Conf.overwrite", "Conf.raw->proxy"),
-        ("Conf._set", "Conf.raw->view"),
         ("Conf._set", "Conf.raw->proxy"),
         ("Child.child_write", "Conf.raw->view"),
         ("Child.child_write", "Conf.raw->proxy"),
@@ -282,7 +281,8 @@ fn mut101_filters() {
     .collect();
     // Excluded: __init__, `_load` (called from __init__), `_init_*`, the `not in` guard,
     // `setdefault`, both invalidations, the nested class `Outer.Inner`, `via_helper` (the
-    // write is reported once, in `_set`), and `_swap` (its only caller `refresh` invalidates).
+    // write is reported once, in `_set`), `_swap` (its only caller `refresh` invalidates), and
+    // the in-place change in `_set` for `view`, whose tuple holds `self.raw` itself.
     assert_eq!(targets, expected, "{diags:#?}");
     let overwrite = diags
         .iter()

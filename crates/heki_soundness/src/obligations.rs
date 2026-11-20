@@ -190,6 +190,13 @@ impl<'a, 'c> Checker<'a, 'c> {
     }
 
     pub fn name(&self, v: VarId) -> String {
+        // A starred display element (`[*xs]`) is a copy of the iterable it unpacks.
+        if self.cx.f.is_unpacked(v)
+            && let Some((_, _, i)) = self.cx.def_inst(v)
+            && let InstKind::Copy { src, .. } = &i.kind
+        {
+            return self.name(*src);
+        }
         self.cx
             .f
             .var_name(v)

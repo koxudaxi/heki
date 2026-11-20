@@ -226,7 +226,12 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     if is_memo_attr(attr) {
                         continue;
                     }
-                    let own = self_attr_writes(f, attr);
+                    let mut own = self_attr_writes(f, attr);
+                    // The cached value holds the attribute's object itself: it sees the changes
+                    // made in place, and only rebinding the attribute leaves it behind.
+                    if ps.returns_self_attrs.contains(*attr) {
+                        own.retain(|w| w.rebinds);
+                    }
                     if own.is_empty() || own.iter().all(|w| w.memo_shaped) {
                         continue;
                     }
@@ -346,6 +351,8 @@ struct SelfWrite {
     block: heki_ir::BlockId,
     /// `setdefault`, or a subscript store guarded by `if k not in self.<attr>:`.
     memo_shaped: bool,
+    /// `self.<attr> = ...` / `del self.<attr>`: the attribute is rebound, not changed in place.
+    rebinds: bool,
 }
 
 /// Writes to `self.<attr>` in `f`'s own body (none without a `self` parameter).
@@ -393,27 +400,33 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
     let mut out = Vec::new();
     for bb in &f.blocks {
         for inst in &bb.insts {
+            // `(memo_shaped, rebinds)`.
             let w = match &inst.kind {
                 InstKind::AttrStore { obj, attr: a, .. }
                 | InstKind::AttrDelete { obj, attr: a }
                     if self_vars.contains(obj) && a == attr =>
                 {
-                    Some(false)
+                    Some((false, true))
                 }
-                InstKind::SubscriptStore { obj, .. } if alias.contains(obj) => Some(guarded(bb.id)),
-                InstKind::SubscriptDelete { obj, .. } if alias.contains(obj) => Some(false),
+                InstKind::SubscriptStore { obj, .. } if alias.contains(obj) => {
+                    Some((guarded(bb.id), false))
+                }
+                InstKind::SubscriptDelete { obj, .. } if alias.contains(obj) => {
+                    Some((false, false))
+                }
                 InstKind::MethodCall { recv, method, .. }
                     if alias.contains(recv) && CONTAINER_MUTATORS.contains(&method.as_str()) =>
                 {
-                    Some(method == "setdefault")
+                    Some((method == "setdefault", false))
                 }
                 _ => None,
             };
-            if let Some(memo_shaped) = w {
+            if let Some((memo_shaped, rebinds)) = w {
                 out.push(SelfWrite {
                     span: inst.span,
                     block: bb.id,
                     memo_shaped,
+                    rebinds,
                 });
             }
         }

@@ -538,6 +538,11 @@ pub struct Inst {
     pub span: Span,
 }
 
+/// Name of the copy a starred element of a list, tuple, or set display (`*xs` in `[a, *xs]`)
+/// is lowered to: the display holds the elements of `xs`, not `xs` itself
+/// ([`IrFunction::is_unpacked`]).
+pub const UNPACKED: &str = ".unpacked";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Terminator {
     Jump(BlockId),
@@ -628,6 +633,12 @@ impl IrFunction {
         self.var_names
             .get(var.0 as usize)
             .and_then(|o| o.as_deref())
+    }
+
+    /// Whether `var` is a starred display element (the copy named [`UNPACKED`]): the display
+    /// unpacks the iterable it copies instead of holding it.
+    pub fn is_unpacked(&self, var: VarId) -> bool {
+        self.var_name(var) == Some(UNPACKED)
     }
 
     /// Loop nesting depth of `id` (`0` if outside all loops).

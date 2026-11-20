@@ -14,10 +14,12 @@ use crate::{
 };
 use heki_ast::Span;
 use heki_ir::{
-    BlockId, ConstLiteral, FunctionId, FunctionKind, InstKind, IrFunction, Terminator, VarId,
+    BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, InstKind, IrFunction,
+    Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Methods that mutate their receiver in place (section 2.4; shared by MUT101/201/202).
@@ -117,6 +119,19 @@ fn extract_module(
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
+    // `returns_self_attrs` holds for every definition: an attribute that either one reads for
+    // more than its object is left out.
+    let read_otherwise = |s: &EffectSummary| -> BTreeSet<String> {
+        s.reads_self_attrs
+            .iter()
+            .filter(|r| !s.returns_self_attrs.contains(&r.attr))
+            .map(|r| r.attr.clone())
+            .collect()
+    };
+    let read = [read_otherwise(into), read_otherwise(&other)];
+    into.returns_self_attrs.extend(other.returns_self_attrs);
+    into.returns_self_attrs
+        .retain(|a| !read.iter().any(|r| r.contains(a)));
     into.direct_exec_effects.extend(other.direct_exec_effects);
     into.transitive_exec_effects
         .extend(other.transitive_exec_effects);
@@ -523,6 +538,9 @@ impl<'a> Extractor<'a> {
             }
         }
         self.iterations();
+        if self.summary.is_cached_property && f.kind == FunctionKind::Sync {
+            self.summary.returns_self_attrs = self.returned_self_attrs();
+        }
         self.summary.refresh_typed_field_writes();
         (self.summary, self.sites)
     }
@@ -641,6 +659,163 @@ impl<'a> Extractor<'a> {
             }
         }
         self.sites.extend(extra);
+    }
+
+    /// [`EffectSummary::returns_self_attrs`] of a `@cached_property` getter, from its own body
+    /// (the reads of the `self` methods and properties it calls are taken away when its final
+    /// summary is computed, `callgraph::apply_edge`).
+    fn returned_self_attrs(&self) -> BTreeSet<String> {
+        let f = self.f;
+        let is_self = |v: &VarId| self.self_vars.contains(v);
+        // `self` itself may only be read from, written to, and called on (project methods,
+        // whose reads count): code that gets `self` may read any attribute.
+        let mut loads: Vec<(VarId, &str)> = Vec::new();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            let allowed: Option<VarId> = match &inst.kind {
+                InstKind::AttrLoad { obj, .. } | InstKind::AttrDelete { obj, .. } => Some(*obj),
+                InstKind::AttrStore { obj, value, .. } if !is_self(value) => Some(*obj),
+                InstKind::Copy { dst, src } if is_self(dst) => Some(*src),
+                InstKind::MethodCall { recv, method, .. }
+                    if is_self(recv) || matches!(self.types.get(recv), Some(Val::Super(_))) =>
+                {
+                    if !matches!(
+                        self.cx.resolve_method(self.types.get(recv), method),
+                        Callee::Project(..)
+                    ) {
+                        return BTreeSet::new();
+                    }
+                    Some(*recv)
+                }
+                _ => None,
+            };
+            if inst
+                .kind
+                .operands()
+                .iter()
+                .any(|v| is_self(v) && Some(*v) != allowed)
+            {
+                return BTreeSet::new();
+            }
+            if let InstKind::AttrLoad { dst, obj, attr } = &inst.kind
+                && is_self(obj)
+            {
+                if attr == "__dict__" {
+                    return BTreeSet::new();
+                }
+                loads.push((*dst, attr));
+            }
+        }
+        if loads.is_empty() {
+            return BTreeSet::new();
+        }
+        let mut phi_uses: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+        let mut tested: FxHashSet<VarId> = FxHashSet::default();
+        for bb in &f.blocks {
+            for phi in &bb.phis {
+                for (_, v) in &phi.incoming {
+                    if is_self(v) && !is_self(&phi.dst) {
+                        return BTreeSet::new();
+                    }
+                    phi_uses.entry(*v).or_default().push(phi.dst);
+                }
+            }
+            match bb.terminator {
+                // A returned value is the result.
+                Terminator::Return(Some(v)) if is_self(&v) => return BTreeSet::new(),
+                Terminator::Branch { cond: v, .. } | Terminator::Raise(Some(v)) => {
+                    if is_self(&v) {
+                        return BTreeSet::new();
+                    }
+                    tested.insert(v);
+                }
+                _ => {}
+            }
+        }
+        // The attributes each value may be or hold, from the loads forward: through copies and
+        // phis, into displays (not as a starred element), dict values, and containers filled by
+        // item assignment or `append` / `add` / `insert`. Any other use reads the attributes.
+        let mut held: FxHashMap<VarId, BTreeSet<&str>> = FxHashMap::default();
+        let mut work: Vec<VarId> = Vec::new();
+        for &(v, attr) in &loads {
+            held.entry(v).or_default().insert(attr);
+            work.push(v);
+        }
+        let mut read: BTreeSet<&str> = BTreeSet::new();
+        while let Some(v) = work.pop() {
+            let attrs = held[&v].clone();
+            // The value `v` is put into `dst`.
+            let mut into: Vec<VarId> = phi_uses.get(&v).cloned().unwrap_or_default();
+            let mut read_here = tested.contains(&v);
+            for kind in self.uses.get(&v).into_iter().flatten() {
+                match kind {
+                    InstKind::Copy { dst, .. } if !f.is_unpacked(*dst) => into.push(*dst),
+                    InstKind::AllocBuiltin {
+                        dst,
+                        kind: BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Set,
+                        ..
+                    } => into.push(*dst),
+                    InstKind::DictLiteral { dst, entries }
+                        if entries.iter().all(|e| match e {
+                            DictEntry::KeyValue { key, .. } => *key != v,
+                            DictEntry::Unpack { dict } => *dict != v,
+                        }) =>
+                    {
+                        into.push(*dst);
+                    }
+                    // Exactly one of the container and the stored value is `v`.
+                    InstKind::SubscriptStore {
+                        obj, index, value, ..
+                    } if *index != v && (*obj == v) != (*value == v) => {
+                        if *value == v {
+                            into.push(*obj);
+                        }
+                    }
+                    InstKind::MethodCall {
+                        recv,
+                        method,
+                        args,
+                        kwargs,
+                        ..
+                    } if kwargs.is_empty() => {
+                        let value_at = match method.as_str() {
+                            "append" | "add" => Some(0),
+                            "insert" => Some(1),
+                            _ => None,
+                        };
+                        let as_arg: Vec<usize> =
+                            (0..args.len()).filter(|&i| args[i] == v).collect();
+                        match (*recv == v, as_arg.as_slice()) {
+                            // Filling the container with other values.
+                            (true, [])
+                                if value_at.is_some()
+                                    || method == "extend"
+                                    || method == "update" => {}
+                            // Put into the receiver, as itself.
+                            (false, [i]) if value_at == Some(*i) => into.push(*recv),
+                            _ => read_here = true,
+                        }
+                    }
+                    _ => read_here = true,
+                }
+            }
+            if read_here {
+                read.extend(attrs.iter().copied());
+            }
+            for dst in into {
+                let to = held.entry(dst).or_default();
+                let before = to.len();
+                to.extend(attrs.iter().copied());
+                if to.len() != before {
+                    work.push(dst);
+                }
+            }
+        }
+        loads
+            .iter()
+            .map(|(_, attr)| *attr)
+            .filter(|attr| !read.contains(attr))
+            .map(str::to_owned)
+            .collect()
     }
 
     fn visit(&mut self, bb: BlockId, index: usize, kind: &'a InstKind, span: Span) {

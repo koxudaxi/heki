@@ -205,6 +205,13 @@ pub struct EffectSummary {
     /// nor do changes deeper inside (`p.a.b.append(...)`) (`MUT108`).
     pub inplace_param_slots: BTreeMap<u8, BTreeSet<Slot>>,
     pub reads_self_attrs: BTreeSet<AttrKeyPath>,
+    /// `@cached_property` getters only: the `self` attributes whose objects the result holds by
+    /// reference and that the getter reads for nothing else. Every read of `self.<attr>` in its
+    /// body is returned as itself or put, as itself, into a display or a container that is
+    /// returned (`{"k": self.a}`, `(x, self.a)`, `d["k"] = self.a`); no `self` method or
+    /// property it calls reads the attribute, and it hands `self` to no other code. An in-place
+    /// change of such an attribute is seen through the cached value (`MUT101`).
+    pub returns_self_attrs: BTreeSet<String>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
     pub invalidates_cached: BTreeSet<String>,
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
@@ -509,7 +516,7 @@ pub struct IncrementalUpdate {
     /// Functions (transitive callers) that depend on changed summaries.
     pub affected_callers: Vec<FuncKey>,
     /// The functions of the file (and of call cycles through it) whose facts changed or that
-    /// disappeared, sorted.
+    /// disappeared, and the callers whose facts changed with them, sorted.
     pub changed: Vec<FuncKey>,
 }
 
@@ -845,9 +852,29 @@ impl ProjectIndex {
             };
         }
         region = affected.iter().chain(&relocated).cloned().collect();
+        let before: FxHashMap<FuncKey, EffectSummary> = affected
+            .iter()
+            .filter_map(|k| Some((k.clone(), self.summary(k)?.clone())))
+            .collect();
         callgraph::reset_to_local(self, &region);
         callgraph::propagate(self, &region);
         callgraph::recompute_sync_driven_for(self, &sync_candidates);
+        // The callers whose facts changed with them (a cached property whose helper now reads
+        // an attribute): the rules reading their summaries elsewhere see the change too.
+        let mut changed = changed;
+        changed.extend(
+            affected
+                .iter()
+                .filter(|k| {
+                    before
+                        .get(*k)
+                        .zip(self.summary(k))
+                        .is_none_or(|(old, new)| !old.same_facts(new))
+                })
+                .cloned(),
+        );
+        changed.sort();
+        changed.dedup();
         IncrementalUpdate {
             summary_changed,
             affected_callers: affected,

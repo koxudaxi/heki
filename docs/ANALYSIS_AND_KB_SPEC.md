@@ -142,6 +142,8 @@ EffectSummary(f) = {
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
                                                            // passed there runs there
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
+    returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
+                                                           // holds by reference, read for nothing else (MUT101)
     mutates_self_attrs:       Set<AttrKeyPath>,            // reassignment or in-place change of self.<attr> (indirect too)
     invalidates_cached:       Set<AttrName>,               // del self.<prop>, self.__dict__.pop("<prop>", ...), clear
     typed_field_write_sites:  Set<TypedFieldWriteSite>,    // writes to (class, attr) with kind, chain, and the
@@ -232,6 +234,12 @@ which module imports which.
 3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains and **`p ∉
    invalidates_cached(m)`** (and `m` has no full invalidation such as `self.__dict__.clear()`; a
    private helper all of whose callers invalidate is covered).
+4. For an attribute in **`returns_self_attrs(p)`**, only rebinding writes count (`self.a = ...`,
+   `del self.a`): the cached value holds the attribute's object itself and sees in-place changes.
+   The fact is local to the getter (every read of `self.a` is returned as itself or put, as
+   itself, into a display or a container that is returned; `self` reaches no other code), minus
+   the attributes the `self` methods and properties it calls read (final summary). A starred
+   display element (`(*self.a,)`) is a copy: the IR lowers it to a copy named `.unpacked`.
 
 #### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
 - The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,
