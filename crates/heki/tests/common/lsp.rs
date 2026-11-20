@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
@@ -254,16 +254,28 @@ impl Lsp {
     }
 }
 
+/// The canonical form of an existing path, without the `\\?\` prefix `std::fs::canonicalize`
+/// adds on Windows: below it, the `/` of a relative path joined to it would not separate
+/// components.
+fn canonical(path: &Path) -> PathBuf {
+    let path = std::fs::canonicalize(path).unwrap();
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) if plain.as_bytes().get(1) == Some(&b':') => PathBuf::from(plain),
+        _ => path,
+    }
+}
+
 pub fn uri(path: &Path) -> String {
-    format!("file://{}", std::fs::canonicalize(path).unwrap().display())
+    url::Url::from_file_path(canonical(path))
+        .unwrap()
+        .to_string()
 }
 
 /// URI of a file that may not exist (its directory is canonicalized when it exists).
 pub fn uri_in(dir: &Path, rel: &str) -> String {
-    format!(
-        "file://{}/{rel}",
-        std::fs::canonicalize(dir).unwrap().display()
-    )
+    url::Url::from_file_path(canonical(dir).join(rel))
+        .unwrap()
+        .to_string()
 }
 
 pub fn codes(diags: &[Value]) -> Vec<String> {
