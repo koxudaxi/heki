@@ -64,7 +64,8 @@ pub(crate) fn mut112(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Borrow {
     Param(String),
-    Attr(String),
+    /// An attribute of the object `Receiver` names.
+    Attr(String, Receiver),
     Global(String),
     Cell(String),
     Element(Box<Borrow>),
@@ -76,7 +77,7 @@ impl Borrow {
     fn describe(&self) -> String {
         match self {
             Self::Param(n) => format!("the parameter `{n}`"),
-            Self::Attr(a) => format!("the attribute `{a}`"),
+            Self::Attr(a, _) => format!("the attribute `{a}`"),
             Self::Global(g) => format!("the global `{g}`"),
             Self::Cell(c) => format!("the enclosing function's `{c}`"),
             Self::Element(b) => format!("an element of {}", b.describe()),
@@ -96,11 +97,21 @@ impl Borrow {
     /// A memo or cache attribute, or an element of one: filling it is what it is for.
     fn is_memo(&self) -> bool {
         match self {
-            Self::Attr(a) => is_memo_name(a),
+            Self::Attr(a, _) => is_memo_name(a),
             Self::Element(b) => b.is_memo(),
             _ => false,
         }
     }
+}
+
+/// The object an attribute belongs to. Each read of `self`, of a global, or of a variable of an
+/// enclosing function is the same object; any other is the value read, through copies.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Receiver {
+    MethodSelf,
+    Global(String),
+    Cell(String),
+    Value(FunctionId, VarId),
 }
 
 /// A new object a value may be.
@@ -460,17 +471,42 @@ impl<'a, 'u> FnCheck<'a, 'u> {
 
     fn holder(&self, h: Holder<'_>) -> Borrow {
         match h {
-            Holder::Attr(a) => Borrow::Attr(a.to_owned()),
-            Holder::NamedAttr(v) => Borrow::Attr(match self.defs.get(&v).map(|i| &i.kind) {
-                Some(InstKind::Const {
-                    literal: ConstLiteral::Str(s),
-                    ..
-                }) => s.clone(),
-                _ => "?".to_owned(),
-            }),
+            Holder::Attr { obj, attr } => Borrow::Attr(attr.to_owned(), self.receiver(obj)),
+            Holder::NamedAttr { obj, name } => {
+                let attr = match self.defs.get(&name).map(|i| &i.kind) {
+                    Some(InstKind::Const {
+                        literal: ConstLiteral::Str(s),
+                        ..
+                    }) => s.clone(),
+                    _ => "?".to_owned(),
+                };
+                Borrow::Attr(attr, self.receiver(obj))
+            }
             Holder::Global(g) => Borrow::Global(g.to_owned()),
             Holder::Cell(c) => Borrow::Cell(c.to_owned()),
         }
+    }
+
+    /// The object whose attributes `obj` reads or stores.
+    fn receiver(&self, obj: VarId) -> Receiver {
+        if self.self_vars.contains(&obj) {
+            return Receiver::MethodSelf;
+        }
+        let root = self.copied_from(obj);
+        match self.defs.get(&root).map(|i| &i.kind) {
+            Some(InstKind::LoadGlobal { name, .. }) => Receiver::Global(name.clone()),
+            Some(InstKind::LoadDeref { name, .. }) => Receiver::Cell(name.clone()),
+            _ => Receiver::Value(self.f.id, root),
+        }
+    }
+
+    /// The value `v` copies, through any number of copies (`v` itself when it is no copy).
+    fn copied_from(&self, v: VarId) -> VarId {
+        let mut cur = v;
+        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur).map(|i| &i.kind) {
+            cur = *src;
+        }
+        cur
     }
 
     /// What a project call's result holds: what its callees return, with the arguments bound
@@ -583,10 +619,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         let mut kept: FxHashMap<Span, Vec<Place<'a>>> = FxHashMap::default();
         for inst in self.live_insts() {
             for (v, place) in ownership::stores(&inst.kind) {
-                let mut root = v;
-                while let Some(InstKind::Copy { src, .. }) = self.defs.get(&root).map(|i| &i.kind) {
-                    root = *src;
-                }
+                let root = self.copied_from(v);
                 if let (Some(def), Some(o)) = (self.defs.get(&root), self.own.get(&root))
                     && o.new.is_some_and(|n| n.at == def.span)
                     && o.borrowed.is_none()
@@ -653,16 +686,10 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         let Some((a, b)) = self.failed_identity(from, block) else {
             return Some(own.clone());
         };
-        let root = |x: VarId| {
-            let mut cur = x;
-            while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur).map(|i| &i.kind) {
-                cur = *src;
-            }
-            cur
-        };
-        let other = if root(a) == root(v) {
+        let root = self.copied_from(v);
+        let other = if self.copied_from(a) == root {
             b
-        } else if root(b) == root(v) {
+        } else if self.copied_from(b) == root {
             a
         } else {
             return Some(own.clone());
@@ -836,16 +863,23 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         }
     }
 
-    /// A conditional value stored back where it borrows from (`self.items = self.items or []`,
+    /// A conditional value stored back where it borrows from, the same attribute of the same
+    /// object or an item of the same container (`self.items = self.items or []`,
     /// `d[k] = d.get(k) or []`): that state holds it on every path.
     fn settled(&self, inst: &'a Inst) -> Option<&Own> {
         let (value, place) = match &inst.kind {
-            InstKind::AttrStore { attr, value, .. } => (value, Borrow::Attr(attr.clone())),
+            InstKind::AttrStore { obj, attr, value } => {
+                (value, self.holder(Holder::Attr { obj: *obj, attr }))
+            }
             InstKind::SubscriptStore { obj, value, .. } => {
                 (value, self.own.get(obj)?.element()?.borrowed?)
             }
             InstKind::Call { callee, args, .. } if callee == "setattr" && args.len() == 3 => {
-                (&args[2], self.holder(Holder::NamedAttr(args[1])))
+                let held = Holder::NamedAttr {
+                    obj: args[0],
+                    name: args[1],
+                };
+                (&args[2], self.holder(held))
             }
             _ => return None,
         };

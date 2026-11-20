@@ -601,7 +601,10 @@ which module imports which.
    `self`. Not reported: a removal when every new object the value may be starts empty, a
    conditional expression changed in place without a name, a value stored back where it borrows
    from (`self.a = self.a or []`, `d[k] = d.get(k) or []`), and memo / cache attributes (as for
-   `MUT101`).
+   `MUT101`). Stored back means the same attribute of the same object (an attribute borrow keeps
+   its object: the method's `self`, a global or an enclosing function's variable by name, else
+   the value read, through copies) or an item of the same container: `self.a = other.a or []`
+   stores it in another object.
 5. **Stored on `self`**: a store of such a value in `self.<attr>` is reported at the store when a
    method of the class family (`ClassMethods::family`) changes that attribute in place
    (`typed_field_writes` with `ContainerMut`, `AliasContainerMut`, or `IndirectHelper` on a class

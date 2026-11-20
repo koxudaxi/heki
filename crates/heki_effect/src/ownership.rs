@@ -61,9 +61,9 @@ impl Origins {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Holder<'i> {
     /// `obj.<attr>`.
-    Attr(&'i str),
-    /// `getattr(obj, name)`: the attribute the operand names.
-    NamedAttr(VarId),
+    Attr { obj: VarId, attr: &'i str },
+    /// `getattr(obj, name)`: the attribute the operand `name` names.
+    NamedAttr { obj: VarId, name: VarId },
     /// A module global or a builtin.
     Global(&'i str),
     /// A variable of an enclosing function.
@@ -138,7 +138,7 @@ pub fn source<'i>(
         InstKind::Copy { src, .. } => Source::Same(*src),
         InstKind::LoadGlobal { name, .. } => Source::Held(Holder::Global(name)),
         InstKind::LoadDeref { name, .. } => Source::Held(Holder::Cell(name)),
-        InstKind::AttrLoad { attr, .. } => Source::Held(Holder::Attr(attr)),
+        InstKind::AttrLoad { obj, attr, .. } => Source::Held(Holder::Attr { obj: *obj, attr }),
         InstKind::SubscriptLoad {
             obj,
             is_slice: true,
@@ -173,9 +173,13 @@ pub fn source<'i>(
                 let Some(name) = args.get(1) else {
                     return Source::Unknown;
                 };
+                let held = Holder::NamedAttr {
+                    obj: args[0],
+                    name: *name,
+                };
                 return match args.get(2) {
-                    Some(default) => Source::HeldOr(Holder::NamedAttr(*name), *default),
-                    None => Source::Held(Holder::NamedAttr(*name)),
+                    Some(default) => Source::HeldOr(held, *default),
+                    None => Source::Held(held),
                 };
             }
             match kind {

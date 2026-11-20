@@ -50,8 +50,9 @@ It does not report:
   the instance keeps the caller's object;
 - a new object the function stores in other state before the paths meet
   (`rows = table[key] = []`, `table.setdefault(key, rows)`): it is that state's on every path;
-- a value stored back where it borrows from (`self.items = self.items or []`,
-  `d[k] = d.get(k) or []`);
+- a value stored back where it borrows from, the same attribute of the same object or an item
+  of the same container (`self.items = self.items or []`, `d[k] = d.get(k) or []`, but not
+  `self.items = other.items or []`);
 - attributes named as memos or caches (`_cache`, `memo`), which are meant to be filled;
 - removing from a value whose new objects all start empty (`d.get(k, {}).pop(x, None)`): the
   removal does nothing to them;
