@@ -22,7 +22,6 @@ pub mod resolver;
 mod scc;
 mod summary;
 
-pub use callgraph::is_private_name;
 pub use report::{
     BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
     boundary_reports_in, group_by_root_cause,

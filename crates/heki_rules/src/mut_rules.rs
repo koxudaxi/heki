@@ -480,6 +480,70 @@ pub(crate) fn initializes_itself(
             .is_some_and(|owner| family.contains(&format!("{}.{owner}", key.module)))
 }
 
+/// Whether `func` (about to be reported for an access to an object that may be its parameters
+/// `obj`) only runs inside allowed contexts: it has project callers, and every path up the
+/// reverse call graph reaches an allowed or exempt function, or an initializer of the target
+/// family on its own `self`, before a function without callers. Such a function is part of the
+/// owner's operations, like a hook that a store operation runs. The walk goes breadth first over
+/// `(function, object parameters)` states; paths that only cycle add no allowed context, so a
+/// function reached through cycles alone keeps its report. Initializers end the walk negatively:
+/// constructor calls also bind the initializers of subclasses (CHA), so their callers are not
+/// known exactly.
+fn runs_inside_allowed(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    allowance: &Allowance,
+    family: &FxHashSet<String>,
+    func: &FuncKey,
+    obj: u64,
+) -> bool {
+    let is_initializer =
+        |k: &FuncKey| INITIALIZERS.contains(&k.qualname.rsplit('.').next().unwrap_or(&k.qualname));
+    if is_initializer(func) {
+        return false;
+    }
+    let mut queue = std::collections::VecDeque::from([(func.clone(), obj)]);
+    let mut visited: FxHashSet<(FuncKey, u64)> = FxHashSet::default();
+    visited.insert((func.clone(), obj));
+    let mut allowed_contexts = false;
+    while let Some((callee, obj)) = queue.pop_front() {
+        let Some(callers) = cx
+            .index
+            .reverse_call_graph
+            .get(&callee)
+            .filter(|c| !c.is_empty())
+        else {
+            // A function without project callers, outside every allowed context.
+            return false;
+        };
+        let mut callers: Vec<&FuncKey> = callers.iter().collect();
+        callers.sort();
+        for caller in callers {
+            if allowance.allows(caller) {
+                allowed_contexts = true;
+                continue;
+            }
+            for (_, site) in sites.get(caller).into_iter().flatten() {
+                for bc in site
+                    .project_callees()
+                    .iter()
+                    .filter(|bc| bc.callee == callee)
+                {
+                    let caller_obj = bc.caller_params_of(obj);
+                    if initializes_itself(cx, caller, family, caller_obj) {
+                        allowed_contexts = true;
+                    } else if is_initializer(caller) {
+                        return false;
+                    } else if visited.insert((caller.clone(), caller_obj)) {
+                        queue.push_back((caller.clone(), caller_obj));
+                    }
+                }
+            }
+        }
+    }
+    allowed_contexts
+}
+
 /// `base`, then `: note` when the contract sets a `message`.
 pub(crate) fn with_note(base: String, note: Option<&str>) -> String {
     match note {
@@ -543,6 +607,7 @@ pub(crate) fn mut201(
     let mut paths: Vec<_> = cx.index.files.keys().collect();
     paths.sort();
     let mut seen = FxHashSet::default();
+    let mut sites = None;
     for path in paths {
         let file = &cx.index.files[path];
         let Some(unit) = cx.unit(path) else {
@@ -580,6 +645,19 @@ pub(crate) fn mut201(
                             || delegates(cx, key)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
                         {
+                            continue;
+                        }
+                        // A function that only runs inside the owner's operations (every caller
+                        // path starts in an allowed context) writes inside them.
+                        let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
+                        if runs_inside_allowed(
+                            cx,
+                            sites,
+                            &rule.allowance,
+                            &t.classes,
+                            key,
+                            site.obj_params,
+                        ) {
                             continue;
                         }
                         let span = site.via_chain.first().map_or(site.span, |h| h.span);
@@ -1440,7 +1518,8 @@ struct WalkState {
 /// Where a read in `reader` is reported: at the read itself, or — for a private helper with
 /// project callers — at every call site of each outermost non-private caller, found breadth
 /// first over `(function, read object parameters)` states (cycle-safe). Allowed functions end
-/// a path; an initializer reading its own instance (MUT201's rule) is not reported.
+/// a path; an initializer reading its own instance and a function that only runs inside
+/// allowed contexts (MUT201's rules) are not reported.
 fn read_reports(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
@@ -1453,7 +1532,9 @@ fn read_reports(
         return Vec::new();
     }
     if !delegates(cx, reader) {
-        if initializes_itself(cx, reader, family, read.obj_params) {
+        if initializes_itself(cx, reader, family, read.obj_params)
+            || runs_inside_allowed(cx, sites, allowance, family, reader, read.obj_params)
+        {
             return Vec::new();
         }
         return vec![ReadReport {
@@ -1504,7 +1585,9 @@ fn read_reports(
                                 down: Some((i, hop)),
                             });
                         }
-                    } else if !initializes_itself(cx, caller, family, caller_obj) {
+                    } else if !initializes_itself(cx, caller, family, caller_obj)
+                        && !runs_inside_allowed(cx, sites, allowance, family, caller, caller_obj)
+                    {
                         let mut chain = vec![hop];
                         let mut j = i;
                         while let Some((below, h)) = &states[j].down {

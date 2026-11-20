@@ -6,7 +6,7 @@
 
 use globset::GlobSet;
 use heki_diagnostics::Diagnostic;
-use heki_effect::{FuncKey, ProjectDecls, ProjectIndex, analyze_project, is_private_name};
+use heki_effect::{FuncKey, ProjectDecls, ProjectIndex, analyze_project};
 use heki_rules::project::{
     ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, exclude_set, parse_source,
     rel_posix, retain_unsuppressed,
@@ -238,22 +238,20 @@ impl Workspace {
         out
     }
 
-    /// Private functions the indexed file `path` calls. A private helper with project callers
-    /// hands its `MUT201` / `MUT203` reports to them, so its own file's diagnostics depend on
-    /// whether it has callers at all.
-    fn private_callees(&self, path: &Path) -> FxHashSet<FuncKey> {
+    /// Project functions the indexed file `path` calls. The `MUT201` / `MUT203` reports of a
+    /// function depend on its callers: a private helper with project callers hands its reports
+    /// to them, and a function that only runs inside a contract's allowed contexts has none.
+    fn project_callees(&self, path: &Path) -> FxHashSet<FuncKey> {
         self.index
             .files
             .get(path)
             .into_iter()
             .flat_map(|f| &f.call_edges)
-            .filter(|(_, callee, _)| is_private_name(&callee.qualname))
             .map(|(_, callee, _)| callee.clone())
             .collect()
     }
 
-    /// Files of the private functions an edit started or stopped calling: each may have gained
-    /// its first caller or lost its last one.
+    /// Files of the functions an edit started or stopped calling: each gained or lost a caller.
     fn delegation_changes(
         &self,
         before: &FxHashSet<FuncKey>,
@@ -269,7 +267,7 @@ impl Workspace {
     /// return its diagnostics plus the other files that need re-analysis.
     pub fn edit(&mut self, path: &Path, text: &str) -> Result<EditOutcome, String> {
         let parsed = self.parse(path, text)?;
-        let calls_before = self.private_callees(&parsed.path);
+        let calls_before = self.project_callees(&parsed.path);
         let (update, decls_changed) = self.summarize(&parsed);
         self.stats.edited_reanalyses += 1;
         self.stats.last_summary_changed = update.summary_changed;
@@ -282,7 +280,7 @@ impl Workspace {
         if decls_changed {
             affected.extend(self.dependents_of(&parsed.module_name, &parsed.path));
         }
-        let calls_after = self.private_callees(&parsed.path);
+        let calls_after = self.project_callees(&parsed.path);
         affected.extend(self.delegation_changes(&calls_before, &calls_after));
         affected.remove(&parsed.path);
         let mut affected: Vec<PathBuf> = affected.into_iter().collect();
@@ -307,7 +305,7 @@ impl Workspace {
         let Some(meta) = self.files.remove(path) else {
             return Vec::new();
         };
-        let calls_before = self.private_callees(path);
+        let calls_before = self.project_callees(path);
         let update = self.index.remove_file(path);
         match self.index.module_decls(&meta.module_name) {
             Some(remaining) => self.decls.replace(remaining),
