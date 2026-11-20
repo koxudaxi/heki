@@ -21,12 +21,14 @@ mod callgraph;
 pub mod consumption;
 mod contracts;
 pub mod guards;
+mod infer;
 mod invalidation;
 pub mod readonly;
 mod report;
 pub mod resolver;
 mod scc;
 mod summary;
+pub mod types;
 
 pub use contracts::Contracts;
 pub use invalidation::{

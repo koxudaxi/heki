@@ -11,9 +11,10 @@
 //! Reading a property (`obj.attr` on a project-class instance whose `attr` is a getter) runs
 //! its getter, so `resolve_attr_load` resolves it like a method call.
 
+use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
-use heki_ir::{FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId};
+use heki_ir::{FnIndex, FunctionKind, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId};
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -154,8 +155,8 @@ fn import_target(imp: &ModuleImport, module_name: &str, is_package: bool) -> Opt
 pub struct ClassDecl {
     /// Base classes, resolved within the defining module (canonicalized on lookup).
     pub bases: Vec<String>,
-    /// Priority 3 `attr -> class fqn` (instance attribute types).
-    pub attr_types: BTreeMap<String, String>,
+    /// Priority 3 `attr -> type` (instance attribute types).
+    pub attr_types: BTreeMap<String, Ty>,
     /// `@dataclass(frozen=True)` / `@dataclasses.dataclass(frozen=True)`, or a `NamedTuple`:
     /// the class promises immutable instances (`MUT108`). Classes a PEP 681
     /// `dataclass_transform(frozen_default=True)` builds are frozen too, and the subclasses of a
@@ -199,8 +200,8 @@ pub struct FunctionDecl {
     pub is_staticmethod: bool,
     pub is_classmethod: bool,
     pub is_method: bool,
-    /// Resolved return annotation (class fqn), Advisory only.
-    pub return_type: Option<String>,
+    /// Resolved return annotation, Advisory only.
+    pub return_type: Option<Ty>,
     pub param_names: Vec<String>,
     /// How many leading parameters a position binds (the receiver included).
     pub positional_params: u8,
@@ -252,8 +253,8 @@ pub struct ModuleDecls {
     pub classes: BTreeMap<String, ClassDecl>,
     /// Function qualname -> declaration (module body excluded).
     pub functions: BTreeMap<String, FunctionDecl>,
-    /// Module global `name -> class fqn` of the instance it holds (`client = httpx.Client()`).
-    pub global_types: BTreeMap<String, String>,
+    /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`).
+    pub global_types: BTreeMap<String, Ty>,
     /// Module globals bound to a small display that no function of the module grows
     /// (`heki_ir::ModuleConstants::displays`): other modules read them through
     /// [`ProjectDecls::small_global`].
@@ -352,6 +353,60 @@ impl ModuleDecls {
         }
     }
 
+    /// The type an annotation names (receiver typing): a class with the arguments of a known
+    /// generic container (`list[Model]`, `Mapping[str, Model]`, `tuple[Model, int]`,
+    /// `Iterator[Model]`), after `Optional` / `| None` / `Annotated` / `Final` / `ClassVar` /
+    /// `Required` / `NotRequired` / `ReadOnly` and quotes. An unresolved name of a `typing`
+    /// generic counts as that generic (`"Iterable[Model]"` without the import).
+    pub fn resolve_annotation_ty(&self, text: &str) -> Option<Ty> {
+        let t = unquote(text);
+        let mut parts = split_top_level(t, '|');
+        if parts.len() > 1 {
+            parts.retain(|p| *p != "None");
+            return self.resolve_annotation_ty(single(&parts)?);
+        }
+        let Some((head, inner)) = subscript(t) else {
+            return self
+                .resolve_type_head(t)
+                .filter(|c| !special_form(c))
+                .map(Ty::inst);
+        };
+        let last = head.rsplit('.').next().unwrap_or(head);
+        match last {
+            "Optional" | "Annotated" | "Final" | "ClassVar" | "Required" | "NotRequired"
+            | "ReadOnly" => return self.resolve_annotation_ty(first_arg(inner)),
+            "Union" => {
+                let mut members = split_top_level(inner, ',');
+                members.retain(|p| *p != "None");
+                return self.resolve_annotation_ty(single(&members)?);
+            }
+            _ => {}
+        }
+        let class = self
+            .resolve_type_head(head)
+            .or_else(|| typing_generic(last))
+            .filter(|c| !special_form(c))?;
+        let args = split_top_level(inner, ',');
+        let elem = |i: usize| Elem::of(args.get(i).and_then(|a| self.resolve_annotation_ty(a)));
+        let args = match generic(&class) {
+            None => Args::None,
+            Some(Generic::Items) => Args::items(elem(0)),
+            Some(Generic::Map) => Args::map(elem(0), elem(1)),
+            Some(Generic::Pairs) => Args::items(Elem::Of(Ty::container(
+                "builtins.tuple",
+                Args::Tuple(vec![elem(0), elem(1)]),
+            ))),
+            Some(Generic::Counter) => Args::map(elem(0), Elem::Of(Ty::inst("builtins.int"))),
+            // `tuple[()]` is the empty tuple, `tuple[T, ...]` a tuple of any length.
+            Some(Generic::Tuple) => match args.as_slice() {
+                ["()"] => Args::Tuple(Vec::new()),
+                [_, "..."] => Args::items(elem(0)),
+                _ => Args::Tuple((0..args.len()).map(elem).collect()),
+            },
+        };
+        Some(Ty::container(&class, args))
+    }
+
     fn resolve_type_head(&self, head: &str) -> Option<String> {
         if head.is_empty()
             || head == "None"
@@ -381,6 +436,29 @@ impl ModuleDecls {
         }
         typing_alias(last).map(|b| format!("builtins.{b}"))
     }
+}
+
+/// A `typing` special form that names no class of instances (`Final` and `ClassVar` without an
+/// argument take their type from the value; `TypeAlias` declares a type, not an instance).
+fn special_form(class: &str) -> bool {
+    const FORMS: &[&str] = &[
+        "Annotated",
+        "ClassVar",
+        "Final",
+        "Literal",
+        "Never",
+        "NoReturn",
+        "NotRequired",
+        "Optional",
+        "ReadOnly",
+        "Required",
+        "TypeAlias",
+        "Union",
+    ];
+    class
+        .strip_prefix("typing.")
+        .or_else(|| class.strip_prefix("typing_extensions."))
+        .is_some_and(|name| FORMS.contains(&name))
 }
 
 /// Split at `sep` outside brackets / parentheses, trimming parts.
@@ -775,7 +853,7 @@ pub(crate) enum Symbol<'a> {
     Module,
     Class(&'a ClassDecl),
     Function(FuncKey, &'a FunctionDecl),
-    Global(&'a str),
+    Global(&'a Ty),
     External,
 }
 
@@ -1157,6 +1235,11 @@ impl ProjectDecls {
             .collect()
     }
 
+    /// Whether `sub` derives (transitively) from `base`, both canonical.
+    pub(crate) fn is_subclass(&self, sub: &str, base: &str) -> bool {
+        self.mro(sub).iter().skip(1).any(|c| c == base)
+    }
+
     /// Depth-first, left-to-right base linearization (project and external classes).
     fn mro(&self, class: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -1191,10 +1274,50 @@ impl ProjectDecls {
     }
 
     /// Priority 3: instance attribute type through the MRO.
-    fn attr_type(&self, class: &str, attr: &str) -> Option<String> {
+    pub(crate) fn attr_type(&self, class: &str, attr: &str) -> Option<&Ty> {
         self.mro(class)
             .iter()
-            .find_map(|c| self.class(c)?.attr_types.get(attr).cloned())
+            .find_map(|c| self.class(c)?.attr_types.get(attr))
+    }
+
+    /// The type a declaration names (an annotation, or a type stored in the declarations), with
+    /// every class named canonically (re-exports chased): `None` when it names a module, or a name
+    /// of a project module that is no class (a type alias, a `TypeVar`, a constant); an item of
+    /// such a type is unknown. A name below a module heki does not see (a compiled submodule of a
+    /// project package) stays as it is.
+    pub(crate) fn declared_ty(&self, ty: &Ty) -> Option<Ty> {
+        let Ty::Inst(o) = ty else {
+            return Some(ty.clone());
+        };
+        let class = self.canonical(&o.class);
+        if let Some((m, rest)) = self.split_module(&class)
+            && !rest.contains('.')
+            && !m.classes.contains_key(rest)
+        {
+            return None;
+        }
+        let elem = |e: &Elem| match e {
+            Elem::Of(t) => Elem::of(self.declared_ty(t)),
+            Elem::Empty | Elem::Unknown => e.clone(),
+        };
+        let args = match &o.args {
+            Args::None => Args::None,
+            Args::Items(e) => Args::Items(Box::new(elem(e))),
+            Args::Map(k, v) => Args::Map(Box::new(elem(k)), Box::new(elem(v))),
+            Args::Tuple(es) => Args::Tuple(es.iter().map(elem).collect()),
+        };
+        Some(Ty::Inst(crate::types::Obj { class, args }))
+    }
+
+    /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
+    /// keeps it: anything for a declaration of `Any` / `object`, and an instance of a project
+    /// subclass of the declared class (`x: Base = Sub()`).
+    pub(crate) fn narrower(&self, t: &Ty, declared: &Ty) -> bool {
+        declared.obj().is_some_and(|d| {
+            matches!(d.class.as_str(), "typing.Any" | "builtins.object")
+                || t.obj()
+                    .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
+        })
     }
 
     /// The project functions `name` names on an instance of the canonical project class
@@ -1541,7 +1664,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             return_type: f
                 .return_annotation
                 .as_deref()
-                .and_then(|a| decls.resolve_annotation(a)),
+                .and_then(|a| decls.resolve_annotation_ty(a)),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
             positional_params: count_u8(
                 f.params
@@ -1883,7 +2006,7 @@ fn complete_decls(
                 if ann.target.contains('.') {
                     continue;
                 }
-                if let Some(t) = cx.module.resolve_annotation(&ann.annotation)
+                if let Some(t) = cx.module.resolve_annotation_ty(&ann.annotation)
                     && let Some(class) = decls.classes.get_mut(&f.qualname)
                 {
                     class.attr_types.entry(ann.target.clone()).or_insert(t);
@@ -1892,11 +2015,18 @@ fn complete_decls(
             continue;
         }
         if f.is_module_body {
-            let types = cx.infer(f);
+            let types = cx.infer_types(f);
             for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-                if let InstKind::StoreGlobal { name, value } = &inst.kind
-                    && let Some(Val::Inst(t)) = types.get(value)
-                {
+                // An annotated global has its declaration (`REGISTRY: dict[str, Model] = {}`),
+                // unless what it holds is narrower.
+                let InstKind::StoreGlobal { name, value } = &inst.kind else {
+                    continue;
+                };
+                let stored = match (types.declared(name), types.ty(*value)) {
+                    (Some(d), Some(t)) if !project.narrower(t, d) => Some(d),
+                    (d, t) => t.or(d),
+                };
+                if let Some(t @ Ty::Inst(_)) = stored {
                     decls.global_types.insert(name.clone(), t.clone());
                 }
             }
@@ -1917,7 +2047,7 @@ fn complete_decls(
         for ann in &f.local_annotations {
             if let Some(attr) = ann.target.strip_prefix(&prefix)
                 && !attr.contains('.')
-                && let Some(t) = cx.module.resolve_annotation(&ann.annotation)
+                && let Some(t) = cx.module.resolve_annotation_ty(&ann.annotation)
             {
                 class.attr_types.insert(attr.to_owned(), t);
             }
@@ -1925,12 +2055,12 @@ fn complete_decls(
         if f.name != "__init__" && f.name != "__post_init__" {
             continue;
         }
-        let types = cx.infer(f);
+        let types = cx.infer_types(f);
         let self_vars = self_aliases(f, self_param.var);
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let InstKind::AttrStore { obj, attr, value } = &inst.kind
                 && self_vars.contains(obj)
-                && let Some(Val::Inst(t)) = types.get(value)
+                && let Some(t @ Ty::Inst(_)) = types.ty(*value)
             {
                 class
                     .attr_types
@@ -2012,6 +2142,43 @@ pub enum Val {
     Super(String),
 }
 
+/// A receiver or callee as call resolution sees it, borrowed from a [`Val`] or a [`Ty`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Recv<'v> {
+    Ref(&'v str),
+    Inst(&'v str),
+    Super(&'v str),
+}
+
+impl Val {
+    pub(crate) fn recv(&self) -> Recv<'_> {
+        match self {
+            Val::Ref(f) => Recv::Ref(f),
+            Val::Inst(c) => Recv::Inst(c),
+            Val::Super(c) => Recv::Super(c),
+        }
+    }
+}
+
+impl Ty {
+    pub(crate) fn recv(&self) -> Recv<'_> {
+        match self {
+            Ty::Ref(f) => Recv::Ref(f),
+            Ty::Inst(o) => Recv::Inst(&o.class),
+            Ty::Super(c) => Recv::Super(c),
+        }
+    }
+
+    /// The value consumers see: the class of an instance, the fqn of a named object.
+    pub(crate) fn val(&self) -> Val {
+        match self {
+            Ty::Ref(f) => Val::Ref(f.clone()),
+            Ty::Inst(o) => Val::Inst(o.class.clone()),
+            Ty::Super(c) => Val::Super(c.clone()),
+        }
+    }
+}
+
 /// Resolution of a call target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Callee {
@@ -2031,6 +2198,8 @@ pub struct TypeCtx<'a> {
     ir: &'a ModuleIr,
     /// `Import` instruction span -> bound fqn (relative imports resolved).
     import_by_span: FxHashMap<Span, String>,
+    /// Inference state shared by the functions of the module (child scopes and their parents).
+    pub(crate) scopes: crate::infer::Scopes,
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
@@ -2067,6 +2236,7 @@ impl<'a> TypeCtx<'a> {
             module_name: input.module_name.clone(),
             ir: input.ir,
             import_by_span,
+            scopes: crate::infer::Scopes::default(),
         }
     }
 
@@ -2086,81 +2256,92 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// Value of a module-level name read inside this module.
-    fn global(&self, name: &str) -> Val {
+    pub(crate) fn global(&self, name: &str) -> Ty {
         if let Some(t) = self.module.imports.get(name) {
             return self.named(t);
         }
         if self.module.classes.contains_key(name) || self.module.functions.contains_key(name) {
-            return Val::Ref(format!("{}.{name}", self.module_name()));
+            return Ty::Ref(format!("{}.{name}", self.module_name()));
         }
-        if let Some(t) = self.module.global_types.get(name) {
-            return Val::Inst(t.clone());
+        if let Some(t) = self
+            .module
+            .global_types
+            .get(name)
+            .and_then(|t| self.project.declared_ty(t))
+        {
+            return t;
         }
-        Val::Ref(format!("builtins.{name}"))
+        Ty::Ref(format!("builtins.{name}"))
     }
 
     /// A named fqn: a project global holding an instance becomes that instance.
-    fn named(&self, fqn: &str) -> Val {
+    pub(crate) fn named(&self, fqn: &str) -> Ty {
         let fqn = self.project.canonical(fqn);
         match self.project.symbol(&fqn) {
-            Symbol::Global(t) => Val::Inst(t.to_owned()),
-            _ => Val::Ref(fqn),
+            Symbol::Global(t) => self.project.declared_ty(t).unwrap_or(Ty::Ref(fqn)),
+            _ => Ty::Ref(fqn),
         }
     }
 
     /// Instance produced by calling the object `fqn`, if known.
-    fn call_result(&self, fqn: &str) -> Option<Val> {
+    pub(crate) fn call_result(&self, fqn: &str) -> Option<Ty> {
         match self.project.symbol(fqn) {
-            Symbol::Class(_) => return Some(Val::Inst(fqn.to_owned())),
+            Symbol::Class(_) => return Some(Ty::inst(fqn)),
             Symbol::Function(_, decl) => {
                 return decl
                     .return_type
                     .as_ref()
-                    .map(|t| Val::Inst(self.project.canonical(t)));
+                    .and_then(|t| self.project.declared_ty(t));
             }
             Symbol::Module | Symbol::Global(_) => return None,
             Symbol::External => {}
         }
         if let Some(b) = fqn.strip_prefix("builtins.") {
-            return BUILTIN_TYPES
-                .contains(&b)
-                .then(|| Val::Inst(fqn.to_owned()));
+            return BUILTIN_TYPES.contains(&b).then(|| Ty::inst(fqn));
         }
         let last = fqn.rsplit('.').next().unwrap_or(fqn);
         if last.chars().next().is_some_and(char::is_uppercase) {
-            return Some(Val::Inst(fqn.to_owned()));
+            return Some(Ty::inst(fqn));
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
         let entry = self.kb.lookup(fqn)?;
         if let Some(rt) = &entry.return_type {
-            return Some(Val::Inst(rt.clone()));
+            return Some(Ty::inst(rt.as_str()));
         }
         (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
             && !entry.effects.contains(&ExecEffectKind::BlockingNet))
-        .then(|| Val::Inst(fqn.to_owned()))
+        .then(|| Ty::inst(fqn))
     }
 
     /// Resolve calling a value (`f(...)`).
     pub fn resolve_call(&self, callee: Option<&Val>) -> Callee {
+        self.call_targets(callee.map(Val::recv))
+    }
+
+    pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
         match callee {
-            Some(Val::Ref(fqn)) => match self.project.symbol(fqn) {
+            Some(Recv::Ref(fqn)) => match self.project.symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
                 Symbol::Class(_) => match self.project.method_targets(fqn, "__init__", false) {
                     Callee::Project(keys, _) => Callee::Project(keys, true),
-                    _ => Callee::External(fqn.clone()),
+                    _ => Callee::External(fqn.to_owned()),
                 },
                 Symbol::Module | Symbol::Global(_) => Callee::Unresolved,
-                Symbol::External => Callee::External(fqn.clone()),
+                Symbol::External => Callee::External(fqn.to_owned()),
             },
-            Some(Val::Inst(class)) => self.project.method_targets(class, "__call__", false),
-            Some(Val::Super(_)) | None => Callee::Unresolved,
+            Some(Recv::Inst(class)) => self.project.method_targets(class, "__call__", false),
+            Some(Recv::Super(_)) | None => Callee::Unresolved,
         }
     }
 
     /// Resolve `recv.method(...)`.
     pub fn resolve_method(&self, recv: Option<&Val>, method: &str) -> Callee {
+        self.method_call_targets(recv.map(Val::recv), method)
+    }
+
+    pub(crate) fn method_call_targets(&self, recv: Option<Recv<'_>>, method: &str) -> Callee {
         match recv {
-            Some(Val::Ref(fqn)) => {
+            Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
                     // Unbound call through the class: `Base.method(obj, ...)`.
                     return match self.project.method_targets(fqn, method, false) {
@@ -2169,10 +2350,10 @@ impl<'a> TypeCtx<'a> {
                     };
                 }
                 let target = self.project.canonical(&format!("{fqn}.{method}"));
-                self.resolve_call(Some(&Val::Ref(target)))
+                self.call_targets(Some(Recv::Ref(&target)))
             }
-            Some(Val::Inst(class)) => self.project.method_targets(class, method, false),
-            Some(Val::Super(class)) => self.project.method_targets(class, method, true),
+            Some(Recv::Inst(class)) => self.project.method_targets(class, method, false),
+            Some(Recv::Super(class)) => self.project.method_targets(class, method, true),
             None => Callee::Unresolved,
         }
     }
@@ -2190,7 +2371,7 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// Value returned by a resolved call target.
-    fn callee_result(&self, callee: &Callee) -> Option<Val> {
+    pub(crate) fn callee_result(&self, callee: &Callee) -> Option<Ty> {
         match callee {
             Callee::Project(keys, _) if keys.len() == 1 => {
                 let key = &keys[0];
@@ -2200,140 +2381,20 @@ impl<'a> TypeCtx<'a> {
                 }
                 decl.return_type
                     .as_ref()
-                    .map(|t| Val::Inst(self.project.canonical(t)))
+                    .and_then(|t| self.project.declared_ty(t))
             }
             Callee::External(fqn) => self.call_result(fqn),
             _ => None,
         }
     }
 
-    /// Forward inference of `var -> Val` over `f` (two RPO passes so loop phis settle).
+    /// Forward inference of `var -> Val` over `f` (the receiver typing of `crate::infer`).
     pub fn infer(&self, f: &IrFunction) -> FxHashMap<VarId, Val> {
-        let mut types: FxHashMap<VarId, Val> = FxHashMap::default();
-        let owner = self.owner_fqn(f);
-        let is_static = f.has_decorator(&["staticmethod"]);
-        let is_classmethod = f.has_decorator(&["classmethod"]);
-        for (i, p) in f.params.iter().enumerate() {
-            if i == 0
-                && !is_static
-                && let Some(owner) = &owner
-            {
-                let v = if is_classmethod {
-                    Val::Ref(owner.clone())
-                } else {
-                    Val::Inst(owner.clone())
-                };
-                types.insert(p.var, v);
-                continue;
-            }
-            if let Some(t) = p
-                .annotation
-                .as_deref()
-                .and_then(|a| self.module.resolve_annotation(a))
-            {
-                types.insert(p.var, Val::Inst(self.project.canonical(&t)));
-            }
-        }
-        let mut annotated: FxHashMap<&str, Val> = FxHashMap::default();
-        for ann in &f.local_annotations {
-            if ann.target.contains('.') {
-                continue;
-            }
-            if let Some(t) = self.module.resolve_annotation(&ann.annotation) {
-                annotated.insert(ann.target.as_str(), Val::Inst(self.project.canonical(&t)));
-            }
-        }
-        let rpo = f.rpo_blocks();
-        for _ in 0..2 {
-            for &bb_id in &rpo {
-                let bb = f.block(bb_id);
-                for phi in &bb.phis {
-                    let mut known = phi
-                        .incoming
-                        .iter()
-                        .filter(|(_, v)| *v != phi.dst)
-                        .map(|(_, v)| types.get(v));
-                    if let Some(Some(first)) = known.next() {
-                        let first = first.clone();
-                        if known.all(|t| t == Some(&first)) {
-                            types.insert(phi.dst, first);
-                        }
-                    }
-                }
-                for inst in &bb.insts {
-                    let Some(dst) = inst.kind.dst() else {
-                        continue;
-                    };
-                    let val = self.infer_inst(inst, &types, owner.as_deref());
-                    let val =
-                        val.or_else(|| f.var_name(dst).and_then(|n| annotated.get(n).cloned()));
-                    if let Some(v) = val {
-                        types.insert(dst, v);
-                    }
-                }
-            }
-        }
-        types
-    }
-
-    fn infer_inst(
-        &self,
-        inst: &Inst,
-        types: &FxHashMap<VarId, Val>,
-        owner: Option<&str>,
-    ) -> Option<Val> {
-        match &inst.kind {
-            InstKind::AllocBuiltin { kind, .. } => {
-                Some(Val::Inst(format!("builtins.{}", kind.name())))
-            }
-            InstKind::DictLiteral { .. } => Some(Val::Inst("builtins.dict".to_owned())),
-            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                Some(self.global(name))
-            }
-            InstKind::Import { .. } => self.import_value(inst.span),
-            InstKind::Copy { src, .. } => types.get(src).cloned(),
-            InstKind::AttrLoad { obj, attr, .. } => match types.get(obj)? {
-                Val::Ref(fqn) => Some(self.named(&format!("{fqn}.{attr}"))),
-                Val::Inst(class) => self
-                    .project
-                    .attr_type(class, attr)
-                    .map(|t| Val::Inst(self.project.canonical(&t))),
-                Val::Super(_) => None,
-            },
-            InstKind::MakeClosure {
-                func_id: Some(id), ..
-            } => {
-                let f = self.ir.function(*id);
-                Some(Val::Ref(format!("{}.{}", self.module_name(), f.qualname)))
-            }
-            InstKind::Call {
-                callee_var, args, ..
-            } => {
-                let callee_val = callee_var.and_then(|v| types.get(&v));
-                match callee_val {
-                    Some(Val::Ref(fqn)) if fqn == "builtins.super" && args.is_empty() => {
-                        owner.map(|o| Val::Super(o.to_owned()))
-                    }
-                    Some(Val::Ref(fqn)) => self.call_result(fqn),
-                    other => self.callee_result(&self.resolve_call(other)),
-                }
-            }
-            InstKind::MethodCall { recv, method, .. } => match types.get(recv) {
-                Some(Val::Ref(fqn)) if !self.project.is_project_class(fqn) => {
-                    self.call_result(&self.project.canonical(&format!("{fqn}.{method}")))
-                }
-                other => self.callee_result(&self.resolve_method(other, method)),
-            },
-            // `with C() as c` binds `C().__enter__()`; clients / sessions / files return self.
-            InstKind::EnterWith { mgr, .. } | InstKind::Await { value: mgr, .. } => {
-                types.get(mgr).cloned()
-            }
-            _ => None,
-        }
+        self.infer_types(f).vals()
     }
 
     /// Value bound by an `Import` instruction (needs the span-keyed semantic import).
-    pub fn import_value(&self, span: Span) -> Option<Val> {
+    pub(crate) fn import_type(&self, span: Span) -> Option<Ty> {
         self.import_by_span.get(&span).map(|t| self.named(t))
     }
 }

@@ -1893,7 +1893,8 @@ count for a read.
     `sleep`, or `blocking` for all six: blocking calls of the ecosystem knowledge base
     (`requests.get`, `sqlite3`, `open`, `subprocess.run`, `time.sleep`, ...);
   - `writes-targets`: writes to the `Class.attr` entries of `write-targets` (and their
-    subclasses), in every form `MUT201` follows; a class's own initialization is no write
+    subclasses), in every form `MUT201` follows, through the receivers whose class `MUT201`
+    sees (the items of annotated containers included); a class's own initialization is no write
     (constructing a fresh object runs its `__init__`), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
@@ -2939,6 +2940,17 @@ the allowed readers:
 
 A target names a class and an attribute; it covers the class's subclasses too.
 
+The read object's class is the one heki infers for it, with annotations as hints: a
+parameter, local, attribute, or return annotation, including the items of `list[...]`,
+`Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
+`Mapping[...]`, `tuple[...]`, and `set[...]`; a constructor call; and what the object comes
+from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
+`by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
+`zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
+display, the items appended to a local list, or a comprehension or generator expression. An
+object whose class heki cannot see (an unannotated parameter or return, `Any`) is not tied to
+the target.
+
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the read is reported at every call
 site of the first non-private callers above it, with the chain of calls as related
@@ -3010,7 +3022,8 @@ No automatic fix.
   - `message`: appended to every message of the contract.
 
 Known limitation: a read through a parameter without a project-class annotation
-(`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown.
+(`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown
+there; unlike a write, a read is not handed to the caller that knows it.
 
 
 ---
@@ -3462,6 +3475,17 @@ allowed writers:
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
 class family).
+
+The written object's class is the one heki infers for it, with annotations as hints: a
+parameter, local, attribute, or return annotation, including the items of `list[...]`,
+`Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
+`Mapping[...]`, `tuple[...]`, and `set[...]`; a constructor call; and what the object comes
+from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
+`by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
+`zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
+display, the items appended to a local list, or a comprehension or generator expression. An
+object whose class heki cannot see (an unannotated parameter or return, `Any`) is not tied to
+the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call

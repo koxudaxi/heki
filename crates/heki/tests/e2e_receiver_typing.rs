@@ -1,0 +1,574 @@
+//! Receiver typing (ENG-1) end to end through the real binary: which writes and reads of
+//! guarded attributes (`MUT201` / `MUT203`) heki sees through receivers whose class comes from
+//! the items of containers, return types, flow, and structural typing. The shapes are those of
+//! the research probe `p01_receivers` plus the store examples of the study.
+
+mod common;
+
+use common::Project;
+use serde_json::Value;
+use std::collections::BTreeSet;
+
+const CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki]
+target-version = "py311"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT203"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["Model.fields", "Model.name", "Node.kwargs", "Node.children_types"]
+allowed-writers = ["pkg.store.*"]
+exempt-methods = ["__deepcopy__"]
+
+[[tool.heki.read-owners]]
+name = "kids"
+targets = ["Ref.children"]
+allowed-readers = ["pkg.store.*"]
+"#;
+
+const MODEL: &str = r#"from __future__ import annotations
+
+from typing import Any, Optional
+
+from pydantic import BaseModel
+
+
+class Model:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.fields: list[str] = []
+
+    def clone(self) -> "Model":
+        return Model(self.name)
+
+    @property
+    def twin(self) -> "Model":
+        return self
+
+    @classmethod
+    def make(cls) -> "Model":
+        return cls("x")
+
+
+class Node(BaseModel):
+    kwargs: Optional[dict[str, Any]] = None
+    children_types: list["Node"] = []
+
+
+class Ref:
+    def __init__(self) -> None:
+        self.children: list[Any] = []
+
+
+def make_model() -> Model:
+    return Model("m")
+
+
+def make_untyped():
+    return Model("m")
+
+
+def copied_node(node: Node) -> Node:
+    return Node.model_construct(**node.__dict__)
+"#;
+
+const STORE: &str = r#"from __future__ import annotations
+
+from pkg.model import Model
+
+
+class Store:
+    def set_fields(self, model: Model, fields: list[str]) -> None:
+        model.fields = fields
+"#;
+
+/// The 40 shapes of the research probe `p01_receivers`, and its two reads.
+const CASES: &str = r#"from __future__ import annotations
+
+import copy
+from copy import deepcopy
+from typing import Any, Optional, Union
+
+from pkg.model import Model, Node, Ref, copied_node, make_model, make_untyped
+
+
+class Holder:
+    model: Model
+
+    def __init__(self, model: Model, models: list[Model]) -> None:
+        self.m2 = model
+        self.models = models
+        self.by_name: dict[str, Model] = {}
+
+
+def c01_annotated_param(model: Model) -> None:
+    model.fields = []
+
+
+def c02_unannotated_param(model) -> None:
+    model.fields = []
+
+
+def c03_local_ctor() -> None:
+    m = Model("a")
+    m.fields = ["x"]
+
+
+def c04_return_annotation() -> None:
+    m = make_model()
+    m.fields = ["x"]
+
+
+def c05_untyped_return() -> None:
+    m = make_untyped()
+    m.fields = ["x"]
+
+
+def c06_method_return(model: Model) -> None:
+    m = model.clone()
+    m.fields = ["x"]
+
+
+def c07_classmethod_return() -> None:
+    m = Model.make()
+    m.fields = ["x"]
+
+
+def c08_property(model: Model) -> None:
+    model.twin.fields = ["x"]
+
+
+def c09_copy_copy(model: Model) -> None:
+    m = copy.copy(model)
+    m.fields = ["x"]
+
+
+def c10_deepcopy(model: Model) -> None:
+    m = deepcopy(model)
+    m.fields = ["x"]
+
+
+def c11_model_copy(node: Node) -> None:
+    n = node.model_copy()
+    n.kwargs = {"a": 1}
+
+
+def c12_project_copy_fn(node: Node) -> None:
+    n = copied_node(node)
+    n.children_types = []
+
+
+def c13_for_loop(models: list[Model]) -> None:
+    for m in models:
+        m.fields = []
+
+
+def c14_dict_subscript(models: dict[str, Model]) -> None:
+    models["a"].fields = []
+
+
+def c15_list_subscript(models: list[Model]) -> None:
+    models[0].fields.append("x")
+
+
+def c16_optional(model: Optional[Model]) -> None:
+    if model is not None:
+        model.fields = []
+
+
+def c17_union(model: Union[Model, None]) -> None:
+    if model:
+        model.fields.append("x")
+
+
+def c18_pep604(model: Model | None) -> None:
+    assert model is not None
+    model.fields.clear()
+
+
+def c19_isinstance(obj: Any) -> None:
+    if isinstance(obj, Model):
+        obj.fields = []
+
+
+def c20_self_attr_init(h: Holder) -> None:
+    h.m2.fields = []
+
+
+def c21_self_attr_class_annotation(h: Holder) -> None:
+    h.model.fields = []
+
+
+def c22_self_list_attr(h: Holder) -> None:
+    for m in h.models:
+        m.fields.append("x")
+
+
+def c23_self_dict_attr(h: Holder) -> None:
+    h.by_name["a"].fields = []
+
+
+def c24_tuple_unpack(pair: tuple[Model, int]) -> None:
+    m, _ = pair
+    m.fields = []
+
+
+def c25_walrus(models: list[Model]) -> None:
+    if (m := models[0]) is not None:
+        m.fields = []
+
+
+def c26_comprehension(models: list[Model]) -> None:
+    [m.fields.clear() for m in models]
+
+
+def c27_setattr_const(model: Model) -> None:
+    setattr(model, "fields", [])
+
+
+def c28_dunder_dict(model: Model) -> None:
+    model.__dict__["fields"] = []
+
+
+KEY = "fields"
+
+
+def c29_dunder_dict_const_name(model: Model) -> None:
+    model.__dict__[KEY] = []
+
+
+def c30_alias_then_helper(model: Model) -> None:
+    fields = model.fields
+    _extend(fields)
+
+
+def _extend(fields: list[str]) -> None:
+    fields.append("id")
+
+
+def c31_dict_get(models: dict[str, Model]) -> None:
+    m = models.get("a")
+    if m is not None:
+        m.fields = []
+
+
+def c32_items_loop(models: dict[str, Model]) -> None:
+    for _, m in models.items():
+        m.fields = []
+
+
+def c33_values_loop(models: dict[str, Model]) -> None:
+    for m in models.values():
+        m.fields = []
+
+
+def c34_enumerate(models: list[Model]) -> None:
+    for _, m in enumerate(models):
+        m.fields = []
+
+
+def c35_iter_param(models: "Iterable[Model]") -> None:
+    for m in models:
+        m.fields = []
+
+
+def c36_nested_attr_write(node: Node) -> None:
+    node.children_types[0].kwargs = {}
+
+
+def c37_subclass_instance() -> None:
+    class Sub(Model):
+        pass
+
+    s = Sub("x")
+    s.fields = []
+
+
+def c38_augassign(model: Model) -> None:
+    model.fields += ["x"]
+
+
+def c39_del(model: Model) -> None:
+    del model.fields[0]
+
+
+def c40_lambda_callback(models: list[Model]) -> None:
+    list(map(lambda m: m.fields.clear(), models))
+
+
+def r01_read(ref: Ref) -> list[Any]:
+    return ref.children
+
+
+def r02_read_loop(refs: list[Ref]) -> int:
+    return sum(len(r.children) for r in refs)
+"#;
+
+/// The shapes of the store examples, the wrapping builtins, displays, comprehension scopes, and
+/// declarations in other modules.
+const MORE: &str = r#"from __future__ import annotations
+
+import itertools
+from itertools import chain
+from typing import Iterator, Mapping, Sequence
+
+from pkg.model import Model, Node
+from pkg.shelf import Shelf, walk
+
+
+def b_loop(models: list[Model]) -> None:
+    for model in models:
+        model.fields = []
+
+
+def e_read(models: list[Model]) -> list[str]:
+    return [m.name for m in models]
+
+
+def zipped(models: list[Model], names: list[str]) -> None:
+    for name, model in zip(names, models):
+        model.fields = [name]
+
+
+def reversed_sorted(models: Sequence[Model]) -> None:
+    for model in reversed(models):
+        model.fields = []
+    for model in sorted(models, key=id):
+        model.fields = []
+
+
+def chained(first: Model, rest: list[Model], groups: list[list[Model]]) -> None:
+    for model in chain((first,), rest):
+        model.fields = []
+    for model in itertools.chain.from_iterable(groups):
+        model.fields = []
+
+
+def stepped(models: Iterator[Model]) -> None:
+    model = next(models, None)
+    if model is not None:
+        model.fields = []
+
+
+def starred(first: Model, rest: list[Model]) -> None:
+    for model in (first, *rest):
+        model.fields = []
+
+
+def appended(source: Mapping[str, Model]) -> None:
+    picked = []
+    for key in source:
+        picked.append(source[key])
+    for model in picked:
+        model.fields = []
+
+
+def generated(models: list[Model]) -> None:
+    for model in (m for m in models if m.name):
+        model.fields = []
+
+
+def listed(models: list[Model]) -> None:
+    for model in [m for m in models if m.name]:
+        model.fields = []
+
+
+def nested_views(by_group: dict[str, dict[str, Model]]) -> None:
+    for group in by_group.values():
+        for name, model in group.items():
+            model.fields = [name]
+
+
+def shelved(shelf: Shelf) -> None:
+    for model in shelf.models:
+        model.fields = []
+    for model in walk(shelf):
+        model.fields = []
+
+
+def varargs(*models: Model) -> None:
+    for model in models:
+        model.fields = []
+
+
+def nodes(node: Node) -> None:
+    for child in node.children_types:
+        child.kwargs = {}
+
+
+def mixed(model: Model, node: Node) -> None:
+    for item in (model, node):
+        item.fields = []
+
+
+def shifted(trio: tuple[str, Model, Model]) -> None:
+    *_, last = trio
+    last.fields = []
+
+
+def strings(names: list[str]) -> None:
+    for name in names:
+        name.fields = []
+
+
+def untyped(models) -> None:
+    for model in models:
+        model.fields = []
+"#;
+
+const SHELF: &str = r#"from __future__ import annotations
+
+from typing import Iterator
+
+from pkg.model import Model
+
+
+class Shelf:
+    models: list[Model]
+
+
+def walk(shelf: Shelf) -> Iterator[Model]:
+    yield from shelf.models
+"#;
+
+fn project(name: &str) -> Project {
+    let p = Project::new(name);
+    p.write("pyproject.toml", CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", MODEL)
+        .write("pkg/store.py", STORE)
+        .write("pkg/cases.py", CASES)
+        .write("pkg/more.py", MORE)
+        .write("pkg/shelf.py", SHELF);
+    p
+}
+
+/// `(qualname, rule)` of every diagnostic of `file`.
+fn reported(p: &Project, args: &[&str], file: &str) -> BTreeSet<(String, String)> {
+    let mut all = vec!["--output-format", "json"];
+    all.extend_from_slice(args);
+    let (code, stdout, stderr) = p.check(&all);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    diags
+        .iter()
+        .filter(|d| d["path"].as_str().unwrap().ends_with(file))
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn names(found: &BTreeSet<(String, String)>) -> BTreeSet<String> {
+    found.iter().map(|(q, _)| q.clone()).collect()
+}
+
+/// The probe shapes reported for every target version, and the ones that stay silent.
+const PROBE_REPORTED: &[&str] = &[
+    "c01_annotated_param",
+    "c03_local_ctor",
+    "c04_return_annotation",
+    "c06_method_return",
+    "c07_classmethod_return",
+    "c12_project_copy_fn",
+    "c13_for_loop",
+    "c14_dict_subscript",
+    "c15_list_subscript",
+    "c16_optional",
+    "c17_union",
+    "c18_pep604",
+    "c20_self_attr_init",
+    "c21_self_attr_class_annotation",
+    "c22_self_list_attr",
+    "c23_self_dict_attr",
+    "c24_tuple_unpack",
+    "c25_walrus",
+    "c26_comprehension",
+    "c27_setattr_const",
+    "c28_dunder_dict",
+    "c30_alias_then_helper",
+    "c31_dict_get",
+    "c32_items_loop",
+    "c33_values_loop",
+    "c34_enumerate",
+    "c35_iter_param",
+    "c36_nested_attr_write",
+    "c37_subclass_instance",
+    "c38_augassign",
+    "c39_del",
+    "r01_read",
+    "r02_read_loop",
+];
+
+/// Silent: an unannotated parameter or return (no class to go by), names computed at run
+/// time, and a lambda handed to `map` (its parameter has no type).
+const PROBE_SILENT: &[&str] = &[
+    "c02_unannotated_param",
+    "c05_untyped_return",
+    "c29_dunder_dict_const_name",
+    "c40_lambda_callback",
+];
+
+#[test]
+fn probe_shapes_through_items_of_containers() {
+    let p = project("probe_items");
+    for version in ["py311", "py312"] {
+        let found = names(&reported(
+            &p,
+            &["--target-version", version],
+            "pkg/cases.py",
+        ));
+        for name in PROBE_REPORTED {
+            assert!(
+                found.contains(*name),
+                "{name} not reported for {version}: {found:?}"
+            );
+        }
+        for name in PROBE_SILENT {
+            assert!(!found.contains(*name), "{name} reported for {version}");
+        }
+        // The comprehension writes inside its own scope (Python 3.11) or in the function
+        // (3.12): the report is the function's either way.
+        assert!(!found.iter().any(|q| q.contains("<listcomp>")), "{found:?}");
+    }
+}
+
+#[test]
+fn items_of_wrapping_builtins_displays_scopes_and_other_modules() {
+    let p = project("more_items");
+    for version in ["py311", "py312"] {
+        let found = names(&reported(&p, &["--target-version", version], "pkg/more.py"));
+        for name in [
+            "b_loop",
+            "zipped",
+            "reversed_sorted",
+            "chained",
+            "stepped",
+            "starred",
+            "appended",
+            "generated",
+            "listed",
+            "nested_views",
+            "shelved",
+            "varargs",
+            "nodes",
+        ] {
+            assert!(
+                found.contains(name),
+                "{name} not reported for {version}: {found:?}"
+            );
+        }
+        // A read; items of two classes; a starred target before the written one (its position
+        // is not trusted); items of `str`; an untyped parameter.
+        for name in ["e_read", "mixed", "shifted", "strings", "untyped"] {
+            assert!(!found.contains(name), "{name} reported for {version}");
+        }
+    }
+}
