@@ -326,6 +326,15 @@ def drain_then_iterate(n, c):
     return out, list(it)
 
 
+def drain_then_sum_reversed(n):
+    """A generator expression receives an iterator of the queue: not modelled."""
+    q = list(range(n))
+    out = []
+    while q:
+        out.append(q.pop(0))
+    return out, sum(x for x in reversed(q))
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -345,6 +354,7 @@ def main() -> int:
             run(fill_front, n),
             run(fill_front_with_comment, n),
             run(drain_then_iterate, n, n % 2),
+            run(drain_then_sum_reversed, n),
             run(fill_front_parenthesized, n),
             run(pop_parenthesized, n),
             run(drain_then_alias, items),

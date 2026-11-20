@@ -608,9 +608,11 @@ impl<'a> FnCtx<'a> {
     /// loop, a comprehension) yields that object's elements: an iterator *retaining* an object
     /// (`map(f, xs)`, a generator expression over `xs`) yields whatever its code produces.
     fn yielded_kinds(&self, st: &FrameState, it: VarId) -> Option<KindMask> {
-        let InstKind::MakeIter { iterable, .. } = self.def_inst(it)?.2.kind else {
-            return None;
-        };
+        // The IR makes every loop's iterator with `MakeIter`, whose one operand is the
+        // iterated object.
+        let (_, _, made) = self.def_inst(it)?;
+        let iterable =
+            matches!(made.kind, InstKind::MakeIter { .. }).then(|| made.kind.operands()[0])?;
         match self.iterable_elems(st, iterable) {
             ElemKinds::Known(m) => Some(m),
             ElemKinds::Unknown => None,
@@ -1589,14 +1591,20 @@ impl<'a> FnCtx<'a> {
     }
 
     /// Replay every reachable block once and collect each instruction's mutations.
+    /// Every reachable block with its entry state (`run` gave every block in RPO one on its
+    /// first pass).
+    pub(crate) fn entered_blocks<'s>(
+        &'s self,
+        an: &'s Analysis,
+    ) -> impl Iterator<Item = (BlockId, FrameState)> + 's {
+        self.rpo
+            .iter()
+            .filter_map(|&b| Some((b, an.block_in[b.0 as usize].clone()?)))
+    }
+
     pub(crate) fn mutations(&self, an: &Analysis) -> FxHashMap<(BlockId, usize), Allocs> {
         let mut out = FxHashMap::default();
-        // `run` gave every block in RPO an entry state on its first pass.
-        let entered = self
-            .rpo
-            .iter()
-            .filter_map(|&b| Some((b, an.block_in[b.0 as usize].clone()?)));
-        for (b, st) in entered {
+        for (b, st) in self.entered_blocks(an) {
             self.transfer_block(b, st, |i, _, eff| {
                 if !eff.mutated.is_empty() {
                     out.insert((b, i), eff.mutated.clone());
