@@ -9,6 +9,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Fixed
 
+- The source distribution carries the pages, changelog, and documentation generator its tests
+  read, so `cargo test --workspace` passes in the unpacked archive (the 0.1.1 release stopped
+  there before publishing to PyPI).
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.
