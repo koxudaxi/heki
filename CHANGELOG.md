@@ -9,6 +9,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Added
 
+- `call-owners` takes `subclasses = false`: a class target then means constructing exactly the
+  class, so raising a subclass of a guarded exception class is no `MUT204` report. `Class.method`
+  targets keep covering overrides.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of

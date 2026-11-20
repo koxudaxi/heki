@@ -2,9 +2,9 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargets, ContractTarget, SiteId, allows_fresh, group_texts, helper_changes_field,
-    initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
-    project_classes, site_callee, write_hits,
+    CallTargets, ContractTarget, SiteId, Subclasses, allows_fresh, group_texts,
+    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
+    parse_targets, patterns, project_classes, site_callee, write_hits,
 };
 use crate::opt_rules::Sizes;
 use crate::{
@@ -612,6 +612,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
                 &all_classes,
                 &b.call_targets,
                 "effect-boundaries.call-targets",
+                Subclasses::Covered,
             )?,
             allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
             note: b.message.as_deref(),

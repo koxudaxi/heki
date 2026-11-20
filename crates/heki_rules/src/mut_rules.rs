@@ -3115,5 +3115,5 @@ pub(crate) fn delegated_reports(
 mod call_owners;
 
 pub(crate) use call_owners::{
-    CallTargets, FunctionMatchers, group_texts, mut204, parse_call_targets, site_callee,
+    CallTargets, FunctionMatchers, Subclasses, group_texts, mut204, parse_call_targets, site_callee,
 };
