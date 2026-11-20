@@ -201,6 +201,12 @@ const ANNOUNCE_SILENT: &str =
     "from pkg.nodes import Index\n\n\ndef announce(index: Index):\n    return index\n";
 const GROW: &str = "from pkg.announce import announce\nfrom pkg.nodes import Index, Node, attach\n\n\ndef grow(index: Index, node: Node, kid):\n    node.kids.append(kid)\n    announce(index)\n\n\ndef adopt(index: Index, node: Node, kid):\n    attach(node, kid)\n    index.refresh()\n";
 const GROW_SILENT_ADOPT: &str = "from pkg.announce import announce\nfrom pkg.nodes import Index, Node, attach\n\n\ndef grow(index: Index, node: Node, kid):\n    node.kids.append(kid)\n    announce(index)\n\n\ndef adopt(index: Index, node: Node, kid):\n    attach(node, kid)\n";
+// A public writer two calls below the function that announces its change, each in its own module.
+const GRAFT: &str =
+    "from pkg.nodes import Node\n\n\ndef graft(node: Node, kid):\n    node.kids.append(kid)\n";
+const RELAY: &str = "from pkg.graft import graft\nfrom pkg.nodes import Node\n\n\ndef forward(node: Node, kid):\n    graft(node, kid)\n";
+const PLANTER: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n    index.refresh()\n";
+const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n";
 
 // Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
 // size-dependent rewrites that rely on them (`OPT110` builds a `set(...)`) are not proven.
@@ -291,6 +297,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/nodes.py", NODES),
         ("pkg/announce.py", ANNOUNCE),
         ("pkg/grow.py", GROW),
+        ("pkg/graft.py", GRAFT),
+        ("pkg/relay.py", RELAY),
+        ("pkg/planter.py", PLANTER),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -605,6 +614,16 @@ fn steps_mut202_mut109() -> Vec<Step> {
             vec![save("pkg/grow.py", GROW)],
         )
         .absent(&[("pkg/nodes.py", "MUT109")]),
+        Step::new(
+            "the caller two calls above a public writer stops announcing",
+            vec![save("pkg/planter.py", PLANTER_SILENT)],
+        )
+        .present(&[("pkg/graft.py", "MUT109")]),
+        Step::new(
+            "the distant caller announces again",
+            vec![save("pkg/planter.py", PLANTER)],
+        )
+        .absent(&[("pkg/graft.py", "MUT109")]),
     ]
 }
 

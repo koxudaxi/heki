@@ -100,6 +100,10 @@ pub struct UnmetWrite {
     pub kind: WriteKind,
     /// The write, or the call of the helper that passes it up, in the owner's file.
     pub span: Span,
+    /// The original write, in the file of the function that writes (the owner's own write:
+    /// `span`). With the writing function it identifies the violation site
+    /// (`Diagnostic::sites`).
+    pub origin: Span,
     /// Calls from the owner down to the function that writes (empty: the owner itself).
     pub via_chain: Vec<CallHop>,
     /// Where the written object comes from, as the owner sees it.
@@ -645,6 +649,7 @@ pub(crate) fn propagate_facts(
                 attr: w.attr.clone(),
                 kind: w.kind,
                 span: w.span,
+                origin: w.span,
                 via_chain: Vec::new(),
                 reach: w.reach,
             });
@@ -688,6 +693,7 @@ pub(crate) fn propagate_facts(
                     attr: u.attr.clone(),
                     kind: u.kind,
                     span: site.span,
+                    origin: u.origin,
                     via_chain,
                     reach,
                 });
@@ -723,6 +729,7 @@ fn shortest_chains(set: BTreeSet<UnmetWrite>) -> BTreeSet<UnmetWrite> {
             w.span,
             w.reach,
             w.via_chain.last().map(|h| h.callee.clone()),
+            w.origin,
         )
     };
     let mut all: Vec<UnmetWrite> = set.into_iter().collect();

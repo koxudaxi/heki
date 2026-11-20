@@ -9,7 +9,7 @@
 //! announced either), and a function every caller path of which announces the change after
 //! calling it (invalidation in bulk by a caller) is not reported.
 
-use super::{is_private, with_note};
+use super::{MergedReports, is_private, with_note};
 use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
 use heki_diagnostics::Diagnostic;
@@ -25,7 +25,13 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
     let sites = cx.sites_by_caller();
     let mut paths: Vec<_> = cx.index.files.keys().collect();
     paths.sort();
-    let mut seen = FxHashSet::default();
+    // Per contract: two contracts naming one target are two reports.
+    let mut merged: Vec<MergedReports<'_>> = cx
+        .config
+        .invalidation
+        .iter()
+        .map(|_| MergedReports::default())
+        .collect();
     for path in paths {
         let Some(unit) = cx.unit(path) else {
             continue;
@@ -59,35 +65,41 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                 let target = contract
                     .target(&classes, &u.attr)
                     .map_or_else(|| format!("{}.{}", u.class_qualname, u.attr), str::to_owned);
-                // One report per call or write, contract, and target.
-                if !seen.insert((key.clone(), u.span, u.contract, target.clone())) {
-                    continue;
-                }
+                // One report per call or write, contract, and target; it stands for every
+                // original write behind it (two writes of one helper are two sites).
+                let writer = u
+                    .via_chain
+                    .last()
+                    .map_or_else(|| key.fqn(), |h| h.callee.clone());
                 let via = u
                     .via_chain
                     .last()
                     .map(|h| format!(" via `{}`", h.callee))
                     .unwrap_or_default();
-                cx.emit(
-                    out,
-                    "MUT109",
+                merged[usize::from(u.contract)].add(
                     unit,
+                    key,
                     u.span,
-                    &key.qualname,
-                    target.clone(),
-                    with_note(
-                        format!(
-                            "`{}` writes `{target}` ({}){via} and returns on some path without calling an invalidator of `{}`",
-                            key.qualname,
-                            u.kind.as_str(),
-                            rule.name
-                        ),
-                        rule.message.as_deref(),
-                    ),
-                    &u.via_chain,
+                    &target,
+                    (writer, u.origin),
+                    || {
+                        with_note(
+                            format!(
+                                "`{}` writes `{target}` ({}){via} and returns on some path without calling an invalidator of `{}`",
+                                key.qualname,
+                                u.kind.as_str(),
+                                rule.name
+                            ),
+                            rule.message.as_deref(),
+                        )
+                    },
+                    || u.via_chain.clone(),
                 );
             }
         }
+    }
+    for m in merged {
+        m.emit(cx, "MUT109", out);
     }
     Ok(())
 }

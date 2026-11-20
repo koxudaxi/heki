@@ -308,6 +308,7 @@ impl EffectSummary {
             .into_iter()
             .map(|mut w| {
                 w.span = Span { start: 0, end: 0 };
+                w.origin = Span { start: 0, end: 0 };
                 for hop in &mut w.via_chain {
                     hop.span = Span { start: 0, end: 0 };
                 }

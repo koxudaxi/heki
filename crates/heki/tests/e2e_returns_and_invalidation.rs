@@ -914,6 +914,19 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
             ("`_write_twice` calls `pkg.passes._write`".to_owned(), 62),
         ]
     );
+    // One report at the call stands for both writes of the helper (two violation sites);
+    // every other report stands for one.
+    let sites: Vec<(&str, u64)> = diags
+        .iter()
+        .filter(|x| x.get("sites").is_some())
+        .map(|x| {
+            (
+                x["qualname"].as_str().unwrap(),
+                x["sites"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(sites, vec![("reset_twice", 2)], "{diags:#?}");
     // Without a contract the rule reports nothing.
     p.write("pyproject.toml", "[project]\nname = \"t\"\n");
     assert!(diagnostics(&p, &["--select", "MUT109"]).is_empty());
@@ -1018,5 +1031,47 @@ fn lsp_mut109_follows_a_helper_that_stops_announcing() {
     );
     save(&mut lsp, &p, "pkg/announce.py", 3, ANNOUNCE);
     lsp.diagnostics(&add, <[Value]>::is_empty);
+    lsp.stop(true);
+}
+
+const GRAFT: &str =
+    "from pkg.nodes import Node\n\n\ndef graft(node: Node, kid):\n    node.kids.append(kid)\n";
+const RELAY: &str = "from pkg.graft import graft\nfrom pkg.nodes import Node\n\n\ndef forward(node: Node, kid):\n    graft(node, kid)\n";
+const PLANTER: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n    index.refresh()\n";
+const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n";
+
+#[test]
+fn lsp_mut109_follows_a_distant_caller_that_stops_announcing() {
+    // Only an `invalidation` contract is configured: the walk over the callers above a writer
+    // alone makes the writer's file depend on every caller above it.
+    let p = Project::new("lsp_mut109_distant");
+    p.write("heki.toml", LSP_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/nodes.py", NODES)
+        .write("pkg/graft.py", GRAFT)
+        .write("pkg/relay.py", RELAY)
+        .write("pkg/planter.py", PLANTER);
+    let graft = uri(&p.dir.join("pkg/graft.py"));
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": {}}),
+    );
+    lsp.notify("initialized", json!({}));
+    lsp.ready();
+    lsp.open(&graft, GRAFT);
+    lsp.diagnostics(&graft, <[Value]>::is_empty);
+    // The function two calls above the public writer stops announcing the change: the writer
+    // is reported in its own file; announcing again clears the report.
+    lsp.open(&uri(&p.dir.join("pkg/planter.py")), PLANTER);
+    save(&mut lsp, &p, "pkg/planter.py", 2, PLANTER_SILENT);
+    let diags = lsp.diagnostics(&graft, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["MUT109"]);
+    assert_eq!(
+        diags[0]["range"]["start"],
+        json!({"line": 4, "character": 4})
+    );
+    save(&mut lsp, &p, "pkg/planter.py", 3, PLANTER);
+    lsp.diagnostics(&graft, <[Value]>::is_empty);
     lsp.stop(true);
 }
