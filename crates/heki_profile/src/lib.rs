@@ -128,8 +128,29 @@ fn column<'a>(table: &'a Value, name: &str) -> Result<&'a Vec<Value>, ProfileErr
         .ok_or_else(|| ProfileError::Parse(format!("gecko table without `{name}`")))
 }
 
-fn index(v: &Value) -> Option<usize> {
-    v.as_u64().and_then(|i| usize::try_from(i).ok())
+/// Entry `i` of a gecko table column as a row of a table of `len` rows: `Ok(None)` for `null`
+/// when `nullable`; anything else that is no row is an error (a dropped sample or an empty
+/// file name would silently change the shares).
+fn reference(
+    col: &[Value],
+    i: usize,
+    len: usize,
+    what: &str,
+    nullable: bool,
+) -> Result<Option<usize>, ProfileError> {
+    let bad = || ProfileError::Parse(format!("gecko `{what}` entry {i} refers to no row"));
+    match col.get(i) {
+        Some(Value::Null) if nullable => Ok(None),
+        Some(v) => {
+            let row = v
+                .as_u64()
+                .and_then(|r| usize::try_from(r).ok())
+                .filter(|r| *r < len)
+                .ok_or_else(bad)?;
+            Ok(Some(row))
+        }
+        None => Err(bad()),
+    }
 }
 
 /// Parse a Tachyon `--gecko` dump: `shared.stringArray`, and per thread `samples.stack`,
@@ -141,12 +162,14 @@ pub fn parse_gecko(text: &str) -> Result<ProfileData, ProfileError> {
         .pointer("/shared/stringArray")
         .and_then(Value::as_array)
         .ok_or_else(|| ProfileError::Parse("gecko dump without `shared.stringArray`".into()))?;
-    let string = |v: &Value| -> String {
-        index(v)
-            .and_then(|i| strings.get(i))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
+    // A file name may be unknown (`null`); a function name may not.
+    let string = |col: &[Value], i: usize, what: &str, nullable: bool| {
+        Ok::<_, ProfileError>(
+            reference(col, i, strings.len(), what, nullable)?
+                .and_then(|s| strings[s].as_str())
+                .unwrap_or_default()
+                .to_owned(),
+        )
     };
     let threads = root
         .get("threads")
@@ -170,28 +193,26 @@ pub fn parse_gecko(text: &str) -> Result<ProfileData, ProfileError> {
             column(func_t, "fileName")?,
         );
         let weights = samples.get("weight").and_then(Value::as_array);
-        for (i, s) in s_stack.iter().enumerate() {
+        for i in 0..s_stack.len() {
             let weight = weights
                 .and_then(|w| w.get(i))
                 .and_then(Value::as_u64)
                 .unwrap_or(1);
             let mut frames = Vec::new();
-            let mut cur = index(s);
-            let mut guard = 0;
+            let mut cur = reference(s_stack, i, st_frame.len(), "samples.stack", true)?;
             while let Some(si) = cur {
-                guard += 1;
-                if guard > st_frame.len() + 1 {
+                if frames.len() > st_frame.len() {
                     return Err(ProfileError::Parse("cyclic gecko stack table".into()));
                 }
-                let fi = st_frame.get(si).and_then(index);
-                let func = fi.and_then(|f| fr_func.get(f)).and_then(index);
-                if let Some(func) = func {
-                    frames.push((
-                        fn_file.get(func).map(string).unwrap_or_default(),
-                        fn_name.get(func).map(string).unwrap_or_default(),
-                    ));
-                }
-                cur = st_prefix.get(si).and_then(index);
+                let fi = reference(st_frame, si, fr_func.len(), "stackTable.frame", false)?
+                    .unwrap_or_default();
+                let func = reference(fr_func, fi, fn_name.len(), "frameTable.func", false)?
+                    .unwrap_or_default();
+                frames.push((
+                    string(fn_file, func, "funcTable.fileName", true)?,
+                    string(fn_name, func, "funcTable.name", false)?,
+                ));
+                cur = reference(st_prefix, si, st_frame.len(), "stackTable.prefix", true)?;
             }
             frames.reverse();
             stacks.push((frames, weight));
@@ -266,6 +287,30 @@ mod tests {
         assert!(!p.is_hot(Path::new("src/app.py"), "missing"));
         assert!(parse_collapsed("no-count\n").is_err());
         assert!(parse_collapsed("a;b x\n").is_err());
+    }
+
+    #[test]
+    fn gecko_references_to_missing_rows_are_an_error() {
+        let dump = |stack: &str, frame: &str, func: &str, name: &str, file: &str| {
+            format!(
+                r#"{{"threads": [{{"samples": {{"stack": [{stack}]}}, "stackTable": {{"frame": [{frame}], "prefix": [null]}}, "frameTable": {{"func": [{func}]}}, "funcTable": {{"name": [{name}], "fileName": [{file}]}}}}], "shared": {{"stringArray": ["f"]}}}}"#
+            )
+        };
+        for (d, what) in [
+            (dump("7", "0", "0", "0", "null"), "samples.stack"),
+            (dump("0", "3", "0", "0", "null"), "stackTable.frame"),
+            (dump("0", "null", "0", "0", "null"), "stackTable.frame"),
+            (dump("0", "0", "4", "0", "null"), "frameTable.func"),
+            (dump("0", "0", "0", "5", "null"), "funcTable.name"),
+            (dump("0", "0", "0", "0", "9"), "funcTable.fileName"),
+        ] {
+            assert!(
+                matches!(parse_gecko(&d), Err(ProfileError::Parse(m)) if m.contains(what)),
+                "{what}"
+            );
+        }
+        // An idle sample (`null` stack) and an unknown file (`null`) are no errors.
+        assert!(parse_gecko(&dump("null, 0", "0", "0", "0", "null")).is_ok());
     }
 
     #[test]

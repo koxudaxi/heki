@@ -27,3 +27,19 @@ fn profile_weights_that_overflow_are_a_malformed_dump() {
         "{stderr}"
     );
 }
+
+#[test]
+fn gecko_references_to_missing_rows_are_a_malformed_dump() {
+    let p = Project::new("prof_gecko_refs");
+    p.write("app.py", &format!("class A:\n{}", member_body("run")))
+        .write(
+            "p.json",
+            r#"{"threads": [{"samples": {"stack": [7]}, "stackTable": {"frame": [], "prefix": []}, "frameTable": {"func": []}, "funcTable": {"name": [], "fileName": []}}], "shared": {"stringArray": []}}"#,
+        );
+    let (code, _, stderr) = p.check(&["--profile", "p.json"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("gecko `samples.stack` entry 0 refers to no row"),
+        "{stderr}"
+    );
+}
