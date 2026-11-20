@@ -279,6 +279,15 @@ impl ScopeBuilder {
     }
 }
 
+/// What a module-scope binding makes a name, for `TYPE_CHECKING` guards.
+enum GuardBinding {
+    /// `typing.TYPE_CHECKING` itself, or `False`.
+    TypeChecking,
+    /// Any other imported name (a module whose `TYPE_CHECKING` attribute a guard may read).
+    Import,
+    Other,
+}
+
 struct Analyzer<'a> {
     profile: RuntimeProfile,
     lines: LineIndex,
@@ -292,6 +301,12 @@ struct Analyzer<'a> {
     imports: Vec<ModuleImport>,
     classes: Vec<ClassInfo>,
     in_type_checking: bool,
+    /// Module names holding `typing.TYPE_CHECKING` (`from typing import TYPE_CHECKING as TC`,
+    /// a re-export of it, or `TYPE_CHECKING = False`): false whenever the program runs.
+    type_checking_names: FxHashSet<String>,
+    /// Module names bound by an import, which `X.TYPE_CHECKING` guards read through
+    /// (`typing.TYPE_CHECKING`); a class attribute of that name is no guard.
+    imported_names: FxHashSet<String>,
     /// `from m import *` (only allowed at module level).
     has_star_import: bool,
     /// Target names of every PEP 709 inlined comprehension, by region index.
@@ -321,6 +336,8 @@ impl<'a> Analyzer<'a> {
             imports: Vec::new(),
             classes: Vec::new(),
             in_type_checking: false,
+            type_checking_names: FxHashSet::default(),
+            imported_names: FxHashSet::default(),
             has_star_import: false,
             comp_regions: Vec::new(),
             source,
@@ -446,6 +463,70 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Record what a module-scope statement binds `name` to, for the `TYPE_CHECKING` guards
+    /// later statements test.
+    fn note_guard_binding(&mut self, name: &str, binding: GuardBinding) {
+        if self.cur_scope_id() != ScopeId(0) {
+            return;
+        }
+        self.type_checking_names.remove(name);
+        self.imported_names.remove(name);
+        match binding {
+            GuardBinding::TypeChecking => {
+                self.type_checking_names.insert(name.to_owned());
+            }
+            GuardBinding::Import => {
+                self.imported_names.insert(name.to_owned());
+            }
+            GuardBinding::Other => {}
+        }
+    }
+
+    /// The value an `if` test has when the program runs, when it is a `TYPE_CHECKING` guard:
+    /// `TYPE_CHECKING` is false, `not TYPE_CHECKING` true.
+    fn runtime_guard_value(&self, test: &Expr) -> Option<bool> {
+        match test {
+            Expr::Name(n) => self
+                .type_checking_names
+                .contains(n.id.as_str())
+                .then_some(false),
+            Expr::Attribute(a) => (a.attr.as_str() == "TYPE_CHECKING"
+                && matches!(a.value.as_ref(), Expr::Name(m) if self.imported_names.contains(m.id.as_str())))
+            .then_some(false),
+            Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => {
+                self.runtime_guard_value(&u.operand).map(|v| !v)
+            }
+            _ => None,
+        }
+    }
+
+    /// The names an assignment binds, for [`Self::note_guard_binding`]: `TYPE_CHECKING = False`
+    /// holds the guard's run-time value.
+    fn note_assignment_guards(&mut self, target: &Expr, value: Option<&Expr>) {
+        match target {
+            Expr::Name(n) => {
+                let false_flag = n.id.as_str() == "TYPE_CHECKING"
+                    && matches!(value, Some(Expr::BooleanLiteral(b)) if !b.value);
+                let binding = if false_flag {
+                    GuardBinding::TypeChecking
+                } else {
+                    GuardBinding::Other
+                };
+                self.note_guard_binding(n.id.as_str(), binding);
+            }
+            Expr::Tuple(t) => t
+                .elts
+                .iter()
+                .for_each(|e| self.note_assignment_guards(e, None)),
+            Expr::List(l) => l
+                .elts
+                .iter()
+                .for_each(|e| self.note_assignment_guards(e, None)),
+            Expr::Starred(st) => self.note_assignment_guards(&st.value, None),
+            _ => {}
+        }
+    }
+
     fn visit_suite(&mut self, suite: &[Stmt]) {
         for stmt in suite {
             self.visit_stmt(stmt);
@@ -527,6 +608,7 @@ impl<'a> Analyzer<'a> {
             Stmt::Assign(assign) => {
                 for t in &assign.targets {
                     self.visit_expr(t);
+                    self.note_assignment_guards(t, Some(&assign.value));
                 }
                 self.visit_expr(&assign.value);
             }
@@ -546,6 +628,9 @@ impl<'a> Analyzer<'a> {
             }
             Stmt::AnnAssign(aa) => {
                 self.visit_ann_assign_target(aa);
+                if aa.value.is_some() {
+                    self.note_assignment_guards(&aa.target, aa.value.as_deref());
+                }
                 self.visit_variable_annotation(&aa.annotation);
                 if let Some(val) = &aa.value {
                     self.visit_expr(val);
@@ -563,19 +648,28 @@ impl<'a> Analyzer<'a> {
                 self.visit_suite(&w.orelse);
             }
             Stmt::If(if_stmt) => {
-                self.visit_expr(&if_stmt.test);
                 let prev_tc = self.in_type_checking;
-                if is_type_checking_expr(&if_stmt.test) {
-                    self.in_type_checking = true;
-                }
-                self.visit_suite(&if_stmt.body);
-                self.in_type_checking = prev_tc;
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.visit_expr(test);
+                // A clause runs only when every earlier test is false: after `not TYPE_CHECKING`
+                // (true at run time) no later clause does.
+                let mut reached_at_runtime = true;
+                let clauses = std::iter::once((Some(&*if_stmt.test), &if_stmt.body)).chain(
+                    if_stmt
+                        .elif_else_clauses
+                        .iter()
+                        .map(|c| (c.test.as_ref(), &c.body)),
+                );
+                for (test, body) in clauses {
+                    let value = test.and_then(|t| {
+                        self.visit_expr(t);
+                        self.runtime_guard_value(t)
+                    });
+                    self.in_type_checking = prev_tc || !reached_at_runtime || value == Some(false);
+                    self.visit_suite(body);
+                    if value == Some(true) {
+                        reached_at_runtime = false;
                     }
-                    self.visit_suite(&clause.body);
                 }
+                self.in_type_checking = prev_tc;
             }
             Stmt::With(w) => {
                 for item in &w.items {
@@ -644,6 +738,7 @@ impl<'a> Analyzer<'a> {
                         false,
                         imp.is_lazy,
                     );
+                    self.note_guard_binding(&bound, GuardBinding::Import);
                     self.imports.push(ModuleImport {
                         scope,
                         module: None,
@@ -677,6 +772,12 @@ impl<'a> Analyzer<'a> {
                         false,
                         imp.is_lazy,
                     );
+                    let binding = if alias.name.as_str() == "TYPE_CHECKING" {
+                        GuardBinding::TypeChecking
+                    } else {
+                        GuardBinding::Import
+                    };
+                    self.note_guard_binding(&bound, binding);
                     self.imports.push(ModuleImport {
                         scope,
                         module: module.clone(),
@@ -730,6 +831,7 @@ impl<'a> Analyzer<'a> {
             false,
             false,
         );
+        self.note_guard_binding(func.name.as_str(), GuardBinding::Other);
         if let Some(cid) = self.cur_class_body() {
             self.classes[cid.0 as usize]
                 .methods
@@ -793,6 +895,7 @@ impl<'a> Analyzer<'a> {
             false,
             false,
         );
+        self.note_guard_binding(cls.name.as_str(), GuardBinding::Other);
 
         let has_type_params = cls
             .type_params
@@ -1504,14 +1607,6 @@ fn collect_func_annotations(func: &ast::StmtFunctionDef) -> Vec<&Expr> {
         out.push(ret.as_ref());
     }
     out
-}
-
-fn is_type_checking_expr(expr: &Expr) -> bool {
-    match expr {
-        Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
-        Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
-        _ => false,
-    }
 }
 
 fn expr_dotted_name(expr: &Expr) -> Option<String> {

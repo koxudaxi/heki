@@ -173,3 +173,38 @@ fn an_alias_spelling_the_first_component_binds_the_submodule() {
     );
     assert_eq!(concise(&p), (0, String::new()));
 }
+
+/// Only what is `typing.TYPE_CHECKING` at run time guards type-only imports, on every clause
+/// of an `if` statement.
+#[test]
+fn type_checking_guards_resolve_to_the_typing_flag_on_every_clause() {
+    let p = Project::new("disc_type_checking");
+    let blocking_pause = "\n\nasync def go():\n    pause(1)\n";
+    // A class attribute that is true at run time: the import runs.
+    p.write(
+        "flags.py",
+        &format!("class Flags:\n    TYPE_CHECKING = True\n\n\nif Flags.TYPE_CHECKING:\n    from time import sleep as pause\n{blocking_pause}"),
+    )
+    // `elif typing.TYPE_CHECKING:` never runs: the `else` binds `pause`.
+    .write(
+        "elif_guard.py",
+        &format!("import sys\nimport typing\n\nif sys.version_info >= (9, 0):\n    pass\nelif typing.TYPE_CHECKING:\n    from time import sleep as pause\nelse:\n    def pause(n):\n        pass\n{blocking_pause}"),
+    )
+    // `else` of `not TYPE_CHECKING` is the type-only clause.
+    .write(
+        "negated.py",
+        &format!("from typing import TYPE_CHECKING as TC\n\nif not TC:\n    def pause(n):\n        pass\nelse:\n    from time import sleep as pause\n{blocking_pause}"),
+    )
+    // The `TYPE_CHECKING = False` fallback is a guard too.
+    .write(
+        "fallback.py",
+        &format!("try:\n    from typing import TYPE_CHECKING\nexcept ImportError:\n    TYPE_CHECKING = False\n\nif TYPE_CHECKING:\n    from time import sleep as pause\nelse:\n    def pause(n):\n        pass\n{blocking_pause}"),
+    );
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    let reported: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.split(':').next().unwrap())
+        .collect();
+    assert_eq!(reported, ["flags.py"], "{stdout}");
+}
