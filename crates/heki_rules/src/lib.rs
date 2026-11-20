@@ -676,12 +676,19 @@ impl<'a> CheckContext<'a> {
     }
 }
 
-/// Dotted-name pattern: a glob (`pkg.*.Model`, `*Store.*`) that also matches when it equals a
-/// dot-separated suffix of the name (`Model.fields` matches `pkg.model.Model.fields`).
+/// Whether a configured name uses glob syntax (`*`, `?`, `[...]`, `{a,b}`) rather than naming
+/// one thing literally.
+pub(crate) fn has_glob_syntax(text: &str) -> bool {
+    text.contains(['*', '?', '[', '{'])
+}
+
+/// Dotted-name pattern: a glob (`pkg.*.Model`, `*Store.*`, `Mode?.fields`) that matches the name
+/// or one of its dot-separated suffixes (`Model.fields` matches `pkg.model.Model.fields`).
 #[derive(Debug)]
 pub(crate) struct DottedPattern {
     text: String,
-    glob: GlobMatcher,
+    /// `None` for a literal name, compared as a string.
+    glob: Option<GlobMatcher>,
 }
 
 impl DottedPattern {
@@ -695,20 +702,21 @@ impl DottedPattern {
             .compile_matcher();
         Ok(Self {
             text: text.to_owned(),
-            glob,
+            glob: has_glob_syntax(text).then_some(glob),
         })
     }
 
     pub fn matches(&self, name: &str) -> bool {
-        self.glob.is_match(name)
-            || name == self.text
+        let Some(glob) = &self.glob else {
+            return name == self.text
+                || name
+                    .strip_suffix(self.text.as_str())
+                    .is_some_and(|head| head.ends_with('.'));
+        };
+        glob.is_match(name)
             || name
-                .strip_suffix(self.text.as_str())
-                .is_some_and(|head| head.ends_with('.'))
-            || self.text.contains('*')
-                && name
-                    .match_indices('.')
-                    .any(|(i, _)| self.glob.is_match(&name[i + 1..]))
+                .match_indices('.')
+                .any(|(i, _)| glob.is_match(&name[i + 1..]))
     }
 }
 
@@ -729,6 +737,15 @@ mod registry_tests {
         assert!(g.matches("Store.add_field"));
         assert!(g.matches("pkg.store.Store.add_field"));
         assert!(!g.matches("pkg.parser.parse"));
+        for (pattern, name) in [
+            ("Mode?.fields", "pkg.models.Model.fields"),
+            ("Model.[fg]ields", "pkg.models.Model.fields"),
+            ("Model.{fields,items}", "pkg.models.Model.items"),
+        ] {
+            let p = DottedPattern::new(pattern, "test").unwrap();
+            assert!(p.matches(name), "{pattern} {name}");
+            assert!(!p.matches("pkg.models.Model.other"), "{pattern}");
+        }
     }
 
     #[test]

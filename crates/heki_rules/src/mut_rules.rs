@@ -1,7 +1,9 @@
 //! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT201`,
 //! `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
-use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
+use crate::{
+    CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
+};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
@@ -600,7 +602,7 @@ impl Allowance {
             targets: Vec::new(),
         };
         for e in keys.exempt.0 {
-            if e.contains(['.', '*', '?', '[', '{']) {
+            if e.contains('.') || has_glob_syntax(e) {
                 out.allowed.push(DottedPattern::new(e, keys.exempt.1)?);
             } else {
                 out.exempt_names.insert(e.clone());

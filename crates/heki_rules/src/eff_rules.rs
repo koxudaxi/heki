@@ -6,7 +6,9 @@ use crate::mut_rules::{
     parse_targets, patterns, project_classes, site_callee, with_note,
 };
 use crate::opt_rules::Sizes;
-use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
+use crate::{
+    CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
+};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::guards::loop_bit;
@@ -564,7 +566,7 @@ fn note<K: Ord>(
 /// writes to a subclass instance keep the class the configuration names.
 fn undeclared_text(entry: &str, attr: &str) -> String {
     match entry.rsplit_once('.') {
-        Some((class, pattern)) if pattern.contains(['*', '?', '[', '{']) => {
+        Some((class, pattern)) if has_glob_syntax(pattern) => {
             format!("{class}.{attr}")
         }
         _ => entry.to_owned(),
