@@ -415,11 +415,15 @@ pub(crate) fn parse_call_targets(
     // The classes each target names, found class by class.
     let mut constructors: FxHashMap<String, Vec<usize>> = FxHashMap::default();
     for class in all_classes {
+        let naming = functions.naming_class(class);
+        if naming.is_empty() {
+            continue;
+        }
         let subclasses_of = match subclasses {
             Subclasses::Covered => cx.decls.subclasses_of(class),
             Subclasses::Excluded => Vec::new(),
         };
-        for i in functions.naming_class(class) {
+        for i in naming {
             for named in std::iter::once(class.clone()).chain(subclasses_of.iter().cloned()) {
                 patterns[i].family.insert(named.clone());
                 constructors.entry(named).or_default().push(i);
