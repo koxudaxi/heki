@@ -3347,6 +3347,59 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// The fully qualified name the import at `span` binds.
+    /// The string constant `var` holds (through copies; `def` gives each variable's defining
+    /// instruction, `types` the inferred values): a string literal, or a module-level `Final`
+    /// string constant of this module or of another project module (`KEY`, `keys.KEY`,
+    /// `from pkg.keys import KEY`). The one resolution of the attribute names and keys every
+    /// rule follows (`self.__dict__.pop(TOTAL)`, `setattr(obj, KEY, v)`, `obj.__dict__[KEY]`).
+    pub(crate) fn str_constant_with<'i>(
+        &self,
+        var: VarId,
+        def: &dyn Fn(VarId) -> Option<&'i Inst>,
+        types: &FxHashMap<VarId, Val>,
+    ) -> Option<String> {
+        let mut cur = var;
+        for _ in 0..16 {
+            let inst = def(cur)?;
+            match &inst.kind {
+                InstKind::Const {
+                    literal: ConstLiteral::Str(s),
+                    ..
+                } => return Some(s.clone()),
+                InstKind::Copy { src, .. } => cur = *src,
+                InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+                    return self.global_str(name).map(str::to_owned);
+                }
+                // A module body reads an imported name as a copy of its `Import`.
+                InstKind::Import { .. } => {
+                    let fqn = self.import_target(inst.span)?;
+                    return self.project.str_constant(fqn).map(str::to_owned);
+                }
+                InstKind::AttrLoad { obj, attr, .. } => {
+                    let Some(Val::Ref(module)) = types.get(obj) else {
+                        return None;
+                    };
+                    return self
+                        .project
+                        .str_constant(&format!("{module}.{attr}"))
+                        .map(str::to_owned);
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// [`Self::str_constant_with`] in `f`, whose variables have the inferred values `types`.
+    pub fn str_constant_in(
+        &self,
+        f: &IrFunction,
+        var: VarId,
+        types: &FxHashMap<VarId, Val>,
+    ) -> Option<String> {
+        self.str_constant_with(var, &|v| f.def_inst(v).map(|(_, inst)| inst), types)
+    }
+
     pub(crate) fn import_target(&self, span: Span) -> Option<&str> {
         self.import_by_span.get(&span).map(String::as_str)
     }

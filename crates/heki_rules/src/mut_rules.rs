@@ -336,7 +336,15 @@ impl CacheEvents {
                     _ => None,
                 }),
         );
-        let names_prop = |v: &VarId| f.const_str(*v) == Some(prop);
+        // A key naming the property: a string literal or a `Final` string constant.
+        let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+        let types = std::cell::OnceCell::new();
+        let names_prop = |v: &VarId| {
+            f.const_str(*v) == Some(prop)
+                || tcx
+                    .str_constant_in(f, *v, types.get_or_init(|| tcx.infer(f)))
+                    .is_some_and(|k| k == prop)
+        };
         let key = CheckContext::key(unit, f);
         let file = cx.index.files.get(&unit.input.path);
         // What the `self` calls at `span` do to the property: `(invalidate, read)`.

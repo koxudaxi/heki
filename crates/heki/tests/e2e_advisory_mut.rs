@@ -667,3 +667,42 @@ fn mut202_follows_a_call_on_a_narrowed_receiver() {
         "{diags:#?}"
     );
 }
+
+/// A `Final` string constant names the cached property a method removes from `self.__dict__`,
+/// as for the contracts.
+#[test]
+fn mut101_follows_final_constants_naming_the_property() {
+    let p = Project::new("mut101_final_keys");
+    p.write(
+        "cart.py",
+        r#"from functools import cached_property
+from typing import Final
+
+TOTAL: Final = "total"
+OTHER: Final = "other"
+
+
+class Cart:
+    def __init__(self):
+        self.items = []
+
+    @cached_property
+    def total(self):
+        return len(self.items)
+
+    def reset(self):
+        self.items = []
+        self.__dict__.pop(TOTAL, None)
+
+    def reset_other(self):
+        self.items = []
+        self.__dict__.pop(OTHER, None)
+
+    def clear(self):
+        self.items = []
+        del self.__dict__[TOTAL]
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "MUT101"]);
+    assert_eq!(found(&diags), vec![d("cart.py", 21, "MUT101", "Cart.reset_other")]);
+}

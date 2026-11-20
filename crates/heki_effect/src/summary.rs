@@ -21,8 +21,8 @@ use crate::{
 };
 use heki_ast::Span;
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
-    InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
+    IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1148,40 +1148,10 @@ impl<'a> Extractor<'a> {
         (field != 0 || !classes.is_empty()).then(|| Box::new(ArgTargets { field, classes }))
     }
 
-    /// String constant behind `var` (through `Copy`): a string literal, or, for contract
-    /// rules ([`Contracts::ownership`]), a module-level `Final` string constant of this
-    /// module or of another project module (`KEY`, `keys.KEY`, `from pkg.keys import KEY`).
+    /// The string constant behind `var` ([`TypeCtx::str_constant_with`]).
     fn const_str(&self, var: VarId) -> Option<String> {
-        let mut cur = var;
-        for _ in 0..16 {
-            match &self.defs.get(&cur)?.kind {
-                InstKind::Const {
-                    literal: ConstLiteral::Str(s),
-                    ..
-                } => return Some(s.clone()),
-                InstKind::Copy { src, .. } => cur = *src,
-                // Only contract rules name attributes and keys by constants.
-                _ if !self.ownership => return None,
-                InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                    return self.cx.global_str(name).map(str::to_owned);
-                }
-                // A module body reads an imported name as a copy of its `Import`.
-                InstKind::Import { .. } => {
-                    let fqn = self.import_fqn(cur)?;
-                    return self.cx.project.str_constant(fqn).map(str::to_owned);
-                }
-                InstKind::AttrLoad { obj, attr, .. } => {
-                    let module = self.ref_of(*obj)?;
-                    return self
-                        .cx
-                        .project
-                        .str_constant(&format!("{module}.{attr}"))
-                        .map(str::to_owned);
-                }
-                _ => return None,
-            }
-        }
-        None
+        self.cx
+            .str_constant_with(var, &|v| self.defs.get(&v).copied(), &self.types)
     }
 
     /// `MUT202` derivations of a call's result from its receiver and from its first argument
@@ -1232,19 +1202,6 @@ impl<'a> Extractor<'a> {
             out.push((*a, d));
         }
         out
-    }
-
-    /// The fully qualified name `var` refers to (a module, a class, a function).
-    fn ref_of(&self, var: VarId) -> Option<&str> {
-        match self.types.get(&var)? {
-            Val::Ref(fqn) => Some(fqn),
-            _ => None,
-        }
-    }
-
-    /// What the `Import` defining `var` binds (its type is the imported value's).
-    fn import_fqn(&self, var: VarId) -> Option<&str> {
-        self.cx.import_target(self.defs.get(&var)?.span)
     }
 
     /// [`Self::pos`] as the construction recorder counts positions.
