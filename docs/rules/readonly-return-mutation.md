@@ -2,7 +2,7 @@
 
 # readonly-return-mutation (MUT202)
 
-Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
 
 Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.
 

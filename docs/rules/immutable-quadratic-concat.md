@@ -2,7 +2,7 @@
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
+Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · No automatic fix
 
 Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
 

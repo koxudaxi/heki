@@ -2,7 +2,7 @@
 
 # list-quadratic-concat (OPT101)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Safe fix (`--fix`)
 
 Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).
 

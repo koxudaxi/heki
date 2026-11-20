@@ -107,7 +107,7 @@ supported version that every clause admits:
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"error"` for every rule | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
+| `severity` | `"warning"` for the `OPT` rules, `"error"` for the others | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix

@@ -2,7 +2,7 @@
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
 

@@ -2,7 +2,7 @@
 
 # hash-attr-mutation (MUT107)
 
-Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
 
 Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).
 

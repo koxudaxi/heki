@@ -2,7 +2,7 @@
 
 # loop-db-query (EFF103)
 
-Family: Execution Effects (EFF) · Enabled by default · No automatic fix
+Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
 
 Explicit DB query / external RPC executed inside a loop (N+1).
 

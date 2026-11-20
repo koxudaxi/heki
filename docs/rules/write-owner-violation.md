@@ -2,7 +2,7 @@
 
 # write-owner-violation (MUT201)
 
-Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
 
 Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.
 
