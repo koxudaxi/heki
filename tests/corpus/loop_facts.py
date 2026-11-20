@@ -191,3 +191,34 @@ def cap_starred(read, parts):
     buf = b""
     while len(*parts) < 10:
         buf += read()
+
+
+def shadowed_range(range):
+    for _ in range(1):
+        pass
+
+
+def grown_constructor(items):
+    xs = list("a")
+    xs.extend(items)
+    for x in xs:
+        pass
+
+
+def ungrown_constructor():
+    xs = list("ab")
+    for x in xs:
+        pass
+
+
+def returned_alias(items):
+    xs = []
+    other = min(xs, xs)
+    other.extend(items)
+    for x in xs:
+        pass
+
+
+def generator_over_range():
+    return sum(1 for _ in range(3))
+

@@ -405,3 +405,46 @@ fn a_length_cap_beyond_i64_is_no_cap() {
     let ir = dump_ir("ir_huge_len_cap", src, "py315");
     assert!(function(&ir, "f")["loops"][0].get("len_caps").is_none());
 }
+
+// ============================================================================ loop sizes
+
+#[test]
+fn a_loop_is_fixed_only_when_the_code_fixes_its_iterable() {
+    let src = "\
+import httpx
+
+
+def shadowed_range(range):
+    for _ in range(1):
+        httpx.Client()
+
+
+def builtin_range():
+    for _ in range(1):
+        httpx.Client()
+
+
+def grown_constructor(items):
+    xs = list(\"a\")
+    xs.extend(items)
+    for x in xs:
+        httpx.Client()
+
+
+def returned_alias(items):
+    xs = []
+    other = min(xs, xs)
+    other.extend(items)
+    for x in xs:
+        httpx.Client()
+
+";
+    assert_eq!(
+        reports("ir_loop_sizes", src, "EFF102"),
+        pairs(&[
+            ("shadowed_range", "EFF102"),
+            ("grown_constructor", "EFF102"),
+            ("returned_alias", "EFF102"),
+        ])
+    );
+}

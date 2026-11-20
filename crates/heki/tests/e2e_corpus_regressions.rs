@@ -922,6 +922,14 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
         ("deep_copies", unbounded.clone()),
         ("deep_ints", unbounded.clone()),
         ("deep_display", small(1)),
+        // A parameter named `range` is not the builtin; a constructor's result that grows,
+        // or a container `min` returns and something grows, holds more than its input.
+        ("shadowed_range", unbounded.clone()),
+        ("grown_constructor", unbounded.clone()),
+        ("ungrown_constructor", small(2)),
+        ("returned_alias", unbounded.clone()),
+        // A generator expression's loop runs over the iterable its creator passed it.
+        ("generator_over_range.<locals>.<genexpr>", small(3)),
     ];
     let functions = ir["functions"].as_array().unwrap();
     let loop_of = |name: &str| -> &Value {

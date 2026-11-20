@@ -406,10 +406,10 @@ impl<'a> FnIndex<'a> {
                     }
                 }
                 for inst in &bb.insts {
-                    if let InstKind::Copy { dst, src } = &inst.kind
-                        && alias.contains(src)
+                    if let Some((dst, sources)) = self.alias_of_operands(inst)
+                        && sources.iter().any(|x| alias.contains(x))
                     {
-                        alias.insert(*dst);
+                        alias.insert(dst);
                     }
                 }
             }
@@ -443,6 +443,24 @@ impl<'a> FnIndex<'a> {
             }
         }
         false
+    }
+
+    /// The result of `inst` when it may be one of the objects of some of its operands: a
+    /// copy, or `min` / `max` of several arguments, which returns one of them.
+    fn alias_of_operands<'i>(&self, inst: &'i Inst) -> Option<(VarId, &'i [VarId])> {
+        match &inst.kind {
+            InstKind::Copy { dst, src } => Some((*dst, std::slice::from_ref(src))),
+            InstKind::Call {
+                dst,
+                callee_var,
+                callee,
+                args,
+                ..
+            } if matches!(self.builtin(*callee_var, callee), Some("min" | "max")) => {
+                Some((*dst, args))
+            }
+            _ => None,
+        }
     }
 
     /// Push the operands of `inst` that it may grow or hand to code that may grow them
@@ -612,10 +630,10 @@ impl<'a> FnIndex<'a> {
                     }
                 }
                 for inst in &bb.insts {
-                    if let InstKind::Copy { dst, src } = &inst.kind
-                        && grown.contains(dst)
+                    if let Some((dst, sources)) = self.alias_of_operands(inst)
+                        && grown.contains(&dst)
                     {
-                        grown.insert(*src);
+                        grown.extend(sources);
                     }
                 }
             }
@@ -683,9 +701,11 @@ impl<'a> FnIndex<'a> {
                         self.iter_bound_depth(plain(0)?, leaf, depth + 1)
                     }
                     "sorted" if args.len() == 1 && keywords(&["key", "reverse"]) => {
+                        self.not_grown(*dst, "sorted")?;
                         self.iter_bound_depth(plain(0)?, leaf, depth + 1)
                     }
                     n if SAME_ITEMS.contains(&n) && args.len() == 1 && kwargs.is_empty() => {
+                        self.not_grown(*dst, n)?;
                         self.iter_bound_depth(plain(0)?, leaf, depth + 1)
                     }
                     "map" | "filter" if args.len() == 2 && kwargs.is_empty() => {
@@ -715,6 +735,20 @@ impl<'a> FnIndex<'a> {
             }
             _ => None,
         }
+    }
+
+    /// `Some` unless `built`, the result of the builtin `constructor`, is a new mutable
+    /// container that something may grow (`xs = list(src)` then `xs.extend(more)`): its
+    /// items are then no longer its input's.
+    fn not_grown(&self, built: VarId, constructor: &str) -> Option<()> {
+        let kind = match constructor {
+            "list" | "sorted" => BuiltinKind::List,
+            "set" => BuiltinKind::Set,
+            "dict" => BuiltinKind::Dict,
+            // Immutable, or an iterator over its input.
+            _ => return Some(()),
+        };
+        (!self.grows(&[built], &[kind], None)).then_some(())
     }
 
     /// The value of an integer expression the code fixes: a literal, a module constant, or
@@ -996,6 +1030,40 @@ pub(crate) fn module_constants(
     out
 }
 
+/// The functions that receive their first iterable from the function creating them (a
+/// generator expression, a comprehension before 3.12): that creator and the iterable.
+fn passed_iterables(functions: &[IrFunction]) -> FxHashMap<FunctionId, (FunctionId, VarId)> {
+    let mut out = FxHashMap::default();
+    for f in functions {
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            match &inst.kind {
+                InstKind::MakeGenExpr {
+                    func_id: Some(child),
+                    outer_iter,
+                    ..
+                } => {
+                    out.insert(*child, (f.id, *outer_iter));
+                }
+                InstKind::Call {
+                    callee_var: None,
+                    callee,
+                    args,
+                    ..
+                } => {
+                    if let (Some(id), Some(first)) = (
+                        callee.strip_prefix("__comp_").and_then(|n| n.parse().ok()),
+                        args.first(),
+                    ) {
+                        out.insert(FunctionId(id), (f.id, *first));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// Refine every loop's [`LoopBound`] and [`NaturalLoop::len_caps`] once the whole module is
 /// lowered: names and module constants bound to small displays, `range` of constant
 /// expressions, and builtin wrappers become fixed trip counts.
@@ -1006,9 +1074,18 @@ pub(crate) fn refine_loops(
     last_star_import: Option<u32>,
 ) -> ModuleConstants {
     let constants = module_constants(functions, module_fn, last_star_import);
+    let passed_iterables = passed_iterables(functions);
     let mut updates: Vec<(usize, usize, LoopBound, Vec<LenCap>)> = Vec::new();
     for (fid, loop_hints) in hints {
         let f = &functions[fid.0 as usize];
+        // The iterable a generator expression or a comprehension function receives as `.0`
+        // is bounded where its creator evaluated it.
+        let passed_bound = |it: VarId| {
+            let &(creator, iterable) = passed_iterables.get(fid)?;
+            (f.var_name(it) == Some(".0")).then_some(())?;
+            FnIndex::new(&functions[creator.0 as usize], &constants)
+                .iter_bound(iterable, &mut |_| None)
+        };
         let needs = f
             .loops
             .iter()
@@ -1021,9 +1098,10 @@ pub(crate) fn refine_loops(
         for (li, (lp, hint)) in f.loops.iter().zip(loop_hints).enumerate() {
             let mut bound = lp.bound;
             if bound == LoopBound::Unbounded
-                && let Some(n) = ix
-                    .loop_iterable(lp)
-                    .and_then(|it| ix.iter_bound(it, &mut |_| None))
+                && let Some(n) = ix.loop_iterable(lp).and_then(|it| {
+                    ix.iter_bound(it, &mut |_| None)
+                        .or_else(|| passed_bound(it))
+                })
             {
                 bound = if hint.retry_body {
                     LoopBound::RetryPattern

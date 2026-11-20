@@ -3544,33 +3544,14 @@ fn fixed_display(elts: &[Expr]) -> Option<LoopBound> {
         .then_some(LoopBound::ConstSmall(elts.len() as u32))
 }
 
+/// The bound a `for` iterable's syntax fixes: a small display. Everything a name decides
+/// (`range(...)`, which a local or a module may rebind, a name bound to a display, a builtin
+/// wrapper) is left to [`crate::facts::refine_loops`], which resolves the names.
 fn classify_iter_expr_bound(iter: &Expr) -> LoopBound {
     match iter {
         Expr::Tuple(t) => fixed_display(&t.elts).unwrap_or(LoopBound::Unbounded),
         Expr::List(l) => fixed_display(&l.elts).unwrap_or(LoopBound::Unbounded),
         Expr::Set(s) => fixed_display(&s.elts).unwrap_or(LoopBound::Unbounded),
-        Expr::Call(c) => {
-            if matches!(c.func.as_ref(), Expr::Name(n) if n.id.as_str() == "range") {
-                if c.arguments.args.len() == 1 {
-                    if let Some(k) = extract_const_int(&c.arguments.args[0])
-                        && (0..=8).contains(&k)
-                    {
-                        return LoopBound::ConstSmall(k as u32);
-                    }
-                } else if c.arguments.args.len() == 2
-                    && let (Some(lo), Some(hi)) = (
-                        extract_const_int(&c.arguments.args[0]),
-                        extract_const_int(&c.arguments.args[1]),
-                    )
-                {
-                    let span = hi.saturating_sub(lo);
-                    if (0..=8).contains(&span) {
-                        return LoopBound::ConstSmall(span as u32);
-                    }
-                }
-            }
-            LoopBound::Unbounded
-        }
         _ => LoopBound::Unbounded,
     }
 }
