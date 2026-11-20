@@ -391,14 +391,20 @@ Two more cases stay quiet by design:
 - A branch the caller's arguments switch off is not followed: `load(name, cache=False)` does not
   reach the request under `if cache:`.
 - A client or query created only while an attribute is unset counts once per object, not once
-  per loop iteration.
+  per loop iteration, and so does a `functools.cached_property` getter; one created only while
+  a module global or a local variable the loop carries is unset (or a first-iteration flag
+  holds), or right before the loop ends (`break`, `return`, `raise`), counts once per loop.
+- A blocking wait on a `concurrent.futures.Future` known to be done (`if f.done():`, after
+  `await asyncio.wrap_future(f)`) returns at once.
 
 A function whose model would pass its size budget (4 units per byte of its source, at most
 50,000; real code stays below one unit per byte) is left unmodeled: heki rewrites nothing in it
 and treats its body as one call it cannot resolve. `heki assumptions` lists it with the hazard
 `unmodeled`. A function whose proof state (a fact per variable per block) would pass 8 cells per
 byte of its source, at most 250,000, gets no `OPT` finding: heki does not try to prove a rewrite
-in it.
+in it. A function whose lazy initializations (the blocks each covers, and the walks that find
+them) would take more than 8 cells per byte of its source, at most 250,000, has none of them
+recognized: its clients and queries count as made on every iteration.
 
 Missed findings close as heki learns more:
 
@@ -487,7 +493,11 @@ A generator's body runs where it is iterated:
   builtin classes.
 - **Not followed:** `a or b` (no guard on either value), and `isinstance` with project classes or
   annotated types.
-- A lazy initialization needs a direct test and the store in the function itself.
+- A lazy initialization needs a direct test and the store in the function itself: a test in a
+  caller of the method that stores, a test combined with `or` / `and`, and memos keyed by an
+  argument (`@lru_cache`, a dict) are not followed.
+- A future is known to be done only through `f.done()` and `await asyncio.wrap_future(f)`, not
+  through an event or another future its done callback sets.
 - `EFF201` does not use guards.
 - An object a factory function returns counts as obtained once, like a pooled connection.
 
@@ -2180,8 +2190,10 @@ follows these rules:
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without
 it, checked against a time limit: comparisons sharing an operand thirty deep, many `match`
 statements of slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many
-`continue`s and `isinstance` tests, a long chain of assignments a loop carries, and task factories
-at the end of a long chain of copies.
+`continue`s and `isinstance` tests, a long chain of assignments a loop carries, many loops one
+after another, each with a lazy initialization (the blocks each covers count toward a budget
+proportional to the source), many waits on one future before many `await`s of it, and task
+factories at the end of a long chain of copies.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -2392,7 +2404,10 @@ waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.jo
 `queue.Queue.get()` / `put()`, `Future.result()`, `concurrent.futures.wait()`; a zero timeout or
 `blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
 on its own flag parameter and its caller passes `False`: `close(wait=False)` over
-`shutdown(wait=wait)`). A function SQLAlchemy's
+`shutdown(wait=wait)`; so does `result()` / `exception()` of a `concurrent.futures.Future` known
+to be done: under `if f.done():` (also after `if not f.done(): return`, a `while not f.done():`
+poll, or with `and`), or once `await asyncio.wrap_future(f)` has returned, on every path to the
+call). A function SQLAlchemy's
 `AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
 its database I/O through the session or connection it receives is awaited for it, its other
 blocking calls are reported. Where an argument decides what a library call does, a literal
@@ -3552,9 +3567,13 @@ display; see `EFF102`).
 
 As for `EFF102`, a query that only runs while an attribute is unset, which the code then sets
 (`if self._columns is None: self._columns = cursor.execute(...)`), runs once per object and is
-not reported when the loop does not construct the object; a call whose arguments switch off
-the branch with the query (a constant, a literal default, a test the caller has made) is not
-followed into it.
+not reported when the loop does not construct the object; so does one in a
+`functools.cached_property` getter, and one behind a module global runs once per process. A
+query that only runs while a local variable the loop carries is unset or a first-iteration flag
+holds (`if first: cursor.execute(...); first = False`), or that every way on from leaves the
+loop (`cursor.execute(...)` followed by `return`, `break`, or `raise`), runs once per run of the
+loop. A call whose arguments switch off the branch with the query (a constant, a literal
+default, a test the caller has made) is not followed into it.
 
 ## Why is this bad?
 One round trip per item makes the run time grow with the number of rows and with the network
@@ -3868,7 +3887,19 @@ initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: 
 before connecting), is created once per object, not on every iteration: the call is not
 reported unless a data-sized loop around it constructs the object in each iteration
 (`Connection().send(cmd)`); `conn.send(cmd)` on a connection made before the loop, taken from
-a pool, or held by the receiver is not reported.
+a pool, or held by the receiver is not reported. A `functools.cached_property` getter (also
+imported through a module that re-exports it, such as `kombu.utils.cached_property`) runs once
+per instance in the same way, and a lazy initialization of a module global (`global _session`)
+once per process.
+
+A client created only while a local variable the loop carries is unset (`if conn is None: conn
+= connect()`, `conn = conn or connect()`), or only while a first-iteration flag holds (`if
+first: ...; first = False`), is created once per run of the loop, and so is one created where
+every way on leaves the loop (`return s.get(url)`, `connect(); break`, `raise` after it). Still
+reported: a variable or flag set back in the loop (also by an `except` handler), or set there to
+a value the branch does not compute (`prev = row`, which may be `None`), a global the function
+also sets back to `None` (before the test, or after the initialization), a branch that does not always set it, a loop around that starts it unset again in each iteration, and a `break` out of
+an inner loop, which runs again in each iteration of the outer one.
 
 A call whose arguments switch off the branch that creates the client is not followed into
 it: `load(name, cache=False)` does not reach the `urlopen` under `if cache:` in `load`. This

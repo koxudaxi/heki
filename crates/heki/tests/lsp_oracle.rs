@@ -122,6 +122,10 @@ const GUARD_DEFAULT_USE: &str =
     "from pkg.guard_net import fetch\n\n\ndef sync(urls):\n    for u in urls:\n        fetch(u)\n";
 const GUARD_CONN: &str = "from urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    def send(self):\n        self._sock = urlopen(\"https://example.com\")\n";
 const GUARD_CONN_USE: &str = "from pkg.guard_conn import Conn\n\n\ndef run(c: Conn, xs):\n    for x in xs:\n        c.send()\n";
+const GUARD_GLOBAL: &str = "from urllib.request import urlopen\n\n_conn = None\n\n\ndef conn():\n    global _conn\n    _conn = urlopen(\"https://example.com\")\n    return _conn\n";
+const GUARD_GLOBAL_USE: &str =
+    "from pkg.guard_global import conn\n\n\ndef run(xs):\n    for x in xs:\n        conn()\n";
+const GUARD_CONN_CACHED: &str = "from functools import cached_property\nfrom urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    @cached_property\n    def sock(self):\n        return urlopen(\"https://example.com\")\n\n    def send(self):\n        return self.sock\n";
 
 // Contracts: private helpers writing / reading guarded attributes report themselves without
 // callers, nothing when only allowed functions call them, and at a non-allowed caller.
@@ -427,6 +431,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/guard_default_use.py", GUARD_DEFAULT_USE),
         ("pkg/guard_conn.py", GUARD_CONN),
         ("pkg/guard_conn_use.py", GUARD_CONN_USE),
+        ("pkg/guard_global.py", GUARD_GLOBAL),
+        ("pkg/guard_global_use.py", GUARD_GLOBAL_USE),
         ("pkg/model.py", MODEL),
         ("pkg/ops.py", OPS),
         ("pkg/store.py", STORE),
@@ -1451,6 +1457,7 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_use.py", "EFF102"),
             ("pkg/guard_default_use.py", "EFF102"),
             ("pkg/guard_conn_use.py", "EFF102"),
+            ("pkg/guard_global_use.py", "EFF102"),
             ("pkg/fill.py", "MUT201"),
             ("pkg/fill_main.py", "MUT201"),
             ("pkg/views.py", "MUT201"),
@@ -1566,10 +1573,39 @@ fn steps() -> Vec<Step> {
         )
         .absent(&[("pkg/guard_conn_use.py", "EFF102")]),
         Step::new(
+            "the connection class connects in a cached property",
+            vec![save("pkg/guard_conn.py", GUARD_CONN_CACHED)],
+        )
+        .absent(&[("pkg/guard_conn_use.py", "EFF102")]),
+        Step::new(
+            "the cached property becomes a plain property",
+            vec![save(
+                "pkg/guard_conn.py",
+                &GUARD_CONN_CACHED.replace("@cached_property", "@property"),
+            )],
+        )
+        .present(&[("pkg/guard_conn_use.py", "EFF102")]),
+        Step::new(
             "the connection class connects on every call again",
             vec![save("pkg/guard_conn.py", GUARD_CONN)],
         )
         .present(&[("pkg/guard_conn_use.py", "EFF102")]),
+        Step::new(
+            "a helper in another file keeps its connection in a module global",
+            vec![save(
+                "pkg/guard_global.py",
+                &GUARD_GLOBAL.replace(
+                    "    _conn = urlopen",
+                    "    if _conn is None:\n        _conn = urlopen",
+                ),
+            )],
+        )
+        .absent(&[("pkg/guard_global_use.py", "EFF102")]),
+        Step::new(
+            "the helper connects on every call again",
+            vec![save("pkg/guard_global.py", GUARD_GLOBAL)],
+        )
+        .present(&[("pkg/guard_global_use.py", "EFF102")]),
     ];
     // 4. `MUT108`, `MUT110`, then where bodies run.
     steps.extend(steps_mut108());

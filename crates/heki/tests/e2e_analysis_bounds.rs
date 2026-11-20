@@ -6,6 +6,7 @@ mod common;
 
 use common::Project;
 use serde_json::Value;
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -18,17 +19,26 @@ fn check_within(p: &Project, limit: Duration) -> Vec<Value> {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    // Read while it runs: output larger than the pipe would otherwise block it.
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).unwrap();
+        out
+    });
     let started = Instant::now();
-    while child.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if started.elapsed() > limit {
             child.kill().unwrap();
             panic!("heki check ran past {limit:?}");
         }
         std::thread::sleep(Duration::from_millis(20));
-    }
-    let out = child.wait_with_output().unwrap();
-    assert!(matches!(out.status.code(), Some(0 | 1)), "{:?}", out.status);
-    serde_json::from_slice(&out.stdout).unwrap()
+    };
+    assert!(matches!(status.code(), Some(0 | 1)), "{status:?}");
+    serde_json::from_slice(&reader.join().unwrap()).unwrap()
 }
 
 /// A loop over a worklist that tests its item against `checks` classes, each test followed by
@@ -317,6 +327,85 @@ fn a_branch_on_a_value_many_cases_pass_through_is_decided_once_per_depth() {
         1,
         "{found:#?}"
     );
+}
+
+/// A function of `loops` loops one after another, each with its own first-iteration flag.
+fn flagged_loops(loops: usize) -> String {
+    let mut lines = vec![
+        "import requests".to_owned(),
+        String::new(),
+        String::new(),
+        "def scan(urls):".to_owned(),
+    ];
+    for _ in 0..loops {
+        lines.extend(
+            [
+                "    first = True",
+                "    for u in urls:",
+                "        if first:",
+                "            requests.get(u)",
+                "            first = False",
+            ]
+            .map(str::to_owned),
+        );
+    }
+    lines.join("\n") + "\n"
+}
+
+/// Each lazy initialization keeps the blocks it covers, a cell per block of the function: the
+/// cells a function's lazy initializations take are bounded by its source size, and past the
+/// bound none of them is recognized, so every loop's call is reported again.
+#[test]
+fn lazy_initializations_past_their_budget_are_not_recognized() {
+    for (loops, expected) in [(4, 0), (600, 600)] {
+        let p = Project::new(&format!("bounds_flags_{loops}"));
+        p.write("m.py", &flagged_loops(loops));
+        let found = check_within(&p, Duration::from_secs(20));
+        let eff102 = found.iter().filter(|d| d["rule_code"] == "EFF102").count();
+        assert_eq!(eff102, expected, "{loops} loops");
+    }
+}
+
+/// A coroutine waiting `waits` times on one future, then awaiting its completion as many times,
+/// then waiting once more.
+fn waits_then_awaits(waits: usize) -> String {
+    let mut lines = vec![
+        "import asyncio".to_owned(),
+        "from concurrent.futures import Future".to_owned(),
+        String::new(),
+        String::new(),
+        "async def drain(f: Future):".to_owned(),
+    ];
+    lines.extend((0..waits).map(|_| "    f.result()".to_owned()));
+    lines.extend((0..waits).map(|_| "    await asyncio.wrap_future(f)".to_owned()));
+    lines.push("    return f.result()".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// Each wait on a future looks up once whether an `await` before it in its block saw the future
+/// finish: only the waits before the first `await` block (reported as one root cause past ten).
+#[test]
+fn waits_on_a_future_look_up_the_awaits_before_them_once() {
+    for waits in [4, 400] {
+        let p = Project::new(&format!("bounds_waits_{waits}"));
+        p.write("m.py", &waits_then_awaits(waits));
+        let found = check_within(&p, Duration::from_secs(20));
+        let lines: Vec<u64> = found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF101")
+            .map(|d| d["line"].as_u64().unwrap())
+            .collect();
+        let expected: Vec<u64> = if waits > 10 {
+            vec![6]
+        } else {
+            (6..6 + waits as u64).collect()
+        };
+        assert_eq!(lines, expected, "{waits} waits");
+        if waits > 10 {
+            let more = format!("(+{} more async call sites", waits - 1);
+            assert!(found[0]["message"].as_str().unwrap().contains(&more));
+        }
+    }
 }
 
 /// Task factories at the end of a long chain of copies of one coroutine (`EFF107`): what each

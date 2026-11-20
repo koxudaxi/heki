@@ -242,12 +242,8 @@ return_type = "asyncio.AbstractEventLoop"
 opaque_to_layer3 = true
 
 # --- Futures (EFF107: `ensure_future` returns a future unchanged, so no new task) ---
-# `asyncio.gather` and `loop.run_in_executor` return one too (their entries above and below).
-
-[[entries]]
-symbol = "asyncio.wrap_future"
-return_type = "asyncio.Future"
-opaque_to_layer3 = true
+# `asyncio.gather`, `loop.run_in_executor`, and `asyncio.wrap_future` return one too (their
+# entries above and below).
 
 [[entries]]
 symbol = "asyncio.AbstractEventLoop.create_future"
@@ -292,7 +288,9 @@ opaque_to_layer3 = true
 # Acquiring a lock, waiting for an event, a condition, a barrier, a thread, a queue, or a
 # future blocks until another thread acts (`blocking_sync`); a zero timeout or `blocking=False`
 # / `block=False` / `wait=False` returns at once. `SimpleQueue.put` never blocks.
-# `Executor.submit` returns the `concurrent.futures.Future` to wait on.
+# `Executor.submit` returns the `concurrent.futures.Future` to wait on; waiting on one known to be
+# done (`waits_until_done`: under `if f.done():`, or once `await asyncio.wrap_future(f)`, which
+# completes with `f` (`done_when_awaited`), has returned) returns at once.
 
 [[entries]]
 symbol = "threading.Lock.acquire"
@@ -463,6 +461,7 @@ effects = ["blocking_sync"]
 cases = [
     { arg = 0, param = "timeout", equals = 0, effects = [] },
 ]
+waits_until_done = true
 opaque_to_layer3 = true
 
 [[entries]]
@@ -471,6 +470,7 @@ effects = ["blocking_sync"]
 cases = [
     { arg = 0, param = "timeout", equals = 0, effects = [] },
 ]
+waits_until_done = true
 opaque_to_layer3 = true
 
 [[entries]]
@@ -479,6 +479,12 @@ effects = ["blocking_sync"]
 cases = [
     { arg = 1, param = "timeout", equals = 0, effects = [] },
 ]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.wrap_future"
+done_when_awaited = 0
+return_type = "asyncio.Future"
 opaque_to_layer3 = true
 
 [[entries]]
