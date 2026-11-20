@@ -1230,6 +1230,25 @@ const IR_COUNTEREXAMPLES: &[Expect] = &[
     ("cx_sequence_pattern_capture", &[]),
     ("cx_as_pattern_capture", &[]),
     ("cx_mapping_pattern_capture", &[]),
+    // `echo[acc:]` hands `slice(acc, None, None)` to `__getitem__`; a template keeps `acc`.
+    (
+        "cx_slice_bound_reaches_getitem",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
+    (
+        "cx_template_keeps_value",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
 ];
 
 const CAPTURED: &[(&str, V)] = &[(

@@ -188,6 +188,30 @@ pub fn interpolated_expressions(expr: &ruff_python_ast::Expr) -> Vec<&ruff_pytho
     out
 }
 
+/// The top-level replacement-field expressions of an f-string or a t-string (without the
+/// fields of their format specifications), in source order.
+pub fn replacement_fields(expr: &ruff_python_ast::Expr) -> Vec<&ruff_python_ast::Expr> {
+    use ruff_python_ast::{Expr, FStringPartRef};
+
+    let mut out = Vec::new();
+    match expr {
+        Expr::FString(fs) => {
+            for part in fs.value.iter() {
+                if let FStringPartRef::FString(f) = part {
+                    out.extend(f.elements.interpolations().map(|i| &*i.expression));
+                }
+            }
+        }
+        Expr::TString(ts) => {
+            for t in ts.value.iter() {
+                out.extend(t.elements.interpolations().map(|i| &*i.expression));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Parse Python source text with Python 3.15 syntax enabled (including PEP 810 `lazy import`).
 pub fn parse_module(source: &str) -> Result<ParsedModule, Vec<ParseError>> {
     let options = ruff_python_parser::ParseOptions::from(ruff_python_ast::PySourceType::Python)

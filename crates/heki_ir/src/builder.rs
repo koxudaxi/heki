@@ -2418,17 +2418,26 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 );
                 dst
             }
+            // `a[l:u:s]` passes `slice(l, u, s)` to `__getitem__`, which may keep it: the slice
+            // is the tuple of its three bounds (`None` where one is left out).
             Expr::Slice(sl) => {
-                if let Some(l) = &sl.lower {
-                    let _ = self.lower_expr(l);
-                }
-                if let Some(u) = &sl.upper {
-                    let _ = self.lower_expr(u);
-                }
-                if let Some(st) = &sl.step {
-                    let _ = self.lower_expr(st);
-                }
-                self.emit_const(ConstLiteral::Other, span)
+                let elems: Vec<VarId> = [&sl.lower, &sl.upper, &sl.step]
+                    .into_iter()
+                    .map(|bound| match bound {
+                        Some(b) => self.lower_expr(b),
+                        None => self.emit_const(ConstLiteral::None, span),
+                    })
+                    .collect();
+                let dst = self.fresh_var(None);
+                self.emit(
+                    InstKind::AllocBuiltin {
+                        dst,
+                        kind: BuiltinKind::Tuple,
+                        elems,
+                    },
+                    span,
+                );
+                dst
             }
             Expr::Starred(s) => self.lower_expr(&s.value),
             Expr::Await(a) => {
@@ -2571,10 +2580,26 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 );
                 dst
             }
+            // A template keeps the values of its replacement fields (`Template.values`, a tuple)
+            // and is otherwise opaque; a format specification's fields become text.
             Expr::TString(_) => {
+                let kept = heki_ast::replacement_fields(expr);
+                let mut values = Vec::with_capacity(kept.len());
                 for field in heki_ast::interpolated_expressions(expr) {
-                    let _ = self.lower_expr(field);
+                    let v = self.lower_expr(field);
+                    if kept.iter().any(|k| std::ptr::eq(*k, field)) {
+                        values.push(v);
+                    }
                 }
+                let held = self.fresh_var(None);
+                self.emit(
+                    InstKind::AllocBuiltin {
+                        dst: held,
+                        kind: BuiltinKind::Tuple,
+                        elems: values,
+                    },
+                    span,
+                );
                 self.emit_const(ConstLiteral::Other, span)
             }
         }

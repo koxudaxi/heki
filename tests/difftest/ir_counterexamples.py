@@ -519,6 +519,49 @@ def old_mapping_pattern_capture(items, shared):
             return len(acc)
 
 
+# ------------------------------------------------------------------------------
+# A slice and a template string keep the objects they are built from
+# ------------------------------------------------------------------------------
+class Echo:
+    def __getitem__(self, key):
+        return key.start
+
+
+echo = Echo()
+
+
+def cx_slice_bound_reaches_getitem(items):
+    acc = []
+    old = echo[acc:]
+    for x in items:
+        acc = acc + [x]
+    return old
+
+
+def old_slice_bound_reaches_getitem(items):
+    acc = []
+    old = echo[acc:]
+    for x in items:
+        acc.append(x)
+    return old
+
+
+def cx_template_keeps_value(items):
+    acc = []
+    template = t"{acc}"
+    for x in items:
+        acc = acc + [x]
+    return template.interpolations[0].value
+
+
+def old_template_keeps_value(items):
+    acc = []
+    template = t"{acc}"
+    for x in items:
+        acc.append(x)
+    return template.interpolations[0].value
+
+
 def run(call, fn):
     try:
         return repr(call(fn))
@@ -593,6 +636,8 @@ def main() -> int:
         (cx_sequence_pattern_capture, old_sequence_pattern_capture, with_owned(list)),
         (cx_as_pattern_capture, old_as_pattern_capture, with_owned(list)),
         (cx_mapping_pattern_capture, old_mapping_pattern_capture, with_owned(dict)),
+        (cx_slice_bound_reaches_getitem, old_slice_bound_reaches_getitem, lambda f: f([1])),
+        (cx_template_keeps_value, old_template_keeps_value, lambda f: f([1])),
     ]
     lines = []
     for cx, old, call in pairs:
