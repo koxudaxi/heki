@@ -203,6 +203,10 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
 - **Classes, decorators, and loops**: natural loops with a `LoopBound` (`ConstSmall(k)` /
   `RetryPattern` / `DaemonPolling` / `Unbounded`), nested classes kept apart from their outer
   class, and decorator metadata (`@cached_property`, `@lru_cache`, CLI and web decorators).
+- **Size facts in one home** (`heki_ir::facts`): small displays, constant trip counts, and
+  `while len(x) < N` caps, for profitability and Advisory noise only. The Soundness lane reads
+  them within one module (`FnIndex`); the Advisory rules read other modules' small displays
+  through the declarations (`ModuleDecls.small_globals`, `ClassDecl.attr_displays`).
 - **Original byte spans**: fixes are produced as minimal `TextEdit`s, never by regenerating code
   from the IR, so formatting and comments survive.
 

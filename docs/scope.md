@@ -169,6 +169,8 @@ state that matters.
   (`StreamingResponse(rows())`, a container), only stepped with `next()`, or unpacked into a call
   (`f(*rows())`) is not followed; a generator expression counts where it is written. A coroutine
   runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on its own.
+  Iterating an object runs its class's `__iter__` only for classes the catalog lists (a
+  SQLAlchemy `Query`); the `__iter__` methods of project classes are not followed.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
@@ -181,7 +183,11 @@ state that matters.
   `requires-python`, which keeps it at the oldest version you support.
 - **Sizes known only at run time.** Whether a collection is small is decided from the code: a
   list built from a short constant display is not reported, a list built at run time is, even
-  when it always holds three items. Such rules are marked size-dependent.
+  when it always holds three items. A container counts as small only when it is a display of at
+  most 8 items, with no `*` / `**` unpacking, that nothing grows or lets escape (shrinking it
+  and read-only builtins are fine). This holds also through local names, module constants, and
+  other modules' module-level displays and class attributes. Such rules are marked
+  size-dependent.
 - **Callers outside the checked files.** Contracts reason about the callers heki sees: a
   private helper hands its reports to its callers, and a function called only from allowed
   writers is not reported. Code outside the run, such as tests left out of it, is not known.
