@@ -650,6 +650,15 @@ def read_str(src: object):
     return None
 
 
+TEXT_KINDS = (str, bytes)
+
+
+def read_kinds(src: object):
+    if isinstance(src, TEXT_KINDS):
+        return None
+    return Path(src).read_text()
+
+
 def kind(x: object, kinds: object):
     if isinstance(x, PathLike):
         Path("k").read_text()
@@ -668,6 +677,8 @@ async def readers(p: object, q: object):
     read(p)  # EFF105
     read_text("s")
     read_text(1)  # EFF105
+    read_kinds(b"s")
+    read_kinds(1)  # EFF105
     if isinstance(q, str):
         read_text(q)
         read_str(q)  # EFF105

@@ -348,9 +348,19 @@ def sliced() -> list[list[int]]:
 def through_wrapper() -> None:
     sliced().clear()
     sliced()[0].append(4)
+
+
+@functools.cache
+def untyped_rows():
+    return [1]
+
+
+def defensive_copy() -> None:
+    untyped_rows()[:].append(5)
 "#,
     );
-    // A wrapper returning a slice hands out a new list holding the shared elements.
+    // A wrapper returning a slice hands out a new list holding the shared elements; a slice of a
+    // value of unknown class is a copy too.
     assert_eq!(
         reports(&p, "MUT202"),
         vec![

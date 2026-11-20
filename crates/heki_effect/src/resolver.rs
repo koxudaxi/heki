@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -300,6 +300,8 @@ pub struct FunctionDecl {
     /// `@database_sync_to_async`, `@asyncify`). `@d def f` is `f = d(f)`: calling `f` calls
     /// `d(f)`, which offloads the body, so the body does not run at the call.
     pub offloaded_by: Option<String>,
+    /// An `@abstractmethod`: a call never runs it.
+    pub is_abstract: bool,
     /// The return annotation of the getter of a property (`@property` / `cached_property`,
     /// with or without a setter): the type reading the attribute gives.
     pub property_type: Option<Ty>,
@@ -980,6 +982,11 @@ pub struct ProjectDecls {
     /// (`ModuleDecls::grown_globals`).
     grown_elsewhere: FxHashSet<String>,
     recorder: Recorder,
+    /// The C3 linearizations computed so far of classes with multiple inheritance along their
+    /// bases (`Self::mro`); cleared with the indexes.
+    linearized: RwLock<FxHashMap<String, Vec<String>>>,
+    /// One shared [`crate::ClassLine`] per class (`Self::lineage`); cleared with the indexes.
+    lines: RwLock<FxHashMap<String, crate::SharedLine>>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -1099,6 +1106,14 @@ impl ProjectDecls {
     }
 
     fn rebuild_indexes(&mut self) {
+        self.linearized
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.lines
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         // Maintenance, not a lookup of an analysis.
         let recording = std::mem::replace(self.recorder.on.get_mut(), false);
         self.build_indexes();
@@ -1330,9 +1345,8 @@ impl ProjectDecls {
                 Some((f, t)) => (f, Some(t)),
                 None => (rest, None),
             };
-            if m.classes.contains_key(first) || m.functions.contains_key(first) {
-                break;
-            }
+            // `imports` holds the names an import binds last (`rebound_imports`): a class or
+            // function of the same name is shadowed by it.
             let Some(target) = m.imports.get(first) else {
                 break;
             };
@@ -1515,23 +1529,107 @@ impl ProjectDecls {
         self.mro(sub).iter().skip(1).any(|c| c == base)
     }
 
-    /// Depth-first, left-to-right base linearization (project and external classes).
+    /// The method resolution order of `class`: Python's C3 linearization of its project bases;
+    /// an external base stands for itself (its bases are not known). A hierarchy C3 cannot
+    /// linearize (Python rejects the class statement, or a cycle) keeps the depth-first,
+    /// left-to-right order.
     fn mro(&self, class: &str) -> Vec<String> {
+        let class = self.canonical(class);
+        // The depth-first walk reads the declarations the linearization depends on.
+        let (order, multiple) = self.depth_first_bases(&class);
+        // Without multiple inheritance, the depth-first order is the linearization.
+        if !multiple {
+            return order;
+        }
+        let known = self
+            .linearized
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&class)
+            .cloned();
+        if let Some(mro) = known {
+            return mro;
+        }
+        let mut done = FxHashMap::default();
+        let mro = self.c3(&class, &mut done, &mut Vec::new()).unwrap_or(order);
+        self.linearized
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(class, mro.clone());
+        mro
+    }
+
+    /// [`Self::mro`] by C3: `class` followed by the merge of its bases' linearizations and the
+    /// list of its bases. `done` holds the linearizations computed so far, `open` the classes
+    /// being linearized (a cycle has none).
+    fn c3(
+        &self,
+        class: &str,
+        done: &mut FxHashMap<String, Vec<String>>,
+        open: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        if let Some(mro) = done.get(class) {
+            return Some(mro.clone());
+        }
+        if open.iter().any(|c| c == class) {
+            return None;
+        }
+        let bases: Vec<String> = self
+            .class(class)
+            .map(|d| d.bases.iter().map(|b| self.canonical(b)).collect())
+            .unwrap_or_default();
+        open.push(class.to_owned());
+        let mut seqs: Vec<std::collections::VecDeque<String>> = Vec::new();
+        for base in &bases {
+            seqs.push(self.c3(base, done, open)?.into());
+        }
+        open.pop();
+        seqs.push(bases.into());
+        let mut out = vec![class.to_owned()];
+        loop {
+            seqs.retain(|s| !s.is_empty());
+            let Some(head) = seqs
+                .iter()
+                .map(|s| &s[0])
+                .find(|h| !seqs.iter().any(|s| s.iter().skip(1).any(|c| c == *h)))
+                .cloned()
+            else {
+                break;
+            };
+            for s in &mut seqs {
+                if s.front() == Some(&head) {
+                    s.pop_front();
+                }
+            }
+            out.push(head);
+        }
+        if !seqs.is_empty() {
+            return None;
+        }
+        done.insert(class.to_owned(), out.clone());
+        Some(out)
+    }
+
+    /// Depth-first, left-to-right base order (project and external classes), and whether a
+    /// class along it has more than one base.
+    fn depth_first_bases(&self, class: &str) -> (Vec<String>, bool) {
         let mut out = Vec::new();
+        let mut multiple = false;
         let mut seen = FxHashSet::default();
-        let mut stack = vec![self.canonical(class)];
+        let mut stack = vec![class.to_owned()];
         while let Some(c) = stack.pop() {
             if !seen.insert(c.clone()) {
                 continue;
             }
             if let Some(decl) = self.class(&c) {
+                multiple |= decl.bases.len() > 1;
                 for base in decl.bases.iter().rev() {
                     stack.push(self.canonical(base));
                 }
             }
             out.push(c);
         }
-        out
+        (out, multiple)
     }
 
     /// Whether calling the class `class` may return an existing instance instead of a new one: a
@@ -1549,6 +1647,39 @@ impl ProjectDecls {
         self.mro(class)
             .iter()
             .any(|c| ENUMS.contains(&c.as_str()) || self.own_method(c, "__new__").is_some())
+    }
+
+    /// The MRO of `class` as a [`crate::ClassLine`], one copy shared by every site and fact
+    /// naming the class. `resolved`: the caller has just resolved a method on `class`, which
+    /// read every declaration its MRO depends on, so a line computed before serves; otherwise
+    /// the MRO is computed again, which reads them.
+    pub(crate) fn lineage(&self, class: &str, resolved: bool) -> crate::SharedLine {
+        if resolved
+            && let Some(line) = self
+                .lines
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(class)
+        {
+            return Arc::clone(line);
+        }
+        let mro = self.mro(class);
+        let known = self
+            .lines
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&mro[0])
+            .filter(|line| line.mro == mro)
+            .cloned();
+        if let Some(line) = known {
+            return line;
+        }
+        let line = Arc::new(crate::ClassLine { mro });
+        self.lines
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(line.mro[0].clone(), Arc::clone(&line));
+        line
     }
 
     /// The method `name` defined directly in project class `class`.
@@ -1632,14 +1763,15 @@ impl ProjectDecls {
 
     /// The project functions `name` names on an instance of the canonical project class
     /// `class`: the first definition along the MRO (past `class` itself with `skip_self`, for
-    /// `super()`) and, without `skip_self`, the definitions of every overriding project
-    /// subclass (Priority 4 CHA), each one kept when `keep` accepts it (sorted, deduplicated).
-    /// Also returns the first external base the MRO walk meets before a definition.
+    /// `super()`) and, with `overrides`, the definitions of every overriding project subclass
+    /// (Priority 4 CHA), each one kept when `keep` accepts it (sorted, deduplicated). Also
+    /// returns the first external base the MRO walk meets before a definition.
     fn definitions(
         &self,
         class: &str,
         name: &str,
         skip_self: bool,
+        overrides: bool,
         keep: impl Fn(&FuncKey) -> bool,
     ) -> (Vec<FuncKey>, Option<String>) {
         let mro = self.mro(class);
@@ -1657,7 +1789,7 @@ impl ProjectDecls {
                 external = Some(format!("{c}.{name}"));
             }
         }
-        if !skip_self {
+        if overrides {
             let mut stack = vec![class.to_owned()];
             let mut seen = FxHashSet::default();
             while let Some(c) = stack.pop() {
@@ -1685,7 +1817,7 @@ impl ProjectDecls {
         if !self.is_project_class(&class) {
             return Callee::External(format!("{class}.{method}"));
         }
-        let (found, external) = self.definitions(&class, method, skip_self, |_| true);
+        let (found, external) = self.definitions(&class, method, skip_self, !skip_self, |_| true);
         if found.len() > CHA_CANDIDATE_LIMIT {
             return Callee::TooMany;
         }
@@ -1693,6 +1825,20 @@ impl ProjectDecls {
             return external.map_or(Callee::Unresolved, Callee::External);
         }
         Callee::Project(found, true)
+    }
+
+    /// Resolve `class.method` on the class object `class` itself (`Base.method(obj)`, and the
+    /// `__init__` of constructing it): the definition its MRO finds first. The overrides of
+    /// subclasses do not count: the class object is no subclass.
+    pub(crate) fn class_targets(&self, class: &str, method: &str) -> Callee {
+        let class = self.canonical(class);
+        if !self.is_project_class(&class) {
+            return Callee::External(format!("{class}.{method}"));
+        }
+        match self.definitions(&class, method, false, false, |_| true) {
+            (found, _) if !found.is_empty() => Callee::Project(found, true),
+            (_, external) => external.map_or(Callee::Unresolved, Callee::External),
+        }
     }
 
     /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run
@@ -1717,7 +1863,7 @@ impl ProjectDecls {
             return None;
         }
         let is_getter = |k: &FuncKey| self.function_decl(k).is_some_and(|d| d.is_property);
-        let (found, _) = self.definitions(&class, attr, skip_self, is_getter);
+        let (found, _) = self.definitions(&class, attr, skip_self, !skip_self, is_getter);
         match found.len() {
             0 => None,
             n if n > CHA_CANDIDATE_LIMIT => Some(Callee::TooMany),
@@ -1884,6 +2030,46 @@ pub(crate) fn project_decls_for(
 }
 
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.
+/// The imported names the module body binds again after the import, in the same straight-line
+/// code (no other block stores them): `from time import sleep` followed by `def sleep(...)`.
+/// The functions of the module run after its body, so they see the later binding. A name bound
+/// on different paths (`try: from fast import f` / `except ImportError: def f(...)`) keeps its
+/// import.
+fn rebound_imports(body: &IrFunction) -> Vec<String> {
+    let imported: FxHashSet<VarId> = body
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|inst| match &inst.kind {
+            InstKind::Import { dst, .. } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    // Per stored name: its only block (`None`: several), whether an import stores it, and
+    // whether its last store does.
+    let mut stores: BTreeMap<&str, (Option<usize>, bool, bool)> = BTreeMap::new();
+    for (i, block) in body.blocks.iter().enumerate() {
+        for inst in &block.insts {
+            if let InstKind::StoreGlobal { name, value } = &inst.kind {
+                let import = imported.contains(value);
+                let entry = stores.entry(name).or_insert((Some(i), false, false));
+                if entry.0 != Some(i) {
+                    entry.0 = None;
+                }
+                entry.1 |= import;
+                entry.2 = import;
+            }
+        }
+    }
+    stores
+        .into_iter()
+        .filter(|(_, (block, any_import, last_import))| {
+            block.is_some() && *any_import && !last_import
+        })
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
 fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     let semantic = input.semantic;
     let module_scope = module_scope(semantic);
@@ -1905,6 +2091,11 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .insert(imp.bound_name.clone(), target);
         } else if !imp.overridden {
             decls.imports.insert(imp.bound_name.clone(), target);
+        }
+    }
+    if let Some(body) = input.ir.functions.iter().find(|f| f.is_module_body) {
+        for name in rebound_imports(body) {
+            decls.imports.remove(&name);
         }
     }
     for class in &semantic.classes {
@@ -2082,6 +2273,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             mutable_params,
             transform: transforms[f.qualname.as_str()],
             offloaded_by: None,
+            is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
         };
         decls.functions.insert(f.qualname.clone(), decl);
@@ -2772,6 +2964,8 @@ pub enum Val {
     Ref(String),
     /// An instance of the class `fqn`.
     Inst(String),
+    /// A class object that is `fqn` or one of its subclasses ([`Ty::Class`]).
+    Class(String),
     /// `super()` inside a method of class `fqn`.
     Super(String),
     /// An instance of one of two or three classes (sorted).
@@ -2783,6 +2977,7 @@ pub enum Val {
 pub(crate) enum Recv<'v> {
     Ref(&'v str),
     Inst(&'v str),
+    Class(&'v str),
     Super(&'v str),
 }
 
@@ -2792,6 +2987,7 @@ impl Val {
         match self {
             Val::Ref(f) => Some(Recv::Ref(f)),
             Val::Inst(c) => Some(Recv::Inst(c)),
+            Val::Class(c) => Some(Recv::Class(c)),
             Val::Super(c) => Some(Recv::Super(c)),
             Val::Union(_) => None,
         }
@@ -2842,11 +3038,21 @@ impl Ty {
     pub(crate) fn val(&self) -> Option<Val> {
         match self {
             Ty::Ref(f) => Some(Val::Ref(f.clone())),
+            Ty::Class(c) => Some(Val::Class(c.clone())),
             Ty::Inst(o) => Some(Val::Inst(o.class.clone())),
             Ty::Super(c) => Some(Val::Super(c.clone())),
             Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
             Ty::SelfType | Ty::Partial(_) => None,
         }
+    }
+}
+
+/// The targets of constructing `class` from its `__init__` targets: they bind the new
+/// instance; a class without a project `__init__` is called by its own name.
+fn constructor(class: &str, init: Callee) -> Callee {
+    match init {
+        Callee::Project(keys, _) => Callee::Project(keys, true),
+        _ => Callee::External(class.to_owned()),
     }
 }
 
@@ -3022,21 +3228,23 @@ impl<'a> TypeCtx<'a> {
         match value? {
             Val::Union(classes) => Some(classes),
             Val::Inst(class) => self.project.protocol_implementers(class),
-            Val::Ref(_) | Val::Super(_) => None,
+            Val::Ref(_) | Val::Class(_) | Val::Super(_) => None,
         }
     }
 
+    /// Calling a named class constructs exactly that class: its `__init__` is the one its MRO
+    /// finds. A class object that may be a subclass (`cls(...)`) runs any of theirs.
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
         match callee {
             Some(Recv::Ref(fqn)) => match self.project.symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
-                Symbol::Class(_) => match self.project.method_targets(fqn, "__init__", false) {
-                    Callee::Project(keys, _) => Callee::Project(keys, true),
-                    _ => Callee::External(fqn.to_owned()),
-                },
+                Symbol::Class(_) => constructor(fqn, self.project.class_targets(fqn, "__init__")),
                 Symbol::Module | Symbol::Global(_) => Callee::Unresolved,
                 Symbol::External => Callee::External(fqn.to_owned()),
             },
+            Some(Recv::Class(class)) => {
+                constructor(class, self.project.method_targets(class, "__init__", false))
+            }
             Some(Recv::Inst(class)) => self.project.method_targets(class, "__call__", false),
             Some(Recv::Super(_)) | None => Callee::Unresolved,
         }
@@ -3056,18 +3264,34 @@ impl<'a> TypeCtx<'a> {
         match recv {
             Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
-                    // Unbound call through the class: `Base.method(obj, ...)`.
-                    return match self.project.method_targets(fqn, method, false) {
-                        Callee::Project(keys, _) => Callee::Project(keys, false),
-                        other => other,
-                    };
+                    return self.through_class(self.project.class_targets(fqn, method));
                 }
                 let target = self.project.canonical(&format!("{fqn}.{method}"));
                 self.call_targets(Some(Recv::Ref(&target)))
             }
+            Some(Recv::Class(class)) => {
+                self.through_class(self.project.method_targets(class, method, false))
+            }
             Some(Recv::Inst(class)) => self.project.method_targets(class, method, false),
             Some(Recv::Super(class)) => self.project.method_targets(class, method, true),
             None => Callee::Unresolved,
+        }
+    }
+
+    /// The targets of calling `method` through a class object, from its definitions `callee`:
+    /// a class method binds the class to `cls`; a plain function takes the instance as its
+    /// first argument, and a static method takes none.
+    fn through_class(&self, callee: Callee) -> Callee {
+        match callee {
+            Callee::Project(keys, _) => {
+                let binds = keys.iter().all(|k| {
+                    self.project
+                        .function_decl(k)
+                        .is_some_and(|d| d.is_classmethod)
+                });
+                Callee::Project(keys, binds)
+            }
+            other => other,
         }
     }
 
@@ -3089,7 +3313,7 @@ impl<'a> TypeCtx<'a> {
         match recv? {
             Val::Inst(class) => self.project.property_targets(class, attr, false),
             Val::Super(class) => self.project.property_targets(class, attr, true),
-            Val::Union(_) | Val::Ref(_) => None,
+            Val::Union(_) | Val::Ref(_) | Val::Class(_) => None,
         }
     }
 
@@ -3131,13 +3355,22 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// [`Self::infer`], with the values `isinstance` checks give variables in the blocks they
-    /// guard.
+    /// guard and the classes each check names (by its second argument).
+    #[allow(clippy::type_complexity)]
     pub(crate) fn infer_flow(
         &self,
         f: &IrFunction,
-    ) -> (FxHashMap<VarId, Val>, FxHashMap<(BlockId, VarId), Val>) {
+    ) -> (
+        FxHashMap<VarId, Val>,
+        FxHashMap<(BlockId, VarId), Val>,
+        FxHashMap<VarId, Vec<String>>,
+    ) {
         let inferred = self.infer_types(f);
-        (inferred.vals(), inferred.narrowed_vals())
+        (
+            inferred.vals(),
+            inferred.narrowed_vals(),
+            inferred.isinstance_args(f, self.project),
+        )
     }
 
     /// The fully qualified name the import at `span` binds.

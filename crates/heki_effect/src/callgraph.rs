@@ -11,8 +11,9 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
     Facts, FuncKey, NewArg, NewCond, NewKind, ProjectIndex, ProtectedReturn, ReturnsNew, Shared,
-    SharedChain, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
+    SharedChain, SharedLine, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
 };
+use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -69,15 +70,24 @@ fn out_sites_of<'f>(
     out
 }
 
-/// Reset the final summaries of `region` to their local facts.
+/// Reset the final summaries of `region` to their local facts. `sync_driven_only` is kept: it
+/// is decided by the function's callers, not propagated from its callees, and recomputed only
+/// for the functions whose callers may have changed ([`recompute_sync_driven_for`]).
 pub(crate) fn reset_to_local(index: &mut ProjectIndex, region: &FxHashSet<FuncKey>) {
     for func in region {
         let Some(path) = index.func_files.get(func).cloned() else {
             continue;
         };
         if let Some(file) = index.files.get_mut(&path)
-            && let Some(local) = file.local_functions.get(func).cloned()
+            && let Some(mut local) = file.local_functions.get(func).cloned()
         {
+            if file
+                .functions
+                .get(func)
+                .is_some_and(|cur| cur.sync_driven_only)
+            {
+                Arc::make_mut(&mut local).sync_driven_only = true;
+            }
             file.functions.insert(func.clone(), local);
         }
     }
@@ -232,22 +242,30 @@ fn recompute(
     resolver.resolve_own(&mut s);
     for (site_path, i) in out.get(func).into_iter().flatten() {
         let site = &index.files[site_path].call_sites[*i];
+        // `MUT106`: the call consumes what every function it may run consumes.
+        let mut consumed: Option<u64> = None;
         for bc in site.project_callees() {
-            if let Some(callee) = index.summary(&bc.callee) {
-                apply_edge(
-                    index,
-                    &mut s,
-                    &local.mutated_param_paths,
-                    func,
-                    site,
-                    bc,
-                    callee,
-                    site_path,
-                    &resolver,
-                );
-                return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
+            let Some(callee) = index.summary(&bc.callee) else {
+                consumed = Some(0);
+                continue;
+            };
+            let here = apply_edge(
+                index,
+                &mut s,
+                &local.mutated_param_paths,
+                func,
+                site,
+                bc,
+                callee,
+                site_path,
+                &resolver,
+            );
+            if !callee.is_abstract() {
+                consumed = Some(consumed.map_or(here, |c| c & here));
             }
+            return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
         }
+        s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
     let hidden = std::mem::take(&mut s.declared_hidden);
     s.hide_exec_effects(&hidden);
@@ -418,7 +436,9 @@ fn return_flow_edge(
 
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts
 /// the site runs ([`delivery`]), into the caller's body or into what iterating the caller's
-/// result runs. The caller's own writes through its parameters are `own_writes`.
+/// result runs. The caller's own writes through its parameters are `own_writes`. Returns the
+/// caller's parameters the callee consumes at the call (`MUT106`, a must-fact the caller
+/// takes only when every candidate of the call consumes them).
 #[allow(clippy::too_many_arguments)]
 fn apply_edge(
     index: &ProjectIndex,
@@ -430,7 +450,7 @@ fn apply_edge(
     callee: &EffectSummary,
     path: &Path,
     resolver: &Resolver<'_>,
-) {
+) -> u64 {
     // A callee keeping a parameter keeps the caller's objects bound to it; a generator or a
     // coroutine created without running keeps every argument.
     let kept = if runs_at_call(callee, site) {
@@ -440,19 +460,21 @@ fn apply_edge(
     };
     s.retains_params |= bound_params(kept, bc);
     let Some(d) = delivery(|k| index.summary(k), site, callee) else {
-        return;
+        return 0;
     };
     let Some(facts) = callee.facts(d.from) else {
-        return;
+        return 0;
     };
     let lead = lead_hops(site, path, &bc.callee, d.via);
     let rewrite = rewrites(callee, d.from);
     // Single-pass consumption (`MUT106`): a callee iterating its parameter k to exhaustion
     // consumes the caller's parameter passed as argument k when the callee's body runs at the
     // call, provided every call receiving that parameter runs on each normal path of the caller.
-    if d.from == Facts::Body && d.into == Facts::Body {
-        s.consumes_params |= caller_params(facts.consumes_params, bc) & s.unconditional_forwards;
-    }
+    let consumed = if d.from == Facts::Body && d.into == Facts::Body {
+        caller_params(facts.consumes_params, bc)
+    } else {
+        0
+    };
     let target = match d.into {
         Facts::Body => s,
         Facts::Result => s.iterated.get_or_insert_with(Box::default),
@@ -462,11 +484,20 @@ fn apply_edge(
     let here = (d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site))
         .then_some(resolver);
     transfer(target, own_writes, site, bc, callee, facts, &lead, rewrite);
-    if !index.skips_typed_writes {
+    if !index.skips_typed_writes
+        && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
+    {
+        // The functions the chains gain at this call: the callee, and the one iterating it.
+        let contexts = index.contracts.as_deref().map_or(0, |c| {
+            std::iter::once(&bc.callee)
+                .chain(d.via)
+                .fold(0, |acc, k| acc | c.writer_contexts(&k.fqn(), &k.qualname))
+        });
         transfer_typed_writes(
-            target, caller, site, bc, callee, facts, &lead, rewrite, here,
+            target, caller, site, bc, callee, facts, &lead, rewrite, here, contexts,
         );
     }
+    consumed
 }
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
@@ -492,7 +523,9 @@ fn transfer(
     // b. Execution effects, with the shortest chain to each. An effect whose guard the call
     //    decides against does not run here; the others take the call's guards and the
     //    callee's undecided tests of caller inputs (except of an attribute the caller assigns
-    //    itself).
+    //    itself). On a receiver of known class, the effects only implementations of unrelated
+    //    classes reach do not run.
+    let receiver = site.receiver();
     for e in facts
         .direct_exec_effects
         .iter()
@@ -502,6 +535,9 @@ fn transfer(
         if site.hides(*e) {
             continue;
         }
+        let Some(tail) = facts.effect_chain_for(*e, receiver) else {
+            continue;
+        };
         let Some(mut through) = guards::through_call(site, bc, facts.exec_guards.get(e)) else {
             continue;
         };
@@ -515,8 +551,8 @@ fn transfer(
         let new = t.transitive_exec_effects.insert(*e);
         let had = !new || t.direct_exec_effects.contains(e);
         guards::add_occurrence(&mut t.exec_guards, *e, had, &through.guards);
-        let tail = facts.exec_chains.get(e).map_or(&[][..], Vec::as_slice);
         let chain = extend_chain(lead, tail, rewrite);
+        add_receiver_effect(t, *e, had, site, bc, facts, &chain, lead, rewrite);
         let slot = t.exec_chains.entry(*e).or_default();
         if slot.is_empty() || chain.len() < slot.len() {
             *slot = chain;
@@ -624,6 +660,7 @@ fn transfer_typed_writes(
     lead: &[Arc<CallHop>],
     rewrite: bool,
     here: Option<&Resolver<'_>>,
+    contexts: u64,
 ) {
     let origin = |k: usize| bc.params.get(k);
     for w in indirect_writes(bc, callee, facts) {
@@ -648,6 +685,7 @@ fn transfer_typed_writes(
                 fresh: w.origin.fresh,
                 key: None,
                 construction,
+                contexts,
             },
         );
     }
@@ -681,9 +719,77 @@ fn transfer_typed_writes(
                 }
                 _ => Construction::No,
             },
+            contexts: w.contexts | contexts,
         };
         insert_site(t, caller, site);
     }
+}
+
+/// Record in `t` whether effect `e`, arriving through `bc` at `site` with `chain` (the caller
+/// `had` it already), runs only for some classes of the caller's own `self`
+/// (`EffectSummary::receiver_effects`): through a call on `self`, the classes the callee's
+/// facts already depend on, or the subclass providing the callee. Any other arrival runs it
+/// whatever `self` is.
+#[allow(clippy::too_many_arguments)]
+fn add_receiver_effect(
+    t: &mut EffectSummary,
+    e: ExecEffectKind,
+    had: bool,
+    site: &CallSite,
+    bc: &BoundCallee,
+    facts: &EffectSummary,
+    chain: &SharedChain,
+    lead: &[Arc<CallHop>],
+    rewrite: bool,
+) {
+    let mut provided: Vec<(SharedLine, SharedChain)> = Vec::new();
+    if site.recv_is_self {
+        let inner = facts.receiver_effects.as_ref().and_then(|r| r.get(&e));
+        match (inner, site.provider(bc)) {
+            (Some(inner), _) => {
+                let receiver = site.receiver();
+                provided.extend(
+                    inner
+                        .iter()
+                        .filter(|(p, _)| receiver.is_none_or(|r| p.related(r)))
+                        .map(|(p, c)| (Arc::clone(p), extend_chain(lead, c, rewrite))),
+                );
+            }
+            (None, Some(p)) => provided.push((Arc::clone(p), chain.clone())),
+            (None, None) => {}
+        }
+    }
+    if provided.is_empty() {
+        if let Some(r) = &mut t.receiver_effects {
+            r.remove(&e);
+            if r.is_empty() {
+                t.receiver_effects = None;
+            }
+        }
+        return;
+    }
+    // Already reached whatever `self` is.
+    if had
+        && !t
+            .receiver_effects
+            .as_ref()
+            .is_some_and(|r| r.contains_key(&e))
+    {
+        return;
+    }
+    let slot = t
+        .receiver_effects
+        .get_or_insert_with(Box::default)
+        .entry(e)
+        .or_default();
+    for (p, c) in provided {
+        match slot.iter_mut().find(|(q, _)| *q == p) {
+            Some((_, kept)) if kept.len() <= c.len() => {}
+            Some((_, kept)) => *kept = c,
+            None => slot.push((p, c)),
+        }
+    }
+    slot.sort();
 }
 
 /// How a callee writes a typed field it does not know through an argument ([`IndirectWrite`]).
@@ -823,7 +929,11 @@ pub(crate) fn delivery<'s, 'i>(
         }),
         SiteRole::Iterate => result(Facts::Body),
         SiteRole::Return => result(Facts::Result),
-        SiteRole::Through { via, iterated } => {
+        SiteRole::Through {
+            via,
+            iterated,
+            returned,
+        } => {
             callee.facts(Facts::Result)?;
             // The first candidate that iterates the parameter: its body runs at its call, or
             // iterating its result runs what iterates the parameter.
@@ -839,7 +949,11 @@ pub(crate) fn delivery<'s, 'i>(
             })?;
             Some(Delivery {
                 from: Facts::Result,
-                into: Facts::Body,
+                into: if *returned {
+                    Facts::Result
+                } else {
+                    Facts::Body
+                },
                 via: Some(p),
             })
         }
@@ -954,6 +1068,7 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         fresh: false,
         key: None,
         construction: Construction::No,
+        contexts: 0,
     };
     let existing = s
         .typed_field_write_sites
@@ -964,7 +1079,12 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
                 && t.kind == site.kind
                 && t.span == site.span
         })
-        .find(|t| t.obj_params == site.obj_params && t.key == site.key && site_origin(t) == origin)
+        .find(|t| {
+            t.obj_params == site.obj_params
+                && t.key == site.key
+                && t.contexts == site.contexts
+                && site_origin(t) == origin
+        })
         .cloned();
     let mut site = site;
     if let Some(existing) = existing {

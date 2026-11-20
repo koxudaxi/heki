@@ -18,7 +18,7 @@
 //! comprehension or generator expression with a scope of its own iterates the value its
 //! enclosing function hands it, so the enclosing function is inferred first.
 
-use crate::resolver::{self, Callee, TypeCtx, Val};
+use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
 use heki_ir::{
@@ -66,6 +66,33 @@ impl Fact {
     }
 }
 
+/// The classes `isinstance`'s second argument names when it has type `t`: a class, or a tuple
+/// of classes (sorted, deduplicated), each named canonically.
+fn isinstance_classes(project: &ProjectDecls, t: &Ty) -> Option<Vec<String>> {
+    let class = |t: &Ty| match t {
+        Ty::Ref(c) => project
+            .declared_ty(&Ty::inst(c.as_str()))
+            .and_then(|t| t.obj().map(|o| o.class.clone())),
+        _ => None,
+    };
+    let mut out = match t {
+        Ty::Inst(Obj {
+            args: Args::Tuple(es),
+            ..
+        }) => es
+            .iter()
+            .map(|e| match e {
+                Elem::Of(t) => class(t),
+                Elem::Empty | Elem::Unknown => None,
+            })
+            .collect::<Option<Vec<_>>>()?,
+        t => vec![class(t)?],
+    };
+    out.sort();
+    out.dedup();
+    Some(out)
+}
+
 /// The types of one function's variables.
 pub(crate) struct Inferred {
     facts: Vec<Fact>,
@@ -97,6 +124,32 @@ impl Inferred {
             .iter()
             .filter_map(|(k, t)| Some((*k, t.val()?)))
             .collect()
+    }
+
+    /// The classes the second argument of each `isinstance(x, C)` call of `f` names, by that
+    /// argument ([`isinstance_classes`]).
+    pub(crate) fn isinstance_args(
+        &self,
+        f: &IrFunction,
+        project: &ProjectDecls,
+    ) -> FxHashMap<VarId, Vec<String>> {
+        let mut out = FxHashMap::default();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::Call {
+                callee_var: Some(c),
+                args,
+                ..
+            } = &inst.kind
+                && args.len() >= 2
+                && matches!(self.ty(*c), Some(Ty::Ref(n)) if n == "builtins.isinstance")
+                && let Some(classes) = self
+                    .ty(args[1])
+                    .and_then(|t| isinstance_classes(project, t))
+            {
+                out.insert(args[1], classes);
+            }
+        }
+        out
     }
 
     /// The values consumers see, by variable.
@@ -353,7 +406,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         for (i, p) in f.params.iter().enumerate() {
             let fact = match &self.owner {
                 Some(owner) if i == 0 && !is_static => Fact::Known(if is_classmethod {
-                    Ty::Ref(owner.clone())
+                    Ty::Class(owner.clone())
                 } else {
                     Ty::inst(owner.as_str())
                 }),
@@ -659,7 +712,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             {
                 let x = args[0];
                 let current = at.get(&x).or_else(|| self.need(x).ok().flatten());
-                if let Some(classes) = self.classes_of(args[1])
+                if let Some(classes) = self
+                    .need(args[1])
+                    .ok()
+                    .flatten()
+                    .and_then(|t| isinstance_classes(self.cx.project, t))
                     && let Some(t) = self.narrow(current, &classes, truth)
                 {
                     out.insert(x, t);
@@ -668,31 +725,6 @@ impl<'e, 'a> Engine<'e, 'a> {
             _ => {}
         }
         out
-    }
-
-    /// The classes an `isinstance` argument names: a class, or a tuple display of classes.
-    fn classes_of(&self, var: VarId) -> Option<Vec<String>> {
-        let class = |t: &Ty| match t {
-            Ty::Ref(c) => self
-                .cx
-                .project
-                .declared_ty(&Ty::inst(c.as_str()))
-                .and_then(|t| t.obj().map(|o| o.class.clone())),
-            _ => None,
-        };
-        match self.need(var).ok()?? {
-            Ty::Inst(Obj {
-                args: Args::Tuple(es),
-                ..
-            }) => es
-                .iter()
-                .map(|e| match e {
-                    Elem::Of(t) => class(t),
-                    Elem::Empty | Elem::Unknown => None,
-                })
-                .collect(),
-            t => class(t).map(|c| vec![c]),
-        }
     }
 
     /// The type of a value of type `t` once `isinstance(value, classes)` is `truth`: true keeps
@@ -801,12 +833,21 @@ impl<'e, 'a> Engine<'e, 'a> {
             InstKind::LoadName { name, .. } if self.reads_globals => Some(cx.global(name)),
             InstKind::LoadName { .. } => return Err(Pending),
             InstKind::Import { .. } => cx.import_type(inst.span),
-            // `with C() as c` binds `C().__enter__()`; clients / sessions / files return self.
-            InstKind::Copy { src, .. }
-            | InstKind::EnterWith { mgr: src, .. }
-            | InstKind::Await { value: src, .. } => self.need(*src)?.cloned(),
+            InstKind::Copy { src, .. } | InstKind::Await { value: src, .. } => {
+                self.need(*src)?.cloned()
+            }
+            // `with m as c` binds `m.__enter__()` (`async with`: `await m.__aenter__()`): what
+            // its definition declares it returns; without a declaration, the manager itself, as
+            // clients, sessions, and files return.
+            InstKind::EnterWith { mgr, is_async, .. } => {
+                let manager = self.need(*mgr)?;
+                let enter = if *is_async { "__aenter__" } else { "__enter__" };
+                manager
+                    .and_then(|m| self.member_call(m, enter, Passed::default()))
+                    .or_else(|| manager.cloned())
+            }
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
-                Some(Ty::Ref(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
+                Some(Ty::Ref(fqn) | Ty::Class(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
                 Some(recv) => self.member(recv, attr),
                 None => None,
             },
@@ -854,7 +895,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     Some(Ty::Ref(fqn)) if fqn == "builtins.super" && args.is_empty() => {
                         self.owner.clone().map(Ty::Super)
                     }
-                    Some(Ty::Ref(fqn)) => return self.call_named(fqn, call),
+                    Some(Ty::Ref(fqn) | Ty::Class(fqn)) => return self.call_named(fqn, call),
                     Some(callee) => self.called(callee, call),
                     None => None,
                 }
@@ -1165,10 +1206,10 @@ impl<'e, 'a> Engine<'e, 'a> {
         match recv {
             Ty::Inst(o) => Some((&o.class, false, recv.clone())),
             Ty::Super(c) => Some((c, true, Ty::inst(c.as_str()))),
-            Ty::Ref(c) if self.cx.project.is_project_class(c) => {
+            Ty::Ref(c) | Ty::Class(c) if self.cx.project.is_project_class(c) => {
                 Some((c, false, Ty::inst(c.as_str())))
             }
-            Ty::Ref(_) | Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
+            Ty::Ref(_) | Ty::Class(_) | Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
         }
     }
 
@@ -1229,7 +1270,9 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// instance its `__call__`.
     fn called(&self, callee: &Ty, call: Passed<'_>) -> Option<Ty> {
         match callee {
-            Ty::Ref(fqn) => self.cx.call_result(fqn, |i, k| self.passed(call, i, k)),
+            Ty::Ref(fqn) | Ty::Class(fqn) => {
+                self.cx.call_result(fqn, |i, k| self.passed(call, i, k))
+            }
             // What the partial object binds shifts the arguments: they are not followed.
             Ty::Partial(inner) => self.called(inner, Passed::default()),
             other => self.member_call(other, "__call__", call),
@@ -1247,7 +1290,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .and_then(|t| cx.project.declared_ty(&t))
                 .and_then(|t| t.bind_self(self.self_ty.as_ref())),
             None => match self.fact(var) {
-                Fact::Known(Ty::Ref(class)) => Some(Ty::inst(class)),
+                Fact::Known(Ty::Ref(class) | Ty::Class(class)) => Some(Ty::inst(class)),
                 _ => None,
             },
         }

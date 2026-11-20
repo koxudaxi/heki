@@ -375,8 +375,6 @@ pub enum InstKind {
         callee: String,
         args: Vec<VarId>,
         kwargs: Vec<(Option<String>, VarId)>,
-        /// An `await` in this frame waits for the result, directly (`await f()`) or through
-        /// copies and merges (`pending = f()` ... `await pending`).
         is_awaited: bool,
         /// Index of the first positional argument unpacked with `*` (`f(a, *rest)`): from it on,
         /// the parameter an argument binds is not known. `**` unpacking is a `None` keyword.
@@ -388,7 +386,6 @@ pub enum InstKind {
         method: String,
         args: Vec<VarId>,
         kwargs: Vec<(Option<String>, VarId)>,
-        /// As for `Call`.
         is_awaited: bool,
         /// As for `Call`.
         star_from: Option<u8>,

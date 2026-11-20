@@ -14,14 +14,15 @@ use crate::resolver::{
 };
 use crate::{
     ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget,
-    Construction, Contracts, EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput,
-    NewArg, NewCond, NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SiteRole, Slot,
-    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedWriteSite, WriteKind,
+    Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject,
+    ModuleInput, NewArg, NewCond, NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine,
+    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedWriteSite,
+    WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
-    BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
-    IrFunction, NaturalLoop, PhiNode, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
+    InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -50,6 +51,35 @@ pub const CONTAINER_MUTATORS: &[&str] = &[
     "symmetric_difference_update",
     "__setitem__",
     "__delitem__",
+];
+
+/// Augmented assignments changing a container in place, by the container's class: `xs += ys`
+/// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
+const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[
+    ("builtins.list", &[BinOpKind::Add, BinOpKind::Mult]),
+    ("builtins.bytearray", &[BinOpKind::Add, BinOpKind::Mult]),
+    (
+        "builtins.set",
+        &[
+            BinOpKind::BitOr,
+            BinOpKind::BitAnd,
+            BinOpKind::Sub,
+            BinOpKind::BitXor,
+        ],
+    ),
+    ("builtins.dict", &[BinOpKind::BitOr]),
+    ("collections.deque", &[BinOpKind::Add, BinOpKind::Mult]),
+    ("collections.OrderedDict", &[BinOpKind::BitOr]),
+    ("collections.defaultdict", &[BinOpKind::BitOr]),
+    (
+        "collections.Counter",
+        &[
+            BinOpKind::Add,
+            BinOpKind::Sub,
+            BinOpKind::BitOr,
+            BinOpKind::BitAnd,
+        ],
+    ),
 ];
 
 /// Execution effects `EFF101` treats as blocking the event loop.
@@ -111,15 +141,39 @@ fn extract_module(
         content_hash: input.content_hash.clone(),
         ..FileSummary::default()
     };
+    // `typing.overload` signatures are replaced by the implementation when it is defined: only
+    // the implementation runs.
+    let implemented: FxHashSet<&str> = input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| !f.is_class_body && !is_overload(f))
+        .map(func_qualname)
+        .collect();
     for f in &input.ir.functions {
-        if f.is_class_body {
+        if f.is_class_body || (is_overload(f) && implemented.contains(func_qualname(f))) {
             continue;
         }
         let key = FuncKey {
             module: input.module_name.clone(),
             qualname: func_qualname(f).to_owned(),
         };
-        let (summary, mut sites, flow) = Extractor::new(f, &key, &cx, &input.path, contracts).run();
+        let (mut summary, mut sites, flow) =
+            Extractor::new(f, &key, &cx, &input.path, contracts).run();
+        // A `class` statement in a function runs its body there: the body's effects and calls
+        // are the function's (its methods run only when they are called).
+        if !f.is_module_body {
+            for body in class_bodies_run_by(input.ir, f) {
+                let (s, body_sites, _) =
+                    Extractor::new(body, &key, &cx, &input.path, contracts).run();
+                absorb_class_body(&mut summary, s);
+                sites.extend(
+                    body_sites
+                        .into_iter()
+                        .map(|site| CallSite { flow: None, ..site }),
+                );
+            }
+        }
         if let Some(mut flow) = flow {
             // Site-list indices of the function become indices into the file's call sites.
             let offset = u32::try_from(file.call_sites.len()).unwrap_or(u32::MAX);
@@ -150,6 +204,53 @@ fn extract_module(
     }
     release_spare_capacity(&mut file);
     file
+}
+
+/// The class bodies the `class` statements of `f` run, nested classes included.
+fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFunction> {
+    let mut out = Vec::new();
+    let mut stack = vec![f];
+    while let Some(g) = stack.pop() {
+        for inst in g.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::MakeClosure {
+                func_id: Some(id), ..
+            } = &inst.kind
+                && ir.function(*id).is_class_body
+            {
+                out.push(ir.function(*id));
+                stack.push(ir.function(*id));
+            }
+        }
+    }
+    out
+}
+
+/// Add the facts of a class body the function runs (`body`) to the function's own: its
+/// execution effects and the project attributes it writes and reads.
+fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
+    for e in &body.direct_exec_effects {
+        let had = into.direct_exec_effects.contains(e);
+        let occ = body.exec_guards.get(e).cloned().unwrap_or_default();
+        guards::add_occurrence(&mut into.exec_guards, *e, had, &occ);
+    }
+    into.direct_exec_effects.extend(body.direct_exec_effects);
+    into.transitive_exec_effects
+        .extend(body.transitive_exec_effects);
+    for (k, chain) in body.exec_chains {
+        into.exec_chains.entry(k).or_insert(chain);
+    }
+    into.typed_field_write_sites
+        .extend(body.typed_field_write_sites);
+    into.typed_field_read_sites
+        .extend(body.typed_field_read_sites);
+    into.private_calls.extend(body.private_calls);
+    into.unknown_calls |= body.unknown_calls;
+    into.refresh_typed_field_writes();
+}
+
+/// A `@typing.overload` signature.
+fn is_overload(f: &IrFunction) -> bool {
+    f.has_decorator(&["overload"])
 }
 
 /// Building by pushes leaves spare capacity in the call-site containers, and a file's summary
@@ -364,6 +465,8 @@ struct Extractor<'a> {
     types: FxHashMap<VarId, Val>,
     /// The values `isinstance` checks give variables in the blocks they guard.
     narrowed: FxHashMap<(BlockId, VarId), Val>,
+    /// The classes each `isinstance` check names, by its second argument.
+    isinstance_classes: FxHashMap<VarId, Vec<String>>,
     /// Defining instruction of each variable.
     defs: FxHashMap<VarId, &'a Inst>,
     /// Instructions using each variable as an operand.
@@ -409,6 +512,8 @@ struct Extractor<'a> {
     returned: FxHashMap<VarId, ReturnStep>,
     /// Position (block, instruction index) of the instruction being visited.
     pos: (BlockId, usize),
+    /// The class line of the method's own class (`Self::own_line`).
+    own_line: OnceCell<Option<SharedLine>>,
     /// The points `MUT109` describes (`Some` when an `invalidation` contract is configured).
     events: Option<Events>,
     /// Contracts naming this function an exempt writer (`MUT109`), matched at its first write
@@ -464,7 +569,7 @@ impl<'a> Extractor<'a> {
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
     ) -> Self {
-        let (types, narrowed) = cx.infer_flow(f);
+        let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
         let mut stored_attrs = Vec::new();
@@ -502,6 +607,7 @@ impl<'a> Extractor<'a> {
             path,
             types,
             narrowed,
+            isinstance_classes,
             defs,
             uses,
             self_vars,
@@ -522,6 +628,7 @@ impl<'a> Extractor<'a> {
             sites: Vec::new(),
             callees: FxHashMap::default(),
             project_calls: Vec::new(),
+            own_line: OnceCell::new(),
             contracts,
             returned: FxHashMap::default(),
             pos: (BlockId(0), 0),
@@ -569,6 +676,7 @@ impl<'a> Extractor<'a> {
             defs: &self.defs,
             uses: &self.uses,
             types: &self.types,
+            isinstance_classes: &self.isinstance_classes,
             param_alias: &self.param_alias,
             param_slot_alias: &self.param_slot_alias,
             stored_attrs: &self.stored_attrs,
@@ -916,18 +1024,39 @@ impl<'a> Extractor<'a> {
         self.reach.get(&var).copied().unwrap_or_default()
     }
 
-    /// [`Self::fresh`]: the results of calling a project class, then a monotone fixpoint over
-    /// copies and phis.
-    fn build_fresh(&mut self) {
-        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::Call {
-                dst,
+    /// The project class a call constructs: a call of a class object (`Model(...)`,
+    /// `cls(...)`), or of a class reached through a module or class (`models.Model(...)`).
+    fn construction(&self, kind: &InstKind) -> Option<String> {
+        let project = self.cx.project;
+        match kind {
+            InstKind::Call {
                 callee_var: Some(c),
                 ..
-            } = &inst.kind
-                && matches!(self.val(*c), Some(Val::Ref(fqn)) if self.cx.project.is_project_class(fqn))
+            } => match self.val(*c)? {
+                Val::Ref(fqn) | Val::Class(fqn) if project.is_project_class(fqn) => {
+                    Some(fqn.clone())
+                }
+                _ => None,
+            },
+            InstKind::MethodCall { recv, method, .. } => match self.val(*recv)? {
+                Val::Ref(owner) => {
+                    let fqn = project.canonical(&format!("{owner}.{method}"));
+                    project.is_project_class(&fqn).then_some(fqn)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// [`Self::fresh`]: the results of constructing a project class
+    /// ([`Self::construction`]), then a monotone fixpoint over copies and phis.
+    fn build_fresh(&mut self) {
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            if let Some(dst) = inst.kind.dst()
+                && self.construction(&inst.kind).is_some()
             {
-                self.fresh.insert(*dst);
+                self.fresh.insert(dst);
             }
         }
         loop {
@@ -1227,6 +1356,25 @@ impl<'a> Extractor<'a> {
                 ));
             }
         }
+        // Coroutines awaited after they are made (`pending = work(); ...; await pending`): the
+        // body runs at the `await`, as for `await work()`.
+        for bb in &f.blocks {
+            for (index, inst) in bb.insts.iter().enumerate() {
+                let InstKind::Await { value, .. } = &inst.kind else {
+                    continue;
+                };
+                for c in calls_in(&flow.expand_steps(&[*value])) {
+                    let site = &self.sites[self.project_calls[c].site];
+                    if !site.is_awaited {
+                        let depth = f.block_loop_depth(bb.id);
+                        extra.push((
+                            role_site(site, SiteRole::Call, inst.span, depth, Some((true, false))),
+                            Some((bb.id, index)),
+                        ));
+                    }
+                }
+            }
+        }
         // Results passed to a project call (`consume(rows())`, `chunked(rows(), 100)`).
         for (x, call) in self.project_calls.iter().enumerate() {
             let mut via_by_arg: Vec<(VarId, Vec<(FuncKey, u8)>)> = Vec::new();
@@ -1250,6 +1398,7 @@ impl<'a> Extractor<'a> {
                         let role = SiteRole::Through {
                             via: via.clone(),
                             iterated: false,
+                            returned: false,
                         };
                         let flags = Some((x_site.is_awaited, x_site.drives_coroutine_manually));
                         extra.push((
@@ -1261,8 +1410,22 @@ impl<'a> Extractor<'a> {
                         let role = SiteRole::Through {
                             via: via.clone(),
                             iterated: true,
+                            returned: false,
                         };
                         extra.push((role_site(y_site, role, span, depth, None), Some(at)));
+                    }
+                    // A returned adapter iterates its input where the caller's result is
+                    // iterated.
+                    if returned[x] {
+                        let role = SiteRole::Through {
+                            via: via.clone(),
+                            iterated: true,
+                            returned: true,
+                        };
+                        extra.push((
+                            role_site(y_site, role, x_site.span, x_site.loop_depth, None),
+                            None,
+                        ));
                     }
                 }
             }
@@ -1673,7 +1836,7 @@ impl<'a> Extractor<'a> {
                         self.seed_protected(fqn, deep, step, span);
                     }
                 }
-                self.property_read(bb, *dst, *obj, attr, span);
+                self.property_read(bb, index, *dst, *obj, attr, span);
             }
             InstKind::SubscriptLoad {
                 obj,
@@ -1687,6 +1850,19 @@ impl<'a> Extractor<'a> {
                 {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
+            }
+            InstKind::BinOp {
+                dst,
+                op,
+                lhs,
+                in_place: true,
+                ..
+            } if self.changes_in_place(*dst, *lhs, *op) => {
+                self.container_mut(*lhs, None, None, span);
+            }
+            // A value stored in a module global or a closure variable outlives the call.
+            InstKind::StoreGlobal { value, .. } | InstKind::StoreDeref { value, .. } => {
+                self.note_escape(*value);
             }
             InstKind::AttrStore { obj, attr, value } => {
                 self.write_attr(*obj, attr, WriteKind::DirectAttr, span);
@@ -1726,7 +1902,13 @@ impl<'a> Extractor<'a> {
                 if crate::callgraph::is_private_name(method) {
                     self.summary.private_calls.insert(method.clone());
                 }
-                if CONTAINER_MUTATORS.contains(&method.as_str()) {
+                let callee = self.cx.resolve_method(self.val(*recv), method);
+                // A container method changes its receiver in place, unless the receiver's
+                // class defines the method itself: then what that method does is in its
+                // summary (`Stats.clear()` may change nothing).
+                if CONTAINER_MUTATORS.contains(&method.as_str())
+                    && !matches!(callee, Callee::Project(..))
+                {
                     self.container_method(*recv, method, args, span);
                     for a in args {
                         if matches!(method.as_str(), "append" | "insert" | "add" | "setdefault") {
@@ -1741,22 +1923,8 @@ impl<'a> Extractor<'a> {
                 {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
-                let callee = self.cx.resolve_method(self.val(*recv), method);
                 let (recv_origin, recv_is_self) = self.receiver(*recv, bb);
-                // `pkg.Model(...)`: a project class reached through a module. Through a module,
-                // only a class binds the receiver (its `__init__`); a class without a project
-                // `__init__` resolves to its own name.
-                let constructs = match (self.val(*recv), &callee) {
-                    (Some(Val::Ref(fqn)), Callee::Project(_, true)) => {
-                        Some(self.cx.project.canonical(&format!("{fqn}.{method}")))
-                    }
-                    (Some(Val::Ref(_)), Callee::External(symbol))
-                        if self.cx.project.class_qualname(symbol).is_some() =>
-                    {
-                        Some(symbol.clone())
-                    }
-                    _ => None,
-                };
+                let constructs = self.construction(kind);
                 let call = Call {
                     dst: *dst,
                     value: None,
@@ -1823,17 +1991,7 @@ impl<'a> Extractor<'a> {
                         .and_then(|n| n.parse::<u32>().ok())
                         .map_or(Callee::Unresolved, |id| self.child_callee(FunctionId(id))),
                 };
-                // `Model(...)`: calling a named class binds the receiver of its `__init__`; a
-                // class without a project `__init__` resolves to its own name.
-                let constructs = match (callee_val, &target) {
-                    (Some(Val::Ref(fqn)), Callee::Project(_, true)) => Some(fqn.clone()),
-                    (Some(Val::Ref(fqn)), Callee::External(_))
-                        if self.cx.project.class_qualname(fqn).is_some() =>
-                    {
-                        Some(fqn.clone())
-                    }
-                    _ => None,
-                };
+                let constructs = self.construction(kind);
                 let call = Call {
                     dst: *dst,
                     value: *callee_var,
@@ -1932,9 +2090,14 @@ impl<'a> Extractor<'a> {
         let mut origin = self.origin(recv);
         let mut binding = self.binding(recv, self.loops_around(bb));
         let is_super = matches!(self.val(recv), Some(Val::Super(_)));
+        // `super()` is the method's own `self`, found along the MRO past its class.
         if is_super {
             origin.param = Some((0, None));
             origin.may_params = 1;
+            origin.reach = origin.reach.join(Reach {
+                params: 1,
+                globals: false,
+            });
             binding.input = Some(GuardSubject {
                 param: 0,
                 attr: None,
@@ -1949,7 +2112,18 @@ impl<'a> Extractor<'a> {
     /// receiver, at the read, awaited when the read value is awaited directly (an `async`
     /// getter returns a coroutine). The read's own facts (`reads_self_attrs`, typed read
     /// sites) stay as they are.
-    fn property_read(&mut self, bb: BlockId, dst: VarId, obj: VarId, attr: &str, span: Span) {
+    /// A read of `obj.attr` at `(bb, index)` that runs property getters: a call of them, whose
+    /// result (`dst`) is a project call's result like any other (a generator a getter returns
+    /// runs where the caller iterates it).
+    fn property_read(
+        &mut self,
+        bb: BlockId,
+        index: usize,
+        dst: VarId,
+        obj: VarId,
+        attr: &str,
+        span: Span,
+    ) {
         let Some(callee) = self.cx.resolve_attr_load(self.val(obj), attr) else {
             return;
         };
@@ -1971,7 +2145,7 @@ impl<'a> Extractor<'a> {
             constructs: None,
             span,
         };
-        self.call(bb, &callee, &call);
+        self.call_inst(bb, index, callee, &call);
     }
 
     /// The receiver and method name of the bound method behind `var` (through copies): an
@@ -2151,6 +2325,7 @@ impl<'a> Extractor<'a> {
             fresh: obj.fresh,
             key,
             construction: Construction::No,
+            contexts: 0,
         };
         // A site waiting for its answer joins the summary once the function is visited.
         if let Some(holder) = obj.holder.filter(|h| self.track && self.trackable(*h)) {
@@ -2282,6 +2457,19 @@ impl<'a> Extractor<'a> {
     fn write_attr(&mut self, obj: VarId, attr: &str, kind: WriteKind, span: Span) {
         let owner = self.owner_of(obj);
         self.write_owner_attr(owner, attr, kind, span);
+    }
+
+    /// Whether the augmented assignment `lhs op= ...` (defining `dst`) changes the container
+    /// `lhs` holds in place: a built-in container whose class does so for `op`, bound to a name
+    /// (a store of the result to an attribute or item is a write of its own).
+    fn changes_in_place(&self, dst: VarId, lhs: VarId, op: BinOpKind) -> bool {
+        let stored = self.uses.get(&dst).into_iter().flatten().any(|u| {
+            matches!(u, InstKind::AttrStore { value, .. } | InstKind::SubscriptStore { value, .. } if *value == dst)
+        });
+        !stored
+            && matches!(self.val(lhs), Some(Val::Inst(class)) if IN_PLACE_OPERATORS
+                .iter()
+                .any(|(c, ops)| c == class && ops.contains(&op)))
     }
 
     /// In-place mutation of the container held in `var` (mutator method or subscript write):
@@ -2445,6 +2633,38 @@ impl<'a> Extractor<'a> {
         false
     }
 
+    /// The positional arguments of `call` with the parameter slot each one binds, counted from
+    /// `offset` (a bound receiver): an argument unpacked with `*` binds the items of a display
+    /// of known length one by one (`*(a, b)`, `*()`); past one of unknown length, no argument
+    /// has a known slot.
+    fn positional_slots(&self, call: &Call<'_>, offset: usize) -> Vec<(usize, VarId)> {
+        let mut out = Vec::new();
+        let mut slot = offset;
+        for (j, a) in call.args.iter().enumerate() {
+            if !self.f.is_starred(call.dst, j) {
+                out.push((slot, *a));
+                slot += 1;
+                continue;
+            }
+            let Some(InstKind::AllocBuiltin {
+                kind: BuiltinKind::Tuple | BuiltinKind::List,
+                elems,
+                dst,
+            }) = self.defs.get(a).map(|inst| &inst.kind)
+            else {
+                break;
+            };
+            if (0..elems.len()).any(|k| self.f.is_starred(*dst, k)) {
+                break;
+            }
+            for e in elems {
+                out.push((slot, *e));
+                slot += 1;
+            }
+        }
+        out
+    }
+
     /// [`Self::call`] for a `Call` / `MethodCall` instruction at `(bb, index)`: its callee is
     /// kept for the iteration flow, and a project call is remembered for the sites of the
     /// object it returns.
@@ -2520,6 +2740,7 @@ impl<'a> Extractor<'a> {
                         once_per: None,
                         once_loops: 0,
                         runner: Runner::Caller,
+                        dispatch: None,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -2527,9 +2748,10 @@ impl<'a> Extractor<'a> {
             }
             Callee::Project(keys, binds_recv) => {
                 // A constructor call returns the new instance, not what `__init__` returns.
-                let constructor = *binds_recv && call.recv.is_none();
-                // The contracts the callees announce, of those whose body runs at the call.
-                let mut invalidates = 0u64;
+                let constructor = call.constructs.is_some();
+                // The contracts the call announces: those every callee whose body may run at
+                // the call is an invalidator of (an abstract method never runs).
+                let mut invalidates: Option<u64> = None;
                 let mut callees = Vec::new();
                 let mut bindings = Vec::new();
                 let mut offloaders: Vec<String> = Vec::new();
@@ -2557,15 +2779,25 @@ impl<'a> Extractor<'a> {
                     }
                     any_async |= decl.is_async && !offloaded;
                     if let (Some(c), Some(_)) = (self.contracts, &self.events)
-                        && !decl.is_generator
+                        && !decl.is_abstract
                     {
-                        invalidates |= c.invalidator_of(&key.fqn(), &key.qualname);
+                        // A generator's body runs only where it is iterated, an offloaded
+                        // one on another thread.
+                        let here = if decl.is_generator || offloaded {
+                            0
+                        } else {
+                            c.invalidator_of(&key.fqn(), &key.qualname)
+                        };
+                        invalidates = Some(invalidates.map_or(here, |i| i & here));
                     }
                     let offset = usize::from(*binds_recv && !decl.is_staticmethod);
                     let mut params: Vec<ArgOrigin> = Vec::new();
                     // The receiver the call hands over (a constructor's is its new object).
                     let mut handed_recv = None;
                     if offset == 1 {
+                        // A class method binds the class (no value of the caller), a
+                        // constructor the object it creates; calling an instance (`p()`) binds
+                        // it to the `self` of its `__call__`.
                         params.push(if decl.is_classmethod {
                             ArgOrigin::default()
                         } else if let Some(new) = new_recv {
@@ -2581,27 +2813,29 @@ impl<'a> Extractor<'a> {
                                 ..ArgOrigin::default()
                             }
                         } else {
-                            handed_recv = call.recv_var;
-                            call.recv.clone().unwrap_or_default()
+                            handed_recv = call.recv_var.or(call.value);
+                            call.recv
+                                .clone()
+                                .or_else(|| call.value.map(|v| self.origin(v)))
+                                .unwrap_or_default()
                         });
                     }
-                    // A position binds its parameter exactly before any `*` unpacking, and a
-                    // keyword unless it lands in `**kwargs`.
-                    for (j, a) in call.args.iter().enumerate() {
-                        let mut o = self.origin(*a);
-                        if call.star_from.is_none_or(|s| j < usize::from(s))
-                            && offset + j < usize::from(decl.positional_params)
-                        {
-                            o.binding = Some(self.binding(*a, loops));
+                    // A position binds its parameter, and a keyword too unless it lands in
+                    // `**kwargs`.
+                    let mut bound: Vec<(u8, VarId)> = Vec::new();
+                    for (slot, a) in self.positional_slots(call, offset) {
+                        let mut o = self.origin(a);
+                        if slot < usize::from(decl.positional_params) {
+                            o.binding = Some(self.binding(a, loops));
                         }
-                        params.push(o);
+                        if params.len() <= slot {
+                            params.resize(slot + 1, ArgOrigin::default());
+                        }
+                        params[slot] = o;
+                        if let Ok(slot) = u8::try_from(slot) {
+                            bound.push((slot, a));
+                        }
                     }
-                    let mut bound: Vec<(u8, VarId)> = call
-                        .args
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, a)| Some((u8::try_from(i + offset).ok()?, *a)))
-                        .collect();
                     for (name, v) in call.kwargs {
                         let Some(name) = name else { continue };
                         if let Some(pos) = decl.param_names.iter().position(|p| p == name) {
@@ -2693,6 +2927,7 @@ impl<'a> Extractor<'a> {
                         .push((self.pos.0, self.pos.1, self.sites.len()));
                     // An `async` invalidator only runs when it is awaited or driven, and a
                     // generator's body only where it is iterated.
+                    let invalidates = invalidates.unwrap_or(0);
                     if invalidates != 0 && (!any_async || call.is_awaited || drives) {
                         events
                             .invalidators
@@ -2703,6 +2938,7 @@ impl<'a> Extractor<'a> {
                 self.sites.push(CallSite {
                     recv_is_self: call.recv_is_self,
                     drives_coroutine_manually: drives,
+                    dispatch: self.dispatch(call, site.project_callees()),
                     constructs: call.constructs.clone(),
                     returned: if constructor {
                         None
@@ -2720,6 +2956,80 @@ impl<'a> Extractor<'a> {
                 None
             }
         }
+    }
+
+    /// The class line of the method's own class: what its `self` is an instance of.
+    fn own_line(&self) -> Option<SharedLine> {
+        self.own_line
+            .get_or_init(|| {
+                let owner = self.cx.owner_fqn(self.f)?;
+                self.cx
+                    .project
+                    .is_project_class(&owner)
+                    .then(|| self.cx.project.lineage(&owner, false))
+            })
+            .clone()
+    }
+
+    /// What the receiver of `call` tells about the implementations `callees` run
+    /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
+    /// class, or the class a constructor call makes) when a callee is inherited from a proper
+    /// base of it, and, on `self`, the callees that are overrides of subclasses.
+    fn dispatch(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<Box<Dispatch>> {
+        let project = self.cx.project;
+        let own;
+        let class: &str = if call.recv_is_self {
+            own = self.cx.owner_fqn(self.f)?;
+            &own
+        } else {
+            call.constructs
+                .as_deref()
+                .or_else(|| call.recv.as_ref()?.typed_instance.as_deref())?
+        };
+        // The class of a method among the callees, as `(module, class qualname)`.
+        fn class_of<'b>(project: &ProjectDecls, bc: &'b BoundCallee) -> Option<(&'b str, &'b str)> {
+            let (owner, _) = bc.callee.qualname.rsplit_once('.')?;
+            project
+                .function_decl(&bc.callee)
+                .is_some_and(|d| d.is_method)
+                .then_some((bc.callee.module.as_str(), owner))
+        }
+        let class_of = |bc| class_of(project, bc);
+        let is = |(module, owner): (&str, &str), fqn: &str| {
+            fqn.strip_prefix(module)
+                .and_then(|r| r.strip_prefix('.'))
+                .is_some_and(|r| r == owner)
+        };
+        if callees.iter().filter_map(class_of).all(|c| is(c, class)) {
+            return None;
+        }
+        let line = if call.recv_is_self {
+            self.own_line()?
+        } else {
+            project.lineage(class, true)
+        };
+        let in_line = |c: (&str, &str)| line.mro.iter().any(|m| is(c, m));
+        let receiver = callees
+            .iter()
+            .filter_map(class_of)
+            .any(|c| !is(c, class) && in_line(c))
+            .then(|| Arc::clone(&line));
+        let mut providers: Vec<(u16, SharedLine)> = Vec::new();
+        if call.recv_is_self {
+            for (i, bc) in callees.iter().enumerate() {
+                if let Some(c) = class_of(bc).filter(|c| !in_line(*c))
+                    && let Ok(i) = u16::try_from(i)
+                {
+                    providers.push((i, project.lineage(&format!("{}.{}", c.0, c.1), false)));
+                }
+            }
+        }
+        (receiver.is_some() || !providers.is_empty()).then(|| {
+            Box::new(Dispatch {
+                receiver,
+                providers,
+            })
+        })
     }
 
     /// The site of `callees` an offloading API runs on a worker thread for `call`
@@ -2815,6 +3125,7 @@ impl<'a> Extractor<'a> {
             once_per: self.guards.once_per_at(&cx, bb),
             once_loops: self.guards.once_loops_at(&cx, bb, self.loops_around(bb)),
             runner: Runner::Caller,
+            dispatch: None,
         }
     }
 
@@ -3268,6 +3579,7 @@ fn role_site(
         once_per: site.once_per,
         once_loops: 0,
         runner: site.runner,
+        dispatch: site.dispatch.clone(),
     }
 }
 
@@ -3343,7 +3655,7 @@ fn merge_phi<T: Clone + PartialEq>(
 }
 
 /// [`merge_phi`] for `obj.<attr>` aliases: the inputs must name one class attribute; the
-/// objects' parameters are united (the merged object may be any of them). Inputs are inserted
+/// objects' parameters and origins (`Reach`) are united (the merged object may be any of them). Inputs are inserted
 /// with their final parameters (`may_params` is complete before the alias pass), so the first
 /// insertion is final too.
 fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &[VarId]) {
@@ -3368,6 +3680,7 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
                 }
                 f.obj_params |= a.obj_params;
                 f.fresh &= a.fresh;
+                f.reach = f.reach.join(a.reach);
                 if f.holder != a.holder {
                     f.holder = None;
                 }

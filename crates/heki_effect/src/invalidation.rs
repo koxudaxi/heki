@@ -555,8 +555,9 @@ fn flag_covered(
 impl ProjectIndex {
     /// The contracts of `mask` announced after a point with `flow` in a function of `path`:
     /// by the function's own invalidator calls on every normal path, or by a project call on
-    /// every such path whose callee announces them on every path of its own (`must_invalidate`;
-    /// one resolved candidate suffices). A different helper in each branch is not combined.
+    /// every such path whose callees announce them on every path of their own
+    /// (`must_invalidate`): every function the call may run, an abstract method aside. A
+    /// different helper in each branch is not combined.
     pub fn covered_after(&self, path: &Path, flow: &SiteFlow, mask: u64) -> u64 {
         let mut covered = flow.invalidated & mask;
         let file = &self.files[path];
@@ -572,13 +573,20 @@ impl ProjectIndex {
             }
             // Only a body that runs at its call is known to run to its end: a generator may be
             // iterated in part.
+            let mut announced: Option<u64> = None;
             for bc in site.project_callees() {
-                if let Some(cs) = self.summary(&bc.callee)
-                    && body_runs_at(self, site, cs).is_some_and(|d| d.from == Facts::Body)
-                {
-                    covered |= cs.must_invalidate & mask;
-                }
+                let here = match self.summary(&bc.callee) {
+                    Some(cs) if cs.is_abstract() => continue,
+                    Some(cs)
+                        if body_runs_at(self, site, cs).is_some_and(|d| d.from == Facts::Body) =>
+                    {
+                        cs.must_invalidate & mask
+                    }
+                    _ => 0,
+                };
+                announced = Some(announced.map_or(here, |a| a & here));
             }
+            covered |= announced.unwrap_or(0);
             next = site.flow.and_then(|f| f.next_call);
         }
         covered

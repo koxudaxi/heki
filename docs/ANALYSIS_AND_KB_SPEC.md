@@ -77,7 +77,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Names | `LoadGlobal`, `LoadName`, `LoadDeref`, `StoreGlobal`, `StoreDeref`, `Copy`, `Delete`, `Import` | `Copy` adds to the direct alias set, `Delete` removes by strong update and leaves the name possibly unbound (a `LoadName` is its value until it is bound again, also at the end of an `except E as e:` handler; `Delete.global` marks a module global); `Import` / `LoadGlobal` carry the PEP 810 `is_lazy` flag |
 | Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; a chained comparison `a < b < c` branches after each link like `a < b and b < c`, with `b` evaluated once and each `Compare` spanning its own operands; until types are exact, any special method may run |
 | Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it; a template string builds the tuple of its fields' values (`Template.values`) and is otherwise opaque |
-| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones: an `await` of the frame waits for the result, directly or through copies and merges (`pending = f()` ... `await pending`); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
+| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
 | Iteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
@@ -177,6 +177,17 @@ the targets of write and read boundaries.
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
+A method called on an instance is the definition the class's MRO (Python's C3 linearization of
+its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
+named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
+`Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
+`cls()` and `cls.method()` dispatch like a call on an instance. A method's calls on its own
+`self` run the overrides of every subclass, so a mixin's summary holds the effects of every
+class sharing it; an execution effect reached only through the override of a subclass records
+that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
+only when that class and the receiver's derive one from the other (an unknown receiver runs them
+all). An async client sharing a command mixin with a sync one runs the async implementation.
+
 Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
 `pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
 `src/acme/io.py` is `acme.io`, for regular and namespace packages and for modules directly under
@@ -212,7 +223,7 @@ EffectSummary(f) = {
                                                            // not just rebound: what a shallow copy shares (MUT202)
     param_change_sites:       Map<ParamIdx, Set<Span>>,    // own changes of parameter i only, never propagated
                                                            // (EFF201 mutates-params counts them)
-    escapes_params:           Bitset,                      // stored in an attribute / container / global, or returned
+    escapes_params:           Bitset,                      // stored in an attribute / container / global / closure variable
     reallocates_params:       Bitset,                      // parameter i comes back as a quadratic reallocation
                                                            // of it (DATA101 through helpers)
     consumes_params:          Bitset,                      // iterated to exhaustion on every normal path (MUT106)
@@ -308,7 +319,8 @@ table (`consumption`):
 - `Return`: a plain function returns it, directly or through lazy wrappers: its `Result` goes into
   the function's own `iterated`;
 - `Through`: it is passed to a project call whose body iterates that parameter (`iterates_params`)
-  at the call, or whose result is iterated there: its `Result` runs inside that call.
+  at the call, or whose result is iterated there or returned by a plain caller (`return
+  relay(rows())`): its `Result` runs inside that call, or goes into the caller's `iterated`.
 
 Any other use runs nothing in the caller: a generator stored, yielded, returned from an
 `async def`, handed to an external or unresolved call (`StreamingResponse(rows())`), or only
@@ -406,7 +418,7 @@ which module imports which.
   `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
   `heapq.nlargest`, `functools.reduce`, ...: one table, `consumption::FULL_CONSUMERS`, which also
   decides where a generator's body runs), also through wrappers over one iterable; `any` / `all`
-  step it but may stop early (`SHORT_CIRCUIT_CONSUMERS`: a generator's body runs, the iterator is
+  step it but may stop early (`STOPPING_CONSUMERS`: a generator's body runs, the iterator is
   not exhausted); `next()` is
   stepping, not consumption. A project function consumes its argument when `consumes_params` says
   so, and its body runs at the call.
@@ -481,7 +493,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
      `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, and the Layer 2
      `copy_sanitizer` entries, as deep as each entry says: a shallow copy ends it for the top
-     level only), and a slice of a value inferred as a builtin sequence is a shallow copy
+     level only), and a slice is a shallow copy unless the value's class is inferred and is not a
+     builtin sequence
      (`readonly::subscript_step`, shared with the return flow). A copy keeps its original's class
      for receiver typing. A phi joins the tags of all its incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a

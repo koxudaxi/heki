@@ -195,7 +195,7 @@ impl<'a, 'c> Sizes<'a, 'c> {
             InstKind::AttrLoad { obj, attr, .. } => {
                 match self.types.get(obj).cloned().or_else(|| self.imported(*obj)) {
                     // A class attribute read through the class (`cls.order`).
-                    Some(Val::Ref(class)) if decls.is_project_class(&class) => {
+                    Some(Val::Ref(class) | Val::Class(class)) if decls.is_project_class(&class) => {
                         decls.small_attr(&class, attr)
                     }
                     Some(Val::Ref(module)) => {
@@ -834,7 +834,7 @@ impl<'a> Defs<'a> {
                 .collect::<Option<Vec<_>>>()?
                 .first()
                 .copied(),
-            Val::Ref(_) | Val::Super(_) => None,
+            Val::Ref(_) | Val::Class(_) | Val::Super(_) => None,
         }
     }
 

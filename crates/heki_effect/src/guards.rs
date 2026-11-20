@@ -414,6 +414,8 @@ pub(crate) struct GuardInputs<'f, 'a> {
     pub defs: &'f FxHashMap<VarId, &'a Inst>,
     pub uses: &'f FxHashMap<VarId, Vec<&'a InstKind>>,
     pub types: &'f FxHashMap<VarId, Val>,
+    /// The classes each `isinstance` check names, by its second argument.
+    pub isinstance_classes: &'f FxHashMap<VarId, Vec<String>>,
     /// Parameter `i` itself (`None`) or a path through its attributes.
     pub param_alias: &'f FxHashMap<VarId, (u8, Option<String>)>,
     /// One-level slots of parameters (`p.a`, `p["k"]`).
@@ -962,7 +964,7 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 && matches!(cx.types.get(c), Some(Val::Ref(n)) if n == "builtins.isinstance") =>
             {
                 let subject = cx.subject(args[0])?;
-                let classes = self.classes(args[1])?;
+                let classes = cx.isinstance_classes.get(&args[1])?.clone();
                 Some((subject, GuardTest::IsInstance(classes), true))
             }
             InstKind::Compare { op, lhs, rhs, .. } => {
@@ -983,26 +985,6 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
             }
             _ => None,
         }
-    }
-
-    /// The classes `isinstance`'s second argument names: a class, or a tuple of classes.
-    fn classes(&self, v: VarId) -> Option<Vec<String>> {
-        let cx = self.cx;
-        let one = |v: &VarId| match cx.types.get(v) {
-            Some(Val::Ref(fqn)) => Some(fqn.clone()),
-            _ => None,
-        };
-        let mut out = match cx.def(v) {
-            Some(InstKind::AllocBuiltin {
-                kind: BuiltinKind::Tuple,
-                elems,
-                ..
-            }) => elems.iter().map(one).collect::<Option<Vec<_>>>()?,
-            _ => vec![one(&v)?],
-        };
-        out.sort();
-        out.dedup();
-        Some(out)
     }
 
     /// What `v` having truthiness `holds` says.

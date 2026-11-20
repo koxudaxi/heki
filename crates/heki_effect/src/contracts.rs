@@ -34,6 +34,12 @@ pub trait Contracts: Debug + Send + Sync {
     /// The contracts that name the function an exempt writer: its writes need no announcement.
     fn exempt_writer(&self, fqn: &str, qualname: &str) -> u64;
 
+    /// How the `write-owners` contracts treat a write made inside the function: bit `2k` when
+    /// contract `k` allows it (an allowed writer or an exempt method), bit `2k + 1` when the
+    /// function is one of its forbidden writers. Contracts past the 32nd share the bits of
+    /// contract `k % 32`: their chains are then kept apart less finely.
+    fn writer_contexts(&self, fqn: &str, qualname: &str) -> u64;
+
     /// The contracts whose targets include attribute `attr` of an object of class `classes[0]`;
     /// `classes` lists that class and then its bases (a target class covers its subclasses).
     fn target_of(&self, classes: &[String], attr: &str) -> u64;
