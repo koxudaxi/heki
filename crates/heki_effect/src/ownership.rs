@@ -188,12 +188,15 @@ const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
 
 /// What the instruction `kind` makes of the object its result holds. A call's resolution is
 /// `callee` (`None` for any other instruction); `constructs` says the call constructs a project
-/// class.
+/// class. `made_here` tells the values holding an object the function makes itself
+/// ([`made_here`]): an attribute of such an object is one of its elements, of unknown origin,
+/// not state that outlives the call.
 pub fn source<'i>(
     kind: &'i InstKind,
     callee: Option<&Callee>,
     constructs: bool,
     kb: &EffectiveEcosystemKb,
+    made_here: &dyn Fn(VarId) -> bool,
 ) -> Source<'i> {
     match kind {
         InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => Source::New,
@@ -206,6 +209,7 @@ pub fn source<'i>(
         InstKind::Copy { src, .. } => Source::Same(*src),
         InstKind::LoadGlobal { name, .. } => Source::Held(Holder::Global(name)),
         InstKind::LoadDeref { name, .. } => Source::Held(Holder::Cell(name)),
+        InstKind::AttrLoad { obj, .. } if made_here(*obj) => Source::Element(*obj),
         InstKind::AttrLoad { obj, attr, .. } => Source::Held(Holder::Attr { obj: *obj, attr }),
         InstKind::SubscriptLoad {
             obj,
@@ -245,9 +249,11 @@ pub fn source<'i>(
                     obj: *obj,
                     name: *name,
                 };
-                return match args.get(2) {
-                    Some(default) => Source::HeldOr(held, *default),
-                    None => Source::Held(held),
+                return match (args.get(2), made_here(*obj)) {
+                    (Some(default), true) => Source::ElementOr(*obj, *default),
+                    (Some(default), false) => Source::HeldOr(held, *default),
+                    (None, true) => Source::Element(*obj),
+                    (None, false) => Source::Held(held),
                 };
             }
             match kind {
@@ -257,6 +263,68 @@ pub fn source<'i>(
         }
         _ => Source::Unknown,
     }
+}
+
+/// Calls of these with one argument return a copy of it.
+const COPYING_CALLS: &[&str] = &[
+    "builtins.list",
+    "builtins.dict",
+    "builtins.set",
+    "builtins.bytearray",
+    "collections.OrderedDict",
+    "collections.deque",
+    "copy.copy",
+    "copy.deepcopy",
+];
+
+/// The operand whose copy the instruction `kind` makes (with the call's resolution `callee`): the
+/// receiver of a copy method (`x.copy()`), or the argument of a copying call with that argument
+/// alone (`list(x)`, `dict(x)`, `copy.copy(x)`, a copy sanitizer of the catalog).
+pub fn copied_operand(
+    kind: &InstKind,
+    callee: Option<&Callee>,
+    kb: &EffectiveEcosystemKb,
+) -> Option<VarId> {
+    match kind {
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            ..
+        } if args.is_empty() && kwargs.is_empty() && COPY_METHODS.contains(&method.as_str()) => {
+            Some(*recv)
+        }
+        InstKind::Call { args, kwargs, .. } if args.len() == 1 && kwargs.is_empty() => {
+            let Some(Callee::External(symbol)) = callee else {
+                return None;
+            };
+            let copies = COPYING_CALLS.contains(&symbol.as_str())
+                || kb
+                    .lookup(symbol)
+                    .is_some_and(|e| e.copy_sanitizer.is_some());
+            copies.then_some(args[0])
+        }
+        _ => None,
+    }
+}
+
+/// Whether the object `var` holds is one the function makes itself: through copies, its
+/// definition is a new object by `source_of`.
+pub fn made_here<'i>(
+    var: VarId,
+    defs: &FxHashMap<VarId, &'i Inst>,
+    source_of: &dyn Fn(&'i Inst) -> Source<'i>,
+) -> bool {
+    let mut cur = var;
+    while let Some(inst) = defs.get(&cur) {
+        match (&inst.kind, source_of(inst)) {
+            (_, Source::New) => return true,
+            (InstKind::Copy { src, .. }, _) => cur = *src,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// [`source`] of a method call outside the project, by the method's name.

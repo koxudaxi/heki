@@ -20,7 +20,9 @@ copy (`list(x)`, `dict(x)`, `x.copy()`, `copy.copy`), a constructor call, an ope
 (`a + b`), or a call of a project function that returns a new object. It is borrowed where it
 comes from state that outlives the call: a parameter, an attribute, a global, a variable of an
 enclosing function, an element of one of these, or a call of a project function that returns
-such state. The paths meet in a conditional expression or an `if`:
+such state. An attribute of an object the function makes itself (`visitor = Visitor()`, then
+`visitor.errors`) is part of that object, not borrowed state. The paths meet in a conditional
+expression or an `if`:
 
 - `items = given or []`, `items = given if given else []`;
 - `options = dict(defaults, **extra) if extra else defaults`;
@@ -49,6 +51,10 @@ It does not report:
 - a value that is a new object on every path, or borrowed on every path;
 - a value rebound to a copy before the change (`x = list(x)`), also when the copy is made only
   where the value is still the borrowed object (`if x is shared: x = shared.copy()`);
+- a value that a flag of the caller's copies, a test of parameters alone
+  (`if not in_place: x = x.copy()`, `list(x) if copy else x`): where it does not copy, the
+  function changes the borrowed object on purpose. A copy that another test picks
+  (`x if isinstance(x, set) else set(x)`, `if config.get("strict"): x = set(x)`) still counts;
 - the accumulator idiom, where a parameter is replaced by a new object only when it is `None`
   or a sentinel (`if out is None: out = []`, `out = [] if out is None else out`): the function
   fills what its caller hands it. Such a value counts when it may also be a new object the test
@@ -93,7 +99,12 @@ def collect(name: str, scopes: list[str] | None = None) -> list[str]:
 
 ## Known limitations
 - The paths are not told apart by the tests on them: a value that an `if v is SENTINEL: return`
-  excludes, or a callee that returns its argument only when it is not a container, still counts.
+  excludes, or a callee that returns its argument only when it is not a container, still counts,
+  and so does a callee's borrowed return that a constant argument rules out
+  (`convert(data, ensure_copy=True)` where `convert` returns `data` itself only without it).
+- A new object that a function gets from a project call and stores on its argument before
+  returning it (`state = runtime.state = make_state()`) still counts as new for its callers,
+  which change the argument's state.
 - Calls of `async def` functions and generators are not followed: their results are not what
   their bodies return.
 - A store in an attribute is followed for `self` only.
