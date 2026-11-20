@@ -646,7 +646,10 @@ class Owner:
 "#,
     );
     assert_eq!(of(&types(&src, "Owner.method"), "it"), one("m.Owner"));
-    assert_eq!(of(&types(&src, "Owner.build"), "made"), one("class m.Owner"));
+    assert_eq!(
+        of(&types(&src, "Owner.build"), "made"),
+        one("class m.Owner")
+    );
     assert!(of(&types(&src, "Owner.helper"), "same").is_empty());
     assert_eq!(
         of(&types(&src, "Owner.sup"), "parent"),

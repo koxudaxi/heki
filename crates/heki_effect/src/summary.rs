@@ -1744,6 +1744,38 @@ impl<'a> Extractor<'a> {
         false
     }
 
+    /// The positional arguments of `call` with the parameter slot each one binds, counted from
+    /// `offset` (a bound receiver): an argument unpacked with `*` binds the items of a display
+    /// of known length one by one (`*(a, b)`, `*()`); past one of unknown length, no argument
+    /// has a known slot.
+    fn positional_slots(&self, call: &Call<'_>, offset: usize) -> Vec<(usize, VarId)> {
+        let mut out = Vec::new();
+        let mut slot = offset;
+        for (j, a) in call.args.iter().enumerate() {
+            if !self.f.is_starred(call.dst, j) {
+                out.push((slot, *a));
+                slot += 1;
+                continue;
+            }
+            let Some(InstKind::AllocBuiltin {
+                kind: BuiltinKind::Tuple | BuiltinKind::List,
+                elems,
+                dst,
+            }) = self.defs.get(a).map(|inst| &inst.kind)
+            else {
+                break;
+            };
+            if (0..elems.len()).any(|k| self.f.is_starred(*dst, k)) {
+                break;
+            }
+            for e in elems {
+                out.push((slot, *e));
+                slot += 1;
+            }
+        }
+        out
+    }
+
     /// [`Self::call`] for a `Call` / `MethodCall` instruction at `(bb, index)`: its callee is
     /// kept for the iteration flow, and a project call is remembered for the sites of the
     /// object it returns.
@@ -1851,23 +1883,22 @@ impl<'a> Extractor<'a> {
                                 .unwrap_or_default()
                         });
                     }
-                    // A position binds its parameter exactly before any `*` unpacking, and a
-                    // keyword unless it lands in `**kwargs`.
-                    for (j, a) in call.args.iter().enumerate() {
-                        let mut o = self.origin(*a);
-                        if call.star_from.is_none_or(|s| j < usize::from(s))
-                            && offset + j < usize::from(decl.positional_params)
-                        {
-                            o.binding = Some(self.binding(*a, loops));
+                    // A position binds its parameter, and a keyword too unless it lands in
+                    // `**kwargs`.
+                    let mut bound: Vec<(u8, VarId)> = Vec::new();
+                    for (slot, a) in self.positional_slots(call, offset) {
+                        let mut o = self.origin(a);
+                        if slot < usize::from(decl.positional_params) {
+                            o.binding = Some(self.binding(a, loops));
                         }
-                        params.push(o);
+                        if params.len() <= slot {
+                            params.resize(slot + 1, ArgOrigin::default());
+                        }
+                        params[slot] = o;
+                        if let Ok(slot) = u8::try_from(slot) {
+                            bound.push((slot, a));
+                        }
                     }
-                    let mut bound: Vec<(u8, VarId)> = call
-                        .args
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, a)| Some((u8::try_from(i + offset).ok()?, *a)))
-                        .collect();
                     for (name, v) in call.kwargs {
                         let Some(name) = name else { continue };
                         if let Some(pos) = decl.param_names.iter().position(|p| p == name) {

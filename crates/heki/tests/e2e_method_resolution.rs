@@ -1,8 +1,8 @@
 //! Which functions a call runs, end to end through the real binary: methods found along
 //! Python's MRO (C3 linearization), constructing a named class (its own `__init__`, not a
 //! subclass's) and calling a method through it, class methods called through their class,
-//! calling an instance (`__call__`), constructions through a module, and the targets of `with`
-//! statements.
+//! calling an instance (`__call__`), constructions through a module, the targets of `with`
+//! statements, module-level names bound twice, and the parameters `*` arguments bind.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -410,5 +410,43 @@ fn a_module_name_is_what_its_module_binds_last() {
             ("pkg/users.py", SHADOW_USERS),
         ],
         &["EFF101"],
+    );
+}
+
+/// An argument unpacked with `*` binds the items of a display of known length one by one; past
+/// one of unknown length, the parameter an argument binds is not known.
+const UNPACKED: &str = r#"from pkg.model import Model
+
+
+def fill(ignored, xs):
+    xs.append(1)
+
+
+def empty_pack(m: Model):
+    fill(*(), None, m.items)  # MUT201
+
+
+def one_item_pack(m: Model):
+    fill(*(None,), m.items)  # MUT201
+
+
+def whole_pack(m: Model):
+    fill(*[None, m.items])  # MUT201
+
+
+def first_slot(m: Model, rest):
+    fill(m.items, *rest)
+
+
+def plain(m: Model):
+    fill(m.items, None)
+"#;
+
+#[test]
+fn unpacked_arguments_bind_the_items_of_known_displays() {
+    check_marks(
+        "unpacked_arguments",
+        &[("pkg/model.py", MODEL), ("pkg/unpacked.py", UNPACKED)],
+        &["MUT201"],
     );
 }
