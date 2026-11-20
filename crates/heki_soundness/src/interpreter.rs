@@ -1440,13 +1440,28 @@ impl<'a> FnCtx<'a> {
     /// it is a phi (`a and b`, `x if c else y`) whose every incoming value is (SSA values keep
     /// their type, and the state joins each one over the paths that define it).
     fn exact_on_every_path(&self, st: &FrameState, v: VarId, depth: u32) -> bool {
+        self.exact_on_every_path_in(st, v, depth, &mut FxHashMap::default())
+    }
+
+    /// [`Self::exact_on_every_path`], deciding each value at each depth once: phis may share
+    /// inputs, which a walk would reach along every path.
+    fn exact_on_every_path_in(
+        &self,
+        st: &FrameState,
+        v: VarId,
+        depth: u32,
+        decided: &mut FxHashMap<(VarId, u32), bool>,
+    ) -> bool {
         if st.exact_type(v).is_some() {
             return true;
         }
         let Def::Phi(b) = self.def(v) else {
             return false;
         };
-        depth < 8
+        if let Some(&known) = decided.get(&(v, depth)) {
+            return known;
+        }
+        let exact = depth < 8
             && self
                 .f
                 .block(b)
@@ -1454,7 +1469,9 @@ impl<'a> FnCtx<'a> {
                 .iter()
                 .filter(|p| p.dst == v)
                 .flat_map(|p| &p.incoming)
-                .all(|&(_, x)| x != v && self.exact_on_every_path(st, x, depth + 1))
+                .all(|&(_, x)| x != v && self.exact_on_every_path_in(st, x, depth + 1, decided));
+        decided.insert((v, depth), exact);
+        exact
     }
 
     /// Apply the phis of `succ` for the edge from `pred` (parallel copy).
