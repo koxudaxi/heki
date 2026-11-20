@@ -141,15 +141,42 @@ def test_the_release_version_comes_from_the_tag_or_the_input(
 ) -> None:
     output = tmp_path / "output"
     script = release["jobs"]["version"]["steps"][0]["run"]
-    env = {"TAG": tag, "INPUT": version_input, "PUBLISH": publish, "GITHUB_OUTPUT": str(output)}
+    env = {
+        "GITHUB_EVENT_NAME": "release" if tag else "workflow_dispatch",
+        "TAG": tag,
+        "INPUT": version_input,
+        "PUBLISH": publish,
+        "GITHUB_OUTPUT": str(output),
+    }
     result = run_step(script, {**os.environ, **env})
     assert result.returncode == 0, result.stderr
     assert outputs(output) == {"version": expected}
 
 
+def test_a_release_tag_without_a_version_fails(release: dict[str, Any], tmp_path: Path) -> None:
+    script = release["jobs"]["version"]["steps"][0]["run"]
+    env = {
+        "GITHUB_EVENT_NAME": "release",
+        "TAG": "v",
+        "INPUT": "",
+        "PUBLISH": "",
+        "GITHUB_OUTPUT": str(tmp_path / "output"),
+    }
+    result = run_step(script, {**os.environ, **env})
+    assert result.returncode == 1
+    assert "The release tag `v` names no version." in result.stdout
+    assert outputs(tmp_path / "output") == {}
+
+
 def test_a_version_input_cannot_publish(release: dict[str, Any], tmp_path: Path) -> None:
     script = release["jobs"]["version"]["steps"][0]["run"]
-    env = {"TAG": "", "INPUT": "0.1.3", "PUBLISH": "true", "GITHUB_OUTPUT": str(tmp_path / "o")}
+    env = {
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "TAG": "",
+        "INPUT": "0.1.3",
+        "PUBLISH": "true",
+        "GITHUB_OUTPUT": str(tmp_path / "o"),
+    }
     result = run_step(script, {**os.environ, **env})
     assert result.returncode == 1
     assert "builds and checks only" in result.stdout

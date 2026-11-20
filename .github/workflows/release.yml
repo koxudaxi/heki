@@ -52,7 +52,12 @@ jobs:
             exit 1
           fi
           version="${TAG:-$INPUT}"
-          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+          version="${version#v}"
+          if [ "$GITHUB_EVENT_NAME" = release ] && [ -z "$version" ]; then
+            echo "::error::The release tag \`$TAG\` names no version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
   wheels:
     name: wheel (${{ matrix.target }})
