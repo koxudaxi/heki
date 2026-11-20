@@ -1055,3 +1055,71 @@ fn iterator_double_consumption_shares_the_consuming_calls() {
         "`it` is a single-pass iterator already consumed at line 10; this pass sees no items"
     );
 }
+
+/// `(path, line, rule)` of diagnostics or marks.
+type Marks = Vec<(String, u64, String)>;
+
+/// `(path, line, rule)` of the diagnostics of `rules` for `files`, and the marks of `files`: a
+/// line ending in `# <RULE>`.
+fn reported_and_marked(name: &str, files: &[(&str, &str)], rules: &[&str]) -> (Marks, Marks) {
+    let p = Project::new(name);
+    p.write("pkg/__init__.py", "");
+    for (path, text) in files {
+        p.write(path, text);
+    }
+    let mut reported: Marks = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|(_, _, _, r, _)| rules.contains(&r.as_str()))
+        .map(|(path, line, _, rule, _)| (path, line, rule))
+        .collect();
+    reported.sort();
+    let mut marked = Vec::new();
+    for (path, text) in files {
+        for (i, line) in text.lines().enumerate() {
+            for rule in rules {
+                if line.trim_end().ends_with(&format!("# {rule}")) {
+                    marked.push(((*path).to_owned(), i as u64 + 1, (*rule).to_owned()));
+                }
+            }
+        }
+    }
+    marked.sort();
+    (reported, marked)
+}
+
+/// What runs where a generator is made and iterated: the implementation behind
+/// `typing.overload` signatures.
+const DEFERRED: &str = r#"import time
+import typing
+
+
+@typing.overload
+def rows(x: int) -> typing.Iterator[int]: ...
+
+
+@typing.overload
+def rows(x: str) -> typing.Iterator[str]: ...
+
+
+def rows(x):
+    time.sleep(1)
+    yield x
+
+
+async def made():
+    rows(1)
+
+
+async def iterated():
+    list(rows(1))  # EFF101
+"#;
+
+#[test]
+fn generator_bodies_run_where_their_generator_is_iterated() {
+    let (reported, marked) = reported_and_marked(
+        "deferred_bodies",
+        &[("pkg/deferred.py", DEFERRED)],
+        &["EFF101"],
+    );
+    assert_eq!(reported, marked);
+}

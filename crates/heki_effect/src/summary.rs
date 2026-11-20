@@ -99,8 +99,17 @@ fn extract_module(
         content_hash: input.content_hash.clone(),
         ..FileSummary::default()
     };
+    // `typing.overload` signatures are replaced by the implementation when it is defined: only
+    // the implementation runs.
+    let implemented: FxHashSet<&str> = input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| !f.is_class_body && !is_overload(f))
+        .map(func_qualname)
+        .collect();
     for f in &input.ir.functions {
-        if f.is_class_body {
+        if f.is_class_body || (is_overload(f) && implemented.contains(func_qualname(f))) {
             continue;
         }
         let key = FuncKey {
@@ -145,6 +154,11 @@ fn extract_module(
         }
     }
     file
+}
+
+/// A `@typing.overload` signature.
+fn is_overload(f: &IrFunction) -> bool {
+    f.has_decorator(&["overload"])
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
