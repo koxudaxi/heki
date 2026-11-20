@@ -293,39 +293,6 @@ fn gate_3_boundary_only_reports_first_sync_crossing() {
     );
 }
 
-fn many_async_callers(n: usize) -> String {
-    let mut src = String::from("import time\n\ndef c():\n    time.sleep(1)\n");
-    for i in 0..n {
-        src.push_str(&format!("\nasync def caller_{i:02}():\n    c()\n"));
-    }
-    src
-}
-
-#[test]
-fn gate_3_root_cause_grouping_folds_beyond_threshold() {
-    let index = project(&[("many.py", &many_async_callers(12))]);
-    let reports = boundary_reports(&index);
-    assert_eq!(reports.len(), 12);
-    let groups = group_by_root_cause(&reports, ROOT_CAUSE_GROUP_THRESHOLD);
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].additional, 11);
-    assert_eq!(groups[0].representative.function, key("many", "caller_00"));
-    assert_eq!(
-        groups[0].message_suffix().as_deref(),
-        Some("(+11 more async call sites reaching the same blocking root cause)")
-    );
-
-    // Exactly at the threshold nothing is folded.
-    let index = project(&[("many.py", &many_async_callers(10))]);
-    let groups = group_by_root_cause(&boundary_reports(&index), ROOT_CAUSE_GROUP_THRESHOLD);
-    assert_eq!(groups.len(), 10);
-    assert!(
-        groups
-            .iter()
-            .all(|g| g.additional == 0 && g.message_suffix().is_none())
-    );
-}
-
 const ASYNC_FILTERS_PY: &str = r#"
 import asyncio
 import time

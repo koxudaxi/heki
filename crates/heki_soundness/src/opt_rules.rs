@@ -1539,7 +1539,10 @@ impl<'a, 'c> Rules<'a, 'c> {
         let edits = vec![
             TextEdit {
                 span: Span { start: ls, end: ls },
-                replacement: format!("{indent}{name} = {expr}\n"),
+                replacement: format!(
+                    "{indent}{name} = {expr}{}",
+                    heki_ast::line_break(self.m.source)
+                ),
             },
             TextEdit {
                 span: replace,
@@ -2734,7 +2737,7 @@ fn closes_at_end(text: &str) -> bool {
 fn annotated_declarations<'t>(text: &'t str, name: &'t str) -> impl Iterator<Item = u32> + 't {
     text.match_indices(name).filter_map(move |(i, _)| {
         let before = text[..i].trim_end_matches([' ', '\t']);
-        let starts = before.is_empty() || before.ends_with(['\n', ';', '(', ',', '*']);
+        let starts = before.is_empty() || before.ends_with(['\n', '\r', ';', '(', ',', '*']);
         let word_start = text[..i]
             .chars()
             .next_back()

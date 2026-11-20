@@ -307,8 +307,9 @@ EffectSummary(f) = {
 4. **Staged `EFF101` and duplicate aggregation**: the default covers `BlockingNet` / `BlockingDb`
    / `BlockingSubprocess` / `BlockingSync` / `Sleep`; `BlockingFs` is the opt-in `EFF105`;
    `logging` / `print` are excluded. An `async` chain is reported only at its boundary, and
-   reports sharing a root cause are grouped (from 10 reports). Click / Typer commands, ASGI
-   lifespan hooks, `ConstSmall` / `RetryPattern` loops, and test code are relaxed by default.
+   output folds more than 10 boundary reports sharing a root cause into one, after inline
+   suppressions and the Ratchet baseline. Click / Typer commands, ASGI lifespan hooks,
+   `ConstSmall` / `RetryPattern` loops, and test code are relaxed by default.
 
 ### 4.3 Soundness / Alias lane (`heki_soundness`): family 3
 
@@ -562,7 +563,8 @@ heki/
   that only moved; those positions are re-propagated into the callers' summaries without changing
   facts. Files changed on disk and configuration changes are followed.
   `crates/heki/tests/lsp_oracle.rs` compares the server with `heki check` after every step of an
-  editing session (107 steps).
+  editing session (107 steps, and a second session of 20 steps over file, layout, buffer, and
+  baseline changes).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
 - **LSP features**: the call chains of `EFF101` / `MUT201` and others are
   `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven
@@ -582,7 +584,7 @@ heki check --diff [PATHS...]                  # preview the fixes
 heki check --select EFF,MUT --ignore MUT101   # rule selection (codes, prefixes, or names)
 heki check --output-format full|concise|json|github|sarif
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
-heki check --update-baseline                  # write or shrink the line-number-independent baseline
+heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
 heki check --profile dump.collapsed [PATHS]   # optional: rank fixes with a recorded profile dump
 heki check --watch [PATHS...]                 # re-check on file changes
 

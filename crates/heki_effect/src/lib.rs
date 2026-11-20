@@ -15,7 +15,7 @@
 //!    with the guards of each effect and call site (`guards`).
 //! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint; `guards` maps a
 //!    callee's guards across each call site (pruning the effects an argument switches off).
-//! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
+//! 4. `report`: Boundary-Only Reporting.
 
 mod callgraph;
 mod construction;
@@ -37,10 +37,7 @@ pub use invalidation::{
     delegates_to_callers, is_initializer, reach_across,
 };
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
-pub use report::{
-    BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
-    boundary_reports_in, group_by_root_cause,
-};
+pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
     ReadOnlyKind, StrConstant, TypeCtx, Val, detect_src_layout, func_qualname,
@@ -1000,6 +997,15 @@ pub(crate) fn is_stub(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "pyi")
 }
 
+/// Which of the files sharing a module name defines it, the greatest winning: an
+/// implementation before its `.pyi` stub, a package (`pkg/__init__.py`) before a module file of
+/// the same name (`pkg.py`, which Python never imports next to it), then the greater path. Full
+/// and incremental analysis both pick the owner this way, whatever order they meet the files in.
+pub(crate) fn module_precedence(path: &Path) -> (bool, bool, &Path) {
+    let package = path.file_stem().is_some_and(|s| s == "__init__");
+    (!is_stub(path), package, path)
+}
+
 /// Summarize every module of a project and propagate effects to a fixpoint.
 pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
     analyze_project_with(modules, kb, None)
@@ -1094,8 +1100,8 @@ impl ProjectIndex {
         contracts: Option<Arc<dyn Contracts>>,
         typed_writes: TypedWrites,
     ) -> Self {
-        // Index stubs first so a sibling `.py` implementation always owns the module's symbols.
-        files.sort_by_key(|f| !is_stub(&f.path));
+        // The owners of shared module names last (`add_file_links` keeps them either way).
+        files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
             skips_typed_writes: typed_writes == TypedWrites::Local,
@@ -1209,28 +1215,22 @@ impl ProjectIndex {
         DeclPasses::new(self.preferred_decls())
     }
 
-    /// Every module's declarations, `.pyi` stubs first (a later `.py` sharing the module name
-    /// replaces them).
+    /// Every module's declarations in [`module_precedence`] order (a later file sharing a
+    /// module name replaces the earlier ones).
     fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
-        let mut entries: Vec<(bool, Arc<ModuleDecls>)> = self
-            .files
-            .values()
-            .map(|f| (is_stub(&f.path), Arc::clone(&f.decls)))
-            .collect();
-        entries.sort_by_key(|(stub, _)| !*stub);
-        entries.into_iter().map(|(_, d)| d).collect()
+        let mut files: Vec<&FileSummary> = self.files.values().collect();
+        files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
+        files.into_iter().map(|f| Arc::clone(&f.decls)).collect()
     }
 
-    /// Preferred declarations currently indexed for `module_name` (`.py` over `.pyi`).
+    /// Declarations currently indexed for `module_name`: those of its owner
+    /// ([`module_precedence`]).
     pub fn module_decls(&self, module_name: &str) -> Option<Arc<ModuleDecls>> {
-        let mut stub = None;
-        for f in self.files.values().filter(|f| f.module_name == module_name) {
-            if !is_stub(&f.path) {
-                return Some(Arc::clone(&f.decls));
-            }
-            stub = Some(Arc::clone(&f.decls));
-        }
-        stub
+        self.files
+            .values()
+            .filter(|f| f.module_name == module_name)
+            .max_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)))
+            .map(|f| Arc::clone(&f.decls))
     }
 
     /// Re-summarize one edited module against the index's declarations and update it.
@@ -1239,11 +1239,11 @@ impl ProjectIndex {
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
     ) -> IncrementalUpdate {
-        let others: Vec<(bool, Arc<ModuleDecls>)> = self
+        let others: Vec<(PathBuf, Arc<ModuleDecls>)> = self
             .files
             .values()
             .filter(|f| f.path != input.path)
-            .map(|f| (is_stub(&f.path), Arc::clone(&f.decls)))
+            .map(|f| (f.path.clone(), Arc::clone(&f.decls)))
             .collect();
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
@@ -1263,11 +1263,13 @@ impl ProjectIndex {
         kb: &EffectiveEcosystemKb,
         decls: &mut DeclPasses,
     ) -> (IncrementalUpdate, DeclKeys) {
-        let masked_by_impl = is_stub(&input.path)
-            && self.files.values().any(|f| {
-                f.module_name == input.module_name && f.path != input.path && !is_stub(&f.path)
-            });
-        let (changed, own) = if masked_by_impl {
+        // Another file owns the module name: its declarations stay the module's.
+        let masked = self.files.values().any(|f| {
+            f.module_name == input.module_name
+                && f.path != input.path
+                && module_precedence(&f.path) > module_precedence(&input.path)
+        });
+        let (changed, own) = if masked {
             (
                 DeclKeys::default(),
                 resolver::own_module_decls(input, kb, decls),
@@ -1331,9 +1333,9 @@ impl ProjectIndex {
                 .files
                 .values()
                 .filter(|f| f.local_functions.contains_key(func))
-                .map(|f| (is_stub(&f.path), &f.path))
-                .min();
-            if let Some((_, other)) = fallback {
+                .map(|f| &f.path)
+                .max_by(|a, b| module_precedence(a).cmp(&module_precedence(b)));
+            if let Some(other) = fallback {
                 self.func_files.insert(func.clone(), other.clone());
             }
         }
@@ -1473,10 +1475,11 @@ impl ProjectIndex {
     }
 
     fn add_file_links(&mut self, file: &FileSummary) {
-        let file_is_stub = is_stub(&file.path);
         for func in file.local_functions.keys() {
-            let keep_impl = file_is_stub && self.func_files.get(func).is_some_and(|p| !is_stub(p));
-            if !keep_impl {
+            let owned_elsewhere = self.func_files.get(func).is_some_and(|p| {
+                p != &file.path && module_precedence(p) > module_precedence(&file.path)
+            });
+            if !owned_elsewhere {
                 self.func_files.insert(func.clone(), file.path.clone());
             }
         }

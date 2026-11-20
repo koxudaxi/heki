@@ -1487,8 +1487,9 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
         .write(".hekiignore", "pkg/ignored/\n");
     std::fs::write(p.dir.join("pkg/latin1.py"), b"x = '\xff'\n").unwrap();
 
+    // Files that cannot be read or parsed are reported after the list, with exit code 2.
     let (code, stdout, stderr) = p.heki(&["assumptions", "pkg"]);
-    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(code, 2, "{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 17, "{stdout}");
     assert!(lines.iter().all(|l| l.starts_with("pkg/tour.py:")));
@@ -1503,23 +1504,25 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("warning: pkg/broken.py: 2 syntax error(s)"),
+        stderr.contains("error: pkg/broken.py:1:7: syntax error: "),
         "{stderr}"
     );
-    assert!(stderr.contains("warning: pkg/latin1.py: "), "{stderr}");
+    assert!(stderr.contains("error: pkg/latin1.py: "), "{stderr}");
 
-    // JSON records, sorted by position; a single file, a duplicate path and a missing one.
+    // JSON records, sorted by position; a single file and a duplicate path. A file named
+    // explicitly is read as Python whatever its extension, as `heki check` does.
     let (code, stdout, stderr) = p.heki(&[
         "assumptions",
         "pkg/tour.py",
         "pkg/tour.py",
         "pkg/notes.txt",
-        "missing.py",
         "--json",
     ]);
     assert_eq!(code, 0, "{stderr}");
     let records: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(records.len(), 17);
+    assert_eq!(records.len(), 18);
+    assert_eq!(records[0]["path"], "pkg/notes.txt");
+    let records = &records[1..];
     assert_eq!(records[0]["kind"], "eval");
     assert_eq!(records[0]["qualname"], "a1_hazards");
     assert_eq!(records[0]["path"], "pkg/tour.py");
@@ -1533,9 +1536,21 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     assert_eq!(records[0]["column"], 5);
     assert!(stderr.is_empty(), "{stderr}");
 
+    // A path that does not exist is an input error, before anything is listed.
+    let (code, stdout, stderr) = p.heki(&["assumptions", "pkg/tour.py", "missing.py", "--json"]);
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("heki error: path `missing.py` does not exist"),
+        "{stderr}"
+    );
+
     // `--target-version` changes the IR (3.11 comprehension functions), not the hazards; an
-    // unknown tag falls back to the configured profile.
-    for version in ["py311", "py39"] {
+    // unknown tag is an error, as for `heki check`.
+    let (code, _, stderr) = p.heki(&["assumptions", "pkg/tour.py", "--target-version", "py39"]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("unknown target version `py39`"), "{stderr}");
+    for version in ["py311", "py315"] {
         let (code, stdout, _) = p.heki(&[
             "assumptions",
             "pkg/tour.py",

@@ -310,18 +310,22 @@ fn inline_directives_without_rule_lists_do_not_suppress() {
     let p = Project::new("directives");
     p.write(
         "a.py",
-        "import time\n\n\nasync def handler():\n    time.sleep(1)  # heki: ignore EFF101\n    time.sleep(2)  # noqa:\n    time.sleep(3)  # heki: ignore\n    time.sleep(4)  # noqa\n    time.sleep(5)  # heki: ignore[EFF101] trailing words\n    time.sleep(6)  # heki: disable[EFF101]\n",
+        "import time\n\n\nasync def handler():\n    time.sleep(1)  # heki: ignore EFF101\n    time.sleep(2)  # noqa:\n    time.sleep(3)  # heki: ignore\n    time.sleep(4)  # noqa\n    time.sleep(5)  # heki: ignore[EFF101] trailing words\n    time.sleep(6)  # heki: disable[EFF101]\n    time.sleep(7)  # heki: ignore[\n    time.sleep(8)  # heki: ignore[]\n    time.sleep(9)  # heki: ignore[EFF101\n",
     );
     let (code, stdout, _) = p.check(&["--output-format", "json"]);
     assert_eq!(code, 1);
     // A rule list needs brackets (`# heki: ignore[EFF101]`) or codes (`# noqa: EFF101`);
-    // `heki:` directives other than `ignore` suppress nothing.
+    // `heki:` directives other than `ignore` suppress nothing, and neither does a bracketed
+    // list that is unfinished or empty (only the bare forms suppress every rule).
     assert_eq!(
         hits(&stdout),
         vec![
             hit("a.py", 5, "EFF101"),
             hit("a.py", 6, "EFF101"),
-            hit("a.py", 10, "EFF101")
+            hit("a.py", 10, "EFF101"),
+            hit("a.py", 11, "EFF101"),
+            hit("a.py", 12, "EFF101"),
+            hit("a.py", 13, "EFF101")
         ]
     );
 }

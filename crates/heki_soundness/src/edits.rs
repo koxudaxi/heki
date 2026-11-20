@@ -7,22 +7,23 @@ pub(crate) fn slice(source: &str, start: u32, end: u32) -> Option<&str> {
 }
 
 /// Offset of the first byte of the line containing `pos` (any byte offset, also one inside a
-/// multi-byte character: a `\n` byte is never part of one).
+/// multi-byte character: a line break byte is never part of one). Lines end as
+/// `heki_ast::ends_line` says: at `\n`, `\r\n`, or a lone `\r`.
 pub(crate) fn line_start(source: &str, pos: u32) -> u32 {
     let pos = (pos as usize).min(source.len());
-    source.as_bytes()[..pos]
-        .iter()
-        .rposition(|&b| b == b'\n')
+    (0..pos)
+        .rev()
+        .find(|&i| heki_ast::ends_line(source.as_bytes(), i))
         .map_or(0, |i| i as u32 + 1)
 }
 
-/// Offset of the `\n` ending the line containing `pos` (or the end of the source).
+/// Offset of the line break ending the line containing `pos` (the `\n` of `\r\n`; the end of
+/// the source without one): the next line starts after it.
 pub(crate) fn line_end(source: &str, pos: u32) -> u32 {
     let pos = (pos as usize).min(source.len());
-    source.as_bytes()[pos..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map_or(source.len() as u32, |i| (pos + i) as u32)
+    (pos..source.len())
+        .find(|&i| heki_ast::ends_line(source.as_bytes(), i))
+        .map_or(source.len() as u32, |i| i as u32)
 }
 
 /// A simple statement can start at `start`: only indentation, a `;`, or a one-line compound
@@ -65,7 +66,7 @@ pub(crate) fn strip_token<'t>(text: &'t str, prefix: &str) -> Option<&'t str> {
 pub(crate) fn trim_fragment(text: &str) -> &str {
     let text = text.trim_start();
     let body = text.trim_end();
-    let last_line = body.rsplit('\n').next().unwrap_or(body);
+    let last_line = body.rsplit(['\n', '\r']).next().unwrap_or(body);
     if body.ends_with('\\') || last_line.contains('#') {
         text
     } else {
@@ -88,7 +89,11 @@ pub(crate) fn header_colon_follows(source: &str, pos: u32) -> bool {
     loop {
         rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\\' || c == ')');
         match rest.strip_prefix('#') {
-            Some(comment) => rest = comment.split_once('\n').map_or("", |(_, after)| after),
+            Some(comment) => {
+                rest = comment
+                    .split_once(['\n', '\r'])
+                    .map_or("", |(_, after)| after);
+            }
             None => return rest.starts_with(':'),
         }
     }
@@ -125,6 +130,15 @@ mod tests {
         assert!(!starts_statement(src, one));
         assert!(!ends_statement(src, one));
         assert_eq!(indentation(src, line_start(src, x)), "    ");
+        // Lone CR and CRLF end lines too; the next line starts after the line end.
+        let mixed = "a = 1\r    b = 2\r\n  c = 3";
+        let at = |t: &str| mixed.find(t).unwrap() as u32;
+        assert_eq!(line_start(mixed, at("b =")), at("    b"));
+        assert_eq!(line_start(mixed, at("c =")), at("  c"));
+        assert_eq!(line_end(mixed, 0), at("\r    b"));
+        assert_eq!(line_end(mixed, at("b =")) + 1, at("  c"));
+        assert!(header_colon_follows("for x in (xs  # c\r    ) :", 12));
+        assert_eq!(trim_fragment("v  # c\r  "), "v  # c\r  ");
         assert!(is_identifier("acc_1") && !is_identifier("1x") && !is_identifier("a.b"));
         assert_eq!(squash("{ k : v ,\n }"), "{k:v,}");
         let cafe = "import os as caf\u{e9}\nx = 1\n";

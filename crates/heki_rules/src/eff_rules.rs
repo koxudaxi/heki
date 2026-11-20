@@ -13,8 +13,8 @@ use heki_diagnostics::Diagnostic;
 use heki_effect::guards::loop_bit;
 use heki_effect::{
     BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, Construction,
-    EffectSummary, Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, Runner, SiteEffect, TypeCtx,
-    WriteKind, anchors_call_site, boundary_reports_in, group_by_root_cause,
+    EffectSummary, Facts, FuncKey, Runner, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
+    boundary_reports_in,
 };
 use heki_ir::{InstKind, IrFunction, VarId};
 use heki_kb::ExecEffectKind;
@@ -79,8 +79,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         }
     }
     for (code, reports) in [("EFF101", eff101), ("EFF105", eff105)] {
-        for g in group_by_root_cause(&reports, ROOT_CAUSE_GROUP_THRESHOLD) {
-            let r = &g.representative;
+        for r in &reports {
             let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
             let first = r
                 .chain
@@ -92,17 +91,13 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 "a blocking call"
             };
             let verb = if r.iterates { "iterates" } else { "calls" };
-            let mut message = format!(
+            let message = format!(
                 "`async def {}` {verb} `{first}`, which reaches {what} `{}` ({}) on the event loop; offload it (`asyncio.to_thread`) or use an async API",
                 r.function.qualname,
                 r.root_cause,
                 effect_name(r.effect)
             );
-            if let Some(suffix) = g.message_suffix() {
-                message.push(' ');
-                message.push_str(&suffix);
-            }
-            cx.emit(
+            if let Some(d) = cx.emit(
                 out,
                 code,
                 unit,
@@ -111,9 +106,53 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 r.root_cause.clone(),
                 message,
                 &r.chain,
-            );
+            ) {
+                d.fold_key = Some(format!("{}|{}", r.root_cause, effect_name(r.effect)));
+            }
         }
     }
+}
+
+/// Async boundaries reaching one blocking root cause are folded into the first beyond this many.
+pub const ROOT_CAUSE_GROUP_THRESHOLD: usize = 10;
+
+/// Root-Cause Grouping of output: when more than [`ROOT_CAUSE_GROUP_THRESHOLD`] of `diags`
+/// share a rule and a [`Diagnostic::fold_key`], only the first (by path and position) stays,
+/// with the count of the others in its message. Run on the reports that are shown, after
+/// suppressions and baselines: each report is a site of its own for both.
+pub fn fold_root_causes(diags: &mut Vec<Diagnostic>) {
+    let mut groups: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+    for (i, d) in diags.iter().enumerate() {
+        if let Some(key) = &d.fold_key {
+            groups.entry((&d.rule_code, key)).or_default().push(i);
+        }
+    }
+    let mut folded: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut dropped: FxHashSet<usize> = FxHashSet::default();
+    for members in groups
+        .into_values()
+        .filter(|m| m.len() > ROOT_CAUSE_GROUP_THRESHOLD)
+    {
+        let first = *members
+            .iter()
+            .min_by_key(|&&i| (&diags[i].path, diags[i].span, &diags[i].qualname))
+            .expect("a group has members");
+        folded.insert(first, members.len() - 1);
+        dropped.extend(members.into_iter().filter(|&i| i != first));
+    }
+    for (&i, &more) in &folded {
+        let d = &mut diags[i];
+        d.message = format!(
+            "{} (+{more} more async call sites reaching the same blocking root cause)",
+            d.message
+        );
+    }
+    *diags = std::mem::take(diags)
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !dropped.contains(i))
+        .map(|(_, d)| d)
+        .collect();
 }
 
 pub(crate) fn effect_name(e: ExecEffectKind) -> &'static str {

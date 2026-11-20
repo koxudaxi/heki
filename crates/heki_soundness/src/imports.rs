@@ -30,6 +30,7 @@ struct ImportStmt {
 /// The edit inserting `import collections` (an insertion, or the replacement of the blank lines
 /// that follow it), or `None` when the module's leading statements leave no safe place.
 pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option<(Span, String)> {
+    let br = heki_ast::line_break(source);
     let (docstring_end, region_end) = import_region(source, module_fn);
     let floor = magic_comments_end(source);
     let mut stmts = import_statements(source, module_fn, region_end, floor);
@@ -74,11 +75,17 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
             .iter()
             .find(|s| key(s) > new_key)
             .map_or_else(|| block.last().map_or(0, |s| s.end), |s| s.start);
-        return Some((Span { start: at, end: at }, "import collections\n".into()));
+        return Some((
+            Span { start: at, end: at },
+            format!("import collections{br}"),
+        ));
     }
     if let Some(first) = others.first().and_then(|b| b.first()) {
         let at = first.start;
-        return Some((Span { start: at, end: at }, "import collections\n\n".into()));
+        return Some((
+            Span { start: at, end: at },
+            format!("import collections{br}{br}"),
+        ));
     }
     // No other import: after the `__future__` block or the docstring, or at the top (below
     // leading comments), followed by the blank lines isort wants before the next statement.
@@ -103,10 +110,10 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
     let replaced_end = blank_run_end(source, anchor, next);
     let mut text = String::new();
     if separated {
-        text.push('\n');
+        text.push_str(br);
     }
-    text.push_str("import collections\n");
-    text.push_str(&"\n".repeat(blank_lines));
+    text.push_str("import collections");
+    text.push_str(&br.repeat(blank_lines + 1));
     Some((
         Span {
             start: anchor,
@@ -294,7 +301,7 @@ pub(crate) fn is_relative_from(source: &str, alias: Span) -> bool {
     slice(source, first, alias.start)
         .and_then(|head| head.strip_prefix("from"))
         .is_some_and(|rest| {
-            rest.trim_start_matches([' ', '\t', '\\', '\n'])
+            rest.trim_start_matches([' ', '\t', '\\', '\n', '\r'])
                 .starts_with('.')
         })
 }

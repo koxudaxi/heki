@@ -62,11 +62,16 @@ profile shows hot.
 
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
-reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. When the
-fixes of a pass would leave a file that does not parse, none of them is applied to that file and
-the run exits with code 2 (a heki bug to report). `--diff`
+reports what is left. A file that changed on disk meanwhile (an editor saved it) is not written:
+the run reports it as an error (exit code 2) and keeps that save; run `--fix` again. Suppressed
+diagnostics (`# heki: ignore[...]`) are never fixed. When the fixes of a pass would leave a file
+that does not parse, none of them is applied to that file and the run exits with code 2 (a heki
+bug to report). `--diff`
 prints the paths every other output format prints (relative to the working directory), so
 `patch -p1` applies it where heki ran.
+
+Fixes work the same in files with `\n`, `\r\n`, or lone `\r` line breaks, and the lines they insert
+use the file's own line break.
 
 A fix keeps the file acceptable to a type checker and to isort:
 

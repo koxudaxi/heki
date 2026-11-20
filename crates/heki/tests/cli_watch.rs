@@ -91,7 +91,9 @@ fn watch_exits_with_the_last_reports_status() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("`--fix`, `--diff`, `--baseline`"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("`--fix`, `--diff`, and `--update-baseline`")
+    );
     let diags: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(diags[0]["rule_code"], "OPT101");
     // Invalid configuration is reported before watching starts.
@@ -184,9 +186,9 @@ fn watch_rechecks_a_coroutine_that_stops_being_sync_driven() {
     );
 }
 
-/// Replace a file's content without changing its modification time, atomically (the watch
-/// never sees the change).
-fn write_unnoticed(path: &std::path::Path, content: &[u8]) {
+/// Replace a file's content atomically, keeping its modification time (as file synchronization
+/// tools do).
+fn replace_keeping_mtime(path: &std::path::Path, content: &[u8]) {
     let stamp = std::fs::metadata(path).unwrap().modified().unwrap();
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, content).unwrap();
@@ -200,7 +202,7 @@ fn write_unnoticed(path: &std::path::Path, content: &[u8]) {
 }
 
 #[test]
-fn watch_skips_unreadable_callers_and_deleted_unindexed_files() {
+fn watch_notices_replacements_that_keep_the_modification_time() {
     let p = Project::new("watch_unreadable");
     let caller = "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n";
     p.write("pkg/__init__.py", "")
@@ -208,30 +210,33 @@ fn watch_skips_unreadable_callers_and_deleted_unindexed_files() {
         .write("pkg/api.py", caller)
         .write("pkg/api2.py", caller)
         .write("pkg/broken.py", "def f(:\n");
-    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "2");
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "3");
     wait_for(&rx, "syntax error");
     wait_for(&rx, "[heki watch] 0 diagnostic(s) in 4 file(s)");
     // The file with the syntax error was never indexed; deleting it changes nothing else.
     std::fs::remove_file(p.dir.join("pkg/broken.py")).unwrap();
     wait_for(&rx, "[heki watch] 0 diagnostic(s) in 4 file(s)");
-    // The callers change behind the watch's back (same modification time): one is no
-    // longer UTF-8, the other no longer parses. When their callee starts blocking, the first
-    // cannot be re-checked and is skipped; the second reports its syntax error.
-    write_unnoticed(&p.dir.join("pkg/api.py"), b"\xff\xfe");
-    write_unnoticed(&p.dir.join("pkg/api2.py"), b"def handler(:\n");
-    p.write(
-        "pkg/util.py",
-        "import time\n\n\ndef helper():\n    time.sleep(1)\n",
+    // The helper is replaced by a blocking one with the old modification time.
+    replace_keeping_mtime(
+        &p.dir.join("pkg/util.py"),
+        b"import time\n\n\ndef helper():\n    time.sleep(1)\n",
     );
-    let lines = wait_for(&rx, "[heki watch]");
+    wait_for(&rx, "[heki watch] 2 diagnostic(s) in 4 file(s)");
+    // So are the callers: one is no longer UTF-8, the other no longer parses. Both are
+    // reported, as `heki check` reports them.
+    replace_keeping_mtime(&p.dir.join("pkg/api.py"), b"\xff\xfe");
+    replace_keeping_mtime(&p.dir.join("pkg/api2.py"), b"def handler(:\n");
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "error: pkg/api.py: stream did not contain valid UTF-8"),
+        "{lines:#?}"
+    );
     assert!(
         lines
             .iter()
             .any(|l| l.starts_with("error: pkg/api2.py:1:13: syntax error")),
-        "{lines:#?}"
-    );
-    assert!(
-        !lines.iter().any(|l| l.contains("pkg/api.py")),
         "{lines:#?}"
     );
     let out = child.wait_with_output().unwrap();
@@ -295,45 +300,28 @@ fn watch_follows_stubs_deleted_callees_and_files_that_stop_being_utf8() {
 }
 
 #[test]
-fn watch_reports_check_errors_of_every_file() {
+fn watch_fails_like_check_on_invalid_rule_options() {
     let p = Project::new("watch_check_errors");
     p.write("pkg/__init__.py", "")
         .write("pkg/util.py", "def helper():\n    return 1\n")
-        .write(
-            "pkg/api.py",
-            "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n",
-        )
-        // A configuration error only the rules see: every file fails to check.
+        // A configuration error only the rules see: `heki check` fails before reporting.
         .write(
             "heki.toml",
             "[[write-owners]]\nname = \"store\"\ntargets = [\"fields\"]\n",
         );
-    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "1");
-    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 0 file(s)");
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|l| l.contains("invalid write-owners target `fields`"))
-            .count(),
-        3,
-        "{lines:#?}"
-    );
-    // The edited file fails the same way, and so does the caller its new effect reaches.
-    p.write(
-        "pkg/util.py",
-        "import time\n\n\ndef helper():\n    time.sleep(1)\n",
-    );
-    let lines = wait_for(&rx, "[heki watch]");
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|l| l.contains("invalid write-owners target `fields`"))
-            .count(),
-        2,
-        "{lines:#?}"
-    );
-    let out = child.wait_with_output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["check", "--watch"])
+        .current_dir(&p.dir)
+        .env("HEKI_WATCH_MAX_RUNS", "0")
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("heki error: invalid write-owners target `fields`"),
+        "{stderr}"
+    );
+    assert_eq!(p.check(&[]).0, 2);
 }
 
 #[test]
@@ -477,4 +465,145 @@ fn watch_rechecks_a_call_chain_whose_end_moves() {
         stdout.ends_with(&check),
         "the watch's re-check equals `heki check`:\n{stdout}"
     );
+}
+
+#[test]
+fn watch_reloads_when_the_first_package_marker_under_src_appears() {
+    let p = Project::new("watch_src_layout");
+    p.write(
+        "src/pkg/util.py",
+        "import time\n\n\ndef wait():\n    time.sleep(1)\n",
+    )
+    .write(
+        "caller.py",
+        "from pkg.util import wait\n\n\nasync def call():\n    wait()\n",
+    );
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "1");
+    // Without a package under `src/`, the helper is `src.pkg.util`: the import does not reach it.
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    p.write("src/pkg/__init__.py", "");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 3 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("caller.py:5:5: EFF101 "),
+    );
+}
+
+#[test]
+fn watch_compares_with_the_ratchet_baseline_like_check() {
+    let p = Project::new("watch_baseline");
+    let blocking = "import time\n\n\nasync def handler():\n    time.sleep(1)\n";
+    p.write("a.py", blocking);
+    assert_eq!(p.check(&["--baseline", "b.toml", "--update-baseline"]).0, 0);
+    let (child, rx) = spawn_watch(
+        &p,
+        &["--baseline", "b.toml", "--output-format", "concise"],
+        "2",
+    );
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 1 file(s)");
+    assert!(!lines.iter().any(|l| l.contains("ignored")), "{lines:#?}");
+    // A second call grows the entry: both calls are reported, as by `heki check`.
+    p.write("a.py", &format!("{blocking}    time.sleep(2)\n"));
+    wait_for(&rx, "[heki watch] 2 diagnostic(s) in 1 file(s)");
+    // Allowing both in the baseline file reloads the workspace.
+    p.write(
+        "b.toml",
+        &p.read("b.toml").replace("count = 1", "count = 2"),
+    );
+    assert_eq!(p.check(&["--baseline", "b.toml"]).0, 0);
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 1 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn watch_keeps_reporting_errors_of_unchanged_files_and_forgets_unreadable_ones() {
+    let p = Project::new("watch_persistent_errors");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/bad.py", "def f(:\n")
+        .write(
+            "pkg/util.py",
+            "import time\n\n\ndef helper():\n    time.sleep(1)\n",
+        )
+        .write(
+            "pkg/api.py",
+            "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n",
+        );
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "2");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 3 file(s)");
+    // Another file changes: the syntax error of the unchanged one is still there.
+    p.write(
+        "pkg/api.py",
+        "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n    helper()\n",
+    );
+    let lines = wait_for(&rx, "[heki watch] 2 diagnostic(s) in 3 file(s)");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("pkg/bad.py:1:7: syntax error")),
+        "{lines:#?}"
+    );
+    // The helper can no longer be read: like `heki check`, the project goes on without it, and
+    // the caller no longer reaches the blocking call.
+    std::fs::write(p.dir.join("pkg/util.py"), b"\xff\xfe").unwrap();
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    assert!(
+        lines.iter().any(|l| l.starts_with("error: pkg/util.py: ")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("pkg/bad.py:1:7: syntax error")),
+        "{lines:#?}"
+    );
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(p.check(&["--output-format", "concise"]).1, "");
+}
+
+#[test]
+fn watch_rechecks_a_caller_saved_in_the_same_poll_as_its_callee() {
+    let p = Project::new("watch_one_poll");
+    let caller = "from z import wait\n\n\nasync def handler():\n    wait()\n";
+    p.write("a.py", caller)
+        .write("z.py", "def wait():\n    return 1\n");
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "1");
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    // Both saved between two polls: `a.py` is analyzed first, against the old `wait`.
+    p.write("a.py", &format!("# edited\n{caller}"))
+        .write("z.py", "import time\n\n\ndef wait():\n    time.sleep(1)\n");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 2 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn watch_survives_a_deleted_input_and_a_broken_configuration() {
+    let p = Project::new("watch_recovers");
+    let blocking = "import time\n\n\nasync def handler():\n    time.sleep(1)\n";
+    p.write("api.py", blocking);
+    let (child, rx) = spawn_watch(&p, &["api.py", "--output-format", "concise"], "4");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 1 file(s)");
+    // The watched file is gone for a while (a checkout, an editor's atomic save), then back.
+    std::fs::remove_file(p.dir.join("api.py")).unwrap();
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 0 file(s)");
+    p.write("api.py", blocking);
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 1 file(s)");
+    // The configuration is malformed for a while: reported, then fixed.
+    p.write("pyproject.toml", "[project\n");
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 0 file(s)");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("error: ") && l.contains("TOML")),
+        "{lines:#?}"
+    );
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 1 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
 }

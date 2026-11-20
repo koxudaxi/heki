@@ -13,7 +13,7 @@ own configurations in separate runs: `heki check a/`, then `heki check b/`.
 [tool.heki]
 target-version = "py312"            # default: inferred from project.requires-python
 extend-exclude = ["generated"]      # added to the default excludes
-baseline = "heki-baseline.toml"     # Ratchet baseline used by `heki check`
+baseline = "heki-baseline.toml"     # Ratchet baseline (heki check, --watch, the server)
 
 [tool.heki.lint]
 select = ["MUT", "EFF", "DATA", "OPT"]
@@ -33,7 +33,7 @@ OPT103 = "warning"
 | `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes its oldest admitted version, clamped to 3.11–3.15 (`>=3.9` → `py311`). `--target-version` overrides both. |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths (globs, matched against paths and path components). |
 | `extend-exclude` | `[]` | Adds excluded paths. |
-| `baseline` | none | Ratchet baseline file used when `--baseline` is not given. |
+| `baseline` | none | Ratchet baseline file used when `--baseline` is not given (also by `--watch` and the language server). |
 
 `.gitignore` and `.hekiignore` files are honored during discovery. Files named explicitly on the
 command line are always checked.
@@ -324,4 +324,6 @@ w = load()            # noqa: EFF101
 ```
 
 A suppression applies to the line of the diagnostic. Codes and rule names are accepted; a
-comment without codes silences every rule on that line.
+comment without codes (`# heki: ignore`, `# noqa`) silences every rule on that line. A bracketed
+list that is not closed or names no rule (`# heki: ignore[`, `# heki: ignore[]`) silences
+nothing.

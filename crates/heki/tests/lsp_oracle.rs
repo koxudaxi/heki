@@ -423,6 +423,10 @@ enum Action {
     Delete(&'static str),
     /// Replace the configuration (`pyproject.toml`) and announce the change.
     Configure(String),
+    /// Close the document without saving it: its unsaved text is discarded.
+    Close(&'static str),
+    /// Write a file that is not open (created or changed outside the editor) and announce it.
+    Write(&'static str, String),
 }
 
 struct Step {
@@ -1531,11 +1535,24 @@ struct Session {
 
 impl Session {
     fn start(name: &str) -> Self {
+        Self::start_with(name, CONFIG, initial_files(), false)
+    }
+
+    /// A session over `files` with the configuration `config`; `snapshot`: the effect summaries
+    /// are saved (`heki snapshot --write`) before the server starts, for `MUT103`.
+    fn start_with(
+        name: &str,
+        config: &str,
+        files: Vec<(&'static str, String)>,
+        snapshot: bool,
+    ) -> Self {
         let p = Project::new(name);
-        p.write("pyproject.toml", CONFIG);
-        let files = initial_files();
+        p.write("pyproject.toml", config);
         for (rel, text) in &files {
             p.write(rel, text);
+        }
+        if snapshot {
+            assert_eq!(p.heki(&["snapshot", "--write"]).0, 0);
         }
         let root = format!("{}/", uri(&p.dir));
         let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
@@ -1615,6 +1632,17 @@ impl Session {
                 self.p.write("pyproject.toml", text);
                 self.watched("pyproject.toml", 2);
             }
+            Action::Close(rel) => {
+                let u = self.uri(rel);
+                self.lsp
+                    .notify("textDocument/didClose", json!({"textDocument": {"uri": u}}));
+                self.versions.remove(rel);
+            }
+            Action::Write(rel, text) => {
+                let created = !self.p.dir.join(rel).exists();
+                self.p.write(rel, text);
+                self.watched(rel, if created { 1 } else { 2 });
+            }
         }
     }
 
@@ -1657,7 +1685,9 @@ impl Session {
                     Action::Save(rel, _)
                     | Action::Change(rel, _)
                     | Action::Create(rel, _)
-                    | Action::Delete(rel) => self.uri(rel),
+                    | Action::Delete(rel)
+                    | Action::Close(rel)
+                    | Action::Write(rel, _) => self.uri(rel),
                     Action::Configure(_) => self.uri("pyproject.toml"),
                 })
                 .collect();
@@ -1684,6 +1714,279 @@ fn lsp_diagnostics_equal_a_full_check_after_every_step() {
     let mut s = Session::start("lsp_oracle");
     let mut failures = Vec::new();
     for step in steps() {
+        failures.extend(s.run(&step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------------------------- files, layout, and buffers (session 2)
+
+const EDGE_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+extend-select = ["MUT103"]
+
+[[tool.heki.effect-boundaries]]
+name = "net"
+scopes = ["app.render.render"]
+forbid = ["blocking-net"]
+allowed-callees = ["requests.get"]
+"#;
+
+// An effect boundary allowing one blocking API of a kind it forbids, reached through a helper.
+const RENDER: &str = "from app.fetcher import fetch\n\n\ndef render(url):\n    return fetch(url)\n";
+const FETCHER: &str =
+    "import requests\n\n\ndef fetch(url):\n    requests.get(url)\n    return requests.get(url)\n";
+// Two public functions calling each other (one recursive component across files), in the
+// effect snapshot.
+const PING: &str = "from app import pong\n\n\ndef f(n, seen):\n    if n:\n        return pong.g(n - 1, seen)\n    return 0\n";
+const PONG: &str = "from app import ping\n\n\ndef g(n, seen):\n    if n:\n        return ping.f(n - 1, seen)\n    return 0\n";
+// An `async def` reaching a blocking call in another file, with a comment above the call.
+const SLOW: &str = "import time\n\n\ndef wait():\n    #x\n    time.sleep(1)\n";
+const HANDLER: &str = "from app.slow import wait\n\n\nasync def handle():\n    wait()\n";
+// A module file and a package of the same name (`app.dup`): Python imports the package.
+const DUP_MODULE: &str = "def one():\n    pass\n";
+const DUP_PACKAGE: &str = "import time\n\n\ndef two():\n    time.sleep(1)\n";
+const DUP_USER: &str = "from app.dup import two\n\n\nasync def use():\n    two()\n";
+// A helper under `src/` without package markers, imported by its `src`-layout name.
+const SRC_UTIL: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
+const SRC_CALLER: &str = "from pkg.util import wait\n\n\nasync def call():\n    wait()\n";
+const GENERATED: &str = "import time\n\n\nasync def tick():\n    time.sleep(1)\n";
+
+fn edge_files() -> Vec<(&'static str, String)> {
+    [
+        ("app/__init__.py", ""),
+        ("app/render.py", RENDER),
+        ("app/fetcher.py", FETCHER),
+        ("app/ping.py", PING),
+        ("app/pong.py", PONG),
+        ("app/slow.py", SLOW),
+        ("app/handler.py", HANDLER),
+        ("app/dup.py", DUP_MODULE),
+        ("app/dup/__init__.py", DUP_PACKAGE),
+        ("app/dup_user.py", DUP_USER),
+        ("src/pkg/util.py", SRC_UTIL),
+        ("caller.py", SRC_CALLER),
+    ]
+    .into_iter()
+    .map(|(rel, text)| (rel, text.to_owned()))
+    .collect()
+}
+
+fn edge_steps() -> Vec<Step> {
+    let mut steps = vec![
+        Step::new("initial index", Vec::new())
+            .present(&[("app/handler.py", "EFF101"), ("app/dup_user.py", "EFF101")])
+            .absent(&[("app/render.py", "EFF201"), ("caller.py", "EFF101")]),
+    ];
+    steps.extend(steps_shared_module_name());
+    steps.extend(steps_boundary_calls());
+    steps.extend(steps_recursive_snapshot());
+    steps.extend(steps_moved_lines());
+    steps.extend(steps_discarded_buffer());
+    steps.extend(steps_src_layout());
+    steps.extend(steps_ignore_files());
+    steps.extend(steps_baseline());
+    steps
+}
+
+/// A module file and a package sharing one name: the package wins, whichever is edited.
+fn steps_shared_module_name() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the module file of a name a package holds is edited",
+            vec![save("app/dup.py", &DUP_MODULE.replace("one", "one_more"))],
+        )
+        .present(&[("app/dup_user.py", "EFF101")]),
+        Step::new(
+            "the package is edited",
+            vec![save(
+                "app/dup/__init__.py",
+                &format!("# package\n{DUP_PACKAGE}"),
+            )],
+        )
+        .present(&[("app/dup_user.py", "EFF101")]),
+        Step::new(
+            "the package stops blocking",
+            vec![save(
+                "app/dup/__init__.py",
+                &DUP_PACKAGE.replace("time.sleep(1)", "pass"),
+            )],
+        )
+        .absent(&[("app/dup_user.py", "EFF101")]),
+        Step::new(
+            "the package blocks again",
+            vec![save("app/dup/__init__.py", DUP_PACKAGE)],
+        )
+        .present(&[("app/dup_user.py", "EFF101")]),
+    ]
+}
+
+/// Effect boundaries read the ecosystem calls below them, not only the summaries.
+fn steps_boundary_calls() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a call the boundary allows becomes one of the same effect it forbids",
+            vec![save(
+                "app/fetcher.py",
+                &FETCHER.replacen("requests.get", "requests.put", 1),
+            )],
+        )
+        .present(&[("app/render.py", "EFF201")]),
+        Step::new(
+            "a second forbidden call of the same effect",
+            vec![save(
+                "app/fetcher.py",
+                &FETCHER.replace("requests.get", "requests.put"),
+            )],
+        )
+        .present(&[("app/render.py", "EFF201")]),
+        Step::new(
+            "the calls are allowed again",
+            vec![save("app/fetcher.py", FETCHER)],
+        )
+        .absent(&[("app/render.py", "EFF201")]),
+    ]
+}
+
+/// `MUT103`: both members of a recursive component across files gain the effect.
+fn steps_recursive_snapshot() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a function calling a function in another file that calls it back mutates an argument",
+            vec![save(
+                "app/ping.py",
+                &PING.replace("    return 0\n", "    seen.append(n)\n    return 0\n"),
+            )],
+        )
+        .present(&[("app/ping.py", "MUT103"), ("app/pong.py", "MUT103")]),
+        Step::new("it stops mutating it", vec![save("app/ping.py", PING)])
+            .absent(&[("app/ping.py", "MUT103"), ("app/pong.py", "MUT103")]),
+    ]
+}
+
+/// A call moves down a line, its byte span unchanged: the chain shown in another file moves
+/// with it.
+fn steps_moved_lines() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a comment above a blocking call becomes a blank line",
+            vec![save("app/slow.py", &SLOW.replace("    #x\n", "    #\n\n"))],
+        )
+        .present(&[("app/handler.py", "EFF101")]),
+    ]
+}
+
+/// An unsaved edit discarded by closing the document: the disk counts again.
+fn steps_discarded_buffer() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an unsaved edit stops the helper blocking",
+            vec![Action::Change(
+                "app/slow.py",
+                "def wait():\n    pass\n".to_owned(),
+            )],
+        )
+        .present(&[("app/handler.py", "EFF101")]),
+        Step::new(
+            "the edit is discarded and the caller saved",
+            vec![
+                Action::Close("app/slow.py"),
+                save("app/handler.py", &format!("# saved\n{HANDLER}")),
+            ],
+        )
+        .present(&[("app/handler.py", "EFF101")]),
+    ]
+}
+
+/// The first package marker under `src/` switches the project to the `src` layout.
+fn steps_src_layout() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the first package marker under src",
+            vec![Action::Write("src/pkg/__init__.py", String::new())],
+        )
+        .present(&[("caller.py", "EFF101")]),
+    ]
+}
+
+/// Ignore files decide which files belong to the project.
+fn steps_ignore_files() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an ignore file lists a module",
+            vec![Action::Write(
+                ".hekiignore",
+                "app/generated.py\n".to_owned(),
+            )],
+        ),
+        Step::new(
+            "the ignored module is created",
+            vec![Action::Write("app/generated.py", GENERATED.to_owned())],
+        )
+        .absent(&[("app/generated.py", "EFF101")]),
+        Step::new(
+            "the ignore file lists a module that has diagnostics",
+            vec![Action::Write(
+                ".hekiignore",
+                "app/generated.py\napp/handler.py\n".to_owned(),
+            )],
+        )
+        .absent(&[("app/handler.py", "EFF101")]),
+        Step::new(
+            "the ignore file is emptied",
+            vec![Action::Write(".hekiignore", String::new())],
+        )
+        .present(&[("app/generated.py", "EFF101"), ("app/handler.py", "EFF101")]),
+    ]
+}
+
+/// A baseline of `handle`'s blocking calls in `app/handler.py`, allowing `count` of them.
+fn handler_baseline(count: u32) -> String {
+    format!(
+        "version = 2\n\n[[entries]]\npath = \"app/handler.py\"\nqualname = \"handle\"\nrule_code = \"EFF101\"\ntarget = \"time.sleep\"\ncount = {count}\n"
+    )
+}
+
+/// A Ratchet baseline in the configuration applies to the editor too.
+fn steps_baseline() -> Vec<Step> {
+    let configured = EDGE_CONFIG.replace(
+        "[tool.heki.lint]",
+        "[tool.heki]\nbaseline = \"heki-baseline.toml\"\n\n[tool.heki.lint]",
+    );
+    vec![
+        Step::new(
+            "a baseline records the blocking call of the handler",
+            vec![
+                Action::Write("heki-baseline.toml", handler_baseline(1)),
+                Action::Configure(configured),
+            ],
+        )
+        .absent(&[("app/handler.py", "EFF101")])
+        .present(&[("app/dup_user.py", "EFF101")]),
+        Step::new(
+            "a second blocking call in the handler",
+            vec![save(
+                "app/handler.py",
+                &format!("# saved\n{HANDLER}    wait()\n"),
+            )],
+        )
+        .present(&[("app/handler.py", "EFF101")]),
+        Step::new(
+            "the baseline grows to both calls",
+            vec![Action::Write("heki-baseline.toml", handler_baseline(2))],
+        )
+        .absent(&[("app/handler.py", "EFF101")]),
+    ]
+}
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_file_layout_and_buffer_changes() {
+    let mut s = Session::start_with("lsp_oracle_edges", EDGE_CONFIG, edge_files(), true);
+    let mut failures = Vec::new();
+    for step in edge_steps() {
         failures.extend(s.run(&step));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
