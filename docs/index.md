@@ -134,7 +134,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: a generator consumed twice | [`MUT106`](rules/iterator-double-consumption.md) |
 | Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](rules/cached-property-stale-read.md) |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](rules/cached-property-stale-mutation.md) |
-| Opt-in: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](rules/conditional-ownership-mutation.md) |
+| Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](rules/conditional-ownership-mutation.md) |
 
 ### A safety net for reviews and coding agents
 

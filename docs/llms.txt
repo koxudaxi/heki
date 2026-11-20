@@ -38,7 +38,7 @@
 - [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Opt-in · Experimental · Severity error · No automatic fix
 - [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Opt-in · Experimental · Severity error · No automatic fix
 - [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
-- [conditional-ownership-mutation (MUT112)](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
+- [conditional-ownership-mutation (MUT112)](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/): Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
 - [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Enabled by default · Severity error · No automatic fix
 - [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
 - [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · No automatic fix

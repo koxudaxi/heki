@@ -2,9 +2,13 @@
 
 # conditional-ownership-mutation (MUT112)
 
-Family: Mutation & State (MUT) · Opt-in · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
 
 Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.
+
+!!! warning "Experimental"
+
+    Its precision on real code bases is still low: much of what it reports is code that changes a borrowed container on purpose. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
 
 ## What it does
 Checks for a container that is a new object on one path and borrowed state on another, and that
