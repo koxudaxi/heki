@@ -5,12 +5,14 @@
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
 
-heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
+🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
 With no configuration, it catches blocking I/O in `async` code, database queries and HTTP clients
 in loops, quadratic loops, and stale caches. You can also add rules in `pyproject.toml` to restrict
 which functions may mutate state or reach I/O.
+
+📚 [Documentation](https://heki.koxudaxi.dev/)
 
 ### A blocking call two helpers below an `async def`
 
@@ -94,11 +96,11 @@ heki follows aliases, helpers, and subclasses, with no decorators and nothing ru
 time. The other contracts are `read-owners`, `call-owners`, `readonly-returns`, `invalidation`,
 and `effect-boundaries`.
 
-> **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
+> 🧪 **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
 > and output formats can change between releases without a deprecation period. Try it on your
 > code and report what it gets wrong, but do not depend on its output staying the same yet.
 
-## Why heki?
+## ✨ Why heki?
 
 Types say what values are; heki checks what code does:
 
@@ -138,7 +140,7 @@ Each report shows the chain of calls that leads to the bug.
 - Configuration, suppression comments, and output formats follow Ruff, and a baseline fails CI
   only on new findings.
 
-## What Python leaves open
+## 🔓 What Python leaves open
 
 | What Python leaves open | What other languages enforce | What heki checks |
 | --- | --- | --- |
@@ -147,7 +149,7 @@ Each report shows the chain of calls that leads to the bug.
 | Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT202`); writes an `invalidation` contract must announce (`MUT109`) |
 | Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
 
-## How heki differs
+## 🔍 How heki differs
 
 The difference is the model, not reaching across files: type checkers already follow types
 across modules. heki models effects and aliases, what code does:
@@ -165,7 +167,7 @@ is slow.
 
 heki leaves to these tools what they cover, and keeps doing so as they grow: use it next to them.
 
-## Rewrites proven under CPython's semantics
+## 🔧 Rewrites proven under CPython's semantics
 
 The `OPT` rules find quadratic list, dict, set, bytes, and queue patterns. `heki check --fix`
 rewrites one only when it proves that the program behaves the same:
@@ -179,7 +181,7 @@ The scope analysis is checked against CPython's `symtable` on 3.11 to 3.15, and 
 programs that break a naive rewrite must all be blocked on CPython. When a proof fails, the
 report names the missing obligation instead of offering a fix.
 
-## Scope
+## 🎯 Scope
 
 - Its knowledge comes from its own analysis, a catalog of library behavior, contracts you
   declare in `pyproject.toml`, and type annotations, which only help it resolve calls: rewrites
@@ -191,14 +193,14 @@ report names the missing obligation instead of offering a fix.
 
 See [Scope and limitations](https://heki.koxudaxi.dev/scope/) for the details.
 
-## Installation
+## 📦 Installation
 
 ```console
 $ uv tool install heki      # or: pipx install heki / pip install heki
 $ uvx heki check            # run without installing
 ```
 
-## Usage
+## 🏃 Usage
 
 ```console
 $ heki check                                    # check the project
@@ -209,7 +211,7 @@ $ heki rule EFF101                              # explain a rule
 $ heki server                                   # LSP server for editors
 ```
 
-## Documentation
+## 📚 Documentation
 
 - [Getting started](https://heki.koxudaxi.dev/getting-started/)
 - [Scope and limitations](https://heki.koxudaxi.dev/scope/)
@@ -223,11 +225,11 @@ $ heki server                                   # LSP server for editors
 - [Development](https://heki.koxudaxi.dev/development/)
 - [Changelog](https://github.com/koxudaxi/heki/blob/main/CHANGELOG.md)
 
-## Name
+## 📛 Name
 
 *heki* is 壁, "wall", in its Sino-Japanese (*on*) reading, the one used in compounds such as
 防火壁 (*bōkaheki*, "firewall"). On its own the character is usually read *kabe*.
 
-## License
+## 📄 License
 
 [MIT](https://github.com/koxudaxi/heki/blob/main/LICENSE)
