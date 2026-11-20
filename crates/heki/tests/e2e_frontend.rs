@@ -505,6 +505,33 @@ fs = [lambda: i for i in range(2)]
 }
 
 #[test]
+fn semantic_explicit_class_cell_reads_are_closures() {
+    let source = "\
+def module_function():
+    return __class__
+class C:
+    def owner(self):
+        return __class__
+    class Inner:
+        x = __class__
+";
+    let m = dump_source("dump-semantic", "fe_class_cell", source, "py312");
+    assert_eq!(
+        reads(scope(&m, &["class C", "function owner"]))["__class__"],
+        "enclosing"
+    );
+    // A nested class body reads the outer class's cell; a module function has none.
+    assert_eq!(
+        reads(scope(&m, &["class C", "class Inner"]))["__class__"],
+        "enclosing"
+    );
+    assert_eq!(
+        reads(scope(&m, &["function module_function"]))["__class__"],
+        "builtin"
+    );
+}
+
+#[test]
 fn semantic_generator_walrus_writes_the_declared_global() {
     let source = "\
 def f():

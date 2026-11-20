@@ -1362,6 +1362,9 @@ impl Resolver<'_> {
             }
             match p.kind {
                 ScopeKind::Module => break,
+                // A class body hides its names from nested scopes but gives them the implicit
+                // `__class__` cell (what zero-argument `super()` reads).
+                ScopeKind::Class if name == "__class__" => return NameResolution::Enclosing,
                 ScopeKind::Class => {}
                 ScopeKind::Function
                 | ScopeKind::Comprehension
