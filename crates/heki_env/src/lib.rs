@@ -85,7 +85,9 @@ pub enum Severity {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct LintConfig {
-    pub select: Vec<String>,
+    /// `None` when the key is absent (the default rules); `Some([])` selects no rule before
+    /// `extend-select`, as in Ruff.
+    pub select: Option<Vec<String>>,
     pub extend_select: Vec<String>,
     pub ignore: Vec<String>,
     pub severity: BTreeMap<String, Severity>,

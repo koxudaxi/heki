@@ -37,7 +37,7 @@ command line are always checked.
 
 | Key | Meaning |
 | --- | ------- |
-| `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). |
+| `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) need their exact code or name. |
 | `ignore` | Rules to disable (prefixes match every rule they cover). |
 | `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
