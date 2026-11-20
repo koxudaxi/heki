@@ -75,6 +75,9 @@ pub struct ClassInfo {
     pub qualname: String,
     pub parent_class: Option<ClassId>,
     pub bases: Vec<String>,
+    /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
+    /// `**kwargs` is left out.
+    pub keywords: Vec<(String, String)>,
     pub methods: Vec<String>,
     pub span: Span,
 }
@@ -269,7 +272,7 @@ struct Analyzer<'a> {
     in_type_checking: bool,
     inlined_comp_depth: u32,
     in_inlined_class_comp: bool,
-    _source: &'a str,
+    source: &'a str,
 }
 
 impl<'a> Analyzer<'a> {
@@ -295,7 +298,7 @@ impl<'a> Analyzer<'a> {
             in_type_checking: false,
             inlined_comp_depth: 0,
             in_inlined_class_comp: false,
-            _source: source,
+            source,
         }
     }
 
@@ -719,6 +722,7 @@ impl<'a> Analyzer<'a> {
         }
 
         let mut bases = Vec::new();
+        let mut keywords = Vec::new();
         if let Some(args) = &cls.arguments {
             for arg in &args.args {
                 if let Some(b) = expr_dotted_name(arg) {
@@ -727,6 +731,10 @@ impl<'a> Analyzer<'a> {
                 self.visit_expr(arg);
             }
             for kw in &args.keywords {
+                if let Some(name) = &kw.arg {
+                    let value = self.source[kw.value.range()].to_owned();
+                    keywords.push((name.to_string(), value));
+                }
                 self.visit_expr(&kw.value);
             }
         }
@@ -749,6 +757,7 @@ impl<'a> Analyzer<'a> {
             qualname,
             parent_class,
             bases,
+            keywords,
             methods: Vec::new(),
             span: Span::from(cls.range),
         });

@@ -1018,6 +1018,161 @@ fn annotation_normalization() {
     assert_eq!(r("Unknown"), None);
 }
 
+/// A resolver mapping the first dotted component like a module's imports (`MUT108` parsing).
+fn mut108_resolve(name: &str) -> Option<String> {
+    let (first, rest) = name
+        .split_once('.')
+        .map_or((name, None), |(f, r)| (f, Some(r)));
+    let base = match first {
+        "Final"
+        | "ClassVar"
+        | "Annotated"
+        | "Optional"
+        | "Union"
+        | "Required"
+        | "NotRequired"
+        | "MutableSequence"
+        | "Mapping"
+        | "dataclass_transform" => format!("typing.{first}"),
+        "te" => "typing_extensions".into(),
+        "other" => "pkg.other".into(),
+        "ReadOnly" => "typing_extensions.ReadOnly".into(),
+        "InitVar" | "KW_ONLY" | "dataclass" => format!("dataclasses.{first}"),
+        "Sequence" => "collections.abc.Sequence".into(),
+        "deque" => "collections.deque".into(),
+        "list" | "dict" | "int" => format!("builtins.{first}"),
+        "t" => "typing".into(),
+        "dc" => "dataclasses".into(),
+        "attrs" => "attrs".into(),
+        "Box" => "pkg.Box".into(),
+        _ => return None,
+    };
+    Some(rest.map_or(base.clone(), |r| format!("{base}.{r}")))
+}
+
+#[test]
+fn mut108_attribute_qualifiers() {
+    use crate::resolver::{Qualifiers, qualifiers};
+    let q = |a: &'static str| qualifiers(a, &mut108_resolve);
+    let none = Qualifiers::default();
+    let fin = Qualifiers {
+        is_final: true,
+        ..none
+    };
+    let pseudo = Qualifiers {
+        pseudo_field: true,
+        ..none
+    };
+    let ro = Qualifiers {
+        read_only: true,
+        ..none
+    };
+    let class_var = Qualifiers {
+        class_var: true,
+        ..none
+    };
+    assert_eq!(q("int"), (none, Some("int")));
+    assert_eq!(q("Final"), (fin, None));
+    assert_eq!(q("Final[list[int]]"), (fin, Some("list[int]")));
+    assert_eq!(q("t.Final[int]"), (fin, Some("int")));
+    assert_eq!(
+        q("ClassVar[Final[list[int]]]"),
+        (
+            Qualifiers {
+                class_var: true,
+                ..fin
+            },
+            Some("list[int]")
+        )
+    );
+    assert_eq!(
+        q("'ReadOnly[NotRequired[list[str]]]'"),
+        (ro, Some("list[str]"))
+    );
+    assert_eq!(q("Required[ReadOnly[list[str]]]"), (ro, Some("list[str]")));
+    assert_eq!(
+        q("Annotated[Final[dict[str, int]], 'doc']"),
+        (fin, Some("dict[str, int]"))
+    );
+    assert_eq!(q("InitVar[list[int]]"), (pseudo, None));
+    assert_eq!(q("KW_ONLY"), (pseudo, None));
+    // `typing` names that are no qualifiers, and names of other modules.
+    assert_eq!(q("t.List[int]"), (none, Some("t.List[int]")));
+    assert_eq!(q("Box"), (none, Some("Box")));
+    // Unresolved names: only the ones that take protection away count.
+    assert_eq!(q("x.Final[list[int]]"), (none, Some("x.Final[list[int]]")));
+    assert_eq!(q("x.ClassVar[list[int]]"), (class_var, Some("list[int]")));
+}
+
+#[test]
+fn mut108_parameter_access() {
+    use crate::resolver::{ParamAccess, param_access};
+    let a = |t: &str| param_access(t, &mut108_resolve);
+    let ro = Some(ParamAccess::ReadOnly);
+    let mutable = Some(ParamAccess::Mutable);
+    assert_eq!(a("Sequence[int]"), ro);
+    assert_eq!(a("Sequence"), ro);
+    assert_eq!(a("Mapping[str, int] | None"), ro);
+    assert_eq!(a("None | Mapping[str, int]"), ro);
+    assert_eq!(a("Optional[Sequence[int]]"), ro);
+    assert_eq!(a("Union[Sequence[int], None]"), ro);
+    assert_eq!(a("Annotated[Mapping[str, int], 'doc']"), ro);
+    assert_eq!(a("'ReadOnly[list[int]]'"), ro);
+    assert_eq!(a("t.Sequence[int]"), ro);
+    assert_eq!(a("list[int]"), mutable);
+    assert_eq!(a("dict[str, int] | None"), mutable);
+    assert_eq!(a("MutableSequence[int]"), mutable);
+    assert_eq!(a("deque[int]"), mutable);
+    // Unresolved names: only the mutable ones count.
+    assert_eq!(a("List[int]"), mutable);
+    assert_eq!(a("Iterable[int]"), None);
+    assert_eq!(a("Box"), None);
+    assert_eq!(a("int"), None);
+    assert_eq!(a("Optional"), None);
+    // Unions of several types promise nothing.
+    assert_eq!(a("Union[Sequence[int], str]"), None);
+    assert_eq!(a("Sequence[int] | list[int]"), None);
+}
+
+#[test]
+fn mut108_dataclass_decorators() {
+    use crate::resolver::dataclass_decorator;
+    let f = |d: &str| dataclass_decorator(d, &mut108_resolve);
+    assert_eq!(f("dataclass"), Some(false));
+    assert_eq!(f("dataclass()"), Some(false));
+    assert_eq!(f("dataclass(frozen=True)"), Some(true));
+    assert_eq!(f("dataclass(slots=True, frozen = True)"), Some(true));
+    assert_eq!(f("dataclass(\n    frozen=True,\n)"), Some(true));
+    assert_eq!(f("dc.dataclass(frozen=True)"), Some(true));
+    assert_eq!(f("dataclass(frozen=False)"), Some(false));
+    assert_eq!(f("dataclass(frozen=FROZEN)"), Some(false));
+    assert_eq!(f("attrs.frozen"), None);
+    assert_eq!(f("unknown(frozen=True)"), None);
+}
+
+#[test]
+fn mut108_dataclass_transform_decorators() {
+    use crate::resolver::transform_decorator;
+    let f = |d: &str| transform_decorator(d, &mut108_resolve);
+    assert_eq!(
+        f("dataclass_transform(frozen_default=True, field_specifiers=(field,))"),
+        Some(true)
+    );
+    assert_eq!(
+        f("te.dataclass_transform(frozen_default = True)"),
+        Some(true)
+    );
+    assert_eq!(f("dataclass_transform(frozen_default=False)"), Some(false));
+    assert_eq!(
+        f("dataclass_transform(field_specifiers=(field,))"),
+        Some(false)
+    );
+    assert_eq!(f("dataclass_transform"), Some(false));
+    assert_eq!(f("other.dataclass_transform(frozen_default=True)"), None);
+    assert_eq!(f("dataclass(frozen=True)"), None);
+    assert_eq!(f("unknown.dataclass_transform(frozen_default=True)"), None);
+}
+
 // =================================================================== limits and invariant guards
 
 /// A cycle of `n` methods, each writing its own `self` attribute and calling the next.

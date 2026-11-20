@@ -46,10 +46,11 @@ def for_tenant(settings: Settings, host: str) -> Settings:
 ```
 
 Ruff (every rule except the docstring rules), ty, Pyrefly, and pyright and mypy in strict mode
-report nothing for this code. heki reports both bugs, with the calls that lead to them:
+report nothing for this code. heki reports both bugs, with the calls that lead to them (`MUT108`
+is opt-in):
 
 ```console
-$ heki check
+$ heki check --extend-select MUT108
 app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
   |
 5 |     return load_user(user_id)  # blocks the event loop two calls down
@@ -58,7 +59,13 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls
   = related: app/users.py:9:41: `load_user` calls `app.users.fetch_name`
   = related: app/users.py:5:12: `fetch_name` calls `requests.get`
 
-Found 1 diagnostic(s) in 4 file(s).
+app/settings.py:14:5: MUT108 (readonly-type-mutation) [error] `for_tenant` changes the field `Settings.allowed_hosts` of a frozen instance in place via `app.settings.add_host` (indirect_helper): the class promises immutable instances, so they get shared (module-level defaults, caches, the same value handed to several owners), and every holder sees the change and different `==` results; copy it first or store an immutable type such as `tuple` / `frozenset`
+   |
+14 |     add_host(settings.allowed_hosts, host)  # changes it for every holder
+   |     ^
+  = related: app/settings.py:14:5: `for_tenant` calls `app.settings.add_host`
+
+Found 2 diagnostic(s) in 4 file(s).
 ```
 
 > **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
@@ -71,13 +78,14 @@ Found 1 diagnostic(s) in 4 file(s).
   `async def` ([`EFF101`](rules/async-blocking-call.md)), a database query or an HTTP client
   created on every iteration of a loop ([`EFF103`](rules/loop-db-query.md),
   [`EFF102`](rules/loop-unpooled-client.md)), a `@cached_property` left stale when another
-  method changes what it read ([`MUT101`](rules/cached-property-stale-mutation.md)), an
+  method changes what it read ([`MUT101`](rules/cached-property-stale-mutation.md)), and an
   attribute `__hash__` reads changing after the object went into a `set`
-  ([`MUT107`](rules/hash-attr-mutation.md)), and a frozen dataclass or a `ReadOnly` field
-  changed in place through a helper (`MUT108`). Opt-in rules add I/O while a `threading` lock or
-  a database transaction is held ([`EFF106`](rules/lock-or-tx-held-across-io.md)) and
-  generators consumed twice ([`MUT106`](rules/iterator-double-consumption.md)). A report that
-  crosses functions shows its call chain.
+  ([`MUT107`](rules/hash-attr-mutation.md)). Opt-in rules add frozen dataclasses, `ReadOnly`
+  fields, and `Sequence` / `Mapping` arguments changed in place through a helper
+  ([`MUT108`](rules/readonly-type-mutation.md)), I/O while a `threading` lock or a database
+  transaction is held ([`EFF106`](rules/lock-or-tx-held-across-io.md)), and generators consumed
+  twice ([`MUT106`](rules/iterator-double-consumption.md)). A report that crosses functions
+  shows its call chain.
 - **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of
@@ -119,7 +127,7 @@ CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive 
 the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
 the obligation instead of offering a fix. See [Fixes and safety](fixes.md).
 
-See the [rules reference](rules/index.md) for all 25 rules.
+See the [rules reference](rules/index.md) for all 26 rules.
 
 ## Next steps
 

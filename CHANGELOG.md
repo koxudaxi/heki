@@ -18,8 +18,8 @@ The first public preview.
   version (`py311` to `py315`) comes from `requires-python` or `--target-version`, and `--watch`
   re-checks on every change.
 - 26 rules in four families:
-  - Mutation and state: `MUT101`, `MUT107`, `MUT108`, `MUT201`, `MUT202`, `MUT203`, and the
-    opt-in `MUT103` and `MUT106`.
+  - Mutation and state: `MUT101`, `MUT107`, `MUT201`, `MUT202`, `MUT203`, and the opt-in
+    `MUT103`, `MUT106`, and `MUT108`.
   - Execution effects: `EFF101`, `EFF102`, `EFF103`, `EFF201`, and the opt-in `EFF105`,
     `EFF106`, and `EFF107`.
   - Data pipelines: `DATA101`.
@@ -31,9 +31,11 @@ The first public preview.
   them.
 - Contracts in `[tool.heki]`: `write-owners` (`MUT201`), `read-owners` (`MUT203`),
   `readonly-returns` (`MUT202`), and `effect-boundaries` (`EFF201`).
-- A catalog of standard-library and third-party behavior (blocking network, database, and file
-  calls, offloading wrappers, locks and transactions), extensible with
-  `[[tool.heki.ecosystem]]`.
+- A catalog of library behavior (blocking network, database, and file calls, their async
+  counterparts, offloading helpers, locks and transactions) for the standard library, requests,
+  httpx, urllib3, aiohttp, SQLAlchemy, SQLModel, psycopg, psycopg2, PyMySQL, Django, redis,
+  pymongo, boto3, pandas, numpy, and the offloading helpers of anyio, trio, Starlette, and
+  FastAPI, extensible with `[[tool.heki.ecosystem]]`.
 - Ratchet baselines (`--baseline`, `--update-baseline`), keyed by file, function, rule, and
   target instead of line numbers.
 - `heki snapshot` saves the effect summaries of public functions for `MUT103`.

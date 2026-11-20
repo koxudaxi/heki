@@ -46,10 +46,11 @@ def for_tenant(settings: Settings, host: str) -> Settings:
 ```
 
 Ruff (every rule except the docstring rules), ty, Pyrefly, and pyright and mypy in strict mode
-report nothing for this code. heki reports both bugs, with the calls that lead to them:
+report nothing for this code. heki reports both bugs, with the calls that lead to them (`MUT108`
+is opt-in):
 
 ```console
-$ heki check
+$ heki check --extend-select MUT108
 app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
   |
 5 |     return load_user(user_id)  # blocks the event loop two calls down
@@ -58,7 +59,13 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls
   = related: app/users.py:9:41: `load_user` calls `app.users.fetch_name`
   = related: app/users.py:5:12: `fetch_name` calls `requests.get`
 
-Found 1 diagnostic(s) in 4 file(s).
+app/settings.py:14:5: MUT108 (readonly-type-mutation) [error] `for_tenant` changes the field `Settings.allowed_hosts` of a frozen instance in place via `app.settings.add_host` (indirect_helper): the class promises immutable instances, so they get shared (module-level defaults, caches, the same value handed to several owners), and every holder sees the change and different `==` results; copy it first or store an immutable type such as `tuple` / `frozenset`
+   |
+14 |     add_host(settings.allowed_hosts, host)  # changes it for every holder
+   |     ^
+  = related: app/settings.py:14:5: `for_tenant` calls `app.settings.add_host`
+
+Found 2 diagnostic(s) in 4 file(s).
 ```
 
 > **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
@@ -70,11 +77,11 @@ Found 1 diagnostic(s) in 4 file(s).
 - **Bugs that cross function boundaries.** A blocking call several helpers below an
   `async def` (`EFF101`), a database query or an HTTP client created on every iteration of a
   loop (`EFF103`, `EFF102`), a `@cached_property` left stale when another method changes what
-  it read (`MUT101`), an attribute `__hash__` reads changing after the object went into a `set`
-  (`MUT107`), and a frozen dataclass or a `ReadOnly` field changed in place through a helper
-  (`MUT108`). Opt-in rules add I/O while a `threading` lock or a database transaction is held
-  (`EFF106`) and generators consumed twice (`MUT106`). A report that crosses functions shows
-  its call chain.
+  it read (`MUT101`), and an attribute `__hash__` reads changing after the object went into a
+  `set` (`MUT107`). Opt-in rules add frozen dataclasses, `ReadOnly` fields, and `Sequence` /
+  `Mapping` arguments changed in place through a helper (`MUT108`), I/O while a `threading` lock
+  or a database transaction is held (`EFF106`), and generators consumed twice (`MUT106`). A
+  report that crosses functions shows its call chain.
 - **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of `[tool.heki]` configuration: `write-owners`,
@@ -147,7 +154,7 @@ $ heki server                                   # LSP server for editors
 - [Getting started](https://heki.koxudaxi.dev/getting-started/)
 - [Scope and limitations](https://heki.koxudaxi.dev/scope/)
 - [Configuration](https://heki.koxudaxi.dev/configuration/)
-- [Rules](https://heki.koxudaxi.dev/rules/) (25 rules)
+- [Rules](https://heki.koxudaxi.dev/rules/) (26 rules)
 - [Fixes and safety](https://heki.koxudaxi.dev/fixes/)
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/)
 - [Editors (LSP)](https://heki.koxudaxi.dev/lsp/) and

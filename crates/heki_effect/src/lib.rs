@@ -27,8 +27,9 @@ pub use report::{
     boundary_reports_in, group_by_root_cause,
 };
 pub use resolver::{
-    Callee, ClassDecl, FunctionDecl, ModuleDecls, ProjectDecls, TypeCtx, Val, detect_src_layout,
-    func_qualname, module_name_for_path, resolve_relative_module, self_aliases,
+    Callee, ClassDecl, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr, ReadOnlyKind,
+    TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path, resolve_relative_module,
+    self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
 
@@ -97,6 +98,10 @@ pub struct TypedFieldWriteSite {
     /// method's own `self`), mapped through every hop. Empty for an object that is no
     /// parameter: a fresh instance, an attribute of one, a call result.
     pub obj_params: u64,
+    /// The written object is an instance that the function holding the original write
+    /// constructs itself (`Model(...)`, `cls(...)`, through copies) and fills before anyone
+    /// else holds it (`MUT108`).
+    pub fresh: bool,
 }
 
 /// Typed field read site for declarative Read Ownership (`MUT203`). A local fact: it is never
@@ -146,6 +151,14 @@ pub enum WriteKind {
     IndirectHelper,
 }
 
+/// A named slot of an object: an attribute (`obj.a`) or a constant string key (`obj["a"]`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Slot {
+    Attr(String),
+    Key(String),
+}
+
 impl WriteKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -181,6 +194,11 @@ pub struct EffectSummary {
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> slots`: the containers held in these slots of the argument itself
+    /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
+    /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
+    /// nor do changes deeper inside (`p.a.b.append(...)`) (`MUT108`).
+    pub inplace_param_slots: BTreeMap<u8, BTreeSet<Slot>>,
     pub reads_self_attrs: BTreeSet<AttrKeyPath>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
     pub invalidates_cached: BTreeSet<String>,
@@ -260,6 +278,8 @@ impl EffectSummary {
 pub struct ArgOrigin {
     /// Caller parameter `i` itself (`None`) or its attribute `a` (`Some(a)`).
     pub param: Option<(u8, Option<String>)>,
+    /// A slot of caller parameter `i` itself, one level deep (`p.a`, `p["k"]`).
+    pub param_slot: Option<(u8, Slot)>,
     /// `self.<attr>` of the calling method.
     pub self_attr: Option<String>,
     /// `obj.<attr>` where `obj` has project class type: `(class_fqn, attr)`.
@@ -268,6 +288,8 @@ pub struct ArgOrigin {
     pub typed_instance: Option<String>,
     /// Caller parameters the argument may be, as itself (through copies and phis).
     pub may_params: u64,
+    /// The argument is an instance the caller constructs (`Model(...)`), or an attribute of one.
+    pub fresh: bool,
 }
 
 impl ArgOrigin {

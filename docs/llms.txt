@@ -19,7 +19,7 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 25 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 26 rules in four families
 
 ## Integrations
 
@@ -53,6 +53,7 @@
 - [nested-loop-equijoin (OPT113)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/): Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
 - [read-owner-violation (MUT203)](https://heki.koxudaxi.dev/rules/read-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
 - [readonly-return-mutation (MUT202)](https://heki.koxudaxi.dev/rules/readonly-return-mutation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+- [readonly-type-mutation (MUT108)](https://heki.koxudaxi.dev/rules/readonly-type-mutation/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
 - [set-dict-quadratic-merge (OPT102)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/): Family: Complexity Rewrites (OPT) · Enabled by default · Safe fix (--fix)
 - [summary-effect-regression (MUT103)](https://heki.koxudaxi.dev/rules/summary-effect-regression/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
 - [unretained-async-task (EFF107)](https://heki.koxudaxi.dev/rules/unretained-async-task/): Family: Execution Effects (EFF) · Opt-in · No automatic fix

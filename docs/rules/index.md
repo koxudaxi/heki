@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 25 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 26 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
@@ -20,6 +20,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT103 | [summary-effect-regression](summary-effect-regression.md) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
 | MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
 | MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
+| MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place what a standard type declares read-only (frozen dataclass / `NamedTuple` fields, `Final` / `ReadOnly` attributes, `Sequence` / `Mapping` parameters), directly, through an alias, or in a helper. | 🔌 |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`. |  |
 | MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
