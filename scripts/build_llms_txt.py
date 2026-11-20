@@ -19,7 +19,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
 LLMS = DOCS / "llms.txt"
 LLMS_FULL = DOCS / "llms-full.txt"
-SKIP = ("```", "!!!", "<", "|", "-", "#", ">", "[![", "![")
+# Lines that start something other than prose: admonitions, content tabs, HTML, tables, lists,
+# headings, quotes, and images.
+NOT_PROSE = ("!!!", "===", "<", "|", "-", "* ", "#", ">", "[![", "![")
+FENCES = ("```", "~~~")
+NUMBERED_ITEM = re.compile(r"\d+\. ")
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
 LINK = re.compile(r"\[([^\]]+)]\([^)]+\)")
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
@@ -32,15 +37,40 @@ def page_url(site: str, path: str) -> str:
     return f"{site}/{slug}/"
 
 
-def description(text: str) -> str:
-    """First prose sentence of a page (headings, lists, tables, code skipped)."""
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith(SKIP):
+def paragraphs(text: str):
+    """The prose paragraphs of a page, each joined into one line, outside code blocks."""
+    fence = None
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if fence:
+            if line.startswith(fence):
+                fence = None
             continue
-        line = LINK.sub(r"\1", line).replace("`", "")
-        sentence = line.split(". ")[0].rstrip(".")
-        return sentence[:160]
+        if line.startswith(FENCES):
+            fence = line[:3]
+        elif (
+            line
+            and not line.startswith(NOT_PROSE)
+            and not NUMBERED_ITEM.match(line)
+            and not raw[:1].isspace()
+        ):
+            lines.append(line)
+            continue
+        if lines:
+            yield " ".join(lines)
+            lines = []
+    if lines:
+        yield " ".join(lines)
+
+
+def description(text: str) -> str:
+    """The first sentence of a page's prose that does not only introduce a block (`...:`)."""
+    for paragraph in paragraphs(text):
+        plain = LINK.sub(r"\1", paragraph).replace("`", "").replace("**", "")
+        sentence = SENTENCE_END.split(plain, maxsplit=1)[0]
+        if not sentence.endswith(":"):
+            return sentence.rstrip(".")
     return ""
 
 
