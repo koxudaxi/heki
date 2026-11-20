@@ -351,6 +351,17 @@ fn a_call_whose_candidates_are_all_targets_of_one_contract_is_reported_once() {
         stdout.contains("`on_base` calls `A.reset` or `B.reset` or `C.reset` outside the call owners of `resets`"),
         "{stdout}"
     );
+    // Glob entries each name the candidate they match.
+    let p = project(
+        "call_union_globs",
+        &owners("\"A.res*\", \"B.res*\", \"C.res*\""),
+    );
+    p.write("app.py", RESETS);
+    let (_, stdout, _) = p.check(&["--select", "MUT204", "--output-format", "concise"]);
+    assert!(
+        stdout.contains("`on_base` calls `app.A.reset` or `app.B.reset` or `app.C.reset` outside the call owners of `resets`"),
+        "{stdout}"
+    );
     // The `calls` form of an effect boundary shares the matcher.
     let p = project(
         "boundary_call_union",

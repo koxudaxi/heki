@@ -35,6 +35,18 @@ pub(crate) struct CallTargetPattern {
 }
 
 impl CallTargetPattern {
+    /// What `site` calls of the target: the class it constructs, or the candidate the target
+    /// names (a group's targets each name one of the candidates).
+    fn called_at(&self, site: &CallSite) -> String {
+        site.constructs.clone().unwrap_or_else(|| {
+            site.project_callees()
+                .iter()
+                .find(|bc| self.functions.matches(&bc.callee))
+                .map(|bc| bc.callee.fqn())
+                .unwrap_or_default()
+        })
+    }
+
     /// Whether calling `name` on an instance of the project class `class` may call the target:
     /// `class` is of the target's family, or the method `name` its MRO finds first is the
     /// target (`Model.reset` for the target `reset`).
@@ -167,11 +179,11 @@ pub(crate) fn group_texts(
     site: Option<&CallSite>,
 ) -> (String, String) {
     let texts: Vec<&str> = group.iter().map(|&i| targets[i].text.as_str()).collect();
-    let mut named: Vec<String> = texts
+    let mut named: Vec<String> = group
         .iter()
-        .map(|t| match site {
-            Some(site) => super::matched_name(t, || site_callee(site)),
-            None => (*t).to_owned(),
+        .map(|&i| match site {
+            Some(site) => super::matched_name(&targets[i].text, || targets[i].called_at(site)),
+            None => targets[i].text.clone(),
         })
         .map(|n| format!("`{n}`"))
         .collect();
