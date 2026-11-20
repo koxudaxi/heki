@@ -613,6 +613,111 @@ def old_subscript_with_slice_object(n):
     return out
 
 
+# ------------------------------------------------------------------------------
+# OPT102 (default `--fix`): insertions that run key code, observed through the order or a
+# handler
+# ------------------------------------------------------------------------------
+class RaisingKey:
+    def __hash__(self):
+        return 0
+
+    def __eq__(self, other):
+        raise ValueError("compared")
+
+
+def cx_partly_updated_in_handler():
+    d = {RaisingKey(): 0}
+    other = {1: 1, 0: 2}
+    try:
+        for _ in range(1):
+            d = {**d, **other}
+    except ValueError:
+        return 1 in d
+    return None
+
+
+def old_partly_updated_in_handler():
+    d = {RaisingKey(): 0}
+    other = {1: 1, 0: 2}
+    try:
+        for _ in range(1):
+            d.update(other)
+    except ValueError:
+        return 1 in d
+    return None
+
+
+def cx_set_partly_updated_in_handler():
+    s = {RaisingKey()}
+    other = {8, 1, 0}
+    try:
+        for _ in range(1):
+            s = s | other
+    except ValueError:
+        return 1 in s
+    return None
+
+
+def old_set_partly_updated_in_handler():
+    s = {RaisingKey()}
+    other = {8, 1, 0}
+    try:
+        for _ in range(1):
+            s |= other
+    except ValueError:
+        return 1 in s
+    return None
+
+
+def later_entries():
+    raise KeyError("later")
+
+
+def cx_later_entry_before_collision():
+    d = {RaisingKey(): 0}
+    try:
+        for _ in range(1):
+            d = {**d, **{0: 1}, **later_entries()}
+    except Exception as e:  # noqa: BLE001 - the exception type is the observable
+        return type(e).__name__
+    return None
+
+
+def old_later_entry_before_collision():
+    d = {RaisingKey(): 0}
+    try:
+        for _ in range(1):
+            d.update({**{0: 1}, **later_entries()})
+    except Exception as e:  # noqa: BLE001
+        return type(e).__name__
+    return None
+
+
+class LoggedKey:
+    def __hash__(self):
+        return 0
+
+    def __eq__(self, other):
+        CALLS.append("eq")
+        return False
+
+
+def cx_entry_reads_what_eq_changes():
+    d = {LoggedKey(): 0}
+    part = {LoggedKey(): 0}
+    for _ in range(1):
+        d = {**d, **part, 1: len(CALLS)}
+    return d[1]
+
+
+def old_entry_reads_what_eq_changes():
+    d = {LoggedKey(): 0}
+    part = {LoggedKey(): 0}
+    for _ in range(1):
+        d.update({**part, 1: len(CALLS)})
+    return d[1]
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -660,6 +765,14 @@ def main() -> int:
         (cx_elements_after_escape, old_elements_after_escape, lambda f: f(1)),
         (cx_list_from_earlier_iteration, old_list_from_earlier_iteration, lambda f: f(3)),
         (cx_subscript_with_slice_object, old_subscript_with_slice_object, lambda f: f(2)),
+        (cx_partly_updated_in_handler, old_partly_updated_in_handler, lambda f: f()),
+        (
+            cx_set_partly_updated_in_handler,
+            old_set_partly_updated_in_handler,
+            lambda f: f(),
+        ),
+        (cx_later_entry_before_collision, old_later_entry_before_collision, lambda f: f()),
+        (cx_entry_reads_what_eq_changes, old_entry_reads_what_eq_changes, lambda f: f()),
     ]
     lines = []
     for cx, old, call in pairs:

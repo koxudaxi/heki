@@ -114,6 +114,15 @@ def merge_unknown_mapping(items, other):
     return d
 
 
+def merge_constant_keys(items):
+    """Builtin keys, and the later entry reads a local name: `update` inserts them alike."""
+    d = {}
+    for i in items:
+        j = -i
+        d = {**d, "lo": i, "hi": j}
+    return d
+
+
 def key_not_simple_text(items):
     d = {}
     for k in items:
@@ -355,6 +364,7 @@ def main() -> int:
             run(rhs_changes_other, items),
             run(merge_exact_dict, items),
             run(merge_unknown_mapping, items, {"b": n}),
+            run(merge_constant_keys, items),
             run(key_not_simple_text, items),
             run(constant_key, items),
             run(parameter_key, items, "k"),

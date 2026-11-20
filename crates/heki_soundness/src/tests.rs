@@ -323,14 +323,14 @@ fn opt101_opt102_positives_are_safe_unconditional_with_exact_edits() {
         (
             "pos_dict_multi",
             OptRule::Opt102,
-            "d = {**d, k: v, f\"{k}_len\": len(str(v))}",
-            "d.update({k: v, f\"{k}_len\": len(str(v))})",
+            "d = {**d, \"key\": k, \"value\": v}",
+            "d.update({\"key\": k, \"value\": v})",
         ),
         (
             "pos_dict_merge",
             OptRule::Opt102,
-            "merged = {**merged, **extra}",
-            "merged.update({**extra})",
+            "merged = {**merged, **part}",
+            "merged.update(part)",
         ),
         (
             "pos_dict_effects",

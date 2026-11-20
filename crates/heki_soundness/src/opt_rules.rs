@@ -1029,6 +1029,9 @@ impl<'a, 'c> Rules<'a, 'c> {
             self.ck
                 .exception_state_safe(&name, &st, acc, at.0, &name, &[dst]),
         );
+        let added = &entries[1..];
+        obs.push(self.insertion_order(&st, &name, added));
+        obs.push(self.partial_update(&name, at.0, matches!(added, [DictEntry::KeyValue { .. }])));
         let stmt = self.assignment_span(copy, lit.span);
         let span = stmt.unwrap_or(lit.span);
         let mut edits = Vec::new();
@@ -1087,6 +1090,78 @@ impl<'a, 'c> Rules<'a, 'c> {
         Some(format!("{name}.update({{{rest}}})"))
     }
 
+    /// `EvalOrderPreserved(update)`: the display inserts each entry into the copy before it
+    /// evaluates the next one, and an insertion may run a key's `__eq__` (on a hash collision)
+    /// or a mapping's `keys()` / `__getitem__`; `d.update({...})` evaluates every entry first,
+    /// then inserts them, comparing the new keys with each other twice. That is the same only
+    /// for one entry, for the entries of one exact dict, or for keys that are `int` / `str` /
+    /// `bytes` / `bool` / `float` values whose later entries evaluate no code.
+    fn insertion_order(&self, st: &FrameState, name: &str, added: &[DictEntry]) -> ProofObligation {
+        let status = match added {
+            [DictEntry::KeyValue { .. }] => {
+                established("one entry: evaluated, then inserted, as in the display")
+            }
+            [DictEntry::Unpack { dict }] if st.exact_type(*dict) == Some(Dict) => {
+                established("the entries of one exact dict are inserted in the same order")
+            }
+            _ if added.iter().enumerate().all(|(i, e)| match e {
+                DictEntry::KeyValue { key, value } => {
+                    self.cx()
+                        .possible_kinds(st, *key)
+                        .is_some_and(|m| m.is_subset_of(KindMask::hash_consistent()))
+                        && (i == 0
+                            || (self.evaluates_no_code(*key) && self.evaluates_no_code(*value)))
+                }
+                DictEntry::Unpack { .. } => false,
+            }) =>
+            {
+                established("builtin keys, and the later entries are constants or local names")
+            }
+            _ => blocked(format!(
+                "`{name}.update({{...}})` evaluates every entry before inserting any; the display inserts each entry (running key `__eq__` or a mapping's methods) before it evaluates the next"
+            )),
+        };
+        self.ck.ob(K::EvalOrderPreserved, "update", status)
+    }
+
+    /// `ExceptionStateSafe(update)`: an insertion that raises (a key's `__eq__`) leaves the
+    /// accumulator updated in place up to that key, where the display left it unchanged; only
+    /// a handler that reads it can tell.
+    fn partial_update(&self, name: &str, at: BlockId, one_insertion: bool) -> ProofObligation {
+        let status = if one_insertion {
+            established("one insertion: it happens entirely or not at all")
+        } else if self.ck.handler_observed_names(at).contains(name) {
+            blocked(format!(
+                "an insertion that raises would leave `{name}` partly updated, and an exception handler reads `{name}`"
+            ))
+        } else {
+            established("no exception handler reads the accumulator")
+        };
+        self.ck.ob(K::ExceptionStateSafe, "update", status)
+    }
+
+    /// Evaluating `v` runs no code and cannot raise: a constant, or a local name that is
+    /// bound on every path and that no nested function can rebind.
+    fn evaluates_no_code(&self, v: VarId) -> bool {
+        match self.cx().def_inst(v) {
+            Some((_, _, inst)) if matches!(inst.kind, InstKind::Const { .. }) => true,
+            _ => self.bound_local_name(v).is_some() && !self.cx().is_captured(v),
+        }
+    }
+
+    /// A display of one element or entry, without unpacking (`{e}`, `{k: v}`).
+    fn single_item_display(&self, v: VarId) -> bool {
+        match self.cx().def_inst(v).map(|(_, _, i)| &i.kind) {
+            Some(InstKind::AllocBuiltin { elems, .. }) => {
+                matches!(elems.as_slice(), [e] if !self.f().is_unpacked(*e))
+            }
+            Some(InstKind::DictLiteral { entries, .. }) => {
+                matches!(entries.as_slice(), [DictEntry::KeyValue { .. }])
+            }
+            _ => false,
+        }
+    }
+
     /// Source text of a side-effect-free, non-raising operand (constant or bound local).
     fn simple_text(&self, v: VarId) -> Option<String> {
         match self.cx().def_inst(v) {
@@ -1133,6 +1208,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             self.ck
                 .exception_state_safe(&name, &st, acc, at.0, &name, &[dst]),
         );
+        obs.push(self.partial_update(&name, at.0, self.single_item_display(rhs)));
         let stmt = self.assignment_span(copy, binop.span);
         let span = stmt.unwrap_or(binop.span);
         let mut edits = Vec::new();

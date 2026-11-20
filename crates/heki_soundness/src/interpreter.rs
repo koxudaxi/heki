@@ -515,6 +515,11 @@ impl<'a> FnCtx<'a> {
         }
     }
 
+    /// A nested function captures `v`'s name, so code it runs may rebind it (`nonlocal`).
+    pub fn is_captured(&self, v: VarId) -> bool {
+        self.captured.get(v.0 as usize).copied().unwrap_or(false)
+    }
+
     pub fn uses(&self, v: VarId) -> &[UseSite] {
         self.uses
             .get(v.0 as usize)
@@ -686,7 +691,7 @@ impl<'a> FnCtx<'a> {
     }
 
     fn after_def(&self, st: &mut FrameState, dst: VarId, span: Span) {
-        if self.captured.get(dst.0 as usize).copied().unwrap_or(false) {
+        if self.is_captured(dst) {
             st.mark_escaped(dst, EscapeWitness::CapturedByClosure, span);
         }
     }

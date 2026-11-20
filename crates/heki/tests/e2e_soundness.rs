@@ -380,7 +380,14 @@ const ACCUMULATE: &[Expect] = &[
     ),
     (
         "merge_unknown_mapping",
-        &[("OPT102", V::Fix(&["d.update({**other})"]))],
+        &[(
+            "OPT102",
+            V::Blocked("EvalOrderPreserved(update): `d.update({...})` evaluates every entry"),
+        )],
+    ),
+    (
+        "merge_constant_keys",
+        &[("OPT102", V::Fix(&["d.update({\"lo\": i, \"hi\": j})"]))],
     ),
     (
         "key_not_simple_text",
@@ -861,6 +868,9 @@ fn deque_rules() {
 
 // ============================================================ counterexamples found in M8
 
+const PARTLY_UPDATED: &str = "ExceptionStateSafe(update): an insertion that raises would leave";
+const REGROUPED: &str = "EvalOrderPreserved(update): ";
+
 const COUNTEREXAMPLES: &[Expect] = &[
     // Default `--fix` (`OPT102`): the display stores the accumulator in the new dict.
     (
@@ -1050,6 +1060,22 @@ const COUNTEREXAMPLES: &[Expect] = &[
             V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
         )],
     ),
+    (
+        "cx_partly_updated_in_handler",
+        &[("OPT102", V::Blocked(PARTLY_UPDATED))],
+    ),
+    (
+        "cx_set_partly_updated_in_handler",
+        &[("OPT102", V::Blocked(PARTLY_UPDATED))],
+    ),
+    (
+        "cx_later_entry_before_collision",
+        &[("OPT102", V::Blocked(REGROUPED))],
+    ),
+    (
+        "cx_entry_reads_what_eq_changes",
+        &[("OPT102", V::Blocked(REGROUPED))],
+    ),
 ];
 
 #[test]
@@ -1065,7 +1091,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 28/28"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 32/32"));
 }
 
 // ======================================================================== module-level facts
