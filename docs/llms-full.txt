@@ -144,7 +144,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) |
 | Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) |
-| Opt-in: a dict or set changed while a suspended generator, or a loop calling a helper, iterates it | [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) |
+| Opt-in, experimental: a dict or set changed while a suspended generator, or a loop calling a helper, iterates it | [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) |
 
 ### A safety net for reviews and coding agents
 
@@ -1807,8 +1807,8 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
 | MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
 | MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
-| MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | 🔌 |
-| MUT113 | [iterated-container-mutation](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | 🔌 |
+| MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | 🔌 🧪 |
+| MUT113 | [iterated-container-mutation](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | 🔌 🧪 |
 | MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
 | MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
@@ -1873,6 +1873,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
+| `rule.MUT113` | rule | [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | 0.2.0 | - |
 
 ## `cli-option.profile`
 
@@ -1905,6 +1906,14 @@ It reports the readers of the stale writes `MUT101` finds, so it shares `MUT101`
 - **Since:** 0.2.0
 
 Its precision on real code bases is still low: much of what it reports is code that changes a borrowed container on purpose.
+
+## `rule.MUT113`
+
+- **Kind:** rule
+- **Target:** [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/)
+- **Since:** 0.2.0
+
+It has few reports, and most of them are still false.
 
 
 ---
@@ -3342,9 +3351,13 @@ Source: https://heki.koxudaxi.dev/rules/iterated-container-mutation/
 
 # iterated-container-mutation (MUT113)
 
-Family: Mutation & State (MUT) · Opt-in · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
 
 Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).
+
+!!! warning "Experimental"
+
+    It has few reports, and most of them are still false. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
 
 ## What it does
 Checks for a `dict`, `set`, or `collections.deque` held in an attribute of `self` that is

@@ -2,9 +2,13 @@
 
 # iterated-container-mutation (MUT113)
 
-Family: Mutation & State (MUT) · Opt-in · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
 
 Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).
+
+!!! warning "Experimental"
+
+    It has few reports, and most of them are still false. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
 
 ## What it does
 Checks for a `dict`, `set`, or `collections.deque` held in an attribute of `self` that is
