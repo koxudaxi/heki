@@ -766,3 +766,37 @@ fn class_constant_reads_on_a_class_with_many_subclasses_decide_it_once() {
     assert_eq!(reported.len(), 1, "{found:#?}");
     assert_eq!(reported[0]["qualname"], "write");
 }
+
+/// A class with thousands of subclasses whose `reset` a call target naming no class names, and
+/// a function calling `Base.reset(obj)` as many times: the class family of each call (the
+/// classes defining the method it reaches, with their subclasses) is expanded once per target
+/// and defining class, not once per call. Only one call is outside the allowed callers.
+#[test]
+fn calls_of_a_method_with_many_subclasses_expand_its_family_once() {
+    let size = 5_000;
+    let mut lines = vec![
+        "class Base:".to_owned(),
+        "    def reset(self):".to_owned(),
+        "        pass".to_owned(),
+    ];
+    for i in 0..size {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Sub{i}(Base):"),
+            "    pass".to_owned(),
+        ]);
+    }
+    lines.extend([String::new(), String::new(), "def run(obj):".to_owned()]);
+    lines.extend((0..size).map(|_| "    Base.reset(obj)".to_owned()));
+    lines.extend(["", "", "def other(obj):", "    Base.reset(obj)"].map(str::to_owned));
+    let p = Project::new("bounds_call_target_families");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"resets\"\ntargets = [\"reset\"]\nallowed-callers = [\"m.run\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0]["qualname"], "other");
+}

@@ -12,8 +12,9 @@ use super::{
 use crate::{CheckContext, DottedPattern, RuleConfigError};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{CallHop, CallSite, FuncKey, SiteRole};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 /// One call target: a project function, a method (with its overrides in subclasses), or a class
 /// (constructing it).
@@ -26,8 +27,7 @@ pub(crate) struct CallTargetPattern {
     classes: FxHashSet<String>,
     /// `classes` and the method's class family: an initializer of one of them calling the
     /// target on its own `self` initializes itself. A text naming no class (`reset`) has none:
-    /// its classes are those whose methods it names ([`Self::calls_on`],
-    /// [`Self::family_at`]).
+    /// its classes are those whose methods it names ([`Self::calls_on`], [`Families`]).
     family: FxHashSet<String>,
     /// The last name of the text (`replace_reference` of `DataType.replace_reference`): what a
     /// call on an object of unknown class names (`MUT207`).
@@ -46,23 +46,19 @@ impl CallTargetPattern {
                 .is_some_and(|k| self.functions.matches(&k))
     }
 
-    /// The target's family with the classes defining the methods `site` calls that the target
-    /// names, and their subclasses: an initializer of one of them calling the method on its own
-    /// `self` initializes itself.
-    pub(crate) fn family_at(&self, cx: &CheckContext<'_>, site: &CallSite) -> FxHashSet<String> {
-        let mut family = self.family.clone();
+    /// Add to `out` the project classes defining the methods `site` calls that the target
+    /// names.
+    fn defining_classes(&self, cx: &CheckContext<'_>, site: &CallSite, out: &mut Vec<String>) {
         for bc in site.project_callees() {
             if let Some((owner, _)) = bc.callee.qualname.rsplit_once('.')
                 && self.functions.matches(&bc.callee)
             {
                 let class = format!("{}.{owner}", bc.callee.module);
                 if cx.decls.is_project_class(&class) {
-                    family.extend(cx.decls.subclasses_of(&class));
-                    family.insert(class);
+                    out.push(class);
                 }
             }
         }
-        family
     }
 
     /// Whether `site` calls the target: it constructs a class of the target's family, or every
@@ -116,6 +112,49 @@ pub(crate) fn called_targets(targets: &[CallTargetPattern], site: &CallSite) -> 
         return whole;
     }
     vec![union.into_iter().collect()]
+}
+
+/// The class families of the groups of targets that sites call ([`called_targets`]): the
+/// targets' families with the classes defining the methods a site calls that they name, and
+/// their subclasses (an initializer of one of them calling the method on its own `self`
+/// initializes itself). Kept per group and defining classes, which many sites share.
+#[derive(Default)]
+struct Families(FxHashMap<FamilyKey, Rc<FxHashSet<String>>>);
+
+/// A group of targets (indices into the contract's targets) and the classes defining the
+/// methods a site calls that they name, sorted.
+type FamilyKey = (Vec<usize>, Vec<String>);
+
+impl Families {
+    fn at(
+        &mut self,
+        cx: &CheckContext<'_>,
+        targets: &[CallTargetPattern],
+        group: &[usize],
+        site: &CallSite,
+    ) -> Rc<FxHashSet<String>> {
+        let mut defining = Vec::new();
+        for &i in group {
+            targets[i].defining_classes(cx, site, &mut defining);
+        }
+        defining.sort_unstable();
+        defining.dedup();
+        let key = (group.to_vec(), defining);
+        if let Some(family) = self.0.get(&key) {
+            return Rc::clone(family);
+        }
+        let mut family: FxHashSet<String> = group
+            .iter()
+            .flat_map(|&i| targets[i].family.iter().cloned())
+            .collect();
+        for class in &key.1 {
+            family.extend(cx.decls.subclasses_of(class));
+            family.insert(class.clone());
+        }
+        let family = Rc::new(family);
+        self.0.insert(key, Rc::clone(&family));
+        family
+    }
 }
 
 /// The configured texts of a group of [`called_targets`]: the diagnostic target (`A.reset|B.reset`)
@@ -234,15 +273,13 @@ pub(crate) fn mut204(
     let mut callers: Vec<&FuncKey> = sites.keys().copied().collect();
     callers.sort();
     let mut reports = MergedReports::default();
+    let mut families: Vec<Families> = rules.iter().map(|_| Families::default()).collect();
     for key in callers {
         for &(path, site) in &sites[key] {
-            for rule in &rules {
+            for (rule, families) in rules.iter().zip(&mut families) {
                 for group in called_targets(&rule.targets, site) {
                     let (target, called) = group_texts(&rule.targets, &group);
-                    let family: FxHashSet<String> = group
-                        .iter()
-                        .flat_map(|&i| rule.targets[i].family_at(cx, site))
-                        .collect();
+                    let family = families.at(cx, &rule.targets, &group, site);
                     let found = delegated_reports(
                         cx,
                         &sites,
