@@ -2866,6 +2866,10 @@ const GENERATED: &str = "import time\n\n\nasync def tick():\n    time.sleep(1)\n
 // an edited function for one.
 const TALLY_FORWARD: &str =
     "from app.tally import Tally\n\n\ndef _forward(t: Tally):\n    return t._walk()\n";
+// A deque a kept generator iterates (`MUT113`), changed by a helper of another module it is
+// handed to.
+const RING: &str = "from collections import deque\n\nfrom app.ring_ops import turn\n\n\nclass Ring:\n    def __init__(self) -> None:\n        self.ring: deque[int] = deque()\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.ring\n\n    def spin(self) -> None:\n        turn(self.ring)\n";
+const RING_OPS: &str = "def turn(q):\n    q.rotate(1)\n";
 const TALLY_LISTED: &str = "from app.tally import Tally\nfrom app.tally_forward import _forward\n\n\ndef listed(t: Tally):\n    return list(_forward(t))\n";
 
 fn edge_files() -> Vec<(&'static str, String)> {
@@ -2885,6 +2889,8 @@ fn edge_files() -> Vec<(&'static str, String)> {
         ("app/tally.py", TALLY),
         ("app/tally_forward.py", TALLY_FORWARD),
         ("app/tally_listed.py", TALLY_LISTED),
+        ("app/ring.py", RING),
+        ("app/ring_ops.py", RING_OPS),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -2915,7 +2921,9 @@ fn edge_steps() -> Vec<Step> {
 
 /// `MUT113`: a module steps by hand, then consumes, a private generator of another module that a
 /// function of a third one returns. The generator's report follows its object through the
-/// function returning it (`heki_rules::family_readers`), while no summary changes.
+/// function returning it (`heki_rules::family_readers`), while no summary changes. Then a helper
+/// a kept generator's method hands its deque to stores an item of it instead of rotating it
+/// (`IterationFacts::changes_param_containers`), and rotates it again.
 fn steps_forwarded_generator() -> Vec<Step> {
     let stepping = TALLY_LISTED.replace(
         "    return list(_forward(t))\n",
@@ -2932,6 +2940,16 @@ fn steps_forwarded_generator() -> Vec<Step> {
             vec![save("app/tally_listed.py", TALLY_LISTED)],
         )
         .absent(&[("app/tally.py", "MUT113")]),
+        Step::new(
+            "a helper of another module only stores an item of the deque it is handed",
+            vec![save("app/ring_ops.py", "def turn(q):\n    q[0] = 0\n")],
+        )
+        .absent(&[("app/ring.py", "MUT113")]),
+        Step::new(
+            "the helper rotates the deque again",
+            vec![save("app/ring_ops.py", RING_OPS)],
+        )
+        .present(&[("app/ring.py", "MUT113")]),
     ]
 }
 

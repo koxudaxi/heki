@@ -801,6 +801,22 @@ fn transfer(
             changes,
         );
     }
+    // A callee parameter bound to a caller parameter itself changes that parameter's container.
+    let param_changes: Vec<(u8, iterations::ContainerChange)> = facts
+        .iteration_facts()
+        .changes_param_containers
+        .iter()
+        .filter_map(|(&i, &change)| match origin(usize::from(i))?.param {
+            Some((p, None)) => Some((p, change)),
+            _ => None,
+        })
+        .collect();
+    if !param_changes.is_empty() {
+        iterations::merge_changes(
+            &mut t.iteration_facts_mut().changes_param_containers,
+            param_changes,
+        );
+    }
     // A slot of a callee parameter bound to a caller parameter is that parameter's slot.
     for (&i, slots) in &facts.inplace_param_slots {
         if let Some(ArgOrigin {

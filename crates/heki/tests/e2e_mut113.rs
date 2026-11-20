@@ -861,6 +861,155 @@ fn mut113_follows_a_generator_through_a_method_returning_its_own_recursive_call(
     );
 }
 
+/// A helper changing the container it is handed changes it as the same code would in the
+/// method: storing an item of a deque (annotated or not) or reversing it breaks no iterator of
+/// it; rotating or growing it does, also through a helper of the helper, and so does storing a
+/// new key of a dict. The same holds for a kept generator's methods.
+const HELPERS: &str = r#"from collections import deque
+
+
+def replace_first(q: deque[int]) -> None:
+    q[0] = 99
+
+
+def turn(q: deque[int]) -> None:
+    q.reverse()
+
+
+def stamp(q) -> None:
+    q[0] = 1
+
+
+def rotate(q: deque[int]) -> None:
+    q.rotate(1)
+
+
+def relay(q: deque[int]) -> None:
+    rotate(q)
+
+
+def grow(q) -> None:
+    q.append(0)
+
+
+def store(d: dict[str, int], k: str) -> None:
+    d[k] = 1
+
+
+class Queue:
+    def __init__(self) -> None:
+        self.q: deque[int] = deque()
+        self.d: dict[str, int] = {}
+
+    def replaced(self) -> None:
+        for x in self.q:
+            replace_first(self.q)
+
+    def turned(self) -> None:
+        for x in self.q:
+            turn(self.q)
+
+    def stamped(self) -> None:
+        for x in self.q:
+            stamp(self.q)
+
+    def rotated(self) -> None:
+        for x in self.q:
+            rotate(self.q)
+
+    def relayed(self) -> None:
+        for x in self.q:
+            relay(self.q)
+
+    def grown(self) -> None:
+        for x in self.q:
+            grow(self.q)
+
+    def stored(self) -> None:
+        for k in self.d:
+            store(self.d, k + "!")
+
+
+class Ring:
+    def __init__(self) -> None:
+        self.ring: deque[int] = deque()
+        self._cursor = self._cycle()
+
+    def _cycle(self):
+        while True:
+            yield from self.ring
+
+    def refresh(self) -> None:
+        replace_first(self.ring)
+
+    def spin(self) -> None:
+        relay(self.ring)
+"#;
+
+const HELPERS_RUN: &str = r#"from pkg.queue import Queue, Ring
+
+for name in ["replaced", "turned", "stamped", "rotated", "relayed", "grown", "stored"]:
+    q = Queue()
+    q.q.extend([1, 2, 3])
+    q.d["a"] = 1
+    try:
+        getattr(q, name)()
+        print(name, "ok")
+    except RuntimeError as e:
+        print(name, e)
+
+r = Ring()
+r.ring.extend([1, 2, 3])
+next(r._cursor)
+r.refresh()
+next(r._cursor)
+print("refresh ok")
+r.spin()
+try:
+    next(r._cursor)
+    print("spin ok")
+except RuntimeError as e:
+    print("spin", e)
+"#;
+
+#[test]
+fn mut113_counts_a_helpers_change_of_a_container_as_the_change_itself() {
+    let p = Project::new("mut113_helpers");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/queue.py", HELPERS)
+        .write("run.py", HELPERS_RUN);
+    let diags = diagnostics(&p, &["--extend-select", "MUT113"]);
+    assert_eq!(
+        reports(&diags),
+        vec![
+            d("pkg/queue.py", 51, "Queue.rotated", "Queue.q"),
+            d("pkg/queue.py", 55, "Queue.relayed", "Queue.q"),
+            d("pkg/queue.py", 59, "Queue.grown", "Queue.q"),
+            d("pkg/queue.py", 63, "Queue.stored", "Queue.d"),
+            d("pkg/queue.py", 73, "Ring._cycle", "Ring.ring"),
+        ]
+    );
+    assert_eq!(
+        related(&diags, "pkg/queue.py", 73),
+        vec![(79, "`Ring.spin` changes `self.ring`".to_owned())]
+    );
+    let raised = "deque mutated during iteration";
+    assert_eq!(
+        run_python(&p.dir, "run.py").lines().collect::<Vec<_>>(),
+        vec![
+            "replaced ok".to_owned(),
+            "turned ok".to_owned(),
+            "stamped ok".to_owned(),
+            format!("rotated {raised}"),
+            format!("relayed {raised}"),
+            format!("grown {raised}"),
+            "stored dictionary changed size during iteration".to_owned(),
+            "refresh ok".to_owned(),
+            format!("spin {raised}"),
+        ]
+    );
+}
+
 /// The container classes whose iterators check for changes, and the changes each checks.
 const CONTAINERS: &str = r#"import collections
 from collections import OrderedDict, deque
