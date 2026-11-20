@@ -946,6 +946,10 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 $ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
+`--include-size-dependent` applies the proven-safe size-dependent rewrites in every function,
+with or without `--profile`; `--profile` on its own applies them only in the functions the
+profile shows hot.
+
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
 reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. `--diff`
@@ -1127,7 +1131,7 @@ Options:
       --fix
           Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`)
       --include-size-dependent
-          Also allow `size-dependent` `safe` fixes (or combine with `--profile`)
+          Also apply the proven-safe `size-dependent` fixes, in every function
       --diff
           Preview fixes as a unified diff without writing files
       --select <SELECT>
@@ -1147,7 +1151,7 @@ Options:
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
       --profile <PROFILE>
-          Optional offline profile dump (`py-spy --collapsed` / Tachyon `--gecko`)
+          Offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
       --watch
           Watch for file changes and re-run incrementally
   -h, --help

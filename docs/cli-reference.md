@@ -38,7 +38,7 @@ Options:
       --fix
           Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`)
       --include-size-dependent
-          Also allow `size-dependent` `safe` fixes (or combine with `--profile`)
+          Also apply the proven-safe `size-dependent` fixes, in every function
       --diff
           Preview fixes as a unified diff without writing files
       --select <SELECT>
@@ -58,7 +58,7 @@ Options:
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
       --profile <PROFILE>
-          Optional offline profile dump (`py-spy --collapsed` / Tachyon `--gecko`)
+          Offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
       --watch
           Watch for file changes and re-run incrementally
   -h, --help

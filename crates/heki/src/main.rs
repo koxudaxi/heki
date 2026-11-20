@@ -62,7 +62,7 @@ struct CheckArgs {
     /// Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`).
     #[arg(long)]
     fix: bool,
-    /// Also allow `size-dependent` `safe` fixes (or combine with `--profile`).
+    /// Also apply the proven-safe `size-dependent` fixes, in every function.
     #[arg(long)]
     include_size_dependent: bool,
     /// Preview fixes as a unified diff without writing files.
@@ -92,7 +92,9 @@ struct CheckArgs {
     /// Generate or shrink-update the Ratchet baseline file.
     #[arg(long)]
     update_baseline: bool,
-    /// Optional offline profile dump (`py-spy --collapsed` / Tachyon `--gecko`).
+    /// Offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko`
+    /// JSON): apply the `size-dependent` fixes in its hot functions (in every function with
+    /// `--include-size-dependent`).
     #[arg(long)]
     profile: Option<PathBuf>,
     /// Watch for file changes and re-run incrementally.

@@ -56,6 +56,10 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 $ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
+`--include-size-dependent` applies the proven-safe size-dependent rewrites in every function,
+with or without `--profile`; `--profile` on its own applies them only in the functions the
+profile shows hot.
+
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
 reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. `--diff`
