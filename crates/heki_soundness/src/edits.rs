@@ -6,17 +6,22 @@ pub(crate) fn slice(source: &str, start: u32, end: u32) -> Option<&str> {
     source.get(start as usize..end as usize)
 }
 
-/// Offset of the first byte of the line containing `pos`.
+/// Offset of the first byte of the line containing `pos` (any byte offset, also one inside a
+/// multi-byte character: a `\n` byte is never part of one).
 pub(crate) fn line_start(source: &str, pos: u32) -> u32 {
     let pos = (pos as usize).min(source.len());
-    source[..pos].rfind('\n').map_or(0, |i| i as u32 + 1)
+    source.as_bytes()[..pos]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i as u32 + 1)
 }
 
 /// Offset of the `\n` ending the line containing `pos` (or the end of the source).
 pub(crate) fn line_end(source: &str, pos: u32) -> u32 {
     let pos = (pos as usize).min(source.len());
-    source[pos..]
-        .find('\n')
+    source.as_bytes()[pos..]
+        .iter()
+        .position(|&b| b == b'\n')
         .map_or(source.len() as u32, |i| (pos + i) as u32)
 }
 
@@ -122,6 +127,12 @@ mod tests {
         assert_eq!(indentation(src, line_start(src, x)), "    ");
         assert!(is_identifier("acc_1") && !is_identifier("1x") && !is_identifier("a.b"));
         assert_eq!(squash("{ k : v ,\n }"), "{k:v,}");
+        let cafe = "import os as caf\u{e9}\nx = 1\n";
+        let inside_e = cafe.find('\u{e9}').unwrap() as u32 + 1;
+        assert_eq!(
+            (line_start(cafe, inside_e), line_end(cafe, inside_e)),
+            (0, 18)
+        );
         assert!(header_colon_follows("for x in (xs  # c\n    ) :", 12));
         assert!(!header_colon_follows("[x for x in xs if x]", 14));
         assert!(!header_colon_follows("[x for x in xs  # c\n]", 14));
