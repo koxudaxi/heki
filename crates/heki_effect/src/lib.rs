@@ -15,7 +15,7 @@
 //!    with the guards of each effect and call site (`guards`).
 //! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint; `guards` maps a
 //!    callee's guards across each call site (pruning the effects an argument switches off).
-//! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
+//! 4. `report`: Boundary-Only Reporting.
 
 mod callgraph;
 mod construction;
@@ -37,16 +37,13 @@ pub use invalidation::{
     delegates_to_callers, is_initializer, reach_across,
 };
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
-pub use report::{
-    BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
-    boundary_reports_in, group_by_root_cause,
-};
+pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ModuleLayout, ProjectDecls,
     ReadOnlyAttr, ReadOnlyKind, StrConstant, TypeCtx, Val, detect_src_layout, func_qualname,
     module_name_for_path, resolve_relative_module, self_aliases,
 };
-pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
+pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
 
 use heki_ast::Span;
 use heki_ir::ModuleIr;
@@ -490,6 +487,11 @@ pub struct EffectSummary {
     /// The guards every occurrence of an execution effect depends on (`guards`); an effect
     /// without an entry runs whenever the function does.
     pub exec_guards: BTreeMap<ExecEffectKind, EffectGuards>,
+
+    /// Execution effects an ecosystem entry naming the function keeps from its callers: every
+    /// one when it is `excluded`, the blocking ones when it is `async_safe` (applied to the
+    /// final summary, whatever the callees bring).
+    pub declared_hidden: BTreeSet<ExecEffectKind>,
 }
 
 /// An input of a function that a guard tests: parameter `param` itself, or its attribute
@@ -577,6 +579,21 @@ pub struct ArgBinding {
 }
 
 impl EffectSummary {
+    /// Drop the execution effects in `hidden`, with their chains and guards, here and in what
+    /// iterating the returned object runs.
+    pub(crate) fn hide_exec_effects(&mut self, hidden: &BTreeSet<ExecEffectKind>) {
+        if hidden.is_empty() {
+            return;
+        }
+        self.direct_exec_effects.retain(|e| !hidden.contains(e));
+        self.transitive_exec_effects.retain(|e| !hidden.contains(e));
+        self.exec_chains.retain(|e, _| !hidden.contains(e));
+        self.exec_guards.retain(|e, _| !hidden.contains(e));
+        if let Some(iterated) = &mut self.iterated {
+            iterated.hide_exec_effects(hidden);
+        }
+    }
+
     /// Copy with every source location zeroed: Early Cutoff compares facts, not positions,
     /// so an edit that only moves code does not notify callers.
     pub fn without_locations(&self) -> Self {
@@ -828,6 +845,35 @@ pub struct CallSite {
     /// a lazy initialization of the caller around the call is tested, on an object the loop does
     /// not construct: across them, its effects run at most once (`EFF102` / `EFF103`).
     pub once_loops: u64,
+    /// How the callees run when an API runs them for the caller (`Runner`).
+    pub runner: Runner,
+}
+
+/// How an API runs a callable it is handed ([`CallSite::runner`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Runner {
+    /// Called directly, on the caller's thread.
+    #[default]
+    Caller,
+    /// On a worker thread: an offloading API's callable (`asyncio.to_thread(f, x)`), a function
+    /// decorated with `@sync_to_async`. Everything it does happens, but its blocking effects
+    /// never block the caller's thread.
+    Worker,
+    /// On the caller's thread with a synchronous facade over an async database connection
+    /// (SQLAlchemy's `AsyncSession.run_sync(f)`, Layer 2 `sync_facade_arg`): its database I/O
+    /// through the facade is awaited for it; its other blocking calls block.
+    SyncFacade,
+}
+
+impl CallSite {
+    /// Whether the effect `e` of the callees does not block the caller's thread here.
+    pub fn hides(&self, e: ExecEffectKind) -> bool {
+        match self.runner {
+            Runner::Caller => false,
+            Runner::Worker => e.blocks(),
+            Runner::SyncFacade => e == ExecEffectKind::BlockingDb,
+        }
+    }
 }
 
 impl CallSite {
@@ -953,18 +999,13 @@ pub fn is_stub(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "pyi")
 }
 
-/// Which of the files sharing a module name owns it: the highest rank. Python imports a
-/// regular package over a module of the same name in one directory (`pkg/__init__.py` over
-/// `pkg.py`), and heki reads implementations over typing stubs: a stub module ranks lowest,
-/// then a stub package, a module, and a package.
-pub(crate) fn module_rank(path: &Path, is_package: bool) -> u8 {
-    u8::from(!is_stub(path)) * 2 + u8::from(is_package)
-}
-
-impl FileSummary {
-    fn module_rank(&self) -> u8 {
-        module_rank(&self.path, self.decls.is_package)
-    }
+/// Which of the files sharing a module name defines it, the greatest winning: an
+/// implementation before its `.pyi` stub, a package (`pkg/__init__.py`) before a module file of
+/// the same name (`pkg.py`, which Python never imports next to it), then the greater path. Full
+/// and incremental analysis both pick the owner this way, whatever order they meet the files in.
+pub(crate) fn module_precedence(path: &Path) -> (bool, bool, &Path) {
+    let package = path.file_stem().is_some_and(|s| s == "__init__");
+    (!is_stub(path), package, path)
 }
 
 /// Summarize every module of a project and propagate effects to a fixpoint.
@@ -1061,8 +1102,8 @@ impl ProjectIndex {
         contracts: Option<Arc<dyn Contracts>>,
         typed_writes: TypedWrites,
     ) -> Self {
-        // Index lower-ranked files first so the owner of a shared module name links last.
-        files.sort_by_key(FileSummary::module_rank);
+        // The owners of shared module names last (`add_file_links` keeps them either way).
+        files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
             skips_typed_writes: typed_writes == TypedWrites::Local,
@@ -1119,6 +1160,9 @@ impl ProjectIndex {
                         .copied()
                         .collect();
                     for e in effects {
+                        if site.hides(e) {
+                            continue;
+                        }
                         // A guard the call decides against: the effect does not run here.
                         let Some(through) =
                             guards::through_call(site, bc, facts.exec_guards.get(&e))
@@ -1163,7 +1207,7 @@ impl ProjectIndex {
     }
 
     /// Declarations of every indexed module (for re-summarizing an edited module), preferring
-    /// the owner ([`module_rank`]) among the files sharing a module name.
+    /// the owner ([`module_precedence`]) among the files sharing a module name.
     pub fn project_decls(&self) -> ProjectDecls {
         ProjectDecls::new(self.preferred_decls())
     }
@@ -1173,24 +1217,21 @@ impl ProjectIndex {
         DeclPasses::new(self.preferred_decls())
     }
 
-    /// Every module's declarations, lowest [`module_rank`] first (a later file sharing the
-    /// module name replaces them).
+    /// Every module's declarations in [`module_precedence`] order (a later file sharing a
+    /// module name replaces the earlier ones).
     fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
-        let mut entries: Vec<(u8, Arc<ModuleDecls>)> = self
-            .files
-            .values()
-            .map(|f| (f.module_rank(), Arc::clone(&f.decls)))
-            .collect();
-        entries.sort_by_key(|(rank, _)| *rank);
-        entries.into_iter().map(|(_, d)| d).collect()
+        let mut files: Vec<&FileSummary> = self.files.values().collect();
+        files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
+        files.into_iter().map(|f| Arc::clone(&f.decls)).collect()
     }
 
-    /// Declarations currently indexed for `module_name`, of its owner ([`module_rank`]).
+    /// Declarations currently indexed for `module_name`: those of its owner
+    /// ([`module_precedence`]).
     pub fn module_decls(&self, module_name: &str) -> Option<Arc<ModuleDecls>> {
         self.files
             .values()
             .filter(|f| f.module_name == module_name)
-            .min_by_key(|f| (std::cmp::Reverse(f.module_rank()), &f.path))
+            .max_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)))
             .map(|f| Arc::clone(&f.decls))
     }
 
@@ -1200,11 +1241,11 @@ impl ProjectIndex {
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
     ) -> IncrementalUpdate {
-        let others: Vec<(u8, Arc<ModuleDecls>)> = self
+        let others: Vec<(PathBuf, Arc<ModuleDecls>)> = self
             .files
             .values()
             .filter(|f| f.path != input.path)
-            .map(|f| (f.module_rank(), Arc::clone(&f.decls)))
+            .map(|f| (f.path.clone(), Arc::clone(&f.decls)))
             .collect();
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
@@ -1224,9 +1265,11 @@ impl ProjectIndex {
         kb: &EffectiveEcosystemKb,
         decls: &mut DeclPasses,
     ) -> (IncrementalUpdate, DeclKeys) {
-        let rank = module_rank(&input.path, input.is_package);
+        // Another file owns the module name: its declarations stay the module's.
         let masked = self.files.values().any(|f| {
-            f.module_name == input.module_name && f.path != input.path && f.module_rank() > rank
+            f.module_name == input.module_name
+                && f.path != input.path
+                && module_precedence(&f.path) > module_precedence(&input.path)
         });
         let (changed, own) = if masked {
             (
@@ -1292,9 +1335,10 @@ impl ProjectIndex {
                 .files
                 .values()
                 .filter(|f| f.local_functions.contains_key(func))
-                .min_by_key(|f| (std::cmp::Reverse(f.module_rank()), &f.path));
+                .map(|f| &f.path)
+                .max_by(|a, b| module_precedence(a).cmp(&module_precedence(b)));
             if let Some(other) = fallback {
-                self.func_files.insert(func.clone(), other.path.clone());
+                self.func_files.insert(func.clone(), other.clone());
             }
         }
 
@@ -1433,14 +1477,11 @@ impl ProjectIndex {
     }
 
     fn add_file_links(&mut self, file: &FileSummary) {
-        let rank = file.module_rank();
         for func in file.local_functions.keys() {
-            let outranked = self
-                .func_files
-                .get(func)
-                .and_then(|p| self.files.get(p))
-                .is_some_and(|owner| owner.module_rank() > rank);
-            if !outranked {
+            let owned_elsewhere = self.func_files.get(func).is_some_and(|p| {
+                p != &file.path && module_precedence(p) > module_precedence(&file.path)
+            });
+            if !owned_elsewhere {
                 self.func_files.insert(func.clone(), file.path.clone());
             }
         }

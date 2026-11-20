@@ -283,7 +283,9 @@ EffectSummary(f) = {
 1. **User-defined offload wrappers**: besides `asyncio.to_thread`, thin project wrappers such as
    `await in_thread(self.open)` propagate `offloads_blocking_params` bottom-up (finding from
    datamodel-code-generator `bodies.py:112`), and functions decorated with an offloading API
-   (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`) are calls of that API.
+   (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`) are calls of that API. Such a
+   function, and an offloading API's callable, run on a worker thread: everything they do
+   counts at the call except blocking effects.
 2. **Sync-over-async relaxation**: an internal `async def` driven only through a synchronous
    driver is relaxed for `EFF101` / `EFF105` (finding from datamodel-code-generator
    `client.py:1399`).
@@ -305,8 +307,9 @@ EffectSummary(f) = {
 4. **Staged `EFF101` and duplicate aggregation**: the default covers `BlockingNet` / `BlockingDb`
    / `BlockingSubprocess` / `BlockingSync` / `Sleep`; `BlockingFs` is the opt-in `EFF105`;
    `logging` / `print` are excluded. An `async` chain is reported only at its boundary, and
-   reports sharing a root cause are grouped (from 10 reports). Click / Typer commands, ASGI
-   lifespan hooks, `ConstSmall` / `RetryPattern` loops, and test code are relaxed by default.
+   output folds more than 10 boundary reports sharing a root cause into one, after inline
+   suppressions and the Ratchet baseline. Click / Typer commands, ASGI lifespan hooks,
+   `ConstSmall` / `RetryPattern` loops, and test code are relaxed by default.
 
 ### 4.3 Soundness / Alias lane (`heki_soundness`): family 3
 
@@ -358,7 +361,9 @@ versions.
 │  redis, boto3, pandas, numpy, ...)                                           │
 │  - declarative model of public APIs for the Advisory lane (the origin of     │
 │    every effect): effects, async safety, offloaded arguments, copy           │
-│    sanitizers, factory return types, synchronous locks and transactions      │
+│    sanitizers, factory return types, synchronous locks and transactions,     │
+│    argument cases (a literal argument selects effects or the return type),   │
+│    sync facades (`run_sync`), and lazy iterators                             │
 │  - user additions and overrides with [[tool.heki.ecosystem]]                 │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ Layer 3: on-demand analysis of unregistered dependencies (planned)           │
@@ -409,7 +414,7 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 
 | Rule ID | Default | Stage 0-A density | What it finds and how precision is controlled |
 |---|---|---|---|
-| **EFF101** | On | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators, sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
+| **EFF101** | On | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators (their queries and writes still count), sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
 | **EFF102** | On | Web/async **44.1%** / DB **48.5%** (90–93% indirect) | HTTP clients, sessions, or connection pools created in a loop (across functions too). `for.iter` excluded; `ConstSmall` / `RetryPattern` / `DaemonPolling` loops relaxed |
 | **EFF103** | On | DB **47.6%** (74% indirect) | Explicit database queries or external RPC calls in a loop (N+1, across functions too). `for.iter`, DDL, migrations, ORM internals, and bulk APIs excluded. **Implicit ORM lazy loading is out of scope (known limitation)** |
 | **EFF105** | Opt-in | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |
@@ -558,7 +563,8 @@ heki/
   that only moved; those positions are re-propagated into the callers' summaries without changing
   facts. Files changed on disk and configuration changes are followed.
   `crates/heki/tests/lsp_oracle.rs` compares the server with `heki check` after every step of an
-  editing session (107 steps).
+  editing session (107 steps, and a second session of 20 steps over file, layout, buffer, and
+  baseline changes).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
 - **LSP features**: the call chains of `EFF101` / `MUT201` and others are
   `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven
@@ -578,7 +584,7 @@ heki check --diff [PATHS...]                  # preview the fixes
 heki check --select EFF,MUT --ignore MUT101   # rule selection (codes, prefixes, or names)
 heki check --output-format full|concise|json|github|sarif
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
-heki check --update-baseline                  # write or shrink the line-number-independent baseline
+heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
 heki check --profile dump.collapsed [PATHS]   # optional: rank fixes with a recorded profile dump
 heki check --watch [PATHS...]                 # re-check on file changes
 

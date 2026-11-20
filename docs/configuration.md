@@ -13,7 +13,7 @@ own configurations in separate runs: `heki check a/`, then `heki check b/`.
 [tool.heki]
 target-version = "py312"            # default: inferred from project.requires-python
 extend-exclude = ["generated"]      # added to the default excludes
-baseline = "heki-baseline.toml"     # Ratchet baseline used by `heki check`
+baseline = "heki-baseline.toml"     # Ratchet baseline (heki check, --watch, the server)
 
 [tool.heki.lint]
 select = ["MUT", "EFF", "DATA", "OPT"]
@@ -33,7 +33,7 @@ OPT103 = "warning"
 | `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes the oldest supported version it admits, every clause counted (`>=3.11, !=3.11.*` → `py312`); a specifier admitting only older or newer versions selects `py311` or `py315` (`>=3.9, <3.11` → `py311`), and one without a lower bound that admits 3.12 (`<4`) keeps `py312`. `--target-version` overrides both. Syntax newer than the target (`lazy import` before `py315`, t-strings before `py314`, ...) is analyzed, not reported: that is Ruff's check. |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths (globs, matched against paths and path components). |
 | `extend-exclude` | `[]` | Adds excluded paths. |
-| `baseline` | none | Ratchet baseline file used when `--baseline` is not given. |
+| `baseline` | none | Ratchet baseline file used when `--baseline` is not given (also by `--watch` and the language server). |
 
 `.gitignore` and `.hekiignore` files are honored during discovery. Files named explicitly on the
 command line are always checked.
@@ -297,12 +297,22 @@ excluded = true               # never reported
 | --- | ------- |
 | `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
 | `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
-| `async-safe` | Safe to call from `async def`. |
+| `async-safe` | Safe to call from `async def`: it never blocks the event loop, so blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread. |
 | `excluded` | Never reported (logging and similar). |
-| `copy-sanitizer` | Returns a copy (ends `MUT202` protection). |
+| `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too, `"shallow"` (or `true`) only the object itself, so the values below it stay protected. |
+| `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
+| `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 
-An override replaces the built-in entry for the same symbol as a whole.
+An override sets the keys it lists on the built-in entry for the same symbol; the keys it
+leaves out keep their built-in values (`effects = []` removes every effect).
+
+An entry may name a function or method of the project itself (by the module that defines it;
+the built-in catalog never describes the project's own functions):
+its `effects` add to what heki finds in its body, `excluded` keeps every effect of the body
+from its callers and `async-safe` the blocking ones, `return-type` types its result over its
+annotation, and `offloads-blocking-arg` counts the receiver out as for a library method.
+`copy-sanitizer` and `sync-lock-or-tx` are read for library symbols only.
 
 ## Inline suppressions
 
@@ -314,4 +324,6 @@ w = load()            # noqa: EFF101
 ```
 
 A suppression applies to the line of the diagnostic. Codes and rule names are accepted; a
-comment without codes silences every rule on that line.
+comment without codes (`# heki: ignore`, `# noqa`) silences every rule on that line. A bracketed
+list that is not closed or names no rule (`# heki: ignore[`, `# heki: ignore[]`) silences
+nothing.

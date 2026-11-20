@@ -949,7 +949,17 @@ fn baselines_count_violation_sites() {
         ),
         "{stderr}"
     );
-    // Recording them again accepts them.
+    // The baseline only shrinks: `--update-baseline` reports them and keeps the file.
+    let recorded = p.read("heki-baseline.toml");
+    let (code, _, stderr) = p.check(&update);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("error: baseline heki-baseline.toml not updated: 6 entry(ies) grew"),
+        "{stderr}"
+    );
+    assert_eq!(p.read("heki-baseline.toml"), recorded);
+    // Recording them takes a new baseline.
+    std::fs::remove_file(p.dir.join("heki-baseline.toml")).unwrap();
     assert_eq!(p.check(&update).0, 0);
     assert!(p.read("heki-baseline.toml").contains("count = 2"));
     assert_eq!(p.check(&args).0, 0);
@@ -996,7 +1006,16 @@ fn baselines_without_a_version_keep_counting_diagnostics() {
         ),
         "{stderr}"
     );
-    // `--update-baseline` rewrites it to count sites.
+    // `--update-baseline` compares in the old unit first: the new diagnostics keep it as it is.
+    let (code, _, stderr) = p.check(&update);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("error: baseline heki-baseline.toml not updated: 2 entry(ies) grew"),
+        "{stderr}"
+    );
+    assert_eq!(p.read("heki-baseline.toml"), old);
+    // Without them, it is rewritten to count sites.
+    p.write("pkg/m.py", BASELINE_SRC);
     assert_eq!(p.check(&update).0, 0);
     assert!(p.read("heki-baseline.toml").contains("\nversion = 2\n"));
     // A version this heki does not know is an error.

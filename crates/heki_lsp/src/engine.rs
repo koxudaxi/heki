@@ -5,13 +5,13 @@
 //! time and dropped as soon as its summary and diagnostics are computed.
 
 use globset::GlobSet;
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Diagnostic, RatchetBaseline};
 use heki_effect::{
     CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, summarize_project_with_reads,
 };
 use heki_rules::project::{
-    ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, exclude_set, parse_source,
-    rel_posix, retain_unsuppressed,
+    FileError, ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, discovers,
+    exclude_set, parse_source, retain_unsuppressed,
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
@@ -33,6 +33,10 @@ pub enum EngineError {
     Snapshot(SnapshotError),
     #[error("unknown rule `{0}` in lint.severity")]
     UnknownSeverityRule(String),
+    #[error(transparent)]
+    Rules(heki_rules::RuleConfigError),
+    #[error(transparent)]
+    Baseline(Box<heki_diagnostics::BaselineError>),
 }
 
 /// The files of a project root whose change reloads the whole workspace: the configuration and
@@ -57,6 +61,31 @@ pub struct EngineStats {
 #[derive(Debug, Clone)]
 struct FileMeta {
     module_name: String,
+    /// Where the file's call sites show in its text (the hops of call chains other files'
+    /// diagnostics show).
+    site_places: Vec<SitePlace>,
+}
+
+/// A span and the line and columns of both its ends: `(line, byte column, UTF-16 column)`, as
+/// the CLI and the LSP show a related location. A span can keep its bytes while its line
+/// changes (a comment above it turned into a blank line).
+type SitePlace = (heki_ast::Span, [(u32, u32, u32); 2]);
+
+/// The places of a file's call sites `sites` in its text `source`.
+fn site_places(sites: &[CallSite], source: &str) -> Vec<SitePlace> {
+    let lines = heki_ast::LineIndex::from_source(source);
+    let place = |offset: u32| {
+        let (line, column) = lines.line_col(offset);
+        let start = lines.line_start(line).unwrap_or(0) as usize;
+        let utf16 = source
+            .get(start..offset as usize)
+            .map_or(0, |t| t.encode_utf16().count());
+        (line, column, u32::try_from(utf16).unwrap_or(u32::MAX))
+    };
+    sites
+        .iter()
+        .map(|s| (s.span, [place(s.span.start), place(s.span.end)]))
+        .collect()
 }
 
 /// Result of re-analyzing one file.
@@ -87,6 +116,10 @@ pub struct Workspace {
     pub env: ProjectEnv,
     selection: RuleSelection,
     snapshot: Option<SummarySnapshot>,
+    /// The Ratchet baseline the diagnostics are compared with, and its file.
+    baseline: Option<(PathBuf, RatchetBaseline)>,
+    /// The directories discovery walks (`ProjectOptions::paths`).
+    walked: Vec<PathBuf>,
     exclude: GlobSet,
     files: BTreeMap<PathBuf, FileMeta>,
     index: ProjectIndex,
@@ -220,20 +253,28 @@ struct ContractReach {
     /// any number of calls above it, and a call of a function without effects changes no
     /// summary.
     calls: bool,
+    /// An effect boundary: a scope function's report names the ecosystem calls it reaches any
+    /// number of calls below (which `allowed-callees` may allow one by one) and counts them,
+    /// while the summaries keep the effects with one chain each.
+    ecosystem_calls: bool,
 }
 
 /// Per function of one file: its project call sites without positions, and the cached
 /// properties it invalidates (see `Workspace::callee_files`).
 type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
 
+/// Per function of one file: its ecosystem (Layer 2) call sites without positions.
+type EcosystemView = BTreeMap<FuncKey, Vec<CallSite>>;
+
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the files are summarized, before
-    /// propagation).
-    /// `overrides` replaces the disk text of open documents.
+    /// propagation). `overrides` replaces the disk text of open documents. `baseline` replaces
+    /// the Ratchet baseline of the configuration (`--baseline`).
     pub fn load(
         opts: &ProjectOptions<'_>,
         selectors: &Selectors,
-    ) -> Result<(Self, Vec<String>), EngineError> {
+        baseline: Option<&Path>,
+    ) -> Result<(Self, Vec<FileError>), EngineError> {
         let project = Project::load(opts).map_err(EngineError::Project)?;
         let env_cfg = &project.env.cfg;
         let selection = RuleSelection::resolve(
@@ -257,6 +298,17 @@ impl Workspace {
         } else {
             None
         };
+        let baseline_path = baseline
+            .map(Path::to_path_buf)
+            .or_else(|| env_cfg.baseline.as_ref().map(|b| project.env.root.join(b)));
+        let baseline = match baseline_path {
+            Some(path) => {
+                let recorded =
+                    RatchetBaseline::load(&path).map_err(|e| EngineError::Baseline(Box::new(e)))?;
+                Some((path, recorded))
+            }
+            None => None,
+        };
         let exclude = exclude_set(env_cfg).map_err(EngineError::Project)?;
         let patching_builtins = project
             .files
@@ -264,20 +316,20 @@ impl Workspace {
             .filter(|f| f.patches_builtins())
             .map(|f| f.path.clone())
             .collect();
-        // A configuration error is reported by every check (`check_project`); without valid
-        // contracts the summaries carry no contract facts.
-        let contracts = heki_rules::summary_contracts(env_cfg).ok().flatten();
+        let contracts = heki_rules::summary_contracts(env_cfg).map_err(EngineError::Rules)?;
         let typed_writes = heki_rules::typed_writes(env_cfg, &selection);
         let summaries =
             summarize_project_with_reads(&project.inputs(), &project.env.kb, contracts.as_deref());
         let files = project
             .files
             .iter()
-            .map(|f| {
+            .zip(&summaries)
+            .map(|(f, summary)| {
                 (
                     f.path.clone(),
                     FileMeta {
                         module_name: f.module_name.clone(),
+                        site_places: site_places(&summary.call_sites, &f.source),
                     },
                 )
             })
@@ -292,6 +344,7 @@ impl Workspace {
                     .effect_boundaries
                     .iter()
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
+            ecosystem_calls: !env_cfg.effect_boundaries.is_empty(),
         };
         // Every file's IR, semantic model, and text go before propagation: only the index stays.
         let Project {
@@ -302,6 +355,18 @@ impl Workspace {
         drop(parsed);
         let index = ProjectIndex::build_for(summaries, contracts, typed_writes);
         let decls = index.decl_passes();
+        // The options of the rules (contract targets and patterns) are read by every check, and
+        // an invalid one fails them all: the workspace fails to load, as `heki check` fails
+        // before it reports anything.
+        let extras = CheckExtras {
+            soundness_kb: &env.soundness_kb,
+            snapshot: snapshot.as_ref(),
+            decls: Some(decls.completed()),
+            project_patches_builtins: Some(false),
+            text_of: None,
+        };
+        check_project(&[], &env.cfg, &env.kb, &index, &selection, &extras)
+            .map_err(EngineError::Rules)?;
         let stats = EngineStats {
             indexed_files: index.files.len(),
             ..EngineStats::default()
@@ -311,6 +376,8 @@ impl Workspace {
                 env,
                 selection,
                 snapshot,
+                baseline,
+                walked: opts.paths.to_vec(),
                 exclude,
                 files,
                 index,
@@ -339,14 +406,25 @@ impl Workspace {
         &self.stats
     }
 
-    /// A Python file the project would index (inside the root, not excluded).
+    /// The files in the index.
+    pub fn indexed(&self) -> impl Iterator<Item = &PathBuf> {
+        self.files.keys()
+    }
+
+    /// The Ratchet baseline file the diagnostics are compared with: a change of it changes them
+    /// all.
+    pub fn baseline_path(&self) -> Option<&Path> {
+        self.baseline.as_ref().map(|(path, _)| path.as_path())
+    }
+
+    /// A Python file the project indexes: one that discovery finds (`collect_files`: ignore
+    /// files, hidden directories, and `exclude` leave files out), as `heki check` does.
     pub fn accepts(&self, path: &Path) -> bool {
-        path.extension().is_some_and(|e| e == "py" || e == "pyi")
-            && path.starts_with(&self.env.root)
-            && {
-                let rel = rel_posix(path, &self.env.root);
-                !self.exclude.is_match(&rel) && !rel.split('/').any(|c| self.exclude.is_match(c))
-            }
+        self.files.contains_key(path)
+            || self
+                .walked
+                .iter()
+                .any(|dir| discovers(dir, &self.env.root, &self.exclude, path))
     }
 
     fn parse(&self, path: &Path, text: &str) -> Result<ParsedFile, String> {
@@ -359,8 +437,9 @@ impl Workspace {
         )
     }
 
-    /// Diagnostics of one parsed file against the current index; records which other files
-    /// they point into and what the check read of the declarations.
+    /// Diagnostics of one parsed file against the current index and, as `heki check` reports
+    /// them, against the Ratchet baseline; records which other files they point into and what
+    /// the check read of the declarations.
     fn check(&mut self, parsed: &ParsedFile) -> Result<Vec<Diagnostic>, String> {
         let unit = parsed.unit();
         let extras = CheckExtras {
@@ -403,7 +482,13 @@ impl Workspace {
             self.chain_reports.remove(&parsed.path);
         }
         self.check_reads.insert(parsed.path.clone(), &reads);
-        checked
+        // Baseline keys name the file, so the counts of one file are the counts of its keys.
+        checked.map(|mut diags| {
+            if let Some((_, baseline)) = &self.baseline {
+                baseline.keep_regressions(&mut diags, &|_| parsed.rel.clone());
+            }
+            diags
+        })
     }
 
     /// Diagnostics of `text` as `path` against the current index (the summaries are unchanged).
@@ -419,16 +504,6 @@ impl Workspace {
             .filter(|(file, shown)| file.as_path() != path && shown.contains(path))
             .map(|(file, _)| file.clone())
             .collect()
-    }
-
-    /// Spans of the call sites indexed for `path` (the positions other files' call chains
-    /// show).
-    fn call_site_spans(&self, path: &Path) -> Vec<heki_ast::Span> {
-        self.index
-            .files
-            .get(path)
-            .map(|f| f.call_sites.iter().map(|s| s.span).collect())
-            .unwrap_or_default()
     }
 
     /// Files whose summary or latest check read declarations in `change` (a re-export, a
@@ -469,6 +544,24 @@ impl Workspace {
                 .summary(key)
                 .map(|s| s.invalidates_cached.clone())
                 .unwrap_or_default();
+        }
+        out
+    }
+
+    /// What the functions of `path` call of the ecosystem (`EcosystemView`).
+    fn ecosystem_view(&self, path: &Path) -> EcosystemView {
+        let mut out = EcosystemView::new();
+        for site in self
+            .index
+            .files
+            .get(path)
+            .into_iter()
+            .flat_map(|f| &f.call_sites)
+            .filter(|s| matches!(s.target, heki_effect::CallTarget::Layer2 { .. }))
+        {
+            let mut site = site.clone();
+            site.span = heki_ast::Span { start: 0, end: 0 };
+            out.entry(site.caller.clone()).or_default().push(site);
         }
         out
     }
@@ -527,19 +620,31 @@ impl Workspace {
         self.check_reads.paths().cloned().collect()
     }
 
-    /// Re-summarize one parsed file; returns the update and what changed in the declarations.
-    fn summarize(&mut self, parsed: &ParsedFile) -> (heki_effect::IncrementalUpdate, DeclKeys) {
-        self.files.insert(
-            parsed.path.clone(),
-            FileMeta {
-                module_name: parsed.module_name.clone(),
-            },
-        );
+    /// Re-summarize one parsed file; returns the update, what changed in the declarations, and
+    /// whether the places of its call sites changed.
+    fn summarize(
+        &mut self,
+        parsed: &ParsedFile,
+    ) -> (heki_effect::IncrementalUpdate, DeclKeys, bool) {
         let out =
             self.index
                 .reanalyze_module_cached(&parsed.input(), &self.env.kb, &mut self.decls);
+        let sites = self
+            .index
+            .files
+            .get(&parsed.path)
+            .map_or(&[][..], |f| f.call_sites.as_slice());
+        let places = site_places(sites, &parsed.source);
+        let before = self.files.insert(
+            parsed.path.clone(),
+            FileMeta {
+                module_name: parsed.module_name.clone(),
+                site_places: places,
+            },
+        );
+        let moved = before.is_none_or(|b| b.site_places != self.files[&parsed.path].site_places);
         self.stats.indexed_files = self.index.files.len();
-        out
+        (out.0, out.1, moved)
     }
 
     /// Files of the generators handed to the `changed` functions (`SiteRole::Through`): whether
@@ -575,21 +680,26 @@ impl Workspace {
         out.into_iter().collect()
     }
 
-    /// The files an update of the index affects besides the updated file: callers of changed
-    /// summaries, readers of changed declarations, callees whose callers changed, generators
-    /// handed to changed functions, class families whose members changed, and the files with
+    /// The files an update of the index affects besides the updated file: the files of changed
+    /// summaries and of their callers, readers of changed declarations, callees whose callers changed, generators
+    /// handed to changed functions, class families whose members changed, the files with
     /// `MUT108` / `MUT110` reports above functions whose chain facts (`chains`, before and
-    /// after) changed.
+    /// after) changed, and with an effect boundary the files above functions whose ecosystem
+    /// calls (`ecosystem`, before and after) changed.
     fn affected_by(
         &self,
         update: &heki_effect::IncrementalUpdate,
         change: &DeclKeys,
         callers: (&CallerView, &CallerView),
         chains: (&ChainFacts, &ChainFacts),
+        ecosystem: (&EcosystemView, &EcosystemView),
     ) -> FxHashSet<PathBuf> {
+        // The functions whose facts changed include the other members of a call cycle through
+        // the file: their own reports (`MUT103` against the snapshot, ...) read them.
         let mut affected: FxHashSet<PathBuf> = update
             .affected_callers
             .iter()
+            .chain(&update.changed)
             .filter_map(|k: &FuncKey| self.index.file_of(k).map(Path::to_path_buf))
             .collect();
         affected.extend(self.reading(change));
@@ -607,6 +717,15 @@ impl Workspace {
         }
         if self.reach.calls {
             affected.extend(self.above_files(&changed));
+        }
+        if self.reach.ecosystem_calls {
+            let calling_differently: Vec<&FuncKey> = ecosystem
+                .0
+                .keys()
+                .chain(ecosystem.1.keys())
+                .filter(|k| ecosystem.0.get(*k) != ecosystem.1.get(*k))
+                .collect();
+            affected.extend(self.above_files(&calling_differently));
         }
         // A `MUT108` / `MUT110` call chain ends at the first function whose own body makes the
         // change and walks the calls of the functions before it: when a function moves the
@@ -727,20 +846,22 @@ impl Workspace {
         };
         let callers_before = self.caller_view(&parsed.path);
         let chains_before = chain_facts(&self.index, &parsed.path);
-        let sites_before = self.call_site_spans(&parsed.path);
-        let (update, change) = self.summarize(&parsed);
+        let ecosystem_before = self.ecosystem_view(&parsed.path);
+        let (update, change, sites_moved) = self.summarize(&parsed);
         let callers_after = self.caller_view(&parsed.path);
         let chains_after = chain_facts(&self.index, &parsed.path);
+        let ecosystem_after = self.ecosystem_view(&parsed.path);
         let mut affected = self.affected_by(
             &update,
             &change,
             (&callers_before, &callers_after),
             (&chains_before, &chains_after),
+            (&ecosystem_before, &ecosystem_after),
         );
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         // Call chains of other files show this file's call sites: when they move, those
         // diagnostics move with them (the summaries copying them were re-propagated).
-        if self.call_site_spans(&parsed.path) != sites_before {
+        if sites_moved {
             affected.extend(self.showing(&parsed.path));
         }
         affected.remove(&parsed.path);
@@ -799,6 +920,7 @@ impl Workspace {
         };
         let callers_before = self.caller_view(path);
         let chains_before = chain_facts(&self.index, path);
+        let ecosystem_before = self.ecosystem_view(path);
         let update = self.index.remove_file(path);
         let change = match self.index.module_decls(&meta.module_name) {
             Some(remaining) => self.decls.replace(remaining),
@@ -810,6 +932,7 @@ impl Workspace {
             &change,
             (&callers_before, &CallerView::new()),
             (&chains_before, &ChainFacts::new()),
+            (&ecosystem_before, &EcosystemView::new()),
         );
         affected.extend(self.note_builtins(path, false));
         let mut v: Vec<PathBuf> = affected.into_iter().collect();
@@ -818,23 +941,22 @@ impl Workspace {
     }
 
     /// Diagnostics of every indexed file, read from the disk.
-    pub fn diagnose_all(&mut self) -> (BTreeMap<PathBuf, Vec<Diagnostic>>, Vec<String>) {
+    pub fn diagnose_all(&mut self) -> (BTreeMap<PathBuf, Vec<Diagnostic>>, Vec<FileError>) {
         let mut out = BTreeMap::new();
         let mut errors = Vec::new();
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in &paths {
-            let text = match heki_ast::read_source(path) {
-                Ok(t) => t,
-                Err(e) => {
-                    errors.push(format!("{}: {e}", path.display()));
-                    continue;
-                }
-            };
-            match self.diagnose(path, &text) {
+            let diagnosed = heki_ast::read_source(path)
+                .map_err(|e| format!("{}: {e}", path.display()))
+                .and_then(|text| self.diagnose(path, &text));
+            match diagnosed {
                 Ok(d) => {
                     out.insert(path.clone(), d);
                 }
-                Err(e) => errors.push(e),
+                Err(message) => errors.push(FileError {
+                    path: path.clone(),
+                    message,
+                }),
             }
         }
         (out, errors)
@@ -876,7 +998,7 @@ mod tests {
             paths: &paths,
             ..ProjectOptions::default()
         };
-        let (mut ws, errors) = Workspace::load(&opts, &Selectors::default()).unwrap();
+        let (mut ws, errors) = Workspace::load(&opts, &Selectors::default(), None).unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         // After indexing (a race a process cannot set up portably), `b.py` stops being UTF-8
         // and `c.py` stops parsing: both errors are reported, `a.py` is still checked.
@@ -889,15 +1011,20 @@ mod tests {
         );
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(
-            errors[0].starts_with(&format!("{}: ", dir.join("b.py").display()))
-                && errors[0].contains("valid UTF-8"),
+            errors[0]
+                .message
+                .starts_with(&format!("{}: ", dir.join("b.py").display()))
+                && errors[0].message.contains("valid UTF-8"),
             "{errors:?}"
         );
         assert!(
-            errors[1].starts_with(&format!("{}:1:", dir.join("c.py").display()))
-                && errors[1].contains("syntax error"),
+            errors[1]
+                .message
+                .starts_with(&format!("{}:1:", dir.join("c.py").display()))
+                && errors[1].message.contains("syntax error"),
             "{errors:?}"
         );
+        assert_eq!(errors[1].path, dir.join("c.py"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

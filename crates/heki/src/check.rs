@@ -6,16 +6,17 @@ use crate::{CheckArgs, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
-    BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, baseline_counts, baseline_key,
-    fix_python_source, render, unified_diff,
+    BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, baseline_counts, fix_python_source,
+    github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{ProjectIndex, analyze_project, analyze_project_for, func_qualname};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
-use heki_rules::project::{ParsedFile, Project, ProjectOptions, retain_unsuppressed};
+use heki_rules::project::{FileError, ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
+    fold_root_causes,
 };
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -38,6 +39,7 @@ pub(crate) fn selection(args: &CheckArgs, project: &Project) -> Result<RuleSelec
 pub(crate) fn snapshot_for(
     selection: &RuleSelection,
     root: &Path,
+    format: OutputFormat,
 ) -> Result<Option<SummarySnapshot>> {
     if !selection.is_enabled("MUT103") {
         return Ok(None);
@@ -46,7 +48,8 @@ pub(crate) fn snapshot_for(
     if path.exists() {
         return Ok(Some(SummarySnapshot::load(&path)?));
     }
-    eprintln!(
+    log!(
+        format,
         "warning: `MUT103` is enabled but `{}` does not exist; run `heki snapshot --write` first",
         path.display()
     );
@@ -106,7 +109,7 @@ fn analyze(
         overrides,
     })?;
     let selection = selection(args, &project)?;
-    let snapshot = snapshot_for(&selection, &project.env.root)?;
+    let snapshot = snapshot_for(&selection, &project.env.root, args.output_format)?;
     let env = &project.env;
     let inputs = project.inputs();
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
@@ -155,6 +158,8 @@ struct FixedFile {
     path: PathBuf,
     original: String,
     fixed: String,
+    /// The fixes applied to it.
+    fixes: usize,
 }
 
 /// How `heki check` prints a path, in every output format and in `--diff` headers (as Ruff
@@ -176,9 +181,9 @@ pub(crate) fn shown_path(p: &Path) -> PathBuf {
         .unwrap_or_else(|| p.to_path_buf())
 }
 
-/// [`shown_path`] in `/` form.
+/// [`shown_path`] as reports write it.
 fn shown_text(p: &Path) -> String {
-    shown_path(p).to_string_lossy().replace('\\', "/")
+    path_text(&shown_path(p))
 }
 
 /// What `--fix` / `--diff` would do.
@@ -186,7 +191,7 @@ struct FixRun {
     fixes: usize,
     files: Vec<FixedFile>,
     /// Read / syntax errors of the last pass.
-    errors: Vec<String>,
+    errors: Vec<FileError>,
     /// Files whose fixes would not parse, left unchanged.
     refused: Vec<String>,
 }
@@ -195,6 +200,7 @@ struct FixRun {
 fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> {
     let mut overrides: FxHashMap<PathBuf, String> = FxHashMap::default();
     let mut originals: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let mut applied_to: FxHashMap<PathBuf, usize> = FxHashMap::default();
     let mut total = 0;
     let mut errors;
     let mut passes = 0;
@@ -217,6 +223,7 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
             };
             let fixed = fix_python_source(&shown_text(&file.path), &file.source, groups);
             pass += fixed.applied.len();
+            *applied_to.entry(file.path.clone()).or_default() += fixed.applied.len();
             refused.extend(fixed.refused);
             originals
                 .entry(file.path.clone())
@@ -233,10 +240,12 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
         .into_iter()
         .filter_map(|(path, original)| {
             let fixed = overrides.remove(&path)?;
+            let fixes = applied_to.get(&path).copied().unwrap_or_default();
             (fixed != original).then_some(FixedFile {
                 path,
                 original,
                 fixed,
+                fixes,
             })
         })
         .collect();
@@ -278,34 +287,61 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         } else {
             ExitCode::from(1)
         };
-        return finish(&[run.errors, run.refused].concat(), code);
+        let errors: Vec<String> = run
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .chain(run.refused)
+            .collect();
+        return finish(args.output_format, &errors, code);
     }
     let mut refused = Vec::new();
+    let mut conflicts = Vec::new();
     if args.fix {
         let run = fix_in_memory(args, hot.as_ref())?;
-        for f in &run.files {
-            heki_ast::write_source(&f.path, &f.fixed)
-                .with_context(|| format!("failed to write `{}`", f.path.display()))?;
-        }
-        eprintln!(
-            "Fixed {} issue(s) in {} file(s).",
-            run.fixes,
-            run.files.len()
-        );
+        let (fixes, written);
+        (fixes, written, conflicts) = write_fixed(&run.files)?;
+        eprintln!("Fixed {fixes} issue(s) in {written} file(s).");
         refused = run.refused;
     }
     let Analyzed {
-        project,
+        mut project,
         index,
         diags,
         ..
     } = analyze(args, hot.as_ref(), None)?;
+    project.errors.extend(conflicts);
     let code = report(args, &project, diags)?;
     // The process ends here: freeing the index and the parsed files one allocation at a time
     // would only cost time.
     std::mem::forget(index);
     std::mem::forget(project);
-    finish(&refused, code)
+    finish(args.output_format, &refused, code)
+}
+
+/// Write the fixed files whose disk text is still the text the fixes were proven on. A file
+/// that changed meanwhile (an editor saved it during the analysis) is left as it is: writing
+/// the fixed text would replace that save. Returns the fixes and files written and an error
+/// for each file left.
+fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
+    let (mut fixes, mut written, mut conflicts) = (0, 0, Vec::new());
+    for f in files {
+        if heki_ast::read_source(&f.path).ok().as_ref() != Some(&f.original) {
+            conflicts.push(FileError {
+                path: f.path.clone(),
+                message: format!(
+                    "{}: changed on disk while heki was fixing it; its fixes were not written (run `heki check --fix` again)",
+                    f.path.display()
+                ),
+            });
+            continue;
+        }
+        heki_ast::write_source(&f.path, &f.fixed)
+            .with_context(|| format!("failed to write `{}`", f.path.display()))?;
+        fixes += f.fixes;
+        written += 1;
+    }
+    Ok((fixes, written, conflicts))
 }
 
 /// Baseline handling, rendering, summary, and exit code of one analyzed run.
@@ -332,41 +368,45 @@ pub(crate) fn report(
         .baseline
         .clone()
         .or_else(|| project.env.cfg.baseline.clone().map(|b| root.join(b)));
-    if args.update_baseline {
-        let Some(bp) = &baseline_path else {
-            bail!(
-                "`--update-baseline` needs `--baseline <path>` or `baseline` in the configuration"
-            );
-        };
-        let baseline =
-            RatchetBaseline::from_counts(baseline_counts(&diags, &key_path, CountUnit::Sites));
-        baseline.save(bp)?;
-        eprintln!(
-            "Wrote Ratchet baseline {} ({} entries, {} diagnostic(s)).",
-            bp.display(),
-            baseline.counts.len(),
-            diags.len()
-        );
-        return finish(&project.errors, ExitCode::SUCCESS);
+    let fmt = args.output_format;
+    if args.update_baseline && baseline_path.is_none() {
+        bail!("`--update-baseline` needs `--baseline <path>` or `baseline` in the configuration");
     }
-    if let Some(bp) = &baseline_path {
-        let baseline = RatchetBaseline::load(bp)?;
+    // `--update-baseline` records the current findings into a missing baseline, and otherwise
+    // only lets it shrink: it compares like a check first.
+    let recorded = match &baseline_path {
+        Some(bp) if !args.update_baseline || bp.exists() => Some(RatchetBaseline::load(bp)?),
+        _ => None,
+    };
+    let current = baseline_counts(&diags, &key_path, CountUnit::Sites);
+    let found = diags.len();
+    let mut regressions = 0;
+    if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
         let unit = baseline.unit;
-        if unit == CountUnit::Diagnostics {
-            eprintln!(
+        if unit == CountUnit::Diagnostics && !args.update_baseline {
+            log!(
+                fmt,
                 "note: baseline {} counts diagnostics, not violation sites (written before version {BASELINE_VERSION}); `--update-baseline` rewrites it to count sites",
                 bp.display()
             );
         }
-        let cmp = baseline.compare(&baseline_counts(&diags, &key_path, unit));
-        for (key, allowed, cur) in &cmp.stale_entries {
-            eprintln!(
-                "note: baseline entry {}::{} {} `{}` can shrink {allowed} -> {cur} (`--update-baseline`)",
-                key.path, key.qualname, key.rule_code, key.target
-            );
+        // Legacy entries compare in their own unit, before `--update-baseline` rewrites them.
+        let cmp = baseline.keep_regressions(&mut diags, &key_path);
+        if !args.update_baseline {
+            for (key, allowed, cur) in &cmp.stale_entries {
+                log!(
+                    fmt,
+                    "note: baseline entry {}::{} {} `{}` can shrink {allowed} -> {cur} (`--update-baseline`)",
+                    key.path,
+                    key.qualname,
+                    key.rule_code,
+                    key.target
+                );
+            }
         }
         for (key, allowed, cur) in &cmp.regressions {
-            eprintln!(
+            log!(
+                fmt,
                 "note: baseline entry {}::{} {} `{}` allows {allowed} {}, found {cur}",
                 key.path,
                 key.qualname,
@@ -375,10 +415,34 @@ pub(crate) fn report(
                 unit.noun()
             );
         }
-        let regressed: FxHashSet<_> = cmp.regressions.iter().map(|(k, _, _)| k.clone()).collect();
-        diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
+        regressions = cmp.regressions.len();
+    }
+    if let Some(bp) = baseline_path.as_ref().filter(|_| args.update_baseline) {
+        if !project.errors.is_empty() {
+            log!(fmt, "{}", not_written("baseline", bp, project.errors.len()));
+            return finish(fmt, &project.errors, ExitCode::SUCCESS);
+        }
+        if regressions > 0 {
+            log!(
+                fmt,
+                "error: baseline {} not updated: {regressions} entry(ies) grew, and a Ratchet baseline only shrinks (delete it to record the current findings)",
+                bp.display()
+            );
+        } else {
+            let baseline = RatchetBaseline::from_counts(current);
+            baseline.save(bp)?;
+            log!(
+                fmt,
+                "Wrote Ratchet baseline {} ({} entries, {found} diagnostic(s)).",
+                bp.display(),
+                baseline.counts.len(),
+            );
+            return finish(fmt, &project.errors, ExitCode::SUCCESS);
+        }
     }
 
+    // Suppressions and the baseline saw every report; only output folds them.
+    fold_root_causes(&mut diags);
     // Every format prints the paths `--diff` prints.
     for d in &mut diags {
         d.path = shown_path(&d.path);
@@ -386,18 +450,16 @@ pub(crate) fn report(
             r.path = shown_path(&r.path);
         }
     }
-    let by_shown: FxHashMap<PathBuf, &ParsedFile> = project
+    let by_shown: FxHashMap<PathBuf, (&ParsedFile, LineIndex)> = project
         .files
         .iter()
-        .map(|p| (shown_path(&p.path), p))
+        .map(|p| (shown_path(&p.path), (p, LineIndex::from_source(&p.source))))
         .collect();
     let source_line = |p: &Path, line: u32| {
-        by_shown.get(p).and_then(|f| {
-            f.source
-                .lines()
-                .nth(usize::try_from(line.saturating_sub(1)).unwrap_or(usize::MAX))
-                .map(str::to_owned)
-        })
+        by_shown
+            .get(p)
+            .and_then(|(f, lines)| lines.line_text(&f.source, line))
+            .map(str::to_owned)
     };
     print!(
         "{}",
@@ -414,7 +476,7 @@ pub(crate) fn report(
     } else {
         ExitCode::from(1)
     };
-    finish(&project.errors, code)
+    finish(args.output_format, &project.errors, code)
 }
 
 /// `heki snapshot [PATHS...] [--write]`: print or save the normalized summaries (`MUT103`).
@@ -439,6 +501,13 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     let snap = SummarySnapshot::build(&units, &index);
     if args.write {
         let path = project.env.root.join(SNAPSHOT_FILE);
+        if !project.errors.is_empty() {
+            eprintln!(
+                "{}",
+                not_written("summary snapshot", &path, project.errors.len())
+            );
+            return finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS);
+        }
         snap.save(&path)?;
         eprintln!(
             "Wrote summary snapshot {} ({} function(s)).",
@@ -448,7 +517,17 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     } else {
         print!("{}", snap.to_json());
     }
-    finish(&project.errors, ExitCode::SUCCESS)
+    finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS)
+}
+
+/// Why a run that could not analyze every file keeps the `what` at `path` as it is: written
+/// from the other files, it would drop the entries of the failed ones, and a later run would
+/// compare them against nothing.
+fn not_written(what: &str, path: &Path, failed: usize) -> String {
+    format!(
+        "error: {what} {} not written: {failed} file(s) could not be analyzed",
+        path.display()
+    )
 }
 
 fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
@@ -464,10 +543,26 @@ fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
     }
 }
 
+/// Write one line to stderr. GitHub Actions reads every line of a job's log for workflow
+/// commands (`::error file=...::`): in `github` output CR and LF are escaped as in annotations,
+/// so text from the project (a file name, a baseline entry, an error message) never starts a
+/// line of its own.
+pub(crate) fn log_line(format: OutputFormat, line: &str) {
+    if matches!(format, OutputFormat::Github) {
+        eprintln!("{}", github_escape(line));
+    } else {
+        eprintln!("{line}");
+    }
+}
+
 /// Syntax / read errors make the run fail with exit code 2 after the report.
-pub(crate) fn finish(errors: &[String], code: ExitCode) -> Result<ExitCode> {
+pub(crate) fn finish(
+    format: OutputFormat,
+    errors: &[impl std::fmt::Display],
+    code: ExitCode,
+) -> Result<ExitCode> {
     for e in errors {
-        eprintln!("error: {e}");
+        log!(format, "error: {e}");
     }
     Ok(if errors.is_empty() {
         code
@@ -483,5 +578,43 @@ pub(crate) fn format_of(f: OutputFormat) -> heki_diagnostics::OutputFormat {
         OutputFormat::Json => heki_diagnostics::OutputFormat::Json,
         OutputFormat::Github => heki_diagnostics::OutputFormat::Github,
         OutputFormat::Sarif => heki_diagnostics::OutputFormat::Sarif,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixes_are_not_written_over_a_save_made_while_fixing() {
+        let dir = std::env::temp_dir().join(format!("heki_write_fixed_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kept, fixed) = (dir.join("kept.py"), dir.join("fixed.py"));
+        let file = |path: &Path, original: &str| FixedFile {
+            path: path.to_path_buf(),
+            original: original.to_owned(),
+            fixed: "x.append(i)\n".to_owned(),
+            fixes: 1,
+        };
+        // After the fixes were proven on `x = x + [i]`, an editor saved `kept.py` (a race a
+        // process cannot set up portably).
+        std::fs::write(&kept, "x = x + [i]  # saved\n").unwrap();
+        std::fs::write(&fixed, "x = x + [i]\n").unwrap();
+        let files = [file(&kept, "x = x + [i]\n"), file(&fixed, "x = x + [i]\n")];
+        let (fixes, written, conflicts) = write_fixed(&files).unwrap();
+        assert_eq!((fixes, written), (1, 1));
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert!(
+            conflicts[0]
+                .message
+                .starts_with(&format!("{}: changed on disk", kept.display())),
+            "{conflicts:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "x = x + [i]  # saved\n"
+        );
+        assert_eq!(std::fs::read_to_string(&fixed).unwrap(), "x.append(i)\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -215,17 +215,32 @@ pub struct InvalidationRule {
 /// `[[tool.heki.ecosystem]]` user addition / override of a Layer 2 ecosystem KB entry.
 ///
 /// `effects` holds Execution Effect names exactly as spelled in `kb/ecosystem/*.toml`
-/// (snake_case, e.g. `"blocking_net"`); `heki_kb` validates them when merging.
-/// An override replaces the built-in entry for the same `symbol` as a whole.
+/// (snake_case, e.g. `"blocking_net"`); `heki_kb` validates them when merging. An override
+/// sets the keys it lists (`None`: left out) on the built-in entry for the same `symbol`, whose
+/// other keys stay.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct EcosystemOverride {
     pub symbol: String,
-    pub effects: Vec<String>,
-    pub async_safe: bool,
+    pub effects: Option<Vec<String>>,
+    pub async_safe: Option<bool>,
     pub offloads_blocking_arg: Option<u8>,
-    pub excluded: bool,
-    pub copy_sanitizer: bool,
+    pub excluded: Option<bool>,
+    pub copy_sanitizer: Option<CopySanitizerSetting>,
+    /// The class of the instances the call returns (a factory).
+    pub return_type: Option<String>,
+    /// `EFF106`: a `with` over an instance of this class, or over the call's result, holds a
+    /// synchronous lock or a database transaction.
+    pub sync_lock_or_tx: Option<bool>,
+}
+
+/// `copy-sanitizer`: the depth of the copy the call returns (`"shallow"` / `"deep"`, validated
+/// by `heki_kb`), or `true` for a shallow copy and `false` for none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CopySanitizerSetting {
+    Flag(bool),
+    Depth(String),
 }
 
 /// Top-level `[tool.heki]` or `heki.toml` configuration.
@@ -765,6 +780,19 @@ excluded = true
 [[tool.heki.ecosystem]]
 symbol = "mypkg.model.Model.clone"
 copy-sanitizer = true
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.model.Model.detach"
+copy-sanitizer = "deep"
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.db.open"
+return-type = "sqlite3.Connection"
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.db.Store.transaction"
+effects = []
+sync-lock-or-tx = true
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -773,23 +801,39 @@ copy-sanitizer = true
             vec![
                 EcosystemOverride {
                     symbol: "mypkg.http.fetch".into(),
-                    effects: vec!["blocking_net".into(), "unpooled_client_alloc".into()],
+                    effects: Some(vec!["blocking_net".into(), "unpooled_client_alloc".into()]),
                     ..EcosystemOverride::default()
                 },
                 EcosystemOverride {
                     symbol: "mypkg.workers.in_thread".into(),
-                    async_safe: true,
+                    async_safe: Some(true),
                     offloads_blocking_arg: Some(0),
                     ..EcosystemOverride::default()
                 },
                 EcosystemOverride {
                     symbol: "mypkg.log.trace".into(),
-                    excluded: true,
+                    excluded: Some(true),
                     ..EcosystemOverride::default()
                 },
                 EcosystemOverride {
                     symbol: "mypkg.model.Model.clone".into(),
-                    copy_sanitizer: true,
+                    copy_sanitizer: Some(CopySanitizerSetting::Flag(true)),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.model.Model.detach".into(),
+                    copy_sanitizer: Some(CopySanitizerSetting::Depth("deep".into())),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.db.open".into(),
+                    return_type: Some("sqlite3.Connection".into()),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.db.Store.transaction".into(),
+                    effects: Some(Vec::new()),
+                    sync_lock_or_tx: Some(true),
                     ..EcosystemOverride::default()
                 },
             ]
@@ -806,8 +850,11 @@ effects = ["blocking_db", "db_query"]
         let cfg: HekiConfig = toml::from_str(raw).unwrap();
         assert_eq!(cfg.ecosystem.len(), 1);
         assert_eq!(cfg.ecosystem[0].symbol, "mypkg.db.run_query");
-        assert_eq!(cfg.ecosystem[0].effects, vec!["blocking_db", "db_query"]);
-        assert!(!cfg.ecosystem[0].async_safe);
+        assert_eq!(
+            cfg.ecosystem[0].effects,
+            Some(vec!["blocking_db".into(), "db_query".into()])
+        );
+        assert_eq!(cfg.ecosystem[0].async_safe, None);
         assert_eq!(cfg.ecosystem[0].offloads_blocking_arg, None);
     }
 }

@@ -5,7 +5,9 @@ the other quadratic reallocations of the ecosystem knowledge base. Only loop-car
 accumulation is reported: the result feeds the next iteration and is computed from the previous
 value, also when it grows on some iterations only. One-off concatenations inside a loop are
 not, also on a branch that leaves the variable unchanged otherwise
-(`if step: x = np.append(edges, last)`).
+(`if step: x = np.append(edges, last)`), nor is writing into a buffer passed as `out=`
+(`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous value must be
+among the data that is combined.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total

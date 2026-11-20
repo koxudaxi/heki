@@ -615,7 +615,7 @@ own configurations in separate runs: `heki check a/`, then `heki check b/`.
 [tool.heki]
 target-version = "py312"            # default: inferred from project.requires-python
 extend-exclude = ["generated"]      # added to the default excludes
-baseline = "heki-baseline.toml"     # Ratchet baseline used by `heki check`
+baseline = "heki-baseline.toml"     # Ratchet baseline (heki check, --watch, the server)
 
 [tool.heki.lint]
 select = ["MUT", "EFF", "DATA", "OPT"]
@@ -635,7 +635,7 @@ OPT103 = "warning"
 | `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes the oldest supported version it admits, every clause counted (`>=3.11, !=3.11.*` → `py312`); a specifier admitting only older or newer versions selects `py311` or `py315` (`>=3.9, <3.11` → `py311`), and one without a lower bound that admits 3.12 (`<4`) keeps `py312`. `--target-version` overrides both. Syntax newer than the target (`lazy import` before `py315`, t-strings before `py314`, ...) is analyzed, not reported: that is Ruff's check. |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths (globs, matched against paths and path components). |
 | `extend-exclude` | `[]` | Adds excluded paths. |
-| `baseline` | none | Ratchet baseline file used when `--baseline` is not given. |
+| `baseline` | none | Ratchet baseline file used when `--baseline` is not given (also by `--watch` and the language server). |
 
 `.gitignore` and `.hekiignore` files are honored during discovery. Files named explicitly on the
 command line are always checked.
@@ -899,12 +899,22 @@ excluded = true               # never reported
 | --- | ------- |
 | `symbol` | Fully qualified function or method name (`package.module.Class.method`). |
 | `effects` | Any of `blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`, `unpooled_client_alloc`, `db_query`, `quadratic_realloc`. |
-| `async-safe` | Safe to call from `async def`. |
+| `async-safe` | Safe to call from `async def`: it never blocks the event loop, so blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread. |
 | `excluded` | Never reported (logging and similar). |
-| `copy-sanitizer` | Returns a copy (ends `MUT202` protection). |
+| `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too, `"shallow"` (or `true`) only the object itself, so the values below it stay protected. |
+| `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
+| `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 
-An override replaces the built-in entry for the same symbol as a whole.
+An override sets the keys it lists on the built-in entry for the same symbol; the keys it
+leaves out keep their built-in values (`effects = []` removes every effect).
+
+An entry may name a function or method of the project itself (by the module that defines it;
+the built-in catalog never describes the project's own functions):
+its `effects` add to what heki finds in its body, `excluded` keeps every effect of the body
+from its callers and `async-safe` the blocking ones, `return-type` types its result over its
+annotation, and `offloads-blocking-arg` counts the receiver out as for a library method.
+`copy-sanitizer` and `sync-lock-or-tx` are read for library symbols only.
 
 ## Inline suppressions
 
@@ -916,7 +926,9 @@ w = load()            # noqa: EFF101
 ```
 
 A suppression applies to the line of the diagnostic. Codes and rule names are accepted; a
-comment without codes silences every rule on that line.
+comment without codes (`# heki: ignore`, `# noqa`) silences every rule on that line. A bracketed
+list that is not closed or names no rule (`# heki: ignore[`, `# heki: ignore[]`) silences
+nothing.
 
 
 ---
@@ -988,11 +1000,16 @@ profile shows hot.
 
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
-reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. When the
-fixes of a pass would leave a file that does not parse, none of them is applied to that file and
-the run exits with code 2 (a heki bug to report). `--diff`
+reports what is left. A file that changed on disk meanwhile (an editor saved it) is not written:
+the run reports it as an error (exit code 2) and keeps that save; run `--fix` again. Suppressed
+diagnostics (`# heki: ignore[...]`) are never fixed. When the fixes of a pass would leave a file
+that does not parse, none of them is applied to that file and the run exits with code 2 (a heki
+bug to report). `--diff`
 prints the paths every other output format prints (relative to the working directory), so
 `patch -p1` applies it where heki ran.
+
+Fixes work the same in files with `\n`, `\r\n`, or lone `\r` line breaks, and the lines they insert
+use the file's own line break.
 
 A fix keeps the file acceptable to a type checker and to isort:
 
@@ -1046,7 +1063,10 @@ $ heki check --baseline heki-baseline.toml                     # fail on regress
 
 Entries are keyed by file, function, rule, and target (not by line number), so unrelated
 edits and reformatting do not break the baseline. When findings are fixed, `heki check` prints a
-note that the entry can shrink; run `--update-baseline` again to lock in the progress. Set
+note that the entry can shrink; run `--update-baseline` again to lock in the progress. On an
+existing baseline, `--update-baseline` checks first: when an entry grew or a new finding appeared,
+it reports them like `heki check`, leaves the file as it is, and exits with 1. To record new
+findings on purpose, delete the baseline and record it again. Set
 `baseline = "heki-baseline.toml"` in the configuration to use it without the flag.
 
 Each entry counts violation sites, not reports. A contract report at the caller of a private
@@ -1057,8 +1077,9 @@ allowed and found counts for every entry that grew.
 
 Baselines written before heki counted sites have no `version` key and keep counting reports: a
 new report is a regression, a second site behind a recorded report is not. `heki check` says so
-in a note, and `--update-baseline` rewrites the file with `version = 2`. A version this heki does
-not know is an error.
+in a note, and `--update-baseline` rewrites the file with `version = 2` (after comparing in the
+old unit, so nothing that grew is taken in). A version this heki does
+not know is an error, and so is a file listing one entry twice (a hand merge of two baselines).
 
 ## Effect snapshots (`MUT103`)
 
@@ -1071,7 +1092,9 @@ $ heki snapshot --write                        # writes .heki-summary-snapshot.j
 $ heki check --extend-select MUT103            # reports functions that gained effects
 ```
 
-Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
+A run that cannot analyze every file (a syntax error, an unreadable file) writes neither a
+snapshot nor a baseline: it reports the errors and exits with 2, so the entries of those files are
+not lost. Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
 same pull request; the diff of the JSON file shows reviewers what changed.
 
 ## pre-commit
@@ -1356,26 +1379,37 @@ Source: https://heki.koxudaxi.dev/lsp/
 indexes the workspace in the background, then keeps only the per-function effect summaries in
 memory. Editing a file re-analyzes that file alone (250 ms after the last keystroke). On save, the
 files whose results depend on the edit are re-analyzed too: the callers of a function whose
-effects changed, every file that resolved names through a changed declaration (a re-exported
+effects changed and the functions of a call cycle through it (their effects change with it), every file that resolved names through a changed declaration (a re-exported
 class, a new method or base class, a property getter, a subclass, an offloading decorator), the
 classes of a family a changed method belongs to, the generators handed to a changed function
 (whether it iterates them decides where their writes and reads are reported), the files with
 `MUT108` / `MUT110` reports above a function that changed its own in-place changes or its calls
 while its effects stayed the same (a report's call chain ends at the first function whose body
-makes the change), and the files whose call chains show a call site the edit moved. With
+makes the change), and the files whose call chains show a call site the edit moved (to another line or column,
+also when its bytes stay where they were). With
 ownership or `invalidation` contracts configured, a function that changes its calls also
 re-analyzes every function below it (whether a function only runs inside allowed callers, or
 whether its callers announce its writes, depends on all callers above it); with a contract on
 calls (`call-owners`, an effect boundary forbidding `calls`), also every function above it (a
 call of a target is reported at the callers of the private helper making it, and at the scope
-functions reaching it). Edits that change none of these, such as most comments, stop at the
-edited file. The diagnostics are the ones `heki check` reports for the saved files.
+functions reaching it); with an effect boundary, a function that changes its calls of library APIs
+re-analyzes every function above it too (a boundary may allow one API and forbid another of the
+same effect, and counts every call it reaches). Edits that change none of these, such as most comments, stop at the
+edited file. The diagnostics are the ones `heki check` reports for the saved files. Closing a
+document with unsaved changes discards them for the analysis too: the file is analyzed from the
+disk again (or leaves the project when it was never saved), and so is everything that affects.
 
 Files created, changed, or deleted outside the editor (`git checkout`, code generators) are
 picked up when the client supports watching files: the server registers for
-`workspace/didChangeWatchedFiles` on Python files (`**/*.{py,pyi}`) and on the configuration
-(`pyproject.toml`, `heki.toml`, `.heki.toml`, and the summary snapshot of `MUT103`). A change to
-the configuration indexes the workspace again, like `heki check --watch` does. A file that does
+`workspace/didChangeWatchedFiles` on Python files (`**/*.{py,pyi}`), on the configuration
+(`pyproject.toml`, `heki.toml`, `.heki.toml`, and the summary snapshot of `MUT103`), and on the
+ignore files (`.gitignore`, `.ignore`, `.hekiignore`). A change to the configuration or to an
+ignore file indexes the workspace again, like `heki check --watch` does. A file belongs to the
+project when `heki check` would find it: a file an ignore file, a hidden directory, or `exclude`
+leaves out is not analyzed, also when it is created or opened. An open document stays the file's
+text until it is closed: indexing the workspace again keeps documents that were never saved, and
+a file deleted on the disk while its document is open stays in the project until the document
+closes. A file that does
 not parse is left out of the project until it parses again, like `heki check` does.
 
 The server provides:
@@ -1383,10 +1417,21 @@ The server provides:
 - diagnostics for open files, with every hop of a call chain (for example the path from an
   `async def` to `time.sleep`) as related information you can jump to;
 - quick fixes for the safe `OPT101` / `OPT102` rewrites;
-- `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites;
-- a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic.
+- `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites (a fix whose result
+  would not parse is never offered, as `heki check --fix` refuses it);
+- a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a
+  comment cannot go there (the line ends inside a string or with a `\` continuation).
 
-It reads the same configuration as `heki check`. One difference is deliberate: `heki check`
+Code actions edit the version of the document their diagnostics were computed on: while an edit
+waits for its analysis, none are offered, and a client that applies versioned workspace edits
+(`workspaceEdit.documentChanges`) gets them with that version, so it rejects them if the
+document changed meanwhile.
+
+It reads the same configuration as `heki check`, including the Ratchet baseline: with
+`baseline` configured, a file shows what `heki check` reports against it (every finding of an
+entry that grew), and a change of the baseline file re-checks every file. A configuration `heki check` rejects (an
+unknown rule, a contract target that is not `Class.attr`, an invalid pattern) is logged as a
+warning, and the server analyzes nothing until it is fixed. One difference is deliberate: `heki check`
 reports ten or more `async def` boundaries that reach the same blocking call once, with a count,
 while the server groups them per file, so the file you edit always shows its own boundary.
 
@@ -1450,8 +1495,16 @@ $ heki check --watch
 ```
 
 re-checks changed files and the files affected by them, using the same incremental engine, and
-prints the full list of diagnostics after every change. A change to `pyproject.toml`,
-`heki.toml`, or the summary snapshot reloads everything.
+prints the full list of diagnostics after every change, compared with the Ratchet baseline
+(`--baseline` or `baseline`) as `heki check` compares them. A change to `pyproject.toml`,
+`heki.toml`, or the summary snapshot reloads everything, and so does the first package marker
+(`__init__.py`) under `src/` appearing or the last one disappearing (module names under `src/`
+change with the `src` layout); the server does the same. What fails once the watch runs, a
+configuration that no longer parses or a watched path that disappears, is reported, and the watch
+goes on until it is fixed. A file counts as changed when its size, modification time, or (on Unix)
+inode or status-change time changes, so a replacement that keeps the modification time is seen
+too; a file stamped within the last two seconds is also compared by content, for file systems
+whose timestamps are coarse.
 
 
 ---
@@ -1630,8 +1683,17 @@ Direct or indirect blocking network/DB/subprocess/sleep call reachable from `asy
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
 synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), database drivers
-(`sqlite3`, `psycopg`, `pymongo`, ...), subprocesses waiting for completion, `time.sleep`, and
-other blocking synchronization.
+(`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
+`conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
+waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
+`queue.Queue.get()` / `put()`, `Future.result()`, `concurrent.futures.wait()`; a zero timeout or
+`blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
+on its own flag parameter and its caller passes `False`: `close(wait=False)` over
+`shutdown(wait=wait)`). A function SQLAlchemy's
+`AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
+its database I/O through the session or connection it receives is awaited for it, its other
+blocking calls are reported. Where an argument decides what a library call does, a literal
+one is followed: `pd.read_csv("https://...")` downloads the file.
 
 Reading a `@property` or `functools.cached_property` attribute of a project class runs its
 getter, so the read counts as a call of the getter (`self.client` whose getter opens a
@@ -1656,14 +1718,17 @@ blocks the event loop that once.
 
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several
-boundaries reaching the same blocking call are grouped once ten or more of them exist (in the
-editor, per file).
+boundaries reaching the same blocking call are shown as one report with a count once more than
+ten of them are shown (in the editor, per file). Inline suppressions and Ratchet baselines see
+every boundary: suppressing the first one leaves the others reported, and a baseline counts each.
 
 It does not report:
 
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
   `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
-  `asyncer.asyncify`, and project wrappers that forward their callable to them);
+  `asyncer.asyncify`, and project wrappers that forward their callable to them; what the
+  offloaded function does besides blocking still counts where it is called, such as its
+  queries in a loop for `EFF103`);
 - functions decorated to run on a thread: `@sync_to_async` (also as a factory,
   `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
   and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
@@ -1675,8 +1740,10 @@ It does not report:
 - `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
   `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
   `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
-- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`,
-  `sqlalchemy.create_engine(...)`) and calls that only build an object (`Redis.pipeline()`, a
+- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`, except
+  that a `mongodb+srv://` URI literal is resolved in the constructor unless `connect=False`,
+  `pymysql.connect(..., defer_connect=True)`, `sqlalchemy.create_engine(...)`) and calls that
+  only build an object (`Redis.pipeline()`, a
   lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
 - spawning a process without waiting (`subprocess.Popen(...)`);
 - coroutine functions that only run through a synchronous driver (`asyncio.run`, ...);
@@ -1733,7 +1800,9 @@ Opt-in: blocking local filesystem I/O reachable from `async def`.
 ## What it does
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
 `pathlib.Path.read_text` / `write_text` / `read_bytes` / `write_bytes` / `open`, `os.listdir`,
-`os.scandir`, `os.walk`, and `shutil` copies and removals. It follows the same boundary,
+`os.scandir`, iterating `os.walk(...)`, `shutil` copies and removals, and the pandas file readers
+(`pd.read_csv(path)`; one given a URL literal downloads it and is `EFF101`, one given an
+`io.StringIO` / `io.BytesIO` buffer does no I/O). It follows the same boundary,
 offload, and guard rules as `EFF101`, generators and offloading decorators included: `await
 in_thread(self.open) if isinstance(self._input, PathLike) else self.open()` is not reported
 when `open` only opens a file under `isinstance(self._input, PathLike)`.
@@ -2006,7 +2075,8 @@ chain is a shortest one. The search does not enter:
   generators that are not iterated (calling a generator function only creates the generator;
   its body is searched where it is iterated, as for `EFF101`, and a generator a function
   returns where the object it returns is iterated);
-- functions an offloading decorator runs on another thread (`@sync_to_async`, ...).
+- functions an offloading decorator or API runs on another thread (`@sync_to_async`,
+  `asyncio.to_thread(f)`, ...).
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope
@@ -2571,7 +2641,9 @@ the other quadratic reallocations of the ecosystem knowledge base. Only loop-car
 accumulation is reported: the result feeds the next iteration and is computed from the previous
 value, also when it grows on some iterations only. One-off concatenations inside a loop are
 not, also on a branch that leaves the variable unchanged otherwise
-(`if step: x = np.append(edges, last)`).
+(`if step: x = np.append(edges, last)`), nor is writing into a buffer passed as `out=`
+(`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous value must be
+among the data that is combined.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -2613,15 +2685,19 @@ Explicit DB query / external RPC executed inside a loop (N+1).
 Checks loops that run a database query on every iteration (the "N+1 queries" problem):
 `cursor.execute(...)`, `session.execute(...)` (awaited ones on async sessions and connections
 too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, `count`, ...)
-and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension),
+and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension,
+`list(query)`),
 the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
 variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
-that reach them, including the getter of a property read in the loop and a generator iterated in
+that reach them, also when an offloading API runs them on a worker thread per item (`await
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
 calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
-`Redis.pipeline()`), DDL statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
+`Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
+batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
+statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
 (`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
 own implementation, or loops whose size the code fixes when no data-sized loop is around them
 (`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
@@ -2927,8 +3003,9 @@ Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
 Checks loops that allocate a network or database client on every iteration: module-level
 request helpers that open a new connection per call (`requests.get`, `httpx.get`), client
 constructors, sync and async (`requests.Session()`, `httpx.AsyncClient()`,
-`aiohttp.ClientSession()`, `boto3.client(...)`), and connection factories (`sqlite3.connect`,
-`redis.Redis`, `create_async_engine`, ...), directly or through project functions,
+`aiohttp.ClientSession()`, `boto3.client(...)`), connection factories (`sqlite3.connect`,
+`redis.Redis`, `create_async_engine`, ...), and connection pools (`psycopg_pool.ConnectionPool`),
+directly or through project functions,
 including the getter of a property read in the loop (`self.client.get(url)` where the `client`
 getter builds a new client).
 
@@ -3268,12 +3345,14 @@ Checks mutations of objects returned by a shared producer:
   and recursion.
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
-that mutate their argument are followed, also on the call result itself
+that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`) are
+followed, also on the call result itself
 (`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
-`model.model_copy(deep=True)`, and the copy sanitizers of the ecosystem knowledge base clear it,
-shallow copies (`copy.copy`, `.copy()`, `dataclasses.replace(...)`) free the top level only: the
-values below stay shared. A wrapper that returns a copy on one path and the shared value on
-another still returns a shared value.
+`model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
+reference), and the deep copy sanitizers of the ecosystem knowledge base clear it, shallow copies
+(`copy.copy`, `.copy()`, `dataclasses.replace(...)`, a sanitizer declared
+`copy-sanitizer = "shallow"`) free the top level only: the values below stay shared. A wrapper
+that returns a copy on one path and the shared value on another still returns a shared value.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
