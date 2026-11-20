@@ -231,6 +231,14 @@ impl FrameState {
         matches!(self.var_unique.get(&v), Some(UniqueState::Unique { .. }))
     }
 
+    /// Why `v` may be shared (`None`: it is unique, or the analysis holds nothing for it).
+    pub fn shared_witness(&self, v: VarId) -> Option<&EscapeWitness> {
+        match self.var_unique.get(&v)? {
+            UniqueState::Shared { witness } => Some(witness),
+            UniqueState::Unique { .. } => None,
+        }
+    }
+
     pub fn exact_type(&self, v: VarId) -> Option<BuiltinKind> {
         match self.var_type.get(&v) {
             Some(ExactTypeVal::Exact { ty, .. }) => Some(*ty),
@@ -627,19 +635,19 @@ impl<'a> FnCtx<'a> {
         Self::elems_of_bases(st, &st.allocs_of(v))
     }
 
-    /// Union of the element kinds of `bases` (`None` if any is unknown).
+    /// Union of the element kinds of `bases` (`None` if any is unknown, or if there is none:
+    /// nothing is known of a value without an allocation site).
     fn elems_of_bases(st: &FrameState, bases: &[AllocId]) -> Option<KindMask> {
-        if bases.is_empty() {
-            return None;
-        }
-        let mut mask = KindMask::EMPTY;
+        let mut mask = None;
         for a in bases {
             match st.alloc_elems.get(a) {
-                Some(ElemKinds::Known(m)) => mask = mask.union(*m),
+                Some(ElemKinds::Known(m)) => {
+                    mask = Some(mask.unwrap_or(KindMask::EMPTY).union(*m));
+                }
                 _ => return None,
             }
         }
-        Some(mask)
+        mask
     }
 
     fn value_kinds(&self, st: &FrameState, v: VarId) -> ElemKinds {
@@ -1421,7 +1429,8 @@ impl<'a> FnCtx<'a> {
                 }
             }
             Terminator::Return(Some(v)) | Terminator::Raise(Some(v)) => {
-                // A `finally` block may still run (modelled by the exception edge).
+                // The object leaves the frame; a handler or `finally` body of this frame may
+                // still see a raised one (along the exception edge).
                 st.mark_escaped(*v, EscapeWitness::ReturnedOrRaised(span), span);
             }
             _ => {}

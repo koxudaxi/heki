@@ -11,6 +11,11 @@ use heki_semantic::{ClassId, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 
+/// The attribute a positional class-pattern argument reads (`case Point(x)`), named by the
+/// class's `__match_args__`, which the IR does not resolve: its `AttrLoad` names the slot,
+/// `__match_args__[i]`.
+const MATCH_ARGS: &str = "__match_args__";
+
 /// Build SSA-CFG IR for every executable body in `parsed` (module top-level, class bodies,
 /// functions/methods, lambdas, generator expressions, and non-inlined comprehensions).
 pub fn build_module_ir(
@@ -30,12 +35,40 @@ pub fn build_module_ir(
         }
     }
 
+    let mut introspection_imports = FxHashMap::default();
+    let mut module_aliases = FxHashMap::default();
+    let module_scope = semantic.scopes.first().map(|s| s.id);
+    for imp in semantic
+        .imports
+        .iter()
+        .filter(|i| Some(i.scope) == module_scope)
+    {
+        match (&imp.module, imp.is_from) {
+            (Some(module), true) => {
+                if let Some(kind) =
+                    introspection_kind(&format!("{module}.{}", imp.imported_name), true)
+                {
+                    introspection_imports.insert(imp.bound_name.clone(), kind);
+                }
+            }
+            (None, false) if imp.imported_name.split('.').next() != Some(&imp.bound_name) => {
+                module_aliases.insert(imp.bound_name.clone(), imp.imported_name.clone());
+            }
+            _ => {}
+        }
+    }
+
     let mut ctx = ModuleLowerer {
         source,
         profile,
+        future_annotations: semantic.has_future_annotations,
+        introspection_imports,
+        module_aliases,
         class_by_span,
         lazy_import_names,
         functions: Vec::new(),
+        free_names: Vec::new(),
+        lowered_at: FxHashMap::default(),
         loop_hints: Vec::new(),
         next_comp_id: 0,
         has_star_import: false,
@@ -59,10 +92,13 @@ pub fn build_module_ir(
         is_module_body: true,
         is_class_body: false,
         outer_locals: FxHashSet::default(),
+        walrus_target: WalrusTarget::OwnScope,
+        walrus_globals: FxHashSet::default(),
         body: FunctionBody::Suite(parsed.suite()),
     });
 
     let mut functions = ctx.functions;
+    record_module_introspection_aliases(&mut functions, module_fn, &ctx.introspection_imports);
     let constants = crate::facts::refine_loops(
         &mut functions,
         module_fn,
@@ -79,6 +115,77 @@ pub fn build_module_ir(
         has_future_annotations: semantic.has_future_annotations,
         has_star_import: ctx.has_star_import,
         constants,
+    }
+}
+
+/// Module globals bound to a frame-introspection function (`snapshot = locals` at module
+/// level): a function reading one may call it in its own frame (Assumption A1(a)). The names
+/// an import binds (`imported`) were recorded where they are read.
+fn record_module_introspection_aliases(
+    functions: &mut [IrFunction],
+    module_fn: FunctionId,
+    imported: &FxHashMap<String, &'static str>,
+) {
+    let module = &functions[module_fn.0 as usize];
+    let hazard_at: FxHashMap<Span, &str> = module
+        .a1_hazards
+        .iter()
+        .map(|h| (h.span, h.kind.as_str()))
+        .collect();
+    let defs: FxHashMap<VarId, &Inst> = module
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| Some((i.kind.dst()?, i)))
+        .collect();
+    let mut aliases: FxHashMap<String, String> = FxHashMap::default();
+    for inst in module.blocks.iter().flat_map(|b| &b.insts) {
+        let InstKind::StoreGlobal { name, value } = &inst.kind else {
+            continue;
+        };
+        if imported.contains_key(name) {
+            continue;
+        }
+        let mut v = *value;
+        while let Some(def) = defs.get(&v) {
+            match &def.kind {
+                InstKind::Copy { src, .. } => v = *src,
+                InstKind::Import {
+                    module: Some(m),
+                    name: imported,
+                    ..
+                } => {
+                    if let Some(kind) = introspection_kind(&format!("{m}.{imported}"), true) {
+                        aliases.insert(name.clone(), kind.to_owned());
+                    }
+                    break;
+                }
+                _ => {
+                    if let Some(kind) = hazard_at.get(&def.span) {
+                        aliases.insert(name.clone(), (*kind).to_owned());
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if aliases.is_empty() {
+        return;
+    }
+    for f in functions.iter_mut().filter(|f| f.id != module_fn) {
+        let reads: Vec<A1Hazard> = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(|i| match &i.kind {
+                InstKind::LoadGlobal { name, .. } => aliases.get(name).map(|kind| A1Hazard {
+                    kind: kind.clone(),
+                    span: i.span,
+                }),
+                _ => None,
+            })
+            .collect();
+        f.a1_hazards.extend(reads);
     }
 }
 
@@ -156,15 +263,30 @@ struct FunctionSpec<'a> {
     is_module_body: bool,
     is_class_body: bool,
     outer_locals: FxHashSet<String>,
+    walrus_target: WalrusTarget,
+    /// The names the function an assignment expression binds in declares `global`.
+    walrus_globals: FxHashSet<String>,
     body: FunctionBody<'a>,
 }
 
 struct ModuleLowerer<'a> {
     source: &'a str,
     profile: RuntimeProfile,
+    /// `from __future__ import annotations`: annotations stay strings.
+    future_annotations: bool,
+    /// Module globals bound by importing a frame-introspection function (`from sys import
+    /// _getframe as frame`), with its `A1Hazard` kind.
+    introspection_imports: FxHashMap<String, &'static str>,
+    /// Modules the module body imports under another name (`import inspect as ins`): bound
+    /// name -> module.
+    module_aliases: FxHashMap<String, String>,
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
     functions: Vec<IrFunction>,
+    /// The free variables of every lowered function, by `FunctionId` (sorted).
+    free_names: Vec<Vec<String>>,
+    /// The function lowered from each definition, by its span.
+    lowered_at: FxHashMap<Span, FunctionId>,
     /// Syntax-level facts of every function's loops (in `IrFunction::loops` order), for the
     /// loop-bound pass that runs once the whole module is lowered.
     loop_hints: Vec<(FunctionId, Vec<LoopHint>)>,
@@ -175,6 +297,15 @@ struct ModuleLowerer<'a> {
 }
 
 impl<'a> ModuleLowerer<'a> {
+    /// `dotted` with an import alias as its first name replaced by the module it names.
+    fn resolve_module_alias(&self, dotted: &str) -> String {
+        let (head, rest) = dotted.split_once('.').unwrap_or((dotted, ""));
+        match self.module_aliases.get(head) {
+            Some(module) if !rest.is_empty() => format!("{module}.{rest}"),
+            _ => dotted.to_owned(),
+        }
+    }
+
     fn slice_text(&self, span: Span) -> String {
         let start = span.start as usize;
         let end = span.end as usize;
@@ -189,10 +320,16 @@ impl<'a> ModuleLowerer<'a> {
         let mut f = placeholder;
         f.id = id;
         self.functions.push(f);
+        self.free_names.push(Vec::new());
         id
     }
 
     fn lower_function_body(&mut self, spec: FunctionSpec<'a>) -> FunctionId {
+        // A `finally` body is lowered once per way out of its `try`; a definition in it is
+        // still one function.
+        if let Some(&id) = self.lowered_at.get(&spec.span) {
+            return id;
+        }
         let mut scope_info = ScopeBindings::default();
         if let Some(params) = spec.params {
             collect_params_into(params, &mut scope_info.locals);
@@ -202,16 +339,7 @@ impl<'a> ModuleLowerer<'a> {
             FunctionBody::Expr(expr) => collect_expr_bindings(expr, &mut scope_info),
             FunctionBody::GenExpr(ge) => {
                 scope_info.has_yield = true;
-                for (idx, g) in ge.generators.iter().enumerate() {
-                    if idx > 0 {
-                        collect_expr_bindings(&g.iter, &mut scope_info);
-                    }
-                    collect_target_bindings(&g.target, &mut scope_info.locals);
-                    for cond in &g.ifs {
-                        collect_expr_bindings(cond, &mut scope_info);
-                    }
-                }
-                collect_expr_bindings(&ge.elt, &mut scope_info);
+                collect_comprehension_bindings(&ge.generators, &[&ge.elt], &mut scope_info);
             }
             FunctionBody::Comp {
                 generators,
@@ -219,20 +347,26 @@ impl<'a> ModuleLowerer<'a> {
                 key,
                 ..
             } => {
-                for (idx, g) in generators.iter().enumerate() {
-                    if idx > 0 {
-                        collect_expr_bindings(&g.iter, &mut scope_info);
-                    }
-                    collect_target_bindings(&g.target, &mut scope_info.locals);
-                    for cond in &g.ifs {
-                        collect_expr_bindings(cond, &mut scope_info);
-                    }
-                }
-                if let Some(k) = key {
-                    collect_expr_bindings(k, &mut scope_info);
-                }
-                collect_expr_bindings(elt, &mut scope_info);
+                let elts: Vec<&Expr> = key.into_iter().chain([elt]).collect();
+                collect_comprehension_bindings(generators, &elts, &mut scope_info);
             }
+        }
+        // PEP 572: an assignment expression in a comprehension's own scope binds the name in
+        // the nearest enclosing function (a cell) or module scope.
+        let walrus_targets = std::mem::take(&mut scope_info.assignment_expression_targets);
+        match spec.walrus_target {
+            WalrusTarget::OwnScope => {}
+            WalrusTarget::EnclosingFunction => {
+                // ... unless that function declares the name `global`.
+                for name in walrus_targets {
+                    if spec.walrus_globals.contains(&name) {
+                        scope_info.globals.insert(name);
+                    } else {
+                        scope_info.nonlocals.insert(name);
+                    }
+                }
+            }
+            WalrusTarget::Module => scope_info.globals.extend(walrus_targets),
         }
         // `global` and `nonlocal` remove names from true function locals.
         for g in &scope_info.globals {
@@ -274,6 +408,7 @@ impl<'a> ModuleLowerer<'a> {
             is_class_body: spec.is_class_body,
         };
         let fn_id = self.alloc_function_slot(placeholder);
+        self.lowered_at.insert(spec.span, fn_id);
 
         let mut builder = FnBuilder::new(
             self,
@@ -290,6 +425,8 @@ impl<'a> ModuleLowerer<'a> {
             spec.is_class_body,
             scope_info,
             &spec.outer_locals,
+            spec.walrus_target,
+            spec.walrus_globals,
         );
 
         if let Some(params) = spec.params {
@@ -313,15 +450,19 @@ impl<'a> ModuleLowerer<'a> {
                     Some(outer_param),
                     false,
                     &|b| {
-                        let v = b.lower_expr(&ge.elt);
                         let dst = b.fresh_var(None);
-                        b.emit(
-                            InstKind::Yield {
+                        // `(*xs for xs in rows)` yields from each `xs` (PEP 798).
+                        let kind = match ge.elt.as_ref() {
+                            Expr::Starred(st) => InstKind::YieldFrom {
                                 dst,
-                                value: Some(v),
+                                value: b.lower_expr(&st.value),
                             },
-                            Span::from(ge.elt.range()),
-                        );
+                            elt => InstKind::Yield {
+                                dst,
+                                value: Some(b.lower_expr(elt)),
+                            },
+                        };
+                        b.emit(kind, Span::from(ge.elt.range()));
                     },
                 );
                 builder.terminate(Terminator::Return(None));
@@ -348,7 +489,7 @@ impl<'a> ModuleLowerer<'a> {
                     Some(outer_param),
                     false,
                     &|b| {
-                        b.emit_comp_element(kind, acc, elt, key, spec.span);
+                        b.emit_comp_element(kind, acc, elt, key);
                     },
                 );
                 builder.terminate_at(Terminator::Return(Some(acc)), spec.span);
@@ -366,7 +507,52 @@ struct ScopeBindings {
     locals: FxHashSet<String>,
     globals: FxHashSet<String>,
     nonlocals: FxHashSet<String>,
+    /// Names bound by `:=`, which a comprehension's own scope does not keep.
+    assignment_expression_targets: FxHashSet<String>,
     has_yield: bool,
+}
+
+/// The scope an assignment expression (`:=`) of a scope binds its name in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalrusTarget {
+    OwnScope,
+    /// A comprehension scope nested (at any depth of comprehensions) in a function.
+    EnclosingFunction,
+    /// A comprehension scope nested in the module body.
+    Module,
+}
+
+/// A statement a `return`, `break`, or `continue` leaves on its way out of the code around it.
+#[derive(Clone)]
+enum Unwind<'a> {
+    /// A loop's body: `break` and `continue` stop here.
+    Loop,
+    /// A `with` statement's managers, exited innermost first.
+    With {
+        managers: Vec<VarId>,
+        is_async: bool,
+        span: Span,
+        /// The exception targets outside the statement.
+        exc_depth: usize,
+    },
+    /// A `try` statement's `finally` body, which runs on every way out.
+    Finally { body: &'a [Stmt], exc_depth: usize },
+}
+
+/// A step of [`FnBuilder::resolve_ssa`].
+enum SsaTask {
+    /// Find the name's value at the end of the block.
+    Read(BlockId),
+    /// The value just found is also the name's value at the end of this block.
+    Define(BlockId),
+    /// The values at the ends of `preds` are found: complete the block's phi.
+    Phi {
+        bb: BlockId,
+        phi_var: VarId,
+        preds: Vec<BlockId>,
+        /// Record the result as the name's value in `bb` (a phi created by a read).
+        define: bool,
+    },
 }
 
 struct ActiveLoop {
@@ -399,6 +585,8 @@ struct FnBuilder<'m, 'a> {
     scope: ScopeBindings,
     /// Union of outer function locals (to recognize closure captures).
     outer_locals: FxHashSet<String>,
+    walrus_target: WalrusTarget,
+    walrus_globals: FxHashSet<String>,
     /// Variables in THIS function captured by nested functions/lambdas/genexprs.
     captured_by_children: FxHashSet<String>,
     /// Free variables read by THIS function from outer scopes.
@@ -406,6 +594,8 @@ struct FnBuilder<'m, 'a> {
 
     blocks: Vec<BasicBlock>,
     terminated: Vec<bool>,
+    /// The block holds an instruction that may raise into its exception target.
+    may_raise: Vec<bool>,
     preds: Vec<Vec<BlockId>>,
     sealed: Vec<bool>,
     cur_bb: BlockId,
@@ -416,6 +606,8 @@ struct FnBuilder<'m, 'a> {
     var_replacements: FxHashMap<VarId, VarId>,
 
     exc_target_stack: Vec<BlockId>,
+    /// The statements around the current point that a jump out of them runs, innermost last.
+    unwind: Vec<Unwind<'a>>,
     loop_stack: Vec<ActiveLoop>,
     finished_loops: Vec<NaturalLoop>,
     /// `finished_loops[i]`'s syntax-level facts.
@@ -423,6 +615,8 @@ struct FnBuilder<'m, 'a> {
     a1_hazards: Vec<A1Hazard>,
     /// `*x` operands of displays and calls (`IrFunction::starred`).
     starred: Vec<(VarId, u32)>,
+    /// Local names bound by importing a frame-introspection function, with its kind.
+    introspection_locals: FxHashMap<String, &'static str>,
 
     /// Lexical isolation map for PEP 709 inlined comprehension targets: `raw_name -> isolated_ssa_name`.
     comp_target_renames: Vec<FxHashMap<String, String>>,
@@ -445,6 +639,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         is_class_body: bool,
         scope: ScopeBindings,
         outer_locals: &FxHashSet<String>,
+        walrus_target: WalrusTarget,
+        walrus_globals: FxHashSet<String>,
     ) -> Self {
         let entry = BasicBlock {
             id: BlockId(0),
@@ -471,10 +667,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_class_body,
             scope,
             outer_locals: outer_locals.clone(),
+            walrus_target,
+            walrus_globals,
             captured_by_children: FxHashSet::default(),
             free_reads: FxHashSet::default(),
             blocks: vec![entry],
             terminated: vec![false],
+            may_raise: vec![false],
             preds: vec![Vec::new()],
             sealed: vec![true], // entry block has no predecessors
             cur_bb: BlockId(0),
@@ -483,11 +682,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             incomplete_phis: FxHashMap::default(),
             var_replacements: FxHashMap::default(),
             exc_target_stack: Vec::new(),
+            unwind: Vec::new(),
             loop_stack: Vec::new(),
             finished_loops: Vec::new(),
             finished_hints: Vec::new(),
             a1_hazards: Vec::new(),
             starred: Vec::new(),
+            introspection_locals: FxHashMap::default(),
             comp_target_renames: Vec::new(),
         }
     }
@@ -500,16 +701,17 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     fn new_block(&mut self, sealed: bool) -> BlockId {
         let id = BlockId(self.blocks.len() as u32);
-        let exc_target = self.exc_target_stack.last().copied();
+        // A block gets its exception edge with its first instruction that may raise.
         self.blocks.push(BasicBlock {
             id,
             phis: Vec::new(),
             insts: Vec::new(),
             terminator: Terminator::Unreachable,
-            exc_target,
+            exc_target: None,
             term_span: None,
         });
         self.terminated.push(false);
+        self.may_raise.push(false);
         self.preds.push(Vec::new());
         self.sealed.push(sealed);
         // Any block allocated while inside active loops belongs to those loop bodies.
@@ -530,6 +732,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.terminated[bb.0 as usize]
     }
 
+    /// No path reaches `bb`: all its predecessors are known, and there are none.
+    fn is_dead(&self, bb: BlockId) -> bool {
+        bb != BlockId(0) && self.sealed[bb.0 as usize] && self.preds[bb.0 as usize].is_empty()
+    }
+
     fn switch_to(&mut self, bb: BlockId) {
         self.cur_bb = bb;
     }
@@ -544,11 +751,37 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     fn emit(&mut self, kind: InstKind, span: Span) {
         self.ensure_open_block();
         let bb = self.cur_bb;
+        if kind.may_raise() {
+            self.raise_edge(bb);
+        }
+        self.blocks[bb.0 as usize].insts.push(Inst { kind, span });
+    }
+
+    /// `bb` may raise into the innermost exception target: the edge to it.
+    fn raise_edge(&mut self, bb: BlockId) {
+        if self.is_dead(bb) {
+            return;
+        }
         if let Some(exc) = self.exc_target_stack.last().copied() {
             self.blocks[bb.0 as usize].exc_target = Some(exc);
             self.add_edge(bb, exc);
+            self.may_raise[bb.0 as usize] = true;
         }
-        self.blocks[bb.0 as usize].insts.push(Inst { kind, span });
+    }
+
+    /// Before a new binding of a source name inside a `try` or `with` body: an exception
+    /// raised earlier in the block must reach the handler with the old binding, so the
+    /// binding starts a new block (the handler's phi merges the binding of every block).
+    fn begin_binding(&mut self) {
+        let bb = self.cur_bb;
+        if !self.exc_target_stack.is_empty()
+            && self.may_raise[bb.0 as usize]
+            && !self.is_terminated(bb)
+        {
+            let next = self.new_block(true);
+            self.terminate(Terminator::Jump(next));
+            self.switch_to(next);
+        }
     }
 
     fn emit_const(&mut self, literal: ConstLiteral, span: Span) -> VarId {
@@ -564,6 +797,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let bb = self.cur_bb;
         if self.terminated[bb.0 as usize] {
             return;
+        }
+        // Code no path reaches (after a `return`, or after a `try` every path leaves) flows
+        // nowhere: its jumps would give live blocks a predecessor with unbound values.
+        let term = if self.is_dead(bb) {
+            Terminator::Unreachable
+        } else {
+            term
+        };
+        if matches!(term, Terminator::Raise(_)) {
+            self.raise_edge(bb);
         }
         for succ in term.successors() {
             self.add_edge(bb, succ);
@@ -645,6 +888,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             );
             return;
         }
+        self.begin_binding();
         if self.is_module_body {
             self.emit(
                 InstKind::StoreGlobal {
@@ -696,6 +940,20 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             return dst;
         }
         if self.is_true_local(raw_name) {
+            // A module-level read of a lazily imported name (PEP 810) may import the module
+            // there, and raise: it loads the global.
+            if self.is_module_body && self.module.lazy_import_names.contains(raw_name) {
+                let dst = self.fresh_var(Some(raw_name.to_string()));
+                self.emit(
+                    InstKind::LoadGlobal {
+                        dst,
+                        name: raw_name.to_string(),
+                        is_lazy_import: true,
+                    },
+                    span,
+                );
+                return dst;
+            }
             return self.read_local_ssa(raw_name, self.cur_bb, span);
         }
         if self.outer_locals.contains(raw_name) {
@@ -727,51 +985,92 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         if let Some(&val) = self.current_def.get(&(bb, name.to_string())) {
             return self.canonical_var(val);
         }
-        self.read_local_recursive(name, bb, span)
+        self.resolve_ssa(name, span, vec![SsaTask::Read(bb)])
     }
 
-    fn read_local_recursive(&mut self, name: &str, bb: BlockId, span: Span) -> VarId {
-        let val = if !self.sealed[bb.0 as usize] {
-            let phi_var = self.fresh_var(Some(name.to_string()));
-            self.incomplete_phis
-                .entry(bb)
-                .or_default()
-                .push((name.to_string(), phi_var));
-            phi_var
-        } else {
-            let preds = self.preds[bb.0 as usize].clone();
-            if preds.is_empty() {
-                let dst = self.fresh_var(Some(name.to_string()));
-                self.blocks[bb.0 as usize].insts.push(Inst {
-                    kind: InstKind::LoadName {
-                        dst,
-                        name: name.to_string(),
-                    },
-                    span,
-                });
-                dst
-            } else if preds.len() == 1 {
-                self.read_local_ssa(name, preds[0], span)
-            } else {
-                let phi_var = self.fresh_var(Some(name.to_string()));
-                // Break cycles before recursing into predecessors.
-                self.write_local(name, bb, phi_var);
-                self.add_phi_operands(bb, name, phi_var, span)
+    /// Braun et al.'s recursive lookup of `name` through the predecessors, run on an explicit
+    /// stack: a function of many sequential branches would otherwise recurse once per block.
+    /// Every `Read` leaves one value on the value stack; the result is the last one.
+    fn resolve_ssa(&mut self, name: &str, span: Span, mut tasks: Vec<SsaTask>) -> VarId {
+        let mut values: Vec<VarId> = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                SsaTask::Read(bb) => {
+                    if let Some(&val) = self.current_def.get(&(bb, name.to_string())) {
+                        values.push(self.canonical_var(val));
+                    } else if !self.sealed[bb.0 as usize] {
+                        let phi_var = self.fresh_var(Some(name.to_string()));
+                        self.incomplete_phis
+                            .entry(bb)
+                            .or_default()
+                            .push((name.to_string(), phi_var));
+                        self.write_local(name, bb, phi_var);
+                        values.push(phi_var);
+                    } else {
+                        let preds = self.preds[bb.0 as usize].clone();
+                        match preds.as_slice() {
+                            [] => {
+                                let dst = self.fresh_var(Some(name.to_string()));
+                                self.blocks[bb.0 as usize].insts.push(Inst {
+                                    kind: InstKind::LoadName {
+                                        dst,
+                                        name: name.to_string(),
+                                    },
+                                    span,
+                                });
+                                self.write_local(name, bb, dst);
+                                values.push(dst);
+                            }
+                            [pred] => {
+                                tasks.push(SsaTask::Define(bb));
+                                tasks.push(SsaTask::Read(*pred));
+                            }
+                            _ => {
+                                let phi_var = self.fresh_var(Some(name.to_string()));
+                                // Break cycles before reading the predecessors.
+                                self.write_local(name, bb, phi_var);
+                                tasks.push(SsaTask::Phi {
+                                    bb,
+                                    phi_var,
+                                    preds: preds.clone(),
+                                    define: true,
+                                });
+                                tasks.extend(preds.iter().rev().map(|p| SsaTask::Read(*p)));
+                            }
+                        }
+                    }
+                }
+                SsaTask::Define(bb) => {
+                    let val = *values.last().expect("a read left its value");
+                    self.write_local(name, bb, val);
+                }
+                SsaTask::Phi {
+                    bb,
+                    phi_var,
+                    preds,
+                    define,
+                } => {
+                    let operands = values.split_off(values.len() - preds.len());
+                    let incoming: Vec<(BlockId, VarId)> = preds.into_iter().zip(operands).collect();
+                    let val = self.finish_phi(bb, phi_var, incoming);
+                    if define {
+                        self.write_local(name, bb, val);
+                    }
+                    values.push(val);
+                }
             }
-        };
-        self.write_local(name, bb, val);
-        val
+        }
+        values.pop().expect("the first read left its value")
     }
 
-    fn add_phi_operands(&mut self, bb: BlockId, name: &str, phi_var: VarId, span: Span) -> VarId {
-        let preds = self.preds[bb.0 as usize].clone();
-        let mut incoming = Vec::with_capacity(preds.len());
-        for p in preds {
-            let v = self.read_local_ssa(name, p, span);
-            incoming.push((p, v));
-        }
-
-        // Check triviality: all operands are either `phi_var` itself or one single `same` value.
+    /// Complete `phi_var` of `bb` from its operands: the one other value when every operand is
+    /// that value or the phi itself (a trivial phi), else the phi.
+    fn finish_phi(
+        &mut self,
+        bb: BlockId,
+        phi_var: VarId,
+        incoming: Vec<(BlockId, VarId)>,
+    ) -> VarId {
         let mut same: Option<VarId> = None;
         let mut trivial = true;
         for &(_, raw_v) in &incoming {
@@ -807,8 +1106,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
         self.sealed[bb.0 as usize] = true;
         if let Some(pending) = self.incomplete_phis.remove(&bb) {
+            let preds = self.preds[bb.0 as usize].clone();
             for (name, phi_var) in pending {
-                self.add_phi_operands(bb, &name, phi_var, self.span);
+                let mut tasks = vec![SsaTask::Phi {
+                    bb,
+                    phi_var,
+                    preds: preds.clone(),
+                    define: false,
+                }];
+                tasks.extend(preds.iter().rev().map(|p| SsaTask::Read(*p)));
+                self.resolve_ssa(&name, self.span, tasks);
             }
         }
     }
@@ -901,17 +1208,33 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Stmt::ClassDef(cls) => self.lower_class_def(cls),
             Stmt::Return(r) => {
                 let val = r.value.as_ref().map(|e| self.lower_expr(e));
-                self.terminate_at(Terminator::Return(val), Span::from(r.range));
+                self.leave(false, |b| {
+                    b.terminate_at(Terminator::Return(val), Span::from(r.range));
+                });
             }
             Stmt::Delete(d) => {
                 for target in &d.targets {
                     self.lower_delete_target(target);
                 }
             }
+            // The alias evaluates its value (and its type parameters' bounds) lazily, in a scope
+            // that reads the names it uses from this frame: an unlowered function closing
+            // over them.
             Stmt::TypeAlias(ta) => {
                 let span = Span::from(ta.range);
-                let v = self.emit_const(ConstLiteral::Other, span);
-                self.lower_assign_target(&ta.name, v, span);
+                let mut names = self.capture_type_param_reads(ta.type_params.as_deref());
+                names.extend(self.capture_free_names(names_loaded(&[&ta.value])));
+                let captured = self.read_captured_vars(&names, span);
+                let dst = self.fresh_var(None);
+                self.emit(
+                    InstKind::MakeClosure {
+                        dst,
+                        func_id: None,
+                        captured,
+                    },
+                    span,
+                );
+                self.lower_assign_target(&ta.name, dst, span);
             }
             Stmt::Assign(a) => {
                 let span = Span::from(a.range);
@@ -934,6 +1257,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 if let Some(val_expr) = &aa.value {
                     let val = self.lower_expr(val_expr);
                     self.lower_assign_target(&aa.target, val, span);
+                }
+                // A function never evaluates its local variables' annotations; a module or
+                // class body stores simple names' annotations in its `__annotations__`.
+                if aa.simple && (self.is_module_body || self.is_class_body) {
+                    let mut retained = Vec::new();
+                    let lazily_read = self.lower_annotations(&[&aa.annotation], &mut retained);
+                    self.capture_free_names(lazily_read);
                 }
             }
             Stmt::For(f) => self.lower_for(f),
@@ -1003,6 +1333,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                         .as_ref()
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| alias.name.to_string());
+                    if !self.is_module_body
+                        && let Some(kind) = module
+                            .as_ref()
+                            .and_then(|m| introspection_kind(&format!("{m}.{}", alias.name), true))
+                    {
+                        self.introspection_locals.insert(bound.clone(), kind);
+                    }
                     let dst = self.fresh_var(Some(bound.clone()));
                     self.emit(
                         InstKind::Import {
@@ -1021,20 +1358,67 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Stmt::Break(_) => {
                 if let Some(exit_bb) = self.loop_stack.last().map(|l| l.exit) {
-                    self.terminate(Terminator::Jump(exit_bb));
+                    self.leave(true, |b| b.terminate(Terminator::Jump(exit_bb)));
                 }
             }
             Stmt::Continue(_) => {
                 if let Some(header_bb) = self.loop_stack.last().map(|l| l.header) {
-                    let cur = self.cur_bb;
-                    if let Some(top) = self.loop_stack.last_mut() {
-                        top.back_edges.push(cur);
-                    }
-                    self.terminate(Terminator::Jump(header_bb));
+                    self.leave(true, |b| {
+                        let cur = b.cur_bb;
+                        if !b.is_dead(cur)
+                            && let Some(top) = b.loop_stack.last_mut()
+                        {
+                            top.back_edges.push(cur);
+                        }
+                        b.terminate(Terminator::Jump(header_bb));
+                    });
                 }
             }
             Stmt::Global(_) | Stmt::Nonlocal(_) | Stmt::Pass(_) | Stmt::IpyEscapeCommand(_) => {}
         }
+    }
+
+    /// Jump out of the statements around the current point (to the innermost loop for
+    /// `break` / `continue`, else out of all of them): exit each `with` and run each
+    /// `finally` body on the way, innermost first, then `jump`. Each `finally` body is lowered
+    /// again here, as CPython compiles it once per way out of its `try`.
+    fn leave(&mut self, to_loop: bool, jump: impl FnOnce(&mut Self)) {
+        let saved_exc = self.exc_target_stack.clone();
+        let saved_unwind = self.unwind.clone();
+        while let Some(frame) = self.unwind.pop() {
+            match frame {
+                Unwind::Loop if to_loop => break,
+                Unwind::Loop => {}
+                Unwind::With {
+                    managers,
+                    is_async,
+                    span,
+                    exc_depth,
+                } => {
+                    self.enter_unwind_block(exc_depth);
+                    for mgr in managers.into_iter().rev() {
+                        self.emit(InstKind::ExitWith { mgr, is_async }, span);
+                    }
+                }
+                Unwind::Finally { body, exc_depth } => {
+                    self.enter_unwind_block(exc_depth);
+                    self.lower_suite(body);
+                }
+            }
+        }
+        jump(self);
+        self.exc_target_stack = saved_exc;
+        self.unwind = saved_unwind;
+    }
+
+    /// Continue in a new block whose exceptions go to the targets outside a statement being
+    /// left.
+    fn enter_unwind_block(&mut self, exc_depth: usize) {
+        self.exc_target_stack.truncate(exc_depth);
+        self.ensure_open_block();
+        let next = self.new_block(true);
+        self.terminate(Terminator::Jump(next));
+        self.switch_to(next);
     }
 
     fn lower_function_def(&mut self, func: &'a ast::StmtFunctionDef) {
@@ -1044,18 +1428,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             decorators.push(self.module.slice_text(Span::from(dec.expression.range())));
             let _ = self.lower_expr(&dec.expression);
         }
-        // Default argument expressions execute in the enclosing scope at def time.
-        for p in func
-            .parameters
-            .posonlyargs
-            .iter()
-            .chain(func.parameters.args.iter())
-            .chain(func.parameters.kwonlyargs.iter())
-        {
-            if let Some(def) = &p.default {
-                let _ = self.lower_expr(def);
-            }
-        }
+        // The function object keeps its defaults (`__defaults__`, `__kwdefaults__`) and its
+        // eagerly evaluated annotations (`__annotations__`).
+        let mut retained: Vec<VarId> = parameter_defaults(&func.parameters)
+            .map(|d| self.lower_expr(d))
+            .collect();
+        let annotations = function_annotations(&func.parameters, func.returns.as_deref());
+        let lazily_read = self.lower_annotations(&annotations, &mut retained);
 
         let (owner_class, owner_class_qualname) = if self.is_class_body {
             (self.owner_class, self.owner_class_qualname.clone())
@@ -1074,10 +1453,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             .as_ref()
             .map(|r| self.module.slice_text(Span::from(r.range())));
 
-        let mut child_outer = self.outer_locals.clone();
-        if !self.is_module_body && !self.is_class_body {
-            child_outer.extend(self.scope.locals.iter().cloned());
-        }
+        let child_outer = self.child_outer_locals();
 
         let child_id = self.module.lower_function_body(FunctionSpec {
             name: func.name.to_string(),
@@ -1092,21 +1468,61 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body: false,
             is_class_body: false,
             outer_locals: child_outer,
+            walrus_target: WalrusTarget::OwnScope,
+            walrus_globals: FxHashSet::default(),
             body: FunctionBody::Suite(&func.body),
         });
 
-        let captured_names = self.collect_child_captures(child_id);
-        let captured_vars = self.read_captured_vars(&captured_names, span);
+        let mut captured_names = self.collect_child_captures(child_id);
+        captured_names.extend(self.capture_free_names(lazily_read));
+        captured_names.extend(self.capture_type_param_reads(func.type_params.as_deref()));
+        let mut captured = self.read_captured_vars(&captured_names, span);
+        captured.extend(retained);
         let dst = self.fresh_var(Some(func.name.to_string()));
         self.emit(
             InstKind::MakeClosure {
                 dst,
                 func_id: Some(child_id),
-                captured: captured_vars,
+                captured,
             },
             span,
         );
         self.write_var(func.name.as_str(), dst, span);
+    }
+
+    /// Evaluate annotations the way the definition does: eagerly before 3.14 (their values
+    /// pushed to `retained`, the dict that holds them), not at all under
+    /// `from __future__ import annotations`, and from 3.14 in a lazily run `__annotate__`
+    /// scope, whose free names are returned.
+    fn lower_annotations(
+        &mut self,
+        annotations: &[&'a Expr],
+        retained: &mut Vec<VarId>,
+    ) -> Vec<String> {
+        if self.module.future_annotations {
+            Vec::new()
+        } else if self.module.profile.pep649_deferred_annotations {
+            names_loaded(annotations)
+        } else {
+            retained.extend(annotations.iter().map(|a| self.lower_expr(a)));
+            Vec::new()
+        }
+    }
+
+    /// The names the lazily evaluated scopes of PEP 695 type parameters read (bounds,
+    /// constraints, defaults), captured like a nested function's free names.
+    fn capture_type_param_reads(&mut self, params: Option<&'a ast::TypeParams>) -> Vec<String> {
+        let exprs: Vec<&Expr> = params
+            .into_iter()
+            .flat_map(|tp| &tp.type_params)
+            .flat_map(|p| match p {
+                ast::TypeParam::TypeVar(tv) => vec![tv.bound.as_deref(), tv.default.as_deref()],
+                ast::TypeParam::ParamSpec(ps) => vec![ps.default.as_deref()],
+                ast::TypeParam::TypeVarTuple(tvt) => vec![tvt.default.as_deref()],
+            })
+            .flatten()
+            .collect();
+        self.capture_free_names(names_loaded(&exprs))
     }
 
     fn lower_class_def(&mut self, cls: &'a ast::StmtClassDef) {
@@ -1116,12 +1532,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             decorators.push(self.module.slice_text(Span::from(dec.expression.range())));
             let _ = self.lower_expr(&dec.expression);
         }
+        // The class keeps its bases and hands its keywords to the metaclass and to
+        // `__init_subclass__`.
+        let mut retained = Vec::new();
         if let Some(args) = &cls.arguments {
             for arg in &args.args {
-                let _ = self.lower_expr(arg);
+                retained.push(self.lower_expr(arg));
             }
             for kw in &args.keywords {
-                let _ = self.lower_expr(&kw.value);
+                retained.push(self.lower_expr(&kw.value));
             }
         }
 
@@ -1129,10 +1548,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         // and qualname are always there.
         let (class_id, class_qualname) = self.module.class_by_span[&span].clone();
 
-        let mut child_outer = self.outer_locals.clone();
-        if !self.is_module_body && !self.is_class_body {
-            child_outer.extend(self.scope.locals.iter().cloned());
-        }
+        let child_outer = self.child_outer_locals();
 
         let child_id = self.module.lower_function_body(FunctionSpec {
             name: cls.name.to_string(),
@@ -1147,43 +1563,81 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body: false,
             is_class_body: true,
             outer_locals: child_outer,
+            walrus_target: WalrusTarget::OwnScope,
+            walrus_globals: FxHashSet::default(),
             body: FunctionBody::Suite(&cls.body),
         });
 
-        let captured_names = self.collect_child_captures(child_id);
-        let captured_vars = self.read_captured_vars(&captured_names, span);
+        let mut captured_names = self.collect_child_captures(child_id);
+        captured_names.extend(self.capture_type_param_reads(cls.type_params.as_deref()));
+        let mut captured = self.read_captured_vars(&captured_names, span);
+        captured.extend(retained);
         let dst = self.fresh_var(Some(cls.name.to_string()));
         self.emit(
             InstKind::MakeClosure {
                 dst,
                 func_id: Some(child_id),
-                captured: captured_vars,
+                captured,
             },
             span,
         );
         self.write_var(cls.name.as_str(), dst, span);
     }
 
-    fn collect_child_captures(&mut self, child_id: FunctionId) -> Vec<String> {
-        // Child's `captured_vars` contains names captured by grandchildren; we also check
-        // LoadDeref / StoreDeref instructions in the child function directly.
-        let mut names = Vec::new();
-        let child = &self.module.functions[child_id.0 as usize];
-        for bb in &child.blocks {
-            for inst in &bb.insts {
-                match &inst.kind {
-                    InstKind::LoadDeref { name, .. } | InstKind::StoreDeref { name, .. }
-                        if !names.contains(name) =>
-                    {
-                        names.push(name.clone());
-                    }
-                    _ => {}
-                }
-            }
+    /// The names a scope nested here may read from enclosing function scopes: the enclosing
+    /// functions' locals, this function's own, and the iteration variables of the inlined
+    /// comprehensions being lowered (PEP 709 keeps those as cells of this frame).
+    fn child_outer_locals(&self) -> FxHashSet<String> {
+        let mut out = self.outer_locals.clone();
+        if !self.is_module_body && !self.is_class_body {
+            out.extend(self.scope.locals.iter().cloned());
         }
+        for renames in &self.comp_target_renames {
+            out.extend(renames.keys().cloned());
+        }
+        out
+    }
+
+    /// Where an assignment expression of a comprehension scope nested here binds its name.
+    /// The names the function an assignment expression of a comprehension scope nested here
+    /// binds in declares `global`.
+    fn comprehension_walrus_globals(&self) -> FxHashSet<String> {
+        match self.walrus_target {
+            WalrusTarget::OwnScope => self.scope.globals.clone(),
+            _ => self.walrus_globals.clone(),
+        }
+    }
+
+    fn comprehension_walrus_target(&self) -> WalrusTarget {
+        match self.walrus_target {
+            WalrusTarget::OwnScope if self.is_module_body => WalrusTarget::Module,
+            WalrusTarget::OwnScope => WalrusTarget::EnclosingFunction,
+            nested => nested,
+        }
+    }
+
+    /// [`Self::capture_free_names`] of the child's free variables (those it forwards to its own
+    /// nested scopes included).
+    fn collect_child_captures(&mut self, child_id: FunctionId) -> Vec<String> {
+        let names = self.module.free_names[child_id.0 as usize].clone();
+        self.capture_free_names(names)
+    }
+
+    /// The names a nested scope reads from enclosing function scopes that are cells of this
+    /// frame, by their SSA names; the others are free here too.
+    fn capture_free_names(&mut self, names: Vec<String>) -> Vec<String> {
         let mut own_captures = Vec::new();
         for name in names {
-            if self.scope.locals.contains(&name) {
+            if let Some(cell) = self.resolve_comp_rename(&name) {
+                self.captured_by_children.insert(cell.clone());
+                own_captures.push(cell);
+            } else if self.is_module_body || self.is_class_body {
+                // Module names are globals, and a class body's names are not visible to the
+                // scopes nested in it.
+                if self.outer_locals.contains(&name) {
+                    self.free_reads.insert(name);
+                }
+            } else if self.scope.locals.contains(&name) {
                 self.captured_by_children.insert(name.clone());
                 own_captures.push(name);
             } else if self.outer_locals.contains(&name) {
@@ -1335,70 +1789,93 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     span,
                 );
             }
-            Expr::Tuple(t) => {
-                for (i, elt) in t.elts.iter().enumerate() {
-                    let idx_var =
-                        self.emit_const(ConstLiteral::Int(i as i64), Span::from(elt.range()));
-                    let elem = self.fresh_var(None);
-                    self.emit(
-                        InstKind::SubscriptLoad {
-                            dst: elem,
-                            obj: value,
-                            index: idx_var,
-                            key_const: None,
-                            is_slice: false,
-                            slice_lower_const: None,
-                            slice_upper_const: None,
-                        },
-                        Span::from(elt.range()),
-                    );
-                    self.lower_assign_target(elt, elem, Span::from(elt.range()));
-                }
-            }
-            Expr::List(l) => {
-                for (i, elt) in l.elts.iter().enumerate() {
-                    let idx_var =
-                        self.emit_const(ConstLiteral::Int(i as i64), Span::from(elt.range()));
-                    let elem = self.fresh_var(None);
-                    self.emit(
-                        InstKind::SubscriptLoad {
-                            dst: elem,
-                            obj: value,
-                            index: idx_var,
-                            key_const: None,
-                            is_slice: false,
-                            slice_lower_const: None,
-                            slice_upper_const: None,
-                        },
-                        Span::from(elt.range()),
-                    );
-                    self.lower_assign_target(elt, elem, Span::from(elt.range()));
-                }
-            }
-            Expr::Starred(s) => {
-                self.lower_assign_target(&s.value, value, Span::from(s.range));
+            Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+                self.lower_unpacking(elts, value);
             }
             // The parser rejects every other target (`InvalidAssignmentTarget`).
             _ => {}
         }
     }
 
-    fn lower_delete_target(&mut self, target: &'a Expr) {
-        let span = Span::from(target.range());
-        match target {
-            Expr::Name(n) => {
-                let prev = self
-                    .current_def
-                    .get(&(self.cur_bb, n.id.to_string()))
-                    .copied();
+    /// `del name`: the name is possibly unbound until it is bound again.
+    fn lower_name_delete(&mut self, name: &str, span: Span) {
+        let prev = self
+            .current_def
+            .get(&(self.cur_bb, name.to_owned()))
+            .copied();
+        let global = self.is_module_body || self.scope.globals.contains(name);
+        self.emit(
+            InstKind::Delete {
+                var: prev,
+                name: name.to_owned(),
+                global,
+            },
+            span,
+        );
+        // Reading it now raises (in a module or class body it falls back to the builtins).
+        if !self.scope.globals.contains(name) && !self.scope.nonlocals.contains(name) {
+            self.begin_binding();
+            let unbound = self.fresh_var(Some(name.to_owned()));
+            self.emit(
+                InstKind::LoadName {
+                    dst: unbound,
+                    name: name.to_owned(),
+                },
+                span,
+            );
+            self.write_local(name, self.cur_bb, unbound);
+        }
+    }
+
+    /// `a, *rest, b = value`: every item is read (and their number checked) before any target
+    /// is written, so `xs[1], x = xs` binds `x` to the old `xs[1]`. `*rest` binds a new list;
+    /// the items after it are counted from the end.
+    fn lower_unpacking(&mut self, elts: &'a [Expr], value: VarId) {
+        let star = elts.iter().position(|e| matches!(e, Expr::Starred(_)));
+        let items: Vec<VarId> = elts
+            .iter()
+            .enumerate()
+            .map(|(i, elt)| {
+                let span = Span::from(elt.range());
+                if matches!(elt, Expr::Starred(_)) {
+                    return self.unpacked_list(value, span);
+                }
+                let index = match star {
+                    Some(s) if i > s => -((elts.len() - i) as i64),
+                    _ => i as i64,
+                };
+                // Index and item share the target's span: the unpacking of an assignment
+                // (`heki_effect::consumption::is_unpacking`).
+                let index_var = self.emit_const(ConstLiteral::Int(index), span);
+                let item = self.fresh_var(None);
                 self.emit(
-                    InstKind::Delete {
-                        var: prev,
-                        name: n.id.to_string(),
+                    InstKind::SubscriptLoad {
+                        dst: item,
+                        obj: value,
+                        index: index_var,
+                        key_const: None,
+                        is_slice: false,
+                        slice_lower_const: None,
+                        slice_upper_const: None,
                     },
                     span,
                 );
-            }
+                item
+            })
+            .collect();
+        for (elt, item) in elts.iter().zip(items) {
+            let target = match elt {
+                Expr::Starred(s) => &s.value,
+                other => other,
+            };
+            self.lower_assign_target(target, item, Span::from(elt.range()));
+        }
+    }
+
+    fn lower_delete_target(&mut self, target: &'a Expr) {
+        let span = Span::from(target.range());
+        match target {
+            Expr::Name(n) => self.lower_name_delete(n.id.as_str(), span),
             Expr::Attribute(attr) => {
                 let obj = self.lower_expr(&attr.value);
                 let attr_name = attr.attr.to_string();
@@ -1512,10 +1989,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         // Body (depth d + 1)
         self.switch_to(body_bb);
         self.lower_assign_target(&f.target, next_val, Span::from(f.target.range()));
+        self.unwind.push(Unwind::Loop);
         self.lower_suite(&f.body);
+        self.unwind.pop();
         if !self.is_terminated(self.cur_bb) {
             let tail = self.cur_bb;
-            if let Some(top) = self.loop_stack.last_mut() {
+            if !self.is_dead(tail)
+                && let Some(top) = self.loop_stack.last_mut()
+            {
                 top.back_edges.push(tail);
             }
             self.terminate(Terminator::Jump(header_bb));
@@ -1594,10 +2075,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         );
 
         self.switch_to(body_bb);
+        self.unwind.push(Unwind::Loop);
         self.lower_suite(&w.body);
+        self.unwind.pop();
         if !self.is_terminated(self.cur_bb) {
             let tail = self.cur_bb;
-            if let Some(top) = self.loop_stack.last_mut() {
+            if !self.is_dead(tail)
+                && let Some(top) = self.loop_stack.last_mut()
+            {
                 top.back_edges.push(tail);
             }
             self.terminate(Terminator::Jump(header_bb));
@@ -1699,6 +2184,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
 
         let exit_bb = self.new_block(false);
+        self.unwind.push(Unwind::With {
+            managers: entered.clone(),
+            is_async: w.is_async,
+            span,
+            exc_depth: self.exc_target_stack.len(),
+        });
         self.exc_target_stack.push(exit_bb);
         let body_bb = self.new_block(true);
         self.terminate(Terminator::Jump(body_bb));
@@ -1708,6 +2199,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.terminate(Terminator::Jump(exit_bb));
 
         self.exc_target_stack.pop();
+        self.unwind.pop();
         self.seal_block(exit_bb);
         self.switch_to(exit_bb);
         for mgr in entered.into_iter().rev() {
@@ -1724,44 +2216,43 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     fn lower_try(&mut self, t: &'a ast::StmtTry) {
         let has_handlers = !t.handlers.is_empty();
         let has_finally = !t.finalbody.is_empty();
-
-        let dispatch_bb = if has_handlers {
-            Some(self.new_block(false))
-        } else {
-            None
-        };
-        let finally_bb = if has_finally {
-            Some(self.new_block(false))
-        } else {
-            None
-        };
+        // The `finally` body runs on every way out of the `try`: after normal completion
+        // (`normal_finally_bb`), before an exception goes on (`raising_finally_bb`, which
+        // re-raises), and before a `return` / `break` / `continue` (inlined by `leave`).
+        let raising_finally_bb = has_finally.then(|| self.new_block(false));
+        let normal_finally_bb = has_finally.then(|| self.new_block(false));
+        let dispatch_bb = has_handlers.then(|| self.new_block(false));
         let after_bb = self.new_block(false);
+        let normal_next = normal_finally_bb.unwrap_or(after_bb);
+        if has_finally {
+            self.unwind.push(Unwind::Finally {
+                body: &t.finalbody,
+                exc_depth: self.exc_target_stack.len(),
+            });
+        }
 
-        let body_exc_target = dispatch_bb.or(finally_bb);
+        let body_exc_target = dispatch_bb.or(raising_finally_bb);
         if let Some(target) = body_exc_target {
             self.exc_target_stack.push(target);
         }
-
         let try_bb = self.new_block(true);
         self.terminate(Terminator::Jump(try_bb));
         self.switch_to(try_bb);
         self.lower_suite(&t.body);
-
         if body_exc_target.is_some() {
             self.exc_target_stack.pop();
         }
 
-        let normal_next = finally_bb.unwrap_or(after_bb);
         if !self.is_terminated(self.cur_bb) {
             if !t.orelse.is_empty() {
-                if let Some(fin) = finally_bb {
+                if let Some(fin) = raising_finally_bb {
                     self.exc_target_stack.push(fin);
                 }
                 let orelse_bb = self.new_block(true);
                 self.terminate(Terminator::Jump(orelse_bb));
                 self.switch_to(orelse_bb);
                 self.lower_suite(&t.orelse);
-                if finally_bb.is_some() {
+                if raising_finally_bb.is_some() {
                     self.exc_target_stack.pop();
                 }
             }
@@ -1770,59 +2261,25 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         if let Some(disp) = dispatch_bb {
             self.seal_block(disp);
-            if let Some(fin) = finally_bb {
+            if let Some(fin) = raising_finally_bb {
                 self.exc_target_stack.push(fin);
             }
-            let mut cur_disp = disp;
-            for (idx, h) in t.handlers.iter().enumerate() {
-                let ast::ExceptHandler::ExceptHandler(eh) = h;
-                self.switch_to(cur_disp);
-                let mut exc_types = Vec::new();
-                if let Some(ty) = &eh.type_ {
-                    exc_types.push(self.module.slice_text(Span::from(ty.range())));
-                    let _ = self.lower_expr(ty);
-                }
-                let handler_bb = self.new_block(true);
-                let fallthrough_bb = if idx + 1 < t.handlers.len() {
-                    self.new_block(true)
-                } else {
-                    finally_bb.unwrap_or(after_bb)
-                };
-                let cond = self.emit_const(ConstLiteral::Bool(true), Span::from(eh.range));
-                self.terminate_at(
-                    Terminator::Branch {
-                        cond,
-                        then_bb: handler_bb,
-                        else_bb: fallthrough_bb,
-                    },
-                    Span::from(eh.range),
-                );
-
-                self.switch_to(handler_bb);
-                let exc_var = eh
-                    .name
-                    .as_ref()
-                    .map(|n| self.fresh_var(Some(n.to_string())));
-                self.emit(
-                    InstKind::CatchException {
-                        dst: exc_var,
-                        exc_types,
-                    },
-                    Span::from(eh.range),
-                );
-                if let (Some(n), Some(v)) = (&eh.name, exc_var) {
-                    self.write_var(n.as_str(), v, Span::from(n.range));
-                }
-                self.lower_suite(&eh.body);
-                self.terminate(Terminator::Jump(normal_next));
-                cur_disp = fallthrough_bb;
-            }
-            if finally_bb.is_some() {
+            self.lower_handlers(t, disp, normal_next);
+            if raising_finally_bb.is_some() {
                 self.exc_target_stack.pop();
             }
         }
+        if has_finally {
+            self.unwind.pop();
+        }
 
-        if let Some(fin) = finally_bb {
+        if let Some(fin) = raising_finally_bb {
+            self.seal_block(fin);
+            self.switch_to(fin);
+            self.lower_suite(&t.finalbody);
+            self.terminate(Terminator::Raise(None));
+        }
+        if let Some(fin) = normal_finally_bb {
             self.seal_block(fin);
             self.switch_to(fin);
             self.lower_suite(&t.finalbody);
@@ -1833,46 +2290,105 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.switch_to(after_bb);
     }
 
+    /// The `except` clauses from the dispatch block `disp`: each tests whether it matches
+    /// (an opaque test, except a bare `except:`, which always does); a handler that
+    /// completes continues at `normal_next`. Every `except*` clause may run on part of the
+    /// exception group, so each continues to the next clause's test. An exception no clause
+    /// takes (all or, for `except*`, part of the group) is raised again.
+    fn lower_handlers(&mut self, t: &'a ast::StmtTry, disp: BlockId, normal_next: BlockId) {
+        let mut cur = disp;
+        for h in &t.handlers {
+            let ast::ExceptHandler::ExceptHandler(eh) = h;
+            self.switch_to(cur);
+            let mut exc_types = Vec::new();
+            let span = Span::from(eh.range);
+            let cond = match &eh.type_ {
+                Some(ty) => {
+                    exc_types.push(self.module.slice_text(Span::from(ty.range())));
+                    let _ = self.lower_expr(ty);
+                    self.emit_const(ConstLiteral::Other, span)
+                }
+                None => self.emit_const(ConstLiteral::Bool(true), span),
+            };
+            let handler_bb = self.new_block(true);
+            let next_bb = self.new_block(false);
+            self.terminate_at(
+                Terminator::Branch {
+                    cond,
+                    then_bb: handler_bb,
+                    else_bb: next_bb,
+                },
+                span,
+            );
+
+            self.switch_to(handler_bb);
+            let exc_var = eh
+                .name
+                .as_ref()
+                .map(|n| self.fresh_var(Some(n.to_string())));
+            self.emit(
+                InstKind::CatchException {
+                    dst: exc_var,
+                    exc_types,
+                },
+                span,
+            );
+            if let (Some(n), Some(v)) = (&eh.name, exc_var) {
+                self.write_var(n.as_str(), v, Span::from(n.range));
+            }
+            self.lower_suite(&eh.body);
+            // `except E as e:` ends with `del e`.
+            if let Some(n) = &eh.name
+                && !self.is_terminated(self.cur_bb)
+            {
+                self.lower_name_delete(n.as_str(), Span::from(n.range));
+            }
+            self.terminate(Terminator::Jump(if t.is_star {
+                next_bb
+            } else {
+                normal_next
+            }));
+            self.seal_block(next_bb);
+            cur = next_bb;
+        }
+        self.switch_to(cur);
+        if t.is_star {
+            let rest = self.emit_const(ConstLiteral::Other, Span::from(t.range));
+            let raise_bb = self.new_block(true);
+            self.terminate(Terminator::Branch {
+                cond: rest,
+                then_bb: normal_next,
+                else_bb: raise_bb,
+            });
+            self.switch_to(raise_bb);
+        }
+        self.terminate(Terminator::Raise(None));
+    }
+
     fn lower_match(&mut self, m: &'a ast::StmtMatch) {
         let subject = self.lower_expr(&m.subject);
         let merge_bb = self.new_block(false);
 
         for (idx, case) in m.cases.iter().enumerate() {
             let is_last = idx + 1 == m.cases.len();
-            let case_bb = self.new_block(true);
             let next_bb = if is_last {
                 merge_bb
             } else {
-                self.new_block(true)
+                self.new_block(false)
             };
-            let pattern_span = Span::from(case.pattern.range());
-            let cond = self.emit_const(ConstLiteral::Bool(true), pattern_span);
-            self.terminate_at(
-                Terminator::Branch {
-                    cond,
-                    then_bb: case_bb,
-                    else_bb: next_bb,
-                },
-                pattern_span,
-            );
-            self.switch_to(case_bb);
-            self.lower_pattern(&case.pattern, subject);
+            let mut captures = Vec::new();
+            self.lower_pattern(&case.pattern, subject, next_bb, &mut captures);
+            for (name, value, span) in captures {
+                self.write_var(name, value, span);
+            }
             if let Some(guard) = &case.guard {
                 let g = self.lower_expr(guard);
-                let body_bb = self.new_block(true);
-                self.terminate_at(
-                    Terminator::Branch {
-                        cond: g,
-                        then_bb: body_bb,
-                        else_bb: next_bb,
-                    },
-                    Span::from(guard.range()),
-                );
-                self.switch_to(body_bb);
+                self.branch_on_test(g, next_bb, Span::from(guard.range()));
             }
             self.lower_suite(&case.body);
             self.terminate(Terminator::Jump(merge_bb));
             if !is_last {
+                self.seal_block(next_bb);
                 self.switch_to(next_bb);
             }
         }
@@ -1881,56 +2397,257 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.switch_to(merge_bb);
     }
 
-    fn lower_pattern(&mut self, pat: &'a Pattern, subject: VarId) {
+    /// Continue in a new block when `cond` holds; otherwise go to `fail`.
+    fn branch_on_test(&mut self, cond: VarId, fail: BlockId, span: Span) {
+        let ok_bb = self.new_block(true);
+        self.terminate_at(
+            Terminator::Branch {
+                cond,
+                then_bb: ok_bb,
+                else_bb: fail,
+            },
+            span,
+        );
+        self.switch_to(ok_bb);
+    }
+
+    /// A test of the subject's shape (its type, length, or keys) the IR does not model: an
+    /// opaque value, so both outcomes stay possible.
+    fn structural_test(&mut self, fail: BlockId, span: Span) {
+        let cond = self.emit_const(ConstLiteral::Other, span);
+        self.branch_on_test(cond, fail, span);
+    }
+
+    /// Lower the tests of `pat` against `subject` (PEP 634), going to `fail` when one fails,
+    /// and collect the values its capture patterns bind. The bindings are written only once
+    /// the whole pattern matched: a failed alternative binds nothing.
+    fn lower_pattern(
+        &mut self,
+        pat: &'a Pattern,
+        subject: VarId,
+        fail: BlockId,
+        captures: &mut Vec<(&'a str, VarId, Span)>,
+    ) {
+        let span = Span::from(pat.range());
         match pat {
             Pattern::MatchValue(mv) => {
-                let _ = self.lower_expr(&mv.value);
+                let value = self.lower_expr(&mv.value);
+                let cond = self.fresh_var(None);
+                self.emit(
+                    InstKind::Compare {
+                        dst: cond,
+                        op: CompareOpKind::Eq,
+                        lhs: subject,
+                        rhs: value,
+                    },
+                    span,
+                );
+                self.branch_on_test(cond, fail, span);
             }
-            Pattern::MatchSingleton(_) => {}
+            Pattern::MatchSingleton(ms) => {
+                let literal = match ms.value {
+                    ast::Singleton::None => ConstLiteral::None,
+                    ast::Singleton::True => ConstLiteral::Bool(true),
+                    ast::Singleton::False => ConstLiteral::Bool(false),
+                };
+                let value = self.emit_const(literal, span);
+                let cond = self.fresh_var(None);
+                self.emit(
+                    InstKind::Compare {
+                        dst: cond,
+                        op: CompareOpKind::Is,
+                        lhs: subject,
+                        rhs: value,
+                    },
+                    span,
+                );
+                self.branch_on_test(cond, fail, span);
+            }
             Pattern::MatchSequence(ms) => {
-                for p in &ms.patterns {
-                    self.lower_pattern(p, subject);
+                self.structural_test(fail, span);
+                let star = ms
+                    .patterns
+                    .iter()
+                    .position(|p| matches!(p, Pattern::MatchStar(_)));
+                let len = ms.patterns.len();
+                for (i, sub) in ms.patterns.iter().enumerate() {
+                    if let Pattern::MatchStar(st) = sub {
+                        // `*rest` is a new list of the items between the fixed positions.
+                        let rest = self.unpacked_list(subject, Span::from(st.range));
+                        self.lower_pattern(sub, rest, fail, captures);
+                        continue;
+                    }
+                    // Items after the star are counted from the end.
+                    let index = match star {
+                        Some(s) if i > s => -((len - i) as i64),
+                        _ => i as i64,
+                    };
+                    let item = self.pattern_item(subject, index, span, Span::from(sub.range()));
+                    self.lower_pattern(sub, item, fail, captures);
                 }
             }
             Pattern::MatchMapping(mm) => {
-                for k in &mm.keys {
-                    let _ = self.lower_expr(k);
-                }
-                for p in &mm.patterns {
-                    self.lower_pattern(p, subject);
+                self.structural_test(fail, span);
+                for (key, sub) in mm.keys.iter().zip(&mm.patterns) {
+                    let index = self.lower_expr(key);
+                    let value = self.fresh_var(None);
+                    self.emit(
+                        InstKind::SubscriptLoad {
+                            dst: value,
+                            obj: subject,
+                            index,
+                            key_const: extract_const_str(key),
+                            is_slice: false,
+                            slice_lower_const: None,
+                            slice_upper_const: None,
+                        },
+                        Span::from(sub.range()),
+                    );
+                    self.lower_pattern(sub, value, fail, captures);
                 }
                 if let Some(rest) = &mm.rest {
-                    self.write_var(rest.as_str(), subject, Span::from(rest.range));
+                    // `**rest` is a new dict of the other items.
+                    let dst = self.fresh_var(None);
+                    self.emit(
+                        InstKind::DictLiteral {
+                            dst,
+                            entries: vec![DictEntry::Unpack { dict: subject }],
+                        },
+                        Span::from(rest.range),
+                    );
+                    captures.push((rest.as_str(), dst, Span::from(rest.range)));
                 }
             }
             Pattern::MatchClass(mc) => {
                 let _ = self.lower_expr(&mc.cls);
-                for p in &mc.arguments.patterns {
-                    self.lower_pattern(p, subject);
-                }
-                for kw in &mc.arguments.keywords {
-                    self.lower_pattern(&kw.pattern, subject);
+                self.structural_test(fail, span);
+                // A positional sub-pattern reads the attribute `__match_args__` names, which
+                // the IR does not know.
+                let positional = mc
+                    .arguments
+                    .patterns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (format!("{MATCH_ARGS}[{i}]"), p));
+                let keywords = mc
+                    .arguments
+                    .keywords
+                    .iter()
+                    .map(|kw| (kw.attr.to_string(), &kw.pattern));
+                for (attr, sub) in positional.chain(keywords).collect::<Vec<_>>() {
+                    let value = self.fresh_var(None);
+                    self.emit(
+                        InstKind::AttrLoad {
+                            dst: value,
+                            obj: subject,
+                            attr,
+                        },
+                        Span::from(sub.range()),
+                    );
+                    self.lower_pattern(sub, value, fail, captures);
                 }
             }
+            // Only inside a sequence pattern, which passes the new list of the items it takes.
             Pattern::MatchStar(ms) => {
                 if let Some(name) = &ms.name {
-                    self.write_var(name.as_str(), subject, Span::from(name.range));
+                    captures.push((name.as_str(), subject, Span::from(name.range)));
                 }
             }
             Pattern::MatchAs(ma) => {
                 if let Some(p) = &ma.pattern {
-                    self.lower_pattern(p, subject);
+                    self.lower_pattern(p, subject, fail, captures);
                 }
                 if let Some(name) = &ma.name {
-                    self.write_var(name.as_str(), subject, Span::from(name.range));
+                    captures.push((name.as_str(), subject, Span::from(name.range)));
                 }
             }
-            Pattern::MatchOr(mo) => {
-                for p in &mo.patterns {
-                    self.lower_pattern(p, subject);
+            Pattern::MatchOr(mo) => self.lower_or_pattern(mo, subject, fail, captures),
+        }
+    }
+
+    /// `p1 | p2 | ...`: the first alternative that matches binds the names (every alternative
+    /// binds the same ones).
+    fn lower_or_pattern(
+        &mut self,
+        mo: &'a ast::PatternMatchOr,
+        subject: VarId,
+        fail: BlockId,
+        captures: &mut Vec<(&'a str, VarId, Span)>,
+    ) {
+        let join_bb = self.new_block(false);
+        let prefix = format!(".or_{}", self.var_names.len());
+        let mut bound: Vec<(&'a str, Span)> = Vec::new();
+        for (idx, alt) in mo.patterns.iter().enumerate() {
+            let alt_fail = if idx + 1 == mo.patterns.len() {
+                fail
+            } else {
+                self.new_block(false)
+            };
+            let mut alt_captures = Vec::new();
+            self.lower_pattern(alt, subject, alt_fail, &mut alt_captures);
+            for (name, value, span) in alt_captures {
+                self.write_local(&format!("{prefix}_{name}"), self.cur_bb, value);
+                if !bound.iter().any(|(n, _)| *n == name) {
+                    bound.push((name, span));
                 }
+            }
+            self.terminate(Terminator::Jump(join_bb));
+            if alt_fail != fail {
+                self.seal_block(alt_fail);
+                self.switch_to(alt_fail);
             }
         }
+        self.seal_block(join_bb);
+        self.switch_to(join_bb);
+        for (name, span) in bound {
+            let value = self.read_local_ssa(&format!("{prefix}_{name}"), join_bb, span);
+            captures.push((name, value, span));
+        }
+    }
+
+    /// Item `index` of a sequence pattern's subject (negative: counted from the end).
+    fn pattern_item(&mut self, subject: VarId, index: i64, pattern: Span, item: Span) -> VarId {
+        // The index belongs to the pattern, not to the item: not the target unpacking of an
+        // assignment (`heki_effect::consumption::is_unpacking`), which consumes an iterator.
+        let index_var = self.emit_const(ConstLiteral::Int(index), pattern);
+        let dst = self.fresh_var(None);
+        self.emit(
+            InstKind::SubscriptLoad {
+                dst,
+                obj: subject,
+                index: index_var,
+                key_const: None,
+                is_slice: false,
+                slice_lower_const: None,
+                slice_upper_const: None,
+            },
+            item,
+        );
+        dst
+    }
+
+    /// A new list holding items of `source` (`[*source]`): what a starred target or pattern
+    /// binds.
+    fn unpacked_list(&mut self, source: VarId, span: Span) -> VarId {
+        let elem = self.fresh_var(Some(crate::UNPACKED.to_owned()));
+        self.emit(
+            InstKind::Copy {
+                dst: elem,
+                src: source,
+            },
+            span,
+        );
+        let dst = self.fresh_var(None);
+        self.starred.push((dst, 0));
+        self.emit(
+            InstKind::AllocBuiltin {
+                dst,
+                kind: BuiltinKind::List,
+                elems: vec![elem],
+            },
+            span,
+        );
+        dst
     }
 
     // -------------------------------------------------------------------------
@@ -1956,7 +2673,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     fn lower_expr(&mut self, expr: &'a Expr) -> VarId {
         let span = Span::from(expr.range());
         match expr {
-            Expr::Name(n) => self.read_var(n.id.as_str(), span),
+            Expr::Name(n) => {
+                let name = n.id.as_str();
+                let global_name = self.resolves_to_global(name);
+                self.record_a1_reference(name, global_name, span);
+                self.read_var(name, span)
+            }
             Expr::Named(named) => {
                 let val = self.lower_expr(&named.value);
                 // PEP 572: walrus writes into the enclosing scope, bypassing comprehension target
@@ -2116,28 +2838,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.switch_to(merge_bb);
                 self.read_local_ssa(&temp_name, merge_bb, span)
             }
-            Expr::Compare(c) => {
-                // Chained comparisons left-to-right (`operands[0] op[0] operands[1] ...`); the
-                // parser always produces at least two operands.
-                let mut lhs = self.lower_expr(&c.operands[0]);
-                let mut last_res = lhs;
-                for (op, rhs_expr) in c.ops.iter().zip(&c.operands[1..]) {
-                    let rhs = self.lower_expr(rhs_expr);
-                    let dst = self.fresh_var(None);
-                    self.emit(
-                        InstKind::Compare {
-                            dst,
-                            op: map_cmpop(*op),
-                            lhs,
-                            rhs,
-                        },
-                        span,
-                    );
-                    lhs = rhs;
-                    last_res = dst;
-                }
-                last_res
-            }
+            Expr::Compare(c) => self.lower_compare(c),
             Expr::If(if_expr) => {
                 let temp_name = format!(".ifexpr_{}", self.var_names.len());
                 let cond = self.lower_expr(&if_expr.test);
@@ -2171,6 +2872,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 let obj = self.lower_expr(&attr.value);
                 let attr_name = attr.attr.to_string();
                 self.record_a1_attr_if_hazard(&attr_name, span);
+                if let Some(dotted) = expr_dotted_name(expr) {
+                    self.record_a1_reference(&dotted, false, span);
+                }
                 let dst = self.fresh_var(None);
                 self.emit(
                     InstKind::AttrLoad {
@@ -2201,17 +2905,26 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 );
                 dst
             }
+            // `a[l:u:s]` passes `slice(l, u, s)` to `__getitem__`, which may keep it: the slice
+            // is the tuple of its three bounds (`None` where one is left out).
             Expr::Slice(sl) => {
-                if let Some(l) = &sl.lower {
-                    let _ = self.lower_expr(l);
-                }
-                if let Some(u) = &sl.upper {
-                    let _ = self.lower_expr(u);
-                }
-                if let Some(st) = &sl.step {
-                    let _ = self.lower_expr(st);
-                }
-                self.emit_const(ConstLiteral::Other, span)
+                let elems: Vec<VarId> = [&sl.lower, &sl.upper, &sl.step]
+                    .into_iter()
+                    .map(|bound| match bound {
+                        Some(b) => self.lower_expr(b),
+                        None => self.emit_const(ConstLiteral::None, span),
+                    })
+                    .collect();
+                let dst = self.fresh_var(None);
+                self.emit(
+                    InstKind::AllocBuiltin {
+                        dst,
+                        kind: BuiltinKind::Tuple,
+                        elems,
+                    },
+                    span,
+                );
+                dst
             }
             Expr::Starred(s) => self.lower_expr(&s.value),
             Expr::Await(a) => {
@@ -2239,22 +2952,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::Call(call) => self.lower_call(call, false),
             Expr::Lambda(lam) => {
-                if let Some(params) = &lam.parameters {
-                    for p in params
-                        .posonlyargs
-                        .iter()
-                        .chain(params.args.iter())
-                        .chain(params.kwonlyargs.iter())
-                    {
-                        if let Some(def) = &p.default {
-                            let _ = self.lower_expr(def);
-                        }
-                    }
-                }
-                let mut child_outer = self.outer_locals.clone();
-                if !self.is_module_body && !self.is_class_body {
-                    child_outer.extend(self.scope.locals.iter().cloned());
-                }
+                // The function object keeps its defaults.
+                let retained: Vec<VarId> = lam
+                    .parameters
+                    .iter()
+                    .flat_map(|params| parameter_defaults(params))
+                    .map(|d| self.lower_expr(d))
+                    .collect();
+                let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<lambda>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
                     name: "<lambda>".to_string(),
@@ -2269,10 +2974,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     is_module_body: false,
                     is_class_body: false,
                     outer_locals: child_outer,
+                    walrus_target: WalrusTarget::OwnScope,
+                    walrus_globals: FxHashSet::default(),
                     body: FunctionBody::Expr(&lam.body),
                 });
                 let captured_names = self.collect_child_captures(child_id);
-                let captured = self.read_captured_vars(&captured_names, span);
+                let mut captured = self.read_captured_vars(&captured_names, span);
+                captured.extend(retained);
                 let dst = self.fresh_var(None);
                 self.emit(
                     InstKind::MakeClosure {
@@ -2289,10 +2997,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 // requires at least one `for` clause.)
                 let outer_iter = self.lower_expr(&ge.generators[0].iter);
 
-                let mut child_outer = self.outer_locals.clone();
-                if !self.is_module_body && !self.is_class_body {
-                    child_outer.extend(self.scope.locals.iter().cloned());
-                }
+                let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<genexpr>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
                     name: "<genexpr>".to_string(),
@@ -2307,6 +3012,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     is_module_body: false,
                     is_class_body: false,
                     outer_locals: child_outer,
+                    walrus_target: self.comprehension_walrus_target(),
+                    walrus_globals: self.comprehension_walrus_globals(),
                     body: FunctionBody::GenExpr(ge),
                 });
                 let captured_names = self.collect_child_captures(child_id);
@@ -2347,24 +3054,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 dc.key.as_deref(),
                 span,
             ),
-            Expr::FString(fs) => {
-                for part in fs.value.iter() {
-                    if let ast::FStringPartRef::FString(fstr) = part {
-                        for elem in &fstr.elements {
-                            if let ast::InterpolatedStringElement::Interpolation(interp) = elem {
-                                let _ = self.lower_expr(&interp.expression);
-                                if let Some(spec) = &interp.format_spec {
-                                    for se in &spec.elements {
-                                        if let ast::InterpolatedStringElement::Interpolation(si) =
-                                            se
-                                        {
-                                            let _ = self.lower_expr(&si.expression);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            Expr::FString(_) => {
+                for field in heki_ast::interpolated_expressions(expr) {
+                    let _ = self.lower_expr(field);
                 }
                 let dst = self.fresh_var(None);
                 self.emit(
@@ -2377,24 +3069,99 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 );
                 dst
             }
+            // A template keeps the values of its replacement fields (`Template.values`, a tuple)
+            // and is otherwise opaque; a format specification's fields become text.
             Expr::TString(ts) => {
-                for part in ts.value.iter() {
-                    for elem in &part.elements {
-                        if let ast::InterpolatedStringElement::Interpolation(interp) = elem {
-                            let _ = self.lower_expr(&interp.expression);
-                            if let Some(spec) = &interp.format_spec {
-                                for se in &spec.elements {
-                                    if let ast::InterpolatedStringElement::Interpolation(si) = se {
-                                        let _ = self.lower_expr(&si.expression);
-                                    }
-                                }
-                            }
-                        }
+                let kept = heki_ast::template_values(ts);
+                let mut values = Vec::with_capacity(kept.len());
+                for field in heki_ast::interpolated_expressions(expr) {
+                    let v = self.lower_expr(field);
+                    if kept.iter().any(|k| std::ptr::eq(*k, field)) {
+                        values.push(v);
                     }
                 }
+                let held = self.fresh_var(None);
+                self.emit(
+                    InstKind::AllocBuiltin {
+                        dst: held,
+                        kind: BuiltinKind::Tuple,
+                        elems: values,
+                    },
+                    span,
+                );
                 self.emit_const(ConstLiteral::Other, span)
             }
         }
+    }
+
+    /// `a < b < c` is `a < b and b < c` with `b` evaluated once: each comparison but the last
+    /// branches to the result on a false value before the next operand runs. Each comparison
+    /// spans its own two operands (the first and the last also the expression's parentheses).
+    fn lower_compare(&mut self, c: &'a ast::ExprCompare) -> VarId {
+        let whole = Span::from(c.range);
+        if let ([op], [left, right]) = (&*c.ops, &*c.operands) {
+            let lhs = self.lower_expr(left);
+            let rhs = self.lower_expr(right);
+            let dst = self.fresh_var(None);
+            self.emit(
+                InstKind::Compare {
+                    dst,
+                    op: map_cmpop(*op),
+                    lhs,
+                    rhs,
+                },
+                whole,
+            );
+            return dst;
+        }
+        let last = c.ops.len() - 1;
+        let result_name = format!(".compare_{}", self.var_names.len());
+        let merge_bb = self.new_block(false);
+        let mut lhs = self.lower_expr(&c.operands[0]);
+        for (i, (op, rhs_expr)) in c.ops.iter().zip(&c.operands[1..]).enumerate() {
+            let rhs = self.lower_expr(rhs_expr);
+            let link = Span {
+                start: if i == 0 {
+                    whole.start
+                } else {
+                    Span::from(c.operands[i].range()).start
+                },
+                end: if i == last {
+                    whole.end
+                } else {
+                    Span::from(rhs_expr.range()).end
+                },
+            };
+            let dst = self.fresh_var(None);
+            self.emit(
+                InstKind::Compare {
+                    dst,
+                    op: map_cmpop(*op),
+                    lhs,
+                    rhs,
+                },
+                link,
+            );
+            self.write_local(&result_name, self.cur_bb, dst);
+            if i == last {
+                self.terminate(Terminator::Jump(merge_bb));
+            } else {
+                let next_bb = self.new_block(true);
+                self.terminate_at(
+                    Terminator::Branch {
+                        cond: dst,
+                        then_bb: next_bb,
+                        else_bb: merge_bb,
+                    },
+                    link,
+                );
+                self.switch_to(next_bb);
+                lhs = rhs;
+            }
+        }
+        self.seal_block(merge_bb);
+        self.switch_to(merge_bb);
+        self.read_local_ssa(&result_name, merge_bb, whole)
     }
 
     fn lower_call(&mut self, call: &'a ast::ExprCall, is_awaited: bool) -> VarId {
@@ -2456,7 +3223,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 call.arguments.keywords.len(),
                 span,
             );
-            let callee_var = Some(self.lower_expr(&call.func));
+            // The call itself is the hazard (above), not the read of its callee.
+            let callee_var = Some(match call.func.as_ref() {
+                Expr::Name(n) => self.read_var(n.id.as_str(), Span::from(n.range)),
+                other => self.lower_expr(other),
+            });
             let args: Vec<VarId> = call
                 .arguments
                 .args
@@ -2493,54 +3264,55 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     /// One element of a list / set / dict comprehension into its accumulator `acc`:
-    /// `acc.append(elt)`, `acc.add(elt)`, or `acc[key] = elt` (`{**d for d in ds}` has no key).
+    /// `acc.append(elt)`, `acc.add(elt)`, or `acc[key] = elt`; an unpacking element (PEP 798,
+    /// `[*xs for xs in rows]`, `{**m for m in maps}`) is `acc.extend(xs)` / `acc.update(...)`.
     fn emit_comp_element(
         &mut self,
         kind: CompKind,
         acc: VarId,
         elt: &'a Expr,
         key: Option<&'a Expr>,
-        span: Span,
     ) {
         let elt_span = Span::from(elt.range());
-        match kind {
-            CompKind::List | CompKind::Set => {
-                let v = self.lower_expr(elt);
-                let dst = self.fresh_var(None);
+        let (method, args) = match (kind, elt, key) {
+            (CompKind::List | CompKind::Set, Expr::Starred(st), _) => {
                 let method = match kind {
-                    CompKind::List => "append",
-                    _ => "add",
+                    CompKind::List => "extend",
+                    _ => "update",
                 };
-                self.emit(
-                    InstKind::MethodCall {
-                        dst,
-                        recv: acc,
-                        method: method.to_string(),
-                        args: vec![v],
-                        kwargs: Vec::new(),
-                        is_awaited: false,
-                        star_from: None,
-                    },
-                    elt_span,
-                );
+                (method, vec![self.lower_expr(&st.value)])
             }
-            CompKind::Dict => {
-                let k = key
-                    .map(|ke| self.lower_expr(ke))
-                    .unwrap_or_else(|| self.emit_const(ConstLiteral::None, span));
-                let key_const = key.and_then(extract_const_str);
-                let v = self.lower_expr(elt);
+            (CompKind::List, _, _) => ("append", vec![self.lower_expr(elt)]),
+            (CompKind::Set, _, _) => ("add", vec![self.lower_expr(elt)]),
+            (CompKind::Dict, _, None) => ("update", vec![self.lower_expr(elt)]),
+            (CompKind::Dict, _, Some(key)) => {
+                let index = self.lower_expr(key);
+                let value = self.lower_expr(elt);
                 self.emit(
                     InstKind::SubscriptStore {
                         obj: acc,
-                        index: k,
-                        key_const,
-                        value: v,
+                        index,
+                        key_const: extract_const_str(key),
+                        value,
                     },
                     elt_span,
                 );
+                return;
             }
-        }
+        };
+        let dst = self.fresh_var(None);
+        self.emit(
+            InstKind::MethodCall {
+                dst,
+                recv: acc,
+                method: method.to_string(),
+                args,
+                kwargs: Vec::new(),
+                is_awaited: false,
+                star_from: None,
+            },
+            elt_span,
+        );
     }
 
     fn lower_comprehension(
@@ -2563,17 +3335,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 span,
             );
             self.lower_comprehension_generators(generators, None, true, &|b| {
-                b.emit_comp_element(kind, acc, elt, key, span);
+                b.emit_comp_element(kind, acc, elt, key);
             });
             acc
         } else {
             // Python 3.11: non-inlined comprehension frame with eager outer iter (the grammar
             // requires at least one `for` clause).
             let outer_iter = self.lower_expr(&generators[0].iter);
-            let mut child_outer = self.outer_locals.clone();
-            if !self.is_module_body && !self.is_class_body {
-                child_outer.extend(self.scope.locals.iter().cloned());
-            }
+            let child_outer = self.child_outer_locals();
             let qualname = format!("{}.<locals>.{comp_name}", self.qualname);
             let child_id = self.module.lower_function_body(FunctionSpec {
                 name: comp_name.to_string(),
@@ -2588,6 +3357,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 is_module_body: false,
                 is_class_body: false,
                 outer_locals: child_outer,
+                walrus_target: self.comprehension_walrus_target(),
+                walrus_globals: self.comprehension_walrus_globals(),
                 body: FunctionBody::Comp {
                     generators,
                     elt,
@@ -2687,7 +3458,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             let comp_id = self.module.next_comp_id;
             self.module.next_comp_id += 1;
             let mut raw_targets = FxHashSet::default();
-            collect_target_bindings(&g.target, &mut raw_targets);
+            collect_target_names(&g.target, &mut raw_targets);
             let mut rename_map = FxHashMap::default();
             for name in raw_targets {
                 rename_map.insert(name.clone(), format!(".comp{comp_id}_{name}"));
@@ -2710,7 +3481,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             );
             self.switch_to(skip_bb);
             let cur = self.cur_bb;
-            if let Some(top) = self.loop_stack.last_mut() {
+            if !self.is_dead(cur)
+                && let Some(top) = self.loop_stack.last_mut()
+            {
                 top.back_edges.push(cur);
             }
             self.terminate(Terminator::Jump(header_bb));
@@ -2725,7 +3498,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         // Expressions never terminate their block, so the element always loops back.
         let tail = self.cur_bb;
-        if let Some(top) = self.loop_stack.last_mut() {
+        if !self.is_dead(tail)
+            && let Some(top) = self.loop_stack.last_mut()
+        {
             top.back_edges.push(tail);
         }
         self.terminate(Terminator::Jump(header_bb));
@@ -2756,6 +3531,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     // -------------------------------------------------------------------------
     // A1 Hazard Detection
     // -------------------------------------------------------------------------
+    /// A call of a frame-introspection function, by the callee's spelling.
     fn record_a1_call_if_hazard(
         &mut self,
         callee: &str,
@@ -2763,29 +3539,53 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         kwarg_count: usize,
         span: Span,
     ) {
-        let hazard = match callee {
-            "eval" | "builtins.eval" => Some("eval"),
-            "exec" | "builtins.exec" => Some("exec"),
-            "locals" | "builtins.locals" => Some("locals"),
-            "vars" | "builtins.vars" if arg_count == 0 && kwarg_count == 0 => Some("vars()"),
-            "sys._getframe" | "_getframe" => Some("sys._getframe"),
-            "inspect.currentframe" => Some("inspect.currentframe"),
-            "gc.get_objects" => Some("gc.get_objects"),
-            "gc.get_referrers" => Some("gc.get_referrers"),
-            "ctypes.pythonapi" => Some("ctypes.pythonapi"),
-            _ if callee.ends_with("._getframe") => Some("sys._getframe"),
-            _ if callee.ends_with(".currentframe") => Some("inspect.currentframe"),
-            _ if callee.ends_with(".get_objects") && callee.contains("gc.") => {
-                Some("gc.get_objects")
-            }
-            _ => None,
-        };
-        if let Some(kind) = hazard {
+        let kind = self.introspection_binding(callee).or_else(|| {
+            introspection_kind(
+                &self.module.resolve_module_alias(callee),
+                arg_count == 0 && kwarg_count == 0,
+            )
+        });
+        self.push_a1_hazard(kind, span);
+    }
+
+    /// The `A1Hazard` kind of the introspection function an import bound `name` to, in the
+    /// scope a read of it here resolves to.
+    fn introspection_binding(&self, name: &str) -> Option<&'static str> {
+        if self.is_module_body || self.resolves_to_global(name) {
+            self.module.introspection_imports.get(name).copied()
+        } else {
+            self.introspection_locals.get(name).copied()
+        }
+    }
+
+    /// A reference to a frame-introspection function that is not a call of it (`snapshot =
+    /// locals`, `map(eval, codes)`): whatever calls it later runs it in this frame or reads
+    /// this frame's state. `global_name` is a name that resolves to a global or builtin.
+    fn record_a1_reference(&mut self, spelling: &str, global_name: bool, span: Span) {
+        let kind = self.introspection_binding(spelling).or_else(|| {
+            (global_name || spelling.contains('.'))
+                .then(|| introspection_kind(&self.module.resolve_module_alias(spelling), true))
+                .flatten()
+        });
+        self.push_a1_hazard(kind, span);
+    }
+
+    fn push_a1_hazard(&mut self, kind: Option<&str>, span: Span) {
+        if let Some(kind) = kind {
             self.a1_hazards.push(A1Hazard {
                 kind: kind.to_string(),
                 span,
             });
         }
+    }
+
+    /// Whether a read of `name` here resolves to a module global or a builtin.
+    fn resolves_to_global(&self, name: &str) -> bool {
+        self.resolve_comp_rename(name).is_none()
+            && (self.scope.globals.contains(name)
+                || (!self.scope.nonlocals.contains(name)
+                    && !self.is_true_local(name)
+                    && !self.outer_locals.contains(name)))
     }
 
     fn record_a1_attr_if_hazard(&mut self, attr: &str, span: Span) {
@@ -2835,6 +3635,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         let mut captured_vars: Vec<String> = self.captured_by_children.into_iter().collect();
         captured_vars.sort();
+        let mut free_names: Vec<String> = self.free_reads.into_iter().collect();
+        free_names.sort();
+        self.module.free_names[self.id.0 as usize] = free_names;
         self.module
             .loop_hints
             .push((self.id, std::mem::take(&mut self.finished_hints)));
@@ -3028,49 +3831,29 @@ fn fixed_display(elts: &[Expr]) -> Option<LoopBound> {
         .then_some(LoopBound::ConstSmall(elts.len() as u32))
 }
 
+/// The bound a `for` iterable's syntax fixes: a small display. Everything a name decides
+/// (`range(...)`, which a local or a module may rebind, a name bound to a display, a builtin
+/// wrapper) is left to [`crate::facts::refine_loops`], which resolves the names.
 fn classify_iter_expr_bound(iter: &Expr) -> LoopBound {
     match iter {
         Expr::Tuple(t) => fixed_display(&t.elts).unwrap_or(LoopBound::Unbounded),
         Expr::List(l) => fixed_display(&l.elts).unwrap_or(LoopBound::Unbounded),
         Expr::Set(s) => fixed_display(&s.elts).unwrap_or(LoopBound::Unbounded),
-        Expr::Call(c) => {
-            if matches!(c.func.as_ref(), Expr::Name(n) if n.id.as_str() == "range") {
-                if c.arguments.args.len() == 1 {
-                    if let Some(k) = extract_const_int(&c.arguments.args[0])
-                        && (0..=8).contains(&k)
-                    {
-                        return LoopBound::ConstSmall(k as u32);
-                    }
-                } else if c.arguments.args.len() == 2
-                    && let (Some(lo), Some(hi)) = (
-                        extract_const_int(&c.arguments.args[0]),
-                        extract_const_int(&c.arguments.args[1]),
-                    )
-                {
-                    let span = hi.saturating_sub(lo);
-                    if (0..=8).contains(&span) {
-                        return LoopBound::ConstSmall(span as u32);
-                    }
-                }
-            }
-            LoopBound::Unbounded
-        }
         _ => LoopBound::Unbounded,
     }
 }
 
 fn classify_while_bound(w: &ast::StmtWhile) -> LoopBound {
-    let is_flag_loop = match w.test.as_ref() {
-        Expr::Attribute(a) => looks_like_daemon_flag(a.attr.as_str()),
-        Expr::Name(n) => looks_like_daemon_flag(n.id.as_str()),
-        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => match u.operand.as_ref() {
-            Expr::Attribute(a) => looks_like_stop_flag(a.attr.as_str()),
-            Expr::Name(n) => looks_like_stop_flag(n.id.as_str()),
-            _ => false,
-        },
+    let (flag, looks_like_flag): (&Expr, fn(&str) -> bool) = match w.test.as_ref() {
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => (&u.operand, looks_like_stop_flag),
+        test => (test, looks_like_daemon_flag),
+    };
+    let named = match flag {
+        Expr::Attribute(a) => looks_like_flag(a.attr.as_str()),
+        Expr::Name(n) => looks_like_flag(n.id.as_str()),
         _ => false,
     };
-    if is_flag_loop {
+    if named && !drains(&w.body, flag) {
         return LoopBound::DaemonPolling;
     }
     if is_retry_body(&w.body) && has_sleep_call(&w.body) {
@@ -3080,6 +3863,59 @@ fn classify_while_bound(w: &ast::StmtWhile) -> LoopBound {
         return LoopBound::RetryPattern;
     }
     LoopBound::Unbounded
+}
+
+/// Whether `body` takes items out of the collection `tested` names (`while queue: item =
+/// queue.pop()`): a loop over its items, however its name reads, not a flag loop.
+fn drains(body: &[Stmt], tested: &Expr) -> bool {
+    use heki_ast::raw_ast::visitor::{self, Visitor};
+
+    struct Drains<'t> {
+        tested: Option<String>,
+        found: bool,
+        _expr: std::marker::PhantomData<&'t ()>,
+    }
+    impl Drains<'_> {
+        fn is_tested(&self, e: &Expr) -> bool {
+            self.tested.is_some() && expr_dotted_name(e) == self.tested
+        }
+    }
+    impl<'e> Visitor<'e> for Drains<'_> {
+        fn visit_stmt(&mut self, stmt: &'e Stmt) {
+            if let Stmt::For(f) = stmt
+                && self.is_tested(&f.iter)
+            {
+                self.found = true;
+            }
+            visitor::walk_stmt(self, stmt);
+        }
+        fn visit_expr(&mut self, expr: &'e Expr) {
+            match expr {
+                Expr::Subscript(sub) if self.is_tested(&sub.value) => self.found = true,
+                Expr::Call(call) => {
+                    if let Expr::Attribute(m) = call.func.as_ref()
+                        && self.is_tested(&m.value)
+                        && matches!(
+                            m.attr.as_str(),
+                            "pop" | "popleft" | "popitem" | "remove" | "clear" | "get_nowait"
+                        )
+                    {
+                        self.found = true;
+                    }
+                }
+                _ => {}
+            }
+            visitor::walk_expr(self, expr);
+        }
+    }
+
+    let mut v = Drains {
+        tested: expr_dotted_name(tested),
+        found: false,
+        _expr: std::marker::PhantomData,
+    };
+    v.visit_body(body);
+    v.found
 }
 
 /// The single comparisons with a `len(...)` operand a `while` test requires (the test itself
@@ -3107,14 +3943,39 @@ fn len_cap_tests(test: &Expr) -> Vec<Span> {
         .collect()
 }
 
+/// The words of an identifier, lowercase (`_isRunning` -> `is`, `running`).
+fn identifier_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut prev_lower = false;
+    for c in name.chars() {
+        if (c == '_' || (c.is_ascii_uppercase() && prev_lower)) && !cur.is_empty() {
+            words.push(std::mem::take(&mut cur));
+        }
+        if c != '_' {
+            cur.push(c.to_ascii_lowercase());
+        }
+        prev_lower = c.is_ascii_lowercase();
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
 fn looks_like_daemon_flag(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("running") || lower.contains("active") || lower.contains("alive")
+    identifier_words(name)
+        .iter()
+        .any(|w| matches!(w.as_str(), "running" | "active" | "alive"))
 }
 
 fn looks_like_stop_flag(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("stop") || lower.contains("closed") || lower.contains("shutdown")
+    identifier_words(name).iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "stop" | "stopped" | "stopping" | "closed" | "closing" | "shutdown"
+        )
+    })
 }
 
 fn target_looks_like_retry(target: &Expr) -> bool {
@@ -3228,29 +4089,105 @@ fn collect_params_into(params: &ast::Parameters, locals: &mut FxHashSet<String>)
     }
 }
 
+/// The default values of a parameter list, in the order the definition evaluates them
+/// (positional ones, then keyword-only ones).
+fn parameter_defaults(params: &ast::Parameters) -> impl Iterator<Item = &Expr> {
+    params
+        .posonlyargs
+        .iter()
+        .chain(&params.args)
+        .chain(&params.kwonlyargs)
+        .filter_map(|p| p.default.as_deref())
+}
+
+/// A function's annotations in the order the definition evaluates them: the parameters'
+/// (positional, `*args`, keyword-only, `**kwargs`), then the return annotation.
+fn function_annotations<'e>(
+    params: &'e ast::Parameters,
+    returns: Option<&'e Expr>,
+) -> Vec<&'e Expr> {
+    let with_default = |p: &'e ast::ParameterWithDefault| p.parameter.annotation.as_deref();
+    let plain =
+        |p: &'e Option<Box<ast::Parameter>>| p.as_deref().and_then(|p| p.annotation.as_deref());
+    params
+        .posonlyargs
+        .iter()
+        .chain(&params.args)
+        .filter_map(with_default)
+        .chain(plain(&params.vararg))
+        .chain(params.kwonlyargs.iter().filter_map(with_default))
+        .chain(plain(&params.kwarg))
+        .chain(returns)
+        .collect()
+}
+
+/// The names an expression loads, also inside the scopes nested in it: what a lazily evaluated
+/// scope built from it (an `__annotate__` function, a type parameter's bound, a type alias's
+/// value) reads from the frame it is defined in.
+fn names_loaded(exprs: &[&Expr]) -> Vec<String> {
+    use heki_ast::raw_ast::visitor::{self, Visitor};
+
+    struct Loads(Vec<String>);
+    impl<'e> Visitor<'e> for Loads {
+        fn visit_expr(&mut self, expr: &'e Expr) {
+            if let Expr::Name(n) = expr
+                && n.ctx == ast::ExprContext::Load
+                && !self.0.iter().any(|seen| seen == n.id.as_str())
+            {
+                self.0.push(n.id.to_string());
+            }
+            visitor::walk_expr(self, expr);
+        }
+    }
+
+    let mut loads = Loads(Vec::new());
+    for e in exprs {
+        loads.visit_expr(e);
+    }
+    loads.0
+}
+
 fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
     for stmt in stmts {
         match stmt {
+            // Decorators, defaults, and class arguments run in this scope at the definition.
             Stmt::FunctionDef(f) => {
+                for dec in &f.decorator_list {
+                    collect_expr_bindings(&dec.expression, out);
+                }
+                for default in parameter_defaults(&f.parameters) {
+                    collect_expr_bindings(default, out);
+                }
                 out.locals.insert(f.name.to_string());
             }
             Stmt::ClassDef(c) => {
+                for dec in &c.decorator_list {
+                    collect_expr_bindings(&dec.expression, out);
+                }
+                if let Some(args) = &c.arguments {
+                    for arg in &args.args {
+                        collect_expr_bindings(arg, out);
+                    }
+                    for kw in &args.keywords {
+                        collect_expr_bindings(&kw.value, out);
+                    }
+                }
                 out.locals.insert(c.name.to_string());
             }
-            Stmt::TypeAlias(ta) => collect_target_bindings(&ta.name, &mut out.locals),
+            Stmt::TypeAlias(ta) => collect_target_bindings(&ta.name, out),
             Stmt::Assign(a) => {
                 for t in &a.targets {
-                    collect_target_bindings(t, &mut out.locals);
+                    collect_target_bindings(t, out);
                 }
                 collect_expr_bindings(&a.value, out);
             }
             Stmt::AugAssign(aa) => {
-                collect_target_bindings(&aa.target, &mut out.locals);
+                collect_target_bindings(&aa.target, out);
                 collect_expr_bindings(&aa.value, out);
             }
             Stmt::AnnAssign(aa) => {
                 if aa.simple || aa.value.is_some() {
-                    collect_target_bindings(&aa.target, &mut out.locals);
+                    collect_target_bindings(&aa.target, out);
                 }
                 if let Some(v) = &aa.value {
                     collect_expr_bindings(v, out);
@@ -3258,12 +4195,12 @@ fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
             }
             Stmt::Delete(d) => {
                 for t in &d.targets {
-                    collect_target_bindings(t, &mut out.locals);
+                    collect_target_bindings(t, out);
                 }
             }
             Stmt::For(f) => {
                 collect_expr_bindings(&f.iter, out);
-                collect_target_bindings(&f.target, &mut out.locals);
+                collect_target_bindings(&f.target, out);
                 collect_suite_bindings(&f.body, out);
                 collect_suite_bindings(&f.orelse, out);
             }
@@ -3286,7 +4223,7 @@ fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
                 for item in &w.items {
                     collect_expr_bindings(&item.context_expr, out);
                     if let Some(opt) = &item.optional_vars {
-                        collect_target_bindings(opt, &mut out.locals);
+                        collect_target_bindings(opt, out);
                     }
                 }
                 collect_suite_bindings(&w.body, out);
@@ -3295,6 +4232,9 @@ fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
                 collect_suite_bindings(&t.body, out);
                 for h in &t.handlers {
                     let ast::ExceptHandler::ExceptHandler(eh) = h;
+                    if let Some(ty) = &eh.type_ {
+                        collect_expr_bindings(ty, out);
+                    }
                     if let Some(name) = &eh.name {
                         out.locals.insert(name.to_string());
                     }
@@ -3371,22 +4311,35 @@ fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
     }
 }
 
-fn collect_target_bindings(expr: &Expr, locals: &mut FxHashSet<String>) {
+/// The names an assignment target binds, and the bindings of the expressions it evaluates
+/// (`d[(k := key)] = v` binds `k`).
+fn collect_target_bindings(expr: &Expr, out: &mut ScopeBindings) {
     match expr {
         Expr::Name(n) => {
-            locals.insert(n.id.to_string());
+            out.locals.insert(n.id.to_string());
         }
-        Expr::Tuple(t) => {
-            for e in &t.elts {
-                collect_target_bindings(e, locals);
+        Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+            for e in elts {
+                collect_target_bindings(e, out);
             }
         }
-        Expr::List(l) => {
-            for e in &l.elts {
-                collect_target_bindings(e, locals);
+        Expr::Starred(s) => collect_target_bindings(&s.value, out),
+        other => collect_expr_bindings(other, out),
+    }
+}
+
+/// The names an assignment target binds, without the expressions it evaluates.
+fn collect_target_names(expr: &Expr, names: &mut FxHashSet<String>) {
+    match expr {
+        Expr::Name(n) => {
+            names.insert(n.id.to_string());
+        }
+        Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+            for e in elts {
+                collect_target_names(e, names);
             }
         }
-        Expr::Starred(s) => collect_target_bindings(&s.value, locals),
+        Expr::Starred(s) => collect_target_names(&s.value, names),
         _ => {}
     }
 }
@@ -3436,10 +4389,33 @@ fn collect_pattern_bindings(pat: &Pattern, locals: &mut FxHashSet<String>) {
     }
 }
 
+/// The bindings of the parts of a comprehension that run in its own scope: every `for` clause
+/// but the first one's iterable (which runs in the enclosing scope), the conditions, and the
+/// elements.
+fn collect_comprehension_bindings(
+    generators: &[ast::Comprehension],
+    elts: &[&Expr],
+    out: &mut ScopeBindings,
+) {
+    for (idx, g) in generators.iter().enumerate() {
+        if idx > 0 {
+            collect_expr_bindings(&g.iter, out);
+        }
+        collect_target_bindings(&g.target, out);
+        for cond in &g.ifs {
+            collect_expr_bindings(cond, out);
+        }
+    }
+    for elt in elts {
+        collect_expr_bindings(elt, out);
+    }
+}
+
 fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
     match expr {
         Expr::Named(n) => {
-            collect_target_bindings(&n.target, &mut out.locals);
+            collect_target_bindings(&n.target, out);
+            collect_target_names(&n.target, &mut out.assignment_expression_targets);
             collect_expr_bindings(&n.value, out);
         }
         Expr::Yield(y) => {
@@ -3452,38 +4428,32 @@ fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
             out.has_yield = true;
             collect_expr_bindings(&yf.value, out);
         }
-        Expr::Lambda(_) | Expr::Generator(_) => {
-            // Do NOT cross nested function / generator expression boundaries.
-        }
-        Expr::ListComp(lc) => {
-            for g in &lc.generators {
-                collect_expr_bindings(&g.iter, out);
-                for c in &g.ifs {
-                    collect_expr_bindings(c, out);
+        // A lambda's body is a scope of its own; its defaults run here.
+        Expr::Lambda(lam) => {
+            if let Some(params) = &lam.parameters {
+                for default in parameter_defaults(params) {
+                    collect_expr_bindings(default, out);
                 }
             }
-            collect_expr_bindings(&lc.elt, out);
         }
-        Expr::SetComp(sc) => {
-            for g in &sc.generators {
-                collect_expr_bindings(&g.iter, out);
-                for c in &g.ifs {
-                    collect_expr_bindings(c, out);
-                }
+        // A generator expression's outermost iterable runs here, and an assignment expression
+        // anywhere else in it binds here too (PEP 572); its other names are its own.
+        Expr::Generator(ge) => {
+            collect_expr_bindings(&ge.generators[0].iter, out);
+            let mut own = ScopeBindings::default();
+            collect_comprehension_bindings(&ge.generators, &[&ge.elt], &mut own);
+            for name in own.assignment_expression_targets {
+                out.locals.insert(name.clone());
+                out.assignment_expression_targets.insert(name);
             }
-            collect_expr_bindings(&sc.elt, out);
         }
+        // Inlined into this scope (PEP 709) apart from their iteration variables, which stay
+        // isolated; before 3.12 an assignment expression in one binds here all the same.
+        Expr::ListComp(lc) => collect_inlined_comprehension(&lc.generators, &[&lc.elt], out),
+        Expr::SetComp(sc) => collect_inlined_comprehension(&sc.generators, &[&sc.elt], out),
         Expr::DictComp(dc) => {
-            for g in &dc.generators {
-                collect_expr_bindings(&g.iter, out);
-                for c in &g.ifs {
-                    collect_expr_bindings(c, out);
-                }
-            }
-            if let Some(k) = &dc.key {
-                collect_expr_bindings(k, out);
-            }
-            collect_expr_bindings(&dc.value, out);
+            let elts: Vec<&Expr> = dc.key.as_deref().into_iter().chain([&*dc.value]).collect();
+            collect_inlined_comprehension(&dc.generators, &elts, out);
         }
         Expr::BoolOp(b) => {
             for v in &b.values {
@@ -3508,18 +4478,10 @@ fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
                 collect_expr_bindings(&item.value, out);
             }
         }
-        Expr::Set(s) => {
-            for e in &s.elts {
-                collect_expr_bindings(e, out);
-            }
-        }
-        Expr::List(l) => {
-            for e in &l.elts {
-                collect_expr_bindings(e, out);
-            }
-        }
-        Expr::Tuple(t) => {
-            for e in &t.elts {
+        Expr::Set(ast::ExprSet { elts, .. })
+        | Expr::List(ast::ExprList { elts, .. })
+        | Expr::Tuple(ast::ExprTuple { elts, .. }) => {
+            for e in elts {
                 collect_expr_bindings(e, out);
             }
         }
@@ -3544,24 +4506,75 @@ fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
             collect_expr_bindings(&s.slice, out);
         }
         Expr::Starred(s) => collect_expr_bindings(&s.value, out),
-        Expr::Slice(s) => {
-            if let Some(l) = &s.lower {
-                collect_expr_bindings(l, out);
-            }
-            if let Some(u) = &s.upper {
-                collect_expr_bindings(u, out);
-            }
-            if let Some(st) = &s.step {
-                collect_expr_bindings(st, out);
+        Expr::FString(_) | Expr::TString(_) => {
+            for field in heki_ast::interpolated_expressions(expr) {
+                collect_expr_bindings(field, out);
             }
         }
-        _ => {}
+        Expr::Slice(s) => {
+            for part in [&s.lower, &s.upper, &s.step].into_iter().flatten() {
+                collect_expr_bindings(part, out);
+            }
+        }
+        Expr::Name(_)
+        | Expr::StringLiteral(_)
+        | Expr::BytesLiteral(_)
+        | Expr::NumberLiteral(_)
+        | Expr::BooleanLiteral(_)
+        | Expr::NoneLiteral(_)
+        | Expr::EllipsisLiteral(_)
+        | Expr::IpyEscapeCommand(_) => {}
     }
+}
+
+/// The bindings of a list, set, or dict comprehension lowered into this scope: everything but
+/// its iteration variables (isolated per PEP 709, a scope of their own before 3.12).
+fn collect_inlined_comprehension(
+    generators: &[ast::Comprehension],
+    elts: &[&Expr],
+    out: &mut ScopeBindings,
+) {
+    collect_expr_bindings(&generators[0].iter, out);
+    let mut own = ScopeBindings::default();
+    collect_comprehension_bindings(generators, elts, &mut own);
+    let mut targets = FxHashSet::default();
+    for g in generators {
+        collect_target_names(&g.target, &mut targets);
+    }
+    own.locals.retain(|n| !targets.contains(n));
+    out.locals.extend(own.locals);
+    out.globals.extend(own.globals);
+    out.nonlocals.extend(own.nonlocals);
+    out.assignment_expression_targets
+        .extend(own.assignment_expression_targets);
+    out.has_yield |= own.has_yield;
 }
 
 // =============================================================================
 // Helpers
 // =============================================================================
+/// The `A1Hazard` kind of a frame-introspection function (Assumption A1(a)) by its spelling: a
+/// builtin's name, or `module.attr`. `vars` reads the caller's locals only without an argument.
+fn introspection_kind(spelling: &str, without_args: bool) -> Option<&'static str> {
+    match spelling {
+        "eval" | "builtins.eval" => Some("eval"),
+        "exec" | "builtins.exec" => Some("exec"),
+        "locals" | "builtins.locals" => Some("locals"),
+        "vars" | "builtins.vars" if without_args => Some("vars()"),
+        "sys._getframe" | "_getframe" => Some("sys._getframe"),
+        "inspect.currentframe" => Some("inspect.currentframe"),
+        "gc.get_objects" => Some("gc.get_objects"),
+        "gc.get_referrers" => Some("gc.get_referrers"),
+        "ctypes.pythonapi" => Some("ctypes.pythonapi"),
+        _ if spelling.ends_with("._getframe") => Some("sys._getframe"),
+        _ if spelling.ends_with(".currentframe") => Some("inspect.currentframe"),
+        _ if spelling.ends_with(".get_objects") && spelling.contains("gc.") => {
+            Some("gc.get_objects")
+        }
+        _ => None,
+    }
+}
+
 fn expr_dotted_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Name(n) => Some(n.id.to_string()),

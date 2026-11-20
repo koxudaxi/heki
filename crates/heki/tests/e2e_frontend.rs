@@ -1064,17 +1064,16 @@ fn ir_control_flow_statements() {
         })
         .map(|(b, _, _)| b)
         .unwrap();
+    // An exception leaving the `try` runs the `finally` body, then goes on.
     let finally = blocks[else_block as usize]["exc_target"].as_u64().unwrap();
     assert!(
         insts(t).iter().any(|(b, k, p)| *b == finally
             && *k == "Const"
             && p["literal"] == json!({"str": "done"}))
     );
-    assert!(
-        !blocks[finally as usize]["phis"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        blocks[finally as usize]["terminator"],
+        json!({"Raise": null})
     );
 
     // `with` items (several, tuple and list targets) enter in order and exit in reverse.
@@ -1505,7 +1504,9 @@ fn ir_comprehensions_follow_pep709() {
         gens.iter()
             .all(|g| var_name(c, &g["outer_iter"]) == Some("rows"))
     );
-    assert_eq!(strs(&c["captured_vars"]), ["cols"]);
+    // The cells CPython's `symtable` gives the function: `cols`, read by the first generator
+    // expression, and `hit`, bound by the assignment expressions of the second (PEP 572).
+    assert_eq!(strs(&c["captured_vars"]), ["cols", "hit"]);
     assert!(
         !qualnames(&ir315)
             .iter()
@@ -1673,14 +1674,19 @@ fn ir_newer_syntax() {
             ("os", false),
         ])
     );
-    // PEP 798 `{**group for group in groups}`: a dict comprehension element without a key,
-    // in place and as a 3.11-style comprehension function.
-    let merged = of_kind(f, "SubscriptStore");
-    assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0]["key_const"], Value::Null);
+    // PEP 798 unpacking elements extend the list (`[*row ...]`) and update the set and the
+    // dict (`{*row ...}`, `{**group ...}`), in place and as 3.11-style comprehension functions.
+    let calls = |f: &Value, method: &str| {
+        of_kind(f, "MethodCall")
+            .iter()
+            .filter(|m| m["method"] == method)
+            .count()
+    };
+    assert!(of_kind(f, "SubscriptStore").is_empty());
+    assert_eq!((calls(f, "extend"), calls(f, "update")), (1, 2));
     let ir311 = self::ir(TOUR_PEP810, "py311");
     let dictcomp = function(&ir311, "use_lazy.<locals>.<dictcomp>");
-    assert_eq!(of_kind(dictcomp, "SubscriptStore").len(), 1);
+    assert_eq!(calls(dictcomp, "update"), 1);
 
     // PEP 750 template strings and PEP 758 unparenthesized handlers.
     let ir = self::ir(TOUR_314, "py314");
@@ -1701,7 +1707,8 @@ fn ir_newer_syntax() {
         ["ValueError, TypeError"]
     );
 
-    // PEP 695 `type` statements bind an opaque value.
+    // PEP 695 `type` statements bind an alias whose value a scope of its own evaluates
+    // lazily: a closure the IR does not lower.
     let ir = self::ir(TOUR_312, "py312");
     let module = &ir["functions"][0];
     let stored: Vec<&str> = of_kind(module, "StoreGlobal")
@@ -1709,11 +1716,11 @@ fn ir_newer_syntax() {
         .map(|s| s["name"].as_str().unwrap())
         .collect();
     assert!(stored.starts_with(&["Alias", "Pair", "Variadic"]));
-    let opaque = of_kind(module, "Const")
+    let lazy = of_kind(module, "MakeClosure")
         .iter()
-        .filter(|c| c["literal"] == "other")
+        .filter(|c| c["func_id"].is_null())
         .count();
-    assert_eq!(opaque, 3);
+    assert_eq!(lazy, 3);
 
     // `from __future__ import annotations`: annotation text is still recorded.
     let ir = self::ir(TOUR_FUTURE, "py314");
@@ -1771,6 +1778,8 @@ fn ir_records_a1_hazards() {
             "gc.get_objects",
             "gc.get_objects",
             "gc.get_referrers",
+            // `ctypes.pythonapi.Py_IncRef(ns)` reads `ctypes.pythonapi`.
+            "ctypes.pythonapi",
             "sys._getframe",
             ".f_globals",
             ".f_locals",
@@ -1806,7 +1815,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     let (code, stdout, stderr) = p.heki(&["assumptions", "pkg"]);
     assert_eq!(code, 2, "{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 17, "{stdout}");
+    assert_eq!(lines.len(), 18, "{stdout}");
     assert!(lines.iter().all(|l| l.starts_with("pkg/tour.py:")));
     assert!(
         lines[0].ends_with("[a1_hazards] A1 hazard: eval"),
@@ -1815,7 +1824,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     );
     assert!(
         stderr.contains("Checked 4 file(s)")
-            && stderr.contains("17 A1 hazard(s), 2 parse/read error(s)"),
+            && stderr.contains("18 A1 hazard(s), 2 parse/read error(s)"),
         "{stderr}"
     );
     assert!(
@@ -1835,7 +1844,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     let records: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(records.len(), 18);
+    assert_eq!(records.len(), 19);
     assert_eq!(records[0]["path"], "pkg/notes.txt");
     let records = &records[1..];
     assert_eq!(records[0]["kind"], "eval");
@@ -1876,7 +1885,7 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
         assert_eq!(code, 0);
         assert_eq!(
             serde_json::from_str::<Vec<Value>>(&stdout).unwrap().len(),
-            17
+            18
         );
     }
     let (_, _, stderr311) = p.heki(&["assumptions", "pkg/tour.py", "--target-version", "py311"]);

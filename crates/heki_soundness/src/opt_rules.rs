@@ -23,6 +23,7 @@ use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::cmp::Reverse;
 
 use BuiltinKind::{Bytes, Dict, List, Set, Str, Tuple};
 use ObligationKind as K;
@@ -371,7 +372,11 @@ pub fn analyze_module(
             }
         }
     }
-    out.sort_by_key(|a| (a.span.start, a.rule));
+    // A `finally` body is lowered once per way out of its `try`: a statement in it has a
+    // candidate per copy, and is rewritten only if every copy is. Keep the least safe one.
+    let strength = |c: &OptCandidate| (Reverse(c.verdict.tier), c.fix().is_some());
+    out.sort_by_key(|a| (a.span.start, a.span.end, a.rule, strength(a)));
+    out.dedup_by(|later, kept| later.rule == kept.rule && later.span == kept.span);
     out
 }
 
@@ -1524,16 +1529,22 @@ impl<'a, 'c> Rules<'a, 'c> {
         Some((ls, indentation(self.m.source, ls).to_owned()))
     }
 
-    /// Hoist `<name> = <expr>` before the loop and replace `replace` with `<name>`.
-    /// The name is fresh (`base`, or `base_1`, ...): `None` when the loop is no `for`
-    /// statement.
+    /// Hoist `<name> = <expr>` before the loop and replace `replace`, the source of
+    /// `replaced`, with `<name>`. The name is fresh (`base`, or `base_1`, ...): `None` when the
+    /// loop is no `for` statement, or when `replaced` is the middle operand of a chained
+    /// comparison, which is also the next comparison's operand (replacing its text would
+    /// change that one too).
     fn hoist_edits(
         &self,
         lp: &NaturalLoop,
         base: &str,
         expr: &str,
         replace: Span,
+        replaced: VarId,
     ) -> Option<(String, Vec<TextEdit>)> {
+        if self.f().is_shared_chain_operand(replaced) {
+            return None;
+        }
         let (ls, indent) = self.for_stmt(lp)?;
         let name = self.hoisted_name(base);
         let edits = vec![
@@ -1552,20 +1563,9 @@ impl<'a, 'c> Rules<'a, 'c> {
         Some((name, edits))
     }
 
-    /// `e in <name>` with `<name>` as the last token of the compare: its span. A comparison
-    /// sharing its span with another one is part of a chain (`i in a in b`): the last token
-    /// may be another comparison's operand.
+    /// `e in <name>` with `<name>` as the last token of the compare (each comparison of a
+    /// chain spans its own operands): its span.
     fn container_name_span(&self, cmp: Span, name: &str) -> Option<Span> {
-        let compares_here = self
-            .f()
-            .blocks
-            .iter()
-            .flat_map(|b| &b.insts)
-            .filter(|i| matches!(i.kind, InstKind::Compare { .. }) && i.span == cmp)
-            .count();
-        if compares_here != 1 {
-            return None;
-        }
         let text = self.m.text(cmp)?;
         let head = text.strip_suffix(name)?;
         let head = head.trim_end();
@@ -1631,8 +1631,13 @@ impl<'a, 'c> Rules<'a, 'c> {
         if self.proven(&obs)
             && f.var_name(lst).is_some_and(is_identifier)
             && let Some(rspan) = self.container_name_span(cmp.span, &name)
-            && let Some((_, e)) =
-                self.hoist_edits(lp, &format!("{name}_set"), &format!("set({name})"), rspan)
+            && let Some((_, e)) = self.hoist_edits(
+                lp,
+                &format!("{name}_set"),
+                &format!("set({name})"),
+                rspan,
+                lst,
+            )
         {
             edits = e;
         }
@@ -1786,7 +1791,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         };
         if self.proven(&obs)
             && let Some(text) = self.m.text(call.span)
-            && let Some((_, e)) = self.hoist_edits(lp, &base, text, call.span)
+            && let Some((_, e)) = self.hoist_edits(lp, &base, text, call.span, rebuilt)
         {
             edits = e;
         }
@@ -1919,8 +1924,13 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .m
                 .text(app.span)
                 .is_some_and(|t| squash(t) == format!("{name}.append({pn})"))
-            && let Some((h, mut e)) =
-                self.hoist_edits(lp, &format!("{name}_set"), &format!("set({name})"), rspan)
+            && let Some((h, mut e)) = self.hoist_edits(
+                lp,
+                &format!("{name}_set"),
+                &format!("set({name})"),
+                rspan,
+                seen,
+            )
         {
             e.push(TextEdit {
                 span: Span {
@@ -2267,7 +2277,12 @@ impl<'a, 'c> Rules<'a, 'c> {
             let ai = inst_at(f, loc);
             let rewritten_slice = matches!(form, Some(FrontForm::SliceRebind { .. })) && loc == at;
             let (init, unpacks) = match &ai.kind {
-                InstKind::AllocBuiltin { kind: List, .. } => (true, false),
+                // A display or a comprehension. A starred target or pattern (`first, *rest =
+                // xs`) makes a list too, with no expression to turn into a deque.
+                InstKind::AllocBuiltin { kind: List, .. } => (
+                    true,
+                    self.m.text(ai.span).is_none_or(|t| !t.starts_with('[')),
+                ),
                 InstKind::Call {
                     dst,
                     callee_var,
@@ -2284,10 +2299,16 @@ impl<'a, 'c> Rules<'a, 'c> {
             if init && !unpacks && !lp.body.contains(&loc.0) {
                 init_sites.push(loc);
             } else if init && unpacks {
-                bad_alloc = Some(format!(
-                    "`list(...)` with `*` / `**` arguments (line {}) has no `deque` equivalent: `deque` reads a second argument as `maxlen`",
-                    self.line(ai.span.start)
-                ));
+                bad_alloc = Some(match ai.kind {
+                    InstKind::AllocBuiltin { .. } => format!(
+                        "the list is made by unpacking (line {}): there is no display to turn into a `deque`",
+                        self.line(ai.span.start)
+                    ),
+                    _ => format!(
+                        "`list(...)` with `*` / `**` arguments (line {}) has no `deque` equivalent: `deque` reads a second argument as `maxlen`",
+                        self.line(ai.span.start)
+                    ),
+                });
             } else if !rewritten_slice {
                 bad_alloc = Some(format!(
                     "it is also created at line {}",

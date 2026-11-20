@@ -1628,6 +1628,7 @@ $ cargo build
 $ python3 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/ tests/corpus/
 $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/difftest/counterexamples.py
+$ python3.15 tests/difftest/ir_counterexamples.py
 ```
 
 - `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15):
@@ -1638,6 +1639,8 @@ $ python3 tests/difftest/counterexamples.py
 - `verify_soundness_kb.py` checks every claim of the Layer 1 knowledge base
   (`kb/soundness/builtins.toml`) on the running interpreter.
 - `counterexamples.py` shows that the naive rewrites heki refuses really change behavior.
+- `ir_counterexamples.py` shows that the rewrites heki made before the IR modeled a shape (a
+  binding, an alias, a path) changed behavior; it needs CPython 3.15.
 
 ## Memory
 
@@ -2543,7 +2546,9 @@ than a list iterator: no iterator of the list may be live at a change, consumed 
 call (`q.extend(reversed(q))`), or used for more than its elements (`type(iter(q))`). `list(xs)`
 of a value that is not a builtin container becomes `deque(list(xs))`, which keeps the length
 query `list` makes; `list(**kw)` and `list(*args)` block the fix (`deque` reads a second
-argument as `maxlen`). Only `q = q[1:]` is a front pop: `q[1:n]` and `q[1::2]` are not.
+argument as `maxlen`), and so does a list a starred target or pattern makes (`first, *q =
+items`), which has no display to rewrite. Only `q = q[1:]` is a front pop: `q[1:n]` and
+`q[1::2]` are not.
 
 
 ---
@@ -2613,9 +2618,9 @@ Family: Execution Effects (EFF) · Opt-in · No automatic fix
 Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.
 
 ## What it does
-Checks for an `await`, or a call reaching blocking network I/O (directly or through project
-helpers, including the getter of a property read), while a `with` block holds a synchronous
-lock or a database transaction.
+Checks for an `await` (also the implicit ones of `async for` and `async with`), or a call
+reaching blocking network I/O (directly or through project helpers, including the getter of a
+property read), while a `with` block holds a synchronous lock or a database transaction.
 
 The held resource must be type-certain:
 
@@ -3072,9 +3077,9 @@ getter builds a new client).
 
 The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
 loops whose size the code fixes, when no data-sized loop is around them: displays of at most 8
-items (also through a name or a module constant bound to one that nothing grows, and through
-`enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer constants
-(`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
+items (also through a name or a module constant bound to one that nothing in the project
+grows, and through `enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer
+constants (`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
 initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`

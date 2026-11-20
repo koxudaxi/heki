@@ -33,6 +33,7 @@ $ cargo build
 $ python3 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/ tests/corpus/
 $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/difftest/counterexamples.py
+$ python3.15 tests/difftest/ir_counterexamples.py
 ```
 
 - `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15):
@@ -43,6 +44,8 @@ $ python3 tests/difftest/counterexamples.py
 - `verify_soundness_kb.py` checks every claim of the Layer 1 knowledge base
   (`kb/soundness/builtins.toml`) on the running interpreter.
 - `counterexamples.py` shows that the naive rewrites heki refuses really change behavior.
+- `ir_counterexamples.py` shows that the rewrites heki made before the IR modeled a shape (a
+  binding, an alias, a path) changed behavior; it needs CPython 3.15.
 
 ## Memory
 

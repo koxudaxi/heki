@@ -2033,22 +2033,35 @@ impl<'a> Extractor<'a> {
                 };
                 self.call(bb, &target, &call);
             }
+            // A comprehension scope's `.0` is the iterator its creator built, where the
+            // iteration starts (`child_iteration`).
             InstKind::MakeIter {
                 iterable, is_async, ..
-            } => self.iteration(bb, *iterable, *is_async, span),
+            } if self.f.var_name(*iterable) != Some(".0") => {
+                self.iteration(bb, *iterable, *is_async, span)
+            }
             _ => {}
         }
     }
 
     /// The comprehension or generator expression `child` created here iterates `iterable`
-    /// (its outermost one) at once: [`Self::iteration`], unless it is asynchronous (whether its
-    /// outermost loop is an `async for` is not recorded).
+    /// (its outermost one) at once, as its first clause does (`__iter__`, or `__aiter__` for an
+    /// `async for`): [`Self::iteration`]. A later `async for` clause does not change how the
+    /// first one starts.
     fn child_iteration(&mut self, bb: BlockId, child: FunctionId, iterable: VarId, span: Span) {
-        if matches!(
-            self.cx.ir().function(child).kind,
-            FunctionKind::Sync | FunctionKind::Generator
-        ) {
-            self.iteration(bb, iterable, false, span);
+        let first_is_async = self
+            .cx
+            .ir()
+            .function(child)
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .find_map(|i| match i.kind {
+                InstKind::MakeIter { is_async, .. } => Some(is_async),
+                _ => None,
+            });
+        if let Some(is_async) = first_is_async {
+            self.iteration(bb, iterable, is_async, span);
         }
     }
 

@@ -515,6 +515,17 @@ def returned_in_try(items):
             x = x + [i + size]
 
 
+def raised_accumulator(items):
+    """The handler may hold the raised list (raising it is a `TypeError`)."""
+    x = []
+    try:
+        raise x
+    except TypeError:
+        for i in items:
+            x = x + [i]
+    return x
+
+
 def stale_handler_alias(items, check):
     """The handler may still see `z` bound to the old list."""
     x = []
@@ -628,6 +639,7 @@ def main() -> int:
             run(two_candidates_one_try, items),
             run(branchy_try, items, n % 2),
             run(returned_in_try, items),
+            run(raised_accumulator, items),
             run(stale_handler_alias, items, int),
             run(many_sites, n, n % 5),
             run(consumed_before_the_loop, items),

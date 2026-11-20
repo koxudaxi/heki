@@ -107,7 +107,9 @@ pub struct ParamInfo {
     pub name: String,
     pub var: VarId,
     pub has_default: bool,
-    /// The default when it is a literal (`None`, `False`, `0`, `""`, ...).
+    /// The default when it is a literal (`None`, `False`, `0`, `""`, ...): what the callee
+    /// binds when the caller passes nothing. The default's value, evaluated where the function
+    /// is defined, is an operand of the `MakeClosure` that builds the function object.
     pub default: Option<ConstLiteral>,
     /// Keyword-only (after `*` or `*args`): never bound by position.
     pub kw_only: bool,
@@ -278,9 +280,13 @@ pub enum InstKind {
         dst: VarId,
         src: VarId,
     },
+    /// `del name`; the name is possibly unbound afterwards (a `LoadName` defines it).
     Delete {
         var: Option<VarId>,
         name: String,
+        /// The name is a module global (`del` in the module body or after `global name`).
+        #[serde(default)]
+        global: bool,
     },
     BinOp {
         dst: VarId,
@@ -353,7 +359,11 @@ pub enum InstKind {
         outer_iter: VarId,
         captured: Vec<VarId>,
     },
-    /// Nested function or lambda capturing outer variables.
+    /// A function, lambda, or class object, or a lazily evaluated scope without a lowered
+    /// body (`func_id: None`: a `type` alias). `captured` is every value the object keeps or
+    /// hands to code that runs later: its closure cells, defaults (the literal ones are also
+    /// the parameters' `ParamInfo::default`), eagerly evaluated annotations, and a class's
+    /// bases and keywords.
     MakeClosure {
         dst: VarId,
         func_id: Option<FunctionId>,
@@ -450,6 +460,35 @@ impl InstKind {
             | Self::SubscriptDelete { .. }
             | Self::ExitWith { .. } => None,
         }
+    }
+
+    /// Whether the instruction may raise an exception: everything but constants, copies, and
+    /// stores of names (a class statement's `MakeClosure` runs the metaclass and
+    /// `__init_subclass__`). A block has its `exc_target` edge only from such an instruction
+    /// or a `raise`, and a name is never rebound after one in the same block, so a handler
+    /// sees the bindings of the point that raised.
+    pub fn may_raise(&self) -> bool {
+        !matches!(
+            self,
+            Self::Const { .. }
+                | Self::Copy { .. }
+                | Self::StoreGlobal { .. }
+                | Self::StoreDeref { .. }
+                | Self::CatchException { .. }
+        )
+    }
+
+    /// Whether the instruction suspends a coroutine until what it awaits completes: an `await`,
+    /// and the implicit awaits of `async for` (`__anext__`) and `async with` (`__aenter__`,
+    /// `__aexit__`). Other tasks run meanwhile.
+    pub fn suspends(&self) -> bool {
+        matches!(
+            self,
+            Self::Await { .. }
+                | Self::IterNext { is_async: true, .. }
+                | Self::EnterWith { is_async: true, .. }
+                | Self::ExitWith { is_async: true, .. }
+        )
     }
 
     /// Collect all SSA operand `VarId`s read by this instruction.
@@ -713,6 +752,29 @@ impl IrFunction {
             } => Some(*b),
             _ => None,
         }
+    }
+
+    /// Whether `var` is the middle operand of a chained comparison (`a < var < c`): two
+    /// comparisons read the one evaluation of its expression, so its source text is an operand
+    /// of both.
+    pub fn is_shared_chain_operand(&self, var: VarId) -> bool {
+        let links: Vec<(Span, VarId, VarId)> = self
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(|i| match i.kind {
+                InstKind::Compare { lhs, rhs, .. } if lhs == var || rhs == var => {
+                    Some((i.span, lhs, rhs))
+                }
+                _ => None,
+            })
+            .collect();
+        links.iter().any(|&(left, _, rhs)| {
+            rhs == var
+                && links.iter().any(|&(right, lhs, _)| {
+                    lhs == var && right.start < left.end && left.start < right.end
+                })
+        })
     }
 
     /// Whether operand `index` of the display or call defining `dst` is written with `*`.

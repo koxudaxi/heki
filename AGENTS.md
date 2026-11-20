@@ -63,6 +63,8 @@ python3.15 tests/sentinel/verify_soundness_kb.py
 # Adversarial Soundness counterexamples (every one Blocked or Disproved)
 python3.15 tests/difftest/counterexamples.py
 python3.15 tests/difftest/soundness_e2e_counterexamples.py
+# Shapes the IR models (frames, bindings, paths); CPython 3.15 only (template strings, PEP 798)
+python3.15 tests/difftest/ir_counterexamples.py
 # Generated documentation
 cargo build --release -p heki
 python3.15 scripts/build_docs.py --heki target/release/heki --check

@@ -209,7 +209,8 @@ pub enum ObligationStatus {
     Disproved { counterexample: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Ordered from the safest verdict to the least safe one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafetyTier {
     Safe,

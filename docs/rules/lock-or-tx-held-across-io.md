@@ -7,9 +7,9 @@ Family: Execution Effects (EFF) · Opt-in · No automatic fix
 Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.
 
 ## What it does
-Checks for an `await`, or a call reaching blocking network I/O (directly or through project
-helpers, including the getter of a property read), while a `with` block holds a synchronous
-lock or a database transaction.
+Checks for an `await` (also the implicit ones of `async for` and `async with`), or a call
+reaching blocking network I/O (directly or through project helpers, including the getter of a
+property read), while a `with` block holds a synchronous lock or a database transaction.
 
 The held resource must be type-certain:
 

@@ -30,11 +30,12 @@ use heki_effect::{
     CallHop, CallSite, EffectSummary, FuncKey, ModuleInput, ProjectDecls, ProjectIndex,
 };
 use heki_env::{HekiConfig, Severity};
-use heki_ir::IrFunction;
+use heki_ir::{IrFunction, ModuleConstants};
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::path::Path;
 use thiserror::Error;
 
@@ -554,6 +555,29 @@ pub fn check_project(
 }
 
 impl<'a> CheckContext<'a> {
+    /// The unit's module constants without the displays another project module may grow or
+    /// rebinds (`ProjectDecls::grown_elsewhere`): the constants the Advisory rules take as
+    /// fixed.
+    pub fn fixed_constants<'u>(&self, unit: &'u ModuleUnit<'_>) -> Cow<'u, ModuleConstants> {
+        let own = &unit.input.ir.constants;
+        let grown: Vec<&String> = own
+            .displays
+            .keys()
+            .filter(|n| {
+                self.decls
+                    .grown_elsewhere(&format!("{}.{n}", unit.input.module_name))
+            })
+            .collect();
+        if grown.is_empty() {
+            return Cow::Borrowed(own);
+        }
+        let mut fixed = own.clone();
+        for n in grown {
+            fixed.displays.remove(n);
+        }
+        Cow::Owned(fixed)
+    }
+
     pub fn unit(&self, path: &Path) -> Option<&'a ModuleUnit<'a>> {
         self.unit_by_path.get(path).map(|&i| &self.units[i])
     }

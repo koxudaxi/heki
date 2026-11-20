@@ -311,21 +311,21 @@ const INTERP: &[Expect] = &[
             ("OPT101", V::Fix(&["x.append(-i)"])),
         ],
     ),
+    // The `finally` loop runs after `return x` took the list: appending would change the
+    // returned list (disproved, not reported).
+    ("returned_in_try", &[]),
     (
-        "returned_in_try",
+        "raised_accumulator",
         &[(
             "OPT101",
             V::Blocked("Unique(x): it may be shared: it is returned or raised"),
         )],
     ),
     (
+        // `check(i)` may raise after the append with `z` still the old list, which the
+        // handler returns: appending would change it (disproved, not reported).
         "stale_handler_alias",
-        &[(
-            "OPT101",
-            V::Blocked(
-                "ExceptionStateSafe(x): an exception handler may still see `z` bound to the old object",
-            ),
-        )],
+        &[],
     ),
     (
         "many_sites",
@@ -371,13 +371,8 @@ const ACCUMULATE: &[Expect] = &[
         "rhs_changes_other",
         &[("OPT101", V::Fix(&["x.append(other.pop())"]))],
     ),
-    (
-        "deleted_accumulator",
-        &[(
-            "OPT101",
-            V::Blocked("ExactType(x): its value is not tracked here"),
-        )],
-    ),
+    // The read after `del x` is of an unbound name, not of the accumulator.
+    ("deleted_accumulator", &[]),
     (
         "merge_exact_dict",
         &[("OPT102", V::Fix(&["d.update(extra)"]))],
@@ -551,13 +546,13 @@ const HOIST: &[Expect] = &[
             V::Blocked("ZeroTripExceptionSafe(allowed): element types are unknown"),
         )],
     ),
+    // The path where `allowed` is unbound returns first: code after the `return` flows
+    // nowhere, and the hoisted set is always built from a bound name.
     (
         "unbound_in_dead_code",
         &[(
             "OPT110",
-            V::Blocked(
-                "ZeroTripExceptionSafe(allowed): `allowed` may be unbound before the loop; hoisting would raise `NameError`",
-            ),
+            V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
         )],
     ),
     (
@@ -773,7 +768,18 @@ const HOIST: &[Expect] = &[
     ("rebuild_in_a_bounded_loop", &[]),
     ("rebuild_tuple_of_a_tuple", &[]),
     // A comparison chain shares one span: no edit can name the right operand.
-    ("chained_membership", &[("OPT110", V::Hand)]),
+    // Each link of the chain is a comparison of its own: the first one's `allowed` is the
+    // second one's operand too (no automatic edit), and the second probes with a list.
+    (
+        "chained_membership",
+        &[
+            ("OPT110", V::Hand),
+            (
+                "OPT110",
+                V::Blocked("HashConsistentProbe(allowed): `allowed` may have a custom"),
+            ),
+        ],
+    ),
     // A comprehension's or generator expression's `for` clause is no statement to hoist before.
     (
         "comprehension_clause_on_its_own_line",
@@ -955,7 +961,11 @@ const DEQUE: &[Expect] = &[
             V::Blocked("DequeEquivalentOps(q): the result of `reversed(...)` (line"),
         )],
     ),
+    ("unpacked_queue", &[("OPT120", V::Blocked(UNPACKED_QUEUE))]),
+    ("matched_queue", &[("OPT120", V::Blocked(UNPACKED_QUEUE))]),
 ];
+
+const UNPACKED_QUEUE: &str = "DequeEquivalentOps(q): the list is made by unpacking";
 
 #[test]
 fn deque_rules() {
@@ -1522,6 +1532,181 @@ fn a_fixpoint_not_reached_in_64_passes_blocks_every_candidate() {
         "sound_fixpoint",
         &[("cases.py", &shift_register(20))],
         &[("shift", &[("OPT101", V::Fix(&[ONE]))])],
+        true,
+    );
+}
+
+// ================================================ frames, bindings, and paths the IR models
+
+const STORED: &str = "Unique(xs): it may be shared: stored in a container, attribute, or global";
+
+const IR_COUNTEREXAMPLES: &[Expect] = &[
+    // A replacement field may rebind a builtin name or store the accumulator.
+    ("cx_walrus_in_fstring", &[]),
+    ("cx_nested_format_spec", &[("OPT101", V::Blocked(STORED))]),
+    // A definition's header, a handler's type, and a target's subscript bind in the function:
+    // `list` is a local name there, not the builtin.
+    ("cx_walrus_in_default", &[]),
+    ("cx_walrus_in_lambda_default", &[]),
+    ("cx_walrus_in_decorator", &[]),
+    ("cx_walrus_in_class_base", &[]),
+    ("cx_walrus_in_handler_type", &[]),
+    ("cx_walrus_in_subscript_target", &[]),
+    // An assignment expression in a generator expression rebinds the function's cell.
+    ("cx_walrus_in_generator_expression", CAPTURED),
+    ("cx_walrus_in_nested_generator_expressions", CAPTURED),
+    // Only a scope nested in the child reads the cell.
+    ("cx_capture_through_function", CAPTURED),
+    ("cx_capture_through_class", CAPTURED),
+    ("cx_capture_through_generator_expression", CAPTURED),
+    // A function keeps its defaults and annotations (evaluated eagerly before 3.14, closed
+    // over by `__annotate__` from 3.14), a type parameter's bound or a type alias's value
+    // closes over the names it reads, and a class hands its keywords to `__init_subclass__`.
+    ("cx_default_keeps_value", CAPTURED),
+    ("cx_keyword_only_default_keeps_value", CAPTURED),
+    ("cx_lambda_default_keeps_value", CAPTURED),
+    ("cx_return_annotation_keeps_value", CAPTURED),
+    ("cx_parameter_annotation_keeps_value", CAPTURED),
+    ("cx_class_annotation_keeps_value", CAPTURED),
+    ("cx_type_parameter_bound_keeps_value", CAPTURED),
+    ("cx_type_alias_keeps_value", CAPTURED),
+    ("cx_class_keyword_reaches_user_code", CAPTURED),
+    // `3 < 2` stops the chain before the assignment expression runs.
+    ("cx_chained_comparison_short_circuits", &[]),
+    // The middle `keys` is also the second comparison's operand: no edit may replace it.
+    (
+        "cx_membership_in_chained_comparison",
+        &[
+            ("OPT110", V::Hand),
+            (
+                "OPT110",
+                V::Blocked("HashConsistentProbe(keys): `keys` may have a custom"),
+            ),
+        ],
+    ),
+    (
+        "old_membership_in_chained_comparison",
+        &[("OPT110", V::Hand)],
+    ),
+    // A capture binds an item of the subject, which may be the caller's list.
+    ("cx_sequence_pattern_capture", &[]),
+    ("cx_as_pattern_capture", &[]),
+    ("cx_mapping_pattern_capture", &[]),
+    // `echo[acc:]` hands `slice(acc, None, None)` to `__getitem__`; a template keeps `acc`.
+    (
+        "cx_slice_bound_reaches_getitem",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
+    (
+        "cx_template_keeps_value",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
+    // `locals` / `eval` reached through an alias or a call of `map` run in this frame.
+    (
+        "cx_locals_through_alias",
+        &[("OPT101", V::Blocked("A1HazardFree: A1 hazard: `locals`"))],
+    ),
+    (
+        "cx_eval_called_by_map",
+        &[("OPT101", V::Blocked("A1HazardFree: A1 hazard: `eval`"))],
+    ),
+    // `keys` may be unbound where the hoisted statement would run.
+    ("cx_deleted_on_one_branch", &[]),
+];
+
+const CAPTURED: &[(&str, V)] = &[(
+    "OPT101",
+    V::Blocked("Unique(acc): it may be shared: its name is captured by a nested function"),
+)];
+
+#[test]
+fn ir_counterexamples_stay_unrewritten() {
+    check_fixture_unchanged(
+        "sound_ir_cx",
+        "tests/difftest/ir_counterexamples.py",
+        IR_COUNTEREXAMPLES,
+    );
+}
+
+/// The originals of a counterexample fixture: the verdicts of `expect`, no edit under any
+/// `--fix`, and CPython confirms that each old rewrite diverged.
+fn check_fixture_unchanged(name: &str, fixture: &str, expect: &[Expect]) {
+    let p = Project::new(name);
+    let original = repo_file(fixture);
+    p.write("cases.py", &original);
+    // Before 3.14 annotations are evaluated eagerly, from 3.14 lazily: both keep the object.
+    for version in ["py313", "py315"] {
+        let args = ["--include-size-dependent", "--target-version", version];
+        assert_verdicts(&opt_json(&p, &args), expect);
+    }
+    let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
+    assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
+    assert_eq!(p.read("cases.py"), original);
+    let transcript = run_python(&p.dir, "cases.py");
+    let total = transcript.lines().count() - 1;
+    assert!(
+        transcript.contains(&format!("old rewrites diverge: {total}/{total}")),
+        "{transcript}"
+    );
+}
+
+#[test]
+fn string_annotations_keep_nothing() {
+    // Under `from __future__ import annotations` the function keeps the annotation's text.
+    let src = "from __future__ import annotations\n\n\ndef tagged(items):\n    acc = []\n    def tag() -> acc:\n        pass\n    old = tag.__annotations__[\"return\"]\n    for x in items:\n        acc = acc + [x]\n    return old, acc\n\n\nprint(tagged([1]))\n";
+    check_module(
+        "sound_string_annotations",
+        &[("cases.py", src)],
+        &[("tagged", &[("OPT101", V::Fix(&["acc.append(x)"]))])],
+        true,
+    );
+}
+
+#[test]
+fn the_last_operand_of_a_chained_comparison_is_its_own() {
+    // `i in keys == keys` would become `i in keys_set == keys`, which changes the second
+    // comparison; the last operand of `0 < i in keys` belongs to one comparison only.
+    let src = "def shared(n):\n    keys = list(range(9))\n    hit = None\n    for i in range(n):\n        hit = i in keys == keys\n    return hit\n\n\ndef last(n):\n    keys = list(range(9))\n    hit = None\n    for i in range(n):\n        hit = 0 < i in keys\n    return hit\n\n\nprint(shared(1), last(2))\n";
+    check_module(
+        "sound_chain_operands",
+        &[("cases.py", src)],
+        &[
+            ("shared", &[("OPT110", V::Hand)]),
+            (
+                "last",
+                &[(
+                    "OPT110",
+                    V::Fix(&["    keys_set = set(keys)\n", "keys_set"]),
+                )],
+            ),
+        ],
+        true,
+    );
+}
+
+#[test]
+fn a_finally_body_is_rewritten_only_if_every_way_through_it_is_safe() {
+    // The `finally` loop runs after the early `return` with `acc` the caller's list, and after
+    // normal completion with a fresh one: rewriting it is unsafe. Without an alias on any path
+    // it is safe.
+    let src = "def finally_after_return(n, early, shared):\n    acc = []\n    try:\n        if early:\n            acc = shared\n            return None\n    finally:\n        for x in range(n):\n            acc = acc + [x]\n    return len(acc)\n\n\ndef finally_all_safe(n, early):\n    acc = []\n    try:\n        if early:\n            return None\n    finally:\n        for x in range(n):\n            acc = acc + [x]\n    return len(acc)\n\n\ns = []\nfinally_after_return(1, True, s)\nprint(s, finally_all_safe(2, True), finally_all_safe(2, False))\n";
+    check_module(
+        "sound_finally_copies",
+        &[("cases.py", src)],
+        &[(
+            "finally_all_safe",
+            &[("OPT101", V::Fix(&["acc.append(x)"]))],
+        )],
         true,
     );
 }

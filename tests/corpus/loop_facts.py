@@ -191,3 +191,53 @@ def cap_starred(read, parts):
     buf = b""
     while len(*parts) < 10:
         buf += read()
+
+
+def shadowed_range(range):
+    for _ in range(1):
+        pass
+
+
+def grown_constructor(items):
+    xs = list("a")
+    xs.extend(items)
+    for x in xs:
+        pass
+
+
+def ungrown_constructor():
+    xs = list("ab")
+    for x in xs:
+        pass
+
+
+def returned_alias(items):
+    xs = []
+    other = min(xs, xs)
+    other.extend(items)
+    for x in xs:
+        pass
+
+
+def generator_over_range():
+    return sum(1 for _ in range(3))
+
+
+def drained_queue(inactive_users):
+    while inactive_users:
+        inactive_users.pop()
+
+
+def drained_active(active_users):
+    while active_users:
+        active_users.pop()
+
+
+class Worker:
+    def serve(self):
+        while self._isRunning:
+            pass
+
+    def until_shutdown(self):
+        while not self.shutdown_requested:
+            pass

@@ -87,7 +87,7 @@ def rhs_changes_other(items):
 
 
 def deleted_accumulator(items):
-    """`del x` before the read: the value is not tracked (the loop raises `NameError`)."""
+    """`del x` before the read: `x` is unbound there (the loop raises `UnboundLocalError`)."""
     x = []
     for i in items:
         print(x)

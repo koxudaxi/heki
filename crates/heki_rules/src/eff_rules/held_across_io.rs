@@ -111,7 +111,10 @@ fn offense(
     inst: &Inst,
 ) -> Option<Offense> {
     match &inst.kind {
-        InstKind::Await { .. } => Some(Offense::Await),
+        // An `async with` held across already suspended at its entry, which this lock region
+        // covers too: its exit is not reported again.
+        InstKind::ExitWith { .. } => None,
+        kind if kind.suspends() => Some(Offense::Await),
         // Reading a property runs its getter (a call site at the read); iterating a generator
         // runs its body (a call site at the iteration).
         kind if anchors_call_site(kind) => {

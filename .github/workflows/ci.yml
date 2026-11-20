@@ -155,6 +155,10 @@ jobs:
         run: python tests/difftest/counterexamples.py
       - name: Counterexamples of the Soundness rewrites, end to end
         run: python tests/difftest/soundness_e2e_counterexamples.py
+      # Template strings and PEP 798 comprehensions: CPython 3.15 only.
+      - name: Counterexamples of the shapes the IR models
+        if: matrix.python == '3.15'
+        run: python tests/difftest/ir_counterexamples.py
 
   memory:
     name: peak memory

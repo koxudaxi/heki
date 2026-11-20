@@ -8,13 +8,16 @@
 
 use crate::interpreter::{Allocs, Analysis, Def, FnCtx};
 use crate::liveness::Liveness;
-use crate::{ExactTypeVal, FrameState, KindMask, ObligationStatus, SafetyTier, UniqueState};
+use crate::{ExactTypeVal, FrameState, KindMask, ObligationStatus, SafetyTier};
 use heki_ast::{LineIndex, Span};
 use heki_ir::{BlockId, BuiltinKind, InstKind, NaturalLoop, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::fmt;
+
+/// Why nothing is proven of a value the analysis holds no state for.
+const UNTRACKED: &str = "its value is not tracked here";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ObligationKind {
@@ -250,8 +253,11 @@ impl<'a, 'c> Checker<'a, 'c> {
         v: VarId,
         allowed: &[BuiltinKind],
     ) -> ProofObligation {
-        let status = match st.var_type.get(&v) {
-            Some(ExactTypeVal::Exact { ty, origin }) if allowed.contains(ty) => {
+        let untracked = ExactTypeVal::Unknown {
+            reason: UNTRACKED.into(),
+        };
+        let status = match st.var_type.get(&v).unwrap_or(&untracked) {
+            ExactTypeVal::Exact { ty, origin } if allowed.contains(ty) => {
                 ObligationStatus::Established {
                     evidence: format!(
                         "exact builtin `{}` created at line {}",
@@ -260,32 +266,29 @@ impl<'a, 'c> Checker<'a, 'c> {
                     ),
                 }
             }
-            Some(ExactTypeVal::Exact { ty, .. }) => ObligationStatus::Blocked {
+            ExactTypeVal::Exact { ty, .. } => ObligationStatus::Blocked {
                 blocker: format!("it is a `{}`", ty.name()),
             },
-            Some(ExactTypeVal::Unknown { reason }) => ObligationStatus::Blocked {
+            ExactTypeVal::Unknown { reason } => ObligationStatus::Blocked {
                 blocker: format!(
                     "its exact type is unknown ({reason}); type annotations are not trusted"
                 ),
-            },
-            None => ObligationStatus::Blocked {
-                blocker: "its value is not tracked here".into(),
             },
         };
         self.ob(ObligationKind::ExactType, subject, status)
     }
 
     pub fn unique(&self, subject: &str, st: &FrameState, v: VarId) -> ProofObligation {
-        let status = match st.var_unique.get(&v) {
-            Some(UniqueState::Unique { .. }) => ObligationStatus::Established {
+        let witness = st.shared_witness(v);
+        let status = if st.is_unique(v) {
+            ObligationStatus::Established {
                 evidence: "only local, tracked references exist".into(),
-            },
-            Some(UniqueState::Shared { witness }) => ObligationStatus::Blocked {
-                blocker: format!("it may be shared: {}", witness.describe(self.lines)),
-            },
-            None => ObligationStatus::Blocked {
-                blocker: "its value is not tracked here".into(),
-            },
+            }
+        } else {
+            let why = witness.map_or(UNTRACKED.to_owned(), |w| {
+                format!("it may be shared: {}", w.describe(self.lines))
+            });
+            ObligationStatus::Blocked { blocker: why }
         };
         self.ob(ObligationKind::Unique, subject, status)
     }
@@ -602,10 +605,11 @@ impl<'a, 'c> Checker<'a, 'c> {
                 evidence: "bound outside the loop, unique, and never mutated in it".into(),
             }
         } else {
-            let why = match st.var_unique.get(&v) {
-                Some(UniqueState::Shared { witness }) => witness.describe(self.lines),
-                _ => "its contents are not tracked".into(),
-            };
+            let why = st
+                .shared_witness(v)
+                .map_or("its contents are not tracked".to_owned(), |w| {
+                    w.describe(self.lines)
+                });
             ObligationStatus::Blocked {
                 blocker: format!("it may change during the loop: {why}"),
             }

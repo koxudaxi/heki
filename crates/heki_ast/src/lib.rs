@@ -224,6 +224,46 @@ impl ParsedModule {
     }
 }
 
+/// The replacement-field expressions of an f-string or a t-string, in evaluation order: each
+/// field's expression, then the fields of its format specification (`f"{x:{width}}"`), which
+/// may nest again. Any other expression has none.
+pub fn interpolated_expressions(expr: &ruff_python_ast::Expr) -> Vec<&ruff_python_ast::Expr> {
+    use ruff_python_ast::{Expr, FStringPartRef, InterpolatedStringElements};
+
+    fn push<'a>(elements: &'a InterpolatedStringElements, out: &mut Vec<&'a Expr>) {
+        for field in elements.interpolations() {
+            out.push(&field.expression);
+            if let Some(spec) = &field.format_spec {
+                push(&spec.elements, out);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    if let Some(fs) = expr.as_f_string_expr() {
+        for part in fs.value.iter() {
+            if let FStringPartRef::FString(f) = part {
+                push(&f.elements, &mut out);
+            }
+        }
+    }
+    if let Some(ts) = expr.as_t_string_expr() {
+        for t in ts.value.iter() {
+            push(&t.elements, &mut out);
+        }
+    }
+    out
+}
+
+/// The values a template string keeps (`Template.values`): its top-level replacement fields,
+/// in source order (a format specification's fields become text).
+pub fn template_values(ts: &ruff_python_ast::ExprTString) -> Vec<&ruff_python_ast::Expr> {
+    ts.value
+        .iter()
+        .flat_map(|t| t.elements.interpolations().map(|i| &*i.expression))
+        .collect()
+}
+
 /// Parse Python source text with Python 3.15 syntax enabled (including PEP 810 `lazy import`).
 pub fn parse_module(source: &str) -> Result<ParsedModule, Vec<ParseError>> {
     let options = ruff_python_parser::ParseOptions::from(ruff_python_ast::PySourceType::Python)

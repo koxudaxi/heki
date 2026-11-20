@@ -63,7 +63,8 @@ BasicBlock {
     id, phis: Vec<PhiNode>,
     insts:      Vec<Inst>,               // every instruction keeps its byte span in the source
     terminator: Jump | Branch | Return | Raise | Unreachable,
-    exc_target: Option<BlockId>,         // where an exception raised in this block goes
+    exc_target: Option<BlockId>,         // where an exception raised in this block goes (set by
+                                         // its first instruction that may raise, or its `raise`)
 }
 ```
 
@@ -73,12 +74,12 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Category | Instructions | Notes |
 |---|---|---|
 | Constants and allocation | `Const`, `AllocBuiltin(kind, elems)`, `DictLiteral(entries)` | `list` / `dict` / `set` / `tuple` / `str` / `bytes` / number literals, comprehensions, unshadowed builtin constructors; `DictLiteral` keeps the order of `**` unpacking (`{**d, ...}` vs `{**other, **d}`) |
-| Names | `LoadGlobal`, `LoadName`, `LoadDeref`, `StoreGlobal`, `StoreDeref`, `Copy`, `Delete`, `Import` | `Copy` adds to the direct alias set, `Delete` removes by strong update; `Import` / `LoadGlobal` carry the PEP 810 `is_lazy` flag |
-| Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; until types are exact, any special method may run |
-| Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds |
-| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones; `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
-| Iteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable |
-| Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique); `Yield` makes the yielded value `Shared` |
+| Names | `LoadGlobal`, `LoadName`, `LoadDeref`, `StoreGlobal`, `StoreDeref`, `Copy`, `Delete`, `Import` | `Copy` adds to the direct alias set, `Delete` removes by strong update and leaves the name possibly unbound (a `LoadName` is its value until it is bound again, also at the end of an `except E as e:` handler; `Delete.global` marks a module global); `Import` / `LoadGlobal` carry the PEP 810 `is_lazy` flag |
+| Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; a chained comparison `a < b < c` branches after each link like `a < b and b < c`, with `b` evaluated once and each `Compare` spanning its own operands; until types are exact, any special method may run |
+| Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it; a template string builds the tuple of its fields' values (`Template.values`) and is otherwise opaque |
+| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
+| Iteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (a `type` alias is a `MakeClosure` without a lowered body) |
+| Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
 | Exceptions | `CatchException(types)` | Starts an exception handler |
 
@@ -88,21 +89,59 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   (depth `d + 1`) starts with `IterNext(it)` (this removed, by construction, the 7 Stage 0-A
   false positives of `EFF102` / `EFF103` that took the one-time `for.iter` call for a call in the
   loop).
+- **Unreachable code** (after a `return`, `break`, `continue`, or `raise`, or after a `try`
+  every path of which leaves) is lowered into blocks without predecessors that end in
+  `Unreachable`: no merge, back edge, or handler takes a value from it.
+- **Exception edges carry the bindings of the point that raised**: inside a `try` or `with`
+  body a name is never rebound after an instruction that may raise in the same block
+  (`InstKind::may_raise`; the binding starts a new block), so a handler's phi merges the
+  bindings each raising point had; the Soundness lane's liveness takes a handler's needs as
+  live before each such instruction. A module-level read of a `lazy import`ed name loads the
+  global, since it may import the module there and raise (PEP 810).
+- **Leaving `with` and `try`**: a `return`, `break`, or `continue` exits each `with` it leaves
+  (`ExitWith`) and runs each `finally` body on the way, innermost first; a `finally` body is
+  lowered once per way out of its `try` (normal completion, an exception, which it re-raises
+  afterwards, and each jump), as CPython compiles it, and the Soundness lane rewrites a
+  statement in it only if every copy is proven safe. A typed `except` clause's test is opaque
+  (a bare `except:` always matches); every `except*` clause may run on part of the group;
+  an exception no clause takes is raised again.
+- **Unpacking** (`a, *rest, b = value`, also in `for` and `with` targets): every item is read
+  (`SubscriptLoad` of a constant index at the target's position, negative after a star) before
+  any target is written; `*rest` binds a new list.
+- **`match`**: each case tests its pattern (PEP 634) and goes to the next case when a test
+  fails: a value pattern is a `Compare` (`==`, or `is` for `None` / `True` / `False`), and the
+  shape tests of sequence, mapping, and class patterns are an opaque `Const` (both outcomes
+  possible); only wildcard and capture patterns always match. Captures bind the matched
+  component once the whole pattern matched: an item (`SubscriptLoad`, negative after a star), a
+  mapping value, an attribute (a positional class argument reads `__match_args__[i]`), a new
+  list for `*rest`, a new dict for `**rest`; an or-pattern merges its alternatives' bindings.
 - **Comprehensions and generator expressions**: when
   `RuntimeProfile.pep709_inlined_comprehensions` is true (3.12+), comprehensions are inlined into
   the enclosing frame; generator expressions are separate functions created by `MakeGenExpr`.
+  An element is `append` / `add` / an item store on the accumulator, or a `Yield`; an
+  unpacking element (3.15 PEP 798: `[*xs for ...]`, `{**m for ...}`, `(*xs for ...)`) is
+  `extend` / `update`, or a `YieldFrom`.
+- **A1 hazards** are references to a frame-introspection function, not only calls of it: a
+  read of `eval` / `exec` / `locals` / `vars` (the builtin, or a name an import binds to one,
+  in the scope the read resolves to), of `sys._getframe` and the like (through `import m as
+  alias` too), and of a module global the module body binds to one (`snapshot = locals`) are
+  hazards of the function that reads them, since whatever calls the value runs it in that
+  frame (`map(eval, codes)`); `vars(x)` with an argument reads no frame.
 - **A1 fallback**: a function with `a1_hazards` is excluded **from `heki_soundness` only**;
   **`heki_effect` (family 1 `MUT`, family 2 `EFF` / `DATA`) continues**.
 - **`LoopBound`** (never a Soundness premise; used for profitability and Advisory noise only):
-  - `ConstSmall(k)`: a `for` over a small display (below) or `range(k)` / `range(a, b)`
-    spanning at most 8, also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
+  - `ConstSmall(k)`: a `for` over a small display (below) or `range(...)` (the builtin, by
+    name resolution) spanning at most 8, also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
     `filter`, and `.items()` / `.keys()` / `.values()`, and with range bounds that are constant
     integer expressions (`+`, `-`, `*`, module constants included).
   - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
     handler) over a small constant range or a target named like `retry` / `attempt`, or a
     `while` loop with a retry body that sleeps.
-  - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops, and
-    `while True:` with a retry body that sleeps (resident workers and reconnect loops).
+  - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops (the
+    flag's name has the word `running`, `active`, or `alive`, or after `not` a word like `stop`
+    or `shutdown`, and the body does not drain it as a collection: no `pop()` / `popleft()` /
+    `remove()` ..., subscript, or `for` over it), and `while True:` with a retry body that
+    sleeps (resident workers and reconnect loops).
   - `Unbounded`: everything else.
 - **Size facts** (`heki_ir::facts`, the one home of size and trip-count facts; profitability and
   Advisory noise only, never Soundness premises):
@@ -118,6 +157,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
     read other modules' small displays through the declarations (`ModuleDecls.small_globals`,
     `ClassDecl.attr_displays`), so the language server re-checks their users when they change.
+    A module display another module may grow or rebinds (`cfg.QUEUE.extend(more)`, `from cfg
+    import QUEUE` and `QUEUE.append(x)`, `cfg.QUEUE = []`; `ModuleDecls.grown_globals`, by the
+    shared `FnIndex::grown_vars`) is not fixed for the Advisory rules, in its own module or
+    any other (`ProjectDecls::grown_elsewhere`, a declaration key the language server tracks).
 
 ---
 
