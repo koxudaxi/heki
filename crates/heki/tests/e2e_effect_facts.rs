@@ -73,3 +73,43 @@ async def handler(cur: sqlite3.Cursor) -> None:
     assert_eq!(lines(&p, "EFF103"), vec![8, 22, 28]);
     assert_eq!(lines(&p, "EFF101"), vec![32]);
 }
+
+#[test]
+fn a_reentrant_lock_stays_held_after_a_nested_with_exits() {
+    let p = Project::new("reentrant_lock");
+    p.write(
+        "app.py",
+        r#"import asyncio
+import threading
+
+
+async def nested() -> None:
+    lock = threading.RLock()
+    with lock:
+        with lock:
+            pass
+        await asyncio.sleep(0)
+
+
+async def one_after_another() -> None:
+    lock = threading.RLock()
+    with lock:
+        pass
+    with lock:
+        pass
+    await asyncio.sleep(0)
+
+
+async def both_exited() -> None:
+    lock = threading.RLock()
+    with lock:
+        with lock:
+            pass
+    await asyncio.sleep(0)
+"#,
+    );
+    let found = reports(&p, "EFF106");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, 10);
+    assert!(found[0].1.contains("taken at line 7"), "{found:?}");
+}

@@ -459,7 +459,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
 5. **Context relaxation**: `click` / `typer` commands (`@command`), ASGI lifespan hooks,
    `LoopBound::ConstSmall` / `RetryPattern` loops, and test code (`lint.relax-async-in-tests`,
    default true) are relaxed by default.
-6. **`EFF106`** (opt-in): a forward must-hold dataflow over the CFG for `with` regions of
+6. **`EFF106`** (opt-in): a forward must-hold dataflow over the CFG, one fact per acquiring
+   `with` item (an `ExitWith` releases the acquisitions of its own statement), for `with` regions of
    synchronous locks (Layer 2 `sync_lock_or_tx` classes: `threading.Lock` / `RLock` / `Semaphore`
    / `BoundedSemaphore` / `Condition`) and transaction starters (`Session.begin()`,
    `Connection.begin()`, `Engine.begin()`, `transaction.atomic()`, `psycopg.Connection.transaction()`,
