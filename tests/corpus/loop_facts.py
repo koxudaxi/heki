@@ -368,6 +368,12 @@ def paced_by_timeout(stop, get, delay):
         stop.wait(timeout=delay)
 
 
+def zero_timeout(stop, get):
+    while True:
+        get()
+        stop.wait(timeout=0)
+
+
 def paced_by_computed_delay(get, time, delay):
     while not get():
         time.sleep(delay)

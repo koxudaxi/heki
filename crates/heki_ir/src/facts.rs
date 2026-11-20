@@ -1110,8 +1110,9 @@ fn waits_every_iteration(f: &IrFunction, lp: &NaturalLoop) -> bool {
 
 /// A call that waits before the program goes on: a sleep of a duration other than a literal
 /// zero (`time.sleep(5)`, `await asyncio.sleep(delay)`; `sleep(0)` only yields), or a wait
-/// with a timeout (`stop.wait(1)`, `event.wait(timeout=delay)`). A `wait` given anything else
-/// may wait for futures that are done already (`asyncio.wait(tasks)`).
+/// with a timeout that is not a literal zero (`stop.wait(1)`, `event.wait(timeout=delay)`;
+/// `wait(timeout=0)` returns at once). A `wait` given anything else may wait for futures that
+/// are done already (`asyncio.wait(tasks)`).
 fn waits_for_time(f: &IrFunction, inst: &Inst) -> bool {
     let (name, args, kwargs) = match &inst.kind {
         InstKind::Call {
@@ -1145,8 +1146,9 @@ fn waits_for_time(f: &IrFunction, inst: &Inst) -> bool {
             .or(kwargs.first().map(|(_, v)| v))
             .is_some_and(|v| seconds(*v) != Some(0.0)),
         "wait" => {
-            kwargs.iter().any(|(k, _)| k.as_deref() == Some("timeout"))
-                || matches!(args.as_slice(), [t] if seconds(*t).is_some_and(|s| s > 0.0))
+            kwargs.iter().any(|(k, t)| {
+                k.as_deref() == Some("timeout") && seconds(*t).is_none_or(|s| s > 0.0)
+            }) || matches!(args.as_slice(), [t] if seconds(*t).is_some_and(|s| s > 0.0))
         }
         _ => false,
     }

@@ -2951,36 +2951,45 @@ pub(crate) fn arg_fact<'i>(
     name_of: impl Fn(VarId) -> Option<String>,
     var: VarId,
 ) -> ArgFact {
-    let mut flags = Vec::new();
-    set_flags(&def, &name_of, var, &mut flags);
     ArgFact {
         literal: literal(&def, var),
         class: class_of(var),
-        flags,
+        flags: set_flags(&def, &name_of, var),
     }
 }
 
-/// The named objects `var` sets with `|` (`ArgFact::flags`), through copies.
+/// The named objects `var` sets with `|` (`ArgFact::flags`), through copies. Each value is
+/// visited once: `f1 = f0 | f0` shares its operands.
 fn set_flags<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
     var: VarId,
-    out: &mut Vec<String>,
-) {
-    // The operands of an SSA expression form a tree, so the walk ends.
-    match def(var).map(|i| &i.kind) {
-        Some(InstKind::Copy { src, .. }) => set_flags(def, name_of, *src, out),
-        Some(InstKind::BinOp {
-            op: BinOpKind::BitOr,
-            lhs,
-            rhs,
-            ..
-        }) => {
-            set_flags(def, name_of, *lhs, out);
-            set_flags(def, name_of, *rhs, out);
+) -> Vec<String> {
+    let mut flags: Vec<String> = Vec::new();
+    let mut seen: FxHashSet<VarId> = FxHashSet::default();
+    let mut stack = vec![var];
+    while let Some(v) = stack.pop() {
+        if !seen.insert(v) {
+            continue;
         }
-        _ => out.extend(name_of(var)),
+        match def(v).map(|i| &i.kind) {
+            Some(InstKind::Copy { src, .. }) => stack.push(*src),
+            Some(InstKind::BinOp {
+                op: BinOpKind::BitOr,
+                lhs,
+                rhs,
+                ..
+            }) => stack.extend([*lhs, *rhs]),
+            _ => {
+                if let Some(name) = name_of(v)
+                    && !flags.contains(&name)
+                {
+                    flags.push(name);
+                }
+            }
+        }
     }
+    flags
 }
 
 /// Inferred value of an SSA variable.

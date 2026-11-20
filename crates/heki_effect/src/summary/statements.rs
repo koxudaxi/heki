@@ -4,7 +4,7 @@
 use super::Extractor;
 use crate::resolver::Callee;
 use heki_ir::{BinOpKind, BuiltinKind, InstKind, ModuleConstants, VarId};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// DB-API (PEP 249) methods, and SQLAlchemy's `exec_driver_sql`, whose first argument is the
 /// statement they run.
@@ -30,6 +30,7 @@ const SAME_WORDS: &[&str] = &["strip", "lstrip", "rstrip", "upper", "lower", "ca
 const MAX_DEPTH: u32 = 64;
 
 /// What the code fixes of one text a statement may be.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Text {
     /// The whole text.
     Whole(String),
@@ -73,6 +74,9 @@ struct Walk {
     merging: FxHashSet<VarId>,
     /// The steps from the statement to the value the walk is at.
     depth: u32,
+    /// The answer for each value the walk has decided: a value reached again along another
+    /// path (`sql = sql.upper() if flag else sql.lower()`) is decided once.
+    decided: FxHashMap<VarId, Option<Vec<Text>>>,
 }
 
 impl Walk {
@@ -101,12 +105,26 @@ impl Extractor<'_> {
                 .is_some_and(|texts| texts.iter().all(Text::is_ddl))
     }
 
-    /// Every text `v` may hold, when the code fixes each (`None` when one is unknown): the
-    /// texts of every value the copies and phis from `v` merge ([`Self::source_texts`]), each
-    /// phi once, so a cycle of copies and phis adds no text. A phi that an earlier step of the
-    /// walk merges makes the texts unknown: the text may go around a cycle that changes it
-    /// (`sql = sql + ", y"` in a loop).
+    /// Every text `v` may hold, when the code fixes each (`None` when one is unknown), each
+    /// once: the texts of every value the copies and phis from `v` merge
+    /// ([`Self::source_texts`]), each phi once, so a cycle of copies and phis adds no text. A
+    /// phi that an earlier step of the walk merges makes the texts unknown: the text may go
+    /// around a cycle that changes it (`sql = sql + ", y"` in a loop).
     fn statement_texts(&self, v: VarId, walk: &mut Walk) -> Option<Vec<Text>> {
+        if let Some(decided) = walk.decided.get(&v) {
+            return decided.clone();
+        }
+        let texts = self.merged_texts(v, walk).map(|mut texts| {
+            texts.sort();
+            texts.dedup();
+            texts
+        });
+        walk.decided.insert(v, texts.clone());
+        texts
+    }
+
+    /// [`Self::statement_texts`] before it is kept, one step further from the statement.
+    fn merged_texts(&self, v: VarId, walk: &mut Walk) -> Option<Vec<Text>> {
         walk.deeper(|walk| {
             let mut sources = Vec::new();
             let mut merged = Vec::new();
