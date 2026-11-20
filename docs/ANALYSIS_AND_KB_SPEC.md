@@ -204,7 +204,12 @@ decorated so), and its body never runs at the call.
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
 re-propagated into their summaries, so that the incremental index always equals a full build, and
-the language server re-checks the files whose diagnostics show a moved call site.
+the language server re-checks the files whose diagnostics show a moved call site. The call chains
+of `MUT108` / `MUT110` reports are no summary facts: the rule walks the own summaries and project
+calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
+the first function whose body makes the change. The language server compares these facts of the
+edited file's functions that change a parameter in place (`heki_rules::chain_facts`) and
+re-checks the files with such reports above a function whose facts changed.
 
 The incremental index also records what summarizing each file read of the project declarations
 (`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the

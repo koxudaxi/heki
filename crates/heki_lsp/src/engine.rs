@@ -14,8 +14,8 @@ use heki_rules::project::{
     rel_posix, retain_unsuppressed,
 };
 use heki_rules::{
-    CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError, SnapshotError, SummarySnapshot,
-    check_project, family_readers, find_rule,
+    CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
+    SnapshotError, SummarySnapshot, chain_facts, check_project, family_readers, find_rule,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -65,9 +65,10 @@ pub struct EditOutcome {
     pub diagnostics: Vec<Diagnostic>,
     /// Other files whose results may change: callers of changed summaries, files whose summary
     /// or check read changed declarations, files of functions whose callers here changed their
-    /// calls, the class families of changed methods, files whose diagnostics show call sites of
-    /// this file that moved, and every checked file when the project starts or stops patching
-    /// `builtins`.
+    /// calls, the class families of changed methods, the `MUT108` / `MUT110` reports above
+    /// functions whose own in-place changes or calls their call chains walk changed, files whose
+    /// diagnostics show call sites of this file that moved, and every checked file when the
+    /// project starts or stops patching `builtins`.
     pub affected: Vec<PathBuf>,
     /// Why the file has no diagnostics: a syntax error (the file then leaves the index, as a
     /// file `heki check` cannot parse is not part of the project) or an invalid rule option.
@@ -94,6 +95,10 @@ pub struct Workspace {
     /// The other files the latest diagnostics of each file point into (related locations):
     /// when an edit moves call sites of one of them, those diagnostics change.
     shown: FxHashMap<PathBuf, FxHashSet<PathBuf>>,
+    /// The files whose latest diagnostics include a report of `heki_rules::CHAIN_RULES`: its
+    /// call chain walks the own in-place changes and calls of functions in other files
+    /// (`heki_rules::ChainFacts`).
+    chain_reports: FxHashSet<PathBuf>,
     /// What the latest check of each file read of the declarations (what its summary read is
     /// in its `FileSummary`).
     check_reads: FxHashMap<PathBuf, DeclKeys>,
@@ -199,6 +204,7 @@ impl Workspace {
                 index,
                 decls,
                 shown: FxHashMap::default(),
+                chain_reports: FxHashSet::default(),
                 check_reads: FxHashMap::default(),
                 patching_builtins,
                 reach,
@@ -266,6 +272,15 @@ impl Workspace {
             .map(|r| r.path.clone())
             .collect();
         self.shown.insert(parsed.path.clone(), shown);
+        let chains = checked
+            .iter()
+            .flatten()
+            .any(|d| CHAIN_RULES.contains(&d.rule_code.as_str()));
+        if chains {
+            self.chain_reports.insert(parsed.path.clone());
+        } else {
+            self.chain_reports.remove(&parsed.path);
+        }
         self.check_reads.insert(parsed.path.clone(), reads);
         checked
     }
@@ -446,12 +461,15 @@ impl Workspace {
 
     /// The files an update of the index affects besides the updated file: callers of changed
     /// summaries, readers of changed declarations, callees whose callers changed, generators
-    /// handed to changed functions, and class families whose members changed.
+    /// handed to changed functions, class families whose members changed, and the files with
+    /// `MUT108` / `MUT110` reports above functions whose chain facts (`chains`, before and
+    /// after) changed.
     fn affected_by(
         &self,
         update: &heki_effect::IncrementalUpdate,
         change: &DeclKeys,
         callers: (&CallerView, &CallerView),
+        chains: (&ChainFacts, &ChainFacts),
     ) -> FxHashSet<PathBuf> {
         let mut affected: FxHashSet<PathBuf> = update
             .affected_callers
@@ -473,6 +491,20 @@ impl Workspace {
         }
         if self.reach.calls {
             affected.extend(self.above_files(&changed));
+        }
+        // A `MUT108` / `MUT110` call chain ends at the first function whose own body makes the
+        // change and walks the calls of the functions before it: when a function moves the
+        // change to or from a function it calls, or changes those calls, the chains of the
+        // reports above it change while no summary does (and no report appears or disappears).
+        let walked: Vec<&FuncKey> = chains
+            .0
+            .keys()
+            .chain(chains.1.keys())
+            .filter(|k| chains.0.get(*k) != chains.1.get(*k))
+            .collect();
+        if !walked.is_empty() && !self.chain_reports.is_empty() {
+            let above = self.above_files(&walked);
+            affected.extend(above.into_iter().filter(|f| self.chain_reports.contains(f)));
         }
         affected
     }
@@ -577,10 +609,17 @@ impl Workspace {
             }
         };
         let callers_before = self.caller_view(&parsed.path);
+        let chains_before = chain_facts(&self.index, &parsed.path);
         let sites_before = self.call_site_spans(&parsed.path);
         let (update, change) = self.summarize(&parsed);
         let callers_after = self.caller_view(&parsed.path);
-        let mut affected = self.affected_by(&update, &change, (&callers_before, &callers_after));
+        let chains_after = chain_facts(&self.index, &parsed.path);
+        let mut affected = self.affected_by(
+            &update,
+            &change,
+            (&callers_before, &callers_after),
+            (&chains_before, &chains_after),
+        );
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         // Call chains of other files show this file's call sites: when they move, those
         // diagnostics move with them (the summaries copying them were re-propagated).
@@ -636,19 +675,25 @@ impl Workspace {
     /// Drop a deleted file (or one that no longer parses); returns the files it affects.
     pub fn remove(&mut self, path: &Path) -> Vec<PathBuf> {
         self.shown.remove(path);
+        self.chain_reports.remove(path);
         self.check_reads.remove(path);
         let Some(meta) = self.files.remove(path) else {
             return Vec::new();
         };
         let callers_before = self.caller_view(path);
+        let chains_before = chain_facts(&self.index, path);
         let update = self.index.remove_file(path);
         let change = match self.index.module_decls(&meta.module_name) {
             Some(remaining) => self.decls.replace(remaining),
             None => self.decls.remove(&meta.module_name),
         };
         self.stats.indexed_files = self.index.files.len();
-        let mut affected =
-            self.affected_by(&update, &change, (&callers_before, &CallerView::new()));
+        let mut affected = self.affected_by(
+            &update,
+            &change,
+            (&callers_before, &CallerView::new()),
+            (&chains_before, &ChainFacts::new()),
+        );
         affected.extend(self.note_builtins(path, false));
         let mut v: Vec<PathBuf> = affected.into_iter().collect();
         v.sort();

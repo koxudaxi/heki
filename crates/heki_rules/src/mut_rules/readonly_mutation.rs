@@ -15,10 +15,11 @@ use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ReadOnlyAttr, ReadOnlyKind, SiteRole,
-    Slot, WriteKind,
+    BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ProjectIndex, ReadOnlyAttr,
+    ReadOnlyKind, SiteRole, Slot, WriteKind,
 };
 use rustc_hash::FxHashSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// What a function changes in place: its parameter itself (`None`) or a slot of it.
@@ -409,6 +410,61 @@ impl Rule<'_, '_> {
                 .emit(out, code, unit, span, qualname, target, message, chain);
         }
     }
+}
+
+/// What the call chains of the reports read of the functions of one file besides their final
+/// summaries ([`Rule::chain`] walks the functions below the call that hands an object over, in
+/// any file): per function, the parameters its own body changes in place, the slots of them it
+/// changes in place, and its project calls without positions (the language server re-checks the
+/// files whose diagnostics show a call site that moved).
+pub type ChainFacts =
+    BTreeMap<FuncKey, (BTreeSet<u8>, BTreeMap<u8, BTreeSet<Slot>>, Vec<CallSite>)>;
+
+/// The rules whose reports carry the call chains that read [`ChainFacts`]. Only the chains
+/// (related locations) depend on them: whether a call is reported does not.
+pub const CHAIN_RULES: &[&str] = &["MUT108", "MUT110"];
+
+/// [`ChainFacts`] of the functions defined in `path` that a chain can pass through: those whose
+/// final summary changes a parameter, or a slot of one, in place. A chain ends at the first
+/// function whose own body makes the change and walks the calls of the functions before it, so
+/// an edit that moves the change from one function to another, or changes those calls, changes
+/// the chains of the reports above them while every final summary stays the same.
+pub fn chain_facts(index: &ProjectIndex, path: &Path) -> ChainFacts {
+    let mut out = ChainFacts::new();
+    let Some(file) = index.files.get(path) else {
+        return out;
+    };
+    for (key, local) in &file.local_functions {
+        let walked = index.file_of(key) == Some(path)
+            && index.summary(key).is_some_and(|s| {
+                s.mutated_param_paths.values().any(|p| p.contains(""))
+                    || s.inplace_param_slots
+                        .values()
+                        .any(|slots| !slots.is_empty())
+            });
+        if walked {
+            let own = local
+                .mutated_param_paths
+                .iter()
+                .filter(|(_, paths)| paths.contains(""))
+                .map(|(j, _)| *j)
+                .collect();
+            let slots = local.inplace_param_slots.clone();
+            out.insert(key.clone(), (own, slots, Vec::new()));
+        }
+    }
+    for site in file
+        .call_sites
+        .iter()
+        .filter(|s| s.role == SiteRole::Call && !s.project_callees().is_empty())
+    {
+        if let Some((_, _, calls)) = out.get_mut(&site.caller) {
+            let mut site = site.clone();
+            site.span = Span { start: 0, end: 0 };
+            calls.push(site);
+        }
+    }
+    out
 }
 
 /// Whether summary `s` changes its parameter `j` itself (`None`) or a slot of it in place.
