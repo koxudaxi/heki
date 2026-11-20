@@ -1354,11 +1354,24 @@ struct Session {
 
 impl Session {
     fn start(name: &str) -> Self {
+        Self::start_with(name, CONFIG, initial_files(), false)
+    }
+
+    /// A session over `files` with the configuration `config`; `snapshot`: the effect summaries
+    /// are saved (`heki snapshot --write`) before the server starts, for `MUT103`.
+    fn start_with(
+        name: &str,
+        config: &str,
+        files: Vec<(&'static str, String)>,
+        snapshot: bool,
+    ) -> Self {
         let p = Project::new(name);
-        p.write("pyproject.toml", CONFIG);
-        let files = initial_files();
+        p.write("pyproject.toml", config);
         for (rel, text) in &files {
             p.write(rel, text);
+        }
+        if snapshot {
+            assert_eq!(p.heki(&["snapshot", "--write"]).0, 0);
         }
         let root = format!("{}/", uri(&p.dir));
         let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
@@ -1507,6 +1520,114 @@ fn lsp_diagnostics_equal_a_full_check_after_every_step() {
     let mut s = Session::start("lsp_oracle");
     let mut failures = Vec::new();
     for step in steps() {
+        failures.extend(s.run(&step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------------------------- files, layout, and buffers (session 2)
+
+const EDGE_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+extend-select = ["MUT103"]
+
+[[tool.heki.effect-boundaries]]
+name = "net"
+scopes = ["app.render.render"]
+forbid = ["blocking-net"]
+allowed-callees = ["requests.get"]
+"#;
+
+// An effect boundary allowing one blocking API of a kind it forbids, reached through a helper.
+const RENDER: &str = "from app.fetcher import fetch\n\n\ndef render(url):\n    return fetch(url)\n";
+const FETCHER: &str =
+    "import requests\n\n\ndef fetch(url):\n    requests.get(url)\n    return requests.get(url)\n";
+// Two public functions calling each other (one recursive component across files), in the
+// effect snapshot.
+const PING: &str = "import time\n\nfrom app import pong\n\n\ndef f(n):\n    if n:\n        return pong.g(n - 1)\n    return 0\n";
+const PONG: &str =
+    "from app import ping\n\n\ndef g(n):\n    if n:\n        return ping.f(n - 1)\n    return 0\n";
+// An `async def` reaching a blocking call in another file, with a comment above the call.
+const SLOW: &str = "import time\n\n\ndef wait():\n    #x\n    time.sleep(1)\n";
+const HANDLER: &str = "from app.slow import wait\n\n\nasync def handle():\n    wait()\n";
+// A module file and a package of the same name (`app.dup`): Python imports the package.
+const DUP_MODULE: &str = "def one():\n    pass\n";
+const DUP_PACKAGE: &str = "import time\n\n\ndef two():\n    time.sleep(1)\n";
+const DUP_USER: &str = "from app.dup import two\n\n\nasync def use():\n    two()\n";
+// A helper under `src/` without package markers, imported by its `src`-layout name.
+const SRC_UTIL: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
+const SRC_CALLER: &str = "from pkg.util import wait\n\n\nasync def call():\n    wait()\n";
+
+fn edge_files() -> Vec<(&'static str, String)> {
+    [
+        ("app/__init__.py", ""),
+        ("app/render.py", RENDER),
+        ("app/fetcher.py", FETCHER),
+        ("app/ping.py", PING),
+        ("app/pong.py", PONG),
+        ("app/slow.py", SLOW),
+        ("app/handler.py", HANDLER),
+        ("app/dup.py", DUP_MODULE),
+        ("app/dup/__init__.py", DUP_PACKAGE),
+        ("app/dup_user.py", DUP_USER),
+        ("src/pkg/util.py", SRC_UTIL),
+        ("caller.py", SRC_CALLER),
+    ]
+    .into_iter()
+    .map(|(rel, text)| (rel, text.to_owned()))
+    .collect()
+}
+
+fn edge_steps() -> Vec<Step> {
+    let mut steps = vec![
+        Step::new("initial index", Vec::new())
+            .present(&[("app/handler.py", "EFF101"), ("app/dup_user.py", "EFF101")])
+            .absent(&[("app/render.py", "EFF201"), ("caller.py", "EFF101")]),
+    ];
+    steps.extend(steps_shared_module_name());
+    steps
+}
+
+/// A module file and a package sharing one name: the package wins, whichever is edited.
+fn steps_shared_module_name() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the module file of a name a package holds is edited",
+            vec![save("app/dup.py", &DUP_MODULE.replace("one", "one_more"))],
+        )
+        .present(&[("app/dup_user.py", "EFF101")]),
+        Step::new(
+            "the package is edited",
+            vec![save(
+                "app/dup/__init__.py",
+                &format!("# package\n{DUP_PACKAGE}"),
+            )],
+        )
+        .present(&[("app/dup_user.py", "EFF101")]),
+        Step::new(
+            "the package stops blocking",
+            vec![save(
+                "app/dup/__init__.py",
+                &DUP_PACKAGE.replace("time.sleep(1)", "pass"),
+            )],
+        )
+        .absent(&[("app/dup_user.py", "EFF101")]),
+        Step::new(
+            "the package blocks again",
+            vec![save("app/dup/__init__.py", DUP_PACKAGE)],
+        )
+        .present(&[("app/dup_user.py", "EFF101")]),
+    ]
+}
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_file_layout_and_buffer_changes() {
+    let mut s = Session::start_with("lsp_oracle_edges", EDGE_CONFIG, edge_files(), true);
+    let mut failures = Vec::new();
+    for step in edge_steps() {
         failures.extend(s.run(&step));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

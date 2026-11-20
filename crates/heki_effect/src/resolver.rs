@@ -19,7 +19,7 @@ use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -1399,25 +1399,27 @@ fn complete_against(
 pub(crate) fn project_decls_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
-    others: Option<Vec<(bool, ModuleDecls)>>,
+    others: Option<Vec<(PathBuf, ModuleDecls)>>,
     track: bool,
 ) -> (ProjectDecls, Vec<(ModuleDecls, DeclKeys)>) {
-    // Process stubs before implementation `.py` files so a `.py` module always wins when both
-    // share one module name.
-    let order = |items: Vec<(bool, ModuleDecls)>| {
+    // The owner of a module name several files share comes last, so its declarations win
+    // (`crate::module_precedence`).
+    let order = |items: Vec<(PathBuf, ModuleDecls)>| {
         let mut items = items;
-        items.sort_by_key(|(stub, _)| !*stub);
+        items.sort_by(|(a, _), (b, _)| {
+            crate::module_precedence(a).cmp(&crate::module_precedence(b))
+        });
         items.into_iter().map(|(_, d)| d)
     };
-    let structural: Vec<(bool, ModuleDecls)> = modules
+    let structural: Vec<(PathBuf, ModuleDecls)> = modules
         .iter()
-        .map(|m| (crate::is_stub(&m.path), structural_decls(m)))
+        .map(|m| (m.path.clone(), structural_decls(m)))
         .collect();
     let others = others.unwrap_or_default();
     let pass1 = ProjectDecls::new(order(
         others
             .iter()
-            .map(|(stub, d)| (*stub, d.structural()))
+            .map(|(path, d)| (path.clone(), d.structural()))
             .chain(structural.iter().cloned())
             .collect(),
     ));
@@ -1438,7 +1440,7 @@ pub(crate) fn project_decls_for(
     let completed = structural
         .iter()
         .zip(&own)
-        .map(|((stub, _), (d, _))| (*stub, d.clone()));
+        .map(|((path, _), (d, _))| (path.clone(), d.clone()));
     let decls = ProjectDecls::new(order(others.into_iter().chain(completed).collect()));
     (decls, own)
 }
