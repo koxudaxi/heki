@@ -2,7 +2,7 @@
 
 # conditional-ownership-mutation (MUT112)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.
 
