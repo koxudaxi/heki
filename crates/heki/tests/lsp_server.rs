@@ -190,7 +190,7 @@ fn lsp_unsaved_and_outside_documents_and_stats_before_indexing() {
     );
     assert_eq!(
         lsp.request("heki/stats", Value::Null),
-        json!({"ready": false})
+        json!({"ready": false, "open_documents": 0})
     );
     // Opened before indexing: a new file that is not saved yet, a file outside the
     // workspace, and a file in a directory that does not exist.
@@ -251,6 +251,7 @@ fn lsp_unsaved_module_next_to_its_indexed_stub() {
     // Opened before indexing and not saved: the index knows `pkg.box` from its stub only.
     let module = uri_in(&p.dir, "pkg/box.py");
     lsp.open(&module, BOX);
+    lsp.opened(1);
     lsp.notify("initialized", json!({}));
     // The stub's summaries do not stand in for the document's own methods (the index knows
     // `Box.add` from the stub only, and `Box.drop` not at all): no `MUT101` before the
@@ -421,7 +422,7 @@ fn lsp_reports_an_invalid_configuration() {
     assert_eq!(log["params"]["type"], 2);
     assert_eq!(
         lsp.request("heki/stats", Value::Null),
-        json!({"ready": false})
+        json!({"ready": false, "open_documents": 0})
     );
     // Without a workspace, documents are not analyzed (the request reads every message
     // sent before its reply).

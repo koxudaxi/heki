@@ -141,6 +141,19 @@ impl Lsp {
         msg["params"]["diagnostics"].as_array().unwrap().clone()
     }
 
+    /// Wait until the server has applied `n` open documents (`heki/stats`): notifications are
+    /// handled concurrently, so a later `initialized` could otherwise index first.
+    pub fn opened(&mut self, n: usize) {
+        let started = Instant::now();
+        while self.request("heki/stats", Value::Null)["open_documents"] != n {
+            assert!(
+                started.elapsed() < TIMEOUT,
+                "the documents were never opened"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Wait until the background index is ready (`heki/stats`).
     pub fn ready(&mut self) {
         let started = Instant::now();

@@ -8,7 +8,8 @@
 //! - `didSave`: re-analyze the document, then every queued file (callers of changed summaries,
 //!   importers of changed declarations), and publish their diagnostics.
 //! - `codeAction`: `OPT` fixes and `# heki: ignore[CODE]` insertions.
-//! - `heki/stats`: engine counters (`EngineStats`), used to verify Early Cutoff.
+//! - `heki/stats`: engine counters (`EngineStats`), used to verify Early Cutoff, and the number
+//!   of open documents.
 
 use crate::convert;
 use crate::engine::{Selectors, Workspace};
@@ -189,17 +190,20 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// `heki/stats`: engine counters plus whether the index is ready.
+    /// `heki/stats`: engine counters plus whether the index is ready and how many documents
+    /// are open (a client can tell when an earlier `didOpen` has been applied).
     async fn stats(&self) -> RpcResult<serde_json::Value> {
         let st = lock(&self.state);
-        Ok(match &st.workspace {
+        let mut v = match &st.workspace {
             Some(ws) => {
                 let mut v = serde_json::to_value(ws.stats()).unwrap_or_default();
                 v["ready"] = serde_json::Value::Bool(true);
                 v
             }
             None => serde_json::json!({ "ready": false }),
-        })
+        };
+        v["open_documents"] = serde_json::json!(st.docs.len());
+        Ok(v)
     }
 }
 
