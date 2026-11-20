@@ -257,6 +257,8 @@ impl Ty {
             (Ty::Ref(a), Ty::Class(b)) | (Ty::Class(b), Ty::Ref(a)) if a == b => {
                 Some(Ty::Class(b.clone()))
             }
+            // Either coroutine may be awaited: the result is either declared result.
+            (Ty::Coroutine(a), Ty::Coroutine(b)) => a.join(b).map(|t| Ty::Coroutine(Box::new(t))),
             _ => match (self.members(), other.members()) {
                 (a, b) if !a.is_empty() && !b.is_empty() => {
                     Ty::of_members(a.iter().chain(b).cloned())
@@ -397,6 +399,17 @@ mod tests {
             Some(Ty::Ref("m.f".into()))
         );
         assert_eq!(Ty::Ref("m.f".into()).join(&model), None);
+        // Coroutines join what awaiting them gives.
+        let coroutine = |t: &Ty| Ty::Coroutine(Box::new(t.clone()));
+        assert_eq!(
+            coroutine(&model).join(&coroutine(&field)),
+            Some(coroutine(&both))
+        );
+        assert_eq!(
+            coroutine(&three).join(&coroutine(&Ty::inst("m.Tree"))),
+            None
+        );
+        assert_eq!(coroutine(&model).join(&model), None);
         // An empty display has no items: it takes the other side's items.
         let models = list(Elem::Of(model.clone()));
         assert_eq!(list(Elem::Empty).join(&models), Some(models.clone()));
