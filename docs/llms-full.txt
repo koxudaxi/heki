@@ -9,10 +9,10 @@ Source: https://heki.koxudaxi.dev/
 
 # heki
 
-heki (壁, Japanese for "wall") checks **what Python code does** across functions and modules: which
-objects it mutates, which references it shares, and which blocking, network, or database work
-it reaches. It is the third layer of static analysis, next to a linter such as
-[Ruff](https://docs.astral.sh/ruff/) and a type checker such as
+heki (壁, Japanese for "wall") is a semantic linter for what Python leaves open. It checks **what
+code does, not what types it has**: which objects it changes in place, which references it
+shares, and which blocking, network, or database work it reaches. It runs next to a linter such
+as [Ruff](https://docs.astral.sh/ruff/) and a type checker such as
 [ty](https://github.com/astral-sh/ty): one Rust binary with a CLI and a language server.
 
 ```python
@@ -51,8 +51,9 @@ def median(values: Sequence[float]) -> float:
 
 Ruff (every rule except the docstring and annotation rules), ty, Pyrefly, and pyright and mypy
 in their default modes report nothing for this code. The annotation rules and the strict modes
-ask for annotations on `sort_values`, but none of them sees that it reorders the caller's list.
-heki reports both bugs, with the calls that lead to them:
+ask for annotations on `sort_values`, but none of them sees that it reorders the caller's list:
+the types are right, and what the code does is wrong. heki reports both bugs, with the calls
+that lead to them:
 
 ```console
 $ heki check
@@ -79,7 +80,15 @@ Found 2 diagnostic(s) in 3 file(s).
 
 ## Why heki?
 
-### Bugs that cross function boundaries
+Types say what values are; heki checks what code does:
+
+- **Aliases and in-place changes:** which objects a function changes, through any alias, helper,
+  or subclass.
+- **Contracts:** who may write, read, or call what, and which code may reach I/O.
+- **Proven rewrites:** quadratic patterns are rewritten only when the rewrite is proven, not
+  guessed.
+
+### What code does, not what types it has
 
 Each report shows the chain of calls that leads to the bug.
 
@@ -123,15 +132,27 @@ and `effect-boundaries`.
 - Configuration, suppression comments, and output formats follow Ruff, and a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) fails CI
   only on new findings.
 
+## What Python leaves open
+
+| What Python leaves open | What other languages enforce | What heki checks |
+| --- | --- | --- |
+| Any code can change any object it reaches | ownership and borrowing (Rust), `const` / `readonly` | read-only parameters and fields changed through helpers (`MUT110`, `MUT108`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
+| A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
+| Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT202`); writes an `invalidation` contract must announce (`MUT109`) |
+| Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
+
 ## How heki differs
 
-| Tool | Checks | heki adds |
-| --- | --- | --- |
-| Ruff | one file's syntax and style | a blocking call reached through other functions |
-| ty, Pyrefly, pyright, mypy | that values match their declared types | what functions do: in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
-| tach, import-linter | which modules may import which | which functions write or read a field, or reach I/O |
+The difference is the model, not reaching across files: type checkers already follow types
+across modules. heki models effects and aliases, what code does:
 
-heki leaves to these tools what they already cover, so use it next to them.
+| Tool | Models | heki adds |
+| --- | --- | --- |
+| Ruff | syntax and style | the effects behind a call: a blocking call, a query, or a write, wherever it happens |
+| ty, Pyrefly, pyright, mypy | declared types | in-place changes, through aliases and helpers, to `frozen`, `ReadOnly`, and `Final` fields and to `Sequence` / `Mapping` arguments |
+| tach, import-linter | which modules may import which | which functions write or read a field, call a function, or reach I/O |
+
+heki leaves to these tools what they cover, and keeps doing so as they grow: use it next to them.
 
 ## Rewrites proven under CPython's semantics
 
@@ -147,16 +168,12 @@ The scope analysis is checked against CPython's `symtable` on 3.11 to 3.15, and 
 programs that break a naive rewrite must all be blocked on CPython. When a proof fails, the
 report names the missing obligation instead of offering a fix. See [Fixes and safety](https://heki.koxudaxi.dev/fixes/).
 
-See [Scope and limitations](https://heki.koxudaxi.dev/scope/) for what heki covers, where its knowledge comes from, and
-what it does not do.
-
-See the [rules reference](https://heki.koxudaxi.dev/rules/) for all 30 rules.
-
 ## Next steps
 
 - See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - [Install heki](https://heki.koxudaxi.dev/installation/) and [run it on a project](https://heki.koxudaxi.dev/getting-started/).
-- [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, ownership contracts, and the Python version.
+- [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
+- Browse the [30 rules](https://heki.koxudaxi.dev/rules/).
 - Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
