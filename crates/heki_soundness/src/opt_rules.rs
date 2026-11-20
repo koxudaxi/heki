@@ -332,6 +332,21 @@ impl<'a> ModuleCtx<'a> {
     }
 }
 
+/// The abstract state holds a fact of each variable at each block, so its size is their
+/// product. A function whose product passes a multiple of its source size (at least a floor,
+/// at most a bound) is not analyzed and gets no candidate: real code rarely passes it, and
+/// none that has a candidate in the corpora.
+const STATE_CELLS_PER_SOURCE_BYTE: usize = 8;
+const MIN_STATE_CELLS: usize = 4096;
+const MAX_STATE_CELLS: usize = 250_000;
+
+fn state_fits(f: &IrFunction) -> bool {
+    let source_bytes = f.span.end.saturating_sub(f.span.start) as usize;
+    let budget =
+        (source_bytes * STATE_CELLS_PER_SOURCE_BYTE).clamp(MIN_STATE_CELLS, MAX_STATE_CELLS);
+    f.blocks.len() * f.var_names.len() <= budget
+}
+
 /// Analyze every function of a module for `OPT` candidates (module and class bodies are
 /// skipped: their namespaces are observable from outside the frame).
 pub fn analyze_module(
@@ -343,7 +358,7 @@ pub fn analyze_module(
     let m = ModuleCtx::new(ir, source, opts);
     let mut out = Vec::new();
     for f in &ir.functions {
-        if f.is_module_body || f.is_class_body {
+        if f.is_module_body || f.is_class_body || !state_fits(f) {
             continue;
         }
         let cx = FnCtx::new(f, kb, &m.builtins);

@@ -138,6 +138,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   frame (`map(eval, codes)`); `vars(x)` with an argument reads no frame.
 - **A1 fallback**: a function with `a1_hazards` is excluded **from `heki_soundness` only**;
   **`heki_effect` (family 1 `MUT`, family 2 `EFF` / `DATA`) continues**.
+- **Proof-state budget**: `heki_soundness` keeps a fact of each variable at each block, so a
+  function's state is its blocks times its variables. A function whose product passes 8 cells
+  per byte of its source (at least 4,096, at most 250,000) is not analyzed and gets no `OPT`
+  candidate; no function with a candidate in the corpora passes it.
 - **`LoopBound`** (never a Soundness premise; used for profitability and Advisory noise only):
   - `ConstSmall(k)`: a `for` over a small display (below) or `range(...)` (the builtin, by
     name resolution) spanning at most 8, also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
