@@ -748,9 +748,6 @@ fn gate_5_handbuilt_file_summaries() {
         .local_functions
         .insert(f_caller.clone(), EffectSummary::default());
     let span = Span { start: 0, end: 1 };
-    file_b
-        .call_edges
-        .push((f_caller.clone(), f_helper.clone(), span));
     file_b.call_sites.push(CallSite {
         caller: f_caller.clone(),
         target: CallTarget::Project(vec![BoundCallee {
@@ -1024,8 +1021,7 @@ fn cha_priority_4_limit() {
     assert!(call.transitive_exec_effects.contains(&Sleep));
     let file = &index.files[&PathBuf::from("cha.py")];
     let edges = file
-        .call_edges
-        .iter()
+        .call_edges()
         .filter(|(caller, _, _)| caller.qualname == "call")
         .count();
     assert_eq!(edges, 8);
@@ -1344,9 +1340,6 @@ fn callers_left_without_a_defining_file_are_skipped() {
     };
     let file_a = file("a.py", "a", &[&helper]);
     let mut file_b = file("b.py", "b", &[]);
-    file_b
-        .call_edges
-        .push((caller.clone(), helper.clone(), span));
     file_b.call_sites.push(CallSite {
         caller: caller.clone(),
         target: CallTarget::Project(vec![BoundCallee {
@@ -1368,7 +1361,6 @@ fn callers_left_without_a_defining_file_are_skipped() {
     });
     let live = key("c", "live");
     let mut file_c = file("c.py", "c", &[&live]);
-    file_c.call_edges.push((live.clone(), helper.clone(), span));
     file_c.call_sites.push(CallSite {
         caller: live.clone(),
         target: CallTarget::Project(vec![BoundCallee {

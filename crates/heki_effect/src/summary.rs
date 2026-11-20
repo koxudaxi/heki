@@ -111,14 +111,6 @@ fn extract_module(
             qualname: func_qualname(f).to_owned(),
         };
         let (summary, mut sites, flow) = Extractor::new(f, &key, &cx, &input.path, contracts).run();
-        for site in &sites {
-            if let CallTarget::Project(callees) = &site.target {
-                for c in callees {
-                    file.call_edges
-                        .push((key.clone(), c.callee.clone(), site.span));
-                }
-            }
-        }
         if let Some(mut flow) = flow {
             // Site-list indices of the function become indices into the file's call sites.
             let offset = u32::try_from(file.call_sites.len()).unwrap_or(u32::MAX);
@@ -147,7 +139,22 @@ fn extract_module(
             }
         }
     }
+    release_spare_capacity(&mut file);
     file
+}
+
+/// Building by pushes leaves spare capacity in the call-site containers, and a file's summary
+/// stays in the index for the whole run.
+fn release_spare_capacity(file: &mut FileSummary) {
+    for site in &mut file.call_sites {
+        if let CallTarget::Project(callees) = &mut site.target {
+            for bc in callees.iter_mut() {
+                bc.params.shrink_to_fit();
+            }
+            callees.shrink_to_fit();
+        }
+    }
+    file.call_sites.shrink_to_fit();
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {

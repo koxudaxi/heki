@@ -864,8 +864,6 @@ pub struct FileSummary {
     pub content_hash: String,
     /// Final (interprocedurally propagated) summaries; filled by `ProjectIndex`.
     pub functions: FxHashMap<FuncKey, EffectSummary>,
-    /// Project call edges `(caller, callee, span)` (reverse call graph source).
-    pub call_edges: Vec<(FuncKey, FuncKey, Span)>,
     /// Local (one-function) summaries before propagation.
     pub local_functions: FxHashMap<FuncKey, EffectSummary>,
     pub call_sites: Vec<CallSite>,
@@ -880,6 +878,18 @@ pub struct FileSummary {
     /// The `MUT109` flow facts of the file's functions (local, IR-free; empty unless an
     /// `invalidation` contract is configured).
     pub flows: FxHashMap<FuncKey, FuncFlow>,
+}
+
+impl FileSummary {
+    /// Project call edges `(caller, callee, span)`, the source of the reverse call graph: every
+    /// resolved project callee of every call site.
+    pub fn call_edges(&self) -> impl Iterator<Item = (&FuncKey, &FuncKey, Span)> + '_ {
+        self.call_sites.iter().flat_map(|site| {
+            site.project_callees()
+                .iter()
+                .map(move |bc| (&site.caller, &bc.callee, site.span))
+        })
+    }
 }
 
 /// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
@@ -1222,7 +1232,7 @@ impl ProjectIndex {
 
     /// Update a single file's summary and report whether downstream callers are affected.
     ///
-    /// `new_file` carries local facts (`local_functions`, `call_sites`, `call_edges`); its
+    /// `new_file` carries local facts (`local_functions`, `call_sites`); its
     /// final summaries are recomputed here. Callers are re-propagated only when a final
     /// summary of the file changed (location-insensitively) — **Early Cutoff**.
     pub fn update_file(&mut self, mut new_file: FileSummary) -> IncrementalUpdate {
@@ -1252,7 +1262,7 @@ impl ProjectIndex {
         let mut sync_candidates: FxHashSet<FuncKey> = own.clone();
         for file in old_file.iter().chain(std::iter::once(&new_file)) {
             sync_candidates.extend(file.local_functions.keys().cloned());
-            for (_, callee, _) in &file.call_edges {
+            for (_, callee, _) in file.call_edges() {
                 sync_candidates.insert(callee.clone());
             }
         }
@@ -1413,7 +1423,7 @@ impl ProjectIndex {
                 self.func_files.insert(func.clone(), file.path.clone());
             }
         }
-        for (caller, callee, _) in &file.call_edges {
+        for (caller, callee, _) in file.call_edges() {
             self.reverse_call_graph
                 .entry(callee.clone())
                 .or_default()
@@ -1427,7 +1437,7 @@ impl ProjectIndex {
                 self.func_files.remove(func);
             }
         }
-        for (caller, callee, _) in &file.call_edges {
+        for (caller, callee, _) in file.call_edges() {
             if let Some(set) = self.reverse_call_graph.get_mut(callee) {
                 set.remove(caller);
                 if set.is_empty() {
