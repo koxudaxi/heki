@@ -75,6 +75,13 @@ impl Watcher<'_> {
     fn print(&self, diags: &BTreeMap<PathBuf, Vec<Diagnostic>>, errors: &[String]) -> bool {
         let mut all: Vec<Diagnostic> = diags.values().flatten().cloned().collect();
         crate::check::annotate_hot(&mut all, self.hot);
+        // The paths `heki check` prints.
+        for d in &mut all {
+            d.path = crate::check::shown_path(&d.path);
+            for r in &mut d.related {
+                r.path = crate::check::shown_path(&r.path);
+            }
+        }
         sort_diagnostics(&mut all);
         let source_line = |p: &Path, line: u32| {
             std::fs::read_to_string(p).ok().and_then(|s| {

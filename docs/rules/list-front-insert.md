@@ -11,7 +11,8 @@ Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests 
 `collections.deque` with `appendleft(v)`.
 
 Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions.
+functions. A list rebuilt in every iteration of the loop is not reported: its front insert
+costs no more than building it.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.
@@ -38,4 +39,4 @@ def reverse(items: list[int]) -> list[int]:
 ```
 
 ## Fix safety
-The same obligations as `OPT120`.
+The same obligations as `OPT120`, and the same rewrite of annotations and imports.

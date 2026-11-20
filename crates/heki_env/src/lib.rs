@@ -1,5 +1,9 @@
 //! Environment resolution, `RuntimeProfile`, and Ruff/`t-linter`-compatible `heki` configuration.
 
+mod stdlib;
+
+pub use stdlib::is_stdlib_module;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

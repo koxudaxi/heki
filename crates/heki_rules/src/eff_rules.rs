@@ -5,15 +5,16 @@ use crate::mut_rules::{
     CallTargetPattern, ContractTarget, SiteId, initializes_itself, parse_call_targets,
     parse_targets, patterns, project_classes, site_callee, with_note,
 };
+use crate::opt_rules::Sizes;
 use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, EffectSummary,
-    Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, WriteKind, anchors_call_site,
+    Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
     boundary_reports_in, group_by_root_cause,
 };
-use heki_ir::{InstKind, IrFunction, LoopBound, VarId};
+use heki_ir::{InstKind, IrFunction, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -150,21 +151,33 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         return;
     }
     let sites = cx.sites_by_span(unit);
+    let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let no_types = FxHashMap::default();
     for f in &unit.input.ir.functions {
-        if f.is_class_body {
+        if f.is_class_body || f.loops.is_empty() {
             continue;
         }
         let key = CheckContext::key(unit, f);
         let migration_fn = f.name == "upgrade" || f.name == "downgrade";
+        // Built when a block of a loop has an effect to report.
+        let mut sizes: Option<Sizes<'_, '_>> = None;
+        let mut data_sized: Vec<Option<bool>> = vec![None; f.loops.len()];
         for bb in &f.blocks {
             if f.block_loop_depth(bb.id) == 0 {
                 continue;
             }
             // `for.iter` / `MakeIter` live in the preheader (depth 0), so they never get here.
-            // Bounded loops (small constant ranges, retries, daemon polling) are relaxed.
-            if f.innermost_loop(bb.id).map(|lp| lp.bound) != Some(LoopBound::Unbounded) {
-                continue;
-            }
+            // Loops whose size the code fixes (small constant ranges and displays, retries,
+            // daemon polling) are relaxed: a call is reported when some loop around it is
+            // data-sized.
+            let mut in_data_loop = || {
+                let sizes = sizes.get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit));
+                f.loops.iter().enumerate().any(|(i, lp)| {
+                    lp.body.contains(&bb.id)
+                        && *data_sized[i].get_or_insert_with(|| sizes.data_sized(lp))
+                })
+            };
+            let mut checked: Option<bool> = None;
             for inst in &bb.insts {
                 // Reading a property runs its getter (a call site at the read); iterating a
                 // generator runs its body (a call site at the iteration).
@@ -182,8 +195,10 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     .iter()
                     .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                     .collect();
+                let mut hot = || *checked.get_or_insert_with(&mut in_data_loop);
                 if want102
                     && let Some(chain) = shortest(&effects, ExecEffectKind::UnpooledClientAlloc)
+                    && hot()
                 {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
@@ -213,6 +228,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     && !migration_fn
                     && !ddl
                     && let Some(chain) = shortest(&effects, ExecEffectKind::DbQuery)
+                    && hot()
                 {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(

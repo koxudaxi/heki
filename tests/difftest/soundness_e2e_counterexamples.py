@@ -219,7 +219,7 @@ class Key:
 
 
 def cx_set_of_dict_keys(items):
-    d = {Key(1): 1, Key(2): 2}
+    d = {Key(1): 1, Key(2): 2, **{Key(p): p for p in items}}
     hits = 0
     for p in items:
         if p in set(d):
@@ -228,7 +228,7 @@ def cx_set_of_dict_keys(items):
 
 
 def old_set_of_dict_keys(items):
-    d = {Key(1): 1, Key(2): 2}
+    d = {Key(1): 1, Key(2): 2, **{Key(p): p for p in items}}
     hits = 0
     d_set = set(d)
     for p in items:
@@ -279,7 +279,7 @@ def old_local_set_dedup(n, set=lambda xs: {0, 1, 2, 3, 4, 5, 6}):
 
 
 def cx_local_collections(n, collections=None):
-    q = [1, 2, 3]
+    q = [1, 2, 3, *range(n)]
     out = []
     while q:
         out.append(q.pop(0))
@@ -287,7 +287,7 @@ def cx_local_collections(n, collections=None):
 
 
 def old_local_collections(n, collections=None):
-    q = collections.deque([1, 2, 3])
+    q = collections.deque([1, 2, 3, *range(n)])
     out = []
     while q:
         out.append(q.popleft())
@@ -299,7 +299,7 @@ def cx_class_in_function_collections(n, collections=None):
     # qualname, `LocalCx.drain`, does not name that function.
     class LocalCx:
         def drain(self):
-            q = [1, 2, 3]
+            q = [1, 2, 3, *range(n)]
             out = []
             while q:
                 out.append(q.pop(0))
@@ -311,7 +311,7 @@ def cx_class_in_function_collections(n, collections=None):
 def old_class_in_function_collections(n, collections=None):
     class LocalOld:
         def drain(self):
-            q = collections.deque([1, 2, 3])
+            q = collections.deque([1, 2, 3, *range(n)])
             out = []
             while q:
                 out.append(q.popleft())
@@ -324,7 +324,7 @@ def old_class_in_function_collections(n, collections=None):
 # OPT120: list operations a deque does not have (the same way)
 # ------------------------------------------------------------------------------
 def cx_two_pops(n):
-    q = [1, 2, 3, 4]
+    q = [1, 2, 3, 4, *range(n)]
     out = []
     while q:
         out.append(q.pop(0))
@@ -335,7 +335,7 @@ def cx_two_pops(n):
 
 def old_two_pops(n):
     """The second site's fix overlapped the first one's and was skipped."""
-    q = collections.deque([1, 2, 3, 4])
+    q = collections.deque([1, 2, 3, 4, *range(n)])
     out = []
     while q:
         out.append(q.popleft())
@@ -345,7 +345,7 @@ def old_two_pops(n):
 
 
 def cx_iterated_while_popped(n):
-    q = [1, 2, 3, 4]
+    q = [1, 2, 3, 4, *range(n)]
     out = []
     for x in q:
         out.append(x)
@@ -355,7 +355,7 @@ def cx_iterated_while_popped(n):
 
 
 def old_iterated_while_popped(n):
-    q = collections.deque([1, 2, 3, 4])
+    q = collections.deque([1, 2, 3, 4, *range(n)])
     out = []
     for x in q:
         out.append(x)
@@ -365,14 +365,14 @@ def old_iterated_while_popped(n):
 
 
 def cx_slice_of_empty(n):
-    q = [1, 2, 3]
+    q = [*range(n // 2)]
     for _ in range(n):
         q = q[1:]
     return len(q)
 
 
 def old_slice_of_empty(n):
-    q = collections.deque([1, 2, 3])
+    q = collections.deque([*range(n // 2)])
     for _ in range(n):
         q.popleft()
     return len(q)

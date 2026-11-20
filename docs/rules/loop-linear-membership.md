@@ -12,7 +12,11 @@ not change during the loop, and suggests building a `set` once before the loop.
 
 This is a size-dependent rewrite: it is reported as a suggestion and applied only with
 `heki check --fix --include-size-dependent`, or for functions that a `--profile` dump shows
-hot. Small constant displays (`x in ("a", "b")`) are not reported.
+hot. Not reported:
+
+- small displays: at most 8 items that nothing grows, whatever the items are
+  (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one);
+- lists whose elements are dicts, lists, or sets: no `set` can hold them.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is

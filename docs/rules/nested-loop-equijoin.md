@@ -20,9 +20,13 @@ its first matching comparison. It does not report:
   (`for b in a.children`, `for b in index[a.k]`, `for b in f(a)`, `for b in xs[i + 1:]`);
 - comparisons that do not select pairs: `!=`, a negated `==`, one alternative of an `or`
   (`a.k == b.k or match(a, b)`), a result that is stored instead of tested, a value picked for
-  every pair (`1 if a.k == b.k else 0`), or a match that only skips to the next iteration
-  (`if a == b: continue` in an all-pairs loop);
-- small constant loops (`for b in ("x", "y")`, `for i in range(3)`, a constant tuple).
+  every pair (`1 if a.k == b.k else 0`), a match that only skips to the next iteration
+  (`if a == b: continue` in an all-pairs loop), or a comparison whose false side does work:
+  an `else` / `elif` body, the failure of an `assert a == b`, or a `break` / `return` on a
+  mismatch runs for the pairs an index would skip, so every pair is needed;
+- loops whose size the code fixes: a display of at most 8 items (`for b in ("x", "y")`, also
+  through a name or a module constant bound to one that nothing grows, and through
+  `enumerate` / `zip` / `sorted` / `.items()` ...), and `range` of integer constants.
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.
