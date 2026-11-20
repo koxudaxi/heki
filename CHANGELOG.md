@@ -77,6 +77,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - A list or set comprehension that collects the results of a call no longer binds each result to
   the call's first parameter: `[load(graph, raw) for raw in items]`, with `load` returning a
   `readonly-returns` value, is no `MUT202` report.
+- A `return` no run reaches (after a `while True:` loop that no `break` leaves, or under
+  `if False:`) is not what the function returns: a wrapper returning a cached or
+  `readonly-returns` value only there is no producer, and changing its result is no `MUT202`
+  report.
 - Sizes the code states are no longer taken as data-sized (`EFF102`, `EFF103`, `DATA101`, and
   the `OPT` rules): a builtin constructor of a fixed iterable (`list(range(7))`,
   `tuple(".;:")`), a string constant, a comprehension over fixed iterables or a new list filled

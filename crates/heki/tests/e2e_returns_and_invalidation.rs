@@ -353,6 +353,21 @@ def coroutine_of():
 
 def use_coroutine_ok() -> None:
     coroutine_of().close()
+
+
+def ready() -> bool:
+    return True
+
+
+def table_until_ready():
+    while True:
+        if ready():
+            return {"a": []}
+    return load_table()
+
+
+def unreached_return_ok() -> None:
+    table_until_ready()["a"].append(1)
 "#;
 
 #[test]
@@ -370,7 +385,8 @@ fn mut202_follows_protected_values_through_returns() {
     // (line 80), a generator's values, a value stored in an attribute and changed in another
     // method (`Keeper`: not followed), a read of a cached value, a coroutine's result (also an
     // `@lru_cache` coroutine returned without `await`), and a generator's `return` value (it
-    // ends the iteration; calling the generator hands out the generator). A value returned on two paths, an
+    // ends the iteration; calling the generator hands out the generator), and a cached value
+    // returned only after a `while True:` loop no `break` leaves. A value returned on two paths, an
     // item of an unpacked cached pair, and a producer wrapped by both definitions of a
     // conditionally defined function are followed.
     assert_eq!(

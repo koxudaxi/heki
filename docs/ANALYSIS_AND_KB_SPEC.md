@@ -574,20 +574,23 @@ which module imports which.
    step), an element or the default (`d.get(k, default)`, `getattr(o, n, default)`), or what the
    project callees return. A parameter is borrowed, `*args` / `**kwargs` are new with borrowed
    elements, and a method's `self` is its own object.
-2. **The summary fact**: `returns_origins` walks back from the function's returns (plain sync
-   functions; a memoizing decorator makes the result held, another decorator unknown): new,
-   held, parameter `i`, or an element of parameter `i`. An object the function stores in another
-   object (an attribute, an item, a display, `setattr`, a container method) is an element of that
-   object; one stored in a global or a closure cell is held. Propagation (`returned_origins_edge`)
-   adds what a callee returns at a call whose result the caller returns as itself
-   (`CallSite.returned`), mapping the callee's parameters through `ArgOrigin::origins` (recorded
-   for those calls only). The fact takes part in Early Cutoff like every summary field.
+2. **The summary fact**: `returns_origins` walks back from the returns a run can reach (plain
+   sync functions; a memoizing decorator makes the result held, another decorator unknown):
+   new, held, parameter `i`, or an element of parameter `i`. A run reaches what
+   `ownership::Live` leaves once each branch on a constant takes its one side (`while True:`
+   never leaves at its header), the blocks the forward analysis follows too. An object the
+   function stores in another object there (an attribute, an item, a display, `setattr`, a
+   container method) is an element of that object; one stored in a global or a closure cell is
+   held. Propagation (`returned_origins_edge`) adds what a callee returns at a call whose result
+   the caller returns as itself (`CallSite.returned`, from the same returns), mapping the
+   callee's parameters through `ArgOrigin::origins` (recorded for those calls only). The fact
+   takes part in Early Cutoff like every summary field.
 3. **The forward analysis** (`heki_rules`, per function, to a fixpoint) joins the kinds of a
    value at phis, maps a project call's result through its callees' `returns_origins` and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it
-   (`MakeClosure` captures; functions are analyzed enclosing first). It does not follow the
-   edges a branch on a constant never takes, nor, on the edge where an `is` test of a value
-   against another fails, the object it is tested against (`if result is shared: result =
+   (`MakeClosure` captures; functions are analyzed enclosing first). It follows the blocks and
+   edges of `ownership::Live` only, and on the edge where an `is` test of a value against
+   another fails, it leaves out the object it is tested against (`if result is shared: result =
    shared.copy()`). A new object the function stores somewhere is part of where it is stored.
    A parameter that an `is` test against a constant, a global, or an attribute decides a branch
    on (through copies and phis) is *defaulted*: the accumulator idiom.
@@ -705,11 +708,12 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
      the call hop.
-  4. **Return flow**: a backward walk from the returns marks each call whose result may be
-     returned (as itself, as an element, or as an item of target unpacking; a copy ends it). A
-     callee that is a producer, an `@lru_cache` function, or `returns_protected` makes the caller
-     `returns_protected`, so a wrapper returning a producer's result is a producer itself, across
-     modules. The join is "protected if any path returns it", and the shortest chain is kept.
+  4. **Return flow**: a backward walk from the returns a run can reach (`ownership::Live`: not
+     a `return` after a `while True:` loop that no `break` leaves) marks each call whose result
+     may be returned (as itself, as an element, or as an item of target unpacking; a copy ends
+     it). A callee that is a producer, an `@lru_cache` function, or `returns_protected` makes
+     the caller `returns_protected`, so a wrapper returning a producer's result is a producer
+     itself, across modules. The join is "protected if any path returns it", and the shortest chain is kept.
      Only plain functions are followed: a generator's `return` value is not what calling it
      returns.
 

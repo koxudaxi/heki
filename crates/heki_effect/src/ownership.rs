@@ -250,9 +250,51 @@ pub fn stores(kind: &InstKind) -> Vec<(VarId, Place<'_>)> {
     }
 }
 
-/// The edges of `f` a branch on a constant never takes (`while True:` never leaves at its
-/// header), by `(from, to)` block.
-pub fn dead_edges(
+/// The blocks of a function a run can reach and the edges it can take: a branch on a constant
+/// takes one side (`while True:` never leaves at its header), and a block only such an untaken
+/// edge leads to never runs. Exception edges are taken.
+pub struct Live {
+    blocks: Vec<bool>,
+    dead: FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)>,
+}
+
+impl Live {
+    pub fn of(f: &heki_ir::IrFunction, defs: &FxHashMap<VarId, &Inst>) -> Self {
+        let dead = dead_edges(f, defs);
+        let mut blocks = vec![false; f.blocks.len()];
+        let mut stack: Vec<heki_ir::BlockId> = f.blocks.first().map(|b| b.id).into_iter().collect();
+        while let Some(b) = stack.pop() {
+            let i = b.0 as usize;
+            if i >= blocks.len() || blocks[i] {
+                continue;
+            }
+            blocks[i] = true;
+            let block = f.block(b);
+            stack.extend(
+                block
+                    .terminator
+                    .successors()
+                    .into_iter()
+                    .filter(|to| !dead.contains(&(b, *to)))
+                    .chain(block.exc_target),
+            );
+        }
+        Self { blocks, dead }
+    }
+
+    /// Whether a run can reach `b`.
+    pub fn block(&self, b: heki_ir::BlockId) -> bool {
+        self.blocks[b.0 as usize]
+    }
+
+    /// Whether a run can take the edge `from -> to`.
+    pub fn edge(&self, from: heki_ir::BlockId, to: heki_ir::BlockId) -> bool {
+        self.block(from) && !self.dead.contains(&(from, to))
+    }
+}
+
+/// The edges of `f` a branch on a constant never takes, by `(from, to)` block.
+fn dead_edges(
     f: &heki_ir::IrFunction,
     defs: &FxHashMap<VarId, &Inst>,
 ) -> FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)> {
@@ -293,19 +335,19 @@ enum Part {
     Element,
 }
 
-/// The origins of the objects the `roots` hold: a walk back through copies, phis (not along the
-/// `dead` edges), casts, in-place operators, iterations, items, and the defaults of `get` /
-/// `pop` / `getattr`, which classifies what each value's definition ([`source`] by `source_of`)
-/// or parameter (`param_of`) makes of it. An element of a new object is of unknown origin, one
-/// of a parameter is the caller's, and one of held state is held; an object the function stores
-/// in another (`kept`, through copies and phis) is an element of that one, and one stored in a
-/// global or a closure cell is held. A project call adds nothing: propagation adds what its
-/// callees return.
+/// The origins of the objects the `roots` hold: a walk back through copies, phis (along the
+/// edges a run can take, `live`), casts, in-place operators, iterations, items, and the
+/// defaults of `get` / `pop` / `getattr`, which classifies what each value's definition
+/// ([`source`] by `source_of`) or parameter (`param_of`) makes of it. An element of a new object
+/// is of unknown origin, one of a parameter is the caller's, and one of held state is held; an
+/// object the function stores in another (`kept`, through copies and phis) is an element of that
+/// one, and one stored in a global or a closure cell is held. A project call adds nothing:
+/// propagation adds what its callees return.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn origins_of<'i>(
     defs: &FxHashMap<VarId, &'i Inst>,
     phis: &FxHashMap<VarId, (heki_ir::BlockId, &PhiNode)>,
-    dead: &FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)>,
+    live: &Live,
     roots: impl IntoIterator<Item = VarId>,
     source_of: impl Fn(&'i Inst) -> Source<'i>,
     param_of: impl Fn(VarId) -> Option<ParamRole>,
@@ -341,7 +383,7 @@ pub(crate) fn origins_of<'i>(
             work.extend(
                 phi.incoming
                     .iter()
-                    .filter(|(from, _)| !dead.contains(&(*from, *block)))
+                    .filter(|(from, _)| live.edge(*from, *block))
                     .map(|(_, v)| (*v, part)),
             );
             continue;

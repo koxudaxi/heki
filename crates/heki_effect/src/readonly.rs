@@ -243,13 +243,15 @@ impl ProtectedReturn {
 
 /// The values a function's result may derive from without a deep copy: for each such variable,
 /// the step from it to the returned value, joined over the paths that return it. The walk goes
-/// back from every `return v` through copies, phis, attribute and item loads, iterations, and
-/// the derivations `derive` reports for an instruction (a call's receiver and first argument);
-/// it does not pass a deep copy, and a generator's or coroutine's caller gets a generator or a
-/// coroutine, never the returned value, so neither is walked.
+/// back from every `return v` a run can reach (`live`), through copies, phis (along the edges a
+/// run can take), attribute and item loads, iterations, and the derivations `derive` reports for
+/// an instruction (a call's receiver and first argument); it does not pass a deep copy, and a
+/// generator's or coroutine's caller gets a generator or a coroutine, never the returned value,
+/// so neither is walked.
 pub(crate) fn returned_values<'t>(
     f: &IrFunction,
     defs: &FxHashMap<VarId, &Inst>,
+    live: &crate::ownership::Live,
     derive: impl Fn(&InstKind) -> Vec<(VarId, Derivation)>,
     type_of: impl Fn(VarId) -> Option<&'t str>,
 ) -> FxHashMap<VarId, ReturnStep> {
@@ -260,12 +262,13 @@ pub(crate) fn returned_values<'t>(
     let mut work: Vec<(VarId, ReturnStep)> = f
         .blocks
         .iter()
+        .filter(|b| live.block(b.id))
         .filter_map(|b| match b.terminator {
             Terminator::Return(Some(v)) => Some((v, ReturnStep::ITSELF)),
             _ => None,
         })
         .collect();
-    let mut phis: Option<FxHashMap<VarId, &PhiNode>> = None;
+    let mut phis: Option<FxHashMap<VarId, (heki_ir::BlockId, &PhiNode)>> = None;
     while let Some((var, step)) = work.pop() {
         let step = match steps.get(&var) {
             Some(old) if old.join(step) == *old => continue,
@@ -277,15 +280,14 @@ pub(crate) fn returned_values<'t>(
             let phis = phis.get_or_insert_with(|| {
                 f.blocks
                     .iter()
-                    .flat_map(|b| &b.phis)
-                    .map(|p| (p.dst, p))
+                    .flat_map(|b| b.phis.iter().map(move |p| (p.dst, (b.id, p))))
                     .collect()
             });
-            if let Some(phi) = phis.get(&var) {
+            if let Some((block, phi)) = phis.get(&var) {
                 work.extend(
                     phi.incoming
                         .iter()
-                        .filter(|(_, v)| *v != var)
+                        .filter(|(from, v)| *v != var && live.edge(*from, *block))
                         .map(|(_, v)| (*v, step)),
                 );
             }
