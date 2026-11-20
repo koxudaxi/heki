@@ -571,8 +571,8 @@ heki/
   editing session (107 steps, and a second session of 20 steps over file, layout, buffer, and
   baseline changes).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
-- **LSP features**: the call chains of `EFF101` / `MUT201` and others are
-  `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven
+- **LSP features**: the call chains of `EFF101` / `MUT201` and others, and each diagnostic's
+  help, are `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven
   size-dependent rewrites are `refactor.rewrite.heki` code actions; a code action inserts
   `# heki: ignore[CODE]`. Any editor connects with `heki server` (alias `heki lsp`).
 
