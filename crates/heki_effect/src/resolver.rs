@@ -1564,34 +1564,43 @@ fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                 _ => continue,
             }
         };
-        let Some(class) = decls.classes.get_mut(owner) else {
-            continue;
-        };
-        let ix = FnIndex::new(f, &input.ir.constants);
-        let grown = ix.grown_vars();
-        let map = &mut class.attr_displays;
-        for bb in &f.blocks {
-            for (i, inst) in bb.insts.iter().enumerate() {
-                match &inst.kind {
-                    // A class attribute: `attr = [...]` in the class body.
-                    InstKind::Copy { dst, src } if f.is_class_body => {
-                        if let Some(attr) = f.var_name(*dst).filter(|n| !n.starts_with('.')) {
-                            note_attr(map, attr, ix.stored_display(*src, (bb.id, i)));
-                        }
+        // The semantic model declares every class the IR has (one AST).
+        if let Some(class) = decls.classes.get_mut(owner) {
+            note_function_attrs(input, f, &selfs, &mut class.attr_displays);
+        }
+    }
+}
+
+/// [`attr_displays`] of one class body or method (`selfs`: the variables holding `self`).
+fn note_function_attrs(
+    input: &ModuleInput<'_>,
+    f: &IrFunction,
+    selfs: &FxHashSet<VarId>,
+    map: &mut BTreeMap<String, Option<SmallDisplay>>,
+) {
+    let ix = FnIndex::new(f, &input.ir.constants);
+    let grown = ix.grown_vars();
+    for bb in &f.blocks {
+        for (i, inst) in bb.insts.iter().enumerate() {
+            match &inst.kind {
+                // A class attribute: `attr = [...]` in the class body.
+                InstKind::Copy { dst, src } if f.is_class_body => {
+                    if let Some(attr) = f.var_name(*dst).filter(|n| !n.starts_with('.')) {
+                        note_attr(map, attr, ix.stored_display(*src, (bb.id, i)));
                     }
-                    InstKind::AttrStore { obj, attr, value } if selfs.contains(obj) => {
-                        note_attr(map, attr, ix.stored_display(*value, (bb.id, i)));
-                    }
-                    InstKind::AttrDelete { obj, attr } if selfs.contains(obj) => {
-                        note_attr(map, attr, None);
-                    }
-                    InstKind::AttrLoad { dst, obj, attr }
-                        if selfs.contains(obj) && grown.contains(dst) =>
-                    {
-                        note_attr(map, attr, None);
-                    }
-                    _ => {}
                 }
+                InstKind::AttrStore { obj, attr, value } if selfs.contains(obj) => {
+                    note_attr(map, attr, ix.stored_display(*value, (bb.id, i)));
+                }
+                InstKind::AttrDelete { obj, attr } if selfs.contains(obj) => {
+                    note_attr(map, attr, None);
+                }
+                InstKind::AttrLoad { dst, obj, attr }
+                    if selfs.contains(obj) && grown.contains(dst) =>
+                {
+                    note_attr(map, attr, None);
+                }
+                _ => {}
             }
         }
     }

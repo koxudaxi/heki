@@ -2117,31 +2117,34 @@ impl<'a, 'c> Rules<'a, 'c> {
             .map_or("collections.deque", |d| d.spelling.as_str());
         let mut edits = Vec::new();
         let mut handled: Vec<u32> = Vec::new();
-        for &s in init_sites {
-            let init = inst_at(f, s);
-            let Some(value) = init.kind.dst() else {
-                continue;
-            };
-            let binding = self.cx().uses(value).iter().find_map(|u| match u {
-                UseSite::Inst(b, i) => match &f.block(*b).insts[*i].kind {
-                    InstKind::Copy { dst, src }
-                        if *src == value && f.var_name(*dst).is_some_and(is_identifier) =>
-                    {
-                        Some(f.block(*b).insts[*i].span)
-                    }
+        // Every init site is a display or a `list(...)` call (`front`): it defines a value.
+        let inits = init_sites
+            .iter()
+            .filter_map(|&s| Some((inst_at(f, s), inst_at(f, s).kind.dst()?)));
+        for (init, value) in inits {
+            // The assignment binding it (`q: list[int] = []`), not a phi of a conditional.
+            let binding = self
+                .cx()
+                .uses(value)
+                .iter()
+                .find_map(|u| match *u {
+                    UseSite::Inst(b, i) => Some(&f.block(b).insts[i]),
                     _ => None,
-                },
-                _ => None,
-            });
-            let Some(target) = binding else {
+                })
+                .filter(|inst| {
+                    matches!(&inst.kind, InstKind::Copy { dst, src }
+                        if *src == value && f.var_name(*dst).is_some_and(is_identifier))
+                });
+            let Some(target) = binding.map(|inst| inst.span) else {
                 continue;
             };
-            let Some(between) = self.m.text(Span {
-                start: target.end,
-                end: init.span.start,
-            }) else {
-                continue;
-            };
+            let between = self
+                .m
+                .text(Span {
+                    start: target.end,
+                    end: init.span.start,
+                })
+                .unwrap_or_default();
             let trimmed = between.trim();
             let Some(inner) = trimmed.strip_prefix(':').and_then(|t| t.strip_suffix('=')) else {
                 continue;
@@ -2307,19 +2310,11 @@ fn deque_annotation(ann: &str, spelling: &str) -> Option<String> {
 /// `[...]` whose first bracket closes at its last character.
 fn closes_at_end(text: &str) -> bool {
     let mut depth = 0i32;
-    for (i, c) in text.char_indices() {
-        match c {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return i + 1 == text.len();
-                }
-            }
-            _ => {}
-        }
-    }
-    false
+    let close = text.char_indices().find_map(|(i, c)| {
+        depth += i32::from(c == '[') - i32::from(c == ']');
+        (depth == 0).then_some(i + c.len_utf8())
+    });
+    close == Some(text.len())
 }
 
 /// Offsets (in `text`) of annotated declarations of `name`: `name:` (not `name :=`) where a

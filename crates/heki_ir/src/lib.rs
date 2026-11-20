@@ -702,11 +702,6 @@ impl IrFunction {
             .any(|&(d, i)| d == dst && i as usize == index)
     }
 
-    /// Source span of the terminator of `id` (`None` for jumps and the implicit return).
-    pub fn term_span(&self, id: BlockId) -> Option<Span> {
-        self.block(id).term_span
-    }
-
     /// Check whether any decorator ends with one of the provided names (e.g. `cached_property`).
     pub fn has_decorator(&self, names: &[&str]) -> bool {
         self.decorators.iter().any(|d| {

@@ -136,18 +136,16 @@ pub(crate) fn shown_path(p: &Path) -> PathBuf {
     if p.is_relative() {
         return p.to_path_buf();
     }
-    let Ok(cwd) = std::env::current_dir() else {
-        return p.to_path_buf();
-    };
-    if let Ok(rel) = p.strip_prefix(&cwd) {
-        return rel.to_path_buf();
-    }
-    match (std::fs::canonicalize(p), std::fs::canonicalize(&cwd)) {
-        (Ok(abs), Ok(cwd)) => abs
-            .strip_prefix(&cwd)
-            .map_or_else(|_| p.to_path_buf(), Path::to_path_buf),
-        _ => p.to_path_buf(),
-    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    p.strip_prefix(&cwd)
+        .ok()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let abs = std::fs::canonicalize(p).ok()?;
+            let rel = abs.strip_prefix(std::fs::canonicalize(&cwd).ok()?).ok()?;
+            Some(rel.to_path_buf())
+        })
+        .unwrap_or_else(|| p.to_path_buf())
 }
 
 /// [`shown_path`] in `/` form.
