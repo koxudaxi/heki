@@ -923,6 +923,15 @@ impl<'a> Extractor<'a> {
                 kwargs,
                 is_awaited,
             } => {
+                // A non-inlined comprehension iterates its first argument.
+                if callee_var.is_none()
+                    && let Some(id) = callee
+                        .strip_prefix("__comp_")
+                        .and_then(|n| n.parse::<u32>().ok())
+                    && let Some(iterable) = args.first()
+                {
+                    self.child_iteration(bb, FunctionId(id), *iterable, span);
+                }
                 let callee_val = callee_var.and_then(|v| self.types.get(&v));
                 // `m = obj.method; m(...)` and `getattr(obj, "method")(...)` call a method of
                 // the receiver, as `obj.method(...)` does.
@@ -983,8 +992,11 @@ impl<'a> Extractor<'a> {
             InstKind::MakeGenExpr {
                 dst,
                 func_id: Some(id),
+                outer_iter,
                 ..
             } => {
+                // Creating it iterates the outermost iterable at once.
+                self.child_iteration(bb, *id, *outer_iter, span);
                 let target = self.child_callee(*id);
                 let call = Call {
                     dst: *dst,
@@ -999,7 +1011,41 @@ impl<'a> Extractor<'a> {
                 };
                 self.call(bb, &target, &call);
             }
+            InstKind::MakeIter {
+                iterable,
+                is_async: false,
+                ..
+            } => self.iteration(bb, *iterable, span),
             _ => {}
+        }
+    }
+
+    /// The comprehension or generator expression `child` created here iterates `iterable`
+    /// (its outermost one) at once: [`Self::iteration`], unless it is asynchronous (an `async
+    /// for` runs `__aiter__`, which the catalog does not list).
+    fn child_iteration(&mut self, bb: BlockId, child: FunctionId, iterable: VarId, span: Span) {
+        if matches!(
+            self.cx.ir().function(child).kind,
+            FunctionKind::Sync | FunctionKind::Generator
+        ) {
+            self.iteration(bb, iterable, span);
+        }
+    }
+
+    /// Iterating `iterable` with `for` runs `__iter__` of its class: the catalog's entry for it
+    /// is a call at `span` (`for row in session.query(User):` runs the query). Project classes'
+    /// `__iter__` are not followed.
+    fn iteration(&mut self, bb: BlockId, iterable: VarId, span: Span) {
+        let Some(Val::Inst(class)) = self.types.get(&iterable) else {
+            return;
+        };
+        if class.starts_with("builtins.") || self.cx.project.is_project_class(class) {
+            return;
+        }
+        let symbol = format!("{class}.__iter__");
+        if self.cx.kb.lookup(&symbol).is_some() {
+            let loop_depth = self.f.block_loop_depth(bb);
+            self.external_call(symbol, &[], false, loop_depth, span);
         }
     }
 

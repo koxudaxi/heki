@@ -162,6 +162,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         // Built when a block of a loop has an effect to report.
         let mut sizes: Option<Sizes<'_, '_>> = None;
         let mut data_sized: Vec<Option<bool>> = vec![None; f.loops.len()];
+        // An iteration shares its span with the call producing the iterable: one report.
+        let mut seen: FxHashSet<Span> = FxHashSet::default();
         for bb in &f.blocks {
             if f.block_loop_depth(bb.id) == 0 {
                 continue;
@@ -180,8 +182,12 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             let mut checked: Option<bool> = None;
             for inst in &bb.insts {
                 // Reading a property runs its getter (a call site at the read); iterating a
-                // generator runs its body (a call site at the iteration).
-                if !anchors_call_site(&inst.kind) {
+                // generator runs its body and iterating an object of a catalogued class its
+                // `__iter__` (call sites at the iteration). Creating a generator expression
+                // iterates its outermost iterable at once: only that catalogued `__iter__` counts
+                // there, as the generator expression's body is a function of its own.
+                let iteration = matches!(inst.kind, InstKind::MakeGenExpr { .. });
+                if !iteration && !anchors_call_site(&inst.kind) {
                     continue;
                 }
                 let args: &[VarId] = match &inst.kind {
@@ -191,8 +197,12 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {
                     continue;
                 };
+                if !seen.insert(inst.span) {
+                    continue;
+                }
                 let effects: Vec<SiteEffect> = list
                     .iter()
+                    .filter(|s| !iteration || s.project_callees().is_empty())
                     .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                     .collect();
                 let mut hot = || *checked.get_or_insert_with(&mut in_data_loop);

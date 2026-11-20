@@ -487,7 +487,50 @@ mod tests {
     const COMMIT_ROLLBACK: &[&str] = &["commit", "rollback"];
     const SA_CONNECTION_QUERIES: &[&str] = &["execute", "exec_driver_sql", "scalar", "scalars"];
     const SA_SESSION_QUERIES: &[&str] = &[
-        "execute", "query", "scalars", "scalar", "get", "get_one", "refresh", "commit", "flush",
+        "execute", "scalars", "scalar", "get", "get_one", "refresh", "commit", "flush",
+    ];
+    /// `sqlalchemy.orm.Query` methods that run the query (iterating it included).
+    const SA_QUERY_RUNS: &[&str] = &[
+        "all",
+        "first",
+        "one",
+        "one_or_none",
+        "scalar",
+        "count",
+        "get",
+        "update",
+        "delete",
+        "__iter__",
+    ];
+    /// `sqlalchemy.orm.Query` methods that only build another `Query`.
+    const SA_QUERY_BUILDERS: &[&str] = &[
+        "filter",
+        "filter_by",
+        "where",
+        "join",
+        "outerjoin",
+        "order_by",
+        "group_by",
+        "having",
+        "limit",
+        "offset",
+        "slice",
+        "distinct",
+        "options",
+        "with_entities",
+        "add_columns",
+        "select_from",
+        "execution_options",
+        "populate_existing",
+        "with_for_update",
+        "params",
+        "yield_per",
+        "union",
+        "union_all",
+        "correlate",
+        "enable_eagerloads",
+        "from_statement",
+        "with_parent",
     ];
     const SA_ASYNC_SESSION_QUERIES: &[&str] = &[
         "execute",
@@ -893,6 +936,7 @@ mod tests {
                 [
                     with_prefix("sqlalchemy.engine.Connection", SA_CONNECTION_QUERIES),
                     with_prefix("sqlalchemy.orm.Session", SA_SESSION_QUERIES),
+                    with_prefix("sqlalchemy.orm.Query", SA_QUERY_RUNS),
                     with_prefix("sqlmodel.Session", SQLMODEL_SESSION_QUERIES),
                     s(&["psycopg.Connection.execute"]),
                     with_prefix("psycopg.Cursor", &["execute", "executemany"]),
@@ -940,6 +984,15 @@ mod tests {
                 // Its sessions stay untyped: `class_=AsyncSession` would make them async.
                 s(&["sqlalchemy.orm.sessionmaker"]),
                 returning("sqlalchemy.orm.sessionmaker", entry(&[])),
+            ),
+            (
+                // Lazy: they only build a `Query`, which runs when executed or iterated.
+                [
+                    s(&["sqlalchemy.orm.Session.query"]),
+                    with_prefix("sqlalchemy.orm.Query", SA_QUERY_BUILDERS),
+                ]
+                .concat(),
+                returning("sqlalchemy.orm.Query", entry(&[])),
             ),
             (
                 s(&["psycopg.connect", "psycopg.Connection.connect"]),
