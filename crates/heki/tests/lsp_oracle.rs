@@ -213,6 +213,15 @@ const MIXIN: &str = "class Mixin:\n    def _extra(self):\n        return 0\n";
 const MIXIN_READING: &str = "class Mixin:\n    def _extra(self):\n        return len(self.items)\n";
 const HOLDER_BASE: &str = "from functools import cached_property\n\nfrom pkg.mixin import Mixin\n\n\nclass Holding(Mixin):\n    def __init__(self):\n        self.items = []\n\n    @cached_property\n    def pair(self):\n        return (self.items, self._extra())\n";
 const HOLDER_SUB: &str = "from pkg.holding import Holding\n\n\nclass Sub(Holding):\n    def push(self, x):\n        self.items.append(x)\n";
+// A cached property holding `items` calls a mixin helper in another module for what it does
+// (result discarded); a subclass in a third module changes `items` in place. The cache is stale
+// once the helper writes an attribute the getter returns.
+const PREP_MIXIN: &str =
+    "class PrepMixin:\n    def _prepare(self):\n        print(len(self.items))\n";
+const PREP_MIXIN_WRITING: &str =
+    "class PrepMixin:\n    def _prepare(self):\n        self.count = len(self.items)\n";
+const PREPARED: &str = "from functools import cached_property\n\nfrom pkg.prep_mixin import PrepMixin\n\n\nclass Prepared(PrepMixin):\n    def __init__(self):\n        self.items = []\n        self.count = 0\n\n    @cached_property\n    def view(self):\n        self._prepare()\n        return (self.items, self.count)\n";
+const PREP_SUB: &str = "from pkg.prepared import Prepared\n\n\nclass Grown(Prepared):\n    def push(self, x):\n        self.items.append(x)\n";
 const SHAPE: &str = "class Shape:\n    def area(self):\n        return 0\n";
 const SQUARE: &str = "import time\n\nfrom pkg.shape import Shape\n\n\nclass Square(Shape):\n    def side(self):\n        time.sleep(1)\n";
 const DRAW: &str =
@@ -428,6 +437,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/mixin.py", MIXIN),
         ("pkg/holding.py", HOLDER_BASE),
         ("pkg/sub.py", HOLDER_SUB),
+        ("pkg/prep_mixin.py", PREP_MIXIN),
+        ("pkg/prepared.py", PREPARED),
+        ("pkg/prep_sub.py", PREP_SUB),
         ("pkg/shape.py", SHAPE),
         ("pkg/square.py", SQUARE),
         ("pkg/draw.py", DRAW),
@@ -1710,6 +1722,16 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/mixin.py", MIXIN)],
         )
         .absent(&[("pkg/sub.py", "MUT101")]),
+        Step::new(
+            "a mixin helper whose result the cached property discards starts writing what it returns",
+            vec![save("pkg/prep_mixin.py", PREP_MIXIN_WRITING)],
+        )
+        .present(&[("pkg/prep_sub.py", "MUT101")]),
+        Step::new(
+            "the helper stops writing it",
+            vec![save("pkg/prep_mixin.py", PREP_MIXIN)],
+        )
+        .absent(&[("pkg/prep_sub.py", "MUT101"), ("pkg/prep_mixin.py", "MUT101")]),
         Step::new(
             "a subclass module starts overriding the method an async def calls",
             vec![save(

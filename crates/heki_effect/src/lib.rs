@@ -484,8 +484,10 @@ pub struct EffectSummary {
     /// reference and that the getter reads for nothing else. Every read of `self.<attr>` in its
     /// body is returned as itself or put, as itself, into a display or a container that is
     /// returned (`{"k": self.a}`, `(x, self.a)`, `d["k"] = self.a`); no `self` method or
-    /// property it calls reads the attribute, and it hands `self` to no other code. An in-place
-    /// change of such an attribute is seen through the cached value (`MUT101`).
+    /// property it calls reads the attribute, except one whose result it discards that writes
+    /// nothing reaching the result (`self.finalize()` before `return self.tasks`), and it hands
+    /// `self` to no other code. An in-place change of such an attribute is seen through the
+    /// cached value (`MUT101`).
     pub returns_self_attrs: BTreeSet<String>,
     /// The `self` attributes the function reads only where they are initialized lazily: by
     /// itself (it writes `self.<attr>` where a `None` / falsy test of it found it unset:
@@ -1012,6 +1014,11 @@ pub struct CallSite {
     pub handed_callable: Option<u8>,
     /// What the receiver tells about the implementations the callees run (`None`: nothing).
     pub dispatch: Option<Box<Dispatch>>,
+    /// A call on `self` whose result nothing reads (`self.prepare()` as a statement): it
+    /// reaches what its caller computes only through the attributes it writes (`MUT101`,
+    /// [`EffectSummary::returns_self_attrs`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub result_discarded: bool,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).

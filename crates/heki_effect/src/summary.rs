@@ -478,6 +478,8 @@ struct Extractor<'a> {
     defs: FxHashMap<VarId, &'a Inst>,
     /// Instructions using each variable as an operand.
     uses: FxHashMap<VarId, Vec<&'a InstKind>>,
+    /// The variables a phi or a block's terminator reads (`return v`, a branch on `v`).
+    flow_uses: OnceCell<FxHashSet<VarId>>,
     self_vars: FxHashSet<VarId>,
     param_alias: FxHashMap<VarId, (u8, Option<String>)>,
     /// One-level slots of parameters: `p.a` / `p["k"]` of parameter `p` itself, through copies
@@ -617,6 +619,7 @@ impl<'a> Extractor<'a> {
             isinstance_classes,
             defs,
             uses,
+            flow_uses: OnceCell::new(),
             self_vars,
             param_alias: FxHashMap::default(),
             param_slot_alias: FxHashMap::default(),
@@ -2707,6 +2710,7 @@ impl<'a> Extractor<'a> {
                         binds_recv: false,
                         handed_callable: None,
                         dispatch: None,
+                        result_discarded: false,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -2903,6 +2907,7 @@ impl<'a> Extractor<'a> {
                 let site = self.site(bb, CallTarget::Project(callees), call.is_awaited, call.span);
                 self.sites.push(CallSite {
                     recv_is_self: call.recv_is_self,
+                    result_discarded: call.recv_is_self && self.discards(call.dst),
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
                     dispatch: self.dispatch(call, site.project_callees()),
@@ -3080,6 +3085,30 @@ impl<'a> Extractor<'a> {
     }
 
     /// A call site in block `bb` with the caller's guards there.
+    /// Nothing reads `v`: no instruction, phi, or terminator (a call made as a statement).
+    fn discards(&self, v: VarId) -> bool {
+        let flow_uses = self.flow_uses.get_or_init(|| {
+            let mut out = FxHashSet::default();
+            for bb in &self.f.blocks {
+                out.extend(
+                    bb.phis
+                        .iter()
+                        .flat_map(|phi| phi.incoming.iter().map(|(_, v)| *v)),
+                );
+                match bb.terminator {
+                    Terminator::Branch { cond: v, .. }
+                    | Terminator::Return(Some(v))
+                    | Terminator::Raise(Some(v)) => {
+                        out.insert(v);
+                    }
+                    _ => {}
+                }
+            }
+            out
+        });
+        !self.uses.contains_key(&v) && !flow_uses.contains(&v)
+    }
+
     fn site(&self, bb: BlockId, target: CallTarget, is_awaited: bool, span: Span) -> CallSite {
         let cx = self.guard_inputs();
         CallSite {
@@ -3101,6 +3130,7 @@ impl<'a> Extractor<'a> {
             binds_recv: false,
             handed_callable: None,
             dispatch: None,
+            result_discarded: false,
         }
     }
 
@@ -3557,6 +3587,7 @@ fn role_site(
         binds_recv: site.binds_recv,
         handed_callable: site.handed_callable,
         dispatch: site.dispatch.clone(),
+        result_discarded: false,
     }
 }
 

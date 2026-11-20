@@ -272,6 +272,10 @@ fn recompute(
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
+    if !s.returns_self_attrs.is_empty() {
+        let sites = out.get(func).map(Vec::as_slice).unwrap_or(&[]);
+        drop_attrs_read_by_discarded_calls(index, sites, local, &mut s);
+    }
     let hidden = std::mem::take(&mut s.declared_hidden);
     s.hide_exec_effects(&hidden);
     s.declared_hidden = hidden;
@@ -288,6 +292,65 @@ fn recompute(
     }
     s.refresh_typed_field_writes();
     s
+}
+
+/// Takes from [`EffectSummary::returns_self_attrs`] of a cached property the attributes its
+/// `self` calls whose results it discards read, when such a call writes an attribute that
+/// reaches the cached value: one the getter reads itself or through a call reaching the value
+/// (the attributes it returns included), so the call may have derived it from what it reads.
+fn drop_attrs_read_by_discarded_calls(
+    index: &ProjectIndex,
+    sites: &[(PathBuf, usize)],
+    local: &EffectSummary,
+    s: &mut EffectSummary,
+) {
+    let mut reaching: BTreeSet<&str> = local
+        .reads_self_attrs
+        .iter()
+        .map(|r| r.attr.as_str())
+        .collect();
+    // `(reads, writes)` of each callee of a discarded `self` call.
+    let mut discarded: Vec<(BTreeSet<&str>, BTreeSet<&str>)> = Vec::new();
+    for (path, i) in sites {
+        let site = &index.files[path].call_sites[*i];
+        if !site.recv_is_self {
+            continue;
+        }
+        for bc in site.project_callees() {
+            let Some(callee) = index.summary(&bc.callee) else {
+                continue;
+            };
+            let delivered = delivery(|k| index.summary(k), site, callee)
+                .filter(|d| d.into == Facts::Body)
+                .and_then(|d| callee.facts(d.from));
+            let Some(facts) = delivered.filter(|_| callee.owner_class_qualname.is_some()) else {
+                continue;
+            };
+            let reads = facts.reads_self_attrs.iter().map(|r| r.attr.as_str());
+            if site.result_discarded {
+                let writes = facts.mutates_self_attrs.iter().map(|w| w.attr.as_str());
+                discarded.push((reads.collect(), writes.collect()));
+            } else {
+                reaching.extend(reads);
+            }
+        }
+    }
+    let mut dropped: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let (reach, inert): (Vec<_>, Vec<_>) = std::mem::take(&mut discarded)
+            .into_iter()
+            .partition(|(_, writes)| !writes.is_disjoint(&reaching));
+        discarded = inert;
+        if reach.is_empty() {
+            break;
+        }
+        for (reads, _) in reach {
+            reaching.extend(reads.iter().copied());
+            dropped.extend(reads);
+        }
+    }
+    s.returns_self_attrs
+        .retain(|a| !dropped.contains(a.as_str()));
 }
 
 /// Resolves the construction conditions of a function's local facts (`construction`) against
@@ -571,8 +634,9 @@ fn transfer(
 
     // c. Mutation & state effects.
     if site.recv_is_self && callee.owner_class_qualname.is_some() {
-        // A `self` method or property reading an attribute reads it for more than its object.
-        if !t.returns_self_attrs.is_empty() {
+        // A `self` method or property reading an attribute reads it for more than its object;
+        // one whose result is discarded is decided with the others (`recompute`).
+        if !t.returns_self_attrs.is_empty() && !site.result_discarded {
             t.returns_self_attrs
                 .retain(|a| !facts.reads_self_attrs.iter().any(|r| r.attr == *a));
         }

@@ -425,7 +425,11 @@ which module imports which.
    `del self.a`): the cached value holds the attribute's object itself and sees in-place changes.
    The fact is local to the getter (every read of `self.a` is returned as itself or put, as
    itself, into a display or a container that is returned; `self` reaches no other code), minus
-   the attributes the `self` methods and properties it calls read (final summary). A starred
+   the attributes the `self` methods and properties it calls read (final summary). A call whose
+   result the getter discards (`CallSite::result_discarded`: no instruction, phi, or terminator
+   reads it) takes its reads away only when it writes an attribute reaching the value: one the
+   getter reads itself or through a call reaching the value (a fixpoint over the getter's
+   discarded calls, `callgraph::recompute`). A starred
    display element (`(*self.a,)`) is a copy: the IR lowers it to a copy named `.unpacked`.
 5. For an attribute in **`lazily_read_self_attrs(p)`**, a lazy initialization does not count: a
    write in a block that only the "unset" outcome of a `None` / falsy test of `self.a` leads to

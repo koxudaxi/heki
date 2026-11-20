@@ -53,7 +53,10 @@ It does not report:
   (`{"items": self.items}`, `ctx["k"] = (x, self.items)`). The cached value sees those changes;
   rebinding the attribute (`self.items = []`) is still reported. A getter that also computes
   from it (`len(self.items)`), copies it (`list(self.items)`, `(*self.items,)`), reads it through
-  a `self` method or property, or hands `self` to other code is reported as before.
+  a `self` method or property, or hands `self` to other code is reported as before. A `self`
+  call whose result the getter discards (`self.finalize()` before `return self.items`) counts
+  only when it writes an attribute the getter reads, itself or through a call whose result it
+  uses.
 
 ## Example
 ```python

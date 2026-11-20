@@ -397,6 +397,84 @@ fn mut101_held_attributes_cross_modules() {
     assert_eq!(lines(&p, "MUT101"), vec![at(6, "Derived.push")]);
 }
 
+/// A getter that calls a `self` method for what it does (`self.finalize()`, result discarded)
+/// and returns the attribute itself: the call reaches the cached value only through what it
+/// writes. When it writes nothing the getter reads, the in-place changes of the returned
+/// attribute are seen; when the getter reads what it writes (`_names`, `finalized`), the call
+/// may have derived that from the attribute, and they are reported.
+const DISCARDED: &str = r#"from functools import cached_property
+
+
+class Registry:
+    def __init__(self):
+        self.finalized = False
+        self._tasks = {}
+        self._names = []
+
+    def finalize(self):
+        if not self.finalized:
+            self.finalized = True
+            for task in self._tasks.values():
+                print(task)
+
+    def _index(self):
+        self._names = sorted(self._tasks)
+
+    @cached_property
+    def tasks(self):
+        self.finalize()
+        return self._tasks
+
+    @cached_property
+    def indexed(self):
+        self._index()
+        return (self._tasks, self._names)
+
+    @cached_property
+    def with_state(self):
+        self.finalize()
+        return (self._tasks, self.finalized)
+
+    @cached_property
+    def summary(self):
+        names = self._index()
+        return (self._tasks, names)
+
+    def register(self, name, task):
+        self._tasks[name] = task
+"#;
+
+#[test]
+fn mut101_getters_calling_self_methods_for_their_effects() {
+    let p = Project::new("regr_mut101_discarded");
+    p.write("registry.py", DISCARDED);
+    let found = reports(&p, "MUT101");
+    let got: Vec<(u64, &str, &str)> = found
+        .iter()
+        .map(|(line, qualname, message)| {
+            let property = message.rsplit_once("`@cached_property` `").unwrap().1;
+            (
+                *line,
+                qualname.as_str(),
+                property.split('`').next().unwrap(),
+            )
+        })
+        .collect();
+    // Not reported: `register` for `tasks`. Reported: `register` for the getters that read
+    // what their discarded call writes (`indexed`, `with_state`) or use its result (`summary`).
+    assert_eq!(
+        got,
+        vec![
+            (12, "Registry.finalize", "with_state"),
+            (17, "Registry._index", "indexed"),
+            (40, "Registry.register", "indexed"),
+            (40, "Registry.register", "summary"),
+            (40, "Registry.register", "with_state"),
+        ],
+        "{found:#?}"
+    );
+}
+
 // ============================================================= MUT101: lazy initialization
 
 /// Lazy initializations (`if self._conn is None: self._conn = ...`, `if not self.finalized:`, in
