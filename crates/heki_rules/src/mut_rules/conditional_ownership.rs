@@ -122,6 +122,9 @@ struct New {
     /// Every new object it may be starts empty (`[]`, `{}`, `dict()`): removing from it does
     /// nothing.
     empty: bool,
+    /// Every new object it may be replaces a parameter that an `is` test found to be `None` or
+    /// a sentinel (`if out is None: out = []`).
+    replacement: bool,
 }
 
 /// The objects a value may hold, path by path: the first found of each kind.
@@ -130,9 +133,11 @@ struct Own {
     new: Option<New>,
     /// Borrowed state it may be.
     borrowed: Option<Borrow>,
-    /// A parameter it may be when the caller passed one, where the function makes a new object
-    /// only for `None` or a sentinel (`if p is None: p = []`): the accumulator idiom fills
-    /// what the caller hands it, so this counts only when the value is also stored on `self`.
+    /// A parameter it may be when the caller passed one, where an `is` test found it is not
+    /// `None` or a sentinel and the function replaces it with a new object otherwise (`if p is
+    /// None: p = []`): the accumulator idiom fills what the caller hands it. It counts when a
+    /// new object the value may be is no such replacement, or when the value is also stored
+    /// on `self`.
     defaulted: Option<Borrow>,
     /// What its elements borrow while it is new itself (`*args`, `**kwargs`).
     items: Option<Borrow>,
@@ -141,7 +146,11 @@ struct Own {
 impl Own {
     fn new_at(at: Span, empty: bool) -> Self {
         Self {
-            new: Some(New { at, empty }),
+            new: Some(New {
+                at,
+                empty,
+                replacement: false,
+            }),
             ..Self::default()
         }
     }
@@ -159,6 +168,7 @@ impl Own {
             (Some(a), Some(b)) => Some(New {
                 at: a.at,
                 empty: a.empty && b.empty,
+                replacement: a.replacement && b.replacement,
             }),
             (a, b) => a.or(b),
         };
@@ -178,6 +188,13 @@ impl Own {
             .or(self.defaulted.as_ref())
             .or(self.items.as_ref())?;
         Some(Self::borrowing(below.element()))
+    }
+
+    /// Borrowed state on some path, other than a parameter's object next to its replacements
+    /// only.
+    fn borrows(&self) -> bool {
+        self.borrowed.is_some()
+            || self.defaulted.is_some() && !self.new.is_some_and(|n| n.replacement)
     }
 
     /// A new object on one path and borrowed state on another.
@@ -302,6 +319,16 @@ fn enclosing_first(functions: &[IrFunction]) -> Vec<usize> {
     order
 }
 
+/// An `is` / `is not` test deciding a branch: its block, the successor where its operands are
+/// the same object, the one where they are not, and the operands.
+struct IdentityTest {
+    at: BlockId,
+    same: BlockId,
+    differs: BlockId,
+    lhs: VarId,
+    rhs: VarId,
+}
+
 /// A change in place of a value: where, the value, and the calls down to a helper making it.
 struct Change {
     span: Span,
@@ -339,6 +366,16 @@ struct FnCheck<'a, 'u> {
     /// The blocks a run can reach and the edges it can take.
     live: ownership::Live,
     preds: Vec<Vec<BlockId>>,
+    /// Per phi input (the phi's variable and the block the input comes from), the values an
+    /// `is` test that failed on the way tested it against (`if result is shared: result =
+    /// shared.copy()`): it is not their objects.
+    not_same: FxHashMap<(VarId, BlockId), Vec<VarId>>,
+    /// The phi inputs that are a parameter's object where an `is` test found it is not `None`
+    /// or a sentinel, at a phi whose inputs from the test's other side replace it (`if out is
+    /// None: out = []`): the accumulator idiom.
+    callers: FxHashSet<(VarId, BlockId)>,
+    /// The phi inputs from the other side of such a test: the parameter's replacements.
+    replacements: FxHashSet<(VarId, BlockId)>,
     /// Where the new objects the function stores in another object, a global, or a closure
     /// cell are made, and where they are stored: they are part of that state from then on, on
     /// every path.
@@ -359,7 +396,6 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             .filter(|_| !f.has_decorator(&["classmethod"]))
             .map(|p| self_aliases(f, p.var))
             .unwrap_or_default();
-        let tested = identity_tested_params(f, &defs);
         let mut own = FxHashMap::default();
         for p in &f.params {
             if receiver.is_some_and(|r| r.var == p.var) {
@@ -375,22 +411,13 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                         ..Own::new_at(f.span, false)
                     },
                 );
-            } else if tested.contains(&p.var) {
-                let defaulted = Some(Borrow::Param(p.name.clone()));
-                own.insert(
-                    p.var,
-                    Own {
-                        defaulted,
-                        ..Own::default()
-                    },
-                );
             } else {
                 own.insert(p.var, Own::borrowing(Borrow::Param(p.name.clone())));
             }
         }
         let live = ownership::Live::of(f, &defs);
         let key = CheckContext::key(u.unit, f);
-        Self {
+        let mut check = Self {
             sites: u.sites.get(key.qualname.as_str()),
             key,
             types: u.tcx.infer(f),
@@ -402,8 +429,131 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             self_vars,
             live,
             preds: f.predecessors(),
+            not_same: FxHashMap::default(),
+            callers: FxHashSet::default(),
+            replacements: FxHashSet::default(),
             kept: FxHashMap::default(),
+        };
+        check.identity_sides();
+        check
+    }
+
+    /// Where the `is` tests deciding the function's branches tell its phi inputs apart
+    /// ([`Self::not_same`], [`Self::callers`], [`Self::replacements`]).
+    fn identity_sides(&mut self) {
+        let tests = self.identity_tests();
+        let sentinel = |v: VarId| {
+            matches!(
+                self.defs.get(&v).map(|i| &i.kind),
+                Some(
+                    InstKind::Const { .. }
+                        | InstKind::LoadGlobal { .. }
+                        | InstKind::AttrLoad { .. }
+                )
+            )
+        };
+        let mut not_same: FxHashMap<(VarId, BlockId), Vec<VarId>> = FxHashMap::default();
+        let mut callers = FxHashSet::default();
+        let mut replacements = FxHashSet::default();
+        for b in self.f.blocks.iter().filter(|b| self.live.block(b.id)) {
+            for phi in &b.phis {
+                for &(from, v) in &phi.incoming {
+                    let root = self.copied_from(v);
+                    for t in &tests {
+                        let other = if self.copied_from(t.lhs) == root {
+                            t.rhs
+                        } else if self.copied_from(t.rhs) == root {
+                            t.lhs
+                        } else {
+                            continue;
+                        };
+                        if !self.on_side(from, b.id, t.at, t.differs) {
+                            continue;
+                        }
+                        not_same.entry((phi.dst, from)).or_default().push(other);
+                        if !sentinel(other) {
+                            continue;
+                        }
+                        let replaced: Vec<BlockId> = phi
+                            .incoming
+                            .iter()
+                            .map(|(f, _)| *f)
+                            .filter(|f| self.on_side(*f, b.id, t.at, t.same))
+                            .collect();
+                        if !replaced.is_empty() {
+                            callers.insert((phi.dst, from));
+                            replacements.extend(replaced.into_iter().map(|f| (phi.dst, f)));
+                        }
+                    }
+                }
+            }
         }
+        self.not_same = not_same;
+        self.callers = callers;
+        self.replacements = replacements;
+    }
+
+    /// The `is` / `is not` tests deciding the branches a run reaches.
+    fn identity_tests(&self) -> Vec<IdentityTest> {
+        self.f
+            .blocks
+            .iter()
+            .filter(|b| self.live.block(b.id))
+            .filter_map(|b| {
+                let Terminator::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } = b.terminator
+                else {
+                    return None;
+                };
+                let (same_when_true, lhs, rhs) = identity_condition(&self.defs, cond)?;
+                let (same, differs) = if same_when_true {
+                    (then_bb, else_bb)
+                } else {
+                    (else_bb, then_bb)
+                };
+                Some(IdentityTest {
+                    at: b.id,
+                    same,
+                    differs,
+                    lhs,
+                    rhs,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether a run takes the edge `from -> to` only after the branch ending `at` went to
+    /// `side`: the edge itself, or one from a block every run reaches through `side` alone.
+    fn on_side(&self, from: BlockId, to: BlockId, at: BlockId, side: BlockId) -> bool {
+        if from == at {
+            return to == side;
+        }
+        self.preds[side.0 as usize] == [at] && self.passes_through(from, side)
+    }
+
+    /// Whether every run that reaches block `b` passes through block `head` on the way.
+    fn passes_through(&self, b: BlockId, head: BlockId) -> bool {
+        let entry = self.f.blocks[0].id;
+        let mut seen: FxHashSet<BlockId> = FxHashSet::default();
+        let mut stack = vec![b];
+        while let Some(x) = stack.pop() {
+            if x == head || !seen.insert(x) {
+                continue;
+            }
+            if x == entry {
+                return false;
+            }
+            stack.extend(
+                self.preds[x.0 as usize]
+                    .iter()
+                    .copied()
+                    .filter(|p| self.live.edge(*p, x)),
+            );
+        }
+        true
     }
 
     fn sites_at(&self, span: Span) -> &[&'a CallSite] {
@@ -657,7 +807,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                         if v == phi.dst || !self.live.edge(from, bb) {
                             continue;
                         }
-                        joined = join_opt(joined, self.incoming(from, bb, v));
+                        joined = join_opt(joined, self.incoming(from, phi.dst, v));
                     }
                     if let Some(o) = joined {
                         changed |= self.grow(phi.dst, o);
@@ -678,53 +828,26 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         }
     }
 
-    /// The value `v` brings into a phi of `block` from `from`: on the edge where an `is` test of
-    /// it against another object fails (`if result is shared: result = shared.copy()`), it is
-    /// not that object.
-    fn incoming(&self, from: BlockId, block: BlockId, v: VarId) -> Option<Own> {
-        let own = self.own.get(&v)?;
-        let Some((a, b)) = self.failed_identity(from, block) else {
-            return Some(own.clone());
-        };
-        let root = self.copied_from(v);
-        let other = if self.copied_from(a) == root {
-            b
-        } else if self.copied_from(b) == root {
-            a
-        } else {
-            return Some(own.clone());
-        };
-        Some(match self.own.get(&other) {
-            Some(o) => own.other_than(o),
-            None => own.clone(),
-        })
-    }
-
-    /// The operands of the `is` comparison that is false on the edge `from -> to`: the branch
-    /// ends `from`, or an empty block `from` that is the side of the branch that it leads to.
-    fn failed_identity(&self, from: BlockId, to: BlockId) -> Option<(VarId, VarId)> {
-        let test = |at: BlockId, side: BlockId| {
-            let Terminator::Branch {
-                cond,
-                then_bb,
-                else_bb,
-            } = self.f.block(at).terminator
-            else {
-                return None;
-            };
-            let (same, lhs, rhs) = identity_condition(&self.defs, cond)?;
-            let fails = if same { else_bb } else { then_bb };
-            (fails == side).then_some((lhs, rhs))
-        };
-        test(from, to).or_else(|| {
-            let b = self.f.block(from);
-            match (self.preds[from.0 as usize].as_slice(), &b.terminator) {
-                ([at], Terminator::Jump(next)) if b.insts.is_empty() && *next == to => {
-                    test(*at, from)
-                }
-                _ => None,
+    /// The value `v` brings into the phi `phi` from the block `from`: not the objects of the
+    /// values an `is` test that failed on the way tested it against, and the accumulator
+    /// idiom's parameter or replacement where an `is` test against a sentinel selects them.
+    fn incoming(&self, from: BlockId, phi: VarId, v: VarId) -> Option<Own> {
+        let mut own = self.own.get(&v)?.clone();
+        for other in self.not_same.get(&(phi, from)).into_iter().flatten() {
+            if let Some(o) = self.own.get(other) {
+                own = own.other_than(o);
             }
-        })
+        }
+        if self.callers.contains(&(phi, from)) && matches!(own.borrowed, Some(Borrow::Param(_))) {
+            own.defaulted = own.defaulted.or(own.borrowed.take());
+        }
+        if self.replacements.contains(&(phi, from)) {
+            own.new = own.new.map(|n| New {
+                replacement: true,
+                ..n
+            });
+        }
+        Some(own)
     }
 
     /// Join `o` into the value of `var`; whether it grew.
@@ -892,7 +1015,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 .f
                 .var_name(change.var)
                 .is_some_and(|n| n.starts_with(".ifexpr"));
-            if o.borrowed.is_none() && !stored.contains(o)
+            if !o.borrows() && !stored.contains(o)
                 || o.borrow().is_memo()
                 || change.removes && o.new.is_some_and(|n| n.empty)
                 || picked
@@ -1042,55 +1165,6 @@ fn identity_condition(defs: &FxHashMap<VarId, &Inst>, cond: VarId) -> Option<(bo
             _ => return None,
         }
     }
-}
-
-/// The parameters (their variables) that an `is` / `is not` comparison deciding a branch tests
-/// against a constant, a global, or an attribute, also through copies and phis: `if out is None:
-/// out = []` replaces such a parameter with a new object only when the caller passes none.
-fn identity_tested_params(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>) -> FxHashSet<VarId> {
-    let sentinel = |v: &VarId| {
-        matches!(
-            defs.get(v).map(|i| &i.kind),
-            Some(InstKind::Const { .. } | InstKind::LoadGlobal { .. } | InstKind::AttrLoad { .. })
-        )
-    };
-    let mut tested: Vec<VarId> = Vec::new();
-    for b in &f.blocks {
-        let Terminator::Branch { cond, .. } = b.terminator else {
-            continue;
-        };
-        let Some((_, lhs, rhs)) = identity_condition(defs, cond) else {
-            continue;
-        };
-        if sentinel(&rhs) {
-            tested.push(lhs);
-        }
-        if sentinel(&lhs) {
-            tested.push(rhs);
-        }
-    }
-    let phis: FxHashMap<VarId, &heki_ir::PhiNode> = f
-        .blocks
-        .iter()
-        .flat_map(|b| &b.phis)
-        .map(|p| (p.dst, p))
-        .collect();
-    let params: FxHashSet<VarId> = f.params.iter().map(|p| p.var).collect();
-    let mut seen: FxHashSet<VarId> = FxHashSet::default();
-    let mut out = FxHashSet::default();
-    while let Some(v) = tested.pop() {
-        if !seen.insert(v) {
-            continue;
-        }
-        if params.contains(&v) {
-            out.insert(v);
-        } else if let Some(phi) = phis.get(&v) {
-            tested.extend(phi.incoming.iter().map(|(_, x)| *x));
-        } else if let Some(InstKind::Copy { src, .. }) = defs.get(&v).map(|i| &i.kind) {
-            tested.push(*src);
-        }
-    }
-    out
 }
 
 /// Whether the new object `kind` makes starts empty: an empty display, or a container
