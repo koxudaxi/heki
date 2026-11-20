@@ -1,6 +1,6 @@
 //! The declared contracts the summaries depend on ([`heki_effect::Contracts`]), built from the
-//! configuration: the `readonly-returns` producers (`MUT202`) and the `invalidation` contracts
-//! (`MUT109`). `heki check` and the LSP engine hand them to the analysis, so a wrapper of a
+//! configuration: the `readonly-returns` producers (`MUT202`), the `invalidation` contracts
+//! (`MUT109`), and whether any ownership contract is declared. `heki check` and the LSP engine hand them to the analysis, so a wrapper of a
 //! producer and an invalidator reached through calls are known across files without IR.
 
 use crate::mut_rules::ReadOnlyProducers;
@@ -50,6 +50,8 @@ impl InvalidationNames {
 /// [`Contracts`] over a configuration's `readonly-returns` and `invalidation` entries.
 #[derive(Debug)]
 pub(crate) struct ConfigContracts {
+    /// [`Contracts::ownership`].
+    ownership: bool,
     producers: ReadOnlyProducers,
     pub(crate) invalidations: Vec<InvalidationNames>,
     /// The masks of [`Contracts::invalidator_of`] by name.
@@ -119,6 +121,10 @@ impl ConfigContracts {
             });
         }
         Ok(Self {
+            ownership: !(config.write_owners.is_empty()
+                && config.read_owners.is_empty()
+                && config.effect_boundaries.is_empty()
+                && config.invalidation.is_empty()),
             producers: ReadOnlyProducers::new(config)?,
             invalidations,
             invalidators: NameMasks::default(),
@@ -127,6 +133,10 @@ impl ConfigContracts {
 }
 
 impl Contracts for ConfigContracts {
+    fn ownership(&self) -> bool {
+        self.ownership
+    }
+
     fn readonly_producer(&self, fqn: &str) -> Option<bool> {
         self.producers.deep_for(fqn)
     }
@@ -162,12 +172,12 @@ fn mask(contracts: &[InvalidationNames], has: impl Fn(&InvalidationNames) -> boo
 }
 
 /// The contracts of `config` the summaries depend on (`None` when it declares no producer and no
-/// `invalidation` contract, so nothing is computed for them).
+/// ownership contract, so nothing is computed for them).
 pub fn summary_contracts(
     config: &HekiConfig,
 ) -> Result<Option<Arc<dyn Contracts>>, RuleConfigError> {
     let contracts = ConfigContracts::new(config)?;
-    if contracts.producers.is_empty() && contracts.invalidations.is_empty() {
+    if contracts.producers.is_empty() && !contracts.ownership {
         return Ok(None);
     }
     Ok(Some(Arc::new(contracts)))

@@ -17,9 +17,9 @@ The first public preview.
   `concise`, `json`, `github`, `sarif`; paths relative to the working directory, as in Ruff),
   and exit codes `0` / `1` / `2`. The target Python version (`py311` to `py315`) comes from
   `requires-python` or `--target-version`, and `--watch` re-checks on every change.
-- 29 rules in four families:
+- 30 rules in four families:
   - Mutation and state: `MUT101`, `MUT107`, `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`,
-    `MUT204`, and the opt-in `MUT103`, `MUT106`, and `MUT108`.
+    `MUT204`, `MUT205`, and the opt-in `MUT103`, `MUT106`, and `MUT108`.
   - Execution effects: `EFF101`, `EFF102`, `EFF103`, `EFF201`, and the opt-in `EFF105`,
     `EFF106`, and `EFF107`.
   - Data pipelines: `DATA101`.
@@ -34,7 +34,11 @@ The first public preview.
   `call-owners` (`MUT204`), `readonly-returns` (`MUT202`, followed through the functions that
   return a producer's result), `invalidation` (`MUT109`), and `effect-boundaries` (`EFF201`, with
   `reads-targets`, `calls`, and `allow-writes` / `write-universe`); `forbidden-writers` /
-  `forbidden-readers` / `forbidden-callers` restrict an owner contract to a layer.
+  `forbidden-readers` / `forbidden-callers` restrict an owner contract to a layer. Targets can
+  name container entries (`Class.attr["key"]`) and use module-level `Final` string constants as
+  keys; `fresh-objects = "allow" | "report"` decides whether a write that constructs its object
+  counts (allowed by default), and `unresolved = "report"` makes a `write-owners` contract count
+  the writes heki cannot tie to a class (`MUT205`).
 - A catalog of library behavior (blocking network, database, and file calls, their async
   counterparts, offloading helpers, locks and transactions) for the standard library, requests,
   httpx, urllib3, aiohttp, SQLAlchemy, SQLModel, psycopg, psycopg2, PyMySQL, Django, redis,

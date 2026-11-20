@@ -177,6 +177,11 @@ EffectSummary(f) = {
                                                            // normal path (MUT109)
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
+    retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
+    returns_new:              bool,                        // returns an object it constructs, nothing else
+                                                           // holding it (fresh-objects)
+    unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
+                                                           // computed names on guarded classes (MUT205)
 
     // Guards: when an effect runs
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy
@@ -195,6 +200,12 @@ EffectSummary(f) = {
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
 ```
+
+Contract-only facts (`Final` string keys through `ModuleDecls::str_constants`, container
+entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
+`TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
+`Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
+invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
 
 `CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
 invalidation contracts announced after the call on every normal path, and the next call; set on

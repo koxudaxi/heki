@@ -18,6 +18,7 @@
 //! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
 
 mod callgraph;
+mod construction;
 pub mod consumption;
 mod contracts;
 pub mod guards;
@@ -42,8 +43,8 @@ pub use report::{
 };
 pub use resolver::{
     Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path,
-    resolve_relative_module, self_aliases,
+    ReadOnlyKind, StrConstant, TypeCtx, Val, detect_src_layout, func_qualname,
+    module_name_for_path, resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
 
@@ -121,6 +122,163 @@ pub struct TypedFieldWriteSite {
     /// constructs itself (`Model(...)`, `cls(...)`, through copies) and fills before anyone
     /// else holds it (`MUT108`).
     pub fresh: bool,
+    /// The constant key of the entry the write changes in the container held in `attr`
+    /// (`obj.attr["k"] = v`, `del obj.attr[KEY]`, `obj.attr.pop("k")`, `obj.attr["k"][i] = v`):
+    /// the first key below the attribute, a string literal or a module-level `Final` string
+    /// constant. `None` for every other write (rebinding, a computed key, `clear()`, ...).
+    pub key: Option<String>,
+    /// Whether the write is part of constructing the object it writes (`fresh-objects`).
+    pub construction: Construction,
+}
+
+/// How a function's new object was made: a shallow copy shares the containers of the original
+/// (`copy.copy(x)`, `x.model_copy()`), a constructor call or a deep copy owns its containers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewKind {
+    Copy,
+    Own,
+}
+
+/// Conditions on the summary owner's own calls under which an object it holds is new and kept by
+/// nobody else (local facts; propagation resolves them against the callees' final summaries).
+/// One pointer: most objects carry none, and every bound call argument has one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct NewCond(Option<Box<CondParts>>);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CondParts {
+    /// The object comes from calls of these project functions: each must return a new object
+    /// (`EffectSummary::returns_new`).
+    pub returns: Vec<FuncKey>,
+    /// Earlier calls handed the object to these `(callee, parameter)`: none may keep it
+    /// (`EffectSummary::retains_params`).
+    pub keeps: Vec<(FuncKey, u8)>,
+}
+
+impl NewCond {
+    /// The conditions, sorted and without duplicates.
+    pub fn new(mut returns: Vec<FuncKey>, mut keeps: Vec<(FuncKey, u8)>) -> Self {
+        returns.sort();
+        returns.dedup();
+        keeps.sort();
+        keeps.dedup();
+        if returns.is_empty() && keeps.is_empty() {
+            return Self(None);
+        }
+        Self(Some(Box::new(CondParts { returns, keeps })))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub fn returns(&self) -> &[FuncKey] {
+        self.0.as_ref().map_or(&[], |c| &c.returns)
+    }
+
+    pub fn keeps(&self) -> &[(FuncKey, u8)] {
+        self.0.as_ref().map_or(&[], |c| &c.keeps)
+    }
+
+    /// Both conditions.
+    pub fn and(&self, other: &Self) -> Self {
+        Self::new(
+            self.returns()
+                .iter()
+                .chain(other.returns())
+                .cloned()
+                .collect(),
+            self.keeps().iter().chain(other.keeps()).cloned().collect(),
+        )
+    }
+}
+
+/// Whether a write is part of constructing the object it writes: the object was allocated in the
+/// same call chain (a constructor call, a copy, a project function returning a new object) and
+/// nothing else holds it yet. A shallow copy's containers are the original's, so only rebinding
+/// its attributes constructs it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Construction {
+    #[default]
+    No,
+    Yes,
+    /// Construction when `cond` holds; `own`: the object must own its containers (an in-place
+    /// change). Local summaries only.
+    Pending {
+        cond: NewCond,
+        own: bool,
+    },
+    /// The object is the summary owner's parameter `param`, kept by nobody before the write (when
+    /// `cond` holds; final summaries carry no condition): construction at a caller that hands it
+    /// a new object.
+    Param {
+        param: u8,
+        own: bool,
+        cond: NewCond,
+    },
+}
+
+/// What a call argument is for the construction of the objects its callee writes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewArg {
+    #[default]
+    Old,
+    /// A new object of the caller, kept by nobody before the call when `cond` holds.
+    New { kind: NewKind, cond: NewCond },
+    /// The caller's parameter `param`, kept by nobody before the call when `cond` holds.
+    Param { param: u8, cond: NewCond },
+}
+
+/// Whether a function returns a new object nobody else holds (`New` with a condition only in
+/// local summaries).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnsNew {
+    #[default]
+    No,
+    New {
+        kind: NewKind,
+        cond: NewCond,
+    },
+}
+
+impl ReturnsNew {
+    /// The kind of a resolved `New` (a final summary's).
+    pub fn kind(&self) -> Option<NewKind> {
+        match self {
+            Self::New { kind, cond } if cond.is_empty() => Some(*kind),
+            _ => None,
+        }
+    }
+}
+
+/// A write heki cannot tie to a class (`MUT205`): an attribute written on an object of unknown
+/// class, or a computed attribute name written on a project class. A local fact, never
+/// propagated.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct UnresolvedWriteSite {
+    pub what: Unresolved,
+    pub kind: WriteKind,
+    pub span: Span,
+    /// Parameters of the writing function the written object may be (bit 0: `self`).
+    pub obj_params: u64,
+    /// Whether the write constructs the object it writes (`fresh-objects`; a parameter is left
+    /// to the callers, `Construction::No`).
+    pub construction: Construction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unresolved {
+    /// `obj.<attr>` written (rebound, deleted, or its container changed) on an object of
+    /// unknown class.
+    Receiver(String),
+    /// A computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on
+    /// an instance of this project class (fqn).
+    Name(String),
 }
 
 /// Typed field read site for declarative Read Ownership (`MUT203`). A local fact: it is never
@@ -168,6 +326,20 @@ pub enum WriteKind {
     SetAttr,
     DictDirect,
     IndirectHelper,
+    /// An entry of an entry of the container held in the attribute changed in place
+    /// (`obj.attr["k"][name] = v`, `obj.attr["k"].append(v)`): `TypedFieldWriteSite::key` is the
+    /// first key.
+    ItemMut,
+}
+
+impl WriteKind {
+    /// Rebinding the attribute (or deleting it): the container it held, if any, is unchanged.
+    pub fn rebinds(self) -> bool {
+        matches!(
+            self,
+            Self::DirectAttr | Self::AttrDelete | Self::SetAttr | Self::DictDirect
+        )
+    }
 }
 
 /// A named slot of an object: an attribute (`obj.a`) or a constant string key (`obj["a"]`).
@@ -188,6 +360,7 @@ impl WriteKind {
             Self::SetAttr => "set_attr",
             Self::DictDirect => "dict_direct",
             Self::IndirectHelper => "indirect_helper",
+            Self::ItemMut => "item_mut",
         }
     }
 }
@@ -262,6 +435,15 @@ pub struct EffectSummary {
     /// Writes to `invalidation` targets that some normal path leaves unannounced: the function's
     /// own, and those the private helpers it calls pass up (`MUT109`; propagated).
     pub unmet_invalidation: BTreeSet<UnmetWrite>,
+    /// Parameters the function may keep beyond the call: stored in an object, a container, a
+    /// global, or a closure cell, yielded, captured by a closure, handed to code heki does not
+    /// follow, or to a project function that keeps them. Reading, writing, or passing a
+    /// parameter to project functions that do not keep it keeps nothing (`fresh-objects`).
+    pub retains_params: u64,
+    /// The function returns a new object that nothing else holds (`fresh-objects`).
+    pub returns_new: ReturnsNew,
+    /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
+    pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -411,6 +593,14 @@ impl EffectSummary {
                 hop.span = Span { start: 0, end: 0 };
             }
         }
+        out.unresolved_write_sites = out
+            .unresolved_write_sites
+            .into_iter()
+            .map(|mut site| {
+                site.span = Span { start: 0, end: 0 };
+                site
+            })
+            .collect();
         out.unmet_invalidation = out
             .unmet_invalidation
             .into_iter()
@@ -433,13 +623,14 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites are left out: read sites are never propagated.
+    /// sites and unresolved writes are left out: those are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
-        let without_reads = |s: &Self| Self {
+        let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
+            unresolved_write_sites: BTreeSet::new(),
             ..s.clone()
         };
-        without_reads(self) == without_reads(other) && self.same_facts(other)
+        without_local(self) == without_local(other) && self.same_facts(other)
     }
 
     /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
@@ -525,6 +716,9 @@ pub struct ArgOrigin {
     pub reach: Reach,
     /// What the caller knows about the parameter's value (`None`: not bound exactly).
     pub binding: Option<ArgBinding>,
+    /// The argument (for `typed_field`, the object holding the attribute) is a new object of the
+    /// caller, or its parameter, that nothing kept before this call (`fresh-objects`).
+    pub new_object: NewArg,
 }
 
 impl ArgOrigin {

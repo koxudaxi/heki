@@ -143,7 +143,9 @@ state that matters.
 
 - **Dynamic names.** `setattr(obj, "fields", v)`, `getattr(obj, "fields")`,
   `getattr(obj, "method")(...)`, and `obj.__dict__["fields"]` are followed only when the name is a
-  constant.
+  constant: a literal, or a module-level `Final` string constant (also imported). Names assigned
+  without `Final`, class-level constants, and computed names are not resolved; a `write-owners`
+  contract with `unresolved = "report"` counts the writes heki cannot tie to a class (`MUT205`).
 - **Objects without a known class.** Reads and writes through `Any` or unannotated parameters
   are not tied to a class, so contracts on that class do not see them. A write in an
   unannotated helper is still found where a caller passes it an object of a known class; a

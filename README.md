@@ -151,7 +151,7 @@ $ heki server                                   # LSP server for editors
 - [Getting started](https://heki.koxudaxi.dev/getting-started/)
 - [Scope and limitations](https://heki.koxudaxi.dev/scope/)
 - [Configuration](https://heki.koxudaxi.dev/configuration/)
-- [Rules](https://heki.koxudaxi.dev/rules/) (29 rules)
+- [Rules](https://heki.koxudaxi.dev/rules/) (30 rules)
 - [Fixes and safety](https://heki.koxudaxi.dev/fixes/)
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/)
 - [Editors (LSP)](https://heki.koxudaxi.dev/lsp/) and
