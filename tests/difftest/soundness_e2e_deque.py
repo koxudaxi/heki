@@ -102,7 +102,7 @@ def drain_slice_parenthesized(items):
 
 def copied_queue(items):
     """`nums[:]` is a fresh list, but not one `deque(...)` can replace."""
-    nums = [3, 1, 2]
+    nums = [3, 1, 2, *items]
     q = nums[:]
     out = list(items)
     while q:
@@ -143,7 +143,7 @@ def deque_uses(n):
 
 def unknown_list_methods(n):
     """`list.count` / `list.index` are not in the Layer 1 KB: unknown code sees `q`."""
-    q = [1, 2, 3]
+    q = [1, 2, 3, *range(n)]
     out = []
     while q:
         out.append((q.count(n), q.index(q[0])))
@@ -184,7 +184,7 @@ def alias_after_site(n):
 # Uses without one
 # ==============================================================================
 def middle_index(n):
-    q = [1, 2, 3, 4]
+    q = [1, 2, 3, 4, *range(n)]
     out = []
     while len(q) > 1:
         out.append(q[1])
@@ -193,7 +193,7 @@ def middle_index(n):
 
 
 def sorted_in_loop(n):
-    q = [3, 1, 2]
+    q = [3, 1, 2, *range(n)]
     while q:
         q.sort(key=abs)
         q.pop(0)
@@ -201,7 +201,7 @@ def sorted_in_loop(n):
 
 
 def passed_to_zip(n):
-    q = [1, 2, 3]
+    q = [1, 2, 3, *range(n)]
     out = []
     while q:
         out.append(list(zip(q, q)))
@@ -218,7 +218,7 @@ def self_extend(n):
 
 
 def compared(n):
-    q = [1, 2]
+    q = [1, 2, *range(n)]
     while q != []:
         q.pop(0)
     return n
@@ -269,6 +269,45 @@ def bounded(n):
     return q
 
 
+# ==============================================================================
+# Profitability: sizes the code fixes, lists rebuilt per iteration, truth tests
+# ==============================================================================
+def drained_small(n):
+    """A display the loop only drains never holds more than its 3 items."""
+    q = [1, 2, 3]
+    out = []
+    while q:
+        out.append(q.pop(0))
+    return out[:n]
+
+
+def rebuilt_per_iteration(n):
+    """One front insert into a list built in the same iteration."""
+    out = []
+    for i in range(n):
+        q = [i, i + 1]
+        q.insert(0, -i)
+        out.append(q)
+    return out
+
+
+def drain_and_test(items):
+    """`q and not q[0]` is a list or a `bool`: its truth test runs no user code."""
+    q = list(items)
+    while q and not q[0]:
+        del q[0]
+    return len(q)
+
+
+def annotated_queue(items):
+    """The variable's `list[int]` annotation becomes `deque[int]`."""
+    q: list[int] = list(items)
+    out = []
+    while q:
+        out.append(q.pop(0))
+    return out
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -307,6 +346,10 @@ def main() -> int:
             run(dict_pop, n),
             run(dict_del, n),
             run(bounded, n),
+            run(drained_small, n),
+            run(rebuilt_per_iteration, n),
+            run(drain_and_test, items),
+            run(annotated_queue, items),
         ]
     lines.append(type(deque()).__name__)
     print("\n".join(lines))

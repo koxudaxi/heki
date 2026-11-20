@@ -829,6 +829,12 @@ impl<'a> FnCtx<'a> {
                     (UnaryOpKind::Not, Some(_)) => {
                         self.fresh(st, *dst, BuiltinKind::Bool, site, span, ElemKinds::Unknown)
                     }
+                    // `not x` always produces an exact `bool`; only `x.__bool__` / `__len__`
+                    // may run user code.
+                    (UnaryOpKind::Not, None) => {
+                        Self::escape_all(st, [*operand], span);
+                        self.fresh(st, *dst, BuiltinKind::Bool, site, span, ElemKinds::Unknown)
+                    }
                     (
                         UnaryOpKind::USub | UnaryOpKind::UAdd | UnaryOpKind::Invert,
                         Some(k @ (BuiltinKind::Int | BuiltinKind::Float)),
@@ -1309,7 +1315,7 @@ impl<'a> FnCtx<'a> {
     fn step_terminator(&self, st: &mut FrameState, term: &Terminator, span: Span) {
         match term {
             Terminator::Branch { cond, .. } => {
-                if st.exact_type(*cond).is_none() {
+                if !self.exact_on_every_path(st, *cond, 0) {
                     // `bool(cond)` may run `__bool__` / `__len__`.
                     Self::escape_all(st, [*cond], span);
                 }
@@ -1320,6 +1326,27 @@ impl<'a> FnCtx<'a> {
             }
             _ => {}
         }
+    }
+
+    /// Whether `v` holds an exact builtin whatever path reached here: its own type is exact, or
+    /// it is a phi (`a and b`, `x if c else y`) whose every incoming value is (SSA values keep
+    /// their type, and the state joins each one over the paths that define it).
+    fn exact_on_every_path(&self, st: &FrameState, v: VarId, depth: u32) -> bool {
+        if st.exact_type(v).is_some() {
+            return true;
+        }
+        let Def::Phi(b) = self.def(v) else {
+            return false;
+        };
+        depth < 8
+            && self
+                .f
+                .block(b)
+                .phis
+                .iter()
+                .filter(|p| p.dst == v)
+                .flat_map(|p| &p.incoming)
+                .all(|&(_, x)| x != v && self.exact_on_every_path(st, x, depth + 1))
     }
 
     /// Apply the phis of `succ` for the edge from `pred` (parallel copy).
@@ -1393,8 +1420,7 @@ impl<'a> FnCtx<'a> {
                 join_into(e, &st);
             }
         }
-        let term_span = block.insts.last().map_or(self.f.span, |i| i.span);
-        self.step_terminator(&mut st, &block.terminator, term_span);
+        self.step_terminator(&mut st, &block.terminator, term_span(self.f, bb));
         if let Some(e) = exc.as_mut() {
             join_into(e, &st);
             self.widen_name_groups(e);
@@ -1500,6 +1526,18 @@ impl<'a> FnCtx<'a> {
 
 /// `var_type` reason of a `range(...)` object (its alloc carries `int` elements).
 const RANGE_REASON: &str = "range object";
+
+/// The source position of block `b`'s terminator: its last instruction, the span the IR
+/// records for it (a block without instructions), or the function's.
+pub(crate) fn term_span(f: &IrFunction, b: BlockId) -> Span {
+    let block = f.block(b);
+    block
+        .insts
+        .last()
+        .map(|i| i.span)
+        .or(block.term_span)
+        .unwrap_or(f.span)
+}
 
 pub(crate) fn term_use(t: &Terminator) -> Option<VarId> {
     match t {

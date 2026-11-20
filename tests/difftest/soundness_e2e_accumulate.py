@@ -302,6 +302,28 @@ class Report:
         return self.s, self.n
 
 
+def capped_by_test(chunks):
+    """`while len(data) < 10` caps the accumulator: no copy is longer than 10 bytes."""
+    data = b""
+    it = iter(chunks)
+    while len(data) < 10:
+        data += next(it, b"0123456789")
+    return data
+
+
+class Item:
+    def __init__(self, name):
+        self.name = name
+
+
+def element_attributes(names):
+    """Each iteration appends once to another object's attribute."""
+    items = [Item(str(n)) for n in names]
+    for item in items:
+        item.name += "_x"
+    return [i.name for i in items]
+
+
 def run(fn, *args):
     try:
         out = fn(*args)
@@ -356,6 +378,8 @@ def main() -> int:
             run(few_iterations),
             run(retry, fetch),
             run(Report().render, items),
+            run(capped_by_test, [b"ab"] * n),
+            run(element_attributes, items),
             repr(logged),
         ]
     print("\n".join(lines))
