@@ -78,5 +78,9 @@ python3.15 scripts/build_llms_txt.py --check
   `tests/semantic/fixtures.py` or `tests/difftest/` where they apply.
 - A rule's documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`; regenerate
   `docs/rules/` and `llms.txt` with `scripts/build_docs.py` and `scripts/build_llms_txt.py`.
+- A rule reads other files only through the index or the declarations (never another checked
+  unit's IR), so that the language server's single-file check equals `heki check`. Every new
+  rule and every new cross-file fact gets a step in `crates/heki/tests/lsp_oracle.rs`, which
+  compares the server with `heki check` after each step of an editing session.
 - Rules the Stage 0-A measurements rejected (`MUT102a/b`, `DATA102`, `EFF104`, `MUT104` for
   `ALL_CAPS` constants, `MUT105`, `EFF108`) are not revived without new evidence.

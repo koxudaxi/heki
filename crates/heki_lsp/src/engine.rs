@@ -6,18 +6,20 @@
 
 use globset::GlobSet;
 use heki_diagnostics::Diagnostic;
-use heki_effect::{FuncKey, ProjectDecls, ProjectIndex, analyze_project};
+use heki_effect::{
+    CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, analyze_project_with_reads,
+};
 use heki_rules::project::{
     ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, exclude_set, parse_source,
     rel_posix, retain_unsuppressed,
 };
 use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError, SnapshotError, SummarySnapshot,
-    check_project, find_rule,
+    check_project, family_readers, find_rule,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -32,6 +34,10 @@ pub enum EngineError {
     #[error("unknown rule `{0}` in lint.severity")]
     UnknownSeverityRule(String),
 }
+
+/// The files of a project root whose change reloads the whole workspace: the configuration and
+/// the summary snapshot (`MUT103`).
+pub const CONFIG_FILES: &[&str] = &["pyproject.toml", "heki.toml", ".heki.toml", SNAPSHOT_FILE];
 
 /// Counters exposed through the `heki/stats` request (Early Cutoff verification).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -53,13 +59,19 @@ struct FileMeta {
     module_name: String,
 }
 
-/// Result of re-analyzing one edited file.
+/// Result of re-analyzing one file.
 #[derive(Debug, Clone, Default)]
 pub struct EditOutcome {
     pub diagnostics: Vec<Diagnostic>,
-    /// Other files whose diagnostics may change (callers of changed summaries and, when the
-    /// module's declarations changed, importers that need re-extraction).
+    /// Other files whose results may change: callers of changed summaries, files whose summary
+    /// or check read changed declarations, files of functions whose callers here changed their
+    /// calls, the class families of changed methods, files whose diagnostics show call sites of
+    /// this file that moved, and every checked file when the project starts or stops patching
+    /// `builtins`.
     pub affected: Vec<PathBuf>,
+    /// Why the file has no diagnostics: a syntax error (the file then leaves the index, as a
+    /// file `heki check` cannot parse is not part of the project) or an invalid rule option.
+    pub error: Option<String>,
 }
 
 /// Selection overrides (`--select` / `--extend-select` / `--ignore`).
@@ -77,10 +89,23 @@ pub struct Workspace {
     exclude: GlobSet,
     files: BTreeMap<PathBuf, FileMeta>,
     index: ProjectIndex,
-    /// Declarations of every indexed module, updated in place by edits.
-    decls: ProjectDecls,
+    /// Declarations of every indexed module (both passes), updated in place by edits.
+    decls: DeclPasses,
+    /// The other files the latest diagnostics of each file point into (related locations):
+    /// when an edit moves call sites of one of them, those diagnostics change.
+    shown: FxHashMap<PathBuf, FxHashSet<PathBuf>>,
+    /// What the latest check of each file read of the declarations (what its summary read is
+    /// in its `FileSummary`).
+    check_reads: FxHashMap<PathBuf, DeclKeys>,
+    /// The indexed files that may patch `builtins` (they import it or touch `__builtins__`):
+    /// while there is one, no module trusts builtin names (Assumption A1(b)).
+    patching_builtins: FxHashSet<PathBuf>,
     stats: EngineStats,
 }
+
+/// Per function of one file: its project call sites without positions, and the cached
+/// properties it invalidates (see `Workspace::callee_files`).
+type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
 
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the index is built).
@@ -113,7 +138,13 @@ impl Workspace {
             None
         };
         let exclude = exclude_set(env_cfg).map_err(EngineError::Project)?;
-        let index = analyze_project(&project.inputs(), &project.env.kb);
+        let patching_builtins = project
+            .files
+            .iter()
+            .filter(|f| f.patches_builtins())
+            .map(|f| f.path.clone())
+            .collect();
+        let index = analyze_project_with_reads(&project.inputs(), &project.env.kb);
         let files = project
             .files
             .iter()
@@ -127,7 +158,7 @@ impl Workspace {
             })
             .collect();
         let Project { env, errors, .. } = project;
-        let decls = index.project_decls();
+        let decls = index.decl_passes();
         let stats = EngineStats {
             indexed_files: index.files.len(),
             ..EngineStats::default()
@@ -141,6 +172,9 @@ impl Workspace {
                 files,
                 index,
                 decls,
+                shown: FxHashMap::default(),
+                check_reads: FxHashMap::default(),
+                patching_builtins,
                 stats,
             },
             errors,
@@ -171,60 +205,171 @@ impl Workspace {
         )
     }
 
-    fn check(&self, parsed: &ParsedFile) -> Result<Vec<Diagnostic>, String> {
+    /// Diagnostics of one parsed file against the current index; records which other files
+    /// they point into and what the check read of the declarations.
+    fn check(&mut self, parsed: &ParsedFile) -> Result<Vec<Diagnostic>, String> {
         let unit = parsed.unit();
         let extras = CheckExtras {
             soundness_kb: &self.env.soundness_kb,
             snapshot: self.snapshot.as_ref(),
-            decls: Some(&self.decls),
+            decls: Some(self.decls.completed()),
+            project_patches_builtins: Some(!self.patching_builtins.is_empty()),
+            text_of: Some(&|p: &Path| std::fs::read_to_string(p).ok()),
         };
-        let mut diags = check_project(
-            std::slice::from_ref(&unit),
-            &self.env.cfg,
-            &self.env.kb,
-            &self.index,
-            &self.selection,
-            &extras,
-        )
-        .map_err(|e| e.to_string())?;
-        retain_unsuppressed(&mut diags, [parsed]);
-        Ok(diags)
+        let (checked, reads) = self.decls.completed().record(|| {
+            check_project(
+                std::slice::from_ref(&unit),
+                &self.env.cfg,
+                &self.env.kb,
+                &self.index,
+                &self.selection,
+                &extras,
+            )
+            .map_err(|e| e.to_string())
+            .map(|mut diags| {
+                retain_unsuppressed(&mut diags, [parsed]);
+                diags
+            })
+        });
+        let shown = checked
+            .iter()
+            .flatten()
+            .flat_map(|d| &d.related)
+            .filter(|r| r.path != parsed.path)
+            .map(|r| r.path.clone())
+            .collect();
+        self.shown.insert(parsed.path.clone(), shown);
+        self.check_reads.insert(parsed.path.clone(), reads);
+        checked
     }
 
-    /// Diagnostics of `text` as `path` against the current index (the index is unchanged).
-    pub fn diagnose(&self, path: &Path, text: &str) -> Result<Vec<Diagnostic>, String> {
+    /// Diagnostics of `text` as `path` against the current index (the summaries are unchanged).
+    pub fn diagnose(&mut self, path: &Path, text: &str) -> Result<Vec<Diagnostic>, String> {
         let parsed = self.parse(path, text)?;
         self.check(&parsed)
     }
 
-    /// Files importing `module` (or a package containing it): their local summaries resolve
-    /// names through its declarations.
-    fn dependents_of(&self, module: &str, except: &Path) -> Vec<PathBuf> {
-        let refers = |fqn: &str| {
-            fqn == module
-                || fqn.starts_with(&format!("{module}."))
-                || module.starts_with(&format!("{fqn}."))
-        };
-        let mut out: Vec<PathBuf> = self
+    /// Files other than `path` whose latest diagnostics point into `path`.
+    fn showing(&self, path: &Path) -> Vec<PathBuf> {
+        self.shown
+            .iter()
+            .filter(|(file, shown)| file.as_path() != path && shown.contains(path))
+            .map(|(file, _)| file.clone())
+            .collect()
+    }
+
+    /// Spans of the call sites indexed for `path` (the positions other files' call chains
+    /// show).
+    fn call_site_spans(&self, path: &Path) -> Vec<heki_ast::Span> {
+        self.index
+            .files
+            .get(path)
+            .map(|f| f.call_sites.iter().map(|s| s.span).collect())
+            .unwrap_or_default()
+    }
+
+    /// Files whose summary or latest check read declarations in `change` (a re-export, a
+    /// class's methods, bases, or attribute types, a property getter, a subclass): their names
+    /// may resolve differently now.
+    fn reading(&self, change: &DeclKeys) -> Vec<PathBuf> {
+        let mut out: FxHashSet<PathBuf> = self
             .index
             .files
             .values()
-            .filter(|f| f.path != except)
-            .filter(|f| {
-                f.decls
-                    .imports
-                    .values()
-                    .chain(f.decls.type_checking_imports.values())
-                    .any(|fqn| refers(fqn))
-            })
+            .filter(|f| f.decl_reads.intersects(change))
             .map(|f| f.path.clone())
             .collect();
-        out.sort();
+        out.extend(
+            self.check_reads
+                .iter()
+                .filter(|(_, reads)| reads.intersects(change))
+                .map(|(path, _)| path.clone()),
+        );
+        out.into_iter().collect()
+    }
+
+    /// What the callees of `path`'s functions see of them: per function, its project call
+    /// sites (without positions) and the cached properties it invalidates.
+    fn caller_view(&self, path: &Path) -> CallerView {
+        let mut out = CallerView::new();
+        let Some(file) = self.index.files.get(path) else {
+            return out;
+        };
+        for site in file
+            .call_sites
+            .iter()
+            .filter(|s| !s.project_callees().is_empty())
+        {
+            let mut site = site.clone();
+            site.span = heki_ast::Span { start: 0, end: 0 };
+            out.entry(site.caller.clone()).or_default().0.push(site);
+        }
+        for (key, (_, invalidated)) in &mut out {
+            *invalidated = self
+                .index
+                .summary(key)
+                .map(|s| s.invalidates_cached.clone())
+                .unwrap_or_default();
+        }
         out
     }
 
-    /// Re-summarize one parsed file; returns the update and whether its declarations changed.
-    fn summarize(&mut self, parsed: &ParsedFile) -> (heki_effect::IncrementalUpdate, bool) {
+    /// Files of the functions whose callers changed what they see of them: calls gained, lost,
+    /// or bound differently (a function's `MUT201` / `MUT203` reports depend on the contexts
+    /// it runs in), or the cached properties a caller invalidates (`MUT101`).
+    fn callee_files(&self, before: &CallerView, after: &CallerView) -> Vec<PathBuf> {
+        let mut out = FxHashSet::default();
+        for caller in before.keys().chain(after.keys()) {
+            let (old, new) = (before.get(caller), after.get(caller));
+            if old == new {
+                continue;
+            }
+            for (sites, _) in old.into_iter().chain(new) {
+                out.extend(
+                    sites
+                        .iter()
+                        .flat_map(CallSite::project_callees)
+                        .filter_map(|bc| self.index.file_of(&bc.callee).map(Path::to_path_buf)),
+                );
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Files defining classes whose `MUT101` / `MUT107` reports read the summaries of the
+    /// `changed` methods (class families span modules).
+    fn family_files(&self, changed: &[FuncKey]) -> Vec<PathBuf> {
+        let classes = family_readers(&self.index, self.decls.completed(), changed);
+        self.index
+            .files
+            .values()
+            .filter(|f| {
+                f.decls
+                    .classes
+                    .keys()
+                    .any(|q| classes.contains(&format!("{}.{q}", f.module_name)))
+            })
+            .map(|f| f.path.clone())
+            .collect()
+    }
+
+    /// Record whether `path` patches `builtins`; when that changes whether the project does,
+    /// every checked file's `OPT` diagnostics may change: returns those files.
+    fn note_builtins(&mut self, path: &Path, patches: bool) -> Vec<PathBuf> {
+        let before = self.patching_builtins.is_empty();
+        if patches {
+            self.patching_builtins.insert(path.to_path_buf());
+        } else {
+            self.patching_builtins.remove(path);
+        }
+        if before == self.patching_builtins.is_empty() {
+            return Vec::new();
+        }
+        self.check_reads.keys().cloned().collect()
+    }
+
+    /// Re-summarize one parsed file; returns the update and what changed in the declarations.
+    fn summarize(&mut self, parsed: &ParsedFile) -> (heki_effect::IncrementalUpdate, DeclKeys) {
         self.files.insert(
             parsed.path.clone(),
             FileMeta {
@@ -238,97 +383,148 @@ impl Workspace {
         out
     }
 
-    /// Project functions the indexed file `path` calls. The `MUT201` / `MUT203` reports of a
-    /// function depend on its callers: a private helper with project callers hands its reports
-    /// to them, and a function that only runs inside a contract's allowed contexts has none.
-    fn project_callees(&self, path: &Path) -> FxHashSet<FuncKey> {
-        self.index
-            .files
-            .get(path)
-            .into_iter()
-            .flat_map(|f| &f.call_edges)
-            .map(|(_, callee, _)| callee.clone())
-            .collect()
-    }
-
-    /// Files of the functions an edit started or stopped calling: each gained or lost a caller.
-    fn delegation_changes(
+    /// The files an update of the index affects besides the updated file: callers of changed
+    /// summaries, readers of changed declarations, callees whose callers changed, and class
+    /// families whose members changed.
+    fn affected_by(
         &self,
-        before: &FxHashSet<FuncKey>,
-        after: &FxHashSet<FuncKey>,
-    ) -> Vec<PathBuf> {
-        before
-            .symmetric_difference(after)
-            .filter_map(|k| self.index.file_of(k).map(Path::to_path_buf))
-            .collect()
-    }
-
-    /// Re-analyze an edited file: update its summary (Early Cutoff when nothing changed) and
-    /// return its diagnostics plus the other files that need re-analysis.
-    pub fn edit(&mut self, path: &Path, text: &str) -> Result<EditOutcome, String> {
-        let parsed = self.parse(path, text)?;
-        let calls_before = self.project_callees(&parsed.path);
-        let (update, decls_changed) = self.summarize(&parsed);
-        self.stats.edited_reanalyses += 1;
-        self.stats.last_summary_changed = update.summary_changed;
-        self.stats.last_decls_changed = decls_changed;
+        update: &heki_effect::IncrementalUpdate,
+        change: &DeclKeys,
+        callers: (&CallerView, &CallerView),
+    ) -> FxHashSet<PathBuf> {
         let mut affected: FxHashSet<PathBuf> = update
             .affected_callers
             .iter()
             .filter_map(|k: &FuncKey| self.index.file_of(k).map(Path::to_path_buf))
             .collect();
-        if decls_changed {
-            affected.extend(self.dependents_of(&parsed.module_name, &parsed.path));
+        affected.extend(self.reading(change));
+        affected.extend(self.callee_files(callers.0, callers.1));
+        affected.extend(self.family_files(&update.changed));
+        affected
+    }
+
+    /// Re-analyze an edited file: update its summary (Early Cutoff when no fact changed) and
+    /// return its diagnostics plus the other files that need re-analysis.
+    pub fn edit(&mut self, path: &Path, text: &str) -> EditOutcome {
+        let (outcome, update) = self.analyze(path, text);
+        if let Some((summary_changed, decls_changed)) = update {
+            self.stats.edited_reanalyses += 1;
+            self.stats.last_summary_changed = summary_changed;
+            self.stats.last_decls_changed = decls_changed;
         }
-        let calls_after = self.project_callees(&parsed.path);
-        affected.extend(self.delegation_changes(&calls_before, &calls_after));
+        outcome
+    }
+
+    /// Re-analyze a file an edit of another file affects (its callees, the declarations it
+    /// resolves names through, or the call sites its diagnostics show changed). Counted as a
+    /// re-analysis of another file; what it affects in turn is in the outcome too.
+    pub fn refresh(&mut self, path: &Path, text: &str) -> EditOutcome {
+        let (outcome, update) = self.analyze(path, text);
+        if update.is_some() {
+            self.stats.dependent_reanalyses += 1;
+        }
+        outcome
+    }
+
+    /// Re-summarize one file and check it. The second value is `(summary changed, declarations
+    /// changed)`, or `None` when the file does not parse: it then leaves the index.
+    fn analyze(&mut self, path: &Path, text: &str) -> (EditOutcome, Option<(bool, bool)>) {
+        let parsed = match self.parse(path, text) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                let outcome = EditOutcome {
+                    diagnostics: Vec::new(),
+                    affected: self.remove(path),
+                    error: Some(e),
+                };
+                return (outcome, None);
+            }
+        };
+        let callers_before = self.caller_view(&parsed.path);
+        let sites_before = self.call_site_spans(&parsed.path);
+        let (update, change) = self.summarize(&parsed);
+        let callers_after = self.caller_view(&parsed.path);
+        let mut affected = self.affected_by(&update, &change, (&callers_before, &callers_after));
+        affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
+        // Call chains of other files show this file's call sites: when they move, those
+        // diagnostics move with them (the summaries copying them were re-propagated).
+        if self.call_site_spans(&parsed.path) != sites_before {
+            affected.extend(self.showing(&parsed.path));
+        }
         affected.remove(&parsed.path);
         let mut affected: Vec<PathBuf> = affected.into_iter().collect();
         affected.sort();
-        Ok(EditOutcome {
-            diagnostics: self.check(&parsed)?,
+        let (diagnostics, error) = match self.check(&parsed) {
+            Ok(diagnostics) => (diagnostics, None),
+            Err(e) => (Vec::new(), Some(e)),
+        };
+        let outcome = EditOutcome {
+            diagnostics,
             affected,
-        })
+            error,
+        };
+        (outcome, Some((update.summary_changed, !change.is_empty())))
     }
 
-    /// Re-extract a dependent file (its imports' declarations or callees changed) and return
-    /// its diagnostics. Counted as a re-analysis of another file.
-    pub fn refresh(&mut self, path: &Path, text: &str) -> Result<Vec<Diagnostic>, String> {
-        let parsed = self.parse(path, text)?;
-        self.summarize(&parsed);
-        self.stats.dependent_reanalyses += 1;
-        self.check(&parsed)
+    /// Re-analyze the `queued` files and, in turn, every file those re-analyses affect, until
+    /// none is left. `text_of` reads a file (an open document's text, else the disk); a file
+    /// it cannot read left the project and is removed (`None` in the result). Returns the
+    /// latest outcome of every file re-analyzed.
+    ///
+    /// It ends: re-analyzing a file whose inputs did not change since its last re-analysis
+    /// changes nothing and affects no file, and each file's inputs change finitely often.
+    pub fn refresh_all(
+        &mut self,
+        queued: impl IntoIterator<Item = PathBuf>,
+        text_of: &dyn Fn(&Path) -> Option<String>,
+    ) -> BTreeMap<PathBuf, Option<EditOutcome>> {
+        let mut queue: BTreeSet<PathBuf> = queued.into_iter().collect();
+        let mut out = BTreeMap::new();
+        while let Some(path) = queue.pop_first() {
+            let outcome = match text_of(&path) {
+                Some(text) => {
+                    let outcome = self.refresh(&path, &text);
+                    queue.extend(outcome.affected.iter().cloned());
+                    Some(outcome)
+                }
+                None => {
+                    queue.extend(self.remove(&path));
+                    None
+                }
+            };
+            out.insert(path, outcome);
+        }
+        out
     }
 
-    /// Drop a deleted file; returns the files whose callees disappeared.
+    /// Drop a deleted file (or one that no longer parses); returns the files it affects.
     pub fn remove(&mut self, path: &Path) -> Vec<PathBuf> {
+        self.shown.remove(path);
+        self.check_reads.remove(path);
         let Some(meta) = self.files.remove(path) else {
             return Vec::new();
         };
-        let calls_before = self.project_callees(path);
+        let callers_before = self.caller_view(path);
         let update = self.index.remove_file(path);
-        match self.index.module_decls(&meta.module_name) {
+        let change = match self.index.module_decls(&meta.module_name) {
             Some(remaining) => self.decls.replace(remaining),
             None => self.decls.remove(&meta.module_name),
-        }
+        };
         self.stats.indexed_files = self.index.files.len();
-        let mut affected: FxHashSet<PathBuf> = update
-            .affected_callers
-            .iter()
-            .filter_map(|k| self.index.file_of(k).map(Path::to_path_buf))
-            .collect();
-        affected.extend(self.dependents_of(&meta.module_name, path));
-        affected.extend(self.delegation_changes(&calls_before, &FxHashSet::default()));
+        let mut affected =
+            self.affected_by(&update, &change, (&callers_before, &CallerView::new()));
+        affected.extend(self.note_builtins(path, false));
         let mut v: Vec<PathBuf> = affected.into_iter().collect();
         v.sort();
         v
     }
 
     /// Diagnostics of every indexed file, read from the disk.
-    pub fn diagnose_all(&self) -> (BTreeMap<PathBuf, Vec<Diagnostic>>, Vec<String>) {
+    pub fn diagnose_all(&mut self) -> (BTreeMap<PathBuf, Vec<Diagnostic>>, Vec<String>) {
         let mut out = BTreeMap::new();
         let mut errors = Vec::new();
-        for path in self.files.keys() {
+        let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
+        for path in &paths {
             let text = match std::fs::read_to_string(path) {
                 Ok(t) => t,
                 Err(e) => {
@@ -364,7 +560,7 @@ mod tests {
             paths: &paths,
             ..ProjectOptions::default()
         };
-        let (ws, errors) = Workspace::load(&opts, &Selectors::default()).unwrap();
+        let (mut ws, errors) = Workspace::load(&opts, &Selectors::default()).unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         // After indexing (a race a process cannot set up portably), `b.py` stops being UTF-8
         // and `c.py` stops parsing: both errors are reported, `a.py` is still checked.

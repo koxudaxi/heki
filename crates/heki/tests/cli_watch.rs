@@ -318,7 +318,7 @@ fn watch_reports_check_errors_of_every_file() {
         3,
         "{lines:#?}"
     );
-    // The edited file fails the same way.
+    // The edited file fails the same way, and so does the caller its new effect reaches.
     p.write(
         "pkg/util.py",
         "import time\n\n\ndef helper():\n    time.sleep(1)\n",
@@ -329,7 +329,7 @@ fn watch_reports_check_errors_of_every_file() {
             .iter()
             .filter(|l| l.contains("invalid write-owners target `fields`"))
             .count(),
-        1,
+        2,
         "{lines:#?}"
     );
     let out = child.wait_with_output().unwrap();
@@ -376,4 +376,34 @@ fn watch_validates_severities_and_loads_the_summary_snapshot() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown rule `NOPE1` in lint.severity"));
+}
+
+#[test]
+fn watch_reports_what_check_reports() {
+    // A call chain through three files: the positions of the hops in the files a re-check does
+    // not cover come from their text, as in `heki check`.
+    let p = Project::new("watch_like_check");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/low.py",
+            "import requests\n\n\ndef fetch(url):\n    return requests.get(url)\n",
+        )
+        .write(
+            "pkg/mid.py",
+            "from pkg.low import fetch\n\n\ndef helper(url):\n    return fetch(url)\n",
+        )
+        .write(
+            "pkg/top.py",
+            "from pkg.mid import helper\n\n\nasync def handler(url):\n    return helper(url)\n",
+        );
+    let (code, check, _) = p.check(&["--output-format", "json"]);
+    assert_eq!(code, 1);
+    let watch = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["check", "--watch", "--output-format", "json"])
+        .current_dir(&p.dir)
+        .env("HEKI_WATCH_MAX_RUNS", "0")
+        .output()
+        .unwrap();
+    let json = |text: &[u8]| -> serde_json::Value { serde_json::from_slice(text).unwrap() };
+    assert_eq!(json(&watch.stdout), json(check.as_bytes()));
 }

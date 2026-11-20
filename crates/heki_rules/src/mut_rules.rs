@@ -5,13 +5,14 @@ use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCal
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, EffectSummary, FuncKey, TypeCtx,
-    TypedFieldReadSite, Val, WriteKind, self_aliases,
+    AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, EffectSummary, FuncKey, ProjectDecls,
+    ProjectIndex, TypeCtx, TypedFieldReadSite, Val, WriteKind, self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 // ==================================================================================== MUT101
 
@@ -30,10 +31,32 @@ const INIT_METHODS: &[&str] = &[
     "_setup",
 ];
 
+/// A method of a project class. Methods of the checked files carry their IR (only they are
+/// reported); the methods of the other indexed files take part in their class families through
+/// their summaries.
 struct Method<'a> {
+    key: FuncKey,
+    /// The file defining it.
+    path: &'a Path,
+    checked: Option<Checked<'a>>,
+}
+
+/// A method of a checked file: its unit and IR.
+#[derive(Clone, Copy)]
+struct Checked<'a> {
     unit: &'a ModuleUnit<'a>,
     f: &'a IrFunction,
-    key: FuncKey,
+}
+
+impl Method<'_> {
+    /// The method's own name (the last component of its qualname).
+    fn name(&self) -> &str {
+        self.key
+            .qualname
+            .rsplit('.')
+            .next()
+            .unwrap_or(&self.key.qualname)
+    }
 }
 
 /// A private function or method name (`_name`, not a dunder), or a synthetic scope
@@ -45,9 +68,11 @@ fn is_private(name: &str) -> bool {
         || last.starts_with('_') && !(last.starts_with("__") && last.ends_with("__"))
 }
 
-/// Visit every class of the checked files with its own methods, its family (its methods plus
-/// those of every project subclass), and the private methods its family's `__init__`s call on
-/// `self`. Classes are keyed by owner class fqn, so nested classes stay separate.
+/// Visit every project class whose family has checked methods with its own methods, its
+/// family (its methods plus those of every project subclass), and the private methods its
+/// family's `__init__`s call on `self`. Classes are keyed by owner class fqn, so nested classes
+/// stay separate. A family spans modules: what a checked method is reported for does not depend
+/// on which other files are checked with it (the language server checks one).
 fn for_each_class_family<'a>(
     cx: &CheckContext<'a>,
     mut visit: impl FnMut(&[Method<'a>], &[&Method<'a>], &FxHashSet<FuncKey>),
@@ -65,16 +90,40 @@ fn for_each_class_family<'a>(
                 .entry(format!("{}.{owner}", unit.input.module_name))
                 .or_default()
                 .push(Method {
-                    unit,
-                    f,
                     key: CheckContext::key(unit, f),
+                    path: &unit.input.path,
+                    checked: Some(Checked { unit, f }),
                 });
         }
+    }
+    let mut others: Vec<(&FuncKey, &Path, &str)> = Vec::new();
+    for (path, file) in &cx.index.files {
+        if cx.unit(path).is_some() {
+            continue;
+        }
+        others.extend(file.local_functions.iter().filter_map(|(key, s)| {
+            let owner = s.owner_class_qualname.as_deref()?;
+            (cx.index.file_of(key) == Some(path.as_path())).then_some((key, path.as_path(), owner))
+        }));
+    }
+    others.sort();
+    for (key, path, owner) in others {
+        by_class
+            .entry(format!("{}.{owner}", key.module))
+            .or_default()
+            .push(Method {
+                key: key.clone(),
+                path,
+                checked: None,
+            });
     }
     for (class, methods) in &by_class {
         let mut family: Vec<&Method<'a>> = methods.iter().collect();
         for sub in cx.decls.subclasses_of(class) {
             family.extend(by_class.get(&sub).into_iter().flatten());
+        }
+        if family.iter().all(|m| m.checked.is_none()) {
+            continue;
         }
         let init_called = private_methods_called_from_init(cx, &family);
         visit(methods, &family, &init_called);
@@ -86,7 +135,7 @@ fn for_each_class_family<'a>(
 fn local_summary<'a>(cx: &CheckContext<'a>, m: &Method<'_>) -> Option<&'a EffectSummary> {
     cx.index
         .files
-        .get(&m.unit.input.path)
+        .get(m.path)
         .and_then(|f| f.local_functions.get(&m.key))
 }
 
@@ -120,13 +169,18 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             if !ps.is_cached_property {
                 continue;
             }
+            let p_name = p.name();
             let mut reads: BTreeMap<&str, Vec<&Option<String>>> = BTreeMap::new();
             for r in &ps.reads_self_attrs {
-                if r.attr != p.f.name {
+                if r.attr != p_name {
                     reads.entry(&r.attr).or_default().push(&r.const_key);
                 }
             }
             for m in family {
+                // Only checked methods are reported.
+                let Some(Checked { unit, f }) = m.checked else {
+                    continue;
+                };
                 if m.key == p.key || filter1_init(m, init_called) {
                     continue;
                 }
@@ -134,15 +188,14 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     continue;
                 };
                 // Filter 4: the method invalidates the cache.
-                if ms.invalidates_cached.contains(&p.f.name) || ms.invalidates_cached.contains("*")
-                {
+                if ms.invalidates_cached.contains(p_name) || ms.invalidates_cached.contains("*") {
                     continue;
                 }
                 let Some(local) = local_summary(cx, m) else {
                     continue;
                 };
                 // A private helper whose every caller invalidates the property is covered.
-                let covered_by_callers = is_private(&m.f.name)
+                let covered_by_callers = is_private(m.name())
                     && cx
                         .index
                         .reverse_call_graph
@@ -151,7 +204,7 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                             !callers.is_empty()
                                 && callers.iter().all(|c| {
                                     cx.index.summary(c).is_some_and(|cs| {
-                                        cs.invalidates_cached.contains(&p.f.name)
+                                        cs.invalidates_cached.contains(p_name)
                                             || cs.invalidates_cached.contains("*")
                                     })
                                 })
@@ -172,7 +225,7 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     if is_memo_attr(attr) {
                         continue;
                     }
-                    let own = self_attr_writes(m.f, attr);
+                    let own = self_attr_writes(f, attr);
                     if own.is_empty() || own.iter().all(|w| w.memo_shaped) {
                         continue;
                     }
@@ -185,21 +238,21 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     }
                     // An overriding `@cached_property` shares the instance `__dict__` slot:
                     // one report per property name.
-                    if !seen.insert((m.key.clone(), attr.to_string(), p.f.name.clone())) {
+                    if !seen.insert((m.key.clone(), attr.to_string(), p_name.to_owned())) {
                         continue;
                     }
                     let span = own[0].span;
-                    let class_qualname = p.f.owner_class_qualname.as_deref().unwrap_or_default();
+                    let class_qualname = ps.owner_class_qualname.as_deref().unwrap_or_default();
                     cx.emit(
                         out,
                         "MUT101",
-                        m.unit,
+                        unit,
                         span,
                         &m.key.qualname,
-                        format!("{class_qualname}.{attr}->{}", p.f.name),
+                        format!("{class_qualname}.{attr}->{p_name}"),
                         format!(
-                            "`{}` mutates `self.{attr}`, read by `@cached_property` `{}`, without invalidating it (`del self.{}`)",
-                            m.key.qualname, p.f.name, p.f.name
+                            "`{}` mutates `self.{attr}`, read by `@cached_property` `{p_name}`, without invalidating it (`del self.{p_name}`)",
+                            m.key.qualname
                         ),
                         &[],
                     );
@@ -210,11 +263,55 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
 }
 
 fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
-    let name = m.f.name.as_str();
+    let name = m.name();
     INIT_METHODS.contains(&name)
         || name.starts_with("_init_")
         || name.starts_with("_configure_")
         || (is_private(name) && init_called.contains(&m.key))
+}
+
+/// The project classes whose methods' `MUT101` / `MUT107` reports read the summaries of the
+/// methods `changed` (a class family spans modules, see [`for_each_class_family`]): a changed
+/// `@cached_property` or `__hash__` (or a removed method) is read for its own family, a changed
+/// initialization method for the families of its ancestors that have either. A changed writer
+/// is reported in its own file only.
+pub fn family_readers(
+    index: &ProjectIndex,
+    decls: &ProjectDecls,
+    changed: &[FuncKey],
+) -> BTreeSet<String> {
+    let has_reported_reads = |class: &String| {
+        decls.methods_of(class).iter().any(|k| {
+            k.qualname.ends_with(".__hash__")
+                || index.summary(k).is_some_and(|s| s.is_cached_property)
+        })
+    };
+    let methods = changed.iter().filter_map(|key| {
+        let (owner, name) = key.qualname.rsplit_once('.')?;
+        let class = format!("{}.{owner}", key.module);
+        decls.is_project_class(&class).then_some((key, class, name))
+    });
+    let mut roots = BTreeSet::new();
+    for (key, class, name) in methods {
+        if name == "__hash__" || index.summary(key).is_none_or(|s| s.is_cached_property) {
+            roots.insert(class.clone());
+        }
+        if INIT_METHODS.contains(&name) {
+            roots.extend(
+                decls
+                    .ancestors_of(&class)
+                    .into_iter()
+                    .chain([class])
+                    .filter(has_reported_reads),
+            );
+        }
+    }
+    let mut out = BTreeSet::new();
+    for root in roots {
+        out.extend(decls.subclasses_of(&root));
+        out.insert(root);
+    }
+    out
 }
 
 /// Private methods `__init__` of the class family calls on `self` directly.
@@ -223,8 +320,8 @@ fn private_methods_called_from_init(
     family: &[&Method<'_>],
 ) -> FxHashSet<FuncKey> {
     let mut out = FxHashSet::default();
-    for init in family.iter().filter(|m| m.f.name == "__init__") {
-        let Some(file) = cx.index.files.get(&init.unit.input.path) else {
+    for init in family.iter().filter(|m| m.name() == "__init__") {
+        let Some(file) = cx.index.files.get(init.path) else {
             continue;
         };
         for site in file
@@ -1184,13 +1281,13 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     for_each_class_family(cx, |methods, family, init_called| {
         let hashes: Vec<_> = methods
             .iter()
-            .filter(|h| h.f.name == "__hash__")
+            .filter(|h| h.name() == "__hash__")
             .filter_map(|h| Some((h, cx.index.summary(&h.key)?)))
             .collect();
         if hashes.is_empty() {
             return;
         }
-        let init_helpers = private_methods_named_in_initializers(family);
+        let init_helpers = private_methods_named_in_initializers(cx, family);
         for (h, hs) in hashes {
             // Filter 5: what the hash computation writes itself (`self._hash = ...`, also
             // through its `self.helper()` calls) is its cache; a write elsewhere resets it.
@@ -1207,16 +1304,18 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             }
             // `__init_subclass__` / `__class_getitem__` are implicit class methods: they set
             // class attributes, not those of an instance.
+            // Only checked methods are reported.
             let writers = family
                 .iter()
-                .filter(|m| {
-                    !IMPLICIT_CLASS_METHODS.contains(&m.f.name.as_str())
-                        && m.f.name != "__hash__"
+                .filter_map(|m| Some((m, m.checked?)))
+                .filter(|(m, _)| {
+                    !IMPLICIT_CLASS_METHODS.contains(&m.name())
+                        && m.name() != "__hash__"
                         && !filter1_init(m, init_called)
                         && !init_helpers.contains(&m.key)
                 })
-                .filter_map(|m| Some((m, local_summary(cx, m)?)));
-            for (m, local) in writers {
+                .filter_map(|(m, checked)| Some((m, checked, local_summary(cx, m)?)));
+            for (m, Checked { unit, f }, local) in writers {
                 for (attr, read_keys) in &reads {
                     let writes: Vec<&AttrKeyPath> = local
                         .mutates_self_attrs
@@ -1236,9 +1335,9 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         continue;
                     }
                     // Filters 2 and 3: lazy initialization, memo-shaped writes.
-                    let lazy = lazy_init_branches(m.f, attr);
-                    let first = self_attr_writes(m.f, attr).into_iter().find(|w| {
-                        !w.memo_shaped && !lazy.iter().any(|b| dominates(m.f, *b, w.block))
+                    let lazy = lazy_init_branches(f, attr);
+                    let first = self_attr_writes(f, attr).into_iter().find(|w| {
+                        !w.memo_shaped && !lazy.iter().any(|b| dominates(f, *b, w.block))
                     });
                     let Some(write) = first else {
                         continue;
@@ -1246,11 +1345,11 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     if !seen.insert((m.key.clone(), attr.to_string())) {
                         continue;
                     }
-                    let class_qualname = h.f.owner_class_qualname.as_deref().unwrap_or_default();
+                    let class_qualname = hs.owner_class_qualname.as_deref().unwrap_or_default();
                     cx.emit(
                         out,
                         "MUT107",
-                        m.unit,
+                        unit,
                         write.span,
                         &m.key.qualname,
                         format!("{class_qualname}.{attr}->__hash__"),
@@ -1281,20 +1380,21 @@ fn is_stored_hash(attr: &str) -> bool {
 /// Filter 1 (`MUT107`) also covers the private methods the family's initialization methods
 /// call by name on any receiver: `__new__` sets up the instance it allocates
 /// (`self = object.__new__(cls)`, then `self.__setstate(state)`), which is no call on its own
-/// `self`.
-fn private_methods_named_in_initializers<'m>(family: &[&'m Method<'_>]) -> FxHashSet<&'m FuncKey> {
+/// `self`. The names come from the summaries (`EffectSummary::private_calls`): an initializer
+/// of the family may be in another file.
+fn private_methods_named_in_initializers<'m>(
+    cx: &CheckContext<'_>,
+    family: &[&'m Method<'_>],
+) -> FxHashSet<&'m FuncKey> {
     let called: FxHashSet<&str> = family
         .iter()
-        .filter(|m| INIT_METHODS.contains(&m.f.name.as_str()))
-        .flat_map(|m| m.f.blocks.iter().flat_map(|b| &b.insts))
-        .filter_map(|i| match &i.kind {
-            InstKind::MethodCall { method, .. } if is_private(method) => Some(method.as_str()),
-            _ => None,
-        })
+        .filter(|m| INIT_METHODS.contains(&m.name()))
+        .filter_map(|m| cx.index.summary(&m.key))
+        .flat_map(|s| s.private_calls.iter().map(String::as_str))
         .collect();
     family
         .iter()
-        .filter(|m| called.contains(m.f.name.as_str()))
+        .filter(|m| called.contains(m.name()))
         .map(|m| &m.key)
         .collect()
 }

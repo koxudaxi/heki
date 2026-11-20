@@ -20,6 +20,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
+
+/// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
+struct Indexes {
+    subclasses: FxHashMap<String, Vec<String>>,
+    property_names: FxHashSet<String>,
+    frozen: FxHashSet<String>,
+    typed_dicts: FxHashSet<String>,
+}
 
 /// CHA fan-out limit: more candidates than this leave the call unresolved (`unknown_calls`).
 pub const CHA_CANDIDATE_LIMIT: usize = 8;
@@ -227,6 +237,17 @@ pub struct ModuleDecls {
 }
 
 impl ModuleDecls {
+    /// The pass-1 declarations these were completed from (`project_decls_for`): without the
+    /// inferred instance attribute and module global types.
+    pub fn structural(&self) -> Self {
+        let mut out = self.clone();
+        for class in out.classes.values_mut() {
+            class.attr_types.clear();
+        }
+        out.global_types.clear();
+        out
+    }
+
     /// Resolve a dotted name written in this module (runtime imports, then local definitions,
     /// then builtin types). `type_checking` also consults `if TYPE_CHECKING:` imports.
     fn resolve_dotted(&self, text: &str, type_checking: bool) -> Option<String> {
@@ -629,8 +650,64 @@ pub(crate) fn transform_decorator(
 const NAMED_TUPLE_BASES: &[&str] = &["typing.NamedTuple", "typing_extensions.NamedTuple"];
 const TYPED_DICT_BASES: &[&str] = &["typing.TypedDict", "typing_extensions.TypedDict"];
 
+/// Keys into the project declarations: what one analysis read of them
+/// ([`ProjectDecls::record`]), or what an update changed in them ([`DeclPasses`]). An analysis
+/// that read a key an update changed may come out differently: incremental re-analysis goes by
+/// this (ADR-017).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclKeys {
+    /// Module names looked up, whether or not such a module exists (one that appears or
+    /// disappears answers differently).
+    pub modules: BTreeSet<String>,
+    /// Classes whose direct project subclasses were listed (class hierarchy analysis).
+    pub subclasses: BTreeSet<String>,
+    /// Attribute names looked up among the project's property getter names.
+    pub property_names: BTreeSet<String>,
+    /// Classes whose project-wide derived facts were looked up: whether they are frozen (a
+    /// `dataclass_transform` or a base in another module can make them so) or a `TypedDict`.
+    pub class_facts: BTreeSet<String>,
+}
+
+impl DeclKeys {
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+            && self.subclasses.is_empty()
+            && self.property_names.is_empty()
+            && self.class_facts.is_empty()
+    }
+
+    pub fn extend(&mut self, other: Self) {
+        self.modules.extend(other.modules);
+        self.subclasses.extend(other.subclasses);
+        self.property_names.extend(other.property_names);
+        self.class_facts.extend(other.class_facts);
+    }
+
+    /// Whether the two share a key (an analysis that read `self` is affected by the change
+    /// `other`).
+    pub fn intersects(&self, other: &Self) -> bool {
+        !self.modules.is_disjoint(&other.modules)
+            || !self.subclasses.is_disjoint(&other.subclasses)
+            || !self.property_names.is_disjoint(&other.property_names)
+            || !self.class_facts.is_disjoint(&other.class_facts)
+    }
+}
+
+fn note(keys: &mut BTreeSet<String>, key: &str) {
+    if !keys.contains(key) {
+        keys.insert(key.to_owned());
+    }
+}
+
+/// The keys analyses read while [`ProjectDecls::record`] runs.
+#[derive(Debug, Default)]
+struct Recorder {
+    on: AtomicBool,
+    keys: Mutex<DeclKeys>,
+}
+
 /// Declarations of every project module plus derived indexes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ProjectDecls {
     modules: FxHashMap<String, ModuleDecls>,
     /// Class fqn -> direct project subclasses.
@@ -642,6 +719,7 @@ pub struct ProjectDecls {
     typed_dicts: FxHashSet<String>,
     /// Every frozen project class (`Self::frozen_classes`).
     frozen: FxHashSet<String>,
+    recorder: Recorder,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -696,7 +774,68 @@ impl ProjectDecls {
         }
     }
 
+    /// Run `f` and return, with its result, the keys it read of these declarations (through
+    /// any lookup: names, classes and their hierarchies, functions, property names).
+    pub fn record<T>(&self, f: impl FnOnce() -> T) -> (T, DeclKeys) {
+        self.recorder.on.store(true, Ordering::SeqCst);
+        let out = f();
+        self.recorder.on.store(false, Ordering::SeqCst);
+        let keys = std::mem::take(&mut *self.recorded());
+        (out, keys)
+    }
+
+    fn recorded(&self) -> MutexGuard<'_, DeclKeys> {
+        self.recorder
+            .keys
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Note a key read during [`Self::record`].
+    fn read(&self, note: impl FnOnce(&mut DeclKeys)) {
+        if self.recorder.on.load(Ordering::Relaxed) {
+            note(&mut self.recorded());
+        }
+    }
+
+    /// What differs in the derived indexes between `before` (an earlier version,
+    /// [`Self::indexes`]) and now: the classes whose direct subclasses changed, the property
+    /// names that appeared or disappeared, and the classes that became or stopped being frozen
+    /// or a `TypedDict`.
+    fn index_changes(&self, before: &Indexes) -> DeclKeys {
+        let mut out = DeclKeys::default();
+        for class in before.subclasses.keys().chain(self.subclasses.keys()) {
+            if before.subclasses.get(class) != self.subclasses.get(class) {
+                out.subclasses.insert(class.clone());
+            }
+        }
+        let differ = |a: &FxHashSet<String>, b: &FxHashSet<String>| -> BTreeSet<String> {
+            a.symmetric_difference(b).cloned().collect()
+        };
+        out.property_names = differ(&before.property_names, &self.property_names);
+        out.class_facts = differ(&before.frozen, &self.frozen);
+        out.class_facts
+            .extend(differ(&before.typed_dicts, &self.typed_dicts));
+        out
+    }
+
+    fn indexes(&self) -> Indexes {
+        Indexes {
+            subclasses: self.subclasses.clone(),
+            property_names: self.property_names.clone(),
+            frozen: self.frozen.clone(),
+            typed_dicts: self.typed_dicts.clone(),
+        }
+    }
+
     fn rebuild_indexes(&mut self) {
+        // Maintenance, not a lookup of an analysis.
+        let recording = std::mem::replace(self.recorder.on.get_mut(), false);
+        self.build_indexes();
+        *self.recorder.on.get_mut() = recording;
+    }
+
+    fn build_indexes(&mut self) {
         let out = &*self;
         let mut subclasses: FxHashMap<String, Vec<String>> = FxHashMap::default();
         let mut property_names = FxHashSet::default();
@@ -787,6 +926,7 @@ impl ProjectDecls {
     }
 
     pub fn module(&self, name: &str) -> Option<&ModuleDecls> {
+        self.read(|k| note(&mut k.modules, name));
         self.modules.get(name)
     }
 
@@ -795,12 +935,18 @@ impl ProjectDecls {
         let mut end = fqn.len();
         loop {
             let prefix = &fqn[..end];
-            if let Some(m) = self.modules.get(prefix) {
+            if let Some(m) = self.module(prefix) {
                 let rest = fqn.get(end + 1..).unwrap_or("");
                 return Some((m, rest));
             }
             end = prefix.rfind('.')?;
         }
+    }
+
+    /// The direct project subclasses of the canonical class `class`.
+    fn direct_subclasses(&self, class: &str) -> &[String] {
+        self.read(|k| note(&mut k.subclasses, class));
+        self.subclasses.get(class).map_or(&[], Vec::as_slice)
     }
 
     /// Chase re-exports (`pkg.Foo` where `pkg/__init__.py` does `from .sub import Foo`).
@@ -871,6 +1017,7 @@ impl ProjectDecls {
 
     /// Whether the canonical project class `class` is a `TypedDict`.
     pub fn is_typed_dict(&self, class: &str) -> bool {
+        self.read(|k| note(&mut k.class_facts, class));
         self.typed_dicts.contains(class)
     }
 
@@ -886,6 +1033,7 @@ impl ProjectDecls {
     pub fn readonly_attr(&self, class: &str, attr: &str) -> Option<ReadOnlyAttr> {
         self.mro(class).into_iter().find_map(|c| {
             let decl = self.class(&c)?;
+            self.read(|k| note(&mut k.class_facts, &c));
             let kind = if self.frozen.contains(&c) && decl.container_fields.contains(attr) {
                 ReadOnlyKind::Frozen
             } else if decl.readonly_attrs.contains(attr) {
@@ -903,7 +1051,7 @@ impl ProjectDecls {
         let mut seen = FxHashSet::default();
         let mut stack = vec![self.canonical(class)];
         while let Some(c) = stack.pop() {
-            for sub in self.subclasses.get(&c).into_iter().flatten() {
+            for sub in self.direct_subclasses(&c) {
                 if seen.insert(sub.clone()) {
                     out.push(sub.clone());
                     stack.push(sub.clone());
@@ -912,6 +1060,35 @@ impl ProjectDecls {
         }
         out.sort();
         out
+    }
+
+    /// The project classes `class` inherits from (its MRO without itself and external bases).
+    pub fn ancestors_of(&self, class: &str) -> Vec<String> {
+        let class = self.canonical(class);
+        self.mro(&class)
+            .into_iter()
+            .filter(|c| *c != class && self.is_project_class(c))
+            .collect()
+    }
+
+    /// The methods defined directly in the project class `class`.
+    pub fn methods_of(&self, class: &str) -> Vec<FuncKey> {
+        self.split_module(class)
+            .into_iter()
+            .flat_map(|(m, rest)| {
+                let prefix = format!("{rest}.");
+                m.functions
+                    .keys()
+                    .filter(move |q| {
+                        q.strip_prefix(&prefix)
+                            .is_some_and(|name| !name.contains('.'))
+                    })
+                    .map(|q| FuncKey {
+                        module: m.module_name.clone(),
+                        qualname: q.clone(),
+                    })
+            })
+            .collect()
     }
 
     /// Depth-first, left-to-right base linearization (project and external classes).
@@ -944,7 +1121,7 @@ impl ProjectDecls {
     }
 
     pub fn function_decl(&self, key: &FuncKey) -> Option<&FunctionDecl> {
-        self.modules.get(&key.module)?.functions.get(&key.qualname)
+        self.module(&key.module)?.functions.get(&key.qualname)
     }
 
     /// Priority 3: instance attribute type through the MRO.
@@ -985,7 +1162,7 @@ impl ProjectDecls {
             let mut stack = vec![class.to_owned()];
             let mut seen = FxHashSet::default();
             while let Some(c) = stack.pop() {
-                for sub in self.subclasses.get(&c).into_iter().flatten() {
+                for sub in self.direct_subclasses(&c) {
                     if seen.insert(sub.clone()) {
                         if let Some(k) = self.own_method(sub, name)
                             && keep(&k)
@@ -1032,6 +1209,7 @@ impl ProjectDecls {
         attr: &str,
         skip_self: bool,
     ) -> Option<Callee> {
+        self.read(|k| note(&mut k.property_names, attr));
         if !self.property_names.contains(attr) {
             return None;
         }
@@ -1049,34 +1227,115 @@ impl ProjectDecls {
     }
 }
 
-/// Build the project declarations used for summarization: structural declarations of
-/// `modules` (plus `others` already known), then Priority 3 attribute types and global types
-/// inferred against them.
-/// Declarations of one edited module completed against `cached` (the project's declarations,
-/// holding this module's previous version), updating `cached` when they changed. The fast
-/// path (completion against the previous version) is exact whenever the module's structure is
-/// unchanged; any difference falls back to completing against the new structure.
+/// Both passes of [`project_decls_for`] over the whole project, kept up to date one module at
+/// a time: pass 1 (`structural`: imports, classes and their bases, signatures; a function of
+/// each module's text alone) and pass 2 (`completed`: pass 1 plus the instance attribute and
+/// module global types inferred against pass 1). Inference never sees inferred types, so a
+/// module's completed declarations do not depend on the order in which modules were edited.
+#[derive(Debug, Default)]
+pub struct DeclPasses {
+    structural: ProjectDecls,
+    completed: ProjectDecls,
+}
+
+impl DeclPasses {
+    /// From the completed declarations of every module (`.py` implementations after `.pyi`
+    /// stubs sharing a module name, so that they win).
+    pub fn new(completed: impl IntoIterator<Item = ModuleDecls>) -> Self {
+        let completed: Vec<ModuleDecls> = completed.into_iter().collect();
+        Self {
+            structural: ProjectDecls::new(completed.iter().map(ModuleDecls::structural)),
+            completed: ProjectDecls::new(completed),
+        }
+    }
+
+    /// The declarations summaries and rules resolve names through.
+    pub fn completed(&self) -> &ProjectDecls {
+        &self.completed
+    }
+
+    /// Replace (or add) one module's completed declarations; returns what changed.
+    pub fn replace(&mut self, completed: ModuleDecls) -> DeclKeys {
+        let name = completed.module_name.clone();
+        if self.completed.module(&name) == Some(&completed) {
+            return DeclKeys::default();
+        }
+        let before = self.structural.indexes();
+        self.structural.replace(completed.structural());
+        self.completed.replace(completed);
+        self.changed(&name, Some(&before))
+    }
+
+    /// Forget a deleted module; returns what changed.
+    pub fn remove(&mut self, module: &str) -> DeclKeys {
+        let before = self.structural.indexes();
+        self.structural.remove(module);
+        self.completed.remove(module);
+        self.changed(module, Some(&before))
+    }
+
+    /// What changed when `module`'s declarations did: the module, and the hierarchy indexes
+    /// that differ from `before` (unchanged without it: the module's structure stayed).
+    fn changed(&self, module: &str, before: Option<&Indexes>) -> DeclKeys {
+        let mut out = before.map_or_else(DeclKeys::default, |b| self.structural.index_changes(b));
+        out.modules.insert(module.to_owned());
+        out
+    }
+}
+
+/// Complete one edited module against pass 1 of the project, as [`project_decls_for`] does,
+/// and update both passes when they changed. Returns what changed (nothing: empty), the
+/// module's completed declarations, and what the completion read of pass 1.
 pub(crate) fn update_module_decls(
     input: &ModuleInput<'_>,
     kb: &EffectiveEcosystemKb,
-    cached: &mut ProjectDecls,
-) -> bool {
+    passes: &mut DeclPasses,
+) -> (DeclKeys, ModuleDecls, DeclKeys) {
+    let name = &input.module_name;
     let structural = structural_decls(input);
-    let fast = complete_decls(input, structural.clone(), cached, kb);
-    if cached.module(&input.module_name) == Some(&fast) {
-        return false;
+    let restructured = passes.structural.module(name) != Some(&structural);
+    let before = restructured.then(|| passes.structural.indexes());
+    if restructured {
+        passes.structural.replace(structural.clone());
     }
-    cached.replace(structural.clone());
-    let completed = complete_decls(input, structural, cached, kb);
-    cached.replace(completed);
-    true
+    let (completed, reads) = complete_against(input, structural, &passes.structural, kb);
+    if passes.completed.module(name) == Some(&completed) {
+        return (DeclKeys::default(), completed, reads);
+    }
+    passes.completed.replace(completed.clone());
+    (passes.changed(name, before.as_ref()), completed, reads)
 }
 
+/// A module's completed declarations against pass 1 without updating it (a `.pyi` stub next to
+/// its `.py` implementation, whose declarations win), and what the completion read.
+pub(crate) fn own_module_decls(
+    input: &ModuleInput<'_>,
+    kb: &EffectiveEcosystemKb,
+    passes: &DeclPasses,
+) -> (ModuleDecls, DeclKeys) {
+    complete_against(input, structural_decls(input), &passes.structural, kb)
+}
+
+/// [`complete_decls`] with what it read of `pass1`.
+fn complete_against(
+    input: &ModuleInput<'_>,
+    structural: ModuleDecls,
+    pass1: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
+) -> (ModuleDecls, DeclKeys) {
+    pass1.record(|| complete_decls(input, structural, pass1, kb))
+}
+
+/// Build the project declarations used for summarization: structural declarations of
+/// `modules` (plus the pass 1 of `others`, whose completed declarations are known), then
+/// Priority 3 attribute types and global types inferred against them. Also returns each
+/// module's own completed declarations, with what its completion read when `track` is set.
 pub(crate) fn project_decls_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     others: Option<Vec<(bool, ModuleDecls)>>,
-) -> ProjectDecls {
+    track: bool,
+) -> (ProjectDecls, Vec<(ModuleDecls, DeclKeys)>) {
     // Process stubs before implementation `.py` files so a `.py` module always wins when both
     // share one module name.
     let order = |items: Vec<(bool, ModuleDecls)>| {
@@ -1092,16 +1351,30 @@ pub(crate) fn project_decls_for(
     let pass1 = ProjectDecls::new(order(
         others
             .iter()
-            .cloned()
+            .map(|(stub, d)| (*stub, d.structural()))
             .chain(structural.iter().cloned())
             .collect(),
     ));
-    let completed: Vec<(bool, ModuleDecls)> = modules
+    let own: Vec<(ModuleDecls, DeclKeys)> = modules
         .iter()
-        .zip(structural)
-        .map(|(m, (stub, d))| (stub, complete_decls(m, d, &pass1, kb)))
+        .zip(&structural)
+        .map(|(m, (_, d))| {
+            if track {
+                complete_against(m, d.clone(), &pass1, kb)
+            } else {
+                (
+                    complete_decls(m, d.clone(), &pass1, kb),
+                    DeclKeys::default(),
+                )
+            }
+        })
         .collect();
-    ProjectDecls::new(order(others.into_iter().chain(completed).collect()))
+    let completed = structural
+        .iter()
+        .zip(&own)
+        .map(|((stub, _), (d, _))| (*stub, d.clone()));
+    let decls = ProjectDecls::new(order(others.into_iter().chain(completed).collect()));
+    (decls, own)
 }
 
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.

@@ -1,0 +1,830 @@
+//! Differential oracle for the incremental language server (docs/lsp.md): after every step of
+//! an editing session over a small multi-file project, the diagnostics the server published for
+//! every file must equal a fresh `heki check --output-format json` of the same files and
+//! configuration.
+//!
+//! The session opens every file, then runs the steps of [`steps`]. A step edits and saves,
+//! creates, or deletes files, or changes the configuration, the way an editor and its file
+//! watcher report it (`workspace/didChangeWatchedFiles`). After it, the harness waits until the
+//! server is idle ([`Lsp::settle`]: `heki/stats` reports no work in flight, and every
+//! publication it counts has arrived; no sleeps) and compares, file by file, the range, code,
+//! severity, message, and related locations of every diagnostic. A step also names diagnostics
+//! the CLI must (or must not) report, so it exercises what it describes, and a step marked
+//! `cutoff` must stop at the edited files (Early Cutoff). A new step is a few lines.
+
+mod common;
+
+use common::Project;
+use common::lsp::{Lsp, uri};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+
+// ------------------------------------------------------------------------------------ project
+
+const CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+extend-select = ["MUT108"]
+
+[[tool.heki.write-owners]]
+name = "registry"
+targets = ["Registry.entries"]
+allowed-writers = ["Store.*"]
+
+[[tool.heki.read-owners]]
+name = "vault"
+targets = ["Vault.secret"]
+allowed-readers = ["Store.*"]
+"#;
+
+// An `async def` two modules above a sync helper (`EFF101` with its chain).
+const LOW: &str = "import requests\n\n\ndef fetch(url):\n    return url\n";
+const LOW_BLOCKING: &str = "import requests\n\n\ndef fetch(url):\n    return requests.get(url)\n";
+const MID: &str = "from pkg.low import fetch\n\n\ndef helper(url):\n    return fetch(url)\n";
+const MID_BROKEN: &str = "from pkg.low import fetch\n\n\ndef helper(url):\n    return fetch(url\n";
+const TOP: &str =
+    "from pkg.mid import helper\n\n\nasync def handler(url):\n    return helper(url)\n";
+
+// Property getters: `MUT101` (a `@cached_property` read), `MUT107` (a property `__hash__`
+// reads), `EFF101` (a getter read from an `async def` in another file).
+const SHAPES: &str = "from functools import cached_property\n\n\nclass Box:\n    def __init__(self):\n        self.items = []\n        self.size = 0\n\n    @cached_property\n    def total(self):\n        return self.size\n\n    def add(self, x):\n        self.items.append(x)\n";
+const SHAPES_READING: &str = "from functools import cached_property\n\n\nclass Box:\n    def __init__(self):\n        self.items = []\n        self.size = 0\n\n    @cached_property\n    def total(self):\n        return len(self.items)\n\n    def add(self, x):\n        self.items.append(x)\n";
+const KEYS: &str = "class Key:\n    def __init__(self, code, name):\n        self.code = code\n        self.name = name\n\n    @property\n    def ident(self):\n        return self.code\n\n    def __hash__(self):\n        return hash(self.ident)\n\n    def rename(self, name):\n        self.name = name\n";
+const KEYS_BY_NAME: &str = "class Key:\n    def __init__(self, code, name):\n        self.code = code\n        self.name = name\n\n    @property\n    def ident(self):\n        return self.name\n\n    def __hash__(self):\n        return hash(self.ident)\n\n    def rename(self, name):\n        self.name = name\n";
+const REMOTE: &str =
+    "import requests\n\n\nclass Client:\n    @property\n    def data(self):\n        return {}\n";
+const REMOTE_BLOCKING: &str = "import requests\n\n\nclass Client:\n    @property\n    def data(self):\n        return requests.get(\"https://example.com\")\n";
+const READER: &str =
+    "from pkg.remote import Client\n\n\nasync def load(c: Client):\n    return c.data\n";
+
+// Contracts: private helpers writing / reading guarded attributes report themselves without
+// callers, nothing when only allowed functions call them, and at a non-allowed caller.
+const MODEL: &str = "class Registry:\n    def __init__(self):\n        self.entries = []\n\n\nclass Vault:\n    def __init__(self):\n        self.secret = \"\"\n";
+const OPS: &str = "from pkg.model import Registry, Vault\n\n\ndef _append(r: Registry, x):\n    r.entries.append(x)\n\n\ndef _peek(v: Vault):\n    return v.secret\n";
+const STORE: &str = "from pkg.model import Registry, Vault\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        return x\n";
+const STORE_CALLING: &str = "from pkg.model import Registry, Vault\nfrom pkg.ops import _append, _peek\n\n\nclass Store:\n    def put(self, r: Registry, x):\n        _append(r, x)\n\n    def look(self, v: Vault):\n        return _peek(v)\n";
+const SERVICE: &str =
+    "from pkg.model import Registry, Vault\n\n\ndef sync(r: Registry, v: Vault):\n    return r\n";
+const SERVICE_CALLING: &str = "from pkg.model import Registry, Vault\nfrom pkg.ops import _append, _peek\n\n\ndef sync(r: Registry, v: Vault):\n    _append(r, 1)\n    return _peek(v)\n";
+
+// Files: a module a caller already imports is created, then deleted; a stub is put next to a
+// module, then removed.
+const USES_EXTRA: &str = "from pkg.extra import slow\n\n\nasync def go():\n    return slow()\n";
+const EXTRA: &str = "import time\n\n\ndef slow():\n    time.sleep(1)\n";
+const SVC: &str =
+    "import requests\n\n\ndef ping():\n    return requests.get(\"https://example.com\")\n";
+const SVC_STUB: &str = "def ping() -> None: ...\n";
+const SVC_USER: &str = "from pkg.svc import ping\n\n\nasync def poll():\n    return ping()\n";
+
+// Declarations: a module global instance stored on `self`, a return type another module's
+// attribute type comes from, a class family across modules, and an override in a subclass
+// module (class hierarchy analysis).
+const CONF: &str = "import requests\n\nsession = requests.Session()\n";
+const API: &str = "from pkg.conf import session\n\n\nclass Api:\n    def __init__(self):\n        self.http = session\n\n    async def get(self):\n        return self.http.get(\"https://example.com\")\n";
+const ENGINES: &str = "import time\n\n\nclass Engine:\n    def run(self):\n        return 1\n\n\nclass Turbo:\n    def run(self):\n        time.sleep(1)\n\n\ndef make() -> Engine:\n    return Engine()\n";
+const HOLDER: &str = "from pkg.engines import make\n\n\nclass Holder:\n    def __init__(self):\n        self.engine = make()\n";
+const GARAGE: &str =
+    "from pkg.holder import Holder\n\n\nasync def drive(h: Holder):\n    return h.engine.run()\n";
+const BASE: &str = "from functools import cached_property\n\n\nclass Base:\n    def __init__(self):\n        self.items = []\n\n    @cached_property\n    def count(self):\n        return len(self.items)\n";
+const BASE_CONSTANT: &str = "from functools import cached_property\n\n\nclass Base:\n    def __init__(self):\n        self.items = []\n\n    @cached_property\n    def count(self):\n        return 0\n";
+const DERIVED: &str = "from pkg.base import Base\n\n\nclass Derived(Base):\n    def push(self, x):\n        self.items.append(x)\n";
+const SHAPE: &str = "class Shape:\n    def area(self):\n        return 0\n";
+const SQUARE: &str = "import time\n\nfrom pkg.shape import Shape\n\n\nclass Square(Shape):\n    def side(self):\n        time.sleep(1)\n";
+const DRAW: &str =
+    "from pkg.shape import Shape\n\n\nasync def render(s: Shape):\n    return s.area()\n";
+
+// A package re-exports classes of its submodule (`from pkg.ui.impl import ...` in
+// `pkg/ui/__init__.py`); another module uses them through the package only. A method becomes a
+// property getter (read from an `async def`, read by `__hash__`), and a class gains a base.
+const UI_INIT: &str = "from pkg.ui.impl import Labeled, Widget\n";
+const UI_BASE: &str =
+    "import time\n\n\nclass Refreshing:\n    def refresh(self):\n        time.sleep(1)\n";
+const UI_IMPL: &str = "import requests\n\nfrom pkg.ui.base import Refreshing\n\n\nclass Widget:\n    def data(self):\n        return requests.get(\"https://example.com\")\n\n\nclass Labeled:\n    def __init__(self, name):\n        self.name = name\n\n    def label(self):\n        return self.name\n";
+const CONSUMER: &str = "from pkg.ui import Labeled, Widget\n\n\nasync def show(w: Widget):\n    return w.data\n\n\nasync def update(w: Widget):\n    return w.refresh()\n\n\nclass Tag(Labeled):\n    def __hash__(self):\n        return hash(self.label)\n\n    def rename(self, name):\n        self.name = name\n";
+
+// `MUT108`: a dataclass whose field a helper in another module changes in place becomes frozen,
+// and a decorator in a third module becomes a `dataclass_transform(frozen_default=True)`.
+const RECORDS: &str = "from typing import dataclass_transform\n\n\n@dataclass_transform()\ndef record(cls):\n    return cls\n";
+const FROZEN_MODEL: &str = "from dataclasses import dataclass, field\n\nfrom pkg.frozen.records import record\n\n\n@dataclass\nclass Config:\n    tags: list[str] = field(default_factory=list)\n\n\n@record\nclass Entry:\n    names: list[str]\n";
+const FROZEN_HELPERS: &str = "def add_default(tags):\n    tags.append(\"default\")\n\n\ndef clear_names(entry):\n    entry.names.clear()\n";
+const CONFIGURE: &str = "from pkg.frozen.helpers import add_default, clear_names\nfrom pkg.frozen.model import Config, Entry\n\n\ndef configure(config: Config) -> None:\n    add_default(config.tags)\n\n\ndef reset(entry: Entry) -> None:\n    clear_names(entry)\n";
+
+// Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
+// size-dependent rewrites that rely on them (`OPT110` builds a `set(...)`) are not proven.
+const LOOPS: &str = "def member(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n";
+const COMPAT: &str = "import builtins\n\nbuiltins.len = len\n";
+
+/// The project before the first step (every file is opened).
+fn initial_files() -> Vec<(&'static str, String)> {
+    [
+        ("pkg/__init__.py", ""),
+        ("pkg/low.py", LOW),
+        ("pkg/mid.py", MID),
+        ("pkg/top.py", TOP),
+        ("pkg/shapes.py", SHAPES),
+        ("pkg/keys.py", KEYS),
+        ("pkg/remote.py", REMOTE),
+        ("pkg/reader.py", READER),
+        ("pkg/model.py", MODEL),
+        ("pkg/ops.py", OPS),
+        ("pkg/store.py", STORE),
+        ("pkg/service.py", SERVICE),
+        ("pkg/uses_extra.py", USES_EXTRA),
+        ("pkg/svc.py", SVC),
+        ("pkg/svc_user.py", SVC_USER),
+        ("pkg/conf.py", CONF),
+        ("pkg/api.py", API),
+        ("pkg/engines.py", ENGINES),
+        ("pkg/holder.py", HOLDER),
+        ("pkg/garage.py", GARAGE),
+        ("pkg/base.py", BASE),
+        ("pkg/derived.py", DERIVED),
+        ("pkg/shape.py", SHAPE),
+        ("pkg/square.py", SQUARE),
+        ("pkg/draw.py", DRAW),
+        ("pkg/ui/__init__.py", UI_INIT),
+        ("pkg/ui/base.py", UI_BASE),
+        ("pkg/ui/impl.py", UI_IMPL),
+        ("pkg/consumer.py", CONSUMER),
+        ("pkg/frozen/__init__.py", ""),
+        ("pkg/frozen/records.py", RECORDS),
+        ("pkg/frozen/model.py", FROZEN_MODEL),
+        ("pkg/frozen/helpers.py", FROZEN_HELPERS),
+        ("pkg/frozen/configure.py", CONFIGURE),
+        ("pkg/loops.py", LOOPS),
+        ("pkg/compat.py", COMPAT),
+    ]
+    .into_iter()
+    .map(|(rel, text)| (rel, text.to_owned()))
+    .collect()
+}
+
+// -------------------------------------------------------------------------------------- steps
+
+/// What an editor does to the project.
+enum Action {
+    /// Edit an open document and save it: `didChange`, write the file, `didSave` with the text.
+    Save(&'static str, String),
+    /// An unsaved edit of an open document (`didChange` only); a later `Save` writes the disk.
+    Change(&'static str, String),
+    /// A new file: written, announced with `workspace/didChangeWatchedFiles`, then opened.
+    Create(&'static str, String),
+    /// Close the document, delete the file, and announce the deletion.
+    Delete(&'static str),
+    /// Replace the configuration (`pyproject.toml`) and announce the change.
+    Configure(String),
+}
+
+struct Step {
+    name: &'static str,
+    actions: Vec<Action>,
+    /// `(file, code)` the CLI reports after the step.
+    present: &'static [(&'static str, &'static str)],
+    /// `(file, code)` the CLI does not report after the step.
+    absent: &'static [(&'static str, &'static str)],
+    /// Early Cutoff: no other file is re-analyzed or re-published.
+    cutoff: bool,
+}
+
+impl Step {
+    fn new(name: &'static str, actions: Vec<Action>) -> Self {
+        Self {
+            name,
+            actions,
+            present: &[],
+            absent: &[],
+            cutoff: false,
+        }
+    }
+
+    fn present(mut self, codes: &'static [(&'static str, &'static str)]) -> Self {
+        self.present = codes;
+        self
+    }
+
+    fn absent(mut self, codes: &'static [(&'static str, &'static str)]) -> Self {
+        self.absent = codes;
+        self
+    }
+
+    fn cutoff(mut self) -> Self {
+        self.cutoff = true;
+        self
+    }
+}
+
+fn save(rel: &'static str, text: &str) -> Action {
+    Action::Save(rel, text.to_owned())
+}
+
+/// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
+/// comes from a decorator in another module, and the in-place change from a helper in a third.
+fn steps_mut108() -> Vec<Step> {
+    let transform = RECORDS.replace(
+        "@dataclass_transform()",
+        "@dataclass_transform(frozen_default=True)",
+    );
+    let frozen = FROZEN_MODEL.replace("@dataclass\n", "@dataclass(frozen=True)\n");
+    vec![
+        Step::new(
+            "a decorator in another module becomes a frozen dataclass transform",
+            vec![Action::Save("pkg/frozen/records.py", transform)],
+        )
+        .present(&[("pkg/frozen/configure.py", "MUT108")]),
+        Step::new(
+            "the transform is not frozen by default again",
+            vec![save("pkg/frozen/records.py", RECORDS)],
+        )
+        .absent(&[("pkg/frozen/configure.py", "MUT108")]),
+        Step::new(
+            "a dataclass a helper in another module changes in place becomes frozen",
+            vec![Action::Save("pkg/frozen/model.py", frozen)],
+        )
+        .present(&[("pkg/frozen/configure.py", "MUT108")]),
+        Step::new(
+            "the dataclass is not frozen again",
+            vec![save("pkg/frozen/model.py", FROZEN_MODEL)],
+        )
+        .absent(&[("pkg/frozen/configure.py", "MUT108")]),
+    ]
+}
+
+/// Reserved for `MUT110` (`Sequence` / `Mapping` / `ReadOnly` parameters changed in place by
+/// helpers, default-on), which lands next; its steps go here.
+fn steps_mut110() -> Vec<Step> {
+    Vec::new()
+}
+
+fn steps() -> Vec<Step> {
+    let mut steps = vec![
+        // 1. The initial index.
+        Step::new("initial index", Vec::new()).present(&[
+            ("pkg/ops.py", "MUT201"),
+            ("pkg/ops.py", "MUT203"),
+            ("pkg/svc_user.py", "EFF101"),
+        ]),
+        // 2. A sync helper two modules below an `async def` starts and stops blocking.
+        Step::new(
+            "the helper two modules below the async def starts blocking",
+            vec![save("pkg/low.py", LOW_BLOCKING)],
+        )
+        .present(&[("pkg/top.py", "EFF101")]),
+        Step::new(
+            "a comment after the blocking call",
+            vec![save("pkg/low.py", &format!("{LOW_BLOCKING}# done\n"))],
+        )
+        .present(&[("pkg/top.py", "EFF101")])
+        .cutoff(),
+        Step::new(
+            "a comment in the async caller",
+            vec![save("pkg/top.py", &format!("# entry points\n{TOP}"))],
+        )
+        .present(&[("pkg/top.py", "EFF101")])
+        .cutoff(),
+        Step::new(
+            "a comment above the blocking call moves the chain's last hop",
+            vec![save(
+                "pkg/low.py",
+                &format!("# network helpers\n{LOW_BLOCKING}# done\n"),
+            )],
+        )
+        .present(&[("pkg/top.py", "EFF101")]),
+        // 6. A syntax error in the middle of an edit of a callee, saved, then the fix.
+        Step::new(
+            "the middle callee stops parsing",
+            vec![
+                Action::Change("pkg/mid.py", MID.replace("fetch(url)", "fetch(")),
+                save("pkg/mid.py", MID_BROKEN),
+            ],
+        )
+        .absent(&[("pkg/top.py", "EFF101")]),
+        Step::new(
+            "the middle callee parses again",
+            vec![save("pkg/mid.py", MID)],
+        )
+        .present(&[("pkg/top.py", "EFF101")]),
+        Step::new(
+            "the helper two modules below stops blocking",
+            vec![save("pkg/low.py", LOW)],
+        )
+        .absent(&[("pkg/top.py", "EFF101")]),
+        // 3. Property getters.
+        Step::new(
+            "a cached property starts reading a mutated attribute",
+            vec![save("pkg/shapes.py", SHAPES_READING)],
+        )
+        .present(&[("pkg/shapes.py", "MUT101")]),
+        Step::new(
+            "the cached property stops reading it",
+            vec![save("pkg/shapes.py", SHAPES)],
+        )
+        .absent(&[("pkg/shapes.py", "MUT101")]),
+        Step::new(
+            "__hash__ reads a property whose getter reads a mutated attribute",
+            vec![save("pkg/keys.py", KEYS_BY_NAME)],
+        )
+        .present(&[("pkg/keys.py", "MUT107")]),
+        Step::new(
+            "the getter reads a constant attribute again",
+            vec![save("pkg/keys.py", KEYS)],
+        )
+        .absent(&[("pkg/keys.py", "MUT107")]),
+        Step::new(
+            "a getter read from an async def in another file starts blocking",
+            vec![save("pkg/remote.py", REMOTE_BLOCKING)],
+        )
+        .present(&[("pkg/reader.py", "EFF101")]),
+        Step::new(
+            "the getter stops blocking",
+            vec![save("pkg/remote.py", REMOTE)],
+        )
+        .absent(&[("pkg/reader.py", "EFF101")]),
+    ];
+    // 4. `MUT108`, then the place reserved for `MUT110`.
+    steps.extend(steps_mut108());
+    steps.extend(steps_mut110());
+    steps.extend([
+        // 5. Contracts: the reports of private helpers move between them and their callers.
+        Step::new(
+            "only allowed functions call the private helpers",
+            vec![save("pkg/store.py", STORE_CALLING)],
+        )
+        .absent(&[("pkg/ops.py", "MUT201"), ("pkg/ops.py", "MUT203")]),
+        Step::new(
+            "a non-allowed caller of the private helpers",
+            vec![save("pkg/service.py", SERVICE_CALLING)],
+        )
+        .present(&[("pkg/service.py", "MUT201"), ("pkg/service.py", "MUT203")]),
+        Step::new(
+            "the non-allowed caller stops calling them",
+            vec![save("pkg/service.py", SERVICE)],
+        )
+        .absent(&[("pkg/service.py", "MUT201"), ("pkg/service.py", "MUT203")]),
+        Step::new(
+            "no caller is left: the helpers report themselves",
+            vec![save("pkg/store.py", STORE)],
+        )
+        .present(&[("pkg/ops.py", "MUT201"), ("pkg/ops.py", "MUT203")]),
+        // 7. Files.
+        Step::new(
+            "a module its caller imports is created",
+            vec![Action::Create("pkg/extra.py", EXTRA.to_owned())],
+        )
+        .present(&[("pkg/uses_extra.py", "EFF101")]),
+        Step::new(
+            "the module is deleted",
+            vec![Action::Delete("pkg/extra.py")],
+        )
+        .absent(&[("pkg/uses_extra.py", "EFF101")]),
+        Step::new(
+            "a stub next to a module",
+            vec![Action::Create("pkg/svc.pyi", SVC_STUB.to_owned())],
+        ),
+        Step::new("the stub is removed", vec![Action::Delete("pkg/svc.pyi")])
+            .present(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the module is deleted while its stub stays",
+            vec![
+                Action::Create("pkg/svc.pyi", SVC_STUB.to_owned()),
+                Action::Delete("pkg/svc.py"),
+            ],
+        )
+        .absent(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the module is back next to its stub",
+            vec![Action::Create("pkg/svc.py", SVC.to_owned())],
+        )
+        .present(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the stub is removed again",
+            vec![Action::Delete("pkg/svc.pyi")],
+        )
+        .present(&[("pkg/svc_user.py", "EFF101")]),
+        // The configuration changes while the server runs.
+        Step::new(
+            "the configuration gains a write owner",
+            vec![Action::Configure(format!(
+                "{CONFIG}\n[[tool.heki.write-owners]]\nname = \"boxes\"\ntargets = [\"Box.items\"]\n"
+            ))],
+        )
+        .present(&[("pkg/shapes.py", "MUT201")]),
+        Step::new(
+            "the write owner is removed again",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .absent(&[("pkg/shapes.py", "MUT201")]),
+        Step::new(
+            "the configuration becomes invalid",
+            vec![Action::Configure(CONFIG.replace(
+                "extend-select = [\"MUT108\"]",
+                "extend-select = [\"MUT108\"]\nselect = [\"NOPE1\"]",
+            ))],
+        )
+        .absent(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the configuration is valid again",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .present(&[("pkg/svc_user.py", "EFF101")]),
+        // Project-wide assumptions.
+        Step::new(
+            "the module patching builtins is deleted",
+            vec![Action::Delete("pkg/compat.py")],
+        )
+        .present(&[("pkg/loops.py", "OPT110")]),
+        Step::new(
+            "a module starts patching builtins",
+            vec![Action::Create("pkg/compat.py", COMPAT.to_owned())],
+        )
+        .absent(&[("pkg/loops.py", "OPT110")]),
+        // Declarations other modules resolve names through.
+        Step::new(
+            "a module that stores an imported global on self",
+            vec![save("pkg/api.py", &format!("# client\n{API}"))],
+        ),
+        Step::new(
+            "a factory's return type changes the attribute type of another module's class",
+            vec![save(
+                "pkg/engines.py",
+                &ENGINES.replace(
+                    "def make() -> Engine:\n    return Engine()",
+                    "def make() -> Turbo:\n    return Turbo()",
+                ),
+            )],
+        )
+        .present(&[("pkg/garage.py", "EFF101")]),
+        Step::new(
+            "the factory returns the plain engine again",
+            vec![save("pkg/engines.py", ENGINES)],
+        )
+        .absent(&[("pkg/garage.py", "EFF101")]),
+        Step::new(
+            "a base class's cached property stops reading what a subclass module mutates",
+            vec![save("pkg/base.py", BASE_CONSTANT)],
+        )
+        .absent(&[("pkg/derived.py", "MUT101")]),
+        Step::new(
+            "the cached property reads it again",
+            vec![save("pkg/base.py", BASE)],
+        )
+        .present(&[("pkg/derived.py", "MUT101")]),
+        Step::new(
+            "a subclass module starts overriding the method an async def calls",
+            vec![save(
+                "pkg/square.py",
+                &SQUARE.replace("def side", "def area"),
+            )],
+        )
+        .present(&[("pkg/draw.py", "EFF101")]),
+        Step::new(
+            "the override is removed",
+            vec![save("pkg/square.py", SQUARE)],
+        )
+        .absent(&[("pkg/draw.py", "EFF101")]),
+        // Declarations reached through a re-export.
+        Step::new(
+            "a re-exported class's method becomes a property getter that blocks",
+            vec![save(
+                "pkg/ui/impl.py",
+                &UI_IMPL.replace("    def data", "    @property\n    def data"),
+            )],
+        )
+        .present(&[("pkg/consumer.py", "EFF101")]),
+        Step::new(
+            "the getter `__hash__` reads becomes a property reading a mutated attribute",
+            vec![save(
+                "pkg/ui/impl.py",
+                &UI_IMPL
+                    .replace("    def data", "    @property\n    def data")
+                    .replace("    def label", "    @property\n    def label"),
+            )],
+        )
+        .present(&[("pkg/consumer.py", "MUT107")]),
+        Step::new(
+            "the re-exported class gains a base class whose method blocks",
+            vec![save(
+                "pkg/ui/impl.py",
+                &UI_IMPL.replace("class Widget:", "class Widget(Refreshing):"),
+            )],
+        )
+        .present(&[("pkg/consumer.py", "EFF101")])
+        .absent(&[("pkg/consumer.py", "MUT107")]),
+        Step::new(
+            "the re-exported classes are plain again",
+            vec![save("pkg/ui/impl.py", UI_IMPL)],
+        )
+        .absent(&[("pkg/consumer.py", "EFF101"), ("pkg/consumer.py", "MUT107")]),
+    ]);
+    steps
+}
+
+// ---------------------------------------------------------------------------------- the oracle
+
+/// One diagnostic in LSP coordinates: `(file, (line, UTF-16 column) start, end)`.
+type Range = (String, (u64, u64), (u64, u64));
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Diag {
+    range: Range,
+    code: String,
+    severity: u64,
+    message: String,
+    related: Vec<(Range, String)>,
+}
+
+/// Byte offset -> LSP position (0-based line, UTF-16 column) in `text`.
+fn position(text: &str, offset: u64) -> (u64, u64) {
+    let before = &text[..usize::try_from(offset).unwrap()];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    (
+        before.matches('\n').count() as u64,
+        before[line_start..].encode_utf16().count() as u64,
+    )
+}
+
+fn cli_range(p: &Project, file: &str, span: &Value) -> Range {
+    let text = p.read(file);
+    (
+        file.to_owned(),
+        position(&text, span["start"].as_u64().unwrap()),
+        position(&text, span["end"].as_u64().unwrap()),
+    )
+}
+
+/// `heki check --output-format json` of the project, by file.
+fn cli(p: &Project) -> BTreeMap<String, Vec<Diag>> {
+    let (code, out, err) = p.check(&["--output-format", "json"]);
+    assert!(matches!(code, 0..=2), "exit {code}: {err}");
+    // An invalid configuration: nothing is checked (exit 2, an error, no report).
+    let diags: Vec<Value> = if code == 2 && out.is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}:\n{out}\n{err}"))
+    };
+    let mut by_file: BTreeMap<String, Vec<Diag>> = BTreeMap::new();
+    for d in diags {
+        let file = d["path"].as_str().unwrap().to_owned();
+        let related = d["related"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    cli_range(p, r["path"].as_str().unwrap(), &r["span"]),
+                    r["message"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        by_file.entry(file.clone()).or_default().push(Diag {
+            range: cli_range(p, &file, &d["span"]),
+            code: d["rule_code"].as_str().unwrap().to_owned(),
+            severity: match d["severity"].as_str().unwrap() {
+                "error" => 1,
+                "warning" => 2,
+                other => panic!("severity {other}"),
+            },
+            message: format!(
+                "{} ({})",
+                d["message"].as_str().unwrap(),
+                d["rule_slug"].as_str().unwrap()
+            ),
+            related,
+        });
+    }
+    by_file
+}
+
+fn lsp_range(root: &str, location_uri: &Value, range: &Value) -> Range {
+    let u = location_uri.as_str().unwrap();
+    let file = u
+        .strip_prefix(root)
+        .unwrap_or_else(|| panic!("{u} is outside {root}"));
+    let at = |p: &Value| {
+        (
+            p["line"].as_u64().unwrap(),
+            p["character"].as_u64().unwrap(),
+        )
+    };
+    (file.to_owned(), at(&range["start"]), at(&range["end"]))
+}
+
+/// The latest diagnostics the server published, by file.
+fn published(lsp: &Lsp, root: &str) -> BTreeMap<String, Vec<Diag>> {
+    let mut by_file = BTreeMap::new();
+    for (u, diags) in &lsp.latest {
+        let list: Vec<Diag> = diags
+            .iter()
+            .map(|d| Diag {
+                range: lsp_range(root, &json!(u), &d["range"]),
+                code: d["code"].as_str().unwrap().to_owned(),
+                severity: d["severity"].as_u64().unwrap(),
+                message: d["message"].as_str().unwrap().to_owned(),
+                related: d["relatedInformation"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| {
+                        (
+                            lsp_range(root, &r["location"]["uri"], &r["location"]["range"]),
+                            r["message"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect();
+        let file = u.strip_prefix(root).unwrap().to_owned();
+        by_file.insert(file, list);
+    }
+    by_file
+}
+
+/// Per-file differences between the server and the CLI (empty: they agree).
+fn differences(
+    server: &BTreeMap<String, Vec<Diag>>,
+    reference: &BTreeMap<String, Vec<Diag>>,
+) -> Vec<String> {
+    let files: BTreeSet<&String> = server.keys().chain(reference.keys()).collect();
+    let mut out = Vec::new();
+    for file in files {
+        let mut got = server.get(file).cloned().unwrap_or_default();
+        let mut want = reference.get(file).cloned().unwrap_or_default();
+        got.sort();
+        want.sort();
+        if got != want {
+            out.push(format!(
+                "{file}:\n  server: {got:#?}\n  heki check: {want:#?}"
+            ));
+        }
+    }
+    out
+}
+
+struct Session {
+    p: Project,
+    lsp: Lsp,
+    /// `file://<root>/`.
+    root: String,
+    versions: BTreeMap<&'static str, i32>,
+}
+
+impl Session {
+    fn start(name: &str) -> Self {
+        let p = Project::new(name);
+        p.write("pyproject.toml", CONFIG);
+        let files = initial_files();
+        for (rel, text) in &files {
+            p.write(rel, text);
+        }
+        let root = format!("{}/", uri(&p.dir));
+        let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+        lsp.request(
+            "initialize",
+            json!({
+                "processId": null,
+                "rootUri": uri(&p.dir),
+                "capabilities": {"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}
+            }),
+        );
+        lsp.notify("initialized", json!({}));
+        let mut s = Self {
+            p,
+            lsp,
+            root,
+            versions: BTreeMap::new(),
+        };
+        for (rel, text) in files {
+            s.open(rel, &text);
+        }
+        s
+    }
+
+    fn uri(&self, rel: &str) -> String {
+        format!("{}{rel}", self.root)
+    }
+
+    fn open(&mut self, rel: &'static str, text: &str) {
+        let u = self.uri(rel);
+        self.lsp.open(&u, text);
+        self.versions.insert(rel, 1);
+    }
+
+    fn change(&mut self, rel: &'static str, text: &str) {
+        let version = self.versions.get_mut(rel).expect("an open document");
+        *version += 1;
+        let v = *version;
+        let u = self.uri(rel);
+        self.lsp.change(&u, v, text);
+    }
+
+    fn watched(&mut self, rel: &str, kind: u8) {
+        let u = self.uri(rel);
+        self.lsp.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({"changes": [{"uri": u, "type": kind}]}),
+        );
+    }
+
+    fn apply(&mut self, action: &Action) {
+        match action {
+            Action::Save(rel, text) => {
+                self.change(rel, text);
+                self.p.write(rel, text);
+                let u = self.uri(rel);
+                self.lsp.notify(
+                    "textDocument/didSave",
+                    json!({"textDocument": {"uri": u}, "text": text}),
+                );
+            }
+            Action::Change(rel, text) => self.change(rel, text),
+            Action::Create(rel, text) => {
+                self.p.write(rel, text);
+                self.watched(rel, 1);
+                self.open(rel, text);
+            }
+            Action::Delete(rel) => {
+                let u = self.uri(rel);
+                self.lsp
+                    .notify("textDocument/didClose", json!({"textDocument": {"uri": u}}));
+                self.versions.remove(rel);
+                std::fs::remove_file(self.p.dir.join(rel)).unwrap();
+                self.watched(rel, 3);
+            }
+            Action::Configure(text) => {
+                self.p.write("pyproject.toml", text);
+                self.watched("pyproject.toml", 2);
+            }
+        }
+    }
+
+    /// Run one step and compare the server with the CLI; returns the disagreements.
+    fn run(&mut self, step: &Step) -> Vec<String> {
+        let before = self.lsp.settle();
+        let first = self.lsp.publications.len();
+        for action in &step.actions {
+            self.apply(action);
+        }
+        let after = self.lsp.settle();
+        let reference = cli(&self.p);
+        for (file, code) in step.present {
+            assert!(
+                reference
+                    .get(*file)
+                    .is_some_and(|d| d.iter().any(|x| x.code == *code)),
+                "step `{}`: the CLI does not report {code} in {file}: {reference:#?}",
+                step.name
+            );
+        }
+        for (file, code) in step.absent {
+            assert!(
+                !reference
+                    .get(*file)
+                    .is_some_and(|d| d.iter().any(|x| x.code == *code)),
+                "step `{}`: the CLI reports {code} in {file}: {reference:#?}",
+                step.name
+            );
+        }
+        let mut out: Vec<String> = differences(&published(&self.lsp, &self.root), &reference)
+            .into_iter()
+            .map(|d| format!("step `{}`: {d}", step.name))
+            .collect();
+        if step.cutoff {
+            let edited: BTreeSet<String> = step
+                .actions
+                .iter()
+                .map(|a| match a {
+                    Action::Save(rel, _)
+                    | Action::Change(rel, _)
+                    | Action::Create(rel, _)
+                    | Action::Delete(rel) => self.uri(rel),
+                    Action::Configure(_) => self.uri("pyproject.toml"),
+                })
+                .collect();
+            let others: BTreeSet<&String> = self.lsp.publications[first..]
+                .iter()
+                .filter(|u| !edited.contains(*u))
+                .collect();
+            if after["dependent_reanalyses"] != before["dependent_reanalyses"]
+                || after["last_summary_changed"] != false
+                || !others.is_empty()
+            {
+                out.push(format!(
+                    "step `{}`: no Early Cutoff: stats before {before}, after {after}; re-published {others:?}",
+                    step.name
+                ));
+            }
+        }
+        out
+    }
+}
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_after_every_step() {
+    let mut s = Session::start("lsp_oracle");
+    let mut failures = Vec::new();
+    for step in steps() {
+        failures.extend(s.run(&step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}

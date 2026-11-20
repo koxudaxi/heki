@@ -3,7 +3,7 @@
 //! Produces the function's local `EffectSummary` plus the `CallSite`s the interprocedural
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
-use crate::resolver::{Callee, TypeCtx, Val, func_qualname, self_aliases};
+use crate::resolver::{Callee, DeclKeys, ModuleDecls, TypeCtx, Val, func_qualname, self_aliases};
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, EffectSummary, FileSummary,
     FuncKey, ModuleInput, ProjectDecls, ReadKind, Slot, TypedFieldReadSite, TypedFieldWriteSite,
@@ -48,7 +48,29 @@ pub const BLOCKING_EFFECTS: &[ExecEffectKind] = &[
 ];
 
 /// Summarize every function of one module (local facts only; see `ProjectIndex::build`).
+/// Summarize one module against the project declarations. `own` is the module's own completed
+/// declarations with what completing them read; with `track`, what the summary reads of
+/// `decls` is recorded too (`FileSummary::decl_reads`).
 pub(crate) fn summarize_module(
+    input: &ModuleInput<'_>,
+    decls: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
+    own: (ModuleDecls, DeclKeys),
+    track: bool,
+) -> FileSummary {
+    let (own_decls, completion_reads) = own;
+    let (mut file, reads) = if track {
+        decls.record(|| extract_module(input, decls, kb))
+    } else {
+        (extract_module(input, decls, kb), DeclKeys::default())
+    };
+    file.decls = own_decls;
+    file.decl_reads = reads;
+    file.decl_reads.extend(completion_reads);
+    file
+}
+
+fn extract_module(
     input: &ModuleInput<'_>,
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
@@ -58,10 +80,6 @@ pub(crate) fn summarize_module(
         path: input.path.clone(),
         module_name: input.module_name.clone(),
         content_hash: input.content_hash.clone(),
-        decls: decls
-            .module(&input.module_name)
-            .cloned()
-            .unwrap_or_default(),
         ..FileSummary::default()
     };
     for f in &input.ir.functions {
@@ -118,6 +136,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         .extend(other.typed_field_write_sites);
     into.typed_field_read_sites
         .extend(other.typed_field_read_sites);
+    into.private_calls.extend(other.private_calls);
     into.offloads_blocking_params |= other.offloads_blocking_params;
     into.unknown_calls |= other.unknown_calls;
     into.refresh_typed_field_writes();
@@ -538,6 +557,9 @@ impl<'a> Extractor<'a> {
                 kwargs,
                 is_awaited,
             } => {
+                if crate::callgraph::is_private_name(method) {
+                    self.summary.private_calls.insert(method.clone());
+                }
                 if CONTAINER_MUTATORS.contains(&method.as_str()) {
                     self.container_method(*recv, method, args, span);
                     for a in args {

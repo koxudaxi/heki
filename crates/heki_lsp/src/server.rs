@@ -2,30 +2,42 @@
 //! (ARCHITECTURE.md section 8, docs/lsp.md).
 //!
 //! - `initialized`: index the workspace in the background, then publish diagnostics of every
-//!   open document.
+//!   open document; register file watchers when the client supports them.
+//! - `didOpen` / `didChange` / `didSave` / `didClose` change the documents in message order;
+//!   the analyses run after, on the documents as they are then.
 //! - `didChange`: after a 250 ms debounce, re-analyze only the edited document (its summary
 //!   update uses Early Cutoff); files it affects are queued.
-//! - `didSave`: re-analyze the document, then every queued file (callers of changed summaries,
-//!   importers of changed declarations), and publish their diagnostics.
+//! - `didSave`: re-analyze the document, then every queued file and, in turn, what those
+//!   affect (`Workspace::refresh_all`), and publish their diagnostics.
+//! - `workspace/didChangeWatchedFiles`: files changed on the disk are re-analyzed like saved
+//!   documents, deleted ones leave the project, and a configuration change re-indexes it.
 //! - `codeAction`: `OPT` fixes and `# heki: ignore[CODE]` insertions.
-//! - `heki/stats`: engine counters (`EngineStats`), used to verify Early Cutoff, and the number
-//!   of open documents.
+//! - `heki/stats`: engine counters (`EngineStats`), used to verify Early Cutoff, the number of
+//!   open documents, and the work still in flight (`Activity`), which lets a client wait until
+//!   every analysis has been published without timing assumptions.
+//!
+//! Publications are created under the state lock and sent after it; an older publication of a
+//! file that a newer one replaced is dropped (`Backend::send`), so the client always ends with
+//! the newest diagnostics of each file.
 
 use crate::convert;
-use crate::engine::{Selectors, Workspace};
+use crate::engine::{CONFIG_FILES, Selectors, Workspace};
 use heki_diagnostics::Diagnostic;
-use heki_rules::project::ProjectOptions;
+use heki_rules::project::{ProjectOptions, find_root};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionParams, CodeActionProviderCapability,
-    CodeActionResponse, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, InitializeParams, InitializeResult,
-    InitializedParams, MessageType, SaveOptions, ServerCapabilities, ServerInfo,
+    CodeActionResponse, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, FileChangeType, FileEvent,
+    FileSystemWatcher, GlobPattern, InitializeParams, InitializeResult, InitializedParams,
+    MessageType, Registration, SaveOptions, ServerCapabilities, ServerInfo,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
     TextDocumentSyncSaveOptions, Url,
 };
@@ -46,6 +58,8 @@ struct Doc {
 #[derive(Default)]
 struct State {
     root: Option<PathBuf>,
+    /// The client registers file watchers on request (`workspace/didChangeWatchedFiles`).
+    watch_files: bool,
     workspace: Option<Workspace>,
     docs: FxHashMap<PathBuf, Doc>,
     /// Last published heki diagnostics per file (code actions read them).
@@ -54,10 +68,49 @@ struct State {
     pending: BTreeSet<PathBuf>,
     /// Debounce tokens per document.
     generation: FxHashMap<PathBuf, u64>,
+    /// The latest publication created for each file (`Publish::seq`): an older one that has
+    /// not gone out yet is dropped, so the client ends with the newest diagnostics.
+    latest_publication: FxHashMap<PathBuf, u64>,
+    publications: u64,
+}
+
+/// Work the server has accepted but not finished (`heki/stats`: `in_flight`, `published`).
+///
+/// Every notification handler starts a [`Work`] before its first `await`, and notifications
+/// are polled in the order they arrive, so a `heki/stats` request sent after a notification
+/// always counts that notification's work. A unit ends after its diagnostics are published
+/// (a debounced edit after its re-analysis, or when a newer edit supersedes it). When
+/// `in_flight` is 0, nothing more is published until the client sends something new, and the
+/// client has seen everything once it has received `published` notifications in total.
+#[derive(Default)]
+struct Activity {
+    in_flight: AtomicUsize,
+    published: AtomicU64,
+    /// Publications go out one at a time (see `Backend::send`).
+    gate: tokio::sync::Mutex<()>,
+}
+
+/// One unit of accepted work; dropping it (after its publications, or on a panic) ends it.
+struct Work(Arc<Activity>);
+
+impl Work {
+    fn start(activity: &Arc<Activity>) -> Self {
+        activity.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self(Arc::clone(activity))
+    }
+}
+
+impl Drop for Work {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// One `publishDiagnostics` notification.
 struct Publish {
+    /// The file it is for, and its place among the publications created (`State::stamp`).
+    path: PathBuf,
+    seq: u64,
     uri: Url,
     diagnostics: Vec<tower_lsp::lsp_types::Diagnostic>,
     version: Option<i32>,
@@ -86,10 +139,15 @@ fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
 
 impl State {
     fn text_of(&self, path: &Path) -> Option<String> {
-        match self.docs.get(path) {
-            Some(d) => Some(d.text.clone()),
-            None => std::fs::read_to_string(path).ok(),
-        }
+        text_of(&self.docs, path)
+    }
+
+    /// The sequence number of a new publication for `path`, now its latest.
+    fn stamp(&mut self, path: &Path) -> u64 {
+        self.publications += 1;
+        self.latest_publication
+            .insert(path.to_path_buf(), self.publications);
+        self.publications
     }
 
     fn uri_of(&self, path: &Path) -> Option<Url> {
@@ -101,16 +159,84 @@ impl State {
 
     fn publish_for(&mut self, path: &Path, diags: Vec<Diagnostic>) -> Option<Publish> {
         let uri = self.uri_of(path)?;
-        let text = self.text_of(path)?;
+        // Positions are converted with the text; a file without diagnostics needs none (it may
+        // be gone).
+        let text = if diags.is_empty() {
+            String::new()
+        } else {
+            self.text_of(path)?
+        };
         let lsp = diags
             .iter()
             .map(|d| convert::diagnostic(d, &text, &|p| self.text_of(p)))
             .collect();
         self.diags.insert(path.to_path_buf(), diags);
         Some(Publish {
+            path: path.to_path_buf(),
+            seq: self.stamp(path),
             uri,
             diagnostics: lsp,
             version: self.docs.get(path).map(|d| d.version),
+        })
+    }
+
+    /// Index the workspace (again, when the configuration changed), then publish the
+    /// diagnostics of every open document and of every file published before. Returns the
+    /// number of indexed files (`None`: the configuration is invalid; nothing is analyzed).
+    fn load(&mut self) -> (Vec<Publish>, Vec<String>, Option<usize>) {
+        let root = self.root.clone().unwrap_or_else(|| PathBuf::from("."));
+        let texts: FxHashMap<PathBuf, String> = self
+            .docs
+            .iter()
+            .map(|(p, d)| (p.clone(), d.text.clone()))
+            .collect();
+        let paths = [root];
+        let loaded = Workspace::load(
+            &ProjectOptions {
+                paths: &paths,
+                overrides: Some(&texts),
+                ..ProjectOptions::default()
+            },
+            &Selectors::default(),
+        );
+        self.pending.clear();
+        let files: BTreeSet<PathBuf> = self.docs.keys().chain(self.diags.keys()).cloned().collect();
+        let (mut ws, errors) = match loaded {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                self.workspace = None;
+                let pubs = files.iter().filter_map(|p| self.clear(p)).collect();
+                return (pubs, vec![e.to_string()], None);
+            }
+        };
+        let n = ws.stats().indexed_files;
+        let checked: Vec<(PathBuf, Vec<Diagnostic>)> = files
+            .into_iter()
+            .map(|p| {
+                let diags = match self.text_of(&p) {
+                    Some(text) if ws.accepts(&p) => ws.diagnose(&p, &text).unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                (p, diags)
+            })
+            .collect();
+        self.workspace = Some(ws);
+        let pubs = checked
+            .into_iter()
+            .filter_map(|(p, diags)| self.publish_for(&p, diags))
+            .collect();
+        (pubs, errors, Some(n))
+    }
+
+    /// Empty diagnostics for a file that left the project.
+    fn clear(&mut self, path: &Path) -> Option<Publish> {
+        self.diags.remove(path);
+        Some(Publish {
+            uri: self.uri_of(path)?,
+            path: path.to_path_buf(),
+            seq: self.stamp(path),
+            diagnostics: Vec::new(),
+            version: None,
         })
     }
 
@@ -122,39 +248,108 @@ impl State {
         if !ws.accepts(path) {
             return (self.publish_for(path, Vec::new()), None);
         }
-        match ws.edit(path, text) {
-            Ok(outcome) => {
-                self.pending.extend(outcome.affected);
-                (self.publish_for(path, outcome.diagnostics), None)
-            }
-            Err(e) => (self.publish_for(path, Vec::new()), Some(e)),
-        }
+        let outcome = ws.edit(path, text);
+        // Analyzed against the current index: no queued re-analysis of it is left to do.
+        self.pending.remove(path);
+        self.pending.extend(outcome.affected);
+        (self.publish_for(path, outcome.diagnostics), outcome.error)
     }
 
-    /// Re-analyze every queued file except `skip`.
-    fn flush_pending(&mut self, skip: &Path) -> (Vec<Publish>, Vec<String>) {
+    /// Re-analyze every queued file and, in turn, what those re-analyses affect; a queued
+    /// file that is neither open nor on the disk any more left the project.
+    fn flush_pending(&mut self) -> (Vec<Publish>, Vec<String>) {
         let pending = std::mem::take(&mut self.pending);
+        if pending.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let ws = self
+            .workspace
+            .as_mut()
+            .expect("files are queued only by an analysis of the loaded workspace");
+        let docs = &self.docs;
+        let results = ws.refresh_all(pending, &|p| text_of(docs, p));
         let (mut pubs, mut errors) = (Vec::new(), Vec::new());
-        for p in pending.into_iter().filter(|p| p != skip) {
-            let Some(text) = self.text_of(&p) else {
-                continue;
-            };
-            let ws = self
-                .workspace
-                .as_mut()
-                .expect("files are queued only by an analysis of the loaded workspace");
-            match ws.refresh(&p, &text) {
-                Ok(d) => pubs.extend(self.publish_for(&p, d)),
-                Err(e) => errors.push(e),
+        for (path, outcome) in results {
+            match outcome {
+                Some(outcome) => {
+                    errors.extend(outcome.error);
+                    pubs.extend(self.publish_for(&path, outcome.diagnostics));
+                }
+                None => pubs.extend(self.clear(&path)),
             }
         }
         (pubs, errors)
+    }
+
+    /// Files changed on the disk (`workspace/didChangeWatchedFiles`): a created or changed
+    /// file is re-analyzed like a saved document (an open document with its own text), a
+    /// deleted one leaves the project; then everything they affect is re-analyzed.
+    fn files_changed(&mut self, changes: Vec<FileEvent>) -> (Vec<Publish>, Vec<String>) {
+        // The configuration (or the summary snapshot) changed: everything is analyzed again,
+        // as `heki check --watch` does.
+        let config_root = find_root(self.root.as_deref().unwrap_or(Path::new(".")));
+        if changes.iter().any(|c| {
+            path_of(&c.uri).is_some_and(|p| CONFIG_FILES.iter().any(|n| config_root.join(n) == p))
+        }) {
+            let (pubs, errors, _) = self.load();
+            return (pubs, errors);
+        }
+        let (mut pubs, mut errors) = (Vec::new(), Vec::new());
+        let changes: Vec<(PathBuf, FileChangeType)> = changes
+            .into_iter()
+            .filter_map(|c| Some((path_of(&c.uri)?, c.typ)))
+            .filter(|(path, _)| self.workspace.as_ref().is_some_and(|ws| ws.accepts(path)))
+            .collect();
+        for (path, typ) in changes {
+            if typ == FileChangeType::DELETED {
+                let ws = self.workspace.as_mut().expect("checked above");
+                let affected = ws.remove(&path);
+                self.pending.extend(affected);
+                pubs.extend(self.clear(&path));
+            } else if let Some(text) = self.text_of(&path) {
+                let (p, e) = self.reanalyze(&path, &text);
+                pubs.extend(p);
+                errors.extend(e);
+            }
+        }
+        let (more, more_errors) = self.flush_pending();
+        pubs.extend(more);
+        errors.extend(more_errors);
+        (pubs, errors)
+    }
+}
+
+/// An open document's text, else the file on the disk.
+fn text_of(docs: &FxHashMap<PathBuf, Doc>, path: &Path) -> Option<String> {
+    match docs.get(path) {
+        Some(d) => Some(d.text.clone()),
+        None => std::fs::read_to_string(path).ok(),
+    }
+}
+
+/// `workspace/didChangeWatchedFiles` registration for Python files and the configuration.
+fn watched_files_registration() -> Registration {
+    let watcher = |glob: String| FileSystemWatcher {
+        glob_pattern: GlobPattern::String(glob),
+        kind: None,
+    };
+    let options = DidChangeWatchedFilesRegistrationOptions {
+        watchers: vec![
+            watcher("**/*.{py,pyi}".into()),
+            watcher(format!("**/{{{}}}", CONFIG_FILES.join(","))),
+        ],
+    };
+    Registration {
+        id: "heki-watched-files".into(),
+        method: "workspace/didChangeWatchedFiles".into(),
+        register_options: serde_json::to_value(options).ok(),
     }
 }
 
 pub struct Backend {
     client: Client,
     state: Arc<Mutex<State>>,
+    activity: Arc<Activity>,
 }
 
 impl Backend {
@@ -162,19 +357,32 @@ impl Backend {
         Self {
             client,
             state: Arc::new(Mutex::new(State::default())),
+            activity: Arc::default(),
         }
     }
 
-    async fn send(client: &Client, pubs: Vec<Publish>, errors: Vec<String>) {
+    /// Log `errors` and send `pubs`. Publications are created under the state lock but sent
+    /// after it, so one gate sends them one at a time and drops any that a newer publication
+    /// of the same file replaced: the client ends with the newest diagnostics of each file.
+    async fn send(
+        work: &Work,
+        client: &Client,
+        state: &Mutex<State>,
+        pubs: Vec<Publish>,
+        errors: Vec<String>,
+    ) {
         for e in errors {
             client
                 .log_message(MessageType::WARNING, format!("heki: {e}"))
                 .await;
         }
-        for p in pubs {
+        let _gate = work.0.gate.lock().await;
+        let current = |p: &Publish| lock(state).latest_publication.get(&p.path) == Some(&p.seq);
+        for p in pubs.into_iter().filter(current) {
             client
                 .publish_diagnostics(p.uri, p.diagnostics, p.version)
                 .await;
+            work.0.published.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -190,9 +398,13 @@ impl Backend {
             .unwrap_or_default()
     }
 
-    /// `heki/stats`: engine counters plus whether the index is ready and how many documents
-    /// are open (a client can tell when an earlier `didOpen` has been applied).
+    /// `heki/stats`: engine counters plus whether the index is ready, how many documents are
+    /// open (a client can tell when an earlier `didOpen` has been applied), and the work in
+    /// flight (see [`Activity`]).
     async fn stats(&self) -> RpcResult<serde_json::Value> {
+        // `in_flight` first: work that has ended has counted its publications already.
+        let in_flight = self.activity.in_flight.load(Ordering::SeqCst);
+        let published = self.activity.published.load(Ordering::SeqCst);
         let st = lock(&self.state);
         let mut v = match &st.workspace {
             Some(ws) => {
@@ -203,6 +415,8 @@ impl Backend {
             None => serde_json::json!({ "ready": false }),
         };
         v["open_documents"] = serde_json::json!(st.docs.len());
+        v["in_flight"] = serde_json::json!(in_flight);
+        v["published"] = serde_json::json!(published);
         Ok(v)
     }
 }
@@ -219,7 +433,16 @@ impl LanguageServer for Backend {
             .or(params.root_uri)
             .and_then(|u| path_of(&u))
             .or_else(|| std::env::current_dir().ok());
-        lock(&self.state).root = root;
+        let watch_files = params
+            .capabilities
+            .workspace
+            .and_then(|w| w.did_change_watched_files)
+            .and_then(|w| w.dynamic_registration)
+            .unwrap_or(false);
+        let mut st = lock(&self.state);
+        st.root = root;
+        st.watch_files = watch_files;
+        drop(st);
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
@@ -251,52 +474,23 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        let work = Work::start(&self.activity);
+        if lock(&self.state).watch_files {
+            // Files created, changed, or deleted outside the editor (`git checkout`, code
+            // generators) reach the index through these events. A client that refuses the
+            // registration sends none; its documents are still analyzed.
+            let client = self.client.clone();
+            tokio::spawn(async move {
+                let _ = client
+                    .register_capability(vec![watched_files_registration()])
+                    .await;
+            });
+        }
         let state = Arc::clone(&self.state);
         let client = self.client.clone();
         tokio::spawn(async move {
             let started = Instant::now();
-            let (pubs, errors, indexed) = Self::blocking(&state, |st| {
-                let root = st.root.clone().unwrap_or_else(|| PathBuf::from("."));
-                let texts: FxHashMap<PathBuf, String> = st
-                    .docs
-                    .iter()
-                    .map(|(p, d)| (p.clone(), d.text.clone()))
-                    .collect();
-                let paths = [root];
-                let loaded = Workspace::load(
-                    &ProjectOptions {
-                        paths: &paths,
-                        overrides: Some(&texts),
-                        ..ProjectOptions::default()
-                    },
-                    &Selectors::default(),
-                );
-                match loaded {
-                    Ok((ws, errors)) => {
-                        let n = ws.stats().indexed_files;
-                        let open: Vec<(PathBuf, Vec<Diagnostic>)> = st
-                            .docs
-                            .iter()
-                            .map(|(p, doc)| {
-                                let diags = if ws.accepts(p) {
-                                    ws.diagnose(p, &doc.text).unwrap_or_default()
-                                } else {
-                                    Vec::new()
-                                };
-                                (p.clone(), diags)
-                            })
-                            .collect();
-                        st.workspace = Some(ws);
-                        let pubs = open
-                            .into_iter()
-                            .filter_map(|(p, diags)| st.publish_for(&p, diags))
-                            .collect();
-                        (pubs, errors, Some(n))
-                    }
-                    Err(e) => (Vec::new(), vec![e.to_string()], None),
-                }
-            })
-            .await;
+            let (pubs, errors, indexed) = Self::blocking(&state, State::load).await;
             if let Some(n) = indexed {
                 client
                     .log_message(
@@ -308,7 +502,7 @@ impl LanguageServer for Backend {
                     )
                     .await;
             }
-            Self::send(&client, pubs, errors).await;
+            Self::send(&work, &client, &state, pubs, errors).await;
         });
     }
 
@@ -323,27 +517,33 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let work = Work::start(&self.activity);
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
+        // Documents change in message order (a `didChange` or `didClose` right after this one
+        // applies after it); only the analysis runs later, on the document as it is then.
+        lock(&self.state).docs.insert(
+            path.clone(),
+            Doc {
+                uri: params.text_document.uri,
+                text: params.text_document.text,
+                version: params.text_document.version,
+            },
+        );
         let (pubs, errors) = Self::blocking(&self.state, move |st| {
-            let text = params.text_document.text;
-            st.docs.insert(
-                path.clone(),
-                Doc {
-                    uri: params.text_document.uri,
-                    text: text.clone(),
-                    version: params.text_document.version,
-                },
-            );
-            let (p, e) = st.reanalyze(&path, &text);
+            let text = st.docs.get(&path).map(|d| d.text.clone());
+            let (p, e) = text
+                .map(|text| st.reanalyze(&path, &text))
+                .unwrap_or_default();
             (p.into_iter().collect(), e.into_iter().collect())
         })
         .await;
-        Self::send(&self.client, pubs, errors).await;
+        Self::send(&work, &self.client, &self.state, pubs, errors).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let work = Work::start(&self.activity);
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
@@ -378,45 +578,59 @@ impl LanguageServer for Backend {
                 (p.into_iter().collect(), e.into_iter().collect())
             })
             .await;
-            Self::send(&client, pubs, errors).await;
+            Self::send(&work, &client, &state, pubs, errors).await;
         });
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let work = Work::start(&self.activity);
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
+        if let (Some(text), Some(doc)) = (params.text, lock(&self.state).docs.get_mut(&path)) {
+            doc.text = text;
+        }
         let (pubs, errors) = Self::blocking(&self.state, move |st| {
-            if let (Some(text), Some(doc)) = (params.text, st.docs.get_mut(&path)) {
-                doc.text = text;
-            }
             let Some(text) = st.text_of(&path) else {
                 return (Vec::new(), Vec::new());
             };
             let (p, e) = st.reanalyze(&path, &text);
             let (mut pubs, mut errors): (Vec<Publish>, Vec<String>) =
                 (p.into_iter().collect(), e.into_iter().collect());
-            let (more, more_errors) = st.flush_pending(&path);
+            let (more, more_errors) = st.flush_pending();
             pubs.extend(more);
             errors.extend(more_errors);
             (pubs, errors)
         })
         .await;
-        Self::send(&self.client, pubs, errors).await;
+        Self::send(&work, &self.client, &self.state, pubs, errors).await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let work = Work::start(&self.activity);
+        let (pubs, errors) =
+            Self::blocking(&self.state, move |st| st.files_changed(params.changes)).await;
+        Self::send(&work, &self.client, &self.state, pubs, errors).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let work = Work::start(&self.activity);
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
-        {
+        let closed = {
             let mut st = lock(&self.state);
             st.docs.remove(&path);
             st.diags.remove(&path);
-        }
-        self.client
-            .publish_diagnostics(params.text_document.uri, Vec::new(), None)
-            .await;
+            Publish {
+                seq: st.stamp(&path),
+                path,
+                uri: params.text_document.uri,
+                diagnostics: Vec::new(),
+                version: None,
+            }
+        };
+        Self::send(&work, &self.client, &self.state, vec![closed], Vec::new()).await;
     }
 
     async fn code_action(&self, params: CodeActionParams) -> RpcResult<Option<CodeActionResponse>> {

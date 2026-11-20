@@ -1,6 +1,7 @@
 //! A minimal LSP client over `heki server --stdio` (JSON-RPC with `Content-Length` framing).
 
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -9,9 +10,6 @@ use std::time::{Duration, Instant};
 
 pub const TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Longer than the server's 250 ms debounce.
-pub const DEBOUNCE_WAIT: Duration = Duration::from_millis(600);
-
 pub struct Lsp {
     pub child: Child,
     pub stdin: Option<ChildStdin>,
@@ -19,6 +17,13 @@ pub struct Lsp {
     pub next_id: u64,
     /// Messages read while waiting for something else.
     pub backlog: Vec<Value>,
+    /// `publishDiagnostics` notifications received so far (compared with `heki/stats`'
+    /// `published` by [`Lsp::settle`]).
+    pub published: u64,
+    /// The URI of every `publishDiagnostics` received, in arrival order.
+    pub publications: Vec<String>,
+    /// The latest diagnostics published for each URI.
+    pub latest: BTreeMap<String, Vec<Value>>,
 }
 
 impl Lsp {
@@ -66,7 +71,28 @@ impl Lsp {
             rx,
             next_id: 1,
             backlog: Vec::new(),
+            published: 0,
+            publications: Vec::new(),
+            latest: BTreeMap::new(),
         }
+    }
+
+    /// The next message from the server (`None` on timeout), recorded on arrival: published
+    /// diagnostics update [`Lsp::latest`], and a request of the server (`client/registerCapability`)
+    /// is answered with `null`.
+    fn receive(&mut self, timeout: Duration) -> Option<Value> {
+        let msg = self.rx.recv_timeout(timeout).ok()?;
+        if msg["method"] == "textDocument/publishDiagnostics" {
+            self.published += 1;
+            let params = &msg["params"];
+            let uri = params["uri"].as_str().unwrap().to_owned();
+            self.publications.push(uri.clone());
+            self.latest
+                .insert(uri, params["diagnostics"].as_array().unwrap().clone());
+        } else if msg.get("method").is_some() && msg.get("id").is_some() {
+            self.write(&json!({"jsonrpc": "2.0", "id": msg["id"], "result": null}));
+        }
+        Some(msg)
     }
 
     pub fn write(&mut self, msg: &Value) {
@@ -121,14 +147,44 @@ impl Lsp {
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             let msg = self
-                .rx
-                .recv_timeout(left)
-                .unwrap_or_else(|_| panic!("timed out; backlog: {:#?}", self.backlog));
+                .receive(left)
+                .unwrap_or_else(|| panic!("timed out; backlog: {:#?}", self.backlog));
             if pred(&msg) {
                 return msg;
             }
             self.backlog.push(msg);
         }
+    }
+
+    /// Wait until the server is idle and every diagnostic it published has arrived: poll
+    /// `heki/stats` until no work is in flight, then read until `published` notifications have
+    /// been received. Returns the final stats. Deterministic: it depends on what the server
+    /// reports, not on how long anything takes.
+    pub fn settle(&mut self) -> Value {
+        let started = Instant::now();
+        let stats = loop {
+            let stats = self.request("heki/stats", Value::Null);
+            if stats["in_flight"] == 0 {
+                break stats;
+            }
+            assert!(
+                started.elapsed() < TIMEOUT,
+                "the server never became idle: {stats}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let published = stats["published"].as_u64().unwrap();
+        while self.published < published {
+            let left = TIMEOUT.saturating_sub(started.elapsed());
+            let msg = self.receive(left).unwrap_or_else(|| {
+                panic!(
+                    "{} of {published} publications arrived; backlog: {:#?}",
+                    self.published, self.backlog
+                )
+            });
+            self.backlog.push(msg);
+        }
+        stats
     }
 
     /// The next `publishDiagnostics` for `uri` satisfying `pred`.

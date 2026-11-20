@@ -78,6 +78,12 @@ pub struct ParsedFile {
 }
 
 impl ParsedFile {
+    /// The module imports `builtins` or touches `__builtins__`: it may patch builtin names, and
+    /// then no module of the project can trust them (Assumption A1(b)).
+    pub fn patches_builtins(&self) -> bool {
+        heki_soundness::module_patches_builtins(&self.ir)
+    }
+
     pub fn input(&self) -> ModuleInput<'_> {
         ModuleInput {
             path: self.path.clone(),

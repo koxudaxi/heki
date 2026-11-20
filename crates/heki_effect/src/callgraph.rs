@@ -467,7 +467,7 @@ fn is_fqn_of(name: &str, owner: &FuncKey) -> bool {
 }
 
 /// A private function name (`_name`, not a dunder) by its qualname's last component.
-fn is_private_name(qualname: &str) -> bool {
+pub(crate) fn is_private_name(qualname: &str) -> bool {
     let name = qualname.rsplit('.').next().unwrap_or(qualname);
     name.starts_with('_') && !(name.starts_with("__") && name.ends_with("__"))
 }

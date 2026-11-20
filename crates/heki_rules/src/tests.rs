@@ -75,6 +75,8 @@ fn check_with(files: &[(&str, &str)], config: &HekiConfig, select: &[&str]) -> V
         soundness_kb: &soundness_kb,
         snapshot: None,
         decls: None,
+        project_patches_builtins: None,
+        text_of: None,
     };
     check_project(&units, config, &kb, &index, &selection, &extras).unwrap()
 }
@@ -448,6 +450,8 @@ fn mut201_glob_writers_and_bad_targets() {
                 soundness_kb: &EffectiveSoundnessKb::load_builtin(PythonVersion::PY315).unwrap(),
                 snapshot: None,
         decls: None,
+        project_patches_builtins: None,
+        text_of: None,
             }
         ),
         Err(RuleConfigError::InvalidTarget { section: "write-owners", target: t }) if t == "nodot"
@@ -858,6 +862,8 @@ fn check_against(checked: &[Built], indexed: &[Built], select: &[&str]) -> Vec<D
         soundness_kb: &soundness_kb,
         snapshot: None,
         decls: Some(&decls),
+        project_patches_builtins: None,
+        text_of: None,
     };
     check_project(&units, &config, &kb, &index, &selection, &extras).unwrap()
 }

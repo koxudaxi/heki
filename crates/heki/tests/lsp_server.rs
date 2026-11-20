@@ -5,7 +5,7 @@
 mod common;
 
 use common::Project;
-use common::lsp::{DEBOUNCE_WAIT, Lsp, codes, uri, uri_in};
+use common::lsp::{Lsp, codes, uri, uri_in};
 use serde_json::{Value, json};
 
 const UTIL: &str = "def helper():\n    return 1\n";
@@ -124,8 +124,8 @@ fn lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries() {
         "textDocument/didChange",
         json!({"textDocument": {"uri": util, "version": 3}, "contentChanges": [{"text": extended}]}),
     );
-    lsp.diagnostics(&util, |_| true);
-    let stats = lsp.request("heki/stats", Value::Null);
+    // Once the debounced analysis of this edit is published (not an earlier publication).
+    let stats = lsp.settle();
     assert_eq!(stats["last_decls_changed"], true, "{stats}");
 
     // Closing clears the document's diagnostics; shutdown + exit ends the process cleanly.
@@ -190,7 +190,7 @@ fn lsp_unsaved_and_outside_documents_and_stats_before_indexing() {
     );
     assert_eq!(
         lsp.request("heki/stats", Value::Null),
-        json!({"ready": false, "open_documents": 0})
+        json!({"ready": false, "open_documents": 0, "in_flight": 0, "published": 0})
     );
     // Opened before indexing: a new file that is not saved yet, a file outside the
     // workspace, and a file in a directory that does not exist.
@@ -358,10 +358,12 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
         json!({"textDocument": {"uri": util}}),
     );
     lsp.diagnostics(&util, <[Value]>::is_empty);
-    std::thread::sleep(DEBOUNCE_WAIT);
-    let stats = lsp.request("heki/stats", Value::Null);
+    let stats = lsp.settle();
     assert_eq!(stats["edited_reanalyses"], 3, "{stats}");
-    assert_eq!(stats["dependent_reanalyses"], 1, "{stats}");
+    // `api.py`, then `util.py`: the callers that left the project (`gone.py`, `bad.py`) took
+    // their calls of `helper` with them.
+    assert_eq!(stats["dependent_reanalyses"], 2, "{stats}");
+    assert_eq!(stats["indexed_files"], 3, "{stats}");
     lsp.stop(true);
 }
 
@@ -421,21 +423,43 @@ fn lsp_reports_an_invalid_configuration() {
     let log = lsp.log("unknown rule selector `NOPE1`");
     assert_eq!(log["params"]["type"], 2);
     assert_eq!(
-        lsp.request("heki/stats", Value::Null),
-        json!({"ready": false, "open_documents": 0})
+        lsp.settle(),
+        json!({"ready": false, "open_documents": 0, "in_flight": 0, "published": 0})
     );
-    // Without a workspace, documents are not analyzed (the request reads every message
-    // sent before its reply).
+    // Without a workspace, documents are not analyzed.
     let a = uri(&p.dir.join("a.py"));
     lsp.open(&a, UTIL);
-    std::thread::sleep(DEBOUNCE_WAIT);
-    assert_eq!(lsp.request("heki/stats", Value::Null)["ready"], false);
-    assert!(
-        !lsp.backlog
-            .iter()
-            .any(|m| m["method"] == "textDocument/publishDiagnostics"),
-        "{:#?}",
-        lsp.backlog
+    assert_eq!(
+        lsp.settle(),
+        json!({"ready": false, "open_documents": 1, "in_flight": 0, "published": 0})
     );
+    lsp.stop(true);
+}
+
+#[test]
+fn lsp_applies_document_changes_in_message_order() {
+    let p = Project::new("lsp_order");
+    let quadratic =
+        "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+    p.write("a.py", quadratic).write("b.py", quadratic);
+    let (a, b) = (uri(&p.dir.join("a.py")), uri(&p.dir.join("b.py")));
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": {}}),
+    );
+    lsp.notify("initialized", json!({}));
+    lsp.ready();
+    // Sent back to back: the change applies to the opened document, whatever the analysis of
+    // the open does meanwhile.
+    lsp.open(&a, quadratic);
+    lsp.change(&a, 2, "def f(items):\n    return list(items)\n");
+    // A document closed right after it was opened stays closed.
+    lsp.open(&b, quadratic);
+    lsp.notify("textDocument/didClose", json!({"textDocument": {"uri": b}}));
+    let stats = lsp.settle();
+    assert_eq!(stats["open_documents"], 1, "{stats}");
+    assert_eq!(lsp.latest[&a], Vec::<Value>::new());
+    assert_eq!(lsp.latest[&b], Vec::<Value>::new());
     lsp.stop(true);
 }

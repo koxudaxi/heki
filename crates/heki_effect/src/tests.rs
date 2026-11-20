@@ -1211,9 +1211,10 @@ fn non_converged_sccs_are_marked_unknown() {
 
 #[test]
 fn callers_left_without_a_defining_file_are_skipped() {
-    // Two `.py` files sharing one module name (`b.py` and `b_alt.py`) both define `b.caller`;
-    // the second wins `func_files`. When it drops `caller`, the call edges of `b.py` still
-    // name it as a caller of `a.helper` although no file defines it any more.
+    // Two `.py` files share one module name: `b_alt.py` defines `b.caller`, and the call edges
+    // of `b.py` (hand-built: a summarized file defines its callers) name it as a caller of
+    // `a.helper`. When `b_alt.py` drops `caller`, no file defines it any more (a file that
+    // still did would take it over).
     let helper = key("a", "_helper");
     let caller = key("b", "caller");
     let span = Span { start: 0, end: 1 };
@@ -1230,7 +1231,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         f
     };
     let file_a = file("a.py", "a", &[&helper]);
-    let mut file_b = file("b.py", "b", &[&caller]);
+    let mut file_b = file("b.py", "b", &[]);
     file_b
         .call_edges
         .push((caller.clone(), helper.clone(), span));
@@ -1333,7 +1334,7 @@ fn py_implementation_takes_precedence_over_sibling_pyi_stub() {
     );
     // Editing the sibling `.pyi` stub leaves the `.py` implementation's decls and effects intact.
     let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
-    let mut decls = index.project_decls();
+    let mut decls = index.decl_passes();
     let stub_src = "def helper() -> None: ...\ndef extra() -> None: ...\n";
     let stub_parsed = heki_ast::parse_module(stub_src).unwrap();
     let profile = RuntimeProfile::from(PythonVersion::PY315);
@@ -1348,7 +1349,7 @@ fn py_implementation_takes_precedence_over_sibling_pyi_stub() {
         ir: &stub_ir,
     };
     let (_upd, decls_changed) = index.reanalyze_module_cached(&stub_input, &kb, &mut decls);
-    assert!(!decls_changed);
+    assert!(decls_changed.is_empty());
     assert_eq!(
         index.file_of(&key("pkg.util", "helper")),
         Some(Path::new("pkg/util.py"))
@@ -1358,9 +1359,24 @@ fn py_implementation_takes_precedence_over_sibling_pyi_stub() {
             .direct_exec_effects
             .contains(&Sleep)
     );
-    // Removing the `.py` file falls back to the remaining stub's declarations.
-    index.remove_file(Path::new("pkg/util.py"));
-    assert!(index.module_decls("pkg.util").is_some());
+    // The stub keeps its own declarations (`extra`, no `time` import).
+    let stub_decls = index.files[Path::new("pkg/util.pyi")].decls.clone();
+    assert!(stub_decls.functions.contains_key("extra"));
+    assert!(!stub_decls.imports.contains_key("time"));
+    // Removing the `.py` file falls back to the remaining stub: its declarations, and its
+    // functions, which no longer block (the caller's effect goes away).
+    let update = index.remove_file(Path::new("pkg/util.py"));
+    assert_eq!(update.affected_callers, vec![key("pkg.api", "handler")]);
+    assert_eq!(index.module_decls("pkg.util"), Some(stub_decls));
+    assert_eq!(
+        index.file_of(&key("pkg.util", "helper")),
+        Some(Path::new("pkg/util.pyi"))
+    );
+    assert!(
+        summary(&index, "pkg.api", "handler")
+            .transitive_exec_effects
+            .is_empty()
+    );
     index.remove_file(Path::new("pkg/util.pyi"));
     assert!(index.module_decls("pkg.util").is_none());
 }
