@@ -645,21 +645,27 @@ command line are always checked.
 The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
 configured lists.
 
-## Ownership contracts: `[[tool.heki.write-owners]]` (`MUT201`)
+## Ownership contracts: `[[tool.heki.write-owners]]` (`MUT201`, `MUT205`)
 
 ```toml
 [[tool.heki.write-owners]]
 name = "generation-store"
-targets = ["pkg.model.DataModel.fields", "DataType.data_types"]
+targets = ["pkg.model.DataModel.fields", "DataType.data_types", 'DataModelFieldBase.extras["init"]']
 allowed-writers = ["pkg.parser.generation.*", "Store.*"]
 exempt-methods = ["__deepcopy__", "copy_deep"]
 forbid-cached-property-on = ["DataModel"]
 message = "use GenerationStore.set_fields() instead"
+fresh-objects = "allow"
+unresolved = "report"
 ```
 
 - `targets`: `Class.attr` names. A target matches the fully qualified name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`), and globs are allowed. Subclasses of
-  a target class are covered too.
+  a target class are covered too. `Class.attr["key"]` names one entry of the container the
+  attribute holds: it matches the writes of that constant key (a literal or a `Final` constant),
+  not a write of the whole container or with a computed key; a write of an entry that both the
+  entry and its container target match is reported once, under the entry. A write into the
+  entries of a target's container (`model.meta["kw"][name] = v`) is a write of the target.
 - `allowed-writers`: functions allowed to write (fully qualified or qualname, globs allowed).
 - `forbidden-writers`: when set, only writes by these functions are reported (matched like
   `allowed-writers`); see [Allowed and forbidden functions](#allowed-and-forbidden-functions).
@@ -668,6 +674,23 @@ message = "use GenerationStore.set_fields() instead"
   (`DataModel.copy_deep`, `create_*`) is matched like `allowed-writers`.
 - `forbid-cached-property-on`: classes on which defining a `@cached_property` is itself reported.
 - `message`: text appended to every report of the contract (where to write instead).
+- `fresh-objects`: `"allow"` (default) or `"report"`. With `"allow"`, a write that constructs the
+  object it writes is no violation: the object was allocated in the same call chain (calling its
+  class, a copy, or a project function returning a new object) and nothing can hold it yet (no
+  store, `yield`, closure, or call that may keep it ran before the write). A shallow copy's
+  containers are the original's: only rebinding its attributes constructs it.
+- `unresolved`: `"ignore"` (default) or `"report"`. With `"report"`, the writes the contract
+  cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md): an
+  attribute named like a target written on an object of unknown class, and a computed attribute
+  name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on a target class.
+
+An attribute named through a string is followed when the string is a constant: a literal or a
+module-level name declared `Final` (`KEY: Final = "_key"`, also imported from another module, a
+re-export, or another `Final` name), in `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and
+`setattr(obj, KEY, v)`. A module name assigned without `Final` is not a constant to heki (any
+code can rebind it).
+
+An unknown `fresh-objects` or `unresolved` value is a configuration error.
 
 A class's own initialization is always allowed: an initializer (`__init__`, `__post_init__`,
 `__new__`, `model_post_init`, `__setstate__`) of a target class or a subclass may write its own
@@ -691,10 +714,11 @@ message = "read children through GenerationIndex instead"
 ```
 
 The read side of `write-owners`: reads of a target (`ref.children`, a local alias,
-`getattr(ref, "children")`, `ref.__dict__["children"]`) outside `allowed-readers` and
-`exempt-methods` are reported. Targets, subclasses, initializers, private helpers, `message`,
-and `forbidden-readers` work as for `write-owners`. Reads through a parameter without a
-project-class annotation are not seen.
+`getattr(ref, "children")`, `ref.__dict__["children"]`, also with a `Final` constant name)
+outside `allowed-readers` and `exempt-methods` are reported. Targets, subclasses, initializers,
+private helpers, `message`, and `forbidden-readers` work as for `write-owners`; a container entry
+(`Class.attr["key"]`) is a write target only, and a configuration error here. Reads through a
+parameter without a project-class annotation are not seen.
 
 ## Call contracts: `[[tool.heki.call-owners]]` (`MUT204`)
 
@@ -782,12 +806,13 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | --- | ------- |
 | `scopes` | Modules, classes, or functions (dotted names or globs) whose functions must stay inside the boundary; nested functions are included. |
 | `forbid` | `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`, `sleep`, `blocking` (all six), `mutates-params` (for a method, `self` is a parameter), `writes-targets`, `reads-targets`, `calls`. An unknown token is a configuration error. |
-| `write-targets` | `Class.attr` targets of `writes-targets` (required with it; subclasses included). |
-| `read-targets` | `Class.attr` targets of `reads-targets` (required with it; subclasses included): reads as `read-owners` sees them, also inside property getters. |
+| `write-targets` | `Class.attr` targets of `writes-targets` (required with it; subclasses included); `Class.attr["key"]` names one entry, as for `write-owners`. |
+| `read-targets` | `Class.attr` targets of `reads-targets` (required with it; subclasses included): reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. |
 | `call-targets` | Functions, methods, or classes of `calls` (required with it), matched as the `targets` of `call-owners`. |
 | `write-universe` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
 | `allow-writes` | `Class.attr` writes the boundary allows; they are exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
+| `fresh-objects` | `"allow"` (default) or `"report"`: whether a write that constructs the object it writes (as for `write-owners`) counts as a write of the boundary. |
 | `message` | Text appended to every report of the boundary. |
 
 Each scope function is checked through any number of calls; a violation inside another scope
@@ -1224,7 +1249,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 29 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 30 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
@@ -1249,6 +1274,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
 | MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
 | MUT204 | [call-owner-violation](call-owner-violation.md) | Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`. |  |
+| MUT205 | [unresolved-guarded-write](unresolved-guarded-write.md) | Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class. |  |
 
 ## Execution Effects (EFF)
 
@@ -1895,9 +1921,12 @@ count for a read.
     `sleep`, or `blocking` for all six: blocking calls of the ecosystem knowledge base
     (`requests.get`, `sqlite3`, `open`, `subprocess.run`, `time.sleep`, ...);
   - `writes-targets`: writes to the `Class.attr` entries of `write-targets` (and their
-    subclasses), in every form `MUT201` follows, through the receivers whose class `MUT201`
-    sees (the items of annotated containers included); a class's own initialization is no write
-    (constructing a fresh object runs its `__init__`), as for `MUT201`;
+    subclasses), or to one entry of the container an attribute holds (`Class.attr["key"]`), in
+    every form `MUT201` follows, through the receivers whose class `MUT201` sees (the items of
+    annotated containers included); a class's own initialization is no write (constructing a
+    fresh object runs its `__init__`), and neither is a write that constructs the object it
+    writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
+    object it allocated), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
     `obj.__dict__["attr"]`, a property getter that reads it); an initializer reading its own
@@ -1934,13 +1963,11 @@ definition. The report counts every distinct site of that kind the scope functio
 (`sites` in JSON), so a Ratchet baseline sees a second blocking call or write below a recorded
 report.
 
-`allow-writes` is only as precise as heki's view of which object each write changes. On a
-196,000-line code generator whose 124 declared passes a run-time check confirms (no pass writes a
-fact it does not declare), one boundary per pass reported 12 passes (25 reports): writes to
-objects the pass constructs or copies, state that property getters write while rendering, and
-store operations whose writes depend on their arguments. With every local and property type
-supplied by a type checker, it reported 36 passes. Treat its reports as candidates to review, or
-narrow the universe, rather than gating on it.
+`allow-writes` is only as precise as heki's view of which object each write changes. A write
+heki cannot tell apart from a write of the pass's input is reported: state that a property
+getter writes while rendering, or a store operation whose writes depend on its arguments. A
+write that constructs the object it writes is not (`fresh-objects = "allow"`). Treat its
+reports as candidates to review, or narrow the universe, rather than gating on it.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -1999,6 +2026,8 @@ No automatic fix.
     `allow-writes` names them; the diagnostic target is the entry, with a glob attribute replaced
     by the written one (`pass:DataModel.fields` for `DataModel.*`).
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
+  - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
+    they write count, as for `[[tool.heki.write-owners]]`.
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
   - `message`: appended to every message of the boundary.
@@ -2937,10 +2966,13 @@ the allowed readers:
 
 - directly (`ref.children`), also on `self` and through local aliases;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
-  with a constant name;
-- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`.
+  with a constant name: a string literal or a module-level `Final` string constant;
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a `Final`
+  constant for the key.
 
-A target names a class and an attribute; it covers the class's subclasses too.
+A target names a class and an attribute; it covers the class's subclasses too. A container
+entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
+read target names `Class.attr` (an entry is a configuration error).
 
 The read object's class is the one heki infers for it, with annotations as hints: a
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
@@ -3401,6 +3433,84 @@ No automatic fix.
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-write/
+
+# unresolved-guarded-write (MUT205)
+
+Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+
+Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class.
+
+## What it does
+The strict mode of a `[[tool.heki.write-owners]]` contract that sets `unresolved = "report"`:
+reports the writes outside the write owners that `MUT201` cannot tie to a target class, so a clean
+`MUT201` run says how much it did not check. Two kinds of writes are reported, each once, at the
+write:
+
+- an attribute named like a target attribute (`fields` for `Model.fields`, any name for
+  `Model.*`) written on an object of unknown class: an unannotated parameter that no project
+  caller binds to an instance of a known class, a loop variable, the result of a call heki does
+  not resolve, a value annotated `Any` or `object`. Rebinding (`obj.fields = []`), deleting,
+  `setattr` with a constant name, and changing the container the attribute holds
+  (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
+- an attribute name computed at run time written on an instance of a target class:
+  `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
+  `__dict__` key that is a module constant not declared `Final`.
+
+The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
+initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
+writers, `forbidden-writers`, and, with `fresh-objects = "allow"`, writes that construct the object
+they write. A parameter that every caller path binds to an object of a project class is not
+reported: `MUT201` reports the write at those callers. A computed name written on an object of
+unknown class is not reported (neither the class nor the attribute is known).
+
+## Why is this bad?
+`MUT201` reports what it can back with a class: a write through an object it cannot type is not
+followed, so a contract that passes says nothing about those writes. Name-based checkers report
+them all; heki reports them separately, under their own code, so they can be counted, ratcheted
+with a baseline, and reduced by annotating the objects or naming the attributes with constants,
+without mixing them with the violations `MUT201` proves.
+
+## Example
+```toml
+[[tool.heki.write-owners]]
+name = "model-store"
+targets = ["Model.fields"]
+allowed-writers = ["Store.*"]
+unresolved = "report"
+```
+
+```python
+def touch(model) -> None:  # no annotation: heki cannot tell what `model` is
+    model.fields = []  # MUT205
+
+
+def fill(model: Model, name: str) -> None:
+    setattr(model, name, [])  # MUT205: the attribute is computed at run time
+
+
+def read_only(model: Model) -> int:
+    return len(model.fields)  # not reported: a read
+```
+
+Use instead:
+```python
+def touch(model: Model) -> None:
+    model.fields = []  # now `MUT201`, outside `Store.*`
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.write-owners]]`:
+  - `unresolved`: `"ignore"` (default) or `"report"`.
+  - `targets`, `allowed-writers`, `forbidden-writers`, `exempt-methods`, `fresh-objects`,
+    `message`: as for `MUT201`.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/unretained-async-task/
 
 # unretained-async-task (EFF107)
@@ -3482,7 +3592,11 @@ allowed writers:
 
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
 - through a local alias (`fields = model.fields; fields.append(...)`);
-- through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`;
+- through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`,
+  also with a module-level `Final` string constant for the name (`model.__dict__[FIELDS_KEY]`,
+  imported or not);
+- into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
+  `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
   reported once at the outermost call site. A helper that sees the object's class (an annotated
   parameter, `self` of a method) reports its own write instead, so a write it routes through
@@ -3491,7 +3605,13 @@ allowed writers:
   and otherwise writes the value's own attributes.
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
-class family).
+class family). A target can also name one entry of the container an attribute holds,
+`Class.attr["key"]`: it matches the writes of that key (`field.extras["init"] = v`,
+`field.extras[INIT]` with a `Final` constant, `field.extras.pop("init")`,
+`del field.extras["init"]`, `field.extras["init"].append(v)`), not a write of the whole
+container (`field.extras = {}`, `field.extras.update(...)`) or with a computed key, which are
+writes of `Class.attr`. When a contract names both a container and one of its entries, a write of
+the entry is reported once, under the entry.
 
 The written object's class is the one heki infers for it, with annotations as hints: a
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
@@ -3544,7 +3664,19 @@ family is not reported when the written object is the initializer's own `self`, 
 writes it directly, through a local alias, through `super().__init__()`, or through helpers it
 passes `self` to (`self._init_fields()`, `_setup(self)`). An object that may be `self`
 (`self if flag else other`) gets the benefit of the doubt. Writes to objects that are provably
-not `self` stay reported: another parameter, a fresh instance, an attribute of `self`.
+not `self` stay reported: another parameter, an attribute of `self`.
+
+A write that constructs the object it writes is allowed too (`fresh-objects = "allow"`, the
+default): the object was allocated in the same call chain, by calling its class, by copying
+(`copy.copy`, `copy.deepcopy`, `dataclasses.replace`, `.copy()`, `.model_copy()`), or by a
+project function that returns such an object, and nothing else can hold it yet: no store into
+another object, a container, a global, or a closure, no `yield`, and no call that may keep it
+ran before the write. A project function keeps an object it stores, yields, or hands to code
+heki does not follow or to a function that keeps it; reading or writing it keeps nothing. Writes
+that a helper makes to a new object its caller hands it count as well. A shallow copy shares its
+containers with the original, so only rebinding its attributes constructs it
+(`copied.data_types = [...]`); `copied.data_types.append(x)` changes the original's list and is
+reported. `fresh-objects = "report"` reports these writes like any other.
 
 ## Why is this bad?
 Large code bases often have one component that owns a piece of shared state (a store, a
@@ -3610,6 +3742,10 @@ No automatic fix.
     allowed writer or an exempt method.
   - `message`: appended to every message of the contract (`use Store.add_field() instead`).
   - `forbid-cached-property-on`: classes on which a `@cached_property` is itself reported.
+  - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
+    they write are reported.
+  - `unresolved`: `"ignore"` (default) or `"report"`: also report the writes the contract
+    cannot tie to a class, under `MUT205`.
 
 
 ---

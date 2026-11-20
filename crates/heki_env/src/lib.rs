@@ -111,6 +111,13 @@ pub struct WriteOwnerRule {
     pub exempt_methods: Vec<String>,
     /// Appended to every `MUT201` message of this contract (`use Store.set_fields() instead`).
     pub message: Option<String>,
+    /// `"allow"` (default) or `"report"`: whether writes that construct the object they write
+    /// (allocated in the same call chain, held by nobody else yet) are reported.
+    pub fresh_objects: Option<String>,
+    /// `"report"`: also report (`MUT205`) writes of an attribute named like a target on an
+    /// object of unknown class, and computed attribute names written on a target class;
+    /// `"ignore"` (default) does not.
+    pub unresolved: Option<String>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -172,6 +179,9 @@ pub struct EffectBoundaryRule {
     /// Callees (dotted patterns) whose effects are allowed: paths through them are not
     /// followed.
     pub allowed_callees: Vec<String>,
+    /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
+    /// the object they write count as writes of the boundary.
+    pub fresh_objects: Option<String>,
     /// Appended to every `EFF201` message of this contract.
     pub message: Option<String>,
 }
@@ -422,6 +432,8 @@ allowed-writers = ["pkg.parser.generation.*"]
 forbidden-writers = ["pkg.render.*"]
 exempt-methods = ["__deepcopy__"]
 message = "use Store.set_fields() instead"
+fresh-objects = "report"
+unresolved = "report"
 
 [[tool.heki.read-owners]]
 name = "reference-children"
@@ -462,6 +474,7 @@ allow-writes = ["DataModel.base_classes"]
 write-universe = ["DataModel.*"]
 allowed-callees = ["pkg.logging.*"]
 message = "render must not mutate model state"
+fresh-objects = "allow"
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -470,6 +483,8 @@ message = "render must not mutate model state"
         assert_eq!(cfg.write_owners.len(), 1);
         assert_eq!(cfg.write_owners[0].exempt_methods, ["__deepcopy__"]);
         assert_eq!(cfg.write_owners[0].forbidden_writers, ["pkg.render.*"]);
+        assert_eq!(cfg.write_owners[0].fresh_objects.as_deref(), Some("report"));
+        assert_eq!(cfg.write_owners[0].unresolved.as_deref(), Some("report"));
         assert_eq!(
             cfg.write_owners[0].message.as_deref(),
             Some("use Store.set_fields() instead")
@@ -514,6 +529,7 @@ message = "render must not mutate model state"
                 write_universe: vec!["DataModel.*".into()],
                 allowed_callees: vec!["pkg.logging.*".into()],
                 message: Some("render must not mutate model state".into()),
+                fresh_objects: Some("allow".into()),
             }
         );
         assert!(cfg.readonly_returns[0].deep);

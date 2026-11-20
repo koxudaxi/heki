@@ -9,8 +9,9 @@
 use crate::guards;
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Delivery, EffectSummary, Facts,
-    FuncKey, ProjectIndex, ProtectedReturn, Shared, SiteRole, TypedFieldWriteSite, WriteKind,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
+    Facts, FuncKey, NewArg, NewCond, NewKind, ProjectIndex, ProtectedReturn, ReturnsNew, Shared,
+    SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -173,7 +174,8 @@ pub(crate) fn propagate_with_budget(
                 converged = false;
                 break;
             }
-            let new = recompute(index, &out, &nodes[i]);
+            let in_scc = |k: &FuncKey| pos.get(k).is_some_and(|j| members.contains(j));
+            let new = recompute(index, &out, &nodes[i], &in_scc);
             if index.summary(&nodes[i]) != Some(&new) {
                 store(index, &nodes[i], new);
                 for &p in &preds[i] {
@@ -207,6 +209,7 @@ fn recompute(
     index: &ProjectIndex,
     out: &FxHashMap<FuncKey, Vec<(PathBuf, usize)>>,
     func: &FuncKey,
+    in_scc: &dyn Fn(&FuncKey) -> bool,
 ) -> EffectSummary {
     let path = &index.func_files[func];
     let file = &index.files[path];
@@ -217,6 +220,9 @@ fn recompute(
         .get(func)
         .is_some_and(|cur| cur.sync_driven_only);
     let contracts = index.contracts.as_deref();
+    let resolver = Resolver { index, in_scc };
+    // The local facts first: the sites the edges add are resolved already.
+    resolver.resolve_own(&mut s);
     for (site_path, i) in out.get(func).into_iter().flatten() {
         let site = &index.files[site_path].call_sites[*i];
         for bc in site.project_callees() {
@@ -230,6 +236,7 @@ fn recompute(
                     bc,
                     callee,
                     site_path,
+                    &resolver,
                 );
                 return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
             }
@@ -248,6 +255,117 @@ fn recompute(
     }
     s.refresh_typed_field_writes();
     s
+}
+
+/// Resolves the construction conditions of a function's local facts (`construction`) against
+/// the final summaries of its callees. A callee of the SCC being computed has no final
+/// `returns_new` yet, so a condition on one fails: the fixpoint stays monotone.
+struct Resolver<'i> {
+    index: &'i ProjectIndex,
+    in_scc: &'i dyn Fn(&FuncKey) -> bool,
+}
+
+impl Resolver<'_> {
+    /// Whether `cond` holds (for `own`, the new object must own its containers), and the
+    /// least kind of the objects its project functions return.
+    fn holds(&self, cond: &NewCond, own: bool) -> Option<NewKind> {
+        let mut kind = NewKind::Own;
+        for k in cond.returns() {
+            if (self.in_scc)(k) {
+                return None;
+            }
+            let r = self.index.summary(k)?.returns_new.kind()?;
+            if own && r == NewKind::Copy {
+                return None;
+            }
+            kind = kind.min(r);
+        }
+        for (k, p) in cond.keeps() {
+            let s = self.index.summary(k)?;
+            if *p >= 64 || s.retains_params & (1u64 << p) != 0 {
+                return None;
+            }
+        }
+        Some(kind)
+    }
+
+    /// The construction, in the caller, of a write a callee makes to the object bound to its
+    /// parameter, given that argument (`own`: an in-place change).
+    fn through_arg(&self, arg: Option<&ArgOrigin>, own: bool) -> Construction {
+        match arg.map(|o| &o.new_object) {
+            Some(NewArg::New { kind, cond })
+                if !(own && *kind == NewKind::Copy) && self.holds(cond, own).is_some() =>
+            {
+                Construction::Yes
+            }
+            Some(NewArg::Param { param, cond }) if self.holds(cond, own).is_some() => {
+                Construction::Param {
+                    param: *param,
+                    own,
+                    cond: NewCond::default(),
+                }
+            }
+            _ => Construction::No,
+        }
+    }
+
+    /// Resolve the conditions of the function's own writes and of its returned object.
+    fn resolve_own(&self, s: &mut EffectSummary) {
+        let pending: Vec<TypedFieldWriteSite> = s
+            .typed_field_write_sites
+            .iter()
+            .filter(|t| match &t.construction {
+                Construction::Pending { .. } => true,
+                Construction::Param { cond, .. } => !cond.is_empty(),
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        let unresolved: Vec<UnresolvedWriteSite> = s
+            .unresolved_write_sites
+            .iter()
+            .filter(|t| matches!(t.construction, Construction::Pending { .. }))
+            .cloned()
+            .collect();
+        for mut t in unresolved {
+            s.unresolved_write_sites.remove(&t);
+            t.construction = match &t.construction {
+                Construction::Pending { cond, own } if self.holds(cond, *own).is_some() => {
+                    Construction::Yes
+                }
+                _ => Construction::No,
+            };
+            s.unresolved_write_sites.insert(t);
+        }
+        for mut t in pending {
+            s.typed_field_write_sites.remove(&t);
+            t.construction = match &t.construction {
+                Construction::Pending { cond, own } if self.holds(cond, *own).is_some() => {
+                    Construction::Yes
+                }
+                Construction::Param { param, own, cond } if self.holds(cond, *own).is_some() => {
+                    Construction::Param {
+                        param: *param,
+                        own: *own,
+                        cond: NewCond::default(),
+                    }
+                }
+                _ => Construction::No,
+            };
+            s.typed_field_write_sites.insert(t);
+        }
+        if let ReturnsNew::New { kind, cond } = &s.returns_new
+            && !cond.is_empty()
+        {
+            s.returns_new = match self.holds(cond, false) {
+                Some(k) => ReturnsNew::New {
+                    kind: (*kind).min(k),
+                    cond: NewCond::default(),
+                },
+                None => ReturnsNew::No,
+            };
+        }
+    }
 }
 
 /// `MUT202` return flow across one call whose result the caller may return: a callee whose
@@ -301,7 +419,16 @@ fn apply_edge(
     bc: &BoundCallee,
     callee: &EffectSummary,
     path: &Path,
+    resolver: &Resolver<'_>,
 ) {
+    // A callee keeping a parameter keeps the caller's objects bound to it; a generator or a
+    // coroutine created without running keeps every argument.
+    let kept = if runs_at_call(callee, site) {
+        callee.retains_params
+    } else {
+        u64::MAX
+    };
+    s.retains_params |= bound_params(kept, bc);
     let Some(d) = delivery(|k| index.summary(k), site, callee) else {
         return;
     };
@@ -320,13 +447,18 @@ fn apply_edge(
         Facts::Body => s,
         Facts::Result => s.iterated.get_or_insert_with(Box::default),
     };
+    // Only facts that run during the call, in the caller's body, can construct the objects the
+    // call hands over.
+    let here = (d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site))
+        .then_some(resolver);
     transfer(
-        target, own_writes, caller, site, bc, callee, facts, &lead, rewrite,
+        target, own_writes, caller, site, bc, callee, facts, &lead, rewrite, here,
     );
 }
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
-/// build each chain ([`extend_chain`]).
+/// build each chain ([`extend_chain`]). `here` resolves the construction of the writes of facts
+/// that run during the call (`None`: they construct nothing).
 #[allow(clippy::too_many_arguments)]
 fn transfer(
     t: &mut EffectSummary,
@@ -338,6 +470,7 @@ fn transfer(
     facts: &EffectSummary,
     lead: &[CallHop],
     rewrite: bool,
+    here: Option<&Resolver<'_>>,
 ) {
     let origin = |k: usize| bc.params.get(k);
 
@@ -450,21 +583,28 @@ fn transfer(
                 Some((p, Some(path))) if path == attr => 1u64 << p,
                 _ => 0,
             };
-            indirect.push((class.clone(), attr.clone(), obj));
+            indirect.push((class.clone(), attr.clone(), obj, Construction::No));
         }
         if let Some(class) = &o.typed_instance
             && callee.typed_params >> i & 1 == 0
         {
             // `helper(obj)` with a parameter the helper does not type: the written object is
-            // the argument itself.
+            // the argument itself, under construction when the caller hands over a new object
+            // the helper does not keep.
+            let construction = match here {
+                Some(r) if i < 64 && facts.retains_params & (1u64 << i) == 0 => {
+                    r.through_arg(Some(o), true)
+                }
+                _ => Construction::No,
+            };
             indirect.extend(
                 paths
                     .iter()
                     .filter(|p| !p.is_empty())
-                    .map(|p| (class.clone(), p.clone(), o.may_params)),
+                    .map(|p| (class.clone(), p.clone(), o.may_params, construction.clone())),
             );
         }
-        for (class, attr, obj_params) in indirect {
+        for (class, attr, obj_params, construction) in indirect {
             // A callee that already records a typed write of this field (itself or through its
             // callees) reports it: there, or here when the callee hands its sites over below.
             let known = facts
@@ -483,6 +623,8 @@ fn transfer(
                         via_chain: lead.to_vec(),
                         obj_params,
                         fresh: o.fresh,
+                        key: None,
+                        construction,
                     },
                 );
             }
@@ -511,6 +653,16 @@ fn transfer(
             via_chain: extend_chain(lead, &w.via_chain, rewrite),
             obj_params: bound_params(w.obj_params, bc),
             fresh: w.fresh,
+            key: w.key.clone(),
+            // A write to the callee's own new object stays construction; one to its parameter
+            // is construction when the call hands it a new object.
+            construction: match (&w.construction, here) {
+                (Construction::Yes, Some(_)) => Construction::Yes,
+                (Construction::Param { param, own, .. }, Some(r)) => {
+                    r.through_arg(origin(usize::from(*param)), *own)
+                }
+                _ => Construction::No,
+            },
         };
         insert_site(t, caller, site);
     }
@@ -518,9 +670,15 @@ fn transfer(
 
 /// The caller parameters the objects bound to the callee parameters in `mask` may be.
 pub(crate) fn bound_params(mask: u64, bc: &BoundCallee) -> u64 {
-    bits(mask)
-        .filter_map(|k| bc.params.get(k))
-        .fold(0, |acc, o| acc | o.may_params)
+    if mask == 0 {
+        return 0;
+    }
+    bc.params
+        .iter()
+        .take(64)
+        .enumerate()
+        .filter(|(k, _)| mask & (1u64 << k) != 0)
+        .fold(0, |acc, (_, o)| acc | o.may_params)
 }
 
 /// Whether a call runs the callee's body: calling a generator function only creates the
@@ -665,7 +823,7 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         // The owner's own write coming back around a cycle.
         return;
     }
-    // Sites order by `(class, attr, kind, span, via_chain, obj_params, fresh)`: the ones sharing
+    // Sites order by `(class, attr, kind, span, via_chain, ...)`: the ones sharing
     // the first four fields form one range, starting at the empty chain.
     let first = TypedFieldWriteSite {
         class_qualname: site.class_qualname.clone(),
@@ -675,6 +833,8 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         via_chain: Vec::new(),
         obj_params: 0,
         fresh: false,
+        key: None,
+        construction: Construction::No,
     };
     let existing = s
         .typed_field_write_sites
@@ -685,13 +845,29 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
                 && t.kind == site.kind
                 && t.span == site.span
         })
-        .find(|t| t.obj_params == site.obj_params && site_origin(t) == origin)
+        .find(|t| t.obj_params == site.obj_params && t.key == site.key && site_origin(t) == origin)
         .cloned();
+    let mut site = site;
     if let Some(existing) = existing {
+        // One chain stands for every chain of the write: it constructs its object only when
+        // each of them does.
+        let construction = if existing.construction == site.construction {
+            site.construction.clone()
+        } else {
+            Construction::No
+        };
         if existing.via_chain.len() <= site.via_chain.len() {
+            if existing.construction != construction {
+                s.typed_field_write_sites.remove(&existing);
+                s.typed_field_write_sites.insert(TypedFieldWriteSite {
+                    construction,
+                    ..existing
+                });
+            }
             return;
         }
         s.typed_field_write_sites.remove(&existing);
+        site.construction = construction;
     }
     s.typed_field_write_sites.insert(site);
 }
