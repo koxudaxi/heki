@@ -89,7 +89,7 @@ def test_nothing_runs_before_the_first_release(
     after = repository.commit("the whole project (#1)")
     github.respond(RELEASES, releases)
     commit_pulls(github, after, linked(1, after))
-    pull(github, 1, after, changed_files=900, commits=300)
+    pull(github, 1, after, commits=300)
 
     result, values = resolve(
         repository, github, tmp_path, "push", "--before", before, "--after", after
@@ -134,16 +134,14 @@ def test_a_squash_merge_diffs_from_the_first_parent(
     github.respond(RELEASES, PUBLISHED)
     commit_pulls(github, merge, linked(5, merge))
     commit_pulls(github, previous, linked(4, previous))
-    pull(github, 5, merge, commits=3, changed_files=7)
+    pull(github, 5, merge, commits=3)
 
     result, values = resolve(
         repository, github, tmp_path, "push", "--before", previous, "--after", merge
     )
 
     assert result.returncode == 0, result.stderr
-    assert resolved(values) == [
-        {"number": 5, "merge_sha": merge, "base_sha": previous, "changed_files": 7}
-    ]
+    assert resolved(values) == [{"number": 5, "merge_sha": merge, "base_sha": previous}]
     assert values["pr_numbers"] == "5"
 
 
@@ -187,9 +185,7 @@ def test_a_rebase_merge_diffs_from_before_its_commits(
     )
 
     assert result.returncode == 0, result.stderr
-    assert resolved(values) == [
-        {"number": 9, "merge_sha": last, "base_sha": before, "changed_files": 2}
-    ]
+    assert resolved(values) == [{"number": 9, "merge_sha": last, "base_sha": before}]
 
 
 def test_a_merge_commit_diffs_from_its_first_parent_without_more_requests(
@@ -274,7 +270,7 @@ def test_an_analyzed_pull_request_is_skipped_on_push(
     [
         ({"merged": False}, "Expected pull request #15 to be merged"),
         ({"merged": "true"}, "Expected pull request #15 to be merged"),
-        ({"changed_files": True}, "Expected pull request #15 to be merged"),
+        ({"commits": True}, "Expected pull request #15 to be merged"),
         ({"commits": 0}, "Expected pull request #15 to be merged"),
         ({"labels": [{"name": 3}]}, "Expected pull request #15 to be merged"),
         (
@@ -352,9 +348,7 @@ def test_a_replay_on_main_analyzes_a_merged_pull_request(
     )
 
     assert result.returncode == 0, result.stderr
-    assert resolved(values) == [
-        {"number": 20, "merge_sha": merge, "base_sha": base, "changed_files": 2}
-    ]
+    assert resolved(values) == [{"number": 20, "merge_sha": merge, "base_sha": base}]
 
 
 def test_a_replay_outside_the_trusted_history_stops_the_run(
@@ -434,9 +428,7 @@ def test_a_dry_run_off_main_checks_the_history_of_main(
     )
 
     assert result.returncode == 0, result.stderr
-    assert resolved(values) == [
-        {"number": 24, "merge_sha": merge, "base_sha": base, "changed_files": 2}
-    ]
+    assert resolved(values) == [{"number": 24, "merge_sha": merge, "base_sha": base}]
 
 
 def test_a_replay_of_an_analyzed_pull_request_does_nothing(

@@ -42,33 +42,29 @@ def test_safe_paths(path: str, safe: bool) -> None:
 
 
 @pytest.mark.parametrize(
-    ("records", "expected", "needs_claude"),
+    ("records", "needs_claude"),
     [
-        pytest.param([record("tests/a.py"), record("docs/b.md")], 2, False, id="only safe paths"),
+        pytest.param([record("tests/a.py"), record("docs/b.md")], False, id="only safe paths"),
         pytest.param(
             [record("docs/new.md", "crates/heki/src/main.rs")],
-            1,
             True,
             id="renamed from shipped code",
         ),
         pytest.param(
-            [record("tests/a.py"), record("crates/heki/src/check.rs")],
-            2,
-            True,
-            id="one shipped file",
+            [record("tests/a.py"), record("crates/heki/src/check.rs")], True, id="one shipped file"
         ),
-        pytest.param([record("tests/a.py")], 2, True, id="fewer records than files"),
-        pytest.param([record("tests/a.py")], 0, True, id="no files reported"),
-        pytest.param(['{"path": "tests/a.py"}'], 1, True, id="record without previous_path"),
+        pytest.param([], True, id="no records"),
+        pytest.param([""], True, id="only a blank line"),
+        pytest.param(['{"path": "tests/a.py"}'], True, id="record without previous_path"),
         pytest.param(
-            ['{"path": "tests/a.py", "previous_path": null, "x": 1}'], 1, True, id="extra key"
+            ['{"path": "tests/a.py", "previous_path": null, "x": 1}'], True, id="extra key"
         ),
-        pytest.param(["not json"], 1, True, id="malformed record"),
-        pytest.param([record("tests/a.py"), ""], 1, False, id="blank lines are not records"),
+        pytest.param(["not json"], True, id="malformed record"),
+        pytest.param([record("tests/a.py"), ""], False, id="blank lines are not records"),
     ],
 )
-def test_routing(records: list[str], expected: int, needs_claude: bool) -> None:
-    assert route.requires_claude(records, expected) is needs_claude
+def test_routing(records: list[str], needs_claude: bool) -> None:
+    assert route.requires_claude(records) is needs_claude
 
 
 def test_a_safe_pull_request_gets_a_valid_analysis_without_claude(tmp_path: Path) -> None:
@@ -81,8 +77,6 @@ def test_a_safe_pull_request_gets_a_valid_analysis_without_claude(tmp_path: Path
         "prepare_release_draft_analysis.py",
         "--changed-files-path",
         str(files),
-        "--expected-changed-files",
-        "2",
         "--analysis-path",
         str(analysis),
         "--github-output-path",
@@ -95,6 +89,7 @@ def test_a_safe_pull_request_gets_a_valid_analysis_without_claude(tmp_path: Path
     assert written == {
         "has_breaking_changes": False,
         "breaking_changes_content": "",
+        "experimental_changes_content": "",
         "reasoning": route.SAFE_REASONING,
     }
     validate_reasoning(written["reasoning"])
@@ -106,8 +101,6 @@ def test_an_unreadable_file_list_goes_to_claude(tmp_path: Path) -> None:
         "prepare_release_draft_analysis.py",
         "--changed-files-path",
         str(tmp_path / "missing.jsonl"),
-        "--expected-changed-files",
-        "1",
         "--analysis-path",
         str(tmp_path / "analysis.json"),
         "--github-output-path",

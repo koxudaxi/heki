@@ -1,4 +1,4 @@
-"""Tests of `prepare_release_draft_artifacts.py`: Claude's diff copy and the release baseline section."""
+"""Tests of `prepare_release_draft_artifacts.py`: the diff copies, the file list, and the context sections."""
 
 from __future__ import annotations
 
@@ -39,7 +39,16 @@ def prepare(
     releases_path.write_text(
         "".join(json.dumps(release) + "\n" for release in releases), encoding="utf-8"
     )
-    paths = {name: tmp_path / name for name in ("claude.diff", "claude-deleted.txt", "sections.md")}
+    paths = {
+        name: tmp_path / name
+        for name in (
+            "deleted.txt",
+            "files.jsonl",
+            "claude.diff",
+            "claude-deleted.txt",
+            "sections.md",
+        )
+    }
     result = run_script(
         "prepare_release_draft_artifacts.py",
         "--diff-path",
@@ -52,6 +61,10 @@ def prepare(
         str(releases_path),
         "--nonce",
         NONCE,
+        "--deleted-lines-path",
+        str(paths["deleted.txt"]),
+        "--changed-files-path",
+        str(paths["files.jsonl"]),
         "--claude-diff-path",
         str(paths["claude.diff"]),
         "--claude-deleted-lines-path",
@@ -149,6 +162,25 @@ def test_a_release_that_is_not_an_ancestor_is_no_baseline(
     )
 
 
+@pytest.mark.parametrize("order", [1, -1])
+def test_both_spellings_of_a_version_tag_are_tried(repository: Repository, order: int) -> None:
+    """`v0.2.0` on the base and `0.2.0` elsewhere name one version; the ancestor one is the baseline."""
+    repository.commit("first release")
+    repository.git("tag", "v0.1.0")
+    repository.commit("second release")
+    repository.git("tag", "v0.2.0")
+    base = repository.commit("after the release")
+    repository.git("checkout", "--quiet", "--orphan", "other")
+    repository.commit("unrelated")
+    repository.git("tag", "0.2.0")
+    releases = [
+        {"tag_name": tag, "draft": False, "prerelease": False}
+        for tag in ("v0.1.0", "v0.2.0", "0.2.0")
+    ]
+
+    assert artifacts.baseline_tag(repository.path, base, releases[::order]) == "v0.2.0"
+
+
 def test_a_registry_missing_at_the_release_is_unavailable(
     repository: Repository, tmp_path: Path
 ) -> None:
@@ -186,6 +218,138 @@ def test_short_lines_are_copied_byte_for_byte(
         "Lines longer than 2,000 characters: 0 condensed, 0 folded, 0 unchanged context lines shortened."
         in (paths["sections.md"].read_text(encoding="utf-8"))
     )
+
+
+def test_deleted_lines_come_from_the_hunks(
+    history: tuple[Repository, str, str], tmp_path: Path
+) -> None:
+    """A removed line that starts with `-- ` reads as `--- ` in the diff, like a file header."""
+    repository, base, merge = history
+    diff = (
+        b"diff --git a/docs/usage.md b/docs/usage.md\n--- a/docs/usage.md\n+++ b/docs/usage.md\n"
+        b"@@ -1,3 +1,2 @@\n heki check\n--- `--legacy` reads old baselines\n-plain\n+changed\n"
+        b"diff --git a/kb/old.toml b/kb/old.toml\ndeleted file mode 100644\n--- a/kb/old.toml\n"
+        b"+++ /dev/null\n@@ -1 +0,0 @@\n--- a comment\n"
+    )
+
+    result, paths = prepare(
+        tmp_path, diff, repository=repository.path, merge_sha=merge, base_sha=base, releases=[]
+    )
+
+    assert result.returncode == 0, result.stderr
+    expected = b"-- `--legacy` reads old baselines\nplain\n-- a comment\n"
+    assert paths["deleted.txt"].read_bytes() == expected
+    assert paths["claude-deleted.txt"].read_bytes() == expected
+
+
+def test_the_file_list_is_the_diff_of_the_two_commits(
+    repository: Repository, tmp_path: Path
+) -> None:
+    """Every change between the commits, renames paired as the diff pairs them, names kept exactly."""
+    text = "".join(f"line {n}\n" for n in range(20))
+    base = repository.commit(
+        "base",
+        {"crates/a.rs": text, "docs/b.md": "b\n", "gone.txt": "gone\n", "kept.txt": "kept\n"},
+    )
+    repository.git("mv", "crates/a.rs", "crates/moved.rs")
+    (repository.path / "gone.txt").unlink()
+    merge = repository.commit(
+        "merge",
+        {
+            "crates/moved.rs": text + "one more\n",
+            "docs/b.md": "changed\n",
+            "new file ü.md": "new\n",
+        },
+    )
+
+    records = artifacts.changed_files(repository.path, base, merge)
+
+    assert records == [
+        {"path": "crates/moved.rs", "previous_path": "crates/a.rs"},
+        {"path": "docs/b.md", "previous_path": None},
+        {"path": "gone.txt", "previous_path": None},
+        {"path": "new file ü.md", "previous_path": None},
+    ]
+    assert artifacts.changed_files(repository.path, base, base) == []
+
+
+def test_the_cli_writes_the_file_list(history: tuple[Repository, str, str], tmp_path: Path) -> None:
+    repository, base, merge = history
+
+    result, paths = prepare(
+        tmp_path, b"", repository=repository.path, merge_sha=merge, base_sha=base, releases=[]
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert [
+        json.loads(line) for line in paths["files.jsonl"].read_text(encoding="utf-8").splitlines()
+    ] == [
+        {"path": path, "previous_path": None}
+        for path in ("docs/cli-reference.md", "docs/configuration.md", "docs/rules/index.md")
+    ]
+
+
+EXPERIMENTAL_PAGE = """\
+# Experimental Features
+
+| ID | Kind | Target | Since | Tracking |
+| -- | ---- | ------ | ----- | -------- |
+| `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
+
+```toml
+select = ["MUT101"]
+```
+"""
+
+
+def test_the_context_lists_the_experimental_features_of_the_checkout(
+    history: tuple[Repository, str, str], tmp_path: Path
+) -> None:
+    repository, base, merge = history
+    (repository.path / "docs/experimental.md").write_text(EXPERIMENTAL_PAGE, encoding="utf-8")
+
+    result, paths = prepare(
+        tmp_path, b"", repository=repository.path, merge_sha=merge, base_sha=base, releases=[]
+    )
+
+    assert result.returncode == 0, result.stderr
+    sections = paths["sections.md"].read_text(encoding="utf-8")
+    # The page holds a fence of three backticks, so the one around it is longer.
+    assert (
+        "\n## Experimental Features\n\nThe experimental features are the ones `docs/experimental.md` of "
+        "the trusted checkout lists. The page follows.\n\n````markdown\n"
+        + EXPERIMENTAL_PAGE
+        + "````\n\n## Prepared Diff\n"
+    ) in sections
+
+
+def test_without_the_page_no_feature_is_experimental(
+    history: tuple[Repository, str, str], tmp_path: Path
+) -> None:
+    repository, base, merge = history
+
+    result, paths = prepare(
+        tmp_path, b"", repository=repository.path, merge_sha=merge, base_sha=base, releases=[]
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (
+        "\n## Experimental Features\n\nNo feature is experimental: the trusted checkout has no "
+        "`docs/experimental.md`.\n\n## Prepared Diff\n"
+    ) in paths["sections.md"].read_text(encoding="utf-8")
+
+
+def test_the_page_is_read_from_the_checkout_not_from_the_merge(
+    repository: Repository, tmp_path: Path
+) -> None:
+    """The page is the one the trusted checkout has, not the one at the analyzed merge commit."""
+    base = repository.commit("base")
+    merge = repository.commit("merge", {"docs/experimental.md": EXPERIMENTAL_PAGE})
+    repository.git("checkout", "--quiet", base)
+
+    assert "No feature is experimental" in artifacts.experimental_section(repository.path)
+    repository.git("checkout", "--quiet", merge)
+    assert "`rule.MUT101`" in artifacts.experimental_section(repository.path)
 
 
 def test_long_lines_are_condensed_folded_or_shortened(
@@ -302,6 +466,8 @@ def test_malformed_identities_are_rejected(tmp_path: Path, argument: str, value:
         "--base-sha": "b" * 40,
         "--releases-path": str(tmp_path / "r"),
         "--nonce": NONCE,
+        "--deleted-lines-path": str(tmp_path / "e"),
+        "--changed-files-path": str(tmp_path / "f"),
         "--claude-diff-path": str(tmp_path / "c"),
         "--claude-deleted-lines-path": str(tmp_path / "l"),
         "--sections-path": str(tmp_path / "s"),

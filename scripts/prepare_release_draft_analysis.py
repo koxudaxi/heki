@@ -2,9 +2,10 @@
 
 A path is safe when it is not part of what heki ships or how a release is built: tests, the
 documentation, development scripts, and the CI and documentation workflows. `release.yml` is not
-safe, since its build matrix decides the platforms a release supports. Anything that does not
-parse, or a file list whose length differs from the count GitHub reports (the files API stops
-at 3,000), goes to Claude.
+safe, since its build matrix decides the platforms a release supports. The file list comes from
+the diff Claude reads (`prepare_release_draft_artifacts.py`), not from the pull request's file
+list, which can miss a file the merge changed. A record that does not parse, or an empty list,
+goes to Claude.
 """
 
 from __future__ import annotations
@@ -48,7 +49,6 @@ SAFE_REASONING = (
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--changed-files-path", required=True, type=Path)
-    parser.add_argument("--expected-changed-files", required=True, type=int)
     parser.add_argument("--analysis-path", required=True, type=Path)
     parser.add_argument("--github-output-path", required=True, type=Path)
     return parser.parse_args(argv)
@@ -79,10 +79,8 @@ def _paths_from_record(raw_record: str) -> tuple[str, ...] | None:
     return None
 
 
-def requires_claude(records: Iterable[str], expected_changed_files: int) -> bool:
+def requires_claude(records: Iterable[str]) -> bool:
     """Return whether the file records leave any doubt that the changes miss every release."""
-    if expected_changed_files <= 0:
-        return True
     count = 0
     for raw_record in records:
         if not raw_record.strip():
@@ -90,7 +88,7 @@ def requires_claude(records: Iterable[str], expected_changed_files: int) -> bool
         if not (paths := _paths_from_record(raw_record)) or not all(map(is_safe_path, paths)):
             return True
         count += 1
-    return count != expected_changed_files
+    return count == 0
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -98,7 +96,7 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     try:
         with args.changed_files_path.open(encoding="utf-8") as records:
-            needs_claude = requires_claude(records, args.expected_changed_files)
+            needs_claude = requires_claude(records)
     except (OSError, UnicodeError):
         needs_claude = True
     if not needs_claude:
@@ -107,6 +105,7 @@ def main(argv: list[str] | None = None) -> None:
                 {
                     "has_breaking_changes": False,
                     "breaking_changes_content": "",
+                    "experimental_changes_content": "",
                     "reasoning": SAFE_REASONING,
                 }
             )

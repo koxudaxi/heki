@@ -1,18 +1,25 @@
 """Plan the draft release, labels, and comments for the analyzed pull requests; write nothing to GitHub.
 
 The draft accumulates: its ``## Breaking Changes`` section keeps the items of every analyzed pull
-request under their headings, and ``## Changes`` lists every merged pull request as
-``* <title> (#<number>)``, except those labeled `maintenance` or `dependencies`. The items and the
-line of a pull request analyzed again replace the earlier ones. Other text in the draft is kept.
+request under their headings, ``## Experimental`` the items about changes to experimental
+features, and ``## Changes`` lists every merged pull request as ``* <title> (#<number>)``, except
+those labeled `maintenance` or `dependencies`. The items and the line of a pull request analyzed
+again replace the earlier ones. Other text in the draft is kept.
 
 The next version follows 0.x semantics from the newest published release: a breaking change bumps
 the minor version (0.1.x -> 0.2.0) and anything else the patch. When the manifests already name a
 later version, the draft takes it. The draft's tag is ``v<version>``, and its body starts with a
 line asking for the manifests to be bumped to that version while they declare another.
 
+A pull request analyzed again keeps one analysis comment: the workflow's earlier comment, found
+by its first line, is updated instead of a new one being posted. A pull request labeled
+`breaking-change` that the analysis finds not breaking loses the label.
+
 The plan directory gets ``release.json`` (the body of the create or update request),
-``comment-<number>.json`` for each pull request, and the step outputs (``release_id``, empty for
-a new draft; ``tag``; ``breaking_prs``; ``pr_numbers``). The workflow's write steps send them.
+``comment-<number>.json`` and ``comment-<number>.id`` (the earlier comment to update, empty for a
+new one) for each pull request, and the step outputs (``release_id``, empty for a new draft;
+``tag``; ``breaking_prs``; ``stale_breaking_prs``, the pull requests that lose the label;
+``pr_numbers``). The workflow's write steps send them.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from release_draft_common import (
 )
 from validate_release_draft_analysis import (
     EM_DASH,
+    Analysis,
     validate_content_format,
     validate_reasoning,
     validate_structured_output,
@@ -46,19 +54,14 @@ from validate_release_draft_analysis import (
 
 ROOT = Path(__file__).resolve().parent.parent
 BREAKING_SECTION = "## Breaking Changes"
+EXPERIMENTAL_SECTION = "## Experimental"
 CHANGES_SECTION = "## Changes"
+COMMENT_MARKER = "<!-- heki-release-draft: breaking-change-analysis -->"
+WORKFLOW_AUTHOR = "github-actions[bot]"
+"""The author of what the workflow writes with `GITHUB_TOKEN`; no one else can post as it."""
 NOTICE_PREFIX = "Before publishing this draft, bump the version to "
 MARKDOWN_PUNCTUATION = re.compile(r"([\\`*_\[\]<>|~@])")
 INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
-
-
-@dataclass(frozen=True)
-class Analysis:
-    """A validated analysis of one pull request."""
-
-    has_breaking_changes: bool
-    breaking_changes_content: str
-    reasoning: str
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,8 @@ class MergedPullRequest:
     title: str
     labels: frozenset[str]
     analysis: Analysis
+    comment_id: int | None = None
+    """The workflow's earlier analysis comment on the pull request, if it has one."""
 
 
 @dataclass
@@ -77,6 +82,7 @@ class DraftBody:
 
     preamble: list[str] = field(default_factory=list)
     breaking: dict[str, list[str]] = field(default_factory=dict)
+    experimental: list[str] = field(default_factory=list)
     changes: list[str] = field(default_factory=list)
     other_sections: list[list[str]] = field(default_factory=list)
 
@@ -86,12 +92,14 @@ class DraftBody:
 
 @dataclass(frozen=True)
 class Plan:
-    """What the write steps send: the draft release and one comment per pull request."""
+    """What the write steps send: the draft release, one comment per pull request, and the labels."""
 
     release_id: int | None
     release: dict[str, Any]
     comments: dict[int, str]
+    comment_ids: dict[int, int | None]
     breaking_prs: list[int]
+    stale_breaking_prs: list[int]
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -99,6 +107,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--pr-numbers", required=True, nargs="+", type=int, help="in merge order")
     parser.add_argument("--analyses-dir", required=True, type=Path)
     parser.add_argument("--prs-path", required=True, type=Path)
+    parser.add_argument(
+        "--comments-dir",
+        required=True,
+        type=Path,
+        help="comments-<number>.jsonl: each pull request's comments as {id, author, body}",
+    )
     parser.add_argument("--releases-path", required=True, type=Path)
     parser.add_argument("--plan-dir", required=True, type=Path)
     parser.add_argument("--github-output-path", required=True, type=Path)
@@ -132,6 +146,8 @@ def parse_body(body: str) -> DraftBody:
             breaking_heading = None
             if line.rstrip() == BREAKING_SECTION:
                 section = None
+            elif line.rstrip() == EXPERIMENTAL_SECTION:
+                section = draft.experimental
             elif line.rstrip() == CHANGES_SECTION:
                 section = draft.changes
             else:
@@ -147,7 +163,7 @@ def parse_body(body: str) -> DraftBody:
         elif section is draft.preamble:
             if not line.startswith(NOTICE_PREFIX):
                 section.append(line)
-        elif section is draft.changes:
+        elif section is draft.changes or section is draft.experimental:
             if line.strip():
                 section.append(line)
         else:
@@ -168,16 +184,22 @@ def breaking_items(content: str) -> dict[str, list[str]]:
 
 
 def merge_pull_requests(draft: DraftBody, pulls: list[MergedPullRequest]) -> DraftBody:
-    """Add each pull request's breaking items and change line, replacing those of an earlier analysis."""
+    """Add each pull request's items and change line, replacing those of an earlier analysis."""
     for pull in pulls:
         for heading, lines in draft.breaking.items():
             draft.breaking[heading] = [
                 line for line in lines if not _ends_with_pr(line, pull.number)
             ]
+        draft.experimental = [
+            line for line in draft.experimental if not _ends_with_pr(line, pull.number)
+        ]
         draft.changes = [line for line in draft.changes if not _ends_with_pr(line, pull.number)]
         if pull.analysis.has_breaking_changes:
             for heading, items in breaking_items(pull.analysis.breaking_changes_content).items():
                 draft.breaking.setdefault(heading, []).extend(items)
+        draft.experimental += [
+            line for line in pull.analysis.experimental_changes_content.splitlines() if line.strip()
+        ]
         if not pull.labels & UNLISTED_LABELS:
             draft.changes.append(f"* {plain_title(pull.title)} (#{pull.number})")
     return draft
@@ -191,7 +213,7 @@ def _heading_order(heading: str, position: int) -> tuple[int, int]:
 
 
 def render_body(draft: DraftBody, notice: str | None) -> str:
-    """Return the draft body: the notice, other leading text, the two sections, then any other section."""
+    """Return the draft body: the notice, other leading text, the three sections, then any other section."""
     parts = [notice] if notice else []
     if preamble := "\n".join(draft.preamble).strip():
         parts.append(preamble)
@@ -203,6 +225,8 @@ def render_body(draft: DraftBody, notice: str | None) -> str:
         for _, (heading, lines) in ordered:
             if lines:
                 parts.append("\n".join(([f"### {heading}"] if heading else []) + lines))
+    if draft.experimental:
+        parts += [EXPERIMENTAL_SECTION, "\n".join(draft.experimental)]
     if draft.changes:
         parts += [CHANGES_SECTION, "\n".join(draft.changes)]
     parts += [text for section in draft.other_sections if (text := "\n".join(section).strip())]
@@ -262,7 +286,7 @@ def draft_release(releases: list[dict[str, Any]]) -> dict[str, Any] | None:
 def comment_body(pull: MergedPullRequest, tag: str) -> str:
     """Return the comment that reports the analysis on the pull request."""
     analysis = pull.analysis
-    lines = ["## Breaking change analysis", ""]
+    lines = [COMMENT_MARKER, "## Breaking change analysis", ""]
     if analysis.has_breaking_changes:
         lines += [
             f"Result: breaking changes found. The pull request is labeled `{BREAKING_LABEL}`.",
@@ -278,6 +302,13 @@ def comment_body(pull: MergedPullRequest, tag: str) -> str:
             analysis.breaking_changes_content.strip(),
             "",
         ]
+    if analysis.experimental_changes_content:
+        lines += [
+            f"These changes to experimental features are in the Experimental section of the draft release {tag}:",
+            "",
+            analysis.experimental_changes_content.strip(),
+            "",
+        ]
     lines += ["---", "Written by the Release Draft workflow."]
     return "\n".join(lines) + "\n"
 
@@ -285,29 +316,39 @@ def comment_body(pull: MergedPullRequest, tag: str) -> str:
 def plan(
     pulls: list[MergedPullRequest], releases: list[dict[str, Any]], declared: dict[str, str]
 ) -> tuple[Plan, Version]:
-    """Return the requests that update the draft and comment on each pull request."""
+    """Return the requests that update the draft, comment on each pull request, and set the labels.
+
+    An update leaves the draft state alone: the plan updates only a release it read as a draft,
+    and an update that lands after the owner published the release must not unpublish it.
+    """
     if not (published := published_versions(releases)):
         fail("No release is published, so the draft has no version to follow.")
     existing = draft_release(releases)
     draft = merge_pull_requests(parse_body((existing or {}).get("body") or ""), pulls)
+    latest, _ = published[0]
     version = next_version(
-        max(published), breaking=draft.has_breaking_changes(), manifest=manifest_version(declared)
+        latest, breaking=draft.has_breaking_changes(), manifest=manifest_version(declared)
     )
     tag = f"v{format_version(version)}"
     release: dict[str, Any] = {
         "tag_name": tag,
         "name": tag,
         "body": render_body(draft, version_notice(version, declared)),
-        "draft": True,
     }
     if existing is None:
-        release["target_commitish"] = "main"
+        release |= {"draft": True, "target_commitish": "main"}
     return (
         Plan(
             release_id=existing["id"] if existing else None,
             release=release,
             comments={pull.number: comment_body(pull, tag) for pull in pulls},
+            comment_ids={pull.number: pull.comment_id for pull in pulls},
             breaking_prs=[pull.number for pull in pulls if pull.analysis.has_breaking_changes],
+            stale_breaking_prs=[
+                pull.number
+                for pull in pulls
+                if not pull.analysis.has_breaking_changes and BREAKING_LABEL in pull.labels
+            ],
         ),
         version,
     )
@@ -321,21 +362,34 @@ def load_analysis(path: Path, number: int) -> Analysis:
         fail(f"The analysis of pull request #{number} is unavailable.")
     if not isinstance(raw, dict):
         fail(f"The analysis of pull request #{number} is invalid.")
-    has_breaking_changes, content, reasoning = validate_structured_output(raw)
-    validate_reasoning(reasoning)
+    analysis = validate_structured_output(raw)
+    validate_reasoning(analysis.reasoning)
     # The analyze job checked the removal claims against the exact diff, which this job does not have.
-    validate_content_format(
-        has_breaking_changes=has_breaking_changes,
-        breaking_changes_content=content,
-        pr_number=number,
-    )
-    return Analysis(has_breaking_changes, content, reasoning)
+    validate_content_format(analysis, number)
+    return analysis
+
+
+def analysis_comment_id(records: list[Any]) -> int | None:
+    """Return the id of the workflow's oldest analysis comment among a pull request's comments."""
+    found = []
+    for record in records:
+        match record:
+            case {
+                "id": int(comment_id),
+                "author": str() | None as author,
+                "body": str() as body,
+            } if type(comment_id) is int and comment_id > 0:
+                if author == WORKFLOW_AUTHOR and body.split("\n", 1)[0] == COMMENT_MARKER:
+                    found.append(comment_id)
+            case _:
+                fail("Unexpected comment record.")
+    return min(found, default=None)
 
 
 def load_pull_requests(
-    numbers: list[int], prs_path: Path, analyses_dir: Path
+    numbers: list[int], prs_path: Path, analyses_dir: Path, comments_dir: Path
 ) -> list[MergedPullRequest]:
-    """Pair each pull request's title and labels with its analysis, in merge order."""
+    """Pair each pull request's title, labels, and earlier comment with its analysis, in merge order."""
     records = json_lines(prs_path.read_text(encoding="utf-8"))
     if [
         record.get("number") if isinstance(record, dict) else None for record in records
@@ -348,7 +402,14 @@ def load_pull_requests(
                 isinstance(label, str) for label in labels
             ):
                 analysis = load_analysis(analyses_dir / f"analysis-{number}.json", number)
-                pulls.append(MergedPullRequest(number, title, frozenset(labels), analysis))
+                comments = json_lines(
+                    (comments_dir / f"comments-{number}.jsonl").read_text(encoding="utf-8")
+                )
+                pulls.append(
+                    MergedPullRequest(
+                        number, title, frozenset(labels), analysis, analysis_comment_id(comments)
+                    )
+                )
             case _:
                 fail("Unexpected pull request record.")
     return pulls
@@ -364,6 +425,10 @@ def write_plan(plan_dir: Path, result: Plan) -> None:
         (plan_dir / f"comment-{number}.json").write_text(
             json.dumps({"body": body}, ensure_ascii=False) + "\n", encoding="utf-8"
         )
+        comment_id = result.comment_ids[number]
+        (plan_dir / f"comment-{number}.id").write_text(
+            f"{'' if comment_id is None else comment_id}\n", encoding="utf-8"
+        )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -371,7 +436,7 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
     if len(set(args.pr_numbers)) != len(args.pr_numbers) or min(args.pr_numbers) < 1:
         fail("Expected distinct positive pull request numbers.")
-    pulls = load_pull_requests(args.pr_numbers, args.prs_path, args.analyses_dir)
+    pulls = load_pull_requests(args.pr_numbers, args.prs_path, args.analyses_dir, args.comments_dir)
     releases = [
         _validated_release(record)
         for record in json_lines(args.releases_path.read_text(encoding="utf-8"))
@@ -385,13 +450,21 @@ def main(argv: list[str] | None = None) -> None:
     print(
         f"Breaking changes in: {', '.join(f'#{n}' for n in result.breaking_prs) or 'none of these'}."
     )
+    if result.stale_breaking_prs:
+        print(
+            f"The {BREAKING_LABEL} label is removed from: "
+            f"{', '.join(f'#{n}' for n in result.stale_breaking_prs)}."
+        )
     print("----- draft body -----", result.release["body"], sep="\n")
     for number, body in result.comments.items():
-        print(f"----- comment on #{number} -----", body, sep="\n")
+        comment_id = result.comment_ids[number]
+        action = "new comment" if comment_id is None else f"update of comment {comment_id}"
+        print(f"----- comment on #{number} ({action}) -----", body, sep="\n")
     with args.github_output_path.open("a", encoding="utf-8") as output:
         output.write(f"release_id={'' if result.release_id is None else result.release_id}\n")
         output.write(f"tag={result.release['tag_name']}\n")
         output.write(f"breaking_prs={' '.join(map(str, result.breaking_prs))}\n")
+        output.write(f"stale_breaking_prs={' '.join(map(str, result.stale_breaking_prs))}\n")
         output.write(f"pr_numbers={' '.join(map(str, args.pr_numbers))}\n")
 
 

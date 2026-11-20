@@ -1,8 +1,10 @@
 """Prepare Claude's copy of a merged pull request's diff and the release baseline for the release draft analysis.
 
-The exact diff stays with the trusted validator. Claude's copy keeps every line of at most 2,000
-characters byte for byte: Claude's Read tool cuts longer lines, and the validator requires every
-line to be read. A longer changed line paired with its counterpart shows only the segments that
+The exact diff stays with the trusted validator. So do its deleted lines and its changed files,
+which this script lists from the same two commits with the same rename detection, so that the
+route and the validator judge the diff Claude reads. Claude's copy keeps every line of at most
+2,000 characters byte for byte: Claude's Read tool cuts longer lines, and the validator requires
+every line to be read. A longer changed line paired with its counterpart shows only the segments that
 changed; any other long changed line is folded into pieces without loss, and a long unchanged
 context line is shortened. If the copy is still over the reading budget, the diff of each
 generated file becomes one summary line. Every line the workflow writes starts with
@@ -10,17 +12,19 @@ generated file becomes one summary line. Every line the workflow writes starts w
 
 The baseline is the newest published release whose tag is an ancestor of the diff's base. The
 rules, command-line options, and configuration keys of a revision are read from its documentation
-through ``git show``; no repository code is imported or run.
+through ``git show``, and the experimental features from ``docs/experimental.md`` of the trusted
+checkout when it has one; no repository code is imported or run.
 """
 
 from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import re
 import subprocess
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from itertools import accumulate, groupby
 from pathlib import Path
@@ -52,8 +56,12 @@ RULE_ROW = re.compile(r"^\| ([A-Z]+[0-9]+) \| \[([a-z0-9-]+)\]\([^)]*\) \|(.*)\|
 OPT_IN_MARK = "\N{ELECTRIC PLUG}"
 OPTION = re.compile(r"(?<![\w-])--[a-z0-9]+(?:-[a-z0-9]+)*(?![\w-])")
 CONFIGURATION_KEY = re.compile(r"^\| `([a-z][a-z0-9-]*)` \|", re.MULTILINE)
+EXPERIMENTAL_PAGE = "docs/experimental.md"
+BACKTICK_RUN = re.compile(r"`+")
 
 Names = dict[str, str]
+PreparedLine = tuple[str, bytes]
+"""A line of Claude's diff copy, with the kind of the exact diff line it shows."""
 
 
 @dataclass
@@ -103,6 +111,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--nonce", required=True, type=_pattern_argument(NONCE, "16 lowercase hex digits")
+    )
+    parser.add_argument(
+        "--deleted-lines-path", required=True, type=Path, help="the exact diff's deleted lines"
+    )
+    parser.add_argument(
+        "--changed-files-path", required=True, type=Path, help="one JSON record per changed file"
     )
     parser.add_argument("--claude-diff-path", required=True, type=Path)
     parser.add_argument("--claude-deleted-lines-path", required=True, type=Path)
@@ -239,7 +253,7 @@ def _prepared_line(nonce: str, line: _Line, counts: Counter[str]) -> list[str] |
     ]
 
 
-def _prepared_file(nonce: str, file: _FileDiff, counts: Counter[str]) -> list[bytes]:
+def _prepared_file(nonce: str, file: _FileDiff, counts: Counter[str]) -> list[PreparedLine]:
     """Return Claude's copy of one file's diff, pairing the long removed and added lines of each change."""
     replaced: dict[int, list[str]] = {}
     for changed, run in groupby(
@@ -264,10 +278,47 @@ def _prepared_file(nonce: str, file: _FileDiff, counts: Counter[str]) -> list[by
             replaced[old_index], replaced[new_index] = old_lines, new_lines
             counts["condensed"] += 2
     return [
-        item if isinstance(item, bytes) else item.encode("utf-8", "surrogateescape")
+        (line.kind, item if isinstance(item, bytes) else item.encode("utf-8", "surrogateescape"))
         for index, line in enumerate(file.lines)
         for item in replaced.get(index) or _prepared_line(nonce, line, counts)
     ]
+
+
+def deleted_lines(lines: Iterable[PreparedLine]) -> bytes:
+    """Return the removed lines of a diff without their ``-`` sign.
+
+    A line's kind comes from the hunk it is in, so a removed line that starts with ``-- `` is
+    kept, and a ``--- a/<path>`` file header is not taken for one.
+    """
+    return b"".join(raw[1:] + b"\n" for kind, raw in lines if kind == "old")
+
+
+def changed_files(repository: Path, base_sha: str, merge_sha: str) -> list[dict[str, str | None]]:
+    """Return every file the diff changes, as ``{path, previous_path}`` with the old path of a rename.
+
+    The workflow runs ``git diff --find-renames`` on the same two commits for the exact diff, so
+    both list the same files and pair the same renames.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--name-status", "-z", "--find-renames", base_sha, merge_sha],
+        cwd=repository,
+        capture_output=True,
+        check=False,
+    )
+    fields = result.stdout.decode("utf-8", "surrogateescape").split("\0")
+    if result.returncode or fields.pop() != "":
+        msg = "The changed files of the diff cannot be listed."
+        raise SystemExit(msg)
+    records: list[dict[str, str | None]] = []
+    items = iter(fields)
+    for status in items:
+        # A rename or copy names the old path, then the new one; any other change names one path.
+        previous = next(items, None) if status.startswith(("R", "C")) else None
+        if (path := next(items, None)) is None:
+            msg = "The changed files of the diff cannot be listed."
+            raise SystemExit(msg)
+        records.append({"path": path, "previous_path": previous})
+    return records
 
 
 def is_generated(path: str) -> bool:
@@ -342,8 +393,7 @@ def _registry_names(repository: Path, revision: str) -> list[Names | None]:
 
 def baseline_tag(repository: Path, base_sha: str, releases: list[object]) -> str:
     """Return the newest published release tag that is an ancestor of the base commit, or ''."""
-    tags = published_versions(release for release in releases if isinstance(release, dict))
-    for _, tag in sorted(tags.items(), reverse=True):
+    for _, tag in published_versions(release for release in releases if isinstance(release, dict)):
         result = subprocess.run(
             ["git", "merge-base", "--is-ancestor", f"refs/tags/{tag}", base_sha],
             cwd=repository,
@@ -397,6 +447,22 @@ def baseline_section(repository: Path, merge_sha: str, tag: str) -> str:
     )
 
 
+def experimental_section(repository: Path) -> str:
+    """Return the context section with the experimental features that the trusted checkout lists."""
+    try:
+        page = (repository / EXPERIMENTAL_PAGE).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return (
+            "\n## Experimental Features\n\nNo feature is experimental: the trusted checkout has no "
+            f"`{EXPERIMENTAL_PAGE}`.\n"
+        )
+    fence = "`" * max([3, *(len(run) + 1 for run in BACKTICK_RUN.findall(page))])
+    return (
+        f"\n## Experimental Features\n\nThe experimental features are the ones `{EXPERIMENTAL_PAGE}` of the "
+        f"trusted checkout lists. The page follows.\n\n{fence}markdown\n{page.strip()}\n{fence}\n"
+    )
+
+
 def _diff_section(
     nonce: str,
     exact: tuple[int, int, int],
@@ -444,28 +510,37 @@ def main(argv: list[str] | None = None) -> None:
     prepared = [_prepared_file(args.nonce, file, counts) for file in files]
     summarised = []
     if (
-        _measure([line for lines in prepared for line in lines])[0] > BUDGET_CHARACTERS
+        _measure([raw for lines in prepared for _, raw in lines])[0] > BUDGET_CHARACTERS
         or sum(map(len, prepared)) > BUDGET_LINES
     ):
         for index, file in enumerate(files):
             if is_generated(file.path):
-                prepared[index] = [_summary_line(args.nonce, file)]
+                prepared[index] = [("summary", _summary_line(args.nonce, file))]
                 summarised.append(file.path)
     copy = [line for lines in prepared for line in lines]
-    args.claude_diff_path.write_bytes(b"".join(line + b"\n" for line in copy))
-    args.claude_deleted_lines_path.write_bytes(
-        b"".join(
-            line[1:] + b"\n"
-            for line in copy
-            if line.startswith(b"-") and not line.startswith(b"--- ")
-        )
+    exact = [(line.kind, line.raw) for file in files for line in file.lines]
+    args.claude_diff_path.write_bytes(b"".join(raw + b"\n" for _, raw in copy))
+    args.claude_deleted_lines_path.write_bytes(deleted_lines(copy))
+    args.deleted_lines_path.write_bytes(deleted_lines(exact))
+    args.changed_files_path.write_text(
+        "".join(
+            json.dumps(record) + "\n"
+            for record in changed_files(args.repository_path, args.base_sha, args.merge_sha)
+        ),
+        encoding="utf-8",
     )
-    exact = _measure([line.raw for file in files for line in file.lines])
     releases = json_lines(args.releases_path.read_text(encoding="utf-8"))
     tag = baseline_tag(args.repository_path, args.base_sha, releases)
     args.sections_path.write_text(
         baseline_section(args.repository_path, args.merge_sha, tag)
-        + _diff_section(args.nonce, exact, _measure(copy), counts, summarised),
+        + experimental_section(args.repository_path)
+        + _diff_section(
+            args.nonce,
+            _measure([raw for _, raw in exact]),
+            _measure([raw for _, raw in copy]),
+            counts,
+            summarised,
+        ),
         encoding="utf-8",
     )
 

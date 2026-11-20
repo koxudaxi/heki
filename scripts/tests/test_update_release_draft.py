@@ -1,4 +1,4 @@
-"""Tests of `update_release_draft.py`: the next version, the accumulated draft body, and the comments."""
+"""Tests of `update_release_draft.py`: the next version, the accumulated draft body, the comments, and the labels."""
 
 from __future__ import annotations
 
@@ -46,10 +46,16 @@ def released(
 
 
 def merged(
-    number: int, *, title: str = "A change", labels: tuple[str, ...] = (), content: str = ""
+    number: int,
+    *,
+    title: str = "A change",
+    labels: tuple[str, ...] = (),
+    content: str = "",
+    experimental: str = "",
+    comment_id: int | None = None,
 ) -> update.MergedPullRequest:
-    analysis = update.Analysis(bool(content), content, "Reasoning.")
-    return update.MergedPullRequest(number, title, frozenset(labels), analysis)
+    analysis = update.Analysis(bool(content), content, experimental, "Reasoning.")
+    return update.MergedPullRequest(number, title, frozenset(labels), analysis, comment_id)
 
 
 BREAKING_CONTENT = (
@@ -179,16 +185,70 @@ def test_a_pull_request_analyzed_again_replaces_its_items() -> None:
     assert update.render_body(again, None) == "## Changes\n\n* A change (#6)\n* New title (#5)\n"
 
 
+def test_changes_to_experimental_features_accumulate_in_their_own_section() -> None:
+    first = update.render_body(
+        update.merge_pull_requests(
+            update.parse_body(""),
+            [merged(5, experimental="* `EFF101` is new - A rule (#5)\n")],
+        ),
+        None,
+    )
+    assert first == (
+        "## Experimental\n\n* `EFF101` is new - A rule (#5)\n\n## Changes\n\n* A change (#5)\n"
+    )
+    later = update.merge_pull_requests(
+        update.parse_body(first),
+        [
+            merged(
+                6,
+                content=BREAKING_CONTENT.format(n=6),
+                experimental="* `EFF101` reports less - Fewer reports (#6)\n",
+            )
+        ],
+    )
+    assert update.render_body(later, None) == (
+        "## Breaking Changes\n\n"
+        "### Configuration and CLI Changes\n"
+        "* Option renamed - The option `--a` is now `--b` (#6)\n\n"
+        "## Experimental\n\n"
+        "* `EFF101` is new - A rule (#5)\n"
+        "* `EFF101` reports less - Fewer reports (#6)\n\n"
+        "## Changes\n\n"
+        "* A change (#5)\n"
+        "* A change (#6)\n"
+    )
+    again = update.merge_pull_requests(update.parse_body(first), [merged(5)])
+    assert update.render_body(again, None) == "## Changes\n\n* A change (#5)\n"
+
+
+def test_experimental_changes_do_not_bump_the_minor_version(tmp_path: Path) -> None:
+    declared = update.manifest_versions(write_manifests(tmp_path, "0.1.0"))
+    plan, version = update.plan(
+        [merged(5, experimental="* `EFF101` reports less - Fewer reports (#5)\n")],
+        [released("v0.1.0")],
+        declared,
+    )
+    assert version == (0, 1, 1)
+    assert plan.breaking_prs == []
+    assert plan.comments[5] == (
+        f"{update.COMMENT_MARKER}\n## Breaking change analysis\n\nResult: no breaking changes found.\n\n"
+        "Reasoning: Reasoning.\n\n"
+        "These changes to experimental features are in the Experimental section of the draft release v0.1.1:\n\n"
+        "* `EFF101` reports less - Fewer reports (#5)\n\n"
+        "---\nWritten by the Release Draft workflow.\n"
+    )
+
+
 def test_the_body_merge_keeps_what_the_owner_wrote() -> None:
+    analysis_31 = json.loads((DATA / "analysis-31.json").read_text(encoding="utf-8"))
     pulls = [
         merged(
             31,
             title=json.loads((DATA / "prs.jsonl").read_text(encoding="utf-8").splitlines()[0])[
                 "title"
             ],
-            content=json.loads((DATA / "analysis-31.json").read_text(encoding="utf-8"))[
-                "breaking_changes_content"
-            ],
+            content=analysis_31["breaking_changes_content"],
+            experimental=analysis_31["experimental_changes_content"],
         ),
         merged(32, labels=("maintenance",)),
     ]
@@ -227,12 +287,15 @@ def test_a_breaking_change_moves_the_draft_to_the_next_minor_version(tmp_path: P
     assert version == (0, 2, 0)
     assert plan.release_id == 77
     assert plan.release["tag_name"] == plan.release["name"] == "v0.2.0"
+    # An update that lands after the owner published the release must not unpublish it.
+    assert "draft" not in plan.release
     assert "target_commitish" not in plan.release
     assert plan.release["body"].startswith(
         "Before publishing this draft, bump the version to 0.2.0 "
     )
     assert plan.breaking_prs == [6]
     assert plan.comments[6] == (
+        f"{update.COMMENT_MARKER}\n"
         "## Breaking change analysis\n\n"
         "Result: breaking changes found. The pull request is labeled `breaking-change`.\n\n"
         "Reasoning: Reasoning.\n\n"
@@ -254,9 +317,57 @@ def test_a_non_breaking_comment(tmp_path: Path) -> None:
     declared = update.manifest_versions(write_manifests(tmp_path, "0.1.0"))
     plan, _ = update.plan([merged(5)], [released("v0.1.0")], declared)
     assert plan.comments[5] == (
+        f"{update.COMMENT_MARKER}\n"
         "## Breaking change analysis\n\nResult: no breaking changes found.\n\nReasoning: Reasoning.\n\n"
         "---\nWritten by the Release Draft workflow.\n"
     )
+
+
+def test_a_pull_request_found_not_breaking_loses_the_label(tmp_path: Path) -> None:
+    declared = update.manifest_versions(write_manifests(tmp_path, "0.1.0"))
+    plan, _ = update.plan(
+        [
+            merged(5, labels=("breaking-change", "bug")),
+            merged(6, labels=("breaking-change",), content=BREAKING_CONTENT.format(n=6)),
+            merged(7, labels=("bug",)),
+        ],
+        [released("v0.1.0")],
+        declared,
+    )
+    assert plan.breaking_prs == [6]
+    assert plan.stale_breaking_prs == [5]
+
+
+COMMENT = {"id": 900, "author": update.WORKFLOW_AUTHOR, "body": f"{update.COMMENT_MARKER}\nOld."}
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        pytest.param([], None, id="no comments"),
+        pytest.param([COMMENT], 900, id="the workflow's comment"),
+        pytest.param([COMMENT | {"author": "someone"}], None, id="another author"),
+        pytest.param([COMMENT | {"author": None}], None, id="a deleted account"),
+        pytest.param(
+            [COMMENT | {"body": f"Quoted: {update.COMMENT_MARKER}"}], None, id="marker not first"
+        ),
+        pytest.param(
+            [COMMENT | {"body": "## Breaking change analysis"}], None, id="without the marker"
+        ),
+        pytest.param([COMMENT | {"id": 950}, COMMENT], 900, id="the oldest of two"),
+    ],
+)
+def test_the_earlier_analysis_comment_is_found(records: list[dict], expected: int | None) -> None:
+    assert update.analysis_comment_id(records) == expected
+
+
+@pytest.mark.parametrize(
+    "record",
+    [COMMENT | {"id": True}, COMMENT | {"id": "900"}, COMMENT | {"body": None}, {"id": 900}],
+)
+def test_an_unexpected_comment_record_stops_the_plan(record: dict) -> None:
+    with pytest.raises(SystemExit):
+        update.analysis_comment_id([record])
 
 
 def test_drafts_and_pre_releases_are_no_baseline(tmp_path: Path) -> None:
@@ -289,13 +400,25 @@ def test_without_a_published_release_there_is_no_plan(tmp_path: Path) -> None:
 
 
 def run_cli(
-    tmp_path: Path, numbers: list[str], releases: list[dict[str, Any]], *, prs: str | None = None
+    tmp_path: Path,
+    numbers: list[str],
+    releases: list[dict[str, Any]],
+    *,
+    prs: str | None = None,
+    comments: dict[str, list[dict[str, Any]]] | None = None,
 ):
     analyses = tmp_path / "analyses"
     analyses.mkdir(exist_ok=True)
     for path in DATA.glob("analysis-*.json"):
         if not (analyses / path.name).exists():
             shutil.copy(path, analyses)
+    comments_dir = tmp_path / "comments"
+    comments_dir.mkdir(exist_ok=True)
+    for number in numbers:
+        (comments_dir / f"comments-{number}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in (comments or {}).get(number, [])),
+            encoding="utf-8",
+        )
     prs_path = tmp_path / "prs.jsonl"
     prs_path.write_text(
         prs if prs is not None else (DATA / "prs.jsonl").read_text(encoding="utf-8"),
@@ -314,6 +437,8 @@ def run_cli(
         str(analyses),
         "--prs-path",
         str(prs_path),
+        "--comments-dir",
+        str(comments_dir),
         "--releases-path",
         str(releases_path),
         "--plan-dir",
@@ -329,14 +454,22 @@ def run_cli(
 def test_the_cli_writes_the_planned_requests(tmp_path: Path) -> None:
     body = (DATA / "draft-body.md").read_text(encoding="utf-8")
     releases = [released("v0.1.1", draft=True, body=body, id=500), released("v0.1.0", id=400)]
+    # The comment bodies are untrusted text: U+0085 inside one must not split its record.
+    comments = {
+        "32": [
+            {"id": 7, "author": "someone", "body": "Looks good\u0085to me"},
+            COMMENT | {"id": 8},
+        ]
+    }
 
-    result, values = run_cli(tmp_path, ["31", "32", "33"], releases)
+    result, values = run_cli(tmp_path, ["31", "32", "33"], releases, comments=comments)
 
     assert result.returncode == 0, result.stderr
     assert values == {
         "release_id": "500",
         "tag": "v0.2.0",
         "breaking_prs": "31",
+        "stale_breaking_prs": "",
         "pr_numbers": "31 32 33",
     }
     release = json.loads((tmp_path / "plan/release.json").read_text(encoding="utf-8"))
@@ -344,16 +477,20 @@ def test_the_cli_writes_the_planned_requests(tmp_path: Path) -> None:
         "tag_name": "v0.2.0",
         "name": "v0.2.0",
         "body": (DATA / "expected-body.md").read_text(encoding="utf-8"),
-        "draft": True,
     }
+    assert {
+        n: (tmp_path / f"plan/comment-{n}.id").read_text(encoding="utf-8") for n in (31, 32, 33)
+    } == {31: "\n", 32: "8\n", 33: "\n"}
     comments = {
         n: json.loads((tmp_path / f"plan/comment-{n}.json").read_text(encoding="utf-8"))
         for n in (31, 32, 33)
     }
     assert comments[32]["body"].startswith(
-        "## Breaking change analysis\n\nResult: no breaking changes found."
+        f"{update.COMMENT_MARKER}\n## Breaking change analysis\n\nResult: no breaking changes found."
     )
     assert "Draft release: update release 500 as v0.2.0 (version 0.2.0)." in result.stdout
+    assert "----- comment on #32 (update of comment 8) -----" in result.stdout
+    assert "----- comment on #33 (new comment) -----" in result.stdout
     assert "Breaking changes in: #31." in result.stdout
 
 
@@ -387,6 +524,7 @@ def test_the_cli_validates_the_analyses_again(tmp_path: Path) -> None:
             {
                 "has_breaking_changes": True,
                 "breaking_changes_content": "* Not under a heading (#31)",
+                "experimental_changes_content": "",
                 "reasoning": "x",
             }
         ),

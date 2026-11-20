@@ -10,6 +10,11 @@ A note the owner wrote by hand.
 ### Hand-written Heading
 * A change the owner described - Kept as written (#28)
 
+## Experimental
+
+* `EFF101` is new - An experimental rule for blocking calls in coroutines (#29)
+* `EFF101` reports `open` - Replaced when #31 is analyzed again (#31)
+
 ## Changes
 
 * Rename --watch (#30)

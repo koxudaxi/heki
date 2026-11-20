@@ -1,9 +1,10 @@
 """Validate Claude's release draft analysis before anything reaches a label, a comment, or the draft.
 
-The structured output must match the schema exactly, its Markdown must stay in a narrow inert
-format, every claimed removal must appear among the diff's deleted lines, and the execution
-record must show that Claude read the whole analysis context and diff and that its one attempt
-to read the read-boundary marker was denied. Any doubt stops the workflow.
+The structured output must match the schema exactly, its Markdown (the breaking changes and the
+changes to experimental features) must stay in a narrow inert format, every claimed removal must
+appear among the diff's deleted lines, and the execution record must show that Claude read the
+whole analysis context and diff and that its one attempt to read the read-boundary marker was
+denied. Any doubt stops the workflow.
 """
 
 from __future__ import annotations
@@ -13,14 +14,23 @@ import json
 import os
 import re
 import unicodedata
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from release_draft_common import BREAKING_CHANGE_HEADINGS, fail
 
 ALLOWED_BREAKING_CHANGE_HEADINGS = frozenset(BREAKING_CHANGE_HEADINGS)
-EXPECTED_FIELDS = frozenset({"has_breaking_changes", "breaking_changes_content", "reasoning"})
+EXPECTED_FIELDS = frozenset(
+    {
+        "has_breaking_changes",
+        "breaking_changes_content",
+        "experimental_changes_content",
+        "reasoning",
+    }
+)
 MAX_BREAKING_CHANGES_CONTENT_LENGTH = 20_000
+MAX_EXPERIMENTAL_CHANGES_CONTENT_LENGTH = 20_000
 MAX_REASONING_LENGTH = 4_000
 EM_DASH = "\N{EM DASH}"
 SAME_CLAUSE = r"(?:(?!`|;|:|\s-\s|\.(?:\s|$)|\b(?:when|if|while|unless|with|under|using)\b).){0,80}"
@@ -58,6 +68,16 @@ INLINE_CODE_OR_ACTIVE_MARKDOWN_RE = re.compile(
 )
 ITEM_TITLE_START_RE = re.compile(r"(?:[A-Za-z]|`[A-Za-z0-9_.:/-]+`)")
 PLAIN_TEXT_MARKDOWN_RE = re.compile(r"[\[\]<>@#]")
+
+
+@dataclass(frozen=True)
+class Analysis:
+    """The fields of one pull request's analysis, as the schema defines them."""
+
+    has_breaking_changes: bool
+    breaking_changes_content: str
+    experimental_changes_content: str
+    reasoning: str
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -318,25 +338,27 @@ def validate_execution_evidence(
         fail("Claude did not completely read all prepared artifacts; refusing to update the draft.")
 
 
-def validate_structured_output(claude_output: dict[str, Any]) -> tuple[bool, str, str]:
+def validate_structured_output(claude_output: dict[str, Any]) -> Analysis:
     """Require the schema's exact, bounded primitive fields."""
     if set(claude_output) != EXPECTED_FIELDS:
         fail("Claude structured output has an unexpected schema; refusing to update the draft.")
-    has_breaking_changes = claude_output["has_breaking_changes"]
-    breaking_changes_content = claude_output["breaking_changes_content"]
-    reasoning = claude_output["reasoning"]
-    if (
-        not isinstance(has_breaking_changes, bool)
-        or not isinstance(breaking_changes_content, str)
-        or not isinstance(reasoning, str)
+    analysis = Analysis(**claude_output)
+    if not isinstance(analysis.has_breaking_changes, bool) or not all(
+        isinstance(text, str)
+        for text in (
+            analysis.breaking_changes_content,
+            analysis.experimental_changes_content,
+            analysis.reasoning,
+        )
     ):
         fail("Claude structured output has invalid field types; refusing to update the draft.")
     if (
-        len(breaking_changes_content) > MAX_BREAKING_CHANGES_CONTENT_LENGTH
-        or len(reasoning) > MAX_REASONING_LENGTH
+        len(analysis.breaking_changes_content) > MAX_BREAKING_CHANGES_CONTENT_LENGTH
+        or len(analysis.experimental_changes_content) > MAX_EXPERIMENTAL_CHANGES_CONTENT_LENGTH
+        or len(analysis.reasoning) > MAX_REASONING_LENGTH
     ):
         fail("Claude structured output exceeds its size limit; refusing to update the draft.")
-    return has_breaking_changes, breaking_changes_content, reasoning
+    return analysis
 
 
 def _validate_text_characters(text: str, *, allowed_controls: frozenset[str]) -> None:
@@ -372,11 +394,32 @@ def _validate_no_fenced_code(line: str) -> None:
         fail("Claude output contains a fenced code block; refusing to update the draft.")
 
 
+def _validate_item(line: str, pr_number: int, what: str) -> None:
+    """Require one ``* <title> - <details> (#<number>)`` item of inert Markdown."""
+    pr_suffix = f" (#{pr_number})"
+    if not line.startswith("* ") or not line.endswith(pr_suffix):
+        fail(f"Claude output has an invalid {what} item; refusing to update the draft.")
+    item = line.removeprefix("* ").removesuffix(pr_suffix)
+    title, separator, details = item.partition(" - ")
+    if (
+        not item
+        or item != item.strip()
+        or "#" in item
+        or not separator
+        or not title
+        or not details
+        or title != title.strip()
+        or details != details.strip()
+        or not ITEM_TITLE_START_RE.match(title)
+    ):
+        fail(f"Claude output has an empty or malformed {what} item; refusing to update the draft.")
+    _validate_no_active_markdown(line)
+
+
 def _validate_release_note_structure(breaking_changes_content: str, pr_number: int) -> None:
     """Require the narrow, inert release-note Markdown that the draft merge expects."""
     current_heading: str | None = None
     items_by_heading: dict[str, int] = {}
-    pr_suffix = f" (#{pr_number})"
 
     for line in breaking_changes_content.splitlines():
         if not line.strip():
@@ -394,62 +437,58 @@ def _validate_release_note_structure(breaking_changes_content: str, pr_number: i
             continue
         if line.startswith("#"):
             fail("Claude output has an unexpected heading; refusing to update the draft.")
-        if current_heading is None or not line.startswith("* ") or not line.endswith(pr_suffix):
+        if current_heading is None:
             fail("Claude output has an invalid breaking-change item; refusing to update the draft.")
-        item = line.removeprefix("* ").removesuffix(pr_suffix)
-        title, separator, details = item.partition(" - ")
-        if (
-            not item
-            or item != item.strip()
-            or "#" in item
-            or not separator
-            or not title
-            or not details
-            or title != title.strip()
-            or details != details.strip()
-            or not ITEM_TITLE_START_RE.match(title)
-        ):
-            fail(
-                "Claude output has an empty or malformed breaking-change item; refusing to update the draft."
-            )
-        _validate_no_active_markdown(line)
+        _validate_item(line, pr_number, "breaking-change")
         items_by_heading[current_heading] += 1
 
     if not items_by_heading or not all(items_by_heading.values()):
         fail("Claude output has an empty breaking-change section; refusing to update the draft.")
 
 
-def validate_content_format(
-    *, has_breaking_changes: bool, breaking_changes_content: str, pr_number: int
-) -> None:
+def _validate_experimental_items(experimental_changes_content: str, pr_number: int) -> None:
+    """Require the changes to experimental features to be items under no heading.
+
+    The draft lists them in its own ``## Experimental`` section, which has no subheadings.
+    """
+    if not experimental_changes_content.strip():
+        fail("Claude output has experimental changes without items; refusing to update the draft.")
+    for line in experimental_changes_content.splitlines():
+        if not line.strip():
+            continue
+        _validate_no_fenced_code(line)
+        _validate_inline_code(line)
+        if line.startswith("#"):
+            fail(
+                "Claude output has a heading among the experimental changes; refusing to update the draft."
+            )
+        _validate_item(line, pr_number, "experimental-change")
+
+
+def validate_content_format(analysis: Analysis, pr_number: int) -> None:
     """Validate cross-field coherence and the constrained Markdown of the release-note items."""
-    _validate_text_characters(breaking_changes_content, allowed_controls=frozenset({"\n"}))
-    if not has_breaking_changes:
-        if breaking_changes_content:
+    for content in (analysis.breaking_changes_content, analysis.experimental_changes_content):
+        _validate_text_characters(content, allowed_controls=frozenset({"\n"}))
+    if analysis.experimental_changes_content:
+        _validate_experimental_items(analysis.experimental_changes_content, pr_number)
+    if not analysis.has_breaking_changes:
+        if analysis.breaking_changes_content:
             fail(
                 "Non-breaking analysis included release-note content; refusing to update the draft."
             )
         return
-    if not breaking_changes_content.strip():
+    if not analysis.breaking_changes_content.strip():
         fail("Breaking analysis omitted release-note content; refusing to update the draft.")
-    _validate_release_note_structure(breaking_changes_content, pr_number)
+    _validate_release_note_structure(analysis.breaking_changes_content, pr_number)
 
 
-def validate_breaking_changes_content(
-    *,
-    has_breaking_changes: bool,
-    breaking_changes_content: str,
-    deleted_lines_path: Path,
-    pr_number: int,
-) -> None:
+def validate_release_notes(analysis: Analysis, deleted_lines_path: Path, pr_number: int) -> None:
     """Validate the release-note items, and their removal claims against the exact diff."""
-    validate_content_format(
-        has_breaking_changes=has_breaking_changes,
-        breaking_changes_content=breaking_changes_content,
-        pr_number=pr_number,
+    validate_content_format(analysis, pr_number)
+    _validate_removal_claims(
+        f"{analysis.breaking_changes_content}\n{analysis.experimental_changes_content}",
+        deleted_lines_path,
     )
-    if has_breaking_changes:
-        _validate_removal_claims(breaking_changes_content, deleted_lines_path)
 
 
 def validate_reasoning(reasoning: str) -> None:
@@ -500,17 +539,21 @@ def token_present(token: str, deleted_lines: str) -> bool:
     return bool(re.search(f"{before}{re.escape(text)}{after}", deleted_lines))
 
 
-def _validate_removal_claims(breaking_changes_content: str, deleted_lines_path: Path) -> None:
+def _validate_removal_claims(release_notes: str, deleted_lines_path: Path) -> None:
     """Validate explicit removal claims against the trusted deleted diff lines."""
     claims = [
         (line, token)
-        for line in breaking_changes_content.splitlines()
+        for line in release_notes.splitlines()
         for token in _claimed_removed_tokens(line)
     ]
     if not claims:
         return
+    # The diff keeps a file's bytes as they are; a claimed token is text, so a byte that is not
+    # UTF-8 can only fail to match, never stop the check.
     deleted_lines = (
-        deleted_lines_path.read_text(encoding="utf-8") if deleted_lines_path.exists() else ""
+        deleted_lines_path.read_text(encoding="utf-8", errors="replace")
+        if deleted_lines_path.exists()
+        else ""
     )
     if not deleted_lines.strip():
         fail(
@@ -538,31 +581,15 @@ def main(argv: list[str] | None = None) -> None:
     execution_messages = _read_execution_messages(args.execution_path)
     raw_output = os.environ.get("CLAUDE_OUTPUT", "")
     _validate_marker_not_leaked(marker, raw_output)
-    has_breaking_changes, breaking_changes_content, reasoning = validate_structured_output(
-        parse_claude_output(raw_output)
-    )
+    analysis = validate_structured_output(parse_claude_output(raw_output))
     validate_execution_evidence(
         execution_messages, args.marker_path, args.analysis_context_path, args.diff_path
     )
-    _validate_diff_was_read(reasoning)
-    validate_reasoning(reasoning)
-    validate_breaking_changes_content(
-        has_breaking_changes=has_breaking_changes,
-        breaking_changes_content=breaking_changes_content,
-        deleted_lines_path=args.deleted_lines_path,
-        pr_number=args.pr_number,
-    )
+    _validate_diff_was_read(analysis.reasoning)
+    validate_reasoning(analysis.reasoning)
+    validate_release_notes(analysis, args.deleted_lines_path, args.pr_number)
     args.analysis_path.write_text(
-        json.dumps(
-            {
-                "has_breaking_changes": has_breaking_changes,
-                "breaking_changes_content": breaking_changes_content,
-                "reasoning": reasoning,
-            },
-            ensure_ascii=False,
-        )
-        + "\n",
-        encoding="utf-8",
+        json.dumps(asdict(analysis), ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
 

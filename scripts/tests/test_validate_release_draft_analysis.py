@@ -169,11 +169,13 @@ def output(
     *,
     breaking: bool = True,
     content: str = VALID_CONTENT,
+    experimental: str = "",
     reasoning: str = "The option is renamed.",
 ) -> dict:
     return {
         "has_breaking_changes": breaking,
         "breaking_changes_content": content,
+        "experimental_changes_content": experimental,
         "reasoning": reasoning,
     }
 
@@ -205,6 +207,27 @@ def test_an_empty_result_is_written(artifacts: Artifacts) -> None:
             json.dumps({"has_breaking_changes": True, "reasoning": "x"}),
             "unexpected schema",
             id="missing field",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    key: value
+                    for key, value in output().items()
+                    if key != "experimental_changes_content"
+                }
+            ),
+            "unexpected schema",
+            id="missing experimental changes",
+        ),
+        pytest.param(
+            json.dumps(output() | {"experimental_changes_content": None}),
+            "invalid field types",
+            id="null experimental changes",
+        ),
+        pytest.param(
+            json.dumps(output() | {"experimental_changes_content": "x" * 20_001}),
+            "exceeds its size limit",
+            id="long experimental changes",
         ),
         pytest.param(
             json.dumps(output() | {"has_breaking_changes": "true"}),
@@ -305,6 +328,72 @@ def test_malformed_release_notes_write_nothing(
     assert result.returncode == 1
     assert message in result.stderr
     assert analysis is None
+
+
+EXPERIMENTAL_ITEM = "* `MUT101` reports less - It no longer reports writes in `__init__` (#42)\n"
+
+
+@pytest.mark.parametrize("breaking", [False, True])
+def test_changes_to_experimental_features_are_written(artifacts: Artifacts, breaking: bool) -> None:
+    artifacts.complete_run()
+    value = output(
+        breaking=breaking,
+        content=VALID_CONTENT if breaking else "",
+        experimental=EXPERIMENTAL_ITEM + "\n* Second change - More detail (#42)\n",
+    )
+    result, analysis = artifacts.validate(value)
+    assert result.returncode == 0, result.stderr
+    assert analysis == value
+
+
+@pytest.mark.parametrize(
+    ("experimental", "message"),
+    [
+        pytest.param(
+            "### Default Rule Changes\n" + EXPERIMENTAL_ITEM,
+            "heading among the experimental changes",
+            id="heading",
+        ),
+        pytest.param(
+            "* Title - Detail (#41)\n", "invalid experimental-change item", id="other number"
+        ),
+        pytest.param("Title - Detail (#42)\n", "invalid experimental-change item", id="no bullet"),
+        pytest.param(
+            "* Title only (#42)\n", "malformed experimental-change item", id="no separator"
+        ),
+        pytest.param("* Title - See [docs](x) (#42)\n", "active Markdown", id="link"),
+        pytest.param("* Title - ```x``` (#42)\n", "fenced code block", id="fence"),
+        pytest.param("* Title — more - Detail (#42)\n", "em dash", id="em dash"),
+        pytest.param("\n", "experimental changes without items", id="blank"),
+        pytest.param(
+            "* Option removed - The option `--follow` was removed (#42)\n",
+            "claims removals that are not deleted lines",
+            id="removal that is not a deleted line",
+        ),
+    ],
+)
+def test_malformed_experimental_changes_write_nothing(
+    artifacts: Artifacts, experimental: str, message: str
+) -> None:
+    artifacts.complete_run()
+    result, analysis = artifacts.validate(
+        output(breaking=False, content="", experimental=experimental)
+    )
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert analysis is None
+
+
+def test_deleted_lines_that_are_not_utf8_are_still_checked(artifacts: Artifacts) -> None:
+    """The exact diff keeps a Latin-1 file's bytes; a removal claim is checked, not a traceback."""
+    artifacts.deleted.write_bytes(b"caf\xe9 = 1\n    --watch\n")
+    artifacts.complete_run()
+    removed = "### Configuration and CLI Changes\n* Option removed - The option `--watch` was removed (#42)\n"
+    result, _ = artifacts.validate(output(content=removed))
+    assert result.returncode == 0, result.stderr
+    result, _ = artifacts.validate(output(content=removed.replace("--watch", "--follow")))
+    assert result.returncode == 1
+    assert "claims removals that are not deleted lines" in result.stderr
 
 
 def test_inline_code_may_hold_brackets(artifacts: Artifacts) -> None:
@@ -441,6 +530,10 @@ def test_the_schema_matches_the_validator() -> None:
         schema["properties"]["breaking_changes_content"]["maxLength"]
         == validator.MAX_BREAKING_CHANGES_CONTENT_LENGTH
     )
+    assert (
+        schema["properties"]["experimental_changes_content"]["maxLength"]
+        == validator.MAX_EXPERIMENTAL_CHANGES_CONTENT_LENGTH
+    )
     assert schema["properties"]["reasoning"]["maxLength"] == validator.MAX_REASONING_LENGTH
 
 
@@ -456,7 +549,21 @@ def test_the_schema_matches_the_validator() -> None:
         (output(reasoning="A change — small"), False),
         (output(reasoning="Ask @someone"), False),
         (output(content="x" * 20_001), False),
-        ({"has_breaking_changes": "yes", "breaking_changes_content": "", "reasoning": "x"}, False),
+        (output(experimental=EXPERIMENTAL_ITEM), True),
+        (output(experimental="x" * 20_001), False),
+        (
+            {"has_breaking_changes": False, "breaking_changes_content": "", "reasoning": "x"},
+            False,
+        ),
+        (
+            {
+                "has_breaking_changes": "yes",
+                "breaking_changes_content": "",
+                "experimental_changes_content": "",
+                "reasoning": "x",
+            },
+            False,
+        ),
     ],
 )
 def test_the_schema_rejects_what_the_validator_rejects(value: dict[str, Any], valid: bool) -> None:

@@ -55,18 +55,23 @@ def format_version(version: Version) -> str:
     return ".".join(map(str, version))
 
 
-def published_versions(releases: Iterable[Mapping[str, Any]]) -> dict[Version, str]:
-    """Map the version of every published, final release to its tag.
+def published_versions(releases: Iterable[Mapping[str, Any]]) -> list[tuple[Version, str]]:
+    """Return the version and tag of every published, final release, the newest version first.
 
-    Drafts and pre-releases do not count: neither is a release users received as final.
+    Drafts and pre-releases do not count: neither is a release users received as final. Two tags
+    can name one version (``v0.2.0`` and ``0.2.0``), and both are kept: either may be the one an
+    ancestry check finds.
     """
-    return {
-        version: release["tag_name"]
-        for release in releases
-        if release.get("draft") is False
-        and release.get("prerelease") is False
-        and (version := parse_version(release.get("tag_name")))
-    }
+    return sorted(
+        (
+            (version, release["tag_name"])
+            for release in releases
+            if release.get("draft") is False
+            and release.get("prerelease") is False
+            and (version := parse_version(release.get("tag_name")))
+        ),
+        reverse=True,
+    )
 
 
 def gh_api(endpoint: str, *, paginate: bool = False, jq: str | None = None) -> str:
@@ -93,8 +98,12 @@ def gh_api_json(endpoint: str) -> Any:
 
 
 def json_lines(text: str) -> list[Any]:
-    """Parse one JSON value per non-empty line, as `gh api --jq '.[] | ...'` prints them."""
+    """Parse one JSON value per non-empty line, as `gh api --jq '.[] | ...'` prints them.
+
+    Only LF ends a record: the encoder leaves characters such as U+0085 unescaped inside strings,
+    and `str.splitlines` would split there.
+    """
     try:
-        return [json.loads(line) for line in text.splitlines() if line.strip()]
+        return [json.loads(line) for line in text.split("\n") if line.strip()]
     except ValueError:
         fail("Expected one JSON value per line.")

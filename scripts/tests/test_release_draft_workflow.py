@@ -10,13 +10,23 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from helpers import ROOT, Repository
+from helpers import ROOT, FakeGitHub, Repository
 from release_draft_common import ANALYZED_LABEL, BREAKING_LABEL
 
 yaml = pytest.importorskip("yaml")
 
 WORKFLOW_PATH = ROOT / ".github/workflows/release-draft.yml"
 WRITE_GUARD = "github.ref == 'refs/heads/main' && !inputs.dry_run"
+WRITE_CONDITIONS = {
+    "Create or update the draft release": WRITE_GUARD,
+    "Label breaking pull requests": f"{WRITE_GUARD} && steps.plan.outputs.breaking_prs != ''",
+    "Unlabel pull requests found not breaking": (
+        f"{WRITE_GUARD} && steps.plan.outputs.stale_breaking_prs != ''"
+    ),
+    "Comment the analysis on each pull request": WRITE_GUARD,
+    "Mark the pull requests analyzed": WRITE_GUARD,
+}
+"""The exact condition of every step that writes: a clause appended with `||` would bypass the guard."""
 PINNED = re.compile(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}")
 
 
@@ -46,21 +56,20 @@ def test_triggers(workflow: dict[str, Any]) -> None:
     assert workflow["concurrency"]["queue"] == "max"
 
 
+def step(workflow: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(step for _, step in all_steps(workflow) if step.get("name") == name)
+
+
 def test_every_write_is_skipped_off_main_and_in_a_dry_run(workflow: dict[str, Any]) -> None:
     writes = [
         (job, step["name"])
         for job, step in all_steps(workflow)
         if re.search(r"--method\s+(POST|PATCH|PUT|DELETE)", step.get("run", ""))
     ]
-    assert writes == [
-        ("update-draft", "Create or update the draft release"),
-        ("update-draft", "Label breaking pull requests"),
-        ("update-draft", "Comment the analysis on each pull request"),
-        ("update-draft", "Mark the pull requests analyzed"),
-    ]
+    assert writes == [("update-draft", name) for name in WRITE_CONDITIONS]
     for job, step in all_steps(workflow):
         if (job, step.get("name")) in writes:
-            assert step["if"].startswith(WRITE_GUARD), step["name"]
+            assert step["if"] == WRITE_CONDITIONS[step["name"]], step["name"]
         else:
             assert not re.search(r"\bgh\s+(release|pr|issue|label)\b", step.get("run", "")), (
                 step.get("name")
@@ -80,7 +89,38 @@ def test_only_the_update_job_may_write(workflow: dict[str, Any]) -> None:
 def test_labels_match_the_scripts(workflow: dict[str, Any]) -> None:
     steps = {step["name"]: step for _, step in all_steps(workflow)}
     assert f"'labels[]={BREAKING_LABEL}'" in steps["Label breaking pull requests"]["run"]
+    assert (
+        f'/labels/{BREAKING_LABEL}" --silent'
+        in steps["Unlabel pull requests found not breaking"]["run"]
+    )
     assert f"'labels[]={ANALYZED_LABEL}'" in steps["Mark the pull requests analyzed"]["run"]
+
+
+def test_an_earlier_analysis_comment_is_updated(workflow: dict[str, Any], tmp_path: Path) -> None:
+    plan = tmp_path / "plan"
+    plan.mkdir()
+    for number, comment_id in (("5", "77"), ("6", "")):
+        (plan / f"comment-{number}.json").write_text('{"body": "x"}\n', encoding="utf-8")
+        (plan / f"comment-{number}.id").write_text(f"{comment_id}\n", encoding="utf-8")
+    github = FakeGitHub(tmp_path / "fake-gh")
+    github.respond("/repos/o/r/issues/comments/77", {})
+    github.respond("/repos/o/r/issues/6/comments", {})
+
+    result = subprocess.run(
+        ["bash", "-c", step(workflow, "Comment the analysis on each pull request")["run"]],
+        env={
+            **github.environment(),
+            "GITHUB_REPOSITORY": "o/r",
+            "PR_NUMBERS": "5 6",
+            "PLAN_DIR": str(plan),
+        },
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert github.requests() == ["/repos/o/r/issues/comments/77", "/repos/o/r/issues/6/comments"]
 
 
 def test_every_action_is_pinned_by_commit(workflow: dict[str, Any]) -> None:

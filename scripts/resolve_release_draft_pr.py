@@ -51,7 +51,6 @@ class MergedPullRequest:
     number: int
     merge_sha: str
     base_sha: str
-    changed_files: int
 
 
 @dataclass(frozen=True)
@@ -60,7 +59,6 @@ class PullRequest:
 
     number: int
     merge_sha: str
-    changed_files: int
     commits: int
     analyzed: bool
 
@@ -160,7 +158,6 @@ def validate_pull_request(payload: Any, number: int, repository: str) -> PullReq
             "number": int(payload_number),
             "merged": True,
             "merge_commit_sha": str(merge_sha),
-            "changed_files": int(changed_files),
             "commits": int(commits),
             "base": {"repo": {"full_name": str(base_repository)}},
             "labels": list(labels),
@@ -169,8 +166,6 @@ def validate_pull_request(payload: Any, number: int, repository: str) -> PullReq
             and payload_number == number
             and base_repository == repository
             and COMMIT_SHA.fullmatch(merge_sha)
-            and type(changed_files) is int
-            and changed_files >= 0
             and type(commits) is int
             and commits >= 1
             and all(
@@ -180,7 +175,6 @@ def validate_pull_request(payload: Any, number: int, repository: str) -> PullReq
             return PullRequest(
                 number=number,
                 merge_sha=merge_sha,
-                changed_files=changed_files,
                 commits=commits,
                 analyzed=any(label["name"] == ANALYZED_LABEL for label in labels),
             )
@@ -210,9 +204,7 @@ def diff_base(repository: str, pull: PullRequest) -> str:
 
 
 def _merged_pull_request(repository: str, pull: PullRequest) -> MergedPullRequest:
-    return MergedPullRequest(
-        pull.number, pull.merge_sha, diff_base(repository, pull), pull.changed_files
-    )
+    return MergedPullRequest(pull.number, pull.merge_sha, diff_base(repository, pull))
 
 
 def _fetch_pull_request(repository: str, number: int) -> PullRequest:

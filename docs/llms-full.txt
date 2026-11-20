@@ -2136,17 +2136,34 @@ of the next version. Publishing the draft runs `release.yml`, which builds and p
 
 After each push to `main`, the workflow takes the pull requests merged at the commits the push
 added (several when a stack merges at once). For each one, Claude reads the merged diff and
-decides whether it breaks something the newest published release has: which rules are enabled
-by default, a rule's default severity or what a default rule reports, rule codes or names,
-configuration keys, command-line options, exit codes, the JSON or SARIF output, language server
-behavior, the format of `--fix` rewrites, or the supported Python versions and platforms. New
-opt-in rules and new optional keys are not breaking. The workflow then:
+decides whether it breaks something the newest published release has. A change is breaking
+when:
+
+- existing code gets new reports from the rules enabled by default: a new rule enabled by
+  default, a rule turned on by default, or wider detection in a rule enabled by default;
+- a rule's default severity changes;
+- a rule code or name changes;
+- configuration keys or their meaning, command-line options, or exit codes change;
+- fields of the JSON or SARIF output are removed or change meaning;
+- the language server behavior that editors rely on changes;
+- the format of `--fix` rewrites changes;
+- the supported Python versions or platforms change.
+
+These are not breaking: a change that only removes false reports, in a default or an opt-in rule
+(a fixed false positive); new opt-in rules; new optional keys and new output fields; and any
+change to a feature that `docs/experimental.md` lists. The analysis context that Claude reads
+holds that page as the trusted checkout of `main` has it (while the page does not exist, no
+feature is experimental), and Claude describes each change to an experimental feature
+separately. The workflow then:
 
 - adds the breaking changes to the draft's `## Breaking Changes` section, under one heading per
-  kind, and a line `* <title> (#<number>)` to `## Changes`, except for pull requests labeled
-  `maintenance` or `dependencies`;
+  kind, the changes to experimental features to `## Experimental`, and a line
+  `* <title> (#<number>)` to `## Changes`, except for pull requests labeled `maintenance` or
+  `dependencies`; every item ends with `(#<number>)`;
 - labels a breaking pull request `breaking-change`, comments the result on every pull request,
-  and labels each `breaking-change-analyzed`, so that a re-run skips it.
+  and labels each `breaking-change-analyzed`, so that a re-run skips it. A pull request analyzed
+  again keeps one comment, which is updated, and loses `breaking-change` when it is no longer
+  found breaking.
 
 The draft's tag is the version after the newest published release: a breaking change bumps the
 minor version (0.1.x to 0.2.0), anything else the patch, and manifests that already name a
@@ -2163,7 +2180,11 @@ release come from `CHANGELOG.md`.
    `maintenance` to keep it out of the list of changes. `release.yml` fails when the tag and the
    manifests differ.
 2. Merge it; the workflow removes the first line from the draft.
-3. Publish the draft on GitHub.
+3. Wait until no Release Draft run is queued or in progress
+   (`gh run list --workflow release-draft.yml`), then reload the draft and publish it on GitHub.
+   GitHub cannot make a draft update conditional on the release still being a draft, so a run
+   that updates the draft while it is published rewrites the published tag, title, and notes
+   (the run then warns), and a draft page loaded before the run's update publishes without it.
 
 ### Replays and dry runs
 
@@ -2174,6 +2195,12 @@ $ gh workflow run release-draft.yml --ref <branch> -f pr_number=123 -f dry_run=t
 
 - A replay on `main` analyzes one merged pull request again, for example after a failed run. A
   pull request labeled `breaking-change-analyzed` is skipped: remove the label first.
+- Up to 100 runs wait for the one in progress, in order. GitHub cancels a run that arrives while
+  100 are waiting, and a later run does not take over its pull requests. A canceled run shows in
+  `gh run list --workflow release-draft.yml --status cancelled`. Its pull requests are among those
+  merged after the first published release that still lack `breaking-change-analyzed`
+  (`gh pr list --state merged --search "-label:breaking-change-analyzed merged:>=<first-release-date>"`). Replay
+  each of them, in merge order.
 - A dry run works from any branch, so a change to the workflow can be tried before it is on
   `main`. It prints the analysis, the planned draft, and the comments in the run's log, and
   changes no label, comment, or release. The pull request must be merged into `main`, and a
