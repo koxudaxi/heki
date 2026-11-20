@@ -89,10 +89,11 @@ $ uvx --from "zensical==0.1.2" zensical serve
   stale.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
-  documents the released version. Only the `docs-production` environment holds that
-  deployment's token.
-- A pull request from this repository gets a preview deployment in a separate Cloudflare account
-  (project `heki-preview`).
+  documents the released version. That job runs in the `docs-production` environment, which
+  admits only `main` and release tags.
+- A pull request from this repository gets a preview deployment of the same Pages project, on the
+  branch `pr-<number>`. Both use the repository secrets `CLOUDFLARE_API_TOKEN` and
+  `CLOUDFLARE_ACCOUNT_ID`.
 
 ## Architecture
 
