@@ -375,3 +375,129 @@ fn mut101_held_attributes_cross_modules() {
     p.write("pkg/base.py", &base("list(self.items)"));
     assert_eq!(lines(&p, "MUT101"), vec![at(6, "Derived.push")]);
 }
+
+// ======================================================= EFF103: `Session.query` builds a query
+
+/// R19: `sqlalchemy.orm.Session.query(...)` and the `Query` builder methods only build a lazy
+/// `Query`; executing it (`all()`, `first()`, ...) or iterating it runs the query.
+const QUERIES: &str = r#"from sqlalchemy.orm import Session
+
+
+def build(session: Session, models: list) -> list:
+    queries = []
+    for model in models:
+        queries.append(session.query(model).filter(model.id > 0).order_by(model.id))
+    return queries
+
+
+def run_all(session: Session, models: list) -> list:
+    out = []
+    for model in models:
+        out.append(session.query(model).filter(model.id > 0).all())
+    return out
+
+
+def first(session: Session, ids):
+    for i in ids:
+        session.query(object).filter_by(id=i).first()
+
+
+def iterate(session: Session, models):
+    for model in models:
+        for row in session.query(model):
+            print(row)
+
+
+def built_before(session: Session, models):
+    q = session.query(object)
+    for model in models:
+        for row in q:
+            print(row, model)
+
+
+def comprehension(session: Session, models):
+    for model in models:
+        print([r for r in session.query(model).filter(model.ok)])
+
+
+def generator(session: Session, models):
+    for model in models:
+        print(sum(1 for _ in session.query(model)))
+
+
+def once(session: Session):
+    for row in session.query(object):
+        print(row)
+"#;
+
+#[test]
+fn eff103_counts_executed_and_iterated_queries_not_built_ones() {
+    let p = Project::new("regr_eff103_query");
+    p.write("queries.py", QUERIES);
+    // Not reported: queries built in the loop and never run there, and an iteration outside any
+    // loop. Reported once each, at the expression that runs the query: the executing call, the
+    // `Query` a nested `for` iterates (also one built before the loop), the comprehension, the
+    // generator expression. Comprehensions run in the function from Python 3.12 (PEP 709) and
+    // in a function of their own before.
+    for (target, comprehension) in [("py312", (38, 27)), ("py311", (38, 15))] {
+        let found: Vec<(u64, u64, String, String)> =
+            diagnostics(&p, &["--select", "EFF103", "--target-version", target])
+                .iter()
+                .map(|d| {
+                    (
+                        d["line"].as_u64().unwrap(),
+                        d["column"].as_u64().unwrap(),
+                        d["qualname"].as_str().unwrap().to_owned(),
+                        d["target"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
+        let r = |line, column, qualname: &str, target: &str| {
+            (line, column, qualname.to_owned(), target.to_owned())
+        };
+        assert_eq!(
+            found,
+            vec![
+                r(14, 20, "run_all", "sqlalchemy.orm.Query.all"),
+                r(20, 9, "first", "sqlalchemy.orm.Query.first"),
+                r(25, 20, "iterate", "sqlalchemy.orm.Query.__iter__"),
+                r(32, 20, "built_before", "sqlalchemy.orm.Query.__iter__"),
+                r(
+                    comprehension.0,
+                    comprehension.1,
+                    "comprehension",
+                    "sqlalchemy.orm.Query.__iter__"
+                ),
+                r(43, 19, "generator", "sqlalchemy.orm.Query.__iter__"),
+            ],
+            "{target}"
+        );
+    }
+    let messages: Vec<String> = reports(&p, "EFF103")
+        .into_iter()
+        .map(|(_, _, m)| m)
+        .collect();
+    assert_eq!(
+        messages[0],
+        "`sqlalchemy.orm.Query.all` runs a database query (`sqlalchemy.orm.Query.all`) on every loop iteration (N+1); batch it or load the data once before the loop"
+    );
+}
+
+/// Iterating a `Query` in an `async def` blocks the event loop, as executing it does.
+#[test]
+fn eff101_sees_a_query_iterated_on_the_event_loop() {
+    let p = Project::new("regr_eff101_query");
+    p.write(
+        "handler.py",
+        "from sqlalchemy.orm import Session\n\n\nasync def handler(session: Session):\n    for row in session.query(object):\n        print(row)\n    return session.query(object).filter_by(id=1)\n",
+    );
+    let found = reports(&p, "EFF101");
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].0, 5);
+    assert!(
+        found[0]
+            .2
+            .contains("`sqlalchemy.orm.Query.__iter__` (blocking_db)"),
+        "{found:#?}"
+    );
+}

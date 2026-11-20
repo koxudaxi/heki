@@ -12,7 +12,9 @@
 # - A constructor or factory that does no I/O until the client is used (`redis.Redis`,
 #   `pymongo.MongoClient`, `sqlalchemy.create_engine`) carries only `unpooled_client_alloc`; the
 #   calls that do the I/O carry the blocking effects. Methods that only build an object
-#   (`Redis.pipeline`, lazy `QuerySet.filter`) carry no effect, only a `return_type`.
+#   (`Redis.pipeline`, lazy `QuerySet.filter`, `Session.query`) carry no effect, only a
+#   `return_type`. Iterating an object (`for row in query:`, a comprehension) runs its class's
+#   `__iter__` entry, where the catalog has one (`sqlalchemy.orm.Query.__iter__`).
 # - `db_query` marks one statement sent to the database and waited for (what `EFF103` counts).
 #   Reading the rows of an executed statement is not a new query, nor is a driver's `commit()`;
 #   an ORM `Session.commit()` / `flush()` sends the pending writes and is one.
@@ -899,9 +901,11 @@ symbol = "sqlalchemy.orm.Session.execute"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
+# `Session.query(...)` only builds a lazy `Query` (as its builder methods do); the query runs
+# when the `Query` is executed (`all()`, `first()`, `one()`, ...) or iterated (`__iter__`).
 [[entries]]
 symbol = "sqlalchemy.orm.Session.query"
-effects = ["blocking_db", "db_query"]
+return_type = "sqlalchemy.orm.Query"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -942,6 +946,191 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.orm.sessionmaker"
 return_type = "sqlalchemy.orm.sessionmaker"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.filter"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.filter_by"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.where"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.join"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.outerjoin"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.order_by"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.group_by"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.having"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.limit"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.offset"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.slice"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.distinct"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.options"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.with_entities"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.add_columns"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.select_from"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.execution_options"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.populate_existing"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.with_for_update"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.params"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.yield_per"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.union"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.union_all"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.correlate"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.enable_eagerloads"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.from_statement"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.with_parent"
+return_type = "sqlalchemy.orm.Query"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.all"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.first"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.one"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.one_or_none"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.scalar"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.count"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.get"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.update"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.delete"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Query.__iter__"
+effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 # --- DB: SQLAlchemy (asyncio) ---

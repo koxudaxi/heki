@@ -484,7 +484,10 @@ The entries follow the public API of each package, with three conventions:
   filter does not apply. Its loop-sensitive effects (`db_query`, `unpooled_client_alloc`) stay.
 - A constructor or factory that does no I/O until first use (`redis.Redis`, `pymongo.MongoClient`,
   `sqlalchemy.create_engine`) carries only `unpooled_client_alloc`; a call that only builds an
-  object (`Redis.pipeline`, a lazy `QuerySet.filter`) carries only a `return_type`.
+  object (`Redis.pipeline`, a lazy `QuerySet.filter`, `Session.query` and the `Query` builder
+  methods) carries only a `return_type`. Iterating an object runs its class's `__iter__` entry
+  (`sqlalchemy.orm.Query.__iter__`): a `for` loop, a comprehension, or a generator expression over
+  a value of that class is a call of it at the iterable (`async for` is not).
 - `db_query` is one statement sent to the database and waited for: reading the rows of an
   executed statement (`sqlite3.Cursor.fetchone`) is not one, nor is a driver's `commit()`; an ORM
   `Session.commit()` / `flush()` sends the pending writes and is.
