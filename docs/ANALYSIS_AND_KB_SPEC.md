@@ -634,9 +634,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    `Connection.begin()`, `Engine.begin()`, `transaction.atomic()`, `psycopg.Connection.transaction()`,
    ...); an `await` or a call site reaching `BlockingNet` inside the region is reported.
 7. **`EFF107`** (opt-in): a `create_task` / `ensure_future` result bound to a named local is
-   reported when no alias of it is awaited, returned, yielded, stored, put in a container, passed
-   to a call, or captured; being only the receiver of `add_done_callback` / `set_name` does not
-   keep it, `cancel()` / `result()` / `exception()` do.
+   reported when no alias of it, nor a method bound to one (`task.cancel`, which holds the task),
+   is awaited, returned, yielded, stored, put in a container, passed to a call, or captured;
+   being only the receiver of `add_done_callback` / `set_name` does not keep it, `cancel()` /
+   `result()` / `exception()` do.
 8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`

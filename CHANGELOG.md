@@ -23,6 +23,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - The language server, when the client names no workspace folder, indexes the working directory
   in the form it compares document paths in; on Windows a document could otherwise be missed
   as part of the project.
+- `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
+  passed to a call or stored, as in `self.addCleanup(task.cancel)` or
+  `loop.call_later(1, task.cancel)`: the bound method holds the task.
 
 ## [0.1.0] - 2026-11-21
 

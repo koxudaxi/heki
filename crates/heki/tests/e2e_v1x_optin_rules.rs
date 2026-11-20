@@ -1063,6 +1063,65 @@ fn eff107_reports_bound_tasks_that_nothing_retains() {
     }
 }
 
+const BOUND_METHODS: &str = r##"import asyncio
+import atexit
+import unittest
+
+
+async def work():
+    await asyncio.sleep(1)
+
+
+class Case(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup(self):
+        t = asyncio.create_task(work())
+        self.addCleanup(t.cancel)
+
+    async def test_stored(self):
+        t = asyncio.create_task(work())
+        self.stop = t.cancel
+
+
+async def passed_on(loop: asyncio.AbstractEventLoop, stack):
+    a = asyncio.create_task(work())
+    b = asyncio.create_task(work())
+    c = asyncio.create_task(work())
+    d = asyncio.create_task(work())
+    loop.call_later(1, a.cancel)
+    stack.callback(callback=b.cancel)
+    atexit.register(c.cancel)
+    cancel = d.cancel
+    handlers = [cancel]
+    return handlers
+
+
+def returned():
+    task = asyncio.ensure_future(work())
+    return task.result
+
+
+async def method_results_only():
+    task = asyncio.create_task(work())
+    print(task.get_name(), task.done())
+    if task.cancelled:
+        pass
+"##;
+
+#[test]
+fn eff107_bound_methods_of_the_task_keep_it_where_they_are_kept() {
+    let p = Project::new("v1x_eff107_bound_methods");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/bound.py", BOUND_METHODS);
+    let diags = diagnostics(&p, &["--select", "EFF107"]);
+    // A bound method passed to a call (positionally or by keyword), stored in an attribute or a
+    // container through a copy, or returned holds the task. The results of its methods, and a
+    // method read only to be tested, hold nothing.
+    assert_eq!(
+        found(&diags),
+        vec![d("pkg/bound.py", 39, "EFF107", "asyncio.create_task->task")]
+    );
+}
+
 // ======================================================================== selection & CLI
 
 const ONE_OF_EACH: &str = r##"import asyncio

@@ -81,7 +81,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             let Some(name) = name_of(f, &aliases) else {
                 continue;
             };
-            if retained(f, &aliases) {
+            if retained(f, &aliases, &holders_of(f, &aliases)) {
                 continue;
             }
             cx.emit(
@@ -103,8 +103,26 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
 
 /// `var` and every `Copy` / phi alias of it.
 fn aliases_of(f: &IrFunction, var: VarId) -> FxHashSet<VarId> {
-    let mut set = FxHashSet::default();
-    set.insert(var);
+    closed_under(f, FxHashSet::from_iter([var]), |_| None)
+}
+
+/// The values that hold the task: its aliases, and every attribute read from a holder with the
+/// aliases of that value. Every public attribute of `asyncio.Task` is a method, and a bound
+/// method (`task.cancel`) holds the task as its `__self__`, so wherever it is kept the task is.
+fn holders_of(f: &IrFunction, aliases: &FxHashSet<VarId>) -> FxHashSet<VarId> {
+    closed_under(f, aliases.clone(), |kind| match kind {
+        InstKind::AttrLoad { dst, obj, .. } => Some((*obj, *dst)),
+        _ => None,
+    })
+}
+
+/// `set` closed under `Copy`, phis, and the `(source, value)` pairs `derives` reads from an
+/// instruction.
+fn closed_under(
+    f: &IrFunction,
+    mut set: FxHashSet<VarId>,
+    derives: impl Fn(&InstKind) -> Option<(VarId, VarId)>,
+) -> FxHashSet<VarId> {
     loop {
         let before = set.len();
         for bb in &f.blocks {
@@ -114,10 +132,14 @@ fn aliases_of(f: &IrFunction, var: VarId) -> FxHashSet<VarId> {
                 }
             }
             for inst in &bb.insts {
-                if let InstKind::Copy { dst, src } = &inst.kind
-                    && set.contains(src)
+                let edge = match &inst.kind {
+                    InstKind::Copy { dst, src } => Some((*src, *dst)),
+                    kind => derives(kind),
+                };
+                if let Some((src, dst)) = edge
+                    && set.contains(&src)
                 {
-                    set.insert(*dst);
+                    set.insert(dst);
                 }
             }
         }
@@ -144,11 +166,12 @@ fn name_of(f: &IrFunction, aliases: &FxHashSet<VarId>) -> Option<String> {
         .map(|(_, n)| n.to_owned())
 }
 
-/// Whether any alias is awaited, returned or yielded, stored (attribute value, subscript key or
-/// value, global, enclosing scope, container literal), passed to a call, captured by a closure
-/// or generator expression, or ended by a [`LIFETIME_METHODS`] call on it.
-fn retained(f: &IrFunction, aliases: &FxHashSet<VarId>) -> bool {
-    let has = |v: &VarId| aliases.contains(v);
+/// Whether any of the task's `holders` is awaited, returned or yielded, stored (attribute value,
+/// subscript key or value, global, enclosing scope, container literal), passed to a call,
+/// captured by a closure or generator expression, or whether an alias is ended by a
+/// [`LIFETIME_METHODS`] call on it.
+fn retained(f: &IrFunction, aliases: &FxHashSet<VarId>, holders: &FxHashSet<VarId>) -> bool {
+    let has = |v: &VarId| holders.contains(v);
     let retains = |kind: &InstKind| match kind {
         InstKind::Await { value, .. }
         | InstKind::YieldFrom { value, .. }
@@ -165,7 +188,7 @@ fn retained(f: &IrFunction, aliases: &FxHashSet<VarId>) -> bool {
             ..
         } => {
             args.iter().chain(kwargs.iter().map(|(_, v)| v)).any(has)
-                || has(recv) && LIFETIME_METHODS.contains(&method.as_str())
+                || aliases.contains(recv) && LIFETIME_METHODS.contains(&method.as_str())
         }
         InstKind::Yield { .. }
         | InstKind::AllocBuiltin { .. }
