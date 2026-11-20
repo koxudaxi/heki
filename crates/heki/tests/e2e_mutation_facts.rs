@@ -191,3 +191,71 @@ class Child(Base):
         ]
     );
 }
+
+#[test]
+fn a_write_leaves_no_stale_cached_value_on_any_path() {
+    let p = project("invalidation_paths", "");
+    p.write(
+        "app.py",
+        r#"from functools import cached_property
+
+
+class C:
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    @cached_property
+    def doubled(self) -> int:
+        return self.n * 2
+
+    def _reset(self) -> None:
+        del self.doubled
+
+    def only_if(self, n: int, clear: bool) -> None:
+        self.n = n
+        if clear:
+            self.__dict__.pop("doubled", None)
+
+    def before(self, n: int) -> None:
+        self.__dict__.pop("doubled", None)
+        self.n = n
+
+    def before_reading(self, n: int) -> int:
+        self.__dict__.pop("doubled", None)
+        old = self.doubled
+        self.n = n
+        return old
+
+    def always(self, n: int) -> None:
+        self.n = n
+        self.__dict__.pop("doubled", None)
+
+    def both_branches(self, n: int, fast: bool) -> None:
+        self.n = n
+        if fast:
+            del self.doubled
+        else:
+            self._reset()
+
+    def through_helper(self, n: int) -> None:
+        self.n = n
+        self._reset()
+
+    def or_raise(self, n: int) -> None:
+        self.n = n
+        if n < 0:
+            raise ValueError(n)
+        self.__dict__.clear()
+"#,
+    );
+    // An invalidation before the write also leaves nothing stale when nothing reads the
+    // property in between (`before`); reading it computes the old value again
+    // (`before_reading`).
+    assert_eq!(
+        reports(&p, "MUT101"),
+        vec![
+            at("app.py", 16, "C.only_if"),
+            at("app.py", 27, "C.before_reading")
+        ]
+    );
+}

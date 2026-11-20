@@ -218,10 +218,9 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 let Some(ms) = cx.index.summary(&m.key) else {
                     continue;
                 };
-                // Filter 4: the method invalidates the cache.
-                if ms.invalidates_cached.contains(p_name) || ms.invalidates_cached.contains("*") {
-                    continue;
-                }
+                // Filter 4: the method invalidates the cache after the write on every path.
+                let invalidations =
+                    invalidates(ms, p_name).then(|| CacheEvents::of(cx, unit, f, p_name));
                 let Some(local) = local_summary(cx, m) else {
                     continue;
                 };
@@ -234,10 +233,9 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         .is_some_and(|callers| {
                             !callers.is_empty()
                                 && callers.iter().all(|c| {
-                                    cx.index.summary(c).is_some_and(|cs| {
-                                        cs.invalidates_cached.contains(p_name)
-                                            || cs.invalidates_cached.contains("*")
-                                    })
+                                    cx.index
+                                        .summary(c)
+                                        .is_some_and(|cs| invalidates(cs, p_name))
                                 })
                         });
                 if covered_by_callers {
@@ -259,6 +257,9 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     // made in place, and only rebinding the attribute leaves it behind.
                     if ps.returns_self_attrs.contains(*attr) {
                         own.retain(|w| w.rebinds);
+                    }
+                    if let Some(points) = &invalidations {
+                        own.retain(|w| !points.cover(f, w.block, w.index));
                     }
                     if own.is_empty() {
                         continue;
@@ -294,6 +295,190 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             }
         }
     });
+}
+
+/// Whether a function's summary says that it invalidates the cached property `prop` somewhere
+/// (`del self.prop`, `self.__dict__.pop("prop")`, `self.__dict__.clear()`, also through its
+/// `self` calls).
+fn invalidates(s: &EffectSummary, prop: &str) -> bool {
+    s.invalidates_cached.contains(prop) || s.invalidates_cached.contains("*")
+}
+
+/// Where a method invalidates the cached property `prop` of its own instance, and where it reads
+/// it (computing the value again): instructions as `(block, index)`.
+struct CacheEvents {
+    /// `del self.prop`, removing `"prop"` from `self.__dict__` (`pop`, `del`, `clear`), and calls
+    /// on `self` of methods whose summary invalidates it.
+    invalidations: FxHashSet<(heki_ir::BlockId, usize)>,
+    /// `self.prop`, and calls on `self` of methods whose summary reads it.
+    reads: FxHashSet<(heki_ir::BlockId, usize)>,
+}
+
+impl CacheEvents {
+    fn of(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, f: &IrFunction, prop: &str) -> Self {
+        let self_vars = f
+            .params
+            .first()
+            .map(|p| self_aliases(f, p.var))
+            .unwrap_or_default();
+        let dicts = heki_effect::aliases_of(
+            f,
+            f.blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .filter_map(|i| match &i.kind {
+                    InstKind::AttrLoad { dst, obj, attr }
+                        if attr == "__dict__" && self_vars.contains(obj) =>
+                    {
+                        Some(*dst)
+                    }
+                    _ => None,
+                }),
+        );
+        let names_prop = |v: &VarId| f.const_str(*v) == Some(prop);
+        let key = CheckContext::key(unit, f);
+        let file = cx.index.files.get(&unit.input.path);
+        // What the `self` calls at `span` do to the property: `(invalidate, read)`.
+        let self_call = |span: Span| {
+            let callees = file
+                .into_iter()
+                .flat_map(|file| &file.call_sites)
+                .filter(|site| site.span == span && site.caller == key && site.recv_is_self)
+                .flat_map(|site| site.project_callees())
+                .filter_map(|bc| cx.index.summary(&bc.callee));
+            callees.fold((false, false), |(inv, read), s| {
+                (
+                    inv || invalidates(s, prop),
+                    read || s.reads_self_attrs.iter().any(|r| r.attr == prop),
+                )
+            })
+        };
+        let mut out = Self {
+            invalidations: FxHashSet::default(),
+            reads: FxHashSet::default(),
+        };
+        for bb in &f.blocks {
+            for (index, inst) in bb.insts.iter().enumerate() {
+                let (invalidates, reads) = match &inst.kind {
+                    InstKind::AttrDelete { obj, attr } => {
+                        (self_vars.contains(obj) && attr == prop, false)
+                    }
+                    InstKind::AttrLoad { obj, attr, .. } => {
+                        (false, self_vars.contains(obj) && attr == prop)
+                    }
+                    InstKind::SubscriptDelete { obj, index, .. } => {
+                        (dicts.contains(obj) && names_prop(index), false)
+                    }
+                    InstKind::MethodCall {
+                        recv, method, args, ..
+                    } if dicts.contains(recv) => match method.as_str() {
+                        "clear" => (true, false),
+                        "pop" | "__delitem__" => (args.first().is_some_and(names_prop), false),
+                        _ => (false, false),
+                    },
+                    InstKind::MethodCall { .. } | InstKind::Call { .. } => self_call(inst.span),
+                    _ => (false, false),
+                };
+                if invalidates {
+                    out.invalidations.insert((bb.id, index));
+                } else if reads {
+                    out.reads.insert((bb.id, index));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the write at instruction `index` of `block` leaves no stale value behind on any
+    /// normal path: the property is invalidated on every path after it, or its value is gone
+    /// on every path to it (invalidated, and not read again since).
+    fn cover(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
+        self.invalidated_after(f, block, index) || self.absent_before(f, block, index)
+    }
+
+    /// Every normal path from just after the instruction to a return passes an invalidation.
+    /// Raising paths carry no obligation (as for `MUT109`), and a loop that never returns adds
+    /// none.
+    fn invalidated_after(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
+        let point_after = |b: heki_ir::BlockId, after: Option<usize>| {
+            self.invalidations
+                .iter()
+                .any(|(pb, pi)| *pb == b && after.is_none_or(|a| *pi > a))
+        };
+        let leaves_covered = |b: &heki_ir::BasicBlock, covered: &[bool]| match b.terminator {
+            Terminator::Return(_) => false,
+            _ => b
+                .terminator
+                .successors()
+                .iter()
+                .all(|s| covered[s.0 as usize]),
+        };
+        // Covered from each block's start: a greatest fixpoint from `true`.
+        let mut covered = vec![true; f.blocks.len()];
+        loop {
+            let mut changed = false;
+            for b in f.blocks.iter().rev() {
+                let v = point_after(b.id, None) || leaves_covered(b, &covered);
+                if v != covered[b.id.0 as usize] {
+                    covered[b.id.0 as usize] = v;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        point_after(block, Some(index)) || leaves_covered(f.block(block), &covered)
+    }
+
+    /// Every path from the entry to the instruction passes an invalidation with no read of the
+    /// property after it: the cached value is gone when the write happens. A block an exception
+    /// enters may hold any value.
+    fn absent_before(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
+        let through = |b: heki_ir::BlockId, mut absent: bool, upto: usize| {
+            for i in 0..upto {
+                if self.invalidations.contains(&(b, i)) {
+                    absent = true;
+                } else if self.reads.contains(&(b, i)) {
+                    absent = false;
+                }
+            }
+            absent
+        };
+        let n = f.blocks.len();
+        let mut preds: Vec<Vec<heki_ir::BlockId>> = vec![Vec::new(); n];
+        let mut handlers = vec![false; n];
+        for b in &f.blocks {
+            for s in b.terminator.successors() {
+                preds[s.0 as usize].push(b.id);
+            }
+            if let Some(h) = b.exc_target {
+                handlers[h.0 as usize] = true;
+            }
+        }
+        // Absent at each block's start: a greatest fixpoint from `true` (the entry: present).
+        let mut absent_in = vec![true; n];
+        absent_in[0] = false;
+        loop {
+            let mut changed = false;
+            for b in f.rpo_blocks() {
+                let i = b.0 as usize;
+                let v = i != 0
+                    && !handlers[i]
+                    && preds[i]
+                        .iter()
+                        .all(|p| through(*p, absent_in[p.0 as usize], f.block(*p).insts.len()));
+                if v != absent_in[i] {
+                    absent_in[i] = v;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        through(block, absent_in[block.0 as usize], index)
+    }
 }
 
 fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
@@ -394,6 +579,8 @@ fn private_methods_called_from_init(
 struct SelfWrite {
     span: Span,
     block: heki_ir::BlockId,
+    /// The write's instruction index in `block`.
+    index: usize,
     /// `setdefault`, or a subscript store guarded by `if k not in self.<attr>:`.
     memo_shaped: bool,
     /// `self.<attr> = ...` / `del self.<attr>`: the attribute is rebound, not changed in place.
@@ -444,7 +631,7 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
     };
     let mut out = Vec::new();
     for bb in &f.blocks {
-        for inst in &bb.insts {
+        for (index, inst) in bb.insts.iter().enumerate() {
             // `(memo_shaped, rebinds)`.
             let w = match &inst.kind {
                 InstKind::AttrStore { obj, attr: a, .. }
@@ -470,6 +657,7 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
                 out.push(SelfWrite {
                     span: inst.span,
                     block: bb.id,
+                    index,
                     memo_shaped,
                     rebinds,
                 });

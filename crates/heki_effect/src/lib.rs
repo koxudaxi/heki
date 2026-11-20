@@ -40,7 +40,7 @@ pub use report::{
 };
 pub use resolver::{
     Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path,
+    ReadOnlyKind, TypeCtx, Val, aliases_of, detect_src_layout, func_qualname, module_name_for_path,
     resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};

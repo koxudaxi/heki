@@ -288,9 +288,11 @@ which module imports which.
      and lazy filling under `if k not in self._xxx:`;
    - **disjoint constant dict keys**: when the keys `p` reads (`self.params["outtmpl"]`) and the
      keys `m` writes (`self.params["proxy"]`) are all constant and disjoint.
-3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains and **`p ∉
-   invalidates_cached(m)`** (and `m` has no full invalidation such as `self.__dict__.clear()`; a
-   private helper all of whose callers invalidate is covered).
+3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains at a write
+   that leaves a stale value on some normal path of `m`: neither does every path after the write
+   invalidate `p` (`del self.p`, `self.__dict__.pop("p")` / `clear()`, a `self` call whose
+   `invalidates_cached` holds it), nor is `p` invalidated on every path to the write with no read
+   of it since (a private helper all of whose callers invalidate is covered).
 4. For an attribute in **`returns_self_attrs(p)`**, only rebinding writes count (`self.a = ...`,
    `del self.a`): the cached value holds the attribute's object itself and sees in-place changes.
    The fact is local to the getter (every read of `self.a` is returned as itself or put, as
