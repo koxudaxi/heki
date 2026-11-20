@@ -442,7 +442,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             types: u.tcx.infer(f),
             u,
             f,
-            copy_roots: copy_roots(&defs),
+            copy_roots: ownership::copy_roots(&defs),
             defs,
             initial: own.clone(),
             own,
@@ -468,7 +468,8 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         if tests.is_empty() {
             return;
         }
-        let idom = immediate_dominators(self.f, &self.live, &self.preds);
+        let idom =
+            ownership::immediate_dominators(self.f, &self.preds, |p, b| self.live.edge(p, b));
         let test_at: FxHashMap<BlockId, usize> =
             tests.iter().enumerate().map(|(i, t)| (t.at, i)).collect();
         let mut heads: FxHashMap<BlockId, (usize, bool)> = FxHashMap::default();
@@ -1339,85 +1340,6 @@ fn identity_condition(
         known.insert(v, answer);
     }
     answer
-}
-
-/// The value each copy among `defs` copies, through any number of copies: each chain is walked
-/// once (`heki_ir` closes no cycle of copies).
-fn copy_roots(defs: &FxHashMap<VarId, &Inst>) -> FxHashMap<VarId, VarId> {
-    let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
-    for (&start, inst) in defs {
-        if !matches!(inst.kind, InstKind::Copy { .. }) {
-            continue;
-        }
-        let mut passed = Vec::new();
-        let mut cur = start;
-        let root = loop {
-            if let Some(&root) = roots.get(&cur) {
-                break root;
-            }
-            match defs.get(&cur).map(|i| &i.kind) {
-                Some(InstKind::Copy { src, .. }) => {
-                    passed.push(cur);
-                    cur = *src;
-                }
-                _ => break cur,
-            }
-        };
-        for v in passed {
-            roots.insert(v, root);
-        }
-    }
-    roots
-}
-
-/// The immediate dominator of each block a run reaches over the edges it can take (`None` for
-/// the other blocks), from one pass in reverse postorder. One pass is exact: in the reducible
-/// graphs Python's statements make, an edge to an earlier block goes back to a loop header that
-/// dominates the edge's source, and leaving such an edge out changes no dominator.
-fn immediate_dominators(
-    f: &IrFunction,
-    live: &ownership::Live,
-    preds: &[Vec<BlockId>],
-) -> Vec<Option<BlockId>> {
-    let rpo: Vec<BlockId> = f
-        .rpo_blocks()
-        .into_iter()
-        .filter(|b| live.block(*b))
-        .collect();
-    let mut order = vec![usize::MAX; f.blocks.len()];
-    for (i, b) in rpo.iter().enumerate() {
-        order[b.0 as usize] = i;
-    }
-    let mut idom: Vec<Option<BlockId>> = vec![None; f.blocks.len()];
-    idom[rpo[0].0 as usize] = Some(rpo[0]);
-    let up = |b: BlockId, idom: &[Option<BlockId>]| {
-        idom[b.0 as usize].expect("a block before in reverse postorder has a dominator")
-    };
-    for &b in &rpo[1..] {
-        let mut found: Option<BlockId> = None;
-        for &p in &preds[b.0 as usize] {
-            if idom[p.0 as usize].is_none() || !live.edge(p, b) {
-                continue;
-            }
-            found = Some(match found {
-                None => p,
-                Some(mut d) => {
-                    let mut q = p;
-                    while d != q {
-                        while order[d.0 as usize] > order[q.0 as usize] {
-                            d = up(d, &idom);
-                        }
-                        while order[q.0 as usize] > order[d.0 as usize] {
-                            q = up(q, &idom);
-                        }
-                    }
-                    d
-                }
-            });
-        }
-        idom[b.0 as usize] = found;
-    }
-    idom
 }
 
 /// Whether the new object `kind` makes starts empty: an empty display, or a container

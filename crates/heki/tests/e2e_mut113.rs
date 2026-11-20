@@ -1881,3 +1881,57 @@ fn mut113_leaves_out_rebound_containers_and_keys_the_container_holds() {
         "ok RuntimeError ok ok ok RuntimeError"
     );
 }
+
+/// A helper that binds the attribute to a new container, fills it, and binds it to another new
+/// container a call makes (`self.rows = dict()`): it changes no container a loop steps. Its
+/// neighbor changes the container the loop steps before binding a new one.
+const REBOUND_TWICE: &str = r#"class Table:
+    def __init__(self) -> None:
+        self.rows: dict[str, int] = {"k": 0}
+        self.cols: dict[str, int] = {"k": 0}
+
+    def refresh(self) -> None:
+        for key in self.rows:
+            self._reload()
+
+    def widen(self) -> None:
+        for key in self.cols:
+            self._reset()
+
+    def _reload(self) -> None:
+        self.rows = {}
+        self.rows["a"] = 1
+        self.rows = dict()
+
+    def _reset(self) -> None:
+        self.cols["a"] = 1
+        self.cols = dict()
+"#;
+
+const REBOUND_TWICE_RUN: &str = r#"from pkg.table import Table
+
+
+def outcome(run):
+    try:
+        run()
+    except RuntimeError:
+        return "RuntimeError"
+    return "ok"
+
+
+print(outcome(Table().refresh), outcome(Table().widen))
+"#;
+
+#[test]
+fn mut113_leaves_out_a_change_between_two_stores_of_new_containers() {
+    let p = Project::new("mut113_rebound_twice");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/table.py", REBOUND_TWICE)
+        .write("run.py", REBOUND_TWICE_RUN);
+    let diags = diagnostics(&p, &["--extend-select", "MUT113"]);
+    assert_eq!(
+        reports(&diags),
+        vec![d("pkg/table.py", 12, "Table.widen", "Table.cols")]
+    );
+    assert_eq!(run_python(&p.dir, "run.py").trim(), "ok RuntimeError");
+}
