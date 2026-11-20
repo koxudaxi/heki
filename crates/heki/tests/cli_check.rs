@@ -335,3 +335,27 @@ fn github_output_never_lets_project_text_start_a_log_line() {
     let (_, _, text) = p.heki(&["--baseline", "b.toml"]);
     assert!(text.contains("`x\n::error"), "{text}");
 }
+
+#[test]
+fn ratchet_baselines_listing_one_key_twice_are_rejected() {
+    let p = Project::new("baseline_twice");
+    p.write("a.py", BLOCKING);
+    let entry = |count: &str| {
+        format!(
+            "[[entries]]\npath = \"a.py\"\nqualname = \"handler\"\nrule_code = \"EFF101\"\ntarget = \"time.sleep\"\ncount = {count}\n"
+        )
+    };
+    // Their sum would not fit the count (and would wrap to an allowance of 0).
+    p.write(
+        "b.toml",
+        &format!("version = 2\n{}{}", entry("4294967295"), entry("1")),
+    );
+    let (code, stdout, stderr) = p.heki(&["--baseline", "b.toml"]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains(
+            "baseline b.toml lists a.py::handler EFF101 `time.sleep` more than once; keep one entry"
+        ),
+        "{stderr}"
+    );
+}

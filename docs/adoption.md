@@ -24,7 +24,7 @@ allowed and found counts for every entry that grew.
 Baselines written before heki counted sites have no `version` key and keep counting reports: a
 new report is a regression, a second site behind a recorded report is not. `heki check` says so
 in a note, and `--update-baseline` rewrites the file with `version = 2`. A version this heki does
-not know is an error.
+not know is an error, and so is a file listing one entry twice (a hand merge of two baselines).
 
 ## Effect snapshots (`MUT103`)
 

@@ -543,6 +543,10 @@ pub enum BaselineError {
         "baseline {path} has version {version}; this heki reads versions 1 and {BASELINE_VERSION}"
     )]
     Version { path: PathBuf, version: u32 },
+    #[error(
+        "baseline {path} lists {}::{} {} `{}` more than once; keep one entry", key.path, key.qualname, key.rule_code, key.target
+    )]
+    Duplicate { path: PathBuf, key: BaselineKey },
 }
 
 /// On-disk shape: `version`, then `[[entries]]` sorted by key (minimal git diffs).
@@ -608,6 +612,8 @@ impl RatchetBaseline {
                 });
             }
         };
+        // heki writes one entry per key; two (a hand merge of two baselines) would add their
+        // allowances up, while each recorded the same findings.
         let mut counts = BTreeMap::new();
         for e in file.entries {
             let key = BaselineKey {
@@ -616,7 +622,13 @@ impl RatchetBaseline {
                 rule_code: e.rule_code,
                 target: e.target,
             };
-            *counts.entry(key).or_insert(0) += e.count;
+            if counts.contains_key(&key) {
+                return Err(BaselineError::Duplicate {
+                    path: path.to_path_buf(),
+                    key,
+                });
+            }
+            counts.insert(key, e.count);
         }
         Ok(Self { counts, unit })
     }
@@ -788,6 +800,16 @@ mod tests {
         assert_eq!(new.unit, CountUnit::Sites);
         assert_eq!(new.unit.noun(), "site(s)");
         assert!(new.to_toml_string().contains("version = 2\n"));
+        let twice = format!(
+            "version = 2\n{entry}{}",
+            entry.replace("count = 1", "count = 4294967295")
+        );
+        assert_eq!(
+            RatchetBaseline::from_toml_str(&twice, path)
+                .unwrap_err()
+                .to_string(),
+            "baseline b.toml lists a.py::f MUT201 `M.f` more than once; keep one entry"
+        );
         let err = RatchetBaseline::from_toml_str(&format!("version = 7\n{entry}"), path)
             .unwrap_err()
             .to_string();
