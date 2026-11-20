@@ -488,11 +488,22 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// The project classes `var` may be an instance of (one, or the members of a union).
+    /// The project classes `var` may be an instance of: one, the members of a union, or a
+    /// protocol with the classes implementing it structurally.
     fn project_classes(&self, var: VarId) -> Vec<String> {
         let project = self.cx.project;
         match self.val(var) {
-            Some(Val::Inst(c)) if project.is_project_class(c) => vec![c.clone()],
+            Some(Val::Inst(c)) if project.is_project_class(c) => {
+                let mut out = vec![c.clone()];
+                out.extend(
+                    project
+                        .protocol_implementers(c)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+                out
+            }
             Some(Val::Union(cs)) => cs
                 .iter()
                 .filter(|c| project.is_project_class(c))

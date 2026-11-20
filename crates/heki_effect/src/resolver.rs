@@ -32,7 +32,23 @@ struct Indexes {
     property_names: FxHashSet<String>,
     frozen: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
+    protocols: FxHashMap<String, Option<Vec<String>>>,
 }
+
+/// Names every class has, which a protocol's body defines without requiring them.
+const IMPLICIT_MEMBERS: &[&str] = &[
+    "__annotations__",
+    "__class__",
+    "__classcell__",
+    "__dict__",
+    "__doc__",
+    "__firstlineno__",
+    "__init__",
+    "__module__",
+    "__qualname__",
+    "__slots__",
+    "__static_attributes__",
+];
 
 /// CHA fan-out limit: more candidates than this leave the call unresolved (`unknown_calls`).
 pub const CHA_CANDIDATE_LIMIT: usize = 8;
@@ -194,6 +210,12 @@ pub struct ClassDecl {
     /// attributes of a class family through [`ProjectDecls::small_attr`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attr_displays: BTreeMap<String, Option<SmallDisplay>>,
+    /// `typing.Protocol` is one of the bases (PEP 544: the class is a protocol, not an
+    /// implementation of one).
+    pub is_protocol: bool,
+    /// The names the class defines: class-body names (methods, annotations, assignments) and
+    /// the attributes its methods set or annotate on `self` (structural typing, `Protocol`).
+    pub members: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -803,6 +825,10 @@ pub struct DeclKeys {
     /// Classes whose project-wide derived facts were looked up: whether they are frozen (a
     /// `dataclass_transform` or a base in another module can make them so) or a `TypedDict`.
     pub class_facts: BTreeSet<String>,
+    /// Protocols whose structural implementations were listed (a class in any module can start
+    /// or stop satisfying one).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub protocols: BTreeSet<String>,
 }
 
 impl DeclKeys {
@@ -811,6 +837,7 @@ impl DeclKeys {
             && self.subclasses.is_empty()
             && self.property_names.is_empty()
             && self.class_facts.is_empty()
+            && self.protocols.is_empty()
     }
 
     pub fn extend(&mut self, other: Self) {
@@ -818,6 +845,7 @@ impl DeclKeys {
         self.subclasses.extend(other.subclasses);
         self.property_names.extend(other.property_names);
         self.class_facts.extend(other.class_facts);
+        self.protocols.extend(other.protocols);
     }
 
     /// Whether the two share a key (an analysis that read `self` is affected by the change
@@ -827,6 +855,7 @@ impl DeclKeys {
             || !self.subclasses.is_disjoint(&other.subclasses)
             || !self.property_names.is_disjoint(&other.property_names)
             || !self.class_facts.is_disjoint(&other.class_facts)
+            || !self.protocols.is_disjoint(&other.protocols)
     }
 }
 
@@ -856,6 +885,9 @@ pub struct ProjectDecls {
     typed_dicts: FxHashSet<String>,
     /// Every frozen project class (`Self::frozen_classes`).
     frozen: FxHashSet<String>,
+    /// Every project protocol with the project classes implementing it structurally
+    /// (`Self::protocol_implementations`), `None` past `CHA_CANDIDATE_LIMIT`.
+    protocols: FxHashMap<String, Option<Vec<String>>>,
     recorder: Recorder,
 }
 
@@ -953,6 +985,11 @@ impl ProjectDecls {
         out.class_facts = differ(&before.frozen, &self.frozen);
         out.class_facts
             .extend(differ(&before.typed_dicts, &self.typed_dicts));
+        for p in before.protocols.keys().chain(self.protocols.keys()) {
+            if before.protocols.get(p) != self.protocols.get(p) {
+                out.protocols.insert(p.clone());
+            }
+        }
         out
     }
 
@@ -962,6 +999,7 @@ impl ProjectDecls {
             property_names: self.property_names.clone(),
             frozen: self.frozen.clone(),
             typed_dicts: self.typed_dicts.clone(),
+            protocols: self.protocols.clone(),
         }
     }
 
@@ -1004,6 +1042,77 @@ impl ProjectDecls {
             .flat_map(|b| self.subclasses_of(b))
             .collect();
         self.frozen = self.frozen_classes();
+        self.protocols = self.protocol_implementations();
+    }
+
+    /// For every project protocol, the project classes implementing it structurally: those
+    /// whose members (along their project MRO) include every member the protocol and its
+    /// protocol bases define, without a project base that implements it too (CHA reaches the
+    /// subclasses from there). An explicit subclass is one of them. `None` for more than
+    /// `CHA_CANDIDATE_LIMIT` (or a protocol without members).
+    fn protocol_implementations(&self) -> FxHashMap<String, Option<Vec<String>>> {
+        let mut protocols = Vec::new();
+        let mut classes = Vec::new();
+        for m in self.modules.values() {
+            for (q, c) in &m.classes {
+                let fqn = format!("{}.{q}", m.module_name);
+                if c.is_protocol {
+                    protocols.push(fqn);
+                } else {
+                    classes.push(fqn);
+                }
+            }
+        }
+        let mut out = FxHashMap::default();
+        if protocols.is_empty() {
+            return out;
+        }
+        // The members of each class along its project MRO (protocols: their protocol bases).
+        let closure = |fqn: &str, only_protocols: bool| -> FxHashSet<&str> {
+            let mut names = FxHashSet::default();
+            for c in self.mro(fqn) {
+                if let Some(d) = self.class(&c)
+                    && (!only_protocols || d.is_protocol)
+                {
+                    names.extend(d.members.iter().map(String::as_str));
+                }
+            }
+            names
+        };
+        let members: FxHashMap<&str, FxHashSet<&str>> = classes
+            .iter()
+            .map(|c| (c.as_str(), closure(c, false)))
+            .collect();
+        for p in &protocols {
+            let mut required = closure(p, true);
+            required.retain(|n| !IMPLICIT_MEMBERS.contains(n));
+            if required.is_empty() {
+                out.insert(p.clone(), None);
+                continue;
+            }
+            let satisfies = |c: &str| {
+                members
+                    .get(c)
+                    .is_some_and(|m| required.iter().all(|n| m.contains(n)))
+            };
+            let mut found: Vec<String> = classes
+                .iter()
+                .filter(|c| satisfies(c))
+                .filter(|c| self.mro(c).iter().skip(1).all(|b| b == p || !satisfies(b)))
+                .cloned()
+                .collect();
+            found.sort();
+            let entry = (found.len() <= CHA_CANDIDATE_LIMIT).then_some(found);
+            out.insert(p.clone(), entry);
+        }
+        out
+    }
+
+    /// The project classes implementing the project protocol `class` structurally
+    /// (`Self::protocol_implementations`); `None` when `class` is no protocol or too many do.
+    pub(crate) fn protocol_implementers(&self, class: &str) -> Option<&[String]> {
+        self.read(|k| note(&mut k.protocols, class));
+        self.protocols.get(class)?.as_deref()
     }
 
     /// The frozen project classes: `ClassDecl::is_frozen` (`@dataclass(frozen=True)`,
@@ -1658,7 +1767,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     }
     // Resolve bases, class keywords, and annotations now that local names are known.
     for class in &semantic.classes {
-        let bases = class
+        let bases: Vec<String> = class
             .bases
             .iter()
             .filter_map(|b| {
@@ -1675,10 +1784,65 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         };
         let metaclass = keyword("metaclass").and_then(|m| decls.resolve_dotted(m, false));
         let frozen_keyword = keyword("frozen").and_then(bool_literal);
+        let is_protocol = bases
+            .iter()
+            .any(|b| matches!(b.as_str(), "typing.Protocol" | "typing_extensions.Protocol"));
+        let mut members: BTreeSet<String> = class.methods.iter().cloned().collect();
+        if let Some(scope) = semantic
+            .scopes
+            .get(class.scope.0 as usize)
+            .filter(|sc| sc.id == class.scope)
+        {
+            members.extend(
+                scope
+                    .bindings
+                    .iter()
+                    .filter(|b| !b.is_global_decl && !b.is_nonlocal_decl)
+                    .map(|b| b.name.clone()),
+            );
+        }
         if let Some(c) = decls.classes.get_mut(&class.qualname) {
             c.bases = bases;
             c.metaclass = metaclass;
             c.frozen_keyword = frozen_keyword;
+            c.is_protocol = is_protocol;
+            c.members = members;
+        }
+    }
+    // Class-body annotations without a value, and what methods set or annotate on `self`.
+    for f in &input.ir.functions {
+        if f.is_class_body {
+            if let Some(c) = decls.classes.get_mut(&f.qualname) {
+                c.members.extend(
+                    f.local_annotations
+                        .iter()
+                        .filter(|a| !a.target.contains('.'))
+                        .map(|a| a.target.clone()),
+                );
+            }
+            continue;
+        }
+        let (Some(owner), Some(first)) = (&f.owner_class_qualname, f.params.first()) else {
+            continue;
+        };
+        if f.has_decorator(&["staticmethod", "classmethod"]) {
+            continue;
+        }
+        let Some(c) = decls.classes.get_mut(owner) else {
+            continue;
+        };
+        let prefix = format!("{}.", first.name);
+        c.members.extend(f.local_annotations.iter().filter_map(|a| {
+            let attr = a.target.strip_prefix(&prefix)?;
+            (!attr.contains('.')).then(|| attr.to_owned())
+        }));
+        let self_vars = self_aliases(f, first.var);
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::AttrStore { obj, attr, .. } = &inst.kind
+                && self_vars.contains(obj)
+            {
+                c.members.insert(attr.clone());
+            }
         }
     }
     // PEP 681 `dataclass_transform` on a decorator function: any definition (an overload or the
@@ -2427,11 +2591,20 @@ impl<'a> TypeCtx<'a> {
 
     /// Resolve calling a value (`f(...)`).
     pub fn resolve_call(&self, callee: Option<&Val>) -> Callee {
-        match callee {
-            Some(Val::Union(classes)) => {
-                union_targets(classes, |c| self.call_targets(Some(Recv::Inst(c))))
-            }
-            _ => self.call_targets(callee.and_then(Val::recv)),
+        match self.dispatch_classes(callee) {
+            Some(classes) => union_targets(classes, |c| self.call_targets(Some(Recv::Inst(c)))),
+            None => self.call_targets(callee.and_then(Val::recv)),
+        }
+    }
+
+    /// The classes a call or a property read on `value` dispatches on, class by class: the
+    /// members of a union, the structural implementations of a protocol; `None` for a value of
+    /// one class (or none) resolved as such.
+    fn dispatch_classes<'v>(&'v self, value: Option<&'v Val>) -> Option<&'v [String]> {
+        match value? {
+            Val::Union(classes) => Some(classes),
+            Val::Inst(class) => self.project.protocol_implementers(class),
+            Val::Ref(_) | Val::Super(_) => None,
         }
     }
 
@@ -2453,11 +2626,11 @@ impl<'a> TypeCtx<'a> {
 
     /// Resolve `recv.method(...)`.
     pub fn resolve_method(&self, recv: Option<&Val>, method: &str) -> Callee {
-        match recv {
-            Some(Val::Union(classes)) => union_targets(classes, |c| {
+        match self.dispatch_classes(recv) {
+            Some(classes) => union_targets(classes, |c| {
                 self.method_call_targets(Some(Recv::Inst(c)), method)
             }),
-            _ => self.method_call_targets(recv.and_then(Val::recv), method),
+            None => self.method_call_targets(recv.and_then(Val::recv), method),
         }
     }
 
@@ -2485,18 +2658,20 @@ impl<'a> TypeCtx<'a> {
     /// project getter (see [`ProjectDecls::property_targets`]). Reading an attribute of a class
     /// or module object (`Val::Ref`) runs none: it yields the property object itself.
     pub fn resolve_attr_load(&self, recv: Option<&Val>, attr: &str) -> Option<Callee> {
-        match recv? {
-            Val::Inst(class) => self.project.property_targets(class, attr, false),
-            Val::Super(class) => self.project.property_targets(class, attr, true),
-            Val::Union(classes) => match union_targets(classes, |c| {
+        if let Some(classes) = self.dispatch_classes(recv) {
+            return match union_targets(classes, |c| {
                 self.project
                     .property_targets(c, attr, false)
                     .unwrap_or(Callee::Unresolved)
             }) {
                 Callee::Unresolved => None,
                 callee => Some(callee),
-            },
-            Val::Ref(_) => None,
+            };
+        }
+        match recv? {
+            Val::Inst(class) => self.project.property_targets(class, attr, false),
+            Val::Super(class) => self.project.property_targets(class, attr, true),
+            Val::Union(_) | Val::Ref(_) => None,
         }
     }
 

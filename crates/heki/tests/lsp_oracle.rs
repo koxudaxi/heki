@@ -277,6 +277,14 @@ class Shelf:
 "#;
 const FILL: &str = "from pkg.shelf import Shelf\n\n\ndef fill(shelf: Shelf, x):\n    for r in shelf.registries:\n        r.entries.append(x)\n";
 const FILL_MAIN: &str = "from pkg.shelf import Shelf\n\n\ndef fill_main(shelf: Shelf, x):\n    shelf.again().main.entries.append(x)\n";
+// A protocol in one module, the class implementing it structurally in another.
+const VIEWS: &str = "from typing import Protocol\n\n\nclass EntriesView(Protocol):\n    entries: list\n    tag: str\n\n\ndef fill_view(view: EntriesView, x):\n    view.entries.append(x)\n";
+// The class body only declares names (no function changes): only the protocol's
+// implementations change.
+const TAGGED: &str =
+    "from pkg.model import Registry\n\n\nclass TaggedRegistry(Registry):\n    tag: str = \"t\"\n";
+const UNTAGGED: &str =
+    "from pkg.model import Registry\n\n\nclass TaggedRegistry(Registry):\n    label: str = \"t\"\n";
 
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
@@ -371,6 +379,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/shelf.py", SHELF),
         ("pkg/fill.py", FILL),
         ("pkg/fill_main.py", FILL_MAIN),
+        ("pkg/views.py", VIEWS),
+        ("pkg/tagged.py", TAGGED),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -538,6 +548,16 @@ fn steps_receiver_typing() -> Vec<Step> {
             vec![save("pkg/shelf.py", SHELF)],
         )
         .present(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the class stops implementing the protocol",
+            vec![save("pkg/tagged.py", UNTAGGED)],
+        )
+        .absent(&[("pkg/views.py", "MUT201")]),
+        Step::new(
+            "the class implements the protocol again",
+            vec![save("pkg/tagged.py", TAGGED)],
+        )
+        .present(&[("pkg/views.py", "MUT201")]),
     ]
 }
 
@@ -943,6 +963,7 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_conn_use.py", "EFF102"),
             ("pkg/fill.py", "MUT201"),
             ("pkg/fill_main.py", "MUT201"),
+            ("pkg/views.py", "MUT201"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(

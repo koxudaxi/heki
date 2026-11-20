@@ -35,8 +35,10 @@ wrapped function returns, and `typing.cast` names the class. A variable rebound 
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
-also inside `and` / `or`). An object whose class heki cannot see (an unannotated parameter or
-return, `Any`, a value of more than three classes) is not tied to the target.
+also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
+classes that implement it structurally (having every member it defines; at most eight, counting
+a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
+or return, `Any`, a value of more than three classes) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the read is reported at every call

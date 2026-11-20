@@ -934,3 +934,117 @@ fn flow_rebinding_walrus_unions_and_isinstance() {
         }
     }
 }
+
+const PROTOCOL_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki]
+target-version = "py311"
+
+[tool.heki.lint]
+select = ["MUT201", "EFF101"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["Field.data_type", "Field.name"]
+allowed-writers = ["pkg.store.*"]
+"#;
+
+const PROTOCOL_VIEWS: &str = r#"from __future__ import annotations
+
+from typing import Protocol
+
+
+class FieldView(Protocol):
+    data_type: str
+
+    def rename(self, name: str) -> None: ...
+
+
+class Pauser(Protocol):
+    def pause(self) -> None: ...
+
+
+class Named(Protocol):
+    name: str
+
+
+def write_view(view: FieldView) -> None:
+    view.data_type = "y"
+
+
+def extend_view(views: list[FieldView]) -> None:
+    for view in views:
+        view.data_type = "z"
+
+
+async def run(pauser: Pauser) -> None:
+    pauser.pause()
+
+
+def rename_named(named: Named) -> None:
+    named.name = "n"
+"#;
+
+const PROTOCOL_IMPLS: &str = r#"from __future__ import annotations
+
+import time
+
+
+class Field:
+    def __init__(self) -> None:
+        self.data_type = "x"
+        self.name = ""
+
+    def rename(self, name: str) -> None:
+        self.name = name
+
+
+class SubField(Field):
+    pass
+
+
+class Unrelated:
+    def rename(self, name: str) -> None:
+        pass
+
+
+class Sleepy:
+    def pause(self) -> None:
+        time.sleep(1)
+"#;
+
+/// Classes that all have a `name`: more than the candidate limit implement `Named`.
+fn many_named() -> String {
+    (0..9)
+        .map(|i| {
+            format!(
+                "class Named{i}:\n    def __init__(self) -> None:\n        self.name = \"\"\n\n\n"
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn protocol_receivers_dispatch_to_the_classes_implementing_them() {
+    let p = Project::new("protocols");
+    p.write("pyproject.toml", PROTOCOL_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/views.py", PROTOCOL_VIEWS)
+        .write("pkg/impls.py", PROTOCOL_IMPLS)
+        .write("pkg/named.py", &many_named());
+    let found = reported(&p, &[], "pkg/views.py");
+    let expected: BTreeSet<(String, String)> = [
+        // `Field` has every member of `FieldView` (`SubField` is reached through it, `Unrelated`
+        // lacks `data_type`).
+        ("write_view", "MUT201"),
+        ("extend_view", "MUT201"),
+        // `Sleepy.pause` blocks.
+        ("run", "EFF101"),
+    ]
+    .iter()
+    .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
+    .collect();
+    // `Named` has more implementations than the candidate limit: nothing is dispatched.
+    assert_eq!(found, expected);
+}
