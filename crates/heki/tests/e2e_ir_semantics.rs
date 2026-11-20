@@ -383,3 +383,18 @@ def unfixed():
         pairs(&[("unfixed", "EFF102")])
     );
 }
+
+// ============================================================================== robustness
+
+#[test]
+fn many_sequential_branches_do_not_exhaust_the_stack() {
+    // The first read of `x` looks through one merge per `if` before it.
+    let src = format!(
+        "def f(x):\n{}    return x\n",
+        "    if True:\n        pass\n".repeat(60_000)
+    );
+    let p = Project::new("ir_deep_merges");
+    p.write("case.py", &src);
+    let (code, _, stderr) = p.check(&[]);
+    assert_eq!(code, 0, "{stderr}");
+}

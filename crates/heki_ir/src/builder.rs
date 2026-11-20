@@ -461,6 +461,22 @@ enum WalrusTarget {
     Module,
 }
 
+/// A step of [`FnBuilder::resolve_ssa`].
+enum SsaTask {
+    /// Find the name's value at the end of the block.
+    Read(BlockId),
+    /// The value just found is also the name's value at the end of this block.
+    Define(BlockId),
+    /// The values at the ends of `preds` are found: complete the block's phi.
+    Phi {
+        bb: BlockId,
+        phi_var: VarId,
+        preds: Vec<BlockId>,
+        /// Record the result as the name's value in `bb` (a phi created by a read).
+        define: bool,
+    },
+}
+
 struct ActiveLoop {
     header: BlockId,
     preheader: Option<BlockId>,
@@ -825,51 +841,92 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         if let Some(&val) = self.current_def.get(&(bb, name.to_string())) {
             return self.canonical_var(val);
         }
-        self.read_local_recursive(name, bb, span)
+        self.resolve_ssa(name, span, vec![SsaTask::Read(bb)])
     }
 
-    fn read_local_recursive(&mut self, name: &str, bb: BlockId, span: Span) -> VarId {
-        let val = if !self.sealed[bb.0 as usize] {
-            let phi_var = self.fresh_var(Some(name.to_string()));
-            self.incomplete_phis
-                .entry(bb)
-                .or_default()
-                .push((name.to_string(), phi_var));
-            phi_var
-        } else {
-            let preds = self.preds[bb.0 as usize].clone();
-            if preds.is_empty() {
-                let dst = self.fresh_var(Some(name.to_string()));
-                self.blocks[bb.0 as usize].insts.push(Inst {
-                    kind: InstKind::LoadName {
-                        dst,
-                        name: name.to_string(),
-                    },
-                    span,
-                });
-                dst
-            } else if preds.len() == 1 {
-                self.read_local_ssa(name, preds[0], span)
-            } else {
-                let phi_var = self.fresh_var(Some(name.to_string()));
-                // Break cycles before recursing into predecessors.
-                self.write_local(name, bb, phi_var);
-                self.add_phi_operands(bb, name, phi_var, span)
+    /// Braun et al.'s recursive lookup of `name` through the predecessors, run on an explicit
+    /// stack: a function of many sequential branches would otherwise recurse once per block.
+    /// Every `Read` leaves one value on the value stack; the result is the last one.
+    fn resolve_ssa(&mut self, name: &str, span: Span, mut tasks: Vec<SsaTask>) -> VarId {
+        let mut values: Vec<VarId> = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                SsaTask::Read(bb) => {
+                    if let Some(&val) = self.current_def.get(&(bb, name.to_string())) {
+                        values.push(self.canonical_var(val));
+                    } else if !self.sealed[bb.0 as usize] {
+                        let phi_var = self.fresh_var(Some(name.to_string()));
+                        self.incomplete_phis
+                            .entry(bb)
+                            .or_default()
+                            .push((name.to_string(), phi_var));
+                        self.write_local(name, bb, phi_var);
+                        values.push(phi_var);
+                    } else {
+                        let preds = self.preds[bb.0 as usize].clone();
+                        match preds.as_slice() {
+                            [] => {
+                                let dst = self.fresh_var(Some(name.to_string()));
+                                self.blocks[bb.0 as usize].insts.push(Inst {
+                                    kind: InstKind::LoadName {
+                                        dst,
+                                        name: name.to_string(),
+                                    },
+                                    span,
+                                });
+                                self.write_local(name, bb, dst);
+                                values.push(dst);
+                            }
+                            [pred] => {
+                                tasks.push(SsaTask::Define(bb));
+                                tasks.push(SsaTask::Read(*pred));
+                            }
+                            _ => {
+                                let phi_var = self.fresh_var(Some(name.to_string()));
+                                // Break cycles before reading the predecessors.
+                                self.write_local(name, bb, phi_var);
+                                tasks.push(SsaTask::Phi {
+                                    bb,
+                                    phi_var,
+                                    preds: preds.clone(),
+                                    define: true,
+                                });
+                                tasks.extend(preds.iter().rev().map(|p| SsaTask::Read(*p)));
+                            }
+                        }
+                    }
+                }
+                SsaTask::Define(bb) => {
+                    let val = *values.last().expect("a read left its value");
+                    self.write_local(name, bb, val);
+                }
+                SsaTask::Phi {
+                    bb,
+                    phi_var,
+                    preds,
+                    define,
+                } => {
+                    let operands = values.split_off(values.len() - preds.len());
+                    let incoming: Vec<(BlockId, VarId)> = preds.into_iter().zip(operands).collect();
+                    let val = self.finish_phi(bb, phi_var, incoming);
+                    if define {
+                        self.write_local(name, bb, val);
+                    }
+                    values.push(val);
+                }
             }
-        };
-        self.write_local(name, bb, val);
-        val
+        }
+        values.pop().expect("the first read left its value")
     }
 
-    fn add_phi_operands(&mut self, bb: BlockId, name: &str, phi_var: VarId, span: Span) -> VarId {
-        let preds = self.preds[bb.0 as usize].clone();
-        let mut incoming = Vec::with_capacity(preds.len());
-        for p in preds {
-            let v = self.read_local_ssa(name, p, span);
-            incoming.push((p, v));
-        }
-
-        // Check triviality: all operands are either `phi_var` itself or one single `same` value.
+    /// Complete `phi_var` of `bb` from its operands: the one other value when every operand is
+    /// that value or the phi itself (a trivial phi), else the phi.
+    fn finish_phi(
+        &mut self,
+        bb: BlockId,
+        phi_var: VarId,
+        incoming: Vec<(BlockId, VarId)>,
+    ) -> VarId {
         let mut same: Option<VarId> = None;
         let mut trivial = true;
         for &(_, raw_v) in &incoming {
@@ -905,8 +962,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
         self.sealed[bb.0 as usize] = true;
         if let Some(pending) = self.incomplete_phis.remove(&bb) {
+            let preds = self.preds[bb.0 as usize].clone();
             for (name, phi_var) in pending {
-                self.add_phi_operands(bb, &name, phi_var, self.span);
+                let mut tasks = vec![SsaTask::Phi {
+                    bb,
+                    phi_var,
+                    preds: preds.clone(),
+                    define: false,
+                }];
+                tasks.extend(preds.iter().rev().map(|p| SsaTask::Read(*p)));
+                self.resolve_ssa(&name, self.span, tasks);
             }
         }
     }
