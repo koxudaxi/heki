@@ -27,6 +27,19 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop (followed by `return`, `break`, or `raise`): it runs once per run of the loop.
 - `EFF101` no longer reports `result()` or `exception()` of a `concurrent.futures.Future` known
   to be done: under `if f.done():`, or once `await asyncio.wrap_future(f)` has returned.
+- Sizes the code states are no longer taken as data-sized (`EFF102`, `EFF103`, `DATA101`, and
+  the `OPT` rules): a builtin constructor of a fixed iterable (`list(range(7))`,
+  `tuple(".;:")`), a string constant, a comprehension over fixed iterables or a new list filled
+  a fixed number of times (`[c for c in LABELS if c in seen]`, `ids.append(...)` for each of a
+  few cards), a slice with constant bounds (`cases[:3]`), and an iterable a length test on every
+  path to the loop caps (`if not 1 <= len(cards) <= 6: raise ...`, `assert len(xs) <= 3`). A
+  module body's loops and comprehensions over imported constants, and generator expressions
+  and comprehensions before 3.12 over constants of other modules, get the same sizes as the
+  code of a function.
+- A module-level tuple or string stays fixed when other code puts it in a list or passes it to
+  a function (an `EFF103` report on a loop of `CREATE TABLE` statements).
+- `DATA101` no longer reports an accumulation in a loop whose trip count the code fixes
+  (`for is_p_wave in [False, True]`, `range(4)`).
 
 ## [0.1.2] - 2026-11-21
 

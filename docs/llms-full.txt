@@ -543,8 +543,8 @@ ASCII. A file declaring any other encoding is reported as an error and not check
 
 ### Sizes known only at run time
 
-Whether a collection is small is decided from the code: a list built at run time counts as
-large, even when it always holds three items. The rules this affects are marked size-dependent;
+Whether a collection is small is decided from the code: a list whose size depends on the
+input counts as large, even when it always holds three items. The rules this affects are marked size-dependent;
 [Fixes and Safety](https://heki.koxudaxi.dev/fixes/#when-the-size-is-fixed) lists what counts as a fixed size.
 
 ### Callers outside the checked files
@@ -1312,17 +1312,25 @@ Two independent questions decide whether heki offers the rewrite:
 
 A size-dependent rule reports nothing when the code fixes the size:
 
-- the container is a display of at most 16 items, without `*` / `**` unpacking, that nothing
-  grows or lets escape. Shrinking it (`expected.pop(0)` on `expected = [b"a", b""]`) and
-  read-only builtins are fine. This holds also through local names, module constants, and other
-  modules' module-level displays and class attributes;
-- the loop runs a fixed number of times: over a small display or a `range` of constants with
-  at most 16 steps;
+- the container holds at most 16 items and nothing grows it past that or lets it escape. It
+  is a display without `*` / `**` unpacking, a string constant, a builtin constructor of an
+  iterable the code fixes (`list(range(7))`, `tuple(".;:")`, `sorted(NAMES)`, `list()`), a
+  slice with constant bounds (`cases[:3]`, `paths[-2:]`), or a comprehension over fixed
+  iterables (`[c for c in LABELS if c in wanted]`). Shrinking it (`expected.pop(0)` on
+  `expected = [b"a", b""]`) and read-only builtins are fine, and so is filling a new list a
+  fixed number of times (`ids.append(card["id"])` in a loop over at most 6 cards). A tuple or
+  a string stays fixed whatever other code does with it. This holds also through local names,
+  module constants, and other modules' module-level displays and class attributes, read in a
+  function or in a module body;
+- the loop runs a fixed number of times: over such a container, a `range` of constants with at
+  most 16 steps, or an iterable a test on every path to the loop caps (`if not 1 <= len(cards)
+  <= 6: raise ValueError(...)`, `assert len(xs) <= 3`, also after a loop that shrinks it, when
+  nothing on the way to the loop grows it or hands it to other code);
 - the list is rebuilt in every iteration;
 - the loop's own test caps the accumulator: `while len(buf) < 10`.
 
 These facts decide profitability only, never safety. A size known only at run time does not
-count: a list built at run time is reported even when it always holds three items.
+count: a list whose size depends on the input is reported even when it always holds three items.
 
 ## What a fix must prove
 
@@ -3503,7 +3511,9 @@ something else and returns its argument unchanged does not. One-off
 concatenations inside a loop are not reported, also on a branch that leaves the variable
 unchanged otherwise (`if step: x = np.append(edges, last)`), nor is writing into a buffer passed
 as `out=` (`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous
-value must be among the data that is combined.
+value must be among the data that is combined. A loop whose trip count the code fixes is not
+reported either (`for is_p_wave in [False, True]`, `for _ in range(steps)` with `steps = 8`):
+it copies a fixed number of times, whatever the input.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -3664,7 +3674,8 @@ container must be used by the membership test only: `(tmp := list(keys))` follow
 `tmp.clear()` would clear the one shared container. Calls with `*` arguments (`list(*args)`
 passes the elements of `args`) and method calls with arguments are not hoisted.
 
-Not reported when the loop runs a fixed small number of times, or when nothing is rebuilt:
+Not reported when the loop runs a fixed small number of times, when the rebuilt container is
+small whatever the input (`set(paths[:2])`, `tuple(".;:")`), or when nothing is rebuilt:
 `tuple(t)` of a tuple returns `t` itself.
 
 
@@ -3746,8 +3757,10 @@ not reported. Neither are:
   `remove()` / `pop()` or replace its items), in the function, as a module global (also of
   another module: `LEVELS = ["low", "mid", "high"]`), or as an attribute its class and
   subclasses only ever assign such a display (`self.preferred = [",", ";"]`, a class
-  attribute). A display handed to code that may grow it (any call but read-only builtins; a
-  `*items` argument passes the items only) is not small;
+  attribute); also a list the code builds from a fixed iterable (`list(range(7))`, `[c for c
+  in LABELS if overflow.get(c)]`) or fills a fixed number of times (`ids.append(card["id"])`
+  for each of at most 6 cards a test allowed). A display handed to code that may grow it (any
+  call but read-only builtins; a `*items` argument passes the items only) is not small;
 - calls after which the loop always ends (`return items.index(x)`, a `break` on every path);
 - `index(x, start)`, which scans from a position that usually moves forward.
 
@@ -3816,8 +3829,9 @@ This is a size-dependent rewrite: it is reported as a suggestion and applied onl
 `heki check --fix --include-size-dependent`, or for functions that a `--profile` dump shows
 hot. Not reported:
 
-- small displays: at most 16 items that nothing grows, whatever the items are
-  (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one);
+- small containers: at most 16 items that nothing grows, whatever the items are
+  (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one, a comprehension
+  over one, or `list(range(5))`);
 - lists whose elements are dicts, lists, or sets: no `set` can hold them.
 
 ## Why is this bad?
@@ -3850,9 +3864,9 @@ Proven safe only when:
 
 A `list[int]` annotation is never trusted: a list subclass can override `__contains__`.
 
-Not reported when the container is a small display that nothing grows, or when the loop runs a
-fixed small number of times (`for i in range(3):`): building the set costs about as much as the
-scans it saves.
+Not reported when the container is small whatever the input, or when the loop runs a fixed
+small number of times (`for i in range(3):`): building the set costs about as much as the scans
+it saves.
 
 
 ---
@@ -3878,8 +3892,12 @@ getter builds a new client).
 The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
 loops whose size the code fixes, when no data-sized loop is around them: displays of at most 16
 items (also through a name or a module constant bound to one that nothing in the project
-grows, and through `enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer
-constants with at most 16 steps (`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
+grows, a tuple whatever other code does with it, and through `enumerate` / `zip` / `reversed` /
+`sorted` / `.items()`), `range` of integer constants with at most 16 steps
+(`range(ATTEMPTS - 1)`), what a builtin constructor, a comprehension, or a fixed loop of
+`append`s makes of those (`list(range(7))`, `[n.upper() for n in ("a", "b")]`), slices with a
+constant bound (`for case in cases[:3]`), iterables a length test on every path to the loop
+caps (`if len(cases) > 3: raise ...`), retry loops, and daemon polling loops.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
 initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`
@@ -3965,9 +3983,11 @@ its first matching comparison. It does not report:
   pair runs do not count;
 - joins where the code fixes the size of either loop, so that the cost grows with one side
   only: a display of at most 16 items (`for b in ("x", "y")`, also through a name or a module
-  constant of this or another module (`NAME`, `module.NAME`) when nothing grows it, and through
-  `enumerate` / `zip` / `sorted` / `.items()` ...), and `range` of integer constants with at
-  most 16 steps (`range(10)`, `range(LIMIT)`).
+  constant of this or another module (`NAME`, `module.NAME`, also read in a module body) when
+  nothing grows it, a comprehension over one (`[r for r in ("a", "b") if r in seen]`), and
+  through `enumerate` / `zip` / `sorted` / `.items()` ...), `range` of integer constants with
+  at most 16 steps (`range(10)`, `range(LIMIT)`), and an iterable a length test on every path
+  caps (`if len(groups) > 8: raise ...`).
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.

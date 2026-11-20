@@ -209,7 +209,9 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
 - **Classes, decorators, and loops**: natural loops with a `LoopBound` (`ConstSmall(k)` /
   `RetryPattern` / `DaemonPolling` / `Unbounded`), nested classes kept apart from their outer
   class, and decorator metadata (`@cached_property`, `@lru_cache`, CLI and web decorators).
-- **Size facts in one home** (`heki_ir::facts`): small displays, constant trip counts, and
+- **Size facts in one home** (`heki_ir::facts`): small containers (displays, constant
+  strings, builtin constructors, comprehensions, constant slices, lists filled a fixed number
+  of times), constant trip counts, length tests on every path to a loop, and
   `while len(x) < N` caps, for profitability and Advisory noise only. The Soundness lane reads
   them within one module (`FnIndex`); the Advisory rules read other modules' small displays
   through the declarations (`ModuleDecls.small_globals`, `ClassDecl.attr_displays`).
@@ -304,7 +306,8 @@ EffectSummary(f) = {
    - `EFF102` recognizes and relaxes the polling loops of resident daemons (reconnect loops such
      as `while self._running:`).
    - `DATA101` requires an SSA **`LoopCarried`** value (accumulation through reassignment) and
-     excludes one-off concatenation or padding in a loop.
+     excludes one-off concatenation or padding in a loop, and loops whose trip count the code
+     fixes.
    - `MUT101` excludes (1) two-phase initialization hooks (`__init__` / `__post_init__` /
      `model_post_init` / `_init_*` / `_configure_*` / `setup_*` / `_open`, ...), (2) memo
      dictionaries (`_cache[k] = v`), (3) disjoint constant dict keys (`params["proxy"]` vs
@@ -429,7 +432,7 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 | **EFF106** | Opt-in | 2.1% (fatal when it happens) | `await` or `BlockingNet` (across functions too) while a type-certain synchronous lock (`threading.Lock` / `RLock` / `Semaphore` / `BoundedSemaphore` / `Condition`) or a database transaction (`.begin()` / `.begin_nested()` / `transaction.atomic()` / ...) is held by a `with`. Async locks and `async with` are out of scope; offloading and test relaxation as in `EFF101` |
 | **EFF107** | Opt-in | — | `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future` results bound to a local variable but never awaited, returned, stored, passed on, or captured (lost to the garbage collector). Discarded results are Ruff's `RUF006` and are not reported; `TaskGroup.create_task` is out of scope |
 | **EFF201** | When configured (contract) | — | **Declared effect boundaries**: functions matching the `scopes` of `[[tool.heki.effect-boundaries]]` must not reach a forbidden effect (`blocking-*`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`, `calls` of `call-targets`), directly or transitively; `allow-writes` with `write-universe` reports every reached write in the universe that is not allowed (one implementation with `writes-targets`; candidates, not a gate: dcg's pass declarations show over-approximation). Paths through `allowed-callees` and the inside of other scope functions are not followed (boundary-only reporting); the shortest call chain is attached |
-| **DATA101** | On | Data/ML **19.5%** (about 90% precise with `LoopCarried`) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. **An SSA `LoopCarried` value is required**: one-off concatenation and padding are excluded |
+| **DATA101** | On | Data/ML **19.5%** (about 90% precise with `LoopCarried`) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. **An SSA `LoopCarried` value is required**: one-off concatenation, padding, and `ConstSmall` loops are excluded |
 
 *(`DATA102` (`df.iterrows()`), measured in Stage 0-A, is **rejected**: it duplicates
 single-expression lints.)*
