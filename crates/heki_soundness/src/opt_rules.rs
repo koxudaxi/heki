@@ -160,6 +160,7 @@ struct ModuleCtx<'a> {
     local_names: Vec<(Span, FxHashSet<&'a str>)>,
     /// How to spell `collections.deque` (`None`: no safe way to import it).
     deque: Option<DequeRef>,
+    ir: &'a ModuleIr,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +264,7 @@ impl<'a> ModuleCtx<'a> {
         // An import heki sees may be rebound behind the IR (star import, `exec`, `globals()`),
         // and so may a new one: no spelling of `deque` is trusted then.
         let deque = deque.filter(|_| !builtins.dynamic_globals());
+
         Self {
             source,
             lines: LineIndex::from_source(source),
@@ -270,7 +272,25 @@ impl<'a> ModuleCtx<'a> {
             used_names,
             local_names,
             deque,
+            ir,
         }
+    }
+
+    /// The kind every `self.<attr> = ...` of the methods of `class` in this module stores,
+    /// when they all store the same `str` / `bytes` / `tuple` literal kind.
+    fn self_attr_kind(&self, class: &str, attr: &str) -> Option<BuiltinKind> {
+        same_kind(
+            self.ir
+                .functions
+                .iter()
+                .filter(|f| f.owner_class_qualname.as_deref() == Some(class))
+                .filter_map(|f| Some((f, f.params.first()?.var)))
+                .flat_map(|(f, this)| {
+                    attribute_stores(f, this)
+                        .filter(|(a, _)| *a == attr)
+                        .map(|(_, k)| k)
+                }),
+        )
     }
 
     /// `f` or a function enclosing it binds `name`, so a reference to `name` added inside `f`
@@ -1418,6 +1438,26 @@ impl<'a, 'c> Rules<'a, 'c> {
                 self.var(obj)
             )
         });
+        // `list += x` extends in place whatever `x` is: only an attribute that holds a `str`,
+        // `bytes`, or `tuple` is copied by `+=`.
+        let receiver = receiver_root(f, obj);
+        let held = match (&f.owner_class_qualname, f.params.first()) {
+            (Some(class), Some(this)) if receiver == this.var => self.m.self_attr_kind(class, attr),
+            _ => same_kind(
+                attribute_stores(f, receiver)
+                    .filter(|(a, _)| *a == attr)
+                    .map(|(_, k)| k),
+            ),
+        };
+        let cost = st
+            .exact_type(rhs)
+            .filter(|k| matches!(k, Str | Bytes | Tuple) && held == Some(*k))
+            .map(|k| {
+                format!(
+                    "`{target}` is assigned an exact `{}` and grows by concatenation",
+                    k.name()
+                )
+            });
         Some(self.candidate(
             OptRule::Opt103,
             binop.span,
@@ -1425,7 +1465,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             format!("`{target} += ...` re-copies the attribute on every iteration (quadratic); accumulate in a local list and assign the joined result once"),
             obs,
             fresh_receiver.or_else(|| loop_bound_note(lp)),
-            st.exact_type(rhs).filter(|k| matches!(k, Str | Bytes | Tuple)).map(|k| format!("the right operand is an exact `{}`", k.name())),
+            cost,
             Vec::new(),
         ))
     }
@@ -2557,6 +2597,87 @@ impl<'a, 'c> Rules<'a, 'c> {
         edits.extend(type_edits);
         Some(edits)
     }
+}
+
+/// The variable a chain of copies of `v` starts from (`out = self` gives `self`), through the
+/// `Copy` definitions of `copies`.
+fn copy_root(copies: &rustc_hash::FxHashMap<VarId, VarId>, mut v: VarId) -> VarId {
+    for _ in 0..copies.len() {
+        match copies.get(&v) {
+            Some(&src) => v = src,
+            None => break,
+        }
+    }
+    v
+}
+
+fn copies_of(f: &IrFunction) -> rustc_hash::FxHashMap<VarId, VarId> {
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i.kind {
+            InstKind::Copy { dst, src } => Some((dst, src)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn receiver_root(f: &IrFunction, v: VarId) -> VarId {
+    copy_root(&copies_of(f), v)
+}
+
+/// `(attribute, kind)` of every `<receiver>.attribute = value` in `f` on a copy of `receiver`:
+/// the exact `str` / `bytes` / `tuple` of a literal value, `None` for any other value. The
+/// update `<receiver>.attribute += ...` itself is skipped.
+fn attribute_stores(
+    f: &IrFunction,
+    receiver: VarId,
+) -> impl Iterator<Item = (&str, Option<BuiltinKind>)> {
+    let copies = copies_of(f);
+    let defs: rustc_hash::FxHashMap<VarId, &Inst> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| Some((i.kind.dst()?, i)))
+        .collect();
+    let def = move |v: VarId| defs.get(&v).copied();
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(move |i| match &i.kind {
+            InstKind::AttrStore { obj, attr, value } if copy_root(&copies, *obj) == receiver => {
+                let kind = match def(*value).map(|d| &d.kind) {
+                    Some(InstKind::BinOp {
+                        in_place: true,
+                        lhs,
+                        ..
+                    }) if def(*lhs).is_some_and(
+                        |l| matches!(&l.kind, InstKind::AttrLoad { attr: a, .. } if a == attr),
+                    ) =>
+                    {
+                        return None;
+                    }
+                    Some(InstKind::Const {
+                        literal: heki_ir::ConstLiteral::Str(_),
+                        ..
+                    }) => Some(Str),
+                    Some(InstKind::Const {
+                        literal: heki_ir::ConstLiteral::Bytes,
+                        ..
+                    }) => Some(Bytes),
+                    Some(InstKind::AllocBuiltin { kind: Tuple, .. }) => Some(Tuple),
+                    _ => None,
+                };
+                Some((attr.as_str(), kind))
+            }
+            _ => None,
+        })
+}
+
+/// The kind all of `kinds` are, when there is at least one and they agree.
+fn same_kind(mut kinds: impl Iterator<Item = Option<BuiltinKind>>) -> Option<BuiltinKind> {
+    let first = kinds.next()??;
+    kinds.all(|k| k == Some(first)).then_some(first)
 }
 
 /// Block `b` runs whenever the function body completes (it is no branch of an `if`, such as

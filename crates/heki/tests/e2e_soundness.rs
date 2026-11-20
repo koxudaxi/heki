@@ -484,6 +484,15 @@ const ACCUMULATE: &[Expect] = &[
             V::Fix(&["d.update(extra  # keep this comment\n             )"]),
         )],
     ),
+    // `list += tuple` extends in place; an attribute that holds a `str` is copied.
+    ("Collector.collect", &[]),
+    (
+        "local_holder",
+        &[(
+            "OPT103",
+            V::Blocked("Unique(holder.text): `holder.text` is reachable through `holder`"),
+        )],
+    ),
 ];
 
 #[test]

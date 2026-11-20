@@ -360,6 +360,31 @@ def merge_with_comment(items):
     return d
 
 
+class Collector:
+    """`list += tuple` extends the list in place: no copy."""
+
+    def __init__(self):
+        self.values = []
+
+    def collect(self, n):
+        for i in range(n):
+            self.values += (i,)
+        return len(self.values)
+
+
+class Holder:
+    pass
+
+
+def local_holder(n):
+    """The attribute starts as a `str` in this function: each `+=` copies it."""
+    holder = Holder()
+    holder.text = ""
+    for _ in range(n):
+        holder.text += "-"
+    return holder.text
+
+
 def run(fn, *args):
     try:
         out = fn(*args)
@@ -395,6 +420,8 @@ def main() -> int:
             run(comment_after_element, items),
             run(comment_before_starred, [items, items]),
             run(merge_with_comment, items),
+            run(Collector().collect, n),
+            run(local_holder, n),
             run(key_not_simple_text, items),
             run(constant_key, items),
             run(parameter_key, items, "k"),
