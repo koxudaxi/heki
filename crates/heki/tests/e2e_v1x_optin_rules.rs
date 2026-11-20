@@ -219,7 +219,7 @@ def annotated(rows: Iterator[int], gen: Generator[int, None, None], items: Itera
     n = sum(rows)
     m = max(rows)
     loaded: Iterator[int] = load()
-    k = any(loaded)
+    k = sum(loaded)
     j = all(loaded)
     s = min(gen)
     t = sorted(gen)

@@ -23,8 +23,11 @@ the allowed callers and resolves to a target:
 
 A call is reported only when every function it may call is a target: when the receiver's class
 hierarchy also offers a method that is no target (a receiver typed with a base class whose own
-`replace_reference` is not guarded), the call is not reported. A call on a receiver whose class
-heki does not know (an unannotated parameter, `Any`) is not seen.
+`replace_reference` is not guarded), the call is not reported. The functions it may call can be
+targets of different entries of one contract: with `A.reset` and `B.reset` both listed, `obj.reset()`
+on `obj: Base`, whose subclasses `A` and `B` implement `reset`, is one report for
+`A.reset|B.reset`. A call on a receiver whose class heki does not know (an unannotated
+parameter, `Any`) is not seen.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
 callers hands its calls to its callers: the call is reported at the call sites of the first
@@ -55,18 +58,19 @@ legitimately imports. The contract states the ownership once in configuration.
 [[tool.heki.call-owners]]
 name = "reference-mutators"
 targets = ["DataType.replace_reference", "FinalFacts"]
-allowed-callers = ["pkg.store.*"]
+allowed-callers = ["pkg.store.GenerationStore.*"]
 message = "use a GenerationStore operation instead"
 ```
 
 ```python
+# pkg/store.py
 class GenerationStore:
     def replace_data_type_ref(self, data_type: DataType, ref: Reference) -> None:
         data_type.replace_reference(ref)  # allowed caller
 
 
 def swap(data_type: DataType, ref: Reference) -> None:
-    data_type.replace_reference(ref)  # MUT204: outside `pkg.store.*`
+    data_type.replace_reference(ref)  # MUT204: outside `pkg.store.GenerationStore.*`
 
 
 def rename(text: str) -> str:

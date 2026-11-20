@@ -1,5 +1,6 @@
 //! Declared contracts that summaries depend on: the producers of `[[tool.heki.readonly-returns]]`
-//! (`MUT202`) and the `[[tool.heki.invalidation]]` contracts (`MUT109`).
+//! (`MUT202`), the `[[tool.heki.invalidation]]` contracts (`MUT109`), and whether any ownership
+//! contract is declared.
 //!
 //! The rules layer implements [`Contracts`] from the configuration and hands it to
 //! [`crate::analyze_project_with`]; the index keeps it for incremental updates. Facts that depend
@@ -12,6 +13,13 @@ use std::fmt::Debug;
 /// What the declared contracts say about a name, as far as the summaries need it. Masks have
 /// one bit per `invalidation` contract, in configuration order (at most 64 contracts).
 pub trait Contracts: Debug + Send + Sync {
+    /// Whether an ownership contract is declared (`write-owners`, `read-owners`,
+    /// `effect-boundaries`, `invalidation`). Only the rules of those contracts read the facts it
+    /// turns on: attributes and keys named by `Final` string constants, writes into the entries
+    /// of attribute containers, whether a write constructs its object, and the writes heki
+    /// cannot tie to a class.
+    fn ownership(&self) -> bool;
+
     /// `Some(deep)` when a `readonly-returns` entry names `fqn`: a project function, an external
     /// symbol, or an attribute (`pkg.mod.Class.attr`).
     fn readonly_producer(&self, fqn: &str) -> Option<bool>;
@@ -29,4 +37,8 @@ pub trait Contracts: Debug + Send + Sync {
     /// The contracts whose targets include attribute `attr` of an object of class `classes[0]`;
     /// `classes` lists that class and then its bases (a target class covers its subclasses).
     fn target_of(&self, classes: &[String], attr: &str) -> u64;
+
+    /// Whether a target of some contract names an attribute of class `classes[0]` or of one of
+    /// its bases (`classes` as for [`Contracts::target_of`]).
+    fn names_class(&self, classes: &[String]) -> bool;
 }

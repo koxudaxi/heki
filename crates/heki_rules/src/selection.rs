@@ -1,7 +1,8 @@
 //! Rule selection (docs/configuration.md, Ruff precedence).
 //!
 //! - Default: every `CORE_RULES` entry with `default_enabled`.
-//! - `select` (CLI over config) replaces the default set; `extend-select` adds; `ignore` and
+//! - `select` (CLI over config) replaces the default set (an empty `select` in the
+//!   configuration selects no rule); `extend-select` adds; `ignore` and
 //!   `per-file-ignores` remove.
 //! - A selector is a code (`EFF105`), a slug (`async-blocking-fs`), or a code prefix
 //!   (`EFF`, `MUT2`, `ALL`). A prefix only enables default-on rules: opt-in rules such as
@@ -69,19 +70,18 @@ impl RuleSelection {
         cli_extend_select: &[String],
         cli_ignore: &[String],
     ) -> Result<Self, SelectionError> {
-        let select = if !cli_select.is_empty() {
-            cli_select
+        let select = if cli_select.is_empty() {
+            lint.select.as_deref()
         } else {
-            &lint.select
+            Some(cli_select)
         };
-        let mut enabled: BTreeSet<&'static str> = if select.is_empty() {
-            CORE_RULES
+        let mut enabled: BTreeSet<&'static str> = match select {
+            None => CORE_RULES
                 .iter()
                 .filter(|r| r.default_enabled)
                 .map(|r| r.code)
-                .collect()
-        } else {
-            codes(select, true)?
+                .collect(),
+            Some(select) => codes(select, true)?,
         };
         enabled.extend(codes(&lint.extend_select, true)?);
         enabled.extend(codes(cli_extend_select, true)?);
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn cli_select_overrides_config_select() {
         let lint = LintConfig {
-            select: vec!["MUT".into()],
+            select: Some(vec!["MUT".into()]),
             extend_select: vec!["EFF105".into()],
             ..LintConfig::default()
         };

@@ -40,6 +40,7 @@ fn input(b: &Built) -> ModuleInput<'_> {
         path: b.path.clone(),
         module_name: b.module_name.clone(),
         is_package: b.is_package,
+        root_is_package: false,
         content_hash: b.hash.clone(),
         semantic: &b.semantic,
         ir: &b.ir,
@@ -293,39 +294,6 @@ fn gate_3_boundary_only_reports_first_sync_crossing() {
     );
 }
 
-fn many_async_callers(n: usize) -> String {
-    let mut src = String::from("import time\n\ndef c():\n    time.sleep(1)\n");
-    for i in 0..n {
-        src.push_str(&format!("\nasync def caller_{i:02}():\n    c()\n"));
-    }
-    src
-}
-
-#[test]
-fn gate_3_root_cause_grouping_folds_beyond_threshold() {
-    let index = project(&[("many.py", &many_async_callers(12))]);
-    let reports = boundary_reports(&index);
-    assert_eq!(reports.len(), 12);
-    let groups = group_by_root_cause(&reports, ROOT_CAUSE_GROUP_THRESHOLD);
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].additional, 11);
-    assert_eq!(groups[0].representative.function, key("many", "caller_00"));
-    assert_eq!(
-        groups[0].message_suffix().as_deref(),
-        Some("(+11 more async call sites reaching the same blocking root cause)")
-    );
-
-    // Exactly at the threshold nothing is folded.
-    let index = project(&[("many.py", &many_async_callers(10))]);
-    let groups = group_by_root_cause(&boundary_reports(&index), ROOT_CAUSE_GROUP_THRESHOLD);
-    assert_eq!(groups.len(), 10);
-    assert!(
-        groups
-            .iter()
-            .all(|g| g.additional == 0 && g.message_suffix().is_none())
-    );
-}
-
 const ASYNC_FILTERS_PY: &str = r#"
 import asyncio
 import time
@@ -513,6 +481,111 @@ fn gate_4_mutated_param_paths_cross_function_container_mutation() {
     }));
 }
 
+const HANDS_PY: &str = r#"
+class Model:
+    def __init__(self):
+        self.fields: list[str] = []
+
+def _private_writer(model: Model):
+    model.fields = []
+
+def public_writer(model: Model):
+    model.fields = []
+
+def top(model: Model):
+    _private_writer(model)
+    public_writer(model)
+
+def untyped(model):
+    model.fields.append("x")
+
+def hands_over(model: Model):
+    untyped(model)
+
+def above(model: Model):
+    hands_over(model)
+"#;
+
+#[test]
+fn private_callees_hand_write_sites_to_callers_public_ones_keep_them() {
+    let index = project(&[("hands.py", HANDS_PY)]);
+    let sites = |q: &str| -> Vec<(WriteKind, Vec<String>)> {
+        summary(&index, "hands", q)
+            .typed_field_write_sites
+            .iter()
+            .map(|t| {
+                (
+                    t.kind,
+                    t.via_chain.iter().map(|h| h.callee.clone()).collect(),
+                )
+            })
+            .collect()
+    };
+    // The private helper's write reaches `top`; the public function reports its own.
+    assert_eq!(
+        sites("top"),
+        vec![(WriteKind::DirectAttr, vec!["hands._private_writer".into()])]
+    );
+    assert_eq!(
+        sites("public_writer"),
+        vec![(WriteKind::DirectAttr, vec![])]
+    );
+    // The facts of both writes reach `top` all the same.
+    let top = summary(&index, "hands", "top");
+    assert_eq!(top.typed_field_writes.len(), 1);
+    assert!(top.typed_field_writes.iter().all(|t| t.attr == "fields"));
+    // An untyped helper's change is the caller's `IndirectHelper` write; a caller above it
+    // knows the field is written (no second `IndirectHelper`) but gets no site from a public
+    // callee.
+    assert_eq!(
+        sites("hands_over"),
+        vec![(WriteKind::IndirectHelper, vec!["hands.untyped".into()])]
+    );
+    assert!(sites("above").is_empty());
+    assert!(
+        summary(&index, "hands", "above")
+            .typed_field_writes
+            .iter()
+            .any(|t| t.kind == WriteKind::IndirectHelper)
+    );
+}
+
+const CYCLE_PY: &str = r#"
+class Model:
+    def __init__(self):
+        self.fields: list[str] = []
+
+
+def _ping(m: Model, n):
+    m.fields = []
+    if n:
+        _pong(m, n - 1)
+
+
+def _pong(m: Model, n):
+    _ping(m, n)
+
+
+def entry(m: Model):
+    _ping(m, 1)
+"#;
+
+#[test]
+fn a_write_handed_around_a_cycle_of_private_helpers_stays_with_its_writer() {
+    let index = project(&[("cycle.py", CYCLE_PY)]);
+    let chains = |q: &str| -> Vec<Vec<String>> {
+        summary(&index, "cycle", q)
+            .typed_field_write_sites
+            .iter()
+            .map(|t| t.via_chain.iter().map(|h| h.callee.clone()).collect())
+            .collect()
+    };
+    // `_ping` keeps its own write once; `_pong` and `entry` get it through the cycle.
+    assert_eq!(chains("_ping"), vec![Vec::<String>::new()]);
+    assert_eq!(chains("_pong"), vec![vec!["cycle._ping".to_owned()]]);
+    assert_eq!(chains("entry"), vec![vec!["cycle._ping".to_owned()]]);
+}
+
 // =================================================================== gate 5: Early Cutoff
 
 const B_PY: &str = r#"
@@ -630,7 +703,7 @@ fn gate_5_handbuilt_file_summaries() {
     };
     file_a
         .local_functions
-        .insert(f_helper.clone(), EffectSummary::default());
+        .insert(f_helper.clone(), EffectSummary::default().into());
     let mut index = ProjectIndex::build(vec![file_a.clone()]);
 
     let mut file_b = FileSummary {
@@ -641,11 +714,8 @@ fn gate_5_handbuilt_file_summaries() {
     };
     file_b
         .local_functions
-        .insert(f_caller.clone(), EffectSummary::default());
+        .insert(f_caller.clone(), EffectSummary::default().into());
     let span = Span { start: 0, end: 1 };
-    file_b
-        .call_edges
-        .push((f_caller.clone(), f_helper.clone(), span));
     file_b.call_sites.push(CallSite {
         caller: f_caller.clone(),
         target: CallTarget::Project(vec![BoundCallee {
@@ -661,6 +731,10 @@ fn gate_5_handbuilt_file_summaries() {
         role: crate::SiteRole::Call,
         returned: None,
         flow: None,
+        guards: Vec::new(),
+        once_per: None,
+        once_loops: 0,
+        runner: crate::Runner::Caller,
     });
     index.update_file(file_b);
 
@@ -673,7 +747,7 @@ fn gate_5_handbuilt_file_summaries() {
     // Now add a BlockingNet effect to helper -> caller is affected!
     let mut sum = EffectSummary::default();
     sum.direct_exec_effects.insert(BlockingNet);
-    file_a.local_functions.insert(f_helper, sum);
+    file_a.local_functions.insert(f_helper, sum.into());
     let res2 = index.update_file(file_a);
     assert!(res2.summary_changed);
     assert_eq!(res2.affected_callers, vec![f_caller.clone()]);
@@ -805,7 +879,7 @@ fn typed_field_write_kinds() {
         writes
             .typed_field_writes
             .iter()
-            .any(|t| t.kind == "set_attr" && t.class_qualname == "state.Model")
+            .any(|t| t.kind == WriteKind::SetAttr && t.class_qualname == "state.Model")
     );
 }
 
@@ -916,8 +990,7 @@ fn cha_priority_4_limit() {
     assert!(call.transitive_exec_effects.contains(&Sleep));
     let file = &index.files[&PathBuf::from("cha.py")];
     let edges = file
-        .call_edges
-        .iter()
+        .call_edges()
         .filter(|(caller, _, _)| caller.qualname == "call")
         .count();
     assert_eq!(edges, 8);
@@ -953,22 +1026,42 @@ fn module_names_and_relative_imports() {
     // A root `__init__.py` names no module.
     assert_eq!(name("__init__.py", false), None);
 
-    let rel = resolve_relative_module;
+    let rel = |m: &str, pkg, level, module| resolve_relative_module(m, pkg, level, module, false);
     assert_eq!(rel("pkg.a", false, 1, Some("sub")), Some("pkg.sub".into()));
     assert_eq!(rel("pkg", true, 1, Some("sub")), Some("pkg.sub".into()));
     assert_eq!(rel("pkg", true, 1, None), Some("pkg".into()));
     assert_eq!(rel("pkg.sub.mod", false, 2, None), Some("pkg".into()));
     assert_eq!(rel("pkg.a", false, 3, Some("x")), None);
+    // Past the top-level package (`from ..time import sleep` in `pkg/mod.py`), or with no
+    // package at all: `ImportError`.
+    assert_eq!(rel("pkg.mod", false, 2, Some("time")), None);
+    assert_eq!(rel("pkg", true, 2, None), None);
+    assert_eq!(rel("mod", false, 1, Some("x")), None);
     assert_eq!(rel("pkg.a", false, 0, Some("os")), Some("os".into()));
+    // A project root that is a package: one more level reaches it (its modules are top-level).
+    let in_root =
+        |m: &str, pkg, level, module| resolve_relative_module(m, pkg, level, module, true);
+    assert_eq!(in_root("api", false, 1, Some("util")), Some("util".into()));
+    assert_eq!(in_root("api", false, 1, None), Some(String::new()));
+    assert_eq!(
+        in_root("pkg.mod", false, 2, Some("time")),
+        Some("time".into())
+    );
+    assert_eq!(in_root("pkg.mod", false, 3, Some("time")), None);
 }
 
 #[test]
 fn src_layout_detection() {
     let root = std::env::temp_dir().join(format!("heki_effect_src_layout_{}", std::process::id()));
-    std::fs::create_dir_all(root.join("src/pkg")).unwrap();
     assert!(!detect_src_layout(&root));
+    // A namespace package (no `__init__.py`) under `src/` is laid out like a regular one.
+    std::fs::create_dir_all(root.join("src/pkg")).unwrap();
+    assert!(detect_src_layout(&root));
     std::fs::write(root.join("src/pkg/__init__.py"), "").unwrap();
     assert!(detect_src_layout(&root));
+    // `src` itself a package: imported as `src.pkg`.
+    std::fs::write(root.join("src/__init__.py"), "").unwrap();
+    assert!(!detect_src_layout(&root));
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -1230,15 +1323,12 @@ fn callers_left_without_a_defining_file_are_skipped() {
         };
         for k in funcs {
             f.local_functions
-                .insert((*k).clone(), EffectSummary::default());
+                .insert((*k).clone(), EffectSummary::default().into());
         }
         f
     };
     let file_a = file("a.py", "a", &[&helper]);
     let mut file_b = file("b.py", "b", &[]);
-    file_b
-        .call_edges
-        .push((caller.clone(), helper.clone(), span));
     file_b.call_sites.push(CallSite {
         caller: caller.clone(),
         target: CallTarget::Project(vec![BoundCallee {
@@ -1254,10 +1344,13 @@ fn callers_left_without_a_defining_file_are_skipped() {
         role: crate::SiteRole::Call,
         returned: None,
         flow: None,
+        guards: Vec::new(),
+        once_per: None,
+        once_loops: 0,
+        runner: crate::Runner::Caller,
     });
     let live = key("c", "live");
     let mut file_c = file("c.py", "c", &[&live]);
-    file_c.call_edges.push((live.clone(), helper.clone(), span));
     file_c.call_sites.push(CallSite {
         caller: live.clone(),
         target: CallTarget::Project(vec![BoundCallee {
@@ -1273,6 +1366,10 @@ fn callers_left_without_a_defining_file_are_skipped() {
         role: crate::SiteRole::Call,
         returned: None,
         flow: None,
+        guards: Vec::new(),
+        once_per: None,
+        once_loops: 0,
+        runner: crate::Runner::Caller,
     });
     file_c.call_sites.push(CallSite {
         caller: live.clone(),
@@ -1289,6 +1386,10 @@ fn callers_left_without_a_defining_file_are_skipped() {
         role: crate::SiteRole::Call,
         returned: None,
         flow: None,
+        guards: Vec::new(),
+        once_per: None,
+        once_loops: 0,
+        runner: crate::Runner::Caller,
     });
     let dup = file("b_alt.py", "b", &[&caller]);
     let mut index = ProjectIndex::build(vec![file_a.clone(), file_b, file_c, dup]);
@@ -1304,7 +1405,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         ..EffectSummary::default()
     };
     s.direct_exec_effects.insert(BlockingNet);
-    blocking.local_functions.insert(helper.clone(), s);
+    blocking.local_functions.insert(helper.clone(), s.into());
     let res = index.update_file(blocking);
     assert!(res.summary_changed);
     assert_eq!(res.affected_callers, vec![caller.clone(), live]);
@@ -1360,6 +1461,7 @@ fn py_implementation_takes_precedence_over_sibling_pyi_stub() {
         path: PathBuf::from("pkg/util.pyi"),
         module_name: "pkg.util".into(),
         is_package: false,
+        root_is_package: false,
         content_hash: String::new(),
         semantic: &stub_sem,
         ir: &stub_ir,

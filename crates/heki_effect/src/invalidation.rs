@@ -13,7 +13,10 @@
 //! constant (`while True:`) takes its one feasible edge, and one on a boolean flag the path sets
 //! after the point (`changed = True ... if changed: notify()`) too (see [`Flags`]).
 
-use crate::{CallHop, CallSite, Delivery, EffectSummary, Facts, FuncKey, ProjectIndex, WriteKind};
+use crate::callgraph::Through;
+use crate::{
+    CallSite, Delivery, EffectSummary, Facts, FuncKey, ProjectIndex, SharedChain, WriteKind,
+};
 use heki_ast::Span;
 use heki_ir::{BlockId, ConstLiteral, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::FxHashMap;
@@ -74,6 +77,8 @@ pub struct FlowWrite {
     pub span: Span,
     /// Where the written object comes from.
     pub reach: Reach,
+    /// The parameters the written object may be, as itself (`TypedFieldWriteSite::obj_params`).
+    pub obj_params: u64,
     pub flow: SiteFlow,
 }
 
@@ -105,9 +110,12 @@ pub struct UnmetWrite {
     /// (`Diagnostic::sites`).
     pub origin: Span,
     /// Calls from the owner down to the function that writes (empty: the owner itself).
-    pub via_chain: Vec<CallHop>,
+    pub via_chain: SharedChain,
     /// Where the written object comes from, as the owner sees it.
     pub reach: Reach,
+    /// The owner's parameters the written object may be, as itself: `self` (bit 0) in an
+    /// initializer is the class's own initialization.
+    pub obj_params: u64,
 }
 
 /// The points of one function the flow analysis describes, by position (`block`, instruction
@@ -657,17 +665,61 @@ pub(crate) fn propagate_facts(
                 origin: w.span,
                 via_chain: Vec::new(),
                 reach: w.reach,
+                obj_params: w.obj_params,
             });
         }
     }
     let initializer = is_initializer(func);
-    // Matched against the patterns only when a helper passes a write up.
+    // Matched against the patterns only when a call writes a target.
     let mut exempt = None;
+    let mut exempt_of =
+        || *exempt.get_or_insert_with(|| contracts.exempt_writer(&func.fqn(), &func.qualname));
     for (site_path, i) in sites {
         let site = &index.files[site_path].call_sites[*i];
         let Some(flow) = site.flow else {
             continue;
         };
+        // Targets a callee writes through the arguments, which only this binding ties to a
+        // class: the function's own writes, at the call.
+        for bc in site.project_callees() {
+            let Some(callee) = index.summary(&bc.callee) else {
+                continue;
+            };
+            let Some(d) = body_runs_at(index, site, callee) else {
+                continue;
+            };
+            let Some(facts) = callee.facts(d.from) else {
+                continue;
+            };
+            for w in crate::callgraph::indirect_writes(bc, callee, facts) {
+                let Some(targets) = &w.origin.targets else {
+                    continue;
+                };
+                let mask = match w.through {
+                    Through::Field => targets.field,
+                    Through::Instance => contracts.target_of(&targets.classes, w.attr),
+                };
+                let reach = w.origin.reach;
+                if mask == 0 || builds_written_object(initializer, reach, w.obj_params) {
+                    continue;
+                }
+                let mask = mask & !exempt_of();
+                let open = mask & !index.covered_after(site_path, &flow, mask);
+                for k in bits(open) {
+                    unmet.insert(UnmetWrite {
+                        contract: k,
+                        class_qualname: w.class.to_owned(),
+                        attr: w.attr.to_owned(),
+                        kind: WriteKind::IndirectHelper,
+                        span: site.span,
+                        origin: site.span,
+                        via_chain: crate::callgraph::lead_hops(site, site_path, &bc.callee, d.via),
+                        reach,
+                        obj_params: w.obj_params,
+                    });
+                }
+            }
+        }
         // Private helpers whose body runs here pass their unannounced writes up.
         let helpers = site
             .project_callees()
@@ -680,15 +732,14 @@ pub(crate) fn propagate_facts(
         for (bc, callee, d) in helpers {
             for u in &callee.unmet_invalidation {
                 let bit = 1u64 << u.contract;
-                let exempt = *exempt
-                    .get_or_insert_with(|| contracts.exempt_writer(&func.fqn(), &func.qualname));
-                if exempt & bit != 0 || u.via_chain.last().is_some_and(|h| h.callee == func.fqn()) {
+                if exempt_of() & bit != 0
+                    || u.via_chain.last().is_some_and(|h| h.callee == func.fqn())
+                {
                     continue;
                 }
                 let reach = reach_across(u.reach, bc);
-                // An object the caller builds (its own initialization through a helper, or one it
-                // constructs, copies, or gets from a call) announces nothing.
-                if !reach.any() || initializer && reach.params & 1 != 0 {
+                let obj_params = bc.caller_params_of(u.obj_params);
+                if builds_written_object(initializer, reach, obj_params) {
                     continue;
                 }
                 if index.covered_after(site_path, &flow, bit) & bit != 0 {
@@ -705,11 +756,20 @@ pub(crate) fn propagate_facts(
                     origin: u.origin,
                     via_chain,
                     reach,
+                    obj_params,
                 });
             }
         }
     }
     s.unmet_invalidation = shortest_chains(unmet);
+}
+
+/// Whether a function builds the object it writes, so the write announces nothing: an object
+/// that did not exist before the call (`reach`: constructed, copied, or from a call), or, in an
+/// initializer, its own `self` (`obj_params` bit 0: the object itself, not one reached through
+/// its attributes).
+pub fn builds_written_object(initializer: bool, reach: Reach, obj_params: u64) -> bool {
+    !reach.any() || initializer && obj_params & 1 != 0
 }
 
 /// Where an object a callee reaches from its parameters (and module state) comes from in the
@@ -737,6 +797,7 @@ fn shortest_chains(set: BTreeSet<UnmetWrite>) -> BTreeSet<UnmetWrite> {
             w.kind,
             w.span,
             w.reach,
+            w.obj_params,
             w.via_chain.last().map(|h| h.callee.clone()),
             w.origin,
         )

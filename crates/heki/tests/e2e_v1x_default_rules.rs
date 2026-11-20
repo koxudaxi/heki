@@ -1078,11 +1078,11 @@ fn opt113_reports_nested_loop_equijoins_but_not_traversals_or_all_pairs_loops() 
     );
     assert_eq!(
         message(6),
-        "nested loops join `xs` and `ys` on `x == y` (O(n·m)); build a `set` of `ys` before the outer loop"
+        "nested loops join `xs` and `ys` on `x == y` (O(n·m)); group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop"
     );
     assert_eq!(
         message(8),
-        "nested loops join `A` and `C` on `c.k == a.k` (O(n·m)); index `C` by `c.k` in a `dict` before the outer loop"
+        "nested loops join `A` and `C` on `c.k == a.k` (O(n·m)); index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop"
     );
     assert_eq!(diags[0]["column"], 16);
     assert_eq!(diags[0]["rule_slug"], "nested-loop-equijoin");

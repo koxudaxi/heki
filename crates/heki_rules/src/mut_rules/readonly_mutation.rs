@@ -10,7 +10,7 @@
 //! change, a helper's change at the call that hands the attribute (the object holding it, or the
 //! read-only parameter) over, with the calls down to the change as related locations.
 
-use super::{Allowance, initializes_itself, runs_inside_allowed};
+use super::{Allowance, facts_run_at, initializes_itself, runs_inside_allowed};
 use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
@@ -43,6 +43,10 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     if !fields && !params {
         return;
     }
+    debug_assert!(
+        !fields || cx.index.propagates_typed_writes(),
+        "`typed_writes` decides for MUT108"
+    );
     let mut rule = Rule {
         cx,
         fields,
@@ -62,14 +66,16 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             .functions
             .iter()
             .filter(|(k, _)| fields && cx.index.file_of(k) == Some(path))
+            .map(|(k, s)| (k, &**s))
             .collect();
         funcs.sort_by(|a, b| a.0.cmp(b.0));
         for (key, s) in funcs {
             rule.own_changes(unit, key, s, out);
         }
         // Without `MUT108`, only the calls of the functions with a read-only parameter matter.
-        // The call itself hands its arguments over; the other sites of the object it returns
-        // (`SiteRole`) hand over nothing more.
+        // A call hands its arguments over; they are changed where the callee's facts run
+        // (`facts_run_at`): at the call for a plain function, where the generator it returns is
+        // iterated for a generator function (never, when it is discarded).
         let readonly: FxHashSet<&str> = cx
             .decls
             .module(&file.module_name)
@@ -79,8 +85,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             .map(|(q, _)| q.as_str())
             .collect();
         for site in file.call_sites.iter().filter(|s| {
-            s.role == SiteRole::Call
-                && (fields || readonly.contains(s.caller.qualname.as_str()))
+            (fields || readonly.contains(s.caller.qualname.as_str()))
                 && cx.index.file_of(&s.caller) == Some(path)
         }) {
             rule.handed_over(unit, path, site, out);
@@ -88,7 +93,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// One project callee of a call site, with its final summary.
+/// One project callee of a call site, with the facts of it that run there.
 struct Call<'s> {
     unit: &'s ModuleUnit<'s>,
     path: &'s Path,
@@ -196,10 +201,10 @@ impl Rule<'_, '_> {
             .decls
             .function_decl(&site.caller)
             .filter(|d| self.params && d.readonly_params != 0);
-        let callees = site
-            .project_callees()
-            .iter()
-            .filter_map(|bc| Some((bc, cx.index.summary(&bc.callee)?)));
+        let callees = site.project_callees().iter().filter_map(|bc| {
+            let summary = cx.index.summary(&bc.callee)?;
+            Some((bc, facts_run_at(cx.index, site, summary)?))
+        });
         for (bc, callee) in callees {
             let call = Call {
                 unit,
@@ -289,7 +294,7 @@ impl Rule<'_, '_> {
         let Some(ro) = self.cx.decls.readonly_attr(class, attr) else {
             return;
         };
-        let recorded = call.callee.typed_field_write_sites.iter().any(|t| {
+        let recorded = call.callee.typed_field_writes.iter().any(|t| {
             t.attr == attr
                 && !t.fresh
                 && self

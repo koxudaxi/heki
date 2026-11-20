@@ -1,5 +1,5 @@
-//! Boundary-Only Reporting and Root-Cause Grouping helpers for `EFF101` / `EFF105`
-//! (docs/ANALYSIS_AND_KB_SPEC.md section 2.4). Rule wiring (codes, severities) is in `heki_rules`.
+//! Boundary-Only Reporting for `EFF101` / `EFF105` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
+//! Rule wiring (codes, severities) and Root-Cause Grouping of the output are in `heki_rules`.
 
 use crate::summary::BLOCKING_EFFECTS;
 use crate::{CallHop, FuncKey, ProjectIndex, SiteRole};
@@ -7,9 +7,6 @@ use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-
-/// Reports sharing one root cause are folded into one beyond this many.
-pub const ROOT_CAUSE_GROUP_THRESHOLD: usize = 10;
 
 /// An `async def` call site that crosses into blocking synchronous code.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -26,25 +23,6 @@ pub struct BoundaryReport {
     /// The chain starts where the async function iterates a generator (`SiteRole::Iterate`, or
     /// a project generator iterating what it is handed), not at a call.
     pub iterates: bool,
-}
-
-/// One diagnostic to emit: a representative plus how many same-cause reports it stands for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RootCauseGroup {
-    pub representative: BoundaryReport,
-    pub additional: usize,
-}
-
-impl RootCauseGroup {
-    /// Message suffix for a folded group.
-    pub fn message_suffix(&self) -> Option<String> {
-        (self.additional > 0).then(|| {
-            format!(
-                "(+{} more async call sites reaching the same blocking root cause)",
-                self.additional
-            )
-        })
-    }
 }
 
 /// Boundary-Only Reporting: in `async A -> await async B -> sync C -> time.sleep()` only `B`
@@ -108,33 +86,4 @@ pub fn boundary_reports_in<'p>(
             },
         )
         .collect()
-}
-
-/// Root-Cause Grouping: when more than `threshold` reports share one `(root_cause, effect)`,
-/// emit only the first (by path / position) with the rest counted in `additional`.
-pub fn group_by_root_cause(reports: &[BoundaryReport], threshold: usize) -> Vec<RootCauseGroup> {
-    let mut by_cause: BTreeMap<(&str, ExecEffectKind), Vec<&BoundaryReport>> = BTreeMap::new();
-    for r in reports {
-        by_cause
-            .entry((r.root_cause.as_str(), r.effect))
-            .or_default()
-            .push(r);
-    }
-    let mut out = Vec::new();
-    for mut group in by_cause.into_values() {
-        group.sort();
-        if group.len() > threshold {
-            out.push(RootCauseGroup {
-                representative: group[0].clone(),
-                additional: group.len() - 1,
-            });
-        } else {
-            out.extend(group.into_iter().map(|r| RootCauseGroup {
-                representative: r.clone(),
-                additional: 0,
-            }));
-        }
-    }
-    out.sort_by(|a, b| a.representative.cmp(&b.representative));
-    out
 }

@@ -90,7 +90,8 @@ $ heki check --ignore OPT110         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are all accepted. Opt-in rules
-(`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) are enabled only by their exact code or name.
+(`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) are enabled only by their exact
+code or name.
 
 ## Machine-readable output
 
@@ -100,7 +101,7 @@ $ heki check --output-format json    # also: full (default), concise, github, sa
 
 `json` includes the evidence behind each diagnostic, the blocker that stops a fix, the call chain,
 and the fix edits. `github` prints GitHub Actions annotations; `sarif` feeds code-scanning
-dashboards.
+dashboards with the message, the location, and the call chain (no evidence or blocker).
 
 ## Exit codes
 

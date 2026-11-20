@@ -27,8 +27,9 @@ resolution are heki's own (`heki_semantic`).
     materialized when the name is first evaluated, not when the module loads.
 - **Bidirectional comparison with CPython `symtable` (quality assurance)**:
   - Following datamodel-code-generator's `scripts/_source_model.py:verify()`, the scope tree
-    (kind and line), bound names, `global` / `nonlocal`, and the kind of every reference (local /
-    enclosing / global / builtin) are compared automatically with the real `symtable` of CPython
+    (kind, name, line, and parent), bound names and parameters, `global` / `nonlocal`
+    declarations, and the kind of every reference (local / enclosing / global / builtin) are
+    compared automatically with the real `symtable` of CPython
     3.11–3.15, which keeps the divergence from the language at zero
     (`tests/symtable_verify/verify_symtable.py`).
 
@@ -36,14 +37,16 @@ resolution are heki's own (`heki_semantic`).
 One `IrFunction` is built per function (`def`, `async def`, lambda, generator expression, a
 comprehension before 3.12), per class body, and for the module's top level. The methods of a
 nested class (its `__init__` in particular) are kept apart from the methods of the outer class
-(against the `MUT101` false positives found in Stage 0-A).
+(against the `MUT101` false positives found in Stage 0-A). Qualnames are Python's
+`__qualname__`: a class defined in a function is `factory.<locals>.Worker`, so its methods never
+share a summary with a module-level `Worker`.
 
 ```text
 IrFunction {
     id, name, qualname,
     owner_class, owner_class_qualname,   // nested classes kept apart from their outer class
     kind:               Sync | Async | Generator | AsyncGenerator,
-    params:             Vec<ParamInfo>,  // name, default, *args / **kwargs, PEP 484 annotation (Advisory lane only)
+    params:             Vec<ParamInfo>,  // name, literal default, keyword-only, *args / **kwargs, PEP 484 annotation (Advisory lane only)
     return_annotation:  Option<String>,  // Advisory lane only
     decorators:         Vec<String>,     // @cached_property, @lru_cache, @property, CLI and web routes, lifespan, ...
     local_annotations:  Vec<LocalAnnotation>, // annotated locals and self.attr (Advisory lane only)
@@ -74,7 +77,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Names | `LoadGlobal`, `LoadName`, `LoadDeref`, `StoreGlobal`, `StoreDeref`, `Copy`, `Delete`, `Import` | `Copy` adds to the direct alias set, `Delete` removes by strong update and leaves the name possibly unbound (a `LoadName` is its value until it is bound again, also at the end of an `except E as e:` handler; `Delete.global` marks a module global); `Import` / `LoadGlobal` carry the PEP 810 `is_lazy` flag |
 | Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; a chained comparison `a < b < c` branches after each link like `a < b and b < c`, with `b` evaluated once and each `Compare` spanning its own operands; until types are exact, any special method may run |
 | Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it; a template string builds the tuple of its fields' values (`Template.values`) and is otherwise opaque |
-| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones: an `await` of the frame waits for the result, directly or through copies and merges (`pending = f()` ... `await pending`) |
+| Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones: an `await` of the frame waits for the result, directly or through copies and merges (`pending = f()` ... `await pending`); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
 | Iteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
@@ -166,9 +169,19 @@ the targets of write and read boundaries.
 | Priority | Source | Confidence | Example |
 |---|---|---|---|
 | 1 | Local constructors and direct imports (relative imports, `src/` layout, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
-| 2 | PEP 484 annotations (parameters, locals, return types, attributes) | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)` |
+| 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
-| 4 | Same-name methods in the class hierarchy (CHA / RTA) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
+| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
+
+Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
+`pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
+`src/acme/io.py` is `acme.io`, for regular and namespace packages and for modules directly under
+`src/`. A module name that several files share is defined by one of them, in full and
+incremental analysis alike: an implementation before its `.pyi` stub, a package
+(`pkg/__init__.py`) before a module file of the same name (`pkg.py`, which Python does not import
+next to it), then the greater path. A relative import resolves inside the packages it climbs; one
+that climbs past the top-level package binds nothing (`ImportError`), except that a project root
+holding `__init__.py` is itself the package of the top-level modules.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
@@ -191,7 +204,13 @@ EffectSummary(f) = {
     // Family 1: mutation and state effects (MUT1xx / MUT2xx)
     mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
     mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i
+    changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes whose objects change (in place or deeper),
+                                                           // not just rebound: what a shallow copy shares (MUT202)
+    param_change_sites:       Map<ParamIdx, Set<Span>>,    // own changes of parameter i only, never propagated
+                                                           // (EFF201 mutates-params counts them)
     escapes_params:           Bitset,                      // stored in an attribute / container / global, or returned
+    reallocates_params:       Bitset,                      // parameter i comes back as a quadratic reallocation
+                                                           // of it (DATA101 through helpers)
     consumes_params:          Bitset,                      // iterated to exhaustion on every normal path (MUT106)
     unconditional_forwards:   Bitset,                      // passed on at calls that run on every normal path
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
@@ -201,8 +220,13 @@ EffectSummary(f) = {
                                                            // holds by reference, read for nothing else (MUT101)
     mutates_self_attrs:       Set<AttrKeyPath>,            // reassignment or in-place change of self.<attr> (indirect too)
     invalidates_cached:       Set<AttrName>,               // del self.<prop>, self.__dict__.pop("<prop>", ...), clear
-    typed_field_write_sites:  Set<TypedFieldWriteSite>,    // writes to (class, attr) with kind, chain, and the
-                                                           // parameters the written object may be (MUT201, EFF201)
+    typed_field_write_sites:  Set<TypedFieldWriteSite>,    // own and IndirectHelper writes to (class, attr) with
+                                                           // kind, chain, and the parameters the written object
+                                                           // may be, plus the sites private callees hand over (a
+                                                           // public callee reports its own) (MUT201, EFF201)
+    typed_field_writes:       Set<(Class, Attr)>,          // every typed write reached through any callee
+    typed_params:             Bitset,                      // parameters the function types itself (its sites
+                                                           // cover their changes)
     typed_field_read_sites:   Set<TypedFieldReadSite>,     // own reads of (class, attr): attribute, getattr,
                                                            // __dict__; never propagated (MUT203)
     returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
@@ -211,6 +235,16 @@ EffectSummary(f) = {
                                                            // normal path (MUT109)
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
+    retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
+    returns_new:              bool,                        // returns an object it constructs, nothing else
+                                                           // holding it (fresh-objects)
+    unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
+                                                           // computed names on guarded classes (MUT205)
+
+    // Guards: when an effect runs
+    exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy
+                                                           // initialization (once per object, from which
+                                                           // parameters)
 
     // Offloading and the sync-driven context
     offloads_blocking_params: Bitset,                      // wrapper running the callable in parameter i on a thread
@@ -225,10 +259,33 @@ EffectSummary(f) = {
 }
 ```
 
+`is_cached_property`, `is_lru_cache`, and `FunctionDecl::is_property` know a decorator by what
+its head is bound to at module scope (`ModuleDecls::decorator_is`): an import by the imported
+symbol's last name (aliases included), a function or class of the module itself never, an
+unbound name by its spelling.
+
+Contract-only facts (`Final` string keys through `ModuleDecls::str_constants`, container
+entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
+`TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
+`Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
+invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
+
 `CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
 invalidation contracts announced after the call on every normal path, and the next call; set on
 `Iterate` / `Through` sites too), with `FileSummary.flows`, are computed at extraction from the
 CFG and its post-dominator tree, only when a contract is configured; `ProjectIndex` keeps no IR.
+
+**Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
+`if x is None:`, `isinstance(x, T)`, also through `and` / `or` / `not`, early returns, and
+conditional expressions; on a parameter, or an attribute of one the function never assigns)
+records that test. An effect inside a lazy initialization (`MUT107`'s branch, when every way out
+of it sets the attribute) runs once per object. At each call the callee's guards are mapped to
+the caller (`through_call`, wherever a callee's facts reach a caller): a constant argument, the
+literal default of an omitted parameter, or a test the caller has made on the same value that
+decides a guard against the effect prunes it there; an undecided test of a caller input becomes
+the caller's guard. A generator's guards are decided at the call that creates it. `EFF102` /
+`EFF103` do not count a lazily initialized effect per iteration unless a data-sized loop around
+the call constructs the object. Anything not recognized keeps the effect.
 
 **Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
 `ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs
@@ -267,7 +324,17 @@ A function decorated with a catalog entry offloading argument 0, applied directl
 (`@sync_to_async`, `@sync_to_async(thread_sensitive=False)`), is `d(f)`: calling it is a call of
 `d` with the function as its offloaded argument (`FunctionDecl::offloaded_by`, resolved through
 imports and re-exports when the declarations are completed; every definition of the name must be
-decorated so), and its body never runs at the call.
+decorated so), and its body runs at the call on a worker thread: a site of its own, whose
+`CallSite::runner` is `Runner::Worker`. The callable an offloading API is given runs so too, as a call of the
+project function with the positional arguments after it (`asyncio.to_thread(f, a)` calls `f(a)`,
+`loop.run_in_executor(None, f, a)` too; keyword arguments are left unbound, since some APIs take
+their own). Every fact of such a site moves to the caller except the blocking effects, which do
+not block the caller's thread: its queries per item (`EFF103`), its clients (`EFF102`), and its
+changes to shared objects (`MUT202`, which reads the offloading call the same way) count, and
+`EFF201` does not enter it. A callable a Layer 2 `sync_facade_arg` API runs
+(`AsyncSession.run_sync(fn)`) gets a site with `Runner::SyncFacade`: it runs on the caller's
+thread, so only its `blocking_db` (the database I/O through the synchronous facade it receives,
+awaited for it) is dropped; its arguments are left unbound.
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
@@ -294,17 +361,22 @@ which module imports which.
    a class of its own), take `reads_self_attrs(p)`: the `self.<attr>` and constant-key
    `self.<dict>["k"]` reads of `p`, directly and through `self.helper()` calls, without `p`
    itself.
-2. For every method `m` of `C` and its subclasses, take the writes in `m`'s own body, **except**:
+2. For every method `m` of `C` and its subclasses, and every method `C` inherits from a project
+   ancestor that no class before it in the MRO overrides, take the writes in `m`'s own body,
+   **except**:
    - **initialization and two-phase initialization hooks**: `__init__`, `__post_init__`,
      `model_post_init`, `__setstate__`, `__enter__`, `__new__`, `setup`, `setUp`, `postinit`,
      `_open`, `_setup`, `_init_*`, `_configure_*`, and private helpers that an initializer calls;
-   - **memo and cache dictionaries**: attributes named like `_cache` / `_memo`, `setdefault`, and
-     lazy filling under `if k not in self._xxx:`;
+   - **memo and cache dictionaries**: in-place changes of attributes with a `cache` / `memo` word
+     in their name (`_cache`, `_memo`; rebinding them and `memory_*` names count), `setdefault`,
+     and lazy filling under `if k not in self._xxx:`;
    - **disjoint constant dict keys**: when the keys `p` reads (`self.params["outtmpl"]`) and the
      keys `m` writes (`self.params["proxy"]`) are all constant and disjoint.
-3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains and **`p ∉
-   invalidates_cached(m)`** (and `m` has no full invalidation such as `self.__dict__.clear()`; a
-   private helper all of whose callers invalidate is covered).
+3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains at a write
+   that leaves a stale value on some normal path of `m`: neither does every path after the write
+   invalidate `p` (`del self.p`, `self.__dict__.pop("p")` / `clear()`, a `self` call whose
+   `invalidates_cached` holds it), nor is `p` invalidated on every path to the write with no read
+   of it since (a private helper all of whose callers invalidate is covered).
 4. For an attribute in **`returns_self_attrs(p)`**, only rebinding writes count (`self.a = ...`,
    `del self.a`): the cached value holds the attribute's object itself and sees in-place changes.
    The fact is local to the getter (every read of `self.a` is returned as itself or put, as
@@ -317,16 +389,21 @@ which module imports which.
   and `direct_exec_effects ∪ transitive_exec_effects`) are saved in a normalized form
   (`.heki-summary-snapshot.json`); a pull request whose functions gained effects or mutability is
   reported.
+- Entries are built and compared from each function's defining file (`ProjectIndex::file_of`:
+  the `.py` file before its `.pyi` stub), and `--write` replaces the file atomically only when
+  every file of the project was read and parsed.
 
 #### `MUT106`: single-pass iterators consumed twice (opt-in)
 - Sources: generator expressions; `iter` / `zip` / `map` / `filter` / `enumerate` / `reversed`
   and the single-pass `itertools` functions (never `tee`, `repeat`, `cycle`, `count`); project
   generator functions; and `Iterator` / `Generator` annotations (not `Iterable` / `Sequence`).
 - Consumers: `for` loops and comprehensions, unpacking, `yield from`, and the calls that
-  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `any` / `all`
-  / `min` / `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
+  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `min` /
+  `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
   `heapq.nlargest`, `functools.reduce`, ...: one table, `consumption::FULL_CONSUMERS`, which also
-  decides where a generator's body runs), also through wrappers over one iterable; `next()` is
+  decides where a generator's body runs), also through wrappers over one iterable; `any` / `all`
+  step it but may stop early (`SHORT_CIRCUIT_CONSUMERS`: a generator's body runs, the iterator is
+  not exhausted); `next()` is
   stepping, not consumption. A project function consumes its argument when `consumes_params` says
   so, and its body runs at the call.
 - The first pass must be full (a loop that can `break`, `return`, or `raise` is partial); the
@@ -370,7 +447,8 @@ message = "write model state through GenerationStore instead"
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
        caught across calls**).
-  2. `typed_field_write_sites` propagate bottom-up with their call chains. A write is allowed
+  2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
+     only: a public callee reports its own writes. A write is allowed
      when a function on its chain matches `allowed-writers` or `exempt-methods`, when an
      initializer of the target's class family writes its own `self`, or when the reporting
      function only runs inside allowed contexts (every path of project callers starts in one); a
@@ -397,7 +475,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      function) gets a read-only origin tag.
   2. The tag flows within the function through `Copy`, attribute reads (with `deep = true`),
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
-     `model_copy(deep=True)`, and the Layer 2 `copy_sanitizer` entries).
+     `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, and the Layer 2
+     `copy_sanitizer` entries, as deep as each entry says: a shallow copy ends it for the top
+     level only), and a slice of a value inferred as a builtin sequence is a shallow copy
+     (`readonly::subscript_step`, shared with the return flow). A copy keeps its original's class
+     for receiver typing. A phi joins the tags of all its incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
      the call hop.
@@ -419,6 +501,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   the callees' `must_invalidate`. A callee's writes and announcements are taken where its body
   runs (`ProjectIndex::delivery`): a plain function at its call, a generator where it is iterated
   or inside the function it is handed to; only bodies run at their call count as announcing.
+  A write a callee makes through an argument it does not type (an in-place change of `obj.attr`,
+  an attribute of `obj`) is the caller's write at the call: the caller's argument binding ties
+  it to a class (`ArgOrigin::targets`, the same `callgraph::indirect_writes` the ownership rules
+  use). The written object's identity (`obj_params`, the parameters it may be as itself) decides
+  an initializer's own construction: its `self`, not the objects reached through `self`.
 - Reporting: private helpers never report and pass the obligation to their callers; a public
   function is relieved when every caller path announces the change after the call (a
   breadth-first walk over the callers; exempt callers count).
@@ -448,20 +535,26 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
    - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
      dict named `requests` is not mistaken for the package (type and name resolution).
-   - **`EFF103`**: `for.iter` headers excluded; SQL literals that are DDL (`CREATE` / `ALTER` /
-     `DROP` / `PRAGMA`) and queries in migration functions excluded; the internals of ORM
-     libraries excluded.
+   - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
+     `executescript` call whose literal statement is DDL (`CREATE` / `ALTER` / `DROP` /
+     `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so helpers running DDL run
+     no query either; queries in migration functions excluded; the internals of ORM libraries
+     excluded.
    - **`DATA101`**: only `df = pd.concat([df, ...])` / `arr = np.vstack([arr, ...])` whose SSA
-     `PhiNode` accumulates across the back edge (`LoopCarried`); one-off concatenation and padding
-     in a loop are excluded.
+     `PhiNode` accumulates across the back edge (`LoopCarried`), or a project call there whose
+     callee's `reallocates_params` covers the argument carrying the previous value; one-off
+     concatenation and padding in a loop are excluded.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
-     synchronous world (`async B`) is reported; when more than a threshold (10) of callers reach
-     the same root cause, they are grouped into one representative with the count.
+     synchronous world (`async B`) is reported; when more than a threshold (10) of the reports
+     shown reach the same root cause, output folds them into one representative with the count
+     (`heki_rules::fold_root_causes`). Folding comes after inline suppressions and the Ratchet
+     baseline, which see every report.
 5. **Context relaxation**: `click` / `typer` commands (`@command`), ASGI lifespan hooks,
    `LoopBound::ConstSmall` / `RetryPattern` loops, and test code (`lint.relax-async-in-tests`,
    default true) are relaxed by default.
-6. **`EFF106`** (opt-in): a forward must-hold dataflow over the CFG for `with` regions of
+6. **`EFF106`** (opt-in): a forward must-hold dataflow over the CFG, one fact per acquiring
+   `with` item (an `ExitWith` releases the acquisitions of its own statement), for `with` regions of
    synchronous locks (Layer 2 `sync_lock_or_tx` classes: `threading.Lock` / `RLock` / `Semaphore`
    / `BoundedSemaphore` / `Condition`) and transaction starters (`Session.begin()`,
    `Connection.begin()`, `Engine.begin()`, `transaction.atomic()`, `psycopg.Connection.transaction()`,
@@ -512,6 +605,7 @@ struct FrameState {
     derives_from: Map<VarId, SmallVec<[AllocId; 2]>>,
     points_to:    Map<VarId, SmallVec<[AllocId; 2]>>,// kept when the variable becomes Shared
     alloc_elems:  Map<AllocId, ElemKinds>,           // element kinds of list / tuple / set allocations
+    points_to_incomplete: Set<VarId>,                // may also hold an object no site names
 }
 ```
 
@@ -524,6 +618,23 @@ struct FrameState {
   `Shared { witness: DerivedRefEscapedAt(span) }`.
 - **CFG merges**: `Shared` on either side gives `Shared`; two `Unique` values give the union of
   their `alloc_ids` (kept when at most 4, otherwise `Shared { witness: JoinAllocOverflow }`).
+- **Element kinds** (`alloc_elems`, used by `HashConsistentProbe`, `ZeroTripExceptionSafe`,
+  and loop-element types) hold only where they describe every object a variable may hold:
+  - a parameter, an unknown result, or a container element has no allocation site, so a
+    variable that may hold one is in `points_to_incomplete` (unioned at merges) and has no
+    element kinds;
+  - an escape (`mark_escaped`) makes the escaped objects' kinds unknown: the code that
+    received them may replace any element whenever it runs;
+  - a site in a loop that runs again while a variable or iterator still refers to its earlier
+    object joins the new kinds into the old ones instead of replacing them;
+  - `next(it)` has the element kinds of the object `it` was made from by `iter()` (a `for`
+    loop, a comprehension) only, not of what an iterator retains (`map(f, xs)`, a generator
+    expression);
+  - `seq[i]` reads one element only when `i` is an exact `int` / `bool` (`seq[s]` with
+    `s = slice(...)` is a new sequence);
+  - a call with `*` arguments does not use its Layer 1 entry (the positions do not line up).
+- **Function objects**: creating one escapes every operand of `MakeClosure` (captured
+  variables, and default values when the IR passes them).
 - **`ValueLoopInvariant(v, loop)`**: besides `BindingLoopInvariant`, the value is an immutable
   builtin (a `tuple` whose elements are hash-consistent builtins too), or a mutable builtin that
   stays `Unique` for the whole loop and whose `alloc_id` (aliases and derived references included)
@@ -539,12 +650,12 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | Rule | Profitability | Safety obligations (behavior preservation) | Profitability condition | Main counterexamples |
 |---|---|---|---|---|
 | **OPT101** | `unconditional` | `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe(x)`, `EvalOrderPreserved` | `LoopCarried(x)` | S1–S5, S14, S23–S25 |
-| **OPT102** | `unconditional` | `Unique(target)`, `ExclusiveAccessAtWrite(target)`, `ExactType(target / rhs, set \| dict)`, **for dict unpacking the accumulated `d` comes first (`{**d, ...}`): `DictUnpackLeading`**, `ExceptionStateSafe`, `EvalOrderPreserved` | `LoopCarried(target)` | S26, S26b, **datamodel-code-generator `_target_binding.py:465` (`{**other, **found}` accumulates on the right and reverses the override order)** |
-| **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc / rhs)`, `NoIntermediateReads`, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall` (local `str +=` excluded) | A.8 (slower for small loops), `self.s +=`, `__radd__` on the right |
-| **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` | `NotConstSmall(lst)` | S9a, S9b, S22, S27 |
+| **OPT102** | `unconditional` | `Unique(target)`, `ExclusiveAccessAtWrite(target)`, `ExactType(target / rhs, set \| dict)`, **for dict unpacking the accumulated `d` comes first (`{**d, ...}`): `DictUnpackLeading`**, `ExceptionStateSafe` (also `(update)`: an update inserting several keys is not observed half done by a handler), `EvalOrderPreserved` (also `(update)`: entries gathered into one `update` have builtin keys and later entries that run no code) | `LoopCarried(target)` | S26, S26b, **datamodel-code-generator `_target_binding.py:465` (`{**other, **found}` accumulates on the right and reverses the override order)** |
+| **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc / rhs)`, `NoIntermediateReads`, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall` (local `str +=` excluded); for `obj.attr +=`, every assignment of the attribute (the class's methods for `self`) stores a `str` / `bytes` / `tuple` literal of the right operand's kind | A.8 (slower for small loops), `self.s +=`, `__radd__` on the right, `self.values = []` then `self.values += (i,)` |
+| **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe`; the edit needs a `for` statement (not a comprehension clause) and a name no other hoist of the function binds | `NotConstSmall(lst)`, not a `ConstSmall` / retry loop | S9a, S9b, S22, S27 |
 | **OPT111** | `size-dependent` | `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, only the appends the set mirrors (`OnlyPairedAppends`) | `NotConstSmall` | `seen.remove`, unhashable elements |
-| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes |
-| **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree`, `ZeroTripExceptionSafe`, the built container never changed | `NotConstSmall` (100 times slower when the loop runs zero times: A.8) | S22, S28, A.8 |
+| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
+| **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
 ---
 
@@ -563,12 +674,29 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 (`blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`,
 `unpooled_client_alloc`, `db_query`, `quadratic_realloc`), `async_safe` (`asyncio.StreamWriter.write`),
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
-`asgiref.sync.sync_to_async`), `excluded` (`logging.Logger.*`), `copy_sanitizer`
-(`copy.deepcopy`, `BaseModel.model_copy`: `MUT202`), `return_type` (factories such as
+`asgiref.sync.sync_to_async`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
+the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
+`copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
+deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
-`opaque_to_layer3` (reserved for Layer 3). A file lists its `opaque_packages`. Projects add or
+`opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
+argument (by position, the receiver not counted, or by keyword) is a given literal, a string
+literal with a given prefix or not empty, or an instance of a given class (`pd.read_csv` of a
+`https://` URL is `blocking_net`, of an `io.StringIO` nothing); the first case that holds sets
+the call's `effects` and `return_type`, and an argument that is not passed, or may be passed
+through `*` / `**` unpacking, selects none. A boolean flag case (`equals = false`) whose argument
+is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: the effects it
+switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
-`offloads-blocking-arg`, `excluded`, `copy-sanitizer`).
+`offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`): an
+override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
+entry naming a project function applies to its summary (the built-in catalog never does: a
+package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),
+`offloads_blocking_arg` a parameter it offloads, `excluded` / `async_safe` hide every / the
+blocking effects of the final summary from its callers (`EffectSummary::declared_hidden`), and
+its `return_type` types the call over the annotation. An `async_safe` entry
+keeps only its loop-sensitive effects when the catalog is loaded (built-in entries carry no
+blocking effect at all).
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a
@@ -578,11 +706,17 @@ The entries follow the public API of each package, with three conventions:
   `sqlalchemy.create_engine`) carries only `unpooled_client_alloc`; a call that only builds an
   object (`Redis.pipeline`, a lazy `QuerySet.filter`, `Session.query` and the `Query` builder
   methods) carries only a `return_type`. Iterating an object runs its class's `__iter__` entry
-  (`sqlalchemy.orm.Query.__iter__`): a `for` loop, a comprehension, or a generator expression over
-  a value of that class is a call of it at the iterable (`async for` is not).
+  (`sqlalchemy.orm.Query.__iter__`): a `for` loop, a comprehension, a generator expression, or a
+  consuming call (`list(query)`, `items.extend(query)`, the `consumption` table) over a value of
+  that class is a call of it at the iterable, and an `async for` runs its `__aiter__` entry. A
+  call returning a lazy iterator (`pymongo`'s `find()`, the generator function `os.walk`, whose
+  result class is named after the call: `os.walk()`) carries only that `return_type`: its I/O
+  runs where the iterator is iterated, on a worker thread when it is handed to one.
 - `db_query` is one statement sent to the database and waited for: reading the rows of an
   executed statement (`sqlite3.Cursor.fetchone`) is not one, nor is a driver's `commit()`; an ORM
-  `Session.commit()` / `flush()` sends the pending writes and is.
+  `Session.commit()` / `flush()` sends the pending writes and is. A bulk API (`bulk_create`,
+  `in_bulk`, `insert_many`, `bulk_write`) handles many rows in one statement and is called per
+  batch by design: it blocks, but it is no `db_query`.
 
 Lookups are exact, without inheritance or aliases (an entry names the class that a `return_type`,
 an annotation, or a constructor call produces), and the `heki_kb` unit tests pin every entry.
@@ -598,8 +732,14 @@ an annotation, or a constructor call produces), and the `heki_kb` unit tests pin
 ### 4.4 Optional profile dumps (`heki_profile`)
 - **Offline reading only (the program is never run or touched)**: collapsed stacks (CPython 3.15
   Tachyon `--collapsed`: `tid:N;file.py:func:line;... count`; py-spy: `func (file.py:line);...
-  count`) and Tachyon `--gecko` JSON are read into one table of hot functions; `heki check
-  --profile` uses it to apply proven size-dependent rewrites in hot functions.
+  count`) and Tachyon `--gecko` JSON are read into their distinct stacks and sample weights
+  (gecko samples summed per stack first; every table reference checked; a total that overflows
+  is a malformed dump); `heki check --profile` uses it to apply proven size-dependent rewrites in
+  hot functions.
+- **Attribution to project functions**: each frame counts for the one project function its name
+  (on a dotted boundary), file (on a path boundary), and line (inside the definition) can denote;
+  a frame several functions fit counts for none, so an ambiguous profile never promotes a fix.
+  A function's share is the weight of the stacks it is on, divided by the total weight.
 - **Constraints checked on real tools**: Tachyon on CPython 3.15 cannot combine `--opcodes` with
   `--jsonl` (`--gecko` / `--binary` are needed), and macOS needs `sudo` to read another process's
   memory. Profile integration is therefore never required, only an optional add-on for tuning.

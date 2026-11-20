@@ -7,8 +7,8 @@
 //! Edits are offered for `Safe` candidates only ([`OptCandidate::fix`]).
 
 use crate::edits::{
-    ends_statement, indentation, is_identifier, is_plain_assign, line_start, slice, squash,
-    starts_statement, strip_token,
+    ends_statement, header_colon_follows, indentation, is_identifier, is_plain_assign, line_start,
+    slice, squash, starts_statement, strip_token, trim_element,
 };
 use crate::interpreter::{Analysis, BuiltinScope, FnCtx, UseSite};
 use crate::liveness::Liveness;
@@ -22,6 +22,7 @@ use heki_ir::{
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 
 use BuiltinKind::{Bytes, Dict, List, Set, Str, Tuple};
 use ObligationKind as K;
@@ -159,6 +160,7 @@ struct ModuleCtx<'a> {
     local_names: Vec<(Span, FxHashSet<&'a str>)>,
     /// How to spell `collections.deque` (`None`: no safe way to import it).
     deque: Option<DequeRef>,
+    ir: &'a ModuleIr,
 }
 
 #[derive(Debug, Clone)]
@@ -197,7 +199,12 @@ impl<'a> ModuleCtx<'a> {
         }
         let module_fn = ir.function(ir.module_fn);
         let mut deque = None;
-        for inst in module_fn.blocks.iter().flat_map(|b| &b.insts) {
+        let imports = module_fn
+            .blocks
+            .iter()
+            .filter(|b| on_every_path(module_fn, b.id))
+            .flat_map(|b| &b.insts);
+        for inst in imports {
             let InstKind::Import {
                 dst, module, name, ..
             } = &inst.kind
@@ -205,7 +212,9 @@ impl<'a> ModuleCtx<'a> {
                 continue;
             };
             let bound = module_fn.var_name(*dst).unwrap_or_default();
-            let single = stores.get(bound).copied() == Some(1);
+            // `from .collections import deque` names another module.
+            let single = stores.get(bound).copied() == Some(1)
+                && !crate::imports::is_relative_from(source, inst.span);
             if module.as_deref() == Some("collections") && name == "deque" && single {
                 deque = Some(DequeRef {
                     spelling: bound.to_owned(),
@@ -255,6 +264,7 @@ impl<'a> ModuleCtx<'a> {
         // An import heki sees may be rebound behind the IR (star import, `exec`, `globals()`),
         // and so may a new one: no spelling of `deque` is trusted then.
         let deque = deque.filter(|_| !builtins.dynamic_globals());
+
         Self {
             source,
             lines: LineIndex::from_source(source),
@@ -262,7 +272,25 @@ impl<'a> ModuleCtx<'a> {
             used_names,
             local_names,
             deque,
+            ir,
         }
+    }
+
+    /// The kind every `self.<attr> = ...` of the methods of `class` in this module stores,
+    /// when they all store the same `str` / `bytes` / `tuple` literal kind.
+    fn self_attr_kind(&self, class: &str, attr: &str) -> Option<BuiltinKind> {
+        same_kind(
+            self.ir
+                .functions
+                .iter()
+                .filter(|f| f.owner_class_qualname.as_deref() == Some(class))
+                .filter_map(|f| Some((f, f.params.first()?.var)))
+                .flat_map(|(f, this)| {
+                    attribute_stores(f, this)
+                        .filter(|(a, _)| *a == attr)
+                        .map(|(_, k)| k)
+                }),
+        )
     }
 
     /// `f` or a function enclosing it binds `name`, so a reference to `name` added inside `f`
@@ -271,7 +299,14 @@ impl<'a> ModuleCtx<'a> {
     /// not always name the functions around a class).
     fn binds_locally(&self, f: &IrFunction, name: &str) -> bool {
         self.local_names.iter().any(|(span, names)| {
-            span.start <= f.span.start && f.span.end <= span.end && names.contains(name)
+            let encloses = span.start <= f.span.start && f.span.end <= span.end;
+            // A bare annotation (`set: object`) makes the name local without a value the IR
+            // records.
+            encloses
+                && (names.contains(name)
+                    || self
+                        .text(*span)
+                        .is_some_and(|t| annotated_declarations(t, name).next().is_some()))
         })
     }
 
@@ -279,15 +314,16 @@ impl<'a> ModuleCtx<'a> {
         slice(self.source, span.start, span.end)
     }
 
-    /// A name not used anywhere in the module.
-    fn fresh_name(&self, base: &str) -> String {
+    /// A name not used anywhere in the module nor `taken` by another edit of the function.
+    fn fresh_name(&self, base: &str, taken: &FxHashSet<String>) -> String {
         let base = if is_identifier(base) { base } else { "hoisted" };
-        if !self.used_names.contains(base) {
+        let free = |n: &str| !self.used_names.contains(n) && !taken.contains(n);
+        if free(base) {
             return base.to_owned();
         }
         (1u64..)
             .map(|i| format!("{base}_{i}"))
-            .find(|n| !self.used_names.contains(n))
+            .find(|n| free(n))
             .expect("a module uses finitely many names")
     }
 }
@@ -327,6 +363,7 @@ pub fn analyze_module(
             m: &m,
             ck: &ck,
             ix: &ix,
+            hoisted_names: RefCell::new(FxHashSet::default()),
         };
         for site in &sites {
             if let Some(c) = rules.evaluate(site) {
@@ -687,6 +724,9 @@ struct Rules<'a, 'c> {
     ck: &'c Checker<'a, 'c>,
     /// The shared size and lifetime facts (`heki_ir::FnIndex`): profitability only.
     ix: &'c FnIndex<'a>,
+    /// Names the function's proven hoists bind: two fixes applied in one pass must not bind
+    /// the same name.
+    hoisted_names: RefCell<FxHashSet<String>>,
 }
 
 fn established(evidence: &str) -> ObligationStatus {
@@ -759,6 +799,23 @@ impl<'a, 'c> Rules<'a, 'c> {
         vec![self.ck.a1_hazard_free(), self.ck.converged()]
     }
 
+    fn a1_blocks(&self) -> bool {
+        !self.f().a1_hazards.is_empty() && !self.ck.disabled.contains(&K::A1HazardFree)
+    }
+
+    /// Every obligation is established: the candidate's edits will be offered.
+    fn proven(&self, obs: &[ProofObligation]) -> bool {
+        SafetyVerdict::evaluate(obs.to_vec(), self.a1_blocks()).tier == SafetyTier::Safe
+    }
+
+    /// A fresh name for a value a proven hoist binds, distinct from the function's other ones.
+    fn hoisted_name(&self, base: &str) -> String {
+        let mut taken = self.hoisted_names.borrow_mut();
+        let name = self.m.fresh_name(base, &taken);
+        taken.insert(name.clone());
+        name
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn candidate(
         &self,
@@ -771,7 +828,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         cost_evidence: Option<String>,
         edits: Vec<TextEdit>,
     ) -> OptCandidate {
-        let a1 = !self.f().a1_hazards.is_empty() && !self.ck.disabled.contains(&K::A1HazardFree);
+        let a1 = self.a1_blocks();
         OptCandidate {
             rule,
             function: self.f().qualname.clone(),
@@ -965,17 +1022,14 @@ impl<'a, 'c> Rules<'a, 'c> {
             && list_inst.span.end == binop.span.end
             && let Some(display) = self.m.text(list_inst.span)
         {
-            let single =
-                matches!(&list_inst.kind, InstKind::AllocBuiltin { elems, .. } if elems.len() == 1);
+            let one_plain_element = matches!(&list_inst.kind,
+                InstKind::AllocBuiltin { elems, .. } if matches!(elems.as_slice(), [e] if !f.is_unpacked(*e)));
             let inner = display
                 .strip_prefix('[')
                 .and_then(|d| d.strip_suffix(']'))
-                .map(str::trim);
+                .map(trim_element);
             let replacement = match inner {
-                Some(e) if single && !e.starts_with('*') => {
-                    let e = e.strip_suffix(',').map_or(e, str::trim_end);
-                    format!("{name}.append({e})")
-                }
+                Some(e) if one_plain_element => format!("{name}.append({e})"),
                 _ => format!("{name}.extend({display})"),
             };
             edits.push(TextEdit {
@@ -1039,6 +1093,9 @@ impl<'a, 'c> Rules<'a, 'c> {
             self.ck
                 .exception_state_safe(&name, &st, acc, at.0, &name, &[dst]),
         );
+        let added = &entries[1..];
+        obs.push(self.insertion_order(&st, &name, added));
+        obs.push(self.partial_update(&name, at.0, matches!(added, [DictEntry::KeyValue { .. }])));
         let stmt = self.assignment_span(copy, lit.span);
         let span = stmt.unwrap_or(lit.span);
         let mut edits = Vec::new();
@@ -1089,12 +1146,83 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
         if let [_, DictEntry::Unpack { dict }] = entries
             && st.exact_type(*dict) == Some(Dict)
-            && let Some(e) = rest_trim.strip_prefix("**")
+            && let Some(e) = rest.trim_start().strip_prefix("**")
         {
-            let e = e.trim().strip_suffix(',').map_or(e.trim(), str::trim_end);
-            return Some(format!("{name}.update({e})"));
+            return Some(format!("{name}.update({})", trim_element(e)));
         }
         Some(format!("{name}.update({{{rest}}})"))
+    }
+
+    /// `EvalOrderPreserved(update)`: the display inserts each entry into the copy before it
+    /// evaluates the next one, and an insertion may run a key's `__eq__` (on a hash collision)
+    /// or a mapping's `keys()` / `__getitem__`; `d.update({...})` evaluates every entry first,
+    /// then inserts them, comparing the new keys with each other twice. That is the same only
+    /// for one entry, for the entries of one exact dict, or for keys that are `int` / `str` /
+    /// `bytes` / `bool` / `float` values whose later entries evaluate no code.
+    fn insertion_order(&self, st: &FrameState, name: &str, added: &[DictEntry]) -> ProofObligation {
+        let status = match added {
+            [DictEntry::KeyValue { .. }] => {
+                established("one entry: evaluated, then inserted, as in the display")
+            }
+            [DictEntry::Unpack { dict }] if st.exact_type(*dict) == Some(Dict) => {
+                established("the entries of one exact dict are inserted in the same order")
+            }
+            _ if added.iter().enumerate().all(|(i, e)| match e {
+                DictEntry::KeyValue { key, value } => {
+                    self.cx()
+                        .possible_kinds(st, *key)
+                        .is_some_and(|m| m.is_subset_of(KindMask::hash_consistent()))
+                        && (i == 0
+                            || (self.evaluates_no_code(*key) && self.evaluates_no_code(*value)))
+                }
+                DictEntry::Unpack { .. } => false,
+            }) =>
+            {
+                established("builtin keys, and the later entries are constants or local names")
+            }
+            _ => blocked(format!(
+                "`{name}.update({{...}})` evaluates every entry before inserting any; the display inserts each entry (running key `__eq__` or a mapping's methods) before it evaluates the next"
+            )),
+        };
+        self.ck.ob(K::EvalOrderPreserved, "update", status)
+    }
+
+    /// `ExceptionStateSafe(update)`: an insertion that raises (a key's `__eq__`) leaves the
+    /// accumulator updated in place up to that key, where the display left it unchanged; only
+    /// a handler that reads it can tell.
+    fn partial_update(&self, name: &str, at: BlockId, one_insertion: bool) -> ProofObligation {
+        let status = if one_insertion {
+            established("one insertion: it happens entirely or not at all")
+        } else if self.ck.handler_observed_names(at).contains(name) {
+            blocked(format!(
+                "an insertion that raises would leave `{name}` partly updated, and an exception handler reads `{name}`"
+            ))
+        } else {
+            established("no exception handler reads the accumulator")
+        };
+        self.ck.ob(K::ExceptionStateSafe, "update", status)
+    }
+
+    /// Evaluating `v` runs no code and cannot raise: a constant, or a local name that is
+    /// bound on every path and that no nested function can rebind.
+    fn evaluates_no_code(&self, v: VarId) -> bool {
+        match self.cx().def_inst(v) {
+            Some((_, _, inst)) if matches!(inst.kind, InstKind::Const { .. }) => true,
+            _ => self.bound_local_name(v).is_some() && !self.cx().is_captured(v),
+        }
+    }
+
+    /// A display of one element or entry, without unpacking (`{e}`, `{k: v}`).
+    fn single_item_display(&self, v: VarId) -> bool {
+        match self.cx().def_inst(v).map(|(_, _, i)| &i.kind) {
+            Some(InstKind::AllocBuiltin { elems, .. }) => {
+                matches!(elems.as_slice(), [e] if !self.f().is_unpacked(*e))
+            }
+            Some(InstKind::DictLiteral { entries, .. }) => {
+                matches!(entries.as_slice(), [DictEntry::KeyValue { .. }])
+            }
+            _ => false,
+        }
     }
 
     /// Source text of a side-effect-free, non-raising operand (constant or bound local).
@@ -1143,6 +1271,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             self.ck
                 .exception_state_safe(&name, &st, acc, at.0, &name, &[dst]),
         );
+        obs.push(self.partial_update(&name, at.0, self.single_item_display(rhs)));
         let stmt = self.assignment_span(copy, binop.span);
         let span = stmt.unwrap_or(binop.span);
         let mut edits = Vec::new();
@@ -1319,6 +1448,26 @@ impl<'a, 'c> Rules<'a, 'c> {
                 self.var(obj)
             )
         });
+        // `list += x` extends in place whatever `x` is: only an attribute that holds a `str`,
+        // `bytes`, or `tuple` is copied by `+=`.
+        let receiver = receiver_root(f, obj);
+        let held = match (&f.owner_class_qualname, f.params.first()) {
+            (Some(class), Some(this)) if receiver == this.var => self.m.self_attr_kind(class, attr),
+            _ => same_kind(
+                attribute_stores(f, receiver)
+                    .filter(|(a, _)| *a == attr)
+                    .map(|(_, k)| k),
+            ),
+        };
+        let cost = st
+            .exact_type(rhs)
+            .filter(|k| matches!(k, Str | Bytes | Tuple) && held == Some(*k))
+            .map(|k| {
+                format!(
+                    "`{target}` is assigned an exact `{}` and grows by concatenation",
+                    k.name()
+                )
+            });
         Some(self.candidate(
             OptRule::Opt103,
             binop.span,
@@ -1326,7 +1475,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             format!("`{target} += ...` re-copies the attribute on every iteration (quadratic); accumulate in a local list and assign the joined result once"),
             obs,
             fresh_receiver.or_else(|| loop_bound_note(lp)),
-            st.exact_type(rhs).filter(|k| matches!(k, Str | Bytes | Tuple)).map(|k| format!("the right operand is an exact `{}`", k.name())),
+            cost,
             Vec::new(),
         ))
     }
@@ -1360,10 +1509,20 @@ impl<'a, 'c> Rules<'a, 'c> {
             .map(|(_, _, make_iter)| make_iter.span)
     }
 
-    /// Line start and indentation of the `for` statement of `lp`.
+    /// Line start and indentation of the `for` statement of `lp`. A comprehension's `for`
+    /// clause is not a statement: a generator expression, a lambda, and (before 3.12) a
+    /// comprehension are scopes named `<...>`, and an inlined comprehension's iterable is
+    /// followed by `if`, `for`, or a closing bracket where a statement's header ends with `:`.
     fn for_stmt(&self, lp: &NaturalLoop) -> Option<(u32, String)> {
+        if !is_identifier(&self.f().name) {
+            return None;
+        }
         let first = self.f().block(lp.header).insts.first()?;
-        if !matches!(first.kind, InstKind::IterNext { .. }) {
+        let InstKind::IterNext { iter, .. } = first.kind else {
+            return None;
+        };
+        let (_, _, make_iter) = self.cx().def_inst(iter)?;
+        if !header_colon_follows(self.m.source, make_iter.span.end) {
             return None;
         }
         let ls = line_start(self.m.source, first.span.start);
@@ -1376,35 +1535,41 @@ impl<'a, 'c> Rules<'a, 'c> {
     }
 
     /// Hoist `<name> = <expr>` before the loop and replace `replace`, the source of
-    /// `replaced`, with `<name>`. The middle operand of a chained comparison is also the next
-    /// comparison's operand: replacing its text would change that one too.
+    /// `replaced`, with `<name>`. The name is fresh (`base`, or `base_1`, ...): `None` when the
+    /// loop is no `for` statement, or when `replaced` is the middle operand of a chained
+    /// comparison, which is also the next comparison's operand (replacing its text would
+    /// change that one too).
     fn hoist_edits(
         &self,
         lp: &NaturalLoop,
-        name: &str,
+        base: &str,
         expr: &str,
         replace: Span,
         replaced: VarId,
-    ) -> Vec<TextEdit> {
+    ) -> Option<(String, Vec<TextEdit>)> {
         if self.f().is_shared_chain_operand(replaced) {
-            return Vec::new();
+            return None;
         }
-        let Some((ls, indent)) = self.for_stmt(lp) else {
-            return Vec::new();
-        };
-        vec![
+        let (ls, indent) = self.for_stmt(lp)?;
+        let name = self.hoisted_name(base);
+        let edits = vec![
             TextEdit {
                 span: Span { start: ls, end: ls },
-                replacement: format!("{indent}{name} = {expr}\n"),
+                replacement: format!(
+                    "{indent}{name} = {expr}{}",
+                    heki_ast::line_break(self.m.source)
+                ),
             },
             TextEdit {
                 span: replace,
-                replacement: name.to_owned(),
+                replacement: name.clone(),
             },
-        ]
+        ];
+        Some((name, edits))
     }
 
-    /// `e in <name>` with `<name>` as the last token of the compare: its span.
+    /// `e in <name>` with `<name>` as the last token of the compare (each comparison of a
+    /// chain spans its own operands): its span.
     fn container_name_span(&self, cmp: Span, name: &str) -> Option<Span> {
         let text = self.m.text(cmp)?;
         let head = text.strip_suffix(name)?;
@@ -1453,23 +1618,33 @@ impl<'a, 'c> Rules<'a, 'c> {
         let unhashable = KindMask::of(List)
             .union(KindMask::of(Dict))
             .union(KindMask::of(Set));
-        let not_profitable = self.small_note(&name, lst).or_else(|| {
-            self.cx()
-                .elems_of_bases(&st, &st.allocs_of(lst))
-                .filter(|m| *m != KindMask::EMPTY && m.is_subset_of(unhashable))
-                .map(|m| {
-                    format!(
-                        "its elements are unhashable ({}): no `set` can hold them",
-                        crate::obligations::describe_mask(m)
-                    )
-                })
-        });
+        let not_profitable = self
+            .small_note(&name, lst)
+            .or_else(|| {
+                self.cx()
+                    .elems_of(&st, lst)
+                    .filter(|m| *m != KindMask::EMPTY && m.is_subset_of(unhashable))
+                    .map(|m| {
+                        format!(
+                            "its elements are unhashable ({}): no `set` can hold them",
+                            crate::obligations::describe_mask(m)
+                        )
+                    })
+            })
+            .or_else(|| loop_bound_note(lp));
         let mut edits = Vec::new();
-        if f.var_name(lst).is_some_and(is_identifier)
+        if self.proven(&obs)
+            && f.var_name(lst).is_some_and(is_identifier)
             && let Some(rspan) = self.container_name_span(cmp.span, &name)
+            && let Some((_, e)) = self.hoist_edits(
+                lp,
+                &format!("{name}_set"),
+                &format!("set({name})"),
+                rspan,
+                lst,
+            )
         {
-            let h = self.m.fresh_name(&format!("{name}_set"));
-            edits = self.hoist_edits(lp, &h, &format!("set({name})"), rspan, lst);
+            edits = e;
         }
         Some(self.candidate(
             OptRule::Opt110,
@@ -1546,7 +1721,28 @@ impl<'a, 'c> Rules<'a, 'c> {
                     .value_loop_invariant(&self.var(v), &st, v, lp, region),
             );
         }
+        // A hoisted container is one object shared by every iteration: no use but the test
+        // may see it (`(tmp := list(keys))` then `tmp.clear()`).
+        obs.push(self.ck.ob(
+            K::ValueLoopInvariant,
+            &target,
+            match self.cx().uses(rebuilt) {
+                [UseSite::Inst(b, i)] if (*b, *i) == at => {
+                    established("only the membership test reads the built container")
+                }
+                _ => blocked(
+                    "the built container is also bound or used: the hoisted one would be shared by every iteration",
+                ),
+            },
+        ));
+        let unpacked = call
+            .kind
+            .dst()
+            .is_some_and(|d| (0..args.len()).any(|i| f.is_starred(d, i)));
         let raises = match (callee, args) {
+            _ if unpacked => Some(
+                "`*` passes the elements of the argument to the constructor: hoisting could raise or consume an iterator even when the loop runs zero times",
+            ),
             ("list" | "tuple", []) | ("set" | "frozenset" | "dict", []) => None,
             // Iterating a builtin container runs no user code (a number is not iterable).
             ("list" | "tuple", [a])
@@ -1565,7 +1761,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             ("set" | "frozenset", [a]) if matches!(st.exact_type(*a), Some(Set | Str | Bytes)) => {
                 None
             }
-            ("set" | "frozenset", [a]) => match self.cx().elems_of_bases(&st, &st.allocs_of(*a)) {
+            ("set" | "frozenset", [a]) => match self.cx().elems_of(&st, *a) {
                 Some(m) if m.is_subset_of(KindMask::hash_consistent()) => None,
                 _ => Some(
                     "its elements may be unhashable: hoisting raises `TypeError` even when the loop runs zero times",
@@ -1584,18 +1780,26 @@ impl<'a, 'c> Rules<'a, 'c> {
             },
         ));
         // These constructors take at most one argument (more always raise, blocked above).
-        let not_profitable = match args.first() {
-            Some(a) => self.small_note(&self.var(*a), *a),
-            None => Some("the container is empty".into()),
+        let not_profitable = match (callee, args.first()) {
+            ("tuple", Some(a)) if st.exact_type(*a) == Some(Tuple) => Some(format!(
+                "`tuple({})` returns the tuple itself: nothing is rebuilt",
+                self.var(*a)
+            )),
+            (_, Some(a)) => self.small_note(&self.var(*a), *a),
+            (_, None) => Some("the container is empty".into()),
+        }
+        .or_else(|| loop_bound_note(lp));
+        let mut edits = Vec::new();
+        let base = match args {
+            [a] => format!("{}_{callee}", self.var(*a)),
+            _ => format!("hoisted_{callee}"),
         };
-        let edits = self.m.text(call.span).map_or_else(Vec::new, |text| {
-            let base = match args {
-                [a] => format!("{}_{callee}", self.var(*a)),
-                _ => format!("hoisted_{callee}"),
-            };
-            let h = self.m.fresh_name(&base);
-            self.hoist_edits(lp, &h, text, call.span, rebuilt)
-        });
+        if self.proven(&obs)
+            && let Some(text) = self.m.text(call.span)
+            && let Some((_, e)) = self.hoist_edits(lp, &base, text, call.span, rebuilt)
+        {
+            edits = e;
+        }
         Some(self.candidate(
             OptRule::Opt130,
             cmp.span,
@@ -1637,14 +1841,16 @@ impl<'a, 'c> Rules<'a, 'c> {
             InstKind::Call { callee, .. } => Some(format!(
                 "`{callee}(...)` inside it may raise or run user code before the loop"
             )),
-            // A list or set method that only reads its receiver; not a dict's (copying a dict
-            // may compare its keys, running their `__eq__`, like `dict(d)`).
+            // A list or set method that only reads its receiver (`.copy()`, which takes no
+            // argument); not a dict's (copying a dict may compare its keys, running their
+            // `__eq__`, like `dict(d)`).
             InstKind::MethodCall {
                 recv,
                 method,
+                args,
                 kwargs,
                 ..
-            } if kwargs.is_empty() => match st
+            } if args.is_empty() && kwargs.is_empty() => match st
                 .exact_type(*recv)
                 .filter(|k| *k != Dict)
                 .and_then(|k| cx.kb.lookup(&format!("builtins.{}.{method}", k.name())))
@@ -1715,6 +1921,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let mut edits = Vec::new();
         let probe_name = f.var_name(probe).filter(|n| is_identifier(n));
         if let (Some(pn), Some(rspan)) = (probe_name, self.container_name_span(cmp.span, &name))
+            && self.proven(&obs)
             && f.var_name(seen).is_some_and(is_identifier)
             && self.cx().uses(app.kind.dst()?).is_empty()
             && ends_statement(self.m.source, app.span.end)
@@ -1722,19 +1929,22 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .m
                 .text(app.span)
                 .is_some_and(|t| squash(t) == format!("{name}.append({pn})"))
+            && let Some((h, mut e)) = self.hoist_edits(
+                lp,
+                &format!("{name}_set"),
+                &format!("set({name})"),
+                rspan,
+                seen,
+            )
         {
-            let h = self.m.fresh_name(&format!("{name}_set"));
-            let mut e = self.hoist_edits(lp, &h, &format!("set({name})"), rspan, seen);
-            if !e.is_empty() {
-                e.push(TextEdit {
-                    span: Span {
-                        start: app.span.end,
-                        end: app.span.end,
-                    },
-                    replacement: format!("; {h}.add({pn})"),
-                });
-                edits = e;
-            }
+            e.push(TextEdit {
+                span: Span {
+                    start: app.span.end,
+                    end: app.span.end,
+                },
+                replacement: format!("; {h}.add({pn})"),
+            });
+            edits = e;
         }
         Some(self.candidate(
             OptRule::Opt111,
@@ -1934,13 +2144,86 @@ impl<'a, 'c> Rules<'a, 'c> {
         changes.into_iter().find_map(|(b, i)| {
             let st = self.state((b, i))?;
             let live = self.ck.live.live_after(f, b, i);
-            let d = allocs.iter()
+            // An iterator the change itself consumes (`q.extend(reversed(q))`) runs during it.
+            let operands = f.block(b).insts[i].kind.operands();
+            let d = allocs
+                .iter()
                 .flat_map(|a| st.derived_refs.get(a).into_iter().flatten())
-                .find(|d| live.contains(**d))?;
+                .find(|d| live.contains(**d) || operands.contains(d))?;
             Some(format!(
                 "{} still iterates it when it changes at line {} (a `deque` raises `RuntimeError` there)",
                 self.ck.name(*d),
                 self.line(f.block(b).insts[i].span.start)
+            ))
+        })
+    }
+
+    /// An iterator (or view) of `allocs` used for more than drawing its elements: a `deque`'s
+    /// iterators have other types and `__reduce__` results than a list's.
+    fn iterator_used_otherwise(
+        &self,
+        st: &FrameState,
+        allocs: &[crate::AllocId],
+    ) -> Option<String> {
+        let f = self.f();
+        let cx = self.cx();
+        // Every state of the function: a derived reference made and used inside one block is
+        // in no block's entry state.
+        let mut derived: FxHashSet<VarId> = FxHashSet::default();
+        let mut collect = |s: &FrameState| {
+            for a in allocs {
+                derived.extend(s.derived_refs.get(a).into_iter().flatten().copied());
+            }
+        };
+        collect(st);
+        for (b, entry) in cx.entered_blocks(self.an()) {
+            let (out, _) = cx.transfer_block(b, entry, |_, before, _| collect(before));
+            collect(&out);
+        }
+        // A phi passes it on (the phi's own uses are checked too); a terminator returns,
+        // raises, or tests it.
+        let consumes = |d: VarId, site: &UseSite| match *site {
+            UseSite::Phi { .. } | UseSite::Term(_) => matches!(site, UseSite::Phi { .. }),
+            UseSite::Inst(b, i) => match &f.block(b).insts[i].kind {
+                InstKind::IterNext { .. } | InstKind::MakeIter { .. } | InstKind::Copy { .. } => {
+                    true
+                }
+                InstKind::Call {
+                    dst,
+                    callee_var,
+                    callee,
+                    args,
+                    kwargs,
+                    ..
+                } => {
+                    kwargs.iter().all(|(_, v)| *v != d)
+                        && !(0..args.len()).any(|k| f.is_starred(*dst, k))
+                        && cx.builtin_callee(*callee_var, callee).is_some_and(|n| {
+                            matches!(
+                                n,
+                                "list"
+                                    | "tuple"
+                                    | "set"
+                                    | "iter"
+                                    | "enumerate"
+                                    | "zip"
+                                    | "map"
+                                    | "filter"
+                            )
+                        })
+                }
+                _ => false,
+            },
+        };
+        let mut sorted: Vec<VarId> = derived.into_iter().collect();
+        sorted.sort_unstable();
+        sorted.into_iter().find_map(|d| {
+            cx.uses(d).iter().find(|u| !consumes(d, u))?;
+            let made_at = cx.def_inst(d).map_or(f.span, |(_, _, i)| i.span);
+            Some(format!(
+                "{} (line {}) is used for more than its elements: a `deque` iterator is another type",
+                self.ck.name(d),
+                self.line(made_at.start)
             ))
         })
     }
@@ -1976,6 +2259,16 @@ impl<'a, 'c> Rules<'a, 'c> {
         let lp = innermost_loop(f, at.0)?;
         let inst = inst_at(f, at);
         let name = self.var(q);
+        // The IR keeps the slice's bounds only when they are constants, and not its step:
+        // `q[1:n]` and `q[1::2]` look like `q[1:]` there.
+        if let Some(FrontForm::SliceRebind { .. }) = form
+            && self
+                .m
+                .text(inst.span)
+                .is_none_or(|t| !squash(t).ends_with("[1:]"))
+        {
+            return None;
+        }
         let mut obs = self.base();
         obs.push(self.ck.exact_type(&name, &st, q, &[List]));
         obs.push(self.ck.unique(&name, &st, q));
@@ -1988,16 +2281,28 @@ impl<'a, 'c> Rules<'a, 'c> {
             let loc = self.cx().site_location(*a);
             let ai = inst_at(f, loc);
             let rewritten_slice = matches!(form, Some(FrontForm::SliceRebind { .. })) && loc == at;
-            let init = !lp.body.contains(&loc.0)
-                && match &ai.kind {
-                    InstKind::AllocBuiltin { kind: List, .. } => true,
-                    InstKind::Call {
-                        callee_var, callee, ..
-                    } => self.cx().builtin_callee(*callee_var, callee) == Some("list"),
-                    _ => false,
-                };
-            if init {
+            let (init, unpacks) = match &ai.kind {
+                InstKind::AllocBuiltin { kind: List, .. } => (true, false),
+                InstKind::Call {
+                    dst,
+                    callee_var,
+                    callee,
+                    args,
+                    kwargs,
+                    ..
+                } => (
+                    self.cx().builtin_callee(*callee_var, callee) == Some("list"),
+                    !kwargs.is_empty() || (0..args.len()).any(|i| f.is_starred(*dst, i)),
+                ),
+                _ => (false, false),
+            };
+            if init && !unpacks && !lp.body.contains(&loc.0) {
                 init_sites.push(loc);
+            } else if init && unpacks {
+                bad_alloc = Some(format!(
+                    "`list(...)` with `*` / `**` arguments (line {}) has no `deque` equivalent: `deque` reads a second argument as `maxlen`",
+                    self.line(ai.span.start)
+                ));
             } else if !rewritten_slice {
                 bad_alloc = Some(format!(
                     "it is also created at line {}",
@@ -2027,7 +2332,9 @@ impl<'a, 'c> Rules<'a, 'c> {
             }
         }
         if bad_use.is_none() {
-            bad_use = self.iterated_while_changed(&allocs);
+            bad_use = self
+                .iterated_while_changed(&allocs)
+                .or_else(|| self.iterator_used_otherwise(&st, &allocs));
         }
         // A type checker must accept the rewritten variable: its `list` annotations become
         // `deque` ones, and one that cannot be rewritten blocks the fix.
@@ -2233,9 +2540,15 @@ impl<'a, 'c> Rules<'a, 'c> {
         for &s in init_sites {
             let ii = inst_at(f, s);
             let text = self.m.text(ii.span)?;
+            // `list(it)` asks `it` for its length (`__len__` / `__length_hint__`), `deque(it)`
+            // does not: an argument that is not a builtin container keeps its `list(...)`.
+            let reads_builtin = |a: VarId| {
+                self.state(s)
+                    .is_some_and(|st| self.cx().iterates_without_user_code(&st, a))
+            };
             let wrapped = match &ii.kind {
                 InstKind::Call { args, .. } if args.is_empty() => format!("{}()", deque.spelling),
-                InstKind::Call { .. } => {
+                InstKind::Call { args, .. } if args.iter().all(|a| reads_builtin(*a)) => {
                     let inner = text.trim_start().strip_prefix("list")?.trim_start();
                     format!("{}{inner}", deque.spelling)
                 }
@@ -2289,7 +2602,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                 let value = strip_token(strip_token(after_paren, "0")?, ",")?;
                 TextEdit {
                     span: inst.span,
-                    replacement: format!("{name}.appendleft({})", value.trim()),
+                    replacement: format!("{name}.appendleft({})", trim_element(value)),
                 }
             }
         };
@@ -2297,6 +2610,107 @@ impl<'a, 'c> Rules<'a, 'c> {
         edits.extend(type_edits);
         Some(edits)
     }
+}
+
+/// The variable a chain of copies of `v` starts from (`out = self` gives `self`), through the
+/// `Copy` definitions of `copies`.
+fn copy_root(copies: &rustc_hash::FxHashMap<VarId, VarId>, mut v: VarId) -> VarId {
+    for _ in 0..copies.len() {
+        match copies.get(&v) {
+            Some(&src) => v = src,
+            None => break,
+        }
+    }
+    v
+}
+
+fn copies_of(f: &IrFunction) -> rustc_hash::FxHashMap<VarId, VarId> {
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i.kind {
+            InstKind::Copy { dst, src } => Some((dst, src)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn receiver_root(f: &IrFunction, v: VarId) -> VarId {
+    copy_root(&copies_of(f), v)
+}
+
+/// `(attribute, kind)` of every `<receiver>.attribute = value` in `f` on a copy of `receiver`:
+/// the exact `str` / `bytes` / `tuple` of a literal value, `None` for any other value. The
+/// update `<receiver>.attribute += ...` itself is skipped.
+fn attribute_stores(
+    f: &IrFunction,
+    receiver: VarId,
+) -> impl Iterator<Item = (&str, Option<BuiltinKind>)> {
+    let copies = copies_of(f);
+    let defs: rustc_hash::FxHashMap<VarId, &Inst> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| Some((i.kind.dst()?, i)))
+        .collect();
+    let def = move |v: VarId| defs.get(&v).copied();
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(move |i| match &i.kind {
+            InstKind::AttrStore { obj, attr, value } if copy_root(&copies, *obj) == receiver => {
+                let kind = match def(*value).map(|d| &d.kind) {
+                    Some(InstKind::BinOp {
+                        in_place: true,
+                        lhs,
+                        ..
+                    }) if def(*lhs).is_some_and(
+                        |l| matches!(&l.kind, InstKind::AttrLoad { attr: a, .. } if a == attr),
+                    ) =>
+                    {
+                        return None;
+                    }
+                    Some(InstKind::Const {
+                        literal: heki_ir::ConstLiteral::Str(_),
+                        ..
+                    }) => Some(Str),
+                    Some(InstKind::Const {
+                        literal: heki_ir::ConstLiteral::Bytes,
+                        ..
+                    }) => Some(Bytes),
+                    Some(InstKind::AllocBuiltin { kind: Tuple, .. }) => Some(Tuple),
+                    _ => None,
+                };
+                Some((attr.as_str(), kind))
+            }
+            _ => None,
+        })
+}
+
+/// The kind all of `kinds` are, when there is at least one and they agree.
+fn same_kind(mut kinds: impl Iterator<Item = Option<BuiltinKind>>) -> Option<BuiltinKind> {
+    let first = kinds.next()??;
+    kinds.all(|k| k == Some(first)).then_some(first)
+}
+
+/// Block `b` runs whenever the function body completes (it is no branch of an `if`, such as
+/// `if TYPE_CHECKING:`): no path from the entry avoids it.
+fn on_every_path(f: &IrFunction, b: BlockId) -> bool {
+    let mut seen = FxHashSet::default();
+    let mut stack = vec![BlockId(0)];
+    while let Some(x) = stack.pop() {
+        if x == b || !seen.insert(x) {
+            continue;
+        }
+        let bb = f.block(x);
+        let next = bb.terminator.successors();
+        if next.is_empty() {
+            return false;
+        }
+        stack.extend(next);
+        stack.extend(bb.exc_target);
+    }
+    true
 }
 
 /// `list[T]` / `list` / `List[T]` / `typing.List[T]` (also quoted) spelled with `spelling`
@@ -2338,7 +2752,7 @@ fn closes_at_end(text: &str) -> bool {
 fn annotated_declarations<'t>(text: &'t str, name: &'t str) -> impl Iterator<Item = u32> + 't {
     text.match_indices(name).filter_map(move |(i, _)| {
         let before = text[..i].trim_end_matches([' ', '\t']);
-        let starts = before.is_empty() || before.ends_with(['\n', ';', '(', ',', '*']);
+        let starts = before.is_empty() || before.ends_with(['\n', '\r', ';', '(', ',', '*']);
         let word_start = text[..i]
             .chars()
             .next_back()

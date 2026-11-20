@@ -84,7 +84,7 @@ allowed-writers = ["Store.*"]
 $ heki check --output-format concise
 app/api.py:5:12: EFF101 `async def handler` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
 app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
-Found 2 diagnostic(s) in 5 file(s).
+Found 2 diagnostic(s) in 4 file(s).
 ```
 
 Ruff's async rules see `requests.get` only when it is written in the `async def` itself; ty sees a
@@ -112,8 +112,10 @@ is allowed. None of them follows the call into `load_user` or the alias into `ad
    `OPT113`) use annotations to learn which class an object has and which method a call reaches
    (`session: Session` makes `session.execute(...)` a database call). Calls are resolved from
    local constructors and imports first, then annotations, then attributes assigned in
-   `__init__`, then the class hierarchy (up to eight overriding methods). The rewriting rules
-   never read annotations, because a subclass can override any method; see
+   `__init__`, then the class hierarchy (up to eight overriding methods). Container item types
+   (`list[Model]`), return annotations along the MRO, `isinstance` narrowing, unions of up to
+   three classes, and project `Protocol`s are followed too. The rewriting rules never read
+   annotations, because a subclass can override any method; see
    [Fixes and Safety](fixes.md).
 
 ## When heki cannot tell
@@ -128,7 +130,10 @@ The two kinds of rules make opposite choices when information is missing:
   name computed at run time, more than eight possible overrides, or a function outside the
   checked files that the catalog does not list. heki would rather miss a finding than report
   one it cannot back with a call chain; reports that cross functions show that chain as
-  related locations.
+  related locations. A branch the caller's arguments switch off is not followed
+  (`load(name, cache=False)` does not reach the request under `if cache:`), and a client or
+  query created only while an attribute is unset counts once per object, not once per loop
+  iteration.
 
 The missed findings close as heki learns more: annotate values whose class it cannot see, add
 your blocking or offloading APIs to `[[tool.heki.ecosystem]]`, and declare contracts for the
@@ -138,7 +143,9 @@ state that matters.
 
 - **Dynamic names.** `setattr(obj, "fields", v)`, `getattr(obj, "fields")`,
   `getattr(obj, "method")(...)`, and `obj.__dict__["fields"]` are followed only when the name is a
-  constant.
+  constant: a literal, or a module-level `Final` string constant (also imported). Names assigned
+  without `Final`, class-level constants, and computed names are not resolved; a `write-owners`
+  contract with `unresolved = "report"` counts the writes heki cannot tie to a class (`MUT205`).
 - **Objects without a known class.** Reads and writes through `Any` or unannotated parameters
   are not tied to a class, so contracts on that class do not see them. A write in an
   unannotated helper is still found where a caller passes it an object of a known class; a
@@ -152,8 +159,8 @@ state that matters.
   of a project class runs its getter: its effects, writes, and the attributes it reads count for
   the reader, also through base classes, overriding subclasses, and `super()`. A property that
   also defines a setter or deleter (`@x.setter`) is not followed, nor is `x = property(get_x)`,
-  and the getter's return annotation does not type the value read (`self.session.execute(...)`
-  through a `session` property is not resolved).
+  and the getter's return annotation types the value read. Values declared `Any`, generics
+  substituted through `TypeVar`s, and calls of `type[C]` attributes are not typed.
 - **Read-only types.** `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the
   helpers they are handed to, any number of calls deep; a helper parameter annotated with a
   mutable type is left to the type checker, and a container inside the argument does not count.
@@ -171,6 +178,12 @@ state that matters.
   runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on its own.
   Iterating an object runs its class's `__iter__` only for classes the catalog lists (a
   SQLAlchemy `Query`); the `__iter__` methods of project classes are not followed.
+- **Guards.** A test is followed when it checks the function's own input directly: truthiness,
+  `is None`, or `isinstance` with builtin classes. `a or b` gives no guard on either value, the
+  classes of project objects and annotated types do not decide `isinstance`, a lazy
+  initialization needs a direct test and the store in the function itself, and `EFF201` does not
+  use guards. An object a factory function returns counts as obtained once, like a pooled
+  connection.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
@@ -180,7 +193,11 @@ state that matters.
 - **The target Python version.** Results follow `target-version`. From Python 3.12, list, set,
   and dict comprehensions run in the enclosing function (PEP 709), so a comprehension inside a
   loop can be reported for `py312` and not for `py311`. heki infers the version from
-  `requires-python`, which keeps it at the oldest version you support.
+  `requires-python`, which keeps it at the oldest version you support. Syntax newer than the
+  target version is analyzed, not reported: that is Ruff's check.
+- **Source encodings.** Sources are read in the encoding a PEP 263 declaration names: heki reads
+  UTF-8 (with or without a BOM), Latin-1, and ASCII, and reports any other declared encoding as
+  an error instead of checking the file.
 - **Sizes known only at run time.** Whether a collection is small is decided from the code: a
   list built from a short constant display is not reported, a list built at run time is, even
   when it always holds three items. A container counts as small only when it is a display of at

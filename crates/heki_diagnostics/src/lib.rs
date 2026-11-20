@@ -3,7 +3,7 @@
 
 mod fix;
 
-pub use fix::{apply_fixes, unified_diff};
+pub use fix::{PythonFixPass, apply_fixes, fix_python_source, unified_diff};
 
 use heki_ast::{LineIndex, Span};
 use heki_env::Severity;
@@ -62,6 +62,11 @@ pub struct Diagnostic {
     /// only when above 1.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub sites: u32,
+    /// What the report shares with others that output may fold into one: the blocking root cause
+    /// and effect of an `async def` boundary (`EFF101` / `EFF105`). Folding happens after
+    /// suppressions and baselines, which see every report (`heki_rules::fold_root_causes`).
+    #[serde(skip)]
+    pub fold_key: Option<String>,
 }
 
 fn one() -> u32 {
@@ -111,8 +116,30 @@ fn severity_word(s: Severity) -> &'static str {
     }
 }
 
-fn display_path(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "/")
+/// How reports write a path: with `/` separators on every platform. Only Windows separates
+/// with `\\`; elsewhere it is a character of the file name and stays.
+pub fn path_text(p: &Path) -> String {
+    let text = p.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '\\' {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
+/// `path` as a relative URI reference (SARIF `artifactLocation.uri`): every byte but the
+/// unreserved characters and `/` percent-encoded, so `#`, `?`, `%`, and spaces stay part of
+/// the path.
+fn path_uri(path: &Path) -> String {
+    let mut out = String::new();
+    for b in path_text(path).bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
 }
 
 /// Render diagnostics. `source_line(path, line)` returns the 1-based source line for `full`.
@@ -132,7 +159,7 @@ pub fn render(
         }
         OutputFormat::Github => render_github(diags),
         OutputFormat::Sarif => {
-            let mut s = serde_json::to_string_pretty(&sarif(diags))
+            let mut s = serde_json::to_string_pretty(&sarif(diags, source_line))
                 .expect("a `serde_json::Value` always serializes");
             s.push('\n');
             s
@@ -146,7 +173,7 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
         let _ = writeln!(
             out,
             "{}:{}:{}: {} ({}) [{}] {}",
-            display_path(&d.path),
+            path_text(&d.path),
             d.line,
             d.column,
             d.rule_code,
@@ -158,14 +185,13 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
             let gutter = d.line.to_string().len();
             let _ = writeln!(out, "{:gutter$} |", "");
             let _ = writeln!(out, "{} | {}", d.line, text.trim_end());
-            let caret_pad = usize::try_from(d.column.saturating_sub(1)).unwrap_or(0);
-            let _ = writeln!(out, "{:gutter$} | {:caret_pad$}^", "", "");
+            let _ = writeln!(out, "{:gutter$} | {}^", "", caret_padding(&text, d.column));
         }
         for r in &d.related {
             let _ = writeln!(
                 out,
                 "  = related: {}:{}:{}: {}",
-                display_path(&r.path),
+                path_text(&r.path),
                 r.line,
                 r.column,
                 r.message
@@ -176,13 +202,83 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
     out
 }
 
+/// The text of `line` before 1-based byte column `column` (cut back to a character boundary).
+fn before_column(line: &str, column: u32) -> &str {
+    let mut end = usize::try_from(column.saturating_sub(1))
+        .unwrap_or(usize::MAX)
+        .min(line.len());
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
+}
+
+/// What puts the caret under byte column `column` of the printed `line`: a tab where the line
+/// has one (the terminal expands both alike), else as many spaces as each character is wide.
+fn caret_padding(line: &str, column: u32) -> String {
+    before_column(line, column)
+        .chars()
+        .map(|c| match c {
+            '\t' => "\t".to_owned(),
+            c => " ".repeat(display_width(c)),
+        })
+        .collect()
+}
+
+/// Terminal columns a character takes: none for combining marks and zero-width characters,
+/// two for East Asian wide and fullwidth characters and emoji, else one.
+fn display_width(c: char) -> usize {
+    const ZERO: &[(u32, u32)] = &[
+        (0x0300, 0x036F),
+        (0x0483, 0x0489),
+        (0x0591, 0x05BD),
+        (0x0610, 0x061A),
+        (0x064B, 0x065F),
+        (0x1AB0, 0x1AFF),
+        (0x1DC0, 0x1DFF),
+        (0x200B, 0x200F),
+        (0x20D0, 0x20FF),
+        (0xFE00, 0xFE0F),
+        (0xFE20, 0xFE2F),
+    ];
+    const WIDE: &[(u32, u32)] = &[
+        (0x1100, 0x115F),
+        (0x2E80, 0x303E),
+        (0x3041, 0x33FF),
+        (0x3400, 0x4DBF),
+        (0x4E00, 0x9FFF),
+        (0xA000, 0xA4CF),
+        (0xAC00, 0xD7A3),
+        (0xF900, 0xFAFF),
+        (0xFE30, 0xFE4F),
+        (0xFF00, 0xFF60),
+        (0xFFE0, 0xFFE6),
+        (0x1F300, 0x1F64F),
+        (0x1F900, 0x1F9FF),
+        (0x20000, 0x2FFFD),
+        (0x30000, 0x3FFFD),
+    ];
+    let within = |ranges: &[(u32, u32)]| {
+        ranges
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&(c as u32)))
+    };
+    if within(ZERO) {
+        0
+    } else if within(WIDE) {
+        2
+    } else {
+        1
+    }
+}
+
 fn render_concise(diags: &[Diagnostic]) -> String {
     let mut out = String::new();
     for d in diags {
         let _ = writeln!(
             out,
             "{}:{}:{}: {} {}",
-            display_path(&d.path),
+            path_text(&d.path),
             d.line,
             d.column,
             d.rule_code,
@@ -190,6 +286,12 @@ fn render_concise(diags: &[Diagnostic]) -> String {
         );
     }
     out
+}
+
+/// Text as a GitHub Actions log line or command message holds it: `%`, CR, and LF escaped, so
+/// it never starts a line of its own (a line starting with `::` is a workflow command).
+pub fn github_escape(s: &str) -> String {
+    gh_escape(s, false)
 }
 
 /// GitHub workflow-command escaping (`%`, CR, LF; plus `:` / `,` inside properties).
@@ -211,7 +313,7 @@ fn render_github(diags: &[Diagnostic]) -> String {
             out,
             "::{} file={},line={},col={},title={}::{}",
             severity_word(d.severity),
-            gh_escape(&display_path(&d.path), true),
+            gh_escape(&path_text(&d.path), true),
             d.line,
             d.column,
             gh_escape(&format!("heki {}", d.rule_code), true),
@@ -221,17 +323,25 @@ fn render_github(diags: &[Diagnostic]) -> String {
     out
 }
 
-/// SARIF 2.1.0 log with one run (`runs[0].tool.driver.name = "heki"`).
-pub fn sarif(diags: &[Diagnostic]) -> serde_json::Value {
+/// SARIF 2.1.0 log with one run (`runs[0].tool.driver.name = "heki"`). Columns are in UTF-16
+/// code units (SARIF's default `columnKind`), converted from the byte columns of diagnostics
+/// with `source_line(path, line)`.
+pub fn sarif(
+    diags: &[Diagnostic],
+    source_line: &dyn Fn(&Path, u32) -> Option<String>,
+) -> serde_json::Value {
     use serde_json::json;
     let mut rules: BTreeMap<&str, &str> = BTreeMap::new();
     for d in diags {
         rules.insert(&d.rule_code, &d.rule_slug);
     }
     let location = |path: &Path, line: u32, column: u32| {
+        let column = source_line(path, line).map_or(column, |text| {
+            u32::try_from(before_column(&text, column).encode_utf16().count() + 1).unwrap_or(column)
+        });
         json!({
             "physicalLocation": {
-                "artifactLocation": { "uri": display_path(path) },
+                "artifactLocation": { "uri": path_uri(path) },
                 "region": { "startLine": line, "startColumn": column }
             }
         })
@@ -257,7 +367,7 @@ pub fn sarif(diags: &[Diagnostic]) -> serde_json::Value {
                 "locations": [location(&d.path, d.line, d.column)],
                 "relatedLocations": related,
                 "partialFingerprints": {
-                    "hekiBaselineKey/v1": format!("{}|{}|{}|{}", display_path(&d.path), d.qualname, d.rule_code, d.target)
+                    "hekiBaselineKey/v1": format!("{}|{}|{}|{}", path_text(&d.path), d.qualname, d.rule_code, d.target)
                 }
             })
         })
@@ -285,26 +395,22 @@ pub fn sarif(diags: &[Diagnostic]) -> serde_json::Value {
 
 /// Parse inline suppressions (`# heki: ignore`, `# heki: ignore[EFF101, async-blocking-call]`,
 /// and `# noqa` / `# noqa: EFF101` compatibility) from one comment directive.
-/// `Some(empty)` suppresses every rule.
+/// `Some(empty)` suppresses every rule: only the bare forms do. A bracketed list without its
+/// closing `]` or without a rule (`# heki: ignore[`, `# heki: ignore[]`) suppresses nothing.
 pub fn parse_inline_ignores(comment: &str) -> Option<Vec<String>> {
     let trimmed = comment.trim_start_matches('#').trim();
     if let Some(rest) = trimmed.strip_prefix("heki:") {
-        let rest = rest.trim();
-        if let Some(after) = rest.strip_prefix("ignore") {
-            let after = after.trim();
-            if after.is_empty() {
-                return Some(Vec::new()); // bare ignore = all rules
-            }
-            if let Some(inner) = after.strip_prefix('[').and_then(|s| s.split(']').next()) {
-                let items = inner
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                return Some(items);
-            }
+        let after = rest.trim().strip_prefix("ignore")?.trim();
+        if after.is_empty() {
+            return Some(Vec::new()); // bare ignore = all rules
         }
-        return None;
+        let (inner, _) = after.strip_prefix('[')?.split_once(']')?;
+        let items: Vec<String> = inner
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        return (!items.is_empty()).then_some(items);
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower == "noqa" {
@@ -442,6 +548,10 @@ pub enum BaselineError {
         "baseline {path} has version {version}; this heki reads versions 1 and {BASELINE_VERSION}"
     )]
     Version { path: PathBuf, version: u32 },
+    #[error(
+        "baseline {path} lists {}::{} {} `{}` more than once; keep one entry", key.path, key.qualname, key.rule_code, key.target
+    )]
+    Duplicate { path: PathBuf, key: BaselineKey },
 }
 
 /// On-disk shape: `version`, then `[[entries]]` sorted by key (minimal git diffs).
@@ -492,6 +602,21 @@ impl RatchetBaseline {
         out
     }
 
+    /// What a check against this baseline reports of `diags`: every diagnostic of a key whose
+    /// count (in the baseline's unit) grew past its entry. `key_path` gives the baseline path of
+    /// a diagnostic's file. Returns the comparison the counts were kept by.
+    pub fn keep_regressions(
+        &self,
+        diags: &mut Vec<Diagnostic>,
+        key_path: &dyn Fn(&Path) -> String,
+    ) -> RatchetComparison {
+        let cmp = self.compare(&baseline_counts(diags, key_path, self.unit));
+        let regressed: std::collections::BTreeSet<&BaselineKey> =
+            cmp.regressions.iter().map(|(k, _, _)| k).collect();
+        diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
+        cmp
+    }
+
     pub fn from_toml_str(text: &str, path: &Path) -> Result<Self, BaselineError> {
         let file: BaselineFile = toml::from_str(text).map_err(|cause| BaselineError::Toml {
             path: path.to_path_buf(),
@@ -507,6 +632,8 @@ impl RatchetBaseline {
                 });
             }
         };
+        // heki writes one entry per key; two (a hand merge of two baselines) would add their
+        // allowances up, while each recorded the same findings.
         let mut counts = BTreeMap::new();
         for e in file.entries {
             let key = BaselineKey {
@@ -515,7 +642,13 @@ impl RatchetBaseline {
                 rule_code: e.rule_code,
                 target: e.target,
             };
-            *counts.entry(key).or_insert(0) += e.count;
+            if counts.contains_key(&key) {
+                return Err(BaselineError::Duplicate {
+                    path: path.to_path_buf(),
+                    key,
+                });
+            }
+            counts.insert(key, e.count);
         }
         Ok(Self { counts, unit })
     }
@@ -620,6 +753,7 @@ mod tests {
             }],
             fix: None,
             sites: 1,
+            fold_key: None,
         }
     }
 
@@ -662,7 +796,7 @@ mod tests {
         two_sites.sites = 2;
         let diags = [d.clone(), d, two_sites];
         let counts = |unit| {
-            baseline_counts(&diags, &|p| display_path(p), unit)
+            baseline_counts(&diags, &|p| path_text(p), unit)
                 .values()
                 .copied()
                 .collect::<Vec<_>>()
@@ -687,6 +821,16 @@ mod tests {
         assert_eq!(new.unit, CountUnit::Sites);
         assert_eq!(new.unit.noun(), "site(s)");
         assert!(new.to_toml_string().contains("version = 2\n"));
+        let twice = format!(
+            "version = 2\n{entry}{}",
+            entry.replace("count = 1", "count = 4294967295")
+        );
+        assert_eq!(
+            RatchetBaseline::from_toml_str(&twice, path)
+                .unwrap_err()
+                .to_string(),
+            "baseline b.toml lists a.py::f MUT201 `M.f` more than once; keep one entry"
+        );
         let err = RatchetBaseline::from_toml_str(&format!("version = 7\n{entry}"), path)
             .unwrap_err()
             .to_string();
@@ -721,6 +865,14 @@ mod tests {
         );
         assert_eq!(parse_inline_ignores("# noqa"), Some(vec![]));
         assert_eq!(parse_inline_ignores("# heki: nothing"), None);
+        for unfinished in [
+            "# heki: ignore[",
+            "# heki: ignore[EFF101",
+            "# heki: ignore[]",
+            "# heki: ignore[ , ]",
+        ] {
+            assert_eq!(parse_inline_ignores(unfinished), None, "{unfinished}");
+        }
         assert_eq!(parse_inline_ignores("# ordinary comment"), None);
     }
 
@@ -768,6 +920,34 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(json[0]["path"], "src/\u{FFFD}.py");
         assert_eq!(json[0]["related"][0]["path"], "src/\u{FFFD}.py");
+    }
+
+    #[test]
+    fn carets_and_sarif_columns_after_multibyte_characters() {
+        // U+00E9 takes two bytes, one terminal column, and one UTF-16 unit; U+8A9E three bytes,
+        // two columns, one unit; U+1F600 four bytes, two columns, two units. A tab stays a tab.
+        let text = "\tx = \"\u{e9}\u{8a9e}\u{1f600}\"; time.sleep(1)";
+        let mut d = diag(4, "EFF101", "m");
+        d.column = u32::try_from(text.find("time").unwrap()).unwrap() + 1;
+        d.related.clear();
+        let line = |_: &Path, n: u32| (n == 4).then(|| text.to_owned());
+        let full = render(std::slice::from_ref(&d), OutputFormat::Full, &line);
+        assert!(
+            full.contains(&format!("\n  | \t{}^\n", " ".repeat(13))),
+            "{full:?}"
+        );
+        let s: serde_json::Value =
+            serde_json::from_str(&render(&[d], OutputFormat::Sarif, &line)).unwrap();
+        assert_eq!(
+            s["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startColumn"],
+            14
+        );
+        assert_eq!(
+            caret_padding("\u{e9}", 99),
+            " ",
+            "a column past the line end"
+        );
+        assert_eq!(display_width('\u{301}'), 0);
     }
 
     #[test]

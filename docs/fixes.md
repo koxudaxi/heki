@@ -10,7 +10,7 @@ equivalent. Whether the rewrite is **offered** depends on two independent questi
 
 | Safety | What you get |
 | ------ | ------------ |
-| Safe (every obligation established) | A diagnostic with a fix. |
+| Safe (every obligation established) | A diagnostic with a fix; for a statement whose shape heki does not rewrite (a parenthesized `x = (x + [i])`, an annotated `x: list = x + [i]`), a diagnostic that says the rewrite is proven safe, to be made by hand. |
 | Blocked | A diagnostic naming the first blocking obligation, no fix. |
 | Disproved | Nothing: the pattern only looks like a quadratic; rewriting it would be a bug. |
 
@@ -42,7 +42,8 @@ deliberately conservative:
 - The evaluation order and exception behavior must be preserved: `{**d, f(): g()}` becomes
   `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first.
 - Builtin names are trusted only while they are not rebound in the module (an assignment, a
-  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`).
+  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`; a `.pyi`
+  stub never runs, so its `import builtins` does not count).
 - Functions using `eval`, `exec`, `locals()`, `sys._getframe`, or frame attributes can change
   locals behind any analysis: their candidates are always blocked. `heki assumptions` lists such
   places in a project.
@@ -56,11 +57,22 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 $ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
+`--include-size-dependent` applies the proven-safe size-dependent rewrites in every function,
+with or without `--profile`; `--profile` on its own applies them only in the functions the
+profile shows hot.
+
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
-reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. `--diff`
+reports what is left. A file that changed on disk meanwhile (an editor saved it) is not written:
+the run reports it as an error (exit code 2) and keeps that save; run `--fix` again. Suppressed
+diagnostics (`# heki: ignore[...]`) are never fixed. When the fixes of a pass would leave a file
+that does not parse, none of them is applied to that file and the run exits with code 2 (a heki
+bug to report). `--diff`
 prints the paths every other output format prints (relative to the working directory), so
 `patch -p1` applies it where heki ran.
+
+Fixes work the same in files with `\n`, `\r\n`, or lone `\r` line breaks, and the lines they insert
+use the file's own line break.
 
 A fix keeps the file acceptable to a type checker and to isort:
 
@@ -73,7 +85,10 @@ A fix keeps the file acceptable to a type checker and to isort:
   `force-sort-within-sections`); without such a block it starts one before the other imports,
   and in a module without imports it follows the docstring and `__future__` imports, with the
   blank lines isort expects. Only imports run before it, so the rewritten function cannot run
-  before `collections` is bound.
+  before `collections` is bound. It never goes above a shebang, an encoding declaration, or a
+  `from __future__` import. An existing `from collections import deque` or `import
+  collections` is reused only when it runs unconditionally (not under `if TYPE_CHECKING:`)
+  and names the standard library's module (not `from .collections import deque`).
 
 ## Profiles
 
@@ -83,6 +98,11 @@ A fix keeps the file acceptable to a type checker and to isort:
   stacks.txt app.py`, or `--gecko -o profile.json`);
 - py-spy (`py-spy record --format raw -o stacks.txt -- python app.py`).
 
-A function on the stack in at least 1 % of the samples is hot. The profile is used to promote
+A function on the stack in at least 1 % of the samples is hot. A frame counts for a function when
+its name names the function on a dotted boundary (`run` or `A.run` for `A.run`, never for
+`BA.run`), its file is the function's file (a basename, a relative, or an absolute path), and its
+line, when the profiler recorded one, lies inside the function. A frame that fits several
+functions (a plain `run` without a line in a file with two `run` methods, a `models.py` two
+packages have) counts for none. `--watch` matches frames by their names only. The profile is used to promote
 size-dependent fixes in hot functions and adds the sample share to the diagnostics' evidence; it
 never makes an unsafe rewrite safe.

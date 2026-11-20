@@ -104,6 +104,10 @@ pub fn build_module_ir(
         &ctx.loop_hints,
         ctx.last_star_import,
     );
+    for f in &mut functions {
+        release_spare_capacity(f);
+    }
+    functions.shrink_to_fit();
     ModuleIr {
         functions,
         module_fn,
@@ -182,6 +186,37 @@ fn record_module_introspection_aliases(
             .collect();
         f.a1_hazards.extend(reads);
     }
+}
+
+/// Building by pushes leaves spare capacity in a function's containers, and a module's IR stays
+/// resident until its file is checked.
+fn release_spare_capacity(f: &mut IrFunction) {
+    f.params.shrink_to_fit();
+    f.decorators.shrink_to_fit();
+    f.local_annotations.shrink_to_fit();
+    f.var_names.shrink_to_fit();
+    f.captured_vars.shrink_to_fit();
+    f.starred.shrink_to_fit();
+    for bb in &mut f.blocks {
+        bb.insts.shrink_to_fit();
+        bb.phis.shrink_to_fit();
+        for phi in &mut bb.phis {
+            phi.incoming.shrink_to_fit();
+        }
+    }
+    f.blocks.shrink_to_fit();
+    for lp in &mut f.loops {
+        lp.body.shrink_to_fit();
+        lp.exits.shrink_to_fit();
+        lp.back_edges.shrink_to_fit();
+        lp.len_caps.shrink_to_fit();
+    }
+    f.loops.shrink_to_fit();
+    for lc in &mut f.loop_carried {
+        lc.updates.shrink_to_fit();
+    }
+    f.loop_carried.shrink_to_fit();
+    f.a1_hazards.shrink_to_fit();
 }
 
 enum FunctionBody<'a> {
@@ -1077,11 +1112,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     // Parameters & Statements
     // -------------------------------------------------------------------------
     fn bind_parameters(&mut self, params: &ast::Parameters) {
-        for p in params
+        let positional = params.posonlyargs.len() + params.args.len();
+        for (i, p) in params
             .posonlyargs
             .iter()
             .chain(params.args.iter())
             .chain(params.kwonlyargs.iter())
+            .enumerate()
         {
             let name = p.parameter.name.to_string();
             let var = self.fresh_var(Some(name.clone()));
@@ -1095,6 +1132,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 name,
                 var,
                 has_default: p.default.is_some(),
+                default: p.default.as_deref().and_then(literal_default),
+                kw_only: i >= positional,
                 is_vararg: false,
                 is_kwarg: false,
                 annotation,
@@ -1112,6 +1151,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 name,
                 var,
                 has_default: false,
+                default: None,
+                kw_only: false,
                 is_vararg: true,
                 is_kwarg: false,
                 annotation,
@@ -1129,6 +1170,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 name,
                 var,
                 has_default: false,
+                default: None,
+                kw_only: false,
                 is_vararg: false,
                 is_kwarg: true,
                 annotation,
@@ -3094,6 +3137,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let span = Span::from(call.range());
         let callee_dotted = expr_dotted_name(&call.func)
             .unwrap_or_else(|| self.module.slice_text(Span::from(call.func.range())));
+        let star_from = call
+            .arguments
+            .args
+            .iter()
+            .position(|a| matches!(a, Expr::Starred(_)))
+            .map(|i| u8::try_from(i).unwrap_or(u8::MAX));
 
         if let Expr::Attribute(attr) = call.func.as_ref() {
             // Check A1 hazards for dotted calls like `sys._getframe`, `gc.get_objects`, `inspect.currentframe`.
@@ -3131,6 +3180,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     args,
                     kwargs,
                     is_awaited,
+                    star_from,
                 },
                 span,
             );
@@ -3174,6 +3224,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     args,
                     kwargs,
                     is_awaited,
+                    star_from,
                 },
                 span,
             );
@@ -3227,6 +3278,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 args,
                 kwargs: Vec::new(),
                 is_awaited: false,
+                star_from: None,
             },
             elt_span,
         );
@@ -3294,6 +3346,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     args,
                     kwargs: Vec::new(),
                     is_awaited: false,
+                    star_from: None,
                 },
                 span,
             );
@@ -4544,6 +4597,21 @@ fn extract_const_str(expr: &Expr) -> Option<String> {
     match expr {
         Expr::StringLiteral(s) => Some(s.value.to_str().to_string()),
         _ => None,
+    }
+}
+
+/// The literal a parameter default is (`None`, `False`, `-1`, `0.5`, `""`, `b""`).
+fn literal_default(expr: &Expr) -> Option<ConstLiteral> {
+    match expr {
+        Expr::NoneLiteral(_) => Some(ConstLiteral::None),
+        Expr::BooleanLiteral(b) => Some(ConstLiteral::Bool(b.value)),
+        Expr::StringLiteral(s) => Some(ConstLiteral::Str(s.value.to_str().to_string())),
+        Expr::BytesLiteral(_) => Some(ConstLiteral::Bytes),
+        Expr::NumberLiteral(ast::ExprNumberLiteral {
+            value: ast::Number::Float(f),
+            ..
+        }) => Some(ConstLiteral::Float(f.to_string())),
+        _ => extract_const_int(expr).map(ConstLiteral::Int),
     }
 }
 

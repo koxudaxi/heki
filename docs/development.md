@@ -35,10 +35,30 @@ $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/difftest/counterexamples.py
 ```
 
-- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15).
+- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15):
+  the scope tree (kind, name, definition line, parent), bindings, parameters, `global` /
+  `nonlocal` declarations, and every read. Every target must exist and every file must parse on
+  the running CPython, except fixtures marked for a newer one in their name (`312_315`,
+  `313_315`, `_314`, `pep810`); a run that compares no file fails.
 - `verify_soundness_kb.py` checks every claim of the Layer 1 knowledge base
   (`kb/soundness/builtins.toml`) on the running interpreter.
 - `counterexamples.py` shows that the naive rewrites heki refuses really change behavior.
+
+## Memory
+
+```console
+$ cargo build --release
+$ python3 scripts/check_memory.py --heki target/release/heki
+```
+
+CI fails when the peak memory of `heki check` (with and without an ownership contract) or of
+the `--watch` engine on a generated project exceeds its budget in the script (the lowest of three runs: the resident set size on Linux, the
+physical footprint on macOS, each platform with its own budgets). The project is shaped after what dominates heki's memory on
+real code bases: typed field writes reached through long chains of private helpers (with an
+ownership contract, every caller keeps the write sites they hand over, with their chains), effect chains below `async def` entry points, and many
+modules and classes (every file's check reads the project's declarations). When a budget is
+exceeded, find what grew before raising it: `/usr/bin/time -l` (macOS) or `-v` (Linux) gives the
+peak of a run, and a counting global allocator in a scratch build gives the live bytes per phase.
 
 ## Documentation
 
@@ -51,9 +71,11 @@ $ uvx --from "zensical==0.1.2" zensical serve
 
 Rule documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`; `heki rule <CODE>` prints it
 and the generator copies it into `docs/rules/`. CI fails when the generated pages are stale.
-The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) when a release is
-published or the workflow is run by hand, so the site documents the released version; a pull
-request from this repository gets a preview deployment.
+The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
+release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
+documents the released version;
+only the `docs-production` environment holds that deployment's token. A pull request from this
+repository gets a preview deployment in a separate Cloudflare account (project `heki-preview`).
 
 ## Architecture
 

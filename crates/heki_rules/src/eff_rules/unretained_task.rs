@@ -31,6 +31,14 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    // Names the module imports a factory under (`from asyncio import create_task as spawn`).
+    let imported_factories: FxHashSet<&str> = tcx
+        .module
+        .imports
+        .iter()
+        .filter(|(_, target)| TASK_FACTORIES.contains(&target.as_str()))
+        .map(|(name, _)| name.as_str())
+        .collect();
     // Module and class bodies bind globals / class attributes, which keep the task.
     for f in unit
         .input
@@ -39,12 +47,13 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         .iter()
         .filter(|f| !f.is_module_body && !f.is_class_body)
     {
+        // Candidates before type inference; resolution decides.
         let named_like_factory = |inst: &&Inst| match &inst.kind {
             InstKind::Call { callee, .. } => {
                 matches!(
                     callee.rsplit('.').next(),
                     Some("create_task" | "ensure_future")
-                )
+                ) || imported_factories.contains(callee.split('.').next().unwrap_or(callee))
             }
             InstKind::MethodCall { method, .. } => {
                 matches!(method.as_str(), "create_task" | "ensure_future")

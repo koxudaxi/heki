@@ -5,8 +5,9 @@
 //! `sync_lock_or_tx` (`threading.Lock`, ...) or when it is the result of a call resolving to a
 //! flagged Layer 2 symbol (`sqlalchemy.orm.Session.begin`, `django.db.transaction.atomic`, ...).
 //! `async with` is never considered. The held region is a forward must-dataflow over the CFG
-//! (exception edges included): held after `EnterWith`, released at the matching `ExitWith`,
-//! joined by intersection.
+//! (exception edges included): each acquisition is held after its `EnterWith` and released at
+//! the `ExitWith` of its own `with` statement, joined by intersection. A re-entrant lock entered
+//! again by a nested `with` stays held when the inner block exits.
 
 use super::{relaxed, shortest};
 use crate::{CheckContext, ModuleUnit};
@@ -30,8 +31,8 @@ struct Held {
     transaction: bool,
 }
 
-/// Managers certainly held at a program point: `mgr -> span of the acquiring with item`.
-type State = BTreeMap<VarId, Span>;
+/// Acquisitions certainly held at a program point: `span of the acquiring with item -> mgr`.
+type State = BTreeMap<Span, VarId>;
 
 pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.enabled("EFF106", unit) {
@@ -72,7 +73,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         for (bb, mut state) in reached {
             for inst in &f.block(bb).insts {
                 // The outermost resource held here names the report.
-                if let Some((&mgr, &taken)) = state.iter().min_by_key(|(_, sp)| sp.start)
+                if let Some((&taken, &mgr)) = state.iter().min_by_key(|(sp, _)| sp.start)
                     && let Some(offense) = offense(cx, unit, sites, &key.qualname, inst)
                 {
                     let line = unit.lines.line_col(taken.start).0;
@@ -234,14 +235,17 @@ fn held_managers(
     out
 }
 
-/// Apply one instruction to the held set.
+/// Apply one instruction to the held set. An `ExitWith` spans its `with` statement, so it
+/// releases the acquisitions of `mgr` by the items inside that statement only.
 fn transfer(kind: &InstKind, held: &FxHashMap<VarId, Held>, span: Span, state: &mut State) {
     match kind {
         InstKind::EnterWith { mgr, .. } if held.contains_key(mgr) => {
-            state.entry(*mgr).or_insert(span);
+            state.insert(span, *mgr);
         }
         InstKind::ExitWith { mgr, .. } => {
-            state.remove(mgr);
+            state.retain(|taken, m| {
+                !(m == mgr && span.start <= taken.start && taken.end <= span.end)
+            });
         }
         _ => {}
     }
@@ -258,8 +262,8 @@ fn held_at_entry(f: &IrFunction, held: &FxHashMap<VarId, Held>) -> Vec<Option<St
         let next = match slot {
             Some(cur) => cur
                 .iter()
-                .filter(|(k, _)| incoming.contains_key(k))
-                .map(|(k, v)| (*k, (*v).min(incoming[k])))
+                .filter(|(k, v)| incoming.get(k) == Some(v))
+                .map(|(k, v)| (*k, *v))
                 .collect(),
             None => incoming.clone(),
         };

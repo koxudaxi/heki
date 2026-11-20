@@ -16,7 +16,7 @@ Commands:
   server       Start the incremental Language Server Protocol (LSP) server [alias: lsp]
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
-  assumptions  List Assumption A1/A2 violations across a project
+  assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection) in a project
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -38,7 +38,7 @@ Options:
       --fix
           Apply `safe` + `unconditional` fixes (`OPT101`/`OPT102`)
       --include-size-dependent
-          Also allow `size-dependent` `safe` fixes (or combine with `--profile`)
+          Also apply the proven-safe `size-dependent` fixes, in every function
       --diff
           Preview fixes as a unified diff without writing files
       --select <SELECT>
@@ -52,13 +52,13 @@ Options:
       --config <CONFIG>
           Explicit configuration file (`heki.toml` or `pyproject.toml`)
       --target-version <TARGET_VERSION>
-          Target Python version (`py312`, `py313`, `py314`, `py315`)
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
       --profile <PROFILE>
-          Optional offline profile dump (`py-spy --collapsed` / Tachyon `--gecko`)
+          Offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
       --watch
           Watch for file changes and re-run incrementally
   -h, --help
@@ -117,7 +117,7 @@ Options:
 ## `heki assumptions`
 
 ```text
-List Assumption A1/A2 violations across a project
+List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection) in a project
 
 Usage: heki assumptions [OPTIONS] [PATHS]...
 

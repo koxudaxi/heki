@@ -2,19 +2,23 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargetPattern, ContractTarget, SiteId, initializes_itself, parse_call_targets,
-    parse_targets, patterns, project_classes, site_callee, with_note,
+    CallTargetPattern, ContractTarget, SiteId, allows_fresh, called_targets, group_texts,
+    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
+    parse_targets, patterns, project_classes, site_callee, with_note, write_hits,
 };
 use crate::opt_rules::Sizes;
-use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
+use crate::{
+    CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
+};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
+use heki_effect::guards::loop_bit;
 use heki_effect::{
-    BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, EffectSummary,
-    Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
-    boundary_reports_in, group_by_root_cause,
+    BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, Construction,
+    EffectSummary, Facts, FuncKey, Runner, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
+    boundary_reports_in,
 };
-use heki_ir::{InstKind, IrFunction, VarId};
+use heki_ir::{InstKind, IrFunction};
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,7 +27,6 @@ use std::sync::LazyLock;
 
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
-const DDL_PREFIXES: &[&str] = &["CREATE", "ALTER", "DROP", "PRAGMA"];
 /// `boundary_reports_in` only reports call sites of the files it is given.
 const REPORTS_OF_UNITS: &str = "boundary reports come from the checked files";
 
@@ -77,8 +80,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         }
     }
     for (code, reports) in [("EFF101", eff101), ("EFF105", eff105)] {
-        for g in group_by_root_cause(&reports, ROOT_CAUSE_GROUP_THRESHOLD) {
-            let r = &g.representative;
+        for r in &reports {
             let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
             let first = r
                 .chain
@@ -90,17 +92,13 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 "a blocking call"
             };
             let verb = if r.iterates { "iterates" } else { "calls" };
-            let mut message = format!(
+            let message = format!(
                 "`async def {}` {verb} `{first}`, which reaches {what} `{}` ({}) on the event loop; offload it (`asyncio.to_thread`) or use an async API",
                 r.function.qualname,
                 r.root_cause,
                 effect_name(r.effect)
             );
-            if let Some(suffix) = g.message_suffix() {
-                message.push(' ');
-                message.push_str(&suffix);
-            }
-            cx.emit(
+            if let Some(d) = cx.emit(
                 out,
                 code,
                 unit,
@@ -109,9 +107,53 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 r.root_cause.clone(),
                 message,
                 &r.chain,
-            );
+            ) {
+                d.fold_key = Some(format!("{}|{}", r.root_cause, effect_name(r.effect)));
+            }
         }
     }
+}
+
+/// Async boundaries reaching one blocking root cause are folded into the first beyond this many.
+pub const ROOT_CAUSE_GROUP_THRESHOLD: usize = 10;
+
+/// Root-Cause Grouping of output: when more than [`ROOT_CAUSE_GROUP_THRESHOLD`] of `diags`
+/// share a rule and a [`Diagnostic::fold_key`], only the first (by path and position) stays,
+/// with the count of the others in its message. Run on the reports that are shown, after
+/// suppressions and baselines: each report is a site of its own for both.
+pub fn fold_root_causes(diags: &mut Vec<Diagnostic>) {
+    let mut groups: BTreeMap<(&str, &str), Vec<usize>> = BTreeMap::new();
+    for (i, d) in diags.iter().enumerate() {
+        if let Some(key) = &d.fold_key {
+            groups.entry((&d.rule_code, key)).or_default().push(i);
+        }
+    }
+    let mut folded: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut dropped: FxHashSet<usize> = FxHashSet::default();
+    for members in groups
+        .into_values()
+        .filter(|m| m.len() > ROOT_CAUSE_GROUP_THRESHOLD)
+    {
+        let first = *members
+            .iter()
+            .min_by_key(|&&i| (&diags[i].path, diags[i].span, &diags[i].qualname))
+            .expect("a group has members");
+        folded.insert(first, members.len() - 1);
+        dropped.extend(members.into_iter().filter(|&i| i != first));
+    }
+    for (&i, &more) in &folded {
+        let d = &mut diags[i];
+        d.message = format!(
+            "{} (+{more} more async call sites reaching the same blocking root cause)",
+            d.message
+        );
+    }
+    *diags = std::mem::take(diags)
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !dropped.contains(i))
+        .map(|(_, d)| d)
+        .collect();
 }
 
 pub(crate) fn effect_name(e: ExecEffectKind) -> &'static str {
@@ -171,15 +213,20 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             // `for.iter` / `MakeIter` live in the preheader (depth 0), so they never get here.
             // Loops whose size the code fixes (small constant ranges and displays, retries,
             // daemon polling) are relaxed: a call is reported when some loop around it is
-            // data-sized.
-            let mut in_data_loop = || {
+            // data-sized (the mask of those loops, as `SiteEffect::once_loops`), and the effect
+            // does not run once per object across that loop (lazy initialization).
+            let mut data_loops = || {
                 let sizes = sizes.get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit));
-                f.loops.iter().enumerate().any(|(i, lp)| {
-                    lp.body.contains(&bb.id)
-                        && *data_sized[i].get_or_insert_with(|| sizes.data_sized(lp))
-                })
+                f.loops
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, lp)| {
+                        lp.body.contains(&bb.id)
+                            && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
+                    })
+                    .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
             };
-            let mut checked: Option<bool> = None;
+            let mut checked: Option<u64> = None;
             for inst in &bb.insts {
                 // Reading a property runs its getter (a call site at the read); iterating a
                 // generator runs its body and iterating an object of a catalogued class its
@@ -190,10 +237,6 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if !iteration && !anchors_call_site(&inst.kind) {
                     continue;
                 }
-                let args: &[VarId] = match &inst.kind {
-                    InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => args,
-                    _ => &[],
-                };
                 let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {
                     continue;
                 };
@@ -205,11 +248,21 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     .filter(|s| !iteration || s.project_callees().is_empty())
                     .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                     .collect();
-                let mut hot = || *checked.get_or_insert_with(&mut in_data_loop);
-                if want102
-                    && let Some(chain) = shortest(&effects, ExecEffectKind::UnpooledClientAlloc)
-                    && hot()
-                {
+                let mut hot = || *checked.get_or_insert_with(&mut data_loops);
+                // The shortest chain of an effect of `kind` that some data-sized loop runs on
+                // every iteration.
+                let mut per_iteration = |kind: ExecEffectKind| {
+                    if !effects.iter().any(|e| e.effect == kind) {
+                        return None;
+                    }
+                    let data = hot();
+                    effects
+                        .iter()
+                        .filter(|e| e.effect == kind && data & !e.once_loops != 0)
+                        .map(|e| e.chain.as_slice())
+                        .min_by_key(|c| c.len())
+                };
+                if want102 && let Some(chain) = per_iteration(ExecEffectKind::UnpooledClientAlloc) {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
                             out,
@@ -225,20 +278,9 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                             chain,
                         );
                 }
-                // Compared as bytes: the prefixes are ASCII, and slicing the constant could
-                // split a multi-byte character.
-                let ddl = args.first().and_then(|a| f.const_str(*a)).is_some_and(|q| {
-                    let q = q.trim_start().as_bytes();
-                    DDL_PREFIXES.iter().any(|p| {
-                        q.get(..p.len())
-                            .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
-                    })
-                });
                 if want103
                     && !migration_fn
-                    && !ddl
-                    && let Some(chain) = shortest(&effects, ExecEffectKind::DbQuery)
-                    && hot()
+                    && let Some(chain) = per_iteration(ExecEffectKind::DbQuery)
                 {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
@@ -317,6 +359,8 @@ struct Boundary<'r> {
     call_targets: Vec<CallTargetPattern>,
     allowed_callees: Vec<DottedPattern>,
     note: Option<&'r str>,
+    /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
+    allow_fresh: bool,
 }
 
 /// `name` and each of its dotted prefixes (`pkg.mod.f`, then `pkg` and `pkg.mod`).
@@ -363,7 +407,8 @@ impl Boundary<'_> {
     /// Which facts of a project callee count at `site`, run where the site's caller runs
     /// `into` ([`heki_effect::ProjectIndex::delivery`]): `allowed-callees` names neither the
     /// callee whose body runs nor the function iterating its result (`SiteRole::Through`). A
-    /// function returning a generator is not checked itself: its own body does not run there.
+    /// function returning a generator is not checked itself: its own body does not run there,
+    /// nor does a callee run on a worker thread (`Runner::Worker`).
     fn counts<'s>(
         &self,
         cx: &CheckContext<'_>,
@@ -371,6 +416,9 @@ impl Boundary<'_> {
         callee: &FuncKey,
         into: Facts,
     ) -> Option<heki_effect::Delivery<'s>> {
+        if site.runner == Runner::Worker {
+            return None;
+        }
         let s = cx.index.summary(callee)?;
         let d = cx.index.delivery(site, s).filter(|d| d.into == into)?;
         let runs_body = d.from == s.body_facts();
@@ -448,7 +496,13 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             write_universe: targets(&b.write_universe, "effect-boundaries.write-universe")?,
             allow_writes: targets(&b.allow_writes, "effect-boundaries.allow-writes")?,
             reads_targets: forbids("reads-targets"),
-            read_targets: targets(&b.read_targets, "effect-boundaries.read-targets")?,
+            read_targets: parse_read_targets(
+                cx,
+                &all_classes,
+                &b.read_targets,
+                "effect-boundaries.read-targets",
+                "effect-boundaries.read-targets",
+            )?,
             calls: forbids("calls"),
             call_targets: parse_call_targets(
                 cx,
@@ -458,6 +512,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             )?,
             allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
             note: b.message.as_deref(),
+            allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
         });
     }
     Ok(out)
@@ -548,7 +603,7 @@ fn note<K: Ord>(
 /// writes to a subclass instance keep the class the configuration names.
 fn undeclared_text(entry: &str, attr: &str) -> String {
     match entry.rsplit_once('.') {
-        Some((class, pattern)) if pattern.contains(['*', '?', '[', '{']) => {
+        Some((class, pattern)) if has_glob_syntax(pattern) => {
             format!("{class}.{attr}")
         }
         _ => entry.to_owned(),
@@ -574,8 +629,8 @@ struct Reach<'a> {
     writes: BTreeMap<WriteBucket, Found>,
     /// By `read-targets` index.
     reads: BTreeMap<usize, Found>,
-    /// By `call-targets` index.
-    calls: BTreeMap<usize, Found>,
+    /// By the `call-targets` indices a call matches ([`called_targets`]).
+    calls: BTreeMap<Vec<usize>, Found>,
 }
 
 impl<'a> Reach<'a> {
@@ -615,7 +670,7 @@ impl<'a> Reach<'a> {
             };
             let own: &[(&'a Path, &'a CallSite)] = sites.get(&func).map_or(&[], Vec::as_slice);
             if b.checks_writes() && runs_body {
-                reach.collect_writes(cx, b, i, &func, own);
+                reach.collect_writes(cx, sites, b, i, &func, own);
             }
             if b.reads_targets && runs_body {
                 reach.collect_reads(cx, b, i, &func);
@@ -628,14 +683,9 @@ impl<'a> Reach<'a> {
                     path: path.to_path_buf(),
                 };
                 if b.calls && runs_body && !b.allows_call(site) {
-                    for (ti, _) in b
-                        .call_targets
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, t)| t.hit(site))
-                    {
+                    for group in called_targets(&b.call_targets, site) {
                         let nodes = &reach.nodes;
-                        note(&mut reach.calls, ti, (func.fqn(), site.span), || {
+                        note(&mut reach.calls, group, (func.fqn(), site.span), || {
                             let mut chain = chain_to(nodes, i);
                             chain.push(hop(&func, site_callee(site)));
                             let kind = if site.constructs.is_some() {
@@ -697,11 +747,16 @@ impl<'a> Reach<'a> {
     fn collect_writes(
         &mut self,
         cx: &CheckContext<'_>,
+        sites: &SitesByCaller<'_>,
         b: &Boundary<'_>,
         i: usize,
         func: &FuncKey,
         own: &[(&Path, &CallSite)],
     ) {
+        debug_assert!(
+            cx.index.propagates_typed_writes(),
+            "`typed_writes` decides for EFF201"
+        );
         let writes = cx
             .index
             .summary(func)
@@ -711,45 +766,52 @@ impl<'a> Reach<'a> {
             let extra = match (w.via_chain.as_slice(), w.kind) {
                 ([], _) => None,
                 // A helper of the scopes counts too: it cannot see the type of the field it
-                // is handed, so the function handing it over reports the write.
+                // is handed, so the function handing it over reports the write. The helper's
+                // summary also holds what its callees change, so the write counts only when the
+                // helper changes the argument outside `allowed-callees`.
                 ([hop], WriteKind::IndirectHelper)
                     if own.iter().any(|(_, site)| {
                         site.span == hop.span
                             && site.project_callees().iter().any(|bc| {
                                 bc.callee.fqn() == hop.callee
                                     && b.counts(cx, site, &bc.callee, Facts::Body).is_some()
+                                    && helper_changes_field(cx, sites, bc, w, |site, callee| {
+                                        b.counts(cx, site, callee, Facts::Body)
+                                    })
                             })
                     }) =>
                 {
-                    Some(hop.clone())
+                    Some(CallHop::clone(hop))
                 }
                 _ => continue,
             };
-            if b.allow_writes
-                .iter()
-                .any(|a| a.matches(&w.class_qualname, &w.attr))
+            if b.allow_writes.iter().any(|a| a.matches_write(w))
+                || b.allow_fresh && w.construction == Construction::Yes
             {
                 continue;
             }
             // A class's own initialization (constructing a fresh object) is not a write.
-            let forbidden = |t: &ContractTarget| {
-                t.matches(&w.class_qualname, &w.attr)
-                    && !initializes_itself(cx, func, &t.classes, w.obj_params)
-            };
+            let own_init =
+                |t: &ContractTarget| initializes_itself(cx, func, &t.classes, w.obj_params);
             let mut buckets: Vec<WriteBucket> = Vec::new();
             if b.writes_targets {
                 buckets.extend(
-                    b.write_targets
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, t)| forbidden(t))
+                    write_hits(&b.write_targets, w)
+                        .into_iter()
+                        .filter(|(_, t)| !own_init(t))
                         .map(|(ti, _)| WriteBucket::Target(ti)),
                 );
             }
             if buckets.is_empty()
-                && let Some(t) = b.write_universe.iter().find(|t| forbidden(t))
+                && let Some((_, t)) = write_hits(&b.write_universe, w)
+                    .into_iter()
+                    .find(|(_, t)| !own_init(t))
             {
-                buckets.push(WriteBucket::Undeclared(undeclared_text(&t.text, &w.attr)));
+                let text = match &t.key {
+                    Some(_) => t.text.clone(),
+                    None => undeclared_text(&t.text, &w.attr),
+                };
+                buckets.push(WriteBucket::Undeclared(text));
             }
             for bucket in buckets {
                 let nodes = &self.nodes;
@@ -784,8 +846,9 @@ impl<'a> Reach<'a> {
     }
 
     /// Parameters of the scope function that a reached function mutates, through followed
-    /// edges only (a forward flow of "callee parameter k is scope parameter p" bits).
-    fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> u64 {
+    /// edges only (a forward flow of "callee parameter k is scope parameter p" bits), and the
+    /// distinct sites of those changes (each in the body making it).
+    fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> (u64, BTreeSet<SiteId>) {
         let mut alias: FxHashMap<(usize, usize), u64> = FxHashMap::default();
         for p in 0..params.min(64) {
             alias.insert((0, p), 1u64 << p);
@@ -810,18 +873,26 @@ impl<'a> Reach<'a> {
             }
         }
         let mut out = 0;
+        let mut sites = BTreeSet::new();
         for (i, (func, facts, _)) in self.nodes.iter().enumerate() {
-            let local = cx
+            let Some(local) = cx
                 .index
                 .file_of(func)
                 .and_then(|p| cx.index.files[p].local_functions.get(func))
                 .filter(|s| *facts == s.body_facts())
-                .map_or(0, |s| s.mutates_params);
-            for k in (0..64).filter(|k| local & (1u64 << k) != 0) {
-                out |= alias.get(&(i, k)).copied().unwrap_or(0);
+            else {
+                continue;
+            };
+            for k in (0..64u8).filter(|k| local.mutates_params & (1u64 << k) != 0) {
+                let scope_params = alias.get(&(i, usize::from(k))).copied().unwrap_or(0);
+                if scope_params != 0 {
+                    out |= scope_params;
+                    let spans = local.param_change_sites.get(&k).into_iter().flatten();
+                    sites.extend(spans.map(|span| (func.fqn(), *span)));
+                }
             }
         }
-        out
+        (out, sites)
     }
 
     fn report(
@@ -894,6 +965,8 @@ impl<'a> Reach<'a> {
                 }
             }
         }
+        // Reads and calls name their kind in the target: one boundary may forbid writing and
+        // reading the same `Class.attr`, and a report of each must stay a report of its own.
         for (ti, found) in &self.reads {
             let target = &b.read_targets[*ti].text;
             let via = via_first(found);
@@ -901,19 +974,19 @@ impl<'a> Reach<'a> {
                 "`{}` reads `{target}` ({}{via})",
                 key.qualname, found.kind
             ));
-            emit(found, target.clone(), message);
+            emit(found, format!("reads:{target}"), message);
         }
-        for (ti, found) in &self.calls {
-            let target = &b.call_targets[*ti].text;
+        for (group, found) in &self.calls {
+            let (target, called) = group_texts(&b.call_targets, group);
             let via = match found.chain.as_slice() {
                 [first, _, ..] => format!(" (via `{}`)", first.callee),
                 _ => String::new(),
             };
-            let message = forbids(format!("`{}` {} `{target}`{via}", key.qualname, found.kind));
-            emit(found, target.clone(), message);
+            let message = forbids(format!("`{}` {} {called}{via}", key.qualname, found.kind));
+            emit(found, format!("calls:{target}"), message);
         }
         if b.mutates_params {
-            let bits = self.mutated_params(cx, f.params.len());
+            let (bits, sites) = self.mutated_params(cx, f.params.len());
             if bits != 0 {
                 let names: Vec<String> = f
                     .params
@@ -923,7 +996,7 @@ impl<'a> Reach<'a> {
                     .filter(|(k, _)| bits & (1u64 << k) != 0)
                     .map(|(_, p)| format!("`{}`", p.name))
                     .collect();
-                cx.emit(
+                if let Some(d) = cx.emit(
                     out,
                     "EFF201",
                     unit,
@@ -936,7 +1009,9 @@ impl<'a> Reach<'a> {
                         names.join(", ")
                     )),
                     &[],
-                );
+                ) {
+                    d.sites = u32::try_from(sites.len().max(1)).unwrap_or(u32::MAX);
+                }
             }
         }
     }

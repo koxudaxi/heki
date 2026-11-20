@@ -30,8 +30,18 @@ struct ImportStmt {
 /// The edit inserting `import collections` (an insertion, or the replacement of the blank lines
 /// that follow it), or `None` when the module's leading statements leave no safe place.
 pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option<(Span, String)> {
+    let br = heki_ast::line_break(source);
     let (docstring_end, region_end) = import_region(source, module_fn);
-    let stmts = import_statements(source, module_fn, region_end);
+    let floor = magic_comments_end(source);
+    let mut stmts = import_statements(source, module_fn, region_end, floor);
+    // `from __future__` imports must stay the first statements: nothing goes before or
+    // between them, whatever the sort order.
+    let future_end = stmts
+        .iter()
+        .filter(|s| s.module == "__future__")
+        .map(|s| s.end)
+        .max();
+    stmts.retain(|s| s.module != "__future__");
     let blocks = blocks(source, &stmts);
     let is_future = |s: &ImportStmt| s.module == "__future__";
     let force_sort = blocks.iter().any(|b| {
@@ -65,11 +75,17 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
             .iter()
             .find(|s| key(s) > new_key)
             .map_or_else(|| block.last().map_or(0, |s| s.end), |s| s.start);
-        return Some((Span { start: at, end: at }, "import collections\n".into()));
+        return Some((
+            Span { start: at, end: at },
+            format!("import collections{br}"),
+        ));
     }
     if let Some(first) = others.first().and_then(|b| b.first()) {
         let at = first.start;
-        return Some((Span { start: at, end: at }, "import collections\n\n".into()));
+        return Some((
+            Span { start: at, end: at },
+            format!("import collections{br}{br}"),
+        ));
     }
     // No other import: after the `__future__` block or the docstring, or at the top (below
     // leading comments), followed by the blank lines isort wants before the next statement.
@@ -77,6 +93,7 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
         .iter()
         .flatten()
         .map(|s| s.end)
+        .chain(future_end)
         .max()
         .or(docstring_end);
     let anchor = after_statement.unwrap_or_else(|| after_leading_comments(source));
@@ -93,10 +110,10 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
     let replaced_end = blank_run_end(source, anchor, next);
     let mut text = String::new();
     if separated {
-        text.push('\n');
+        text.push_str(br);
     }
-    text.push_str("import collections\n");
-    text.push_str(&"\n".repeat(blank_lines));
+    text.push_str("import collections");
+    text.push_str(&br.repeat(blank_lines + 1));
     Some((
         Span {
             start: anchor,
@@ -132,8 +149,15 @@ fn import_region(source: &str, module_fn: &IrFunction) -> (Option<u32>, u32) {
     (docstring_end, region_end)
 }
 
-/// The top-level import statements that start before `region_end`, in source order.
-fn import_statements(source: &str, module_fn: &IrFunction, region_end: u32) -> Vec<ImportStmt> {
+/// The top-level import statements that start before `region_end`, in source order, with the
+/// comments directly above them (but none of the first lines a shebang or an encoding
+/// declaration must keep: `floor`).
+fn import_statements(
+    source: &str,
+    module_fn: &IrFunction,
+    region_end: u32,
+    floor: u32,
+) -> Vec<ImportStmt> {
     let mut out: Vec<ImportStmt> = Vec::new();
     let mut aliases: Vec<u32> = module_fn
         .blocks
@@ -166,7 +190,7 @@ fn import_statements(source: &str, module_fn: &IrFunction, region_end: u32) -> V
             .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '.'))
             .collect();
         out.push(ImportStmt {
-            start: attached_comments(source, first),
+            start: attached_comments(source, first).max(floor),
             end: statement_end(source, first, end),
             module: module.to_lowercase(),
             is_from,
@@ -240,6 +264,46 @@ fn attached_comments(source: &str, first: u32) -> u32 {
         start = prev;
     }
     start
+}
+
+/// The offset after the lines that must stay first: a shebang (line 1), and an encoding
+/// declaration (line 1 or 2, PEP 263).
+fn magic_comments_end(source: &str) -> u32 {
+    let mut end = 0;
+    for n in 0..2 {
+        let line_end_at = line_end(source, end);
+        let text = slice(source, end, line_end_at).unwrap_or_default();
+        let magic = (n == 0 && text.starts_with("#!")) || is_encoding_declaration(text);
+        if !magic {
+            break;
+        }
+        end = (line_end_at as usize + 1).min(source.len()) as u32;
+    }
+    end
+}
+
+/// `# -*- coding: utf-8 -*-` / `# vim: set fileencoding=...`: a comment line matching
+/// `coding[:=]\s*[-\w.]+` (PEP 263).
+fn is_encoding_declaration(line: &str) -> bool {
+    let t = line.trim_start_matches([' ', '\t', '\x0c']);
+    t.starts_with('#')
+        && t.match_indices("coding").any(|(i, _)| {
+            let rest = &t[i + "coding".len()..];
+            rest.strip_prefix([':', '='])
+                .map(|r| r.trim_start_matches([' ', '\t']))
+                .is_some_and(|r| r.starts_with(|c: char| c.is_alphanumeric() || "-_.".contains(c)))
+        })
+}
+
+/// `from .m import x`: the statement holding the alias at `alias` imports relatively.
+pub(crate) fn is_relative_from(source: &str, alias: Span) -> bool {
+    let first = statement_line(source, alias.end);
+    slice(source, first, alias.start)
+        .and_then(|head| head.strip_prefix("from"))
+        .is_some_and(|rest| {
+            rest.trim_start_matches([' ', '\t', '\\', '\n', '\r'])
+                .starts_with('.')
+        })
 }
 
 /// The offset after the comment lines a module starts with (a shebang, an encoding cookie, a

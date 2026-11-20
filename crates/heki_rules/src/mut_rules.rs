@@ -1,17 +1,19 @@
 //! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT201`,
 //! `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
-use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
+use crate::{
+    CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
+};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, Facts,
-    FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared, TypeCtx, Val, WriteKind,
-    self_aliases,
+    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, Construction,
+    Delivery, EffectSummary, Facts, FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep,
+    Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val, WriteKind, self_aliases,
 };
 use heki_env::HekiConfig;
-use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{CompareOpKind, Inst, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -69,10 +71,12 @@ fn is_private(name: &str) -> bool {
 }
 
 /// Visit every project class whose family has checked methods with its own methods, its
-/// family (its methods plus those of every project subclass), and the private methods its
-/// family's `__init__`s call on `self`. Classes are keyed by owner class fqn, so nested classes
-/// stay separate. A family spans modules: what a checked method is reported for does not depend
-/// on which other files are checked with it (the language server checks one).
+/// family (its methods, those of every project subclass, and the methods it inherits from its
+/// project ancestors that no class before them in the MRO overrides: they run on its instances
+/// too), and the private methods its family's `__init__`s call on `self`. Classes are keyed by
+/// owner class fqn, so nested classes stay separate. A family spans modules: what a checked
+/// method is reported for does not depend on which other files are checked with it (the
+/// language server checks one).
 fn for_each_class_family<'a>(
     cx: &CheckContext<'a>,
     mut visit: impl FnMut(&[Method<'a>], &[&Method<'a>], &FxHashSet<FuncKey>),
@@ -122,6 +126,12 @@ fn for_each_class_family<'a>(
         for sub in cx.decls.subclasses_of(class) {
             family.extend(by_class.get(&sub).into_iter().flatten());
         }
+        let mut defined: FxHashSet<&str> = methods.iter().map(Method::name).collect();
+        for ancestor in cx.decls.ancestors_of(class) {
+            let inherited = by_class.get(&ancestor).into_iter().flatten();
+            family.extend(inherited.clone().filter(|m| !defined.contains(m.name())));
+            defined.extend(inherited.map(Method::name));
+        }
         if family.iter().all(|m| m.checked.is_none()) {
             continue;
         }
@@ -137,12 +147,34 @@ fn local_summary<'a>(cx: &CheckContext<'a>, m: &Method<'_>) -> Option<&'a Effect
         .files
         .get(m.path)
         .and_then(|f| f.local_functions.get(&m.key))
+        .map(|s| &**s)
 }
 
-/// Memo / cache dictionaries by name (`self._cache`, `self.memo`).
-fn is_memo_attr(attr: &str) -> bool {
-    let lower = attr.to_ascii_lowercase();
-    lower.contains("cache") || lower.contains("memo")
+/// Memo / cache dictionaries by name: a word of the attribute's name is `cache...` or `memo...`
+/// (`self._cache`, `self.memo`, `self._resultCache`, `self.memoized`), not `memory`.
+fn is_memo_name(attr: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    for part in attr.split('_') {
+        let mut word = String::new();
+        for c in part.chars() {
+            if c.is_ascii_uppercase() && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(c.to_ascii_lowercase());
+        }
+        words.push(word);
+    }
+    words
+        .iter()
+        .any(|w| w.starts_with("cache") || w.starts_with("memo") && !w.starts_with("memor"))
+}
+
+/// A write that fills a memo dictionary rather than changing what it was computed from: a
+/// memo-shaped write (`setdefault`, a store under `if k not in self.<attr>:`), or an in-place
+/// change of an attribute named as a memo or cache. Rebinding such an attribute is no memo
+/// operation (`self.cache_size = n`).
+fn is_memo_write(attr: &str, w: &SelfWrite) -> bool {
+    w.memo_shaped || !w.rebinds && is_memo_name(attr)
 }
 
 /// Disjoint constant dict keys: every read and every write names a constant key, and no key
@@ -187,10 +219,9 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 let Some(ms) = cx.index.summary(&m.key) else {
                     continue;
                 };
-                // Filter 4: the method invalidates the cache.
-                if ms.invalidates_cached.contains(p_name) || ms.invalidates_cached.contains("*") {
-                    continue;
-                }
+                // Filter 4: the method invalidates the cache after the write on every path.
+                let invalidations =
+                    invalidates(ms, p_name).then(|| CacheEvents::of(cx, unit, f, p_name));
                 let Some(local) = local_summary(cx, m) else {
                     continue;
                 };
@@ -203,10 +234,9 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         .is_some_and(|callers| {
                             !callers.is_empty()
                                 && callers.iter().all(|c| {
-                                    cx.index.summary(c).is_some_and(|cs| {
-                                        cs.invalidates_cached.contains(p_name)
-                                            || cs.invalidates_cached.contains("*")
-                                    })
+                                    cx.index
+                                        .summary(c)
+                                        .is_some_and(|cs| invalidates(cs, p_name))
                                 })
                         });
                 if covered_by_callers {
@@ -222,16 +252,17 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         continue;
                     }
                     // Filter 2: memo / cache dictionaries.
-                    if is_memo_attr(attr) {
-                        continue;
-                    }
                     let mut own = self_attr_writes(f, attr);
+                    own.retain(|w| !is_memo_write(attr, w));
                     // The cached value holds the attribute's object itself: it sees the changes
                     // made in place, and only rebinding the attribute leaves it behind.
                     if ps.returns_self_attrs.contains(*attr) {
                         own.retain(|w| w.rebinds);
                     }
-                    if own.is_empty() || own.iter().all(|w| w.memo_shaped) {
+                    if let Some(points) = &invalidations {
+                        own.retain(|w| !points.cover(f, w.block, w.index));
+                    }
+                    if own.is_empty() {
                         continue;
                     }
                     // Filter 3: disjoint constant dict keys.
@@ -267,6 +298,190 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     });
 }
 
+/// Whether a function's summary says that it invalidates the cached property `prop` somewhere
+/// (`del self.prop`, `self.__dict__.pop("prop")`, `self.__dict__.clear()`, also through its
+/// `self` calls).
+fn invalidates(s: &EffectSummary, prop: &str) -> bool {
+    s.invalidates_cached.contains(prop) || s.invalidates_cached.contains("*")
+}
+
+/// Where a method invalidates the cached property `prop` of its own instance, and where it reads
+/// it (computing the value again): instructions as `(block, index)`.
+struct CacheEvents {
+    /// `del self.prop`, removing `"prop"` from `self.__dict__` (`pop`, `del`, `clear`), and calls
+    /// on `self` of methods whose summary invalidates it.
+    invalidations: FxHashSet<(heki_ir::BlockId, usize)>,
+    /// `self.prop`, and calls on `self` of methods whose summary reads it.
+    reads: FxHashSet<(heki_ir::BlockId, usize)>,
+}
+
+impl CacheEvents {
+    fn of(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, f: &IrFunction, prop: &str) -> Self {
+        let self_vars = f
+            .params
+            .first()
+            .map(|p| self_aliases(f, p.var))
+            .unwrap_or_default();
+        let dicts = heki_effect::aliases_of(
+            f,
+            f.blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .filter_map(|i| match &i.kind {
+                    InstKind::AttrLoad { dst, obj, attr }
+                        if attr == "__dict__" && self_vars.contains(obj) =>
+                    {
+                        Some(*dst)
+                    }
+                    _ => None,
+                }),
+        );
+        let names_prop = |v: &VarId| f.const_str(*v) == Some(prop);
+        let key = CheckContext::key(unit, f);
+        let file = cx.index.files.get(&unit.input.path);
+        // What the `self` calls at `span` do to the property: `(invalidate, read)`.
+        let self_call = |span: Span| {
+            let callees = file
+                .into_iter()
+                .flat_map(|file| &file.call_sites)
+                .filter(|site| site.span == span && site.caller == key && site.recv_is_self)
+                .flat_map(|site| site.project_callees())
+                .filter_map(|bc| cx.index.summary(&bc.callee));
+            callees.fold((false, false), |(inv, read), s| {
+                (
+                    inv || invalidates(s, prop),
+                    read || s.reads_self_attrs.iter().any(|r| r.attr == prop),
+                )
+            })
+        };
+        let mut out = Self {
+            invalidations: FxHashSet::default(),
+            reads: FxHashSet::default(),
+        };
+        for bb in &f.blocks {
+            for (index, inst) in bb.insts.iter().enumerate() {
+                let (invalidates, reads) = match &inst.kind {
+                    InstKind::AttrDelete { obj, attr } => {
+                        (self_vars.contains(obj) && attr == prop, false)
+                    }
+                    InstKind::AttrLoad { obj, attr, .. } => {
+                        (false, self_vars.contains(obj) && attr == prop)
+                    }
+                    InstKind::SubscriptDelete { obj, index, .. } => {
+                        (dicts.contains(obj) && names_prop(index), false)
+                    }
+                    InstKind::MethodCall {
+                        recv, method, args, ..
+                    } if dicts.contains(recv) => match method.as_str() {
+                        "clear" => (true, false),
+                        "pop" | "__delitem__" => (args.first().is_some_and(names_prop), false),
+                        _ => (false, false),
+                    },
+                    InstKind::MethodCall { .. } | InstKind::Call { .. } => self_call(inst.span),
+                    _ => (false, false),
+                };
+                if invalidates {
+                    out.invalidations.insert((bb.id, index));
+                } else if reads {
+                    out.reads.insert((bb.id, index));
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the write at instruction `index` of `block` leaves no stale value behind on any
+    /// normal path: the property is invalidated on every path after it, or its value is gone
+    /// on every path to it (invalidated, and not read again since).
+    fn cover(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
+        self.invalidated_after(f, block, index) || self.absent_before(f, block, index)
+    }
+
+    /// Every normal path from just after the instruction to a return passes an invalidation.
+    /// Raising paths carry no obligation (as for `MUT109`), and a loop that never returns adds
+    /// none.
+    fn invalidated_after(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
+        let point_after = |b: heki_ir::BlockId, after: Option<usize>| {
+            self.invalidations
+                .iter()
+                .any(|(pb, pi)| *pb == b && after.is_none_or(|a| *pi > a))
+        };
+        let leaves_covered = |b: &heki_ir::BasicBlock, covered: &[bool]| match b.terminator {
+            Terminator::Return(_) => false,
+            _ => b
+                .terminator
+                .successors()
+                .iter()
+                .all(|s| covered[s.0 as usize]),
+        };
+        // Covered from each block's start: a greatest fixpoint from `true`.
+        let mut covered = vec![true; f.blocks.len()];
+        loop {
+            let mut changed = false;
+            for b in f.blocks.iter().rev() {
+                let v = point_after(b.id, None) || leaves_covered(b, &covered);
+                if v != covered[b.id.0 as usize] {
+                    covered[b.id.0 as usize] = v;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        point_after(block, Some(index)) || leaves_covered(f.block(block), &covered)
+    }
+
+    /// Every path from the entry to the instruction passes an invalidation with no read of the
+    /// property after it: the cached value is gone when the write happens. A block an exception
+    /// enters may hold any value.
+    fn absent_before(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
+        let through = |b: heki_ir::BlockId, mut absent: bool, upto: usize| {
+            for i in 0..upto {
+                if self.invalidations.contains(&(b, i)) {
+                    absent = true;
+                } else if self.reads.contains(&(b, i)) {
+                    absent = false;
+                }
+            }
+            absent
+        };
+        let n = f.blocks.len();
+        let mut preds: Vec<Vec<heki_ir::BlockId>> = vec![Vec::new(); n];
+        let mut handlers = vec![false; n];
+        for b in &f.blocks {
+            for s in b.terminator.successors() {
+                preds[s.0 as usize].push(b.id);
+            }
+            if let Some(h) = b.exc_target {
+                handlers[h.0 as usize] = true;
+            }
+        }
+        // Absent at each block's start: a greatest fixpoint from `true` (the entry: present).
+        let mut absent_in = vec![true; n];
+        absent_in[0] = false;
+        loop {
+            let mut changed = false;
+            for b in f.rpo_blocks() {
+                let i = b.0 as usize;
+                let v = i != 0
+                    && !handlers[i]
+                    && preds[i]
+                        .iter()
+                        .all(|p| through(*p, absent_in[p.0 as usize], f.block(*p).insts.len()));
+                if v != absent_in[i] {
+                    absent_in[i] = v;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        through(block, absent_in[block.0 as usize], index)
+    }
+}
+
 fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
     let name = m.name();
     INIT_METHODS.contains(&name)
@@ -278,8 +493,9 @@ fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
 /// The project classes whose methods' `MUT101` / `MUT107` reports read the summaries of the
 /// methods `changed` (a class family spans modules, see [`for_each_class_family`]): a changed
 /// `@cached_property` or `__hash__` (or a removed method) is read for its own family, a changed
-/// initialization method for the families of its ancestors that have either. A changed writer
-/// is reported in its own file only.
+/// initialization method for the families of its ancestors and subclasses that have either, and
+/// a method overriding an inherited one for its own family. A family's classes include the
+/// ancestors whose methods it inherits. A changed writer is reported in its own file only.
 pub fn family_readers(
     index: &ProjectIndex,
     decls: &ProjectDecls,
@@ -301,11 +517,23 @@ pub fn family_readers(
         if name == "__hash__" || index.summary(key).is_none_or(|s| s.is_cached_property) {
             roots.insert(class.clone());
         }
+        // A method that overrides an inherited one (or stops doing so) changes which of the
+        // ancestors' methods the class family inherits.
+        let overrides = decls.ancestors_of(&class).iter().any(|a| {
+            decls
+                .methods_of(a)
+                .iter()
+                .any(|k| k.qualname.rsplit('.').next() == Some(name))
+        });
+        if overrides {
+            roots.insert(class.clone());
+        }
         if INIT_METHODS.contains(&name) {
             roots.extend(
                 decls
                     .ancestors_of(&class)
                     .into_iter()
+                    .chain(decls.subclasses_of(&class))
                     .chain([class])
                     .filter(has_reported_reads),
             );
@@ -314,6 +542,10 @@ pub fn family_readers(
     let mut out = BTreeSet::new();
     for root in roots {
         out.extend(decls.subclasses_of(&root));
+        // The methods a family inherits are reported in their ancestors' files.
+        for class in std::iter::once(root.clone()).chain(decls.subclasses_of(&root)) {
+            out.extend(decls.ancestors_of(&class));
+        }
         out.insert(root);
     }
     out
@@ -348,6 +580,8 @@ fn private_methods_called_from_init(
 struct SelfWrite {
     span: Span,
     block: heki_ir::BlockId,
+    /// The write's instruction index in `block`.
+    index: usize,
     /// `setdefault`, or a subscript store guarded by `if k not in self.<attr>:`.
     memo_shaped: bool,
     /// `self.<attr> = ...` / `del self.<attr>`: the attribute is rebound, not changed in place.
@@ -398,7 +632,7 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
     };
     let mut out = Vec::new();
     for bb in &f.blocks {
-        for inst in &bb.insts {
+        for (index, inst) in bb.insts.iter().enumerate() {
             // `(memo_shaped, rebinds)`.
             let w = match &inst.kind {
                 InstKind::AttrStore { obj, attr: a, .. }
@@ -424,6 +658,7 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
                 out.push(SelfWrite {
                     span: inst.span,
                     block: bb.id,
+                    index,
                     memo_shaped,
                     rebinds,
                 });
@@ -436,11 +671,14 @@ fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
 
 // ==================================================================================== MUT201
 
-/// A `Class.attr` contract target (`write-owners`, `read-owners`, `effect-boundaries`).
+/// A `Class.attr` contract target (`write-owners`, `read-owners`, `effect-boundaries`), or
+/// an entry of the container an attribute holds (`Class.attr["key"]`, write targets only).
 pub(crate) struct ContractTarget {
     /// The configured text (diagnostic target and baseline key).
     pub text: String,
     attr: DottedPattern,
+    /// The entry key of an item target.
+    pub key: Option<String>,
     /// Project classes (fqn) the class pattern names, plus all their subclasses: the
     /// target's class family.
     pub classes: FxHashSet<String>,
@@ -450,6 +688,53 @@ impl ContractTarget {
     pub fn matches(&self, class: &str, attr: &str) -> bool {
         self.classes.contains(class) && self.attr.matches(attr)
     }
+
+    /// Whether the attribute pattern matches `attr`, whatever the class.
+    pub fn matches_attr(&self, attr: &str) -> bool {
+        self.attr.matches(attr)
+    }
+
+    /// Whether `site` writes the target: its class and attribute, and for an item target the
+    /// entry with its key (a write of the whole container, or with a computed key, writes the
+    /// attribute only).
+    pub fn matches_write(&self, site: &TypedFieldWriteSite) -> bool {
+        self.matches(&site.class_qualname, &site.attr)
+            && self
+                .key
+                .as_ref()
+                .is_none_or(|k| site.key.as_ref() == Some(k))
+    }
+}
+
+/// The targets of one contract `site` writes (by index): the item targets naming the entry it
+/// changes when there are any, else the attribute targets, so a write of one entry is reported
+/// once, under its most specific target.
+pub(crate) fn write_hits<'t>(
+    targets: &'t [ContractTarget],
+    site: &TypedFieldWriteSite,
+) -> Vec<(usize, &'t ContractTarget)> {
+    let hits: Vec<(usize, &ContractTarget)> = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.matches_write(site))
+        .collect();
+    if hits.iter().any(|(_, t)| t.key.is_some()) {
+        hits.into_iter().filter(|(_, t)| t.key.is_some()).collect()
+    } else {
+        hits
+    }
+}
+
+/// `Class.attr["key"]` / `Class.attr['key']` -> (`Class.attr`, `key`).
+fn split_item(text: &str) -> Option<(&str, &str)> {
+    let quote = match text.as_bytes() {
+        [.., q @ (b'"' | b'\''), b']'] => char::from(*q),
+        _ => return None,
+    };
+    let open = format!("[{quote}");
+    let start = text.rfind(&open)?;
+    let key = text.get(start + 2..text.len() - 2)?;
+    (!key.contains(quote)).then_some((&text[..start], key))
 }
 
 /// Every project class (fqn), sorted.
@@ -478,8 +763,8 @@ fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> 
     out
 }
 
-/// Parse `Class.attr` targets: a target without a dot is `InvalidTarget { section }`, a bad
-/// glob `Glob { context }`.
+/// Parse `Class.attr` (and `Class.attr["key"]`) targets: a target without a dot is
+/// `InvalidTarget { section }`, a bad glob `Glob { context }`.
 pub(crate) fn parse_targets(
     cx: &CheckContext<'_>,
     all: &[String],
@@ -489,7 +774,11 @@ pub(crate) fn parse_targets(
 ) -> Result<Vec<ContractTarget>, RuleConfigError> {
     let mut out = Vec::new();
     for t in targets {
-        let Some((class, attr)) = t.rsplit_once('.') else {
+        let (base, key) = match split_item(t) {
+            Some((base, key)) => (base, Some(key.to_owned())),
+            None => (t.as_str(), None),
+        };
+        let Some((class, attr)) = base.rsplit_once('.') else {
             return Err(RuleConfigError::InvalidTarget {
                 section,
                 target: t.clone(),
@@ -499,7 +788,27 @@ pub(crate) fn parse_targets(
         out.push(ContractTarget {
             text: t.clone(),
             attr: DottedPattern::new(attr, context)?,
+            key,
             classes: class_set(cx, &class, all),
+        });
+    }
+    Ok(out)
+}
+
+/// [`parse_targets`] for reads: an item target is `ItemTarget { section }` (a read site is an
+/// attribute read).
+pub(crate) fn parse_read_targets(
+    cx: &CheckContext<'_>,
+    all: &[String],
+    targets: &[String],
+    section: &'static str,
+    context: &'static str,
+) -> Result<Vec<ContractTarget>, RuleConfigError> {
+    let out = parse_targets(cx, all, targets, section, context)?;
+    if let Some(t) = out.iter().find(|t| t.key.is_some()) {
+        return Err(RuleConfigError::ItemTarget {
+            section,
+            target: t.text.clone(),
         });
     }
     Ok(out)
@@ -600,7 +909,7 @@ impl Allowance {
             targets: Vec::new(),
         };
         for e in keys.exempt.0 {
-            if e.contains(['.', '*', '?', '[', '{']) {
+            if e.contains('.') || has_glob_syntax(e) {
                 out.allowed.push(DottedPattern::new(e, keys.exempt.1)?);
             } else {
                 out.exempt_names.insert(e.clone());
@@ -657,13 +966,34 @@ impl Allowance {
 /// A private helper delegates responsibility to its project callers: the call sites that run
 /// its own body (`EffectSummary::body_facts`) and so receive its writes and reads. A private
 /// `async def` only scheduled (never awaited) or a private generator whose generators all
-/// escape keeps its reports.
+/// escape keeps its reports. So does a private function that only private functions of its own
+/// recursion call (`_walk` calling itself, exposed as a callback): going up through private
+/// callers never reaches a function that reports, so the access would be reported nowhere.
 fn delegates(cx: &CheckContext<'_>, sites: &SitesByCaller<'_>, key: &FuncKey) -> bool {
-    is_private(&key.qualname)
-        && cx
-            .index
-            .summary(key)
-            .is_some_and(|s| !callers_of(cx, sites, key, s.body_facts()).is_empty())
+    if !is_private(&key.qualname) {
+        return false;
+    }
+    let callers_running = |func: &FuncKey| {
+        cx.index
+            .summary(func)
+            .map_or_else(Vec::new, |s| callers_of(cx, sites, func, s.body_facts()))
+    };
+    let mut queue = vec![key.clone()];
+    let mut seen: FxHashSet<FuncKey> = FxHashSet::from_iter([key.clone()]);
+    while let Some(func) = queue.pop() {
+        for c in callers_running(&func) {
+            let leaves_the_recursion = !is_private(&c.caller.qualname)
+                || c.into != Facts::Body
+                || callers_running(c.caller).is_empty();
+            if leaves_the_recursion {
+                return true;
+            }
+            if seen.insert(c.caller.clone()) {
+                queue.push(c.caller.clone());
+            }
+        }
+    }
+    false
 }
 
 /// One project call site that runs the facts `facts` of a function: the caller, the site and
@@ -814,30 +1144,202 @@ fn runs_inside_allowed(
     allowed_contexts
 }
 
-/// Whether `func`'s own summary holds the write `site` (as its caller sees it): the same write
-/// at the same location, by `func` itself (`own`) or through its callees. A function iterating a
-/// generator it is handed does not: the generator's writes reach the function that handed it
-/// over, and only that one.
-fn holds_write(
+/// Whether the helper `bc` calls changes the typed field `w` (an `IndirectHelper` write) that
+/// its caller hands it, as the field's value or as the instance holding it, itself or through
+/// the callees it hands the argument to. `delivers` says what of a callee runs at a call
+/// (`None`: nothing that counts, such as a callee the contract allows). The helper's summary
+/// also holds what its callees change, so a change made only inside allowed callees is no write
+/// of the helper's caller.
+pub(crate) fn helper_changes_field<'s>(
     cx: &CheckContext<'_>,
-    func: &FuncKey,
-    site: &heki_effect::TypedFieldWriteSite,
-    own: bool,
+    sites: &SitesByCaller<'s>,
+    bc: &BoundCallee,
+    w: &TypedFieldWriteSite,
+    delivers: impl Fn(&'s CallSite, &FuncKey) -> Option<Delivery<'s>>,
 ) -> bool {
-    let origin = site.via_chain.last().map(|h| h.callee.as_str());
-    cx.index.summary(func).is_some_and(|s| {
-        s.typed_field_write_sites.iter().any(|t| {
-            t.class_qualname == site.class_qualname
-                && t.attr == site.attr
-                && t.kind == site.kind
-                && t.span == site.span
-                && if own {
-                    t.via_chain.is_empty()
-                } else {
-                    t.via_chain.last().map(|h| h.callee.as_str()) == origin
-                }
-        })
+    bc.params.iter().enumerate().any(|(k, o)| {
+        let want = if o
+            .typed_field
+            .as_ref()
+            .is_some_and(|(class, attr)| *class == w.class_qualname && *attr == w.attr)
+        {
+            ParamChange::Itself
+        } else if o.typed_instance.as_ref() == Some(&w.class_qualname) {
+            ParamChange::Attr(&w.attr)
+        } else {
+            return false;
+        };
+        changes_param(cx, sites, &bc.callee, k, want, &delivers)
     })
+}
+
+/// Whether the helper call behind the `IndirectHelper` write `w` (its last hop) changes the
+/// field outside the functions `allowed` names. A call that is no longer found counts.
+fn indirect_write_outside(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    w: &TypedFieldWriteSite,
+    allowed: impl Fn(&FuncKey) -> bool,
+) -> bool {
+    let Some(hop) = w.via_chain.last() else {
+        return true;
+    };
+    let helpers: Vec<&BoundCallee> = sites
+        .get(&hop.caller)
+        .into_iter()
+        .flatten()
+        .filter(|(_, s)| s.span == hop.span)
+        .flat_map(|(_, s)| s.project_callees())
+        .filter(|bc| bc.callee.fqn() == hop.callee)
+        .collect();
+    helpers.is_empty()
+        || helpers.into_iter().any(|bc| {
+            helper_changes_field(cx, sites, bc, w, |site, callee| {
+                if allowed(callee) {
+                    return None;
+                }
+                let summary = cx.index.summary(callee)?;
+                cx.index
+                    .delivery(site, summary)
+                    .filter(|d| d.into == Facts::Body)
+            })
+        })
+}
+
+/// What change of a parameter counts: an in-place change of the value itself (what a handed
+/// field's `IndirectHelper` write is), any in-place change of it or below it, or a change of its
+/// attribute (rebinding it, or changing its value in place).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ParamChange<'a> {
+    Itself,
+    Any,
+    Attr(&'a str),
+}
+
+/// Whether `func` changes its parameter `k` as `want` says, in its own body or through the
+/// callees it hands the parameter to. A callee whose facts arrive other than as its body (what
+/// iterating a plain function's result runs) counts as changing it: that is not followed.
+fn changes_param<'s>(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'s>,
+    func: &FuncKey,
+    k: usize,
+    want: ParamChange<'_>,
+    delivers: &impl Fn(&'s CallSite, &FuncKey) -> Option<Delivery<'s>>,
+) -> bool {
+    let mut stack = vec![(func.clone(), k, want)];
+    let mut seen: FxHashSet<(FuncKey, usize, ParamChange<'_>)> = FxHashSet::default();
+    while let Some((func, k, want)) = stack.pop() {
+        if !seen.insert((func.clone(), k, want)) {
+            continue;
+        }
+        let local = cx
+            .index
+            .file_of(&func)
+            .and_then(|p| cx.index.files[p].local_functions.get(&func));
+        let paths = u8::try_from(k)
+            .ok()
+            .and_then(|k| local?.mutated_param_paths.get(&k));
+        let changed_here = match want {
+            ParamChange::Itself => paths.is_some_and(|p| p.contains("")),
+            ParamChange::Any => {
+                k < 64 && local.is_some_and(|s| s.mutates_params & (1u64 << k) != 0)
+            }
+            ParamChange::Attr(attr) => paths.is_some_and(|p| p.contains(attr)),
+        };
+        if changed_here {
+            return true;
+        }
+        for (_, site) in sites.get(&func).into_iter().flatten() {
+            for callee in site.project_callees() {
+                let handed: Vec<(usize, ParamChange<'_>)> = callee
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, o)| match (&o.param, want) {
+                        (Some((p, None)), _) if usize::from(*p) == k => Some((j, want)),
+                        // The callee is handed a part of the parameter: a change there is below
+                        // the value, or of another attribute.
+                        (Some((_, Some(_))), ParamChange::Itself) => None,
+                        (Some((p, Some(attr))), ParamChange::Attr(a))
+                            if usize::from(*p) == k && a != attr =>
+                        {
+                            None
+                        }
+                        (Some((p, Some(_))), _) if usize::from(*p) == k => {
+                            Some((j, ParamChange::Any))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if handed.is_empty() {
+                    continue;
+                }
+                let (Some(summary), Some(d)) = (
+                    cx.index.summary(&callee.callee),
+                    delivers(site, &callee.callee),
+                ) else {
+                    continue;
+                };
+                if d.from != summary.body_facts() {
+                    return true;
+                }
+                stack.extend(
+                    handed
+                        .into_iter()
+                        .map(|(j, next)| (callee.callee.clone(), j, next)),
+                );
+            }
+        }
+    }
+    false
+}
+
+/// The arguments of a call of the project function `decl` by the callee's parameter positions:
+/// a bound method's receiver at 0 (not for a class method's class or a static method),
+/// positional arguments after it, keyword arguments by name.
+pub(crate) fn bind_arguments(
+    decl: &heki_effect::FunctionDecl,
+    binds_recv: bool,
+    recv: Option<VarId>,
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+) -> Vec<(usize, VarId)> {
+    let offset = usize::from(binds_recv && !decl.is_staticmethod);
+    let mut bound: Vec<(usize, VarId)> = Vec::new();
+    if offset == 1
+        && !decl.is_classmethod
+        && let Some(r) = recv
+    {
+        bound.push((0, r));
+    }
+    bound.extend(args.iter().enumerate().map(|(i, v)| (i + offset, *v)));
+    for (name, v) in kwargs {
+        if let Some(pos) = name
+            .as_ref()
+            .and_then(|n| decl.param_names.iter().position(|p| p == n))
+        {
+            bound.push((pos, *v));
+        }
+    }
+    bound
+}
+
+/// The facts of `callee` that run in the body of `site`'s caller
+/// ([`heki_effect::ProjectIndex::delivery`]): its body where the call runs it, or what iterating
+/// the object it returns runs where that object is iterated or handed to a function iterating
+/// it. A generator function's body runs there, never at its call; `None` where nothing of it
+/// runs in the caller (a generator never iterated, a coroutine never awaited, an object the
+/// caller returns).
+pub(crate) fn facts_run_at<'s>(
+    index: &ProjectIndex,
+    site: &CallSite,
+    callee: &'s EffectSummary,
+) -> Option<&'s EffectSummary> {
+    let d = index.delivery(site, callee)?;
+    (d.into == Facts::Body)
+        .then(|| callee.facts(d.from))
+        .flatten()
 }
 
 /// `base`, then `: note` when the contract sets a `message`.
@@ -912,21 +1414,82 @@ impl<'u> MergedReports<'u> {
     }
 }
 
+/// `unresolved` values; the first is the default (writes heki cannot tie to a class are not
+/// reported).
+const UNRESOLVED: &[&str] = &["ignore", "report"];
+
+/// `fresh-objects` values; the first is the default (writes that construct an object are no
+/// violation).
+const FRESH_OBJECTS: &[&str] = &["allow", "report"];
+
+/// Whether a contract allows the writes that construct the object they write (`fresh-objects`).
+pub(crate) fn allows_fresh(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        FRESH_OBJECTS,
+        "`allow` or `report`",
+        section,
+        contract,
+        "fresh-objects",
+    )? == "allow")
+}
+
+/// The value of a contract's mode key, one of `values` (the first when unset).
+fn mode(
+    value: Option<&str>,
+    values: &'static [&'static str],
+    expected: &'static str,
+    section: &'static str,
+    contract: &str,
+    key: &'static str,
+) -> Result<&'static str, RuleConfigError> {
+    let Some(value) = value else {
+        return Ok(values[0]);
+    };
+    values
+        .iter()
+        .find(|v| **v == value)
+        .copied()
+        .ok_or_else(|| RuleConfigError::UnknownMode {
+            section,
+            contract: contract.to_owned(),
+            key,
+            value: value.to_owned(),
+            expected,
+        })
+}
+
 struct OwnerRule<'r> {
     name: &'r str,
     targets: Vec<ContractTarget>,
     allowance: Allowance,
     forbid_cached: FxHashSet<String>,
     note: Option<&'r str>,
+    /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
+    allow_fresh: bool,
+    /// `unresolved = "report"`: writes heki cannot tie to a class are reported (`MUT205`).
+    report_unresolved: bool,
 }
 
 pub(crate) fn mut201(
     cx: &CheckContext<'_>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
-    if !cx.selection.is_enabled("MUT201") || cx.config.write_owners.is_empty() {
+    let (writes, unresolved) = (
+        cx.selection.is_enabled("MUT201"),
+        cx.selection.is_enabled("MUT205"),
+    );
+    if !writes && !unresolved || cx.config.write_owners.is_empty() {
         return Ok(());
     }
+    debug_assert!(
+        cx.index.propagates_typed_writes(),
+        "`typed_writes` decides for MUT201"
+    );
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
     for rule in &cx.config.write_owners {
@@ -953,7 +1516,21 @@ pub(crate) fn mut201(
             allowance,
             forbid_cached,
             note: rule.message.as_deref(),
+            allow_fresh: allows_fresh(rule.fresh_objects.as_deref(), "write-owners", &rule.name)?,
+            report_unresolved: mode(
+                rule.unresolved.as_deref(),
+                UNRESOLVED,
+                "`ignore` or `report`",
+                "write-owners",
+                &rule.name,
+                "unresolved",
+            )? == "report",
         });
+    }
+
+    unresolved::mut205(cx, &rules, out);
+    if !writes {
+        return Ok(());
     }
 
     let mut keys_by_fqn: FxHashMap<String, FuncKey> = FxHashMap::default();
@@ -977,10 +1554,11 @@ pub(crate) fn mut201(
         for (key, s) in funcs {
             for site in &s.typed_field_write_sites {
                 for rule in &rules {
-                    for t in &rule.targets {
-                        if !t.matches(&site.class_qualname, &site.attr) {
-                            continue;
-                        }
+                    // Constructing an object is no write of its owners' state.
+                    if rule.allow_fresh && site.construction == Construction::Yes {
+                        continue;
+                    }
+                    for (_, t) in write_hits(&rule.targets, site) {
                         let mut chain: Vec<FuncKey> = vec![key.clone()];
                         chain.extend(
                             site.via_chain
@@ -999,18 +1577,30 @@ pub(crate) fn mut201(
                         } else {
                             chain.len() - 1
                         };
-                        // Report at the outermost function: helpers in between must be private
-                        // (they delegate) unless they do not hold the write themselves (a function
-                        // iterating a generator it is handed runs the generator's writes without
-                        // knowing them), and a delegating function leaves it to its callers.
+                        // Report at the outermost function: a write site only reaches callers
+                        // through private helpers (and the functions iterating a generator they
+                        // are handed, which run its writes without holding them). A private
+                        // helper on the way that keeps its accesses (only its own recursion
+                        // calls it, see `delegates`) reports the write itself, and a delegating
+                        // function leaves it to its callers.
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let last = chain.len() - 1;
-                        if !chain[1..=origin].iter().enumerate().all(|(i, k)| {
-                            is_private(&k.qualname) || !holds_write(cx, k, site, i + 1 == last)
-                        }) || delegates(cx, sites, key)
+                        let kept_below = chain[1..=origin]
+                            .iter()
+                            .any(|k| is_private(&k.qualname) && !delegates(cx, sites, k));
+                        if kept_below
+                            || delegates(cx, sites, key)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
+                        {
+                            continue;
+                        }
+                        // A helper handed the field that changes it only inside allowed
+                        // writers or exempt methods.
+                        if site.kind == WriteKind::IndirectHelper
+                            && !indirect_write_outside(cx, sites, site, |callee| {
+                                rule.allowance.allows(callee)
+                            })
                         {
                             continue;
                         }
@@ -1058,7 +1648,7 @@ pub(crate) fn mut201(
                                     rule.note,
                                 )
                             },
-                            || site.via_chain.clone(),
+                            || heki_effect::owned_chain(&site.via_chain),
                         );
                     }
                 }
@@ -1073,7 +1663,11 @@ pub(crate) fn mut201(
             let Some(owner) = &f.owner_class_qualname else {
                 continue;
             };
-            if f.is_class_body || !f.has_decorator(&["cached_property"]) {
+            let cached = cx
+                .index
+                .summary(&CheckContext::key(unit, f))
+                .is_some_and(|s| s.is_cached_property);
+            if f.is_class_body || !cached {
                 continue;
             }
             let class = format!("{}.{owner}", unit.input.module_name);
@@ -1099,6 +1693,10 @@ pub(crate) fn mut201(
     }
     Ok(())
 }
+
+// ==================================================================================== MUT205
+
+mod unresolved;
 
 // ==================================================================================== MUT202
 
@@ -1147,10 +1745,11 @@ pub(crate) struct ReadOnlyReturns {
 impl ReadOnlyReturns {
     pub fn new(cx: &CheckContext<'_>) -> Result<Self, RuleConfigError> {
         let producers = ReadOnlyProducers::new(cx.config)?;
-        let property = |s: &EffectSummary| {
-            s.decorators.iter().any(|d| {
-                let last = d.rsplit('.').next().unwrap_or(d);
-                matches!(last, "property" | "cached_property")
+        let property = |k: &FuncKey, s: &EffectSummary| {
+            cx.decls.module(&k.module).is_some_and(|m| {
+                s.decorators
+                    .iter()
+                    .any(|d| m.decorator_is(d, &["property", "cached_property"]))
             })
         };
         let getters = cx
@@ -1161,7 +1760,7 @@ impl ReadOnlyReturns {
             .filter(|(k, s)| {
                 s.returns_protected.is_some()
                     || s.is_lru_cache
-                    || property(s) && producers.deep_for(&k.fqn()).is_some()
+                    || producers.deep_for(&k.fqn()).is_some() && property(k, s)
             })
             .map(|(k, _)| {
                 k.qualname
@@ -1202,6 +1801,23 @@ impl Ro {
         Shared {
             object: !self.shallow_copy,
             elements: self.deep,
+        }
+    }
+
+    /// The origin of a value that is this one on some paths and `other` on the others: what
+    /// either shares, named after the one that shares the object itself.
+    fn join(&self, other: &Self) -> Self {
+        let shared = self.shared().join(other.shared());
+        let named = if !self.shared().object && other.shared().object {
+            other
+        } else {
+            self
+        };
+        Self {
+            producer: named.producer.clone(),
+            deep: shared.elements,
+            shallow_copy: !shared.object,
+            via: named.via.clone(),
         }
     }
 
@@ -1258,6 +1874,8 @@ struct Mut202Fn<'a> {
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
     ro: FxHashMap<VarId, Ro>,
+    /// The function's call sites in the index, every role (built on the first need).
+    sites: std::cell::OnceCell<Vec<&'a CallSite>>,
 }
 
 impl<'a> Mut202Fn<'a> {
@@ -1277,7 +1895,44 @@ impl<'a> Mut202Fn<'a> {
             key: CheckContext::key(unit, f),
             types: tcx.infer(f),
             ro: FxHashMap::default(),
+            sites: std::cell::OnceCell::new(),
         }
+    }
+
+    /// The facts of `callee` that the call at `span` runs in this function: at the call, and
+    /// where the object it returns is iterated ([`facts_run_at`]); the summary itself when the
+    /// index has no site for the call.
+    fn facts_run_by_call(
+        &self,
+        span: Span,
+        key: &FuncKey,
+        callee: &'a EffectSummary,
+    ) -> Vec<&'a EffectSummary> {
+        let sites = self.sites.get_or_init(|| {
+            self.cx
+                .index
+                .files
+                .get(&self.unit.input.path)
+                .into_iter()
+                .flat_map(|f| &f.call_sites)
+                .filter(|s| s.caller == self.key)
+                .collect()
+        });
+        let calls_key = |s: &&&CallSite| s.project_callees().iter().any(|bc| bc.callee == *key);
+        let Some(call) = sites
+            .iter()
+            .filter(calls_key)
+            .find(|s| s.role == SiteRole::Call && s.span == span)
+        else {
+            return vec![callee];
+        };
+        // The other sites of the object the call returns copy its target.
+        sites
+            .iter()
+            .filter(|s| s.target == call.target)
+            .filter(calls_key)
+            .filter_map(|s| facts_run_at(self.cx.index, s, callee))
+            .collect()
     }
 
     /// The parts of a call instruction (`None` for any other instruction).
@@ -1312,6 +1967,46 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
+    /// The call an offloading API makes on a worker thread (`asyncio.to_thread(clear, xs)` calls
+    /// `clear(xs)`; keyword arguments are left unbound), when its callable is a project one.
+    fn worker_call_of<'i>(&self, kind: &'i InstKind) -> Option<CallParts<'i>>
+    where
+        'a: 'i,
+    {
+        let (InstKind::Call {
+            args, star_from, ..
+        }
+        | InstKind::MethodCall {
+            args, star_from, ..
+        }) = kind
+        else {
+            return None;
+        };
+        let Callee::External(symbol) = self.call_of(kind)?.callee else {
+            return None;
+        };
+        let (callable, first) =
+            heki_effect::offloaded_callable(self.cx.kb, &symbol, args, *star_from)?;
+        let (recv, callee) = match self.f.def_inst(callable).map(|(_, i)| &i.kind) {
+            Some(InstKind::AttrLoad { obj, attr, .. })
+                if self
+                    .tcx
+                    .resolve_attr_load(self.types.get(obj), attr)
+                    .is_none() =>
+            {
+                let callee = self.tcx.resolve_method(self.types.get(obj), attr);
+                (Some((*obj, attr.as_str())), callee)
+            }
+            _ => (None, self.tcx.resolve_call(self.types.get(&callable))),
+        };
+        matches!(callee, Callee::Project(..)).then_some(CallParts {
+            recv,
+            args: &args[first..],
+            kwargs: &[],
+            callee,
+        })
+    }
+
     /// The read-only origin of a call's (or a property read's) result: a declared producer, an
     /// `@lru_cache` function, or a project function that returns one's value (its summary's
     /// `returns_protected`), reached through the call at `span`.
@@ -1335,7 +2030,7 @@ impl<'a> Mut202Fn<'a> {
                     span,
                     path: self.unit.input.path.clone(),
                 }];
-                via.extend(r.chain.iter().cloned());
+                via.extend(heki_effect::owned_chain(&r.chain));
                 Ro::new(r.producer.clone(), r.shared, via)
             }),
             Callee::External(sym) => self
@@ -1347,23 +2042,17 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
-    fn kwarg_true(&self, kwargs: &[(Option<String>, VarId)], name: &str) -> bool {
-        kwargs
-            .iter()
-            .any(|(k, v)| k.as_deref() == Some(name) && self.f.const_bool(*v) == Some(true))
-    }
-
     /// Value produced by one instruction from read-only operands (the derivations of
     /// `heki_effect::readonly`, which the return flow applies backward).
     fn transfer(&self, inst: &Inst) -> Option<Ro> {
         match &inst.kind {
             InstKind::Copy { src, .. } => self.ro.get(src).cloned(),
-            InstKind::SubscriptLoad { obj, index, .. } => {
-                let step = if heki_effect::consumption::is_unpacking(self.f, *index, inst.span) {
-                    ReturnStep::TARGET_ITEM
-                } else {
-                    ReturnStep::ELEMENT
+            InstKind::SubscriptLoad { obj, .. } => {
+                let class = match self.types.get(obj) {
+                    Some(Val::Inst(class)) => Some(class.as_str()),
+                    _ => None,
                 };
+                let step = readonly::subscript_step(self.f, inst, class);
                 self.ro.get(obj)?.derive(step)
             }
             InstKind::AttrLoad { obj, attr, .. } => {
@@ -1408,7 +2097,9 @@ impl<'a> Mut202Fn<'a> {
                     Callee::External(s) => s.as_str(),
                     _ => "",
                 };
-                let deep = self.kwarg_true(call.kwargs, "deep");
+                let deep = readonly::deep_copy_requested(call.kwargs, |v| {
+                    self.f.const_bool(v) == Some(true)
+                });
                 match readonly::call_derivation(method, symbol, self.cx.kb, deep)? {
                     Derivation::DeepCopy => None,
                     Derivation::Step(step) => r.derive(step),
@@ -1417,41 +2108,54 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
+    /// The read-only origins of the function's values, to a fixpoint: a phi joins the origins
+    /// of every incoming value (a shallow copy on one branch and the shared object on the other
+    /// is the shared object), and a value is derived again when its operand's origin grows. An
+    /// origin only grows (`Ro::join`), so the loop ends.
     fn propagate(&mut self) {
         let rpo = self.f.rpo_blocks();
-        for _ in 0..4 {
-            let before = self.ro.len();
+        loop {
+            let mut changed = false;
             for &bb in &rpo {
                 let block = self.f.block(bb);
                 for phi in &block.phis {
-                    if self.ro.contains_key(&phi.dst) {
-                        continue;
-                    }
-                    if let Some(r) = phi
+                    let joined = phi
                         .incoming
                         .iter()
-                        .find_map(|(_, v)| self.ro.get(v))
-                        .cloned()
-                    {
-                        self.ro.insert(phi.dst, r);
+                        .filter_map(|(_, v)| self.ro.get(v))
+                        .fold(None::<Ro>, |acc, r| {
+                            Some(acc.map_or_else(|| r.clone(), |a| a.join(r)))
+                        });
+                    if let Some(r) = joined {
+                        changed |= self.grow(phi.dst, r);
                     }
                 }
                 for inst in &block.insts {
                     let Some(dst) = inst.kind.dst() else {
                         continue;
                     };
-                    if self.ro.contains_key(&dst) {
-                        continue;
-                    }
                     if let Some(r) = self.transfer(inst) {
-                        self.ro.insert(dst, r);
+                        changed |= self.grow(dst, r);
                     }
                 }
             }
-            if self.ro.len() == before {
+            if !changed {
                 break;
             }
         }
+    }
+
+    /// Join `r` into the origin of `var`; whether it grew.
+    fn grow(&mut self, var: VarId, r: Ro) -> bool {
+        let next = match self.ro.get(&var) {
+            Some(old) => old.join(&r),
+            None => r,
+        };
+        let grew = self.ro.get(&var) != Some(&next);
+        if grew {
+            self.ro.insert(var, next);
+        }
+        grew
     }
 
     /// Read-only origin of `var` when mutating its own top level is a violation.
@@ -1519,13 +2223,17 @@ impl<'a> Mut202Fn<'a> {
         if direct.is_some() {
             return (direct.cloned(), Vec::new());
         }
-        // Passing a read-only value to a project function that mutates that parameter.
+        // Passing a read-only value to a project function that mutates that parameter, also
+        // through an offloading API that calls it on a worker thread.
         let Some(CallParts {
             recv,
             args,
             kwargs,
             callee: Callee::Project(keys, binds_recv),
-        }) = self.call_of(&inst.kind)
+        }) = self
+            .call_of(&inst.kind)
+            .filter(|c| matches!(c.callee, Callee::Project(..)))
+            .or_else(|| self.worker_call_of(&inst.kind))
         else {
             return (None, Vec::new());
         };
@@ -1537,36 +2245,26 @@ impl<'a> Mut202Fn<'a> {
                 .function_decl(key)
                 .cloned()
                 .unwrap_or_default();
-            let offset = usize::from(binds_recv && !decl.is_staticmethod);
-            let mut bound: Vec<(usize, VarId)> = Vec::new();
-            if offset == 1
-                && !decl.is_classmethod
-                && let Some(r) = recv
-            {
-                bound.push((0, r));
-            }
-            bound.extend(args.iter().enumerate().map(|(i, v)| (i + offset, *v)));
-            for (name, v) in kwargs {
-                if let Some(pos) = name
-                    .as_ref()
-                    .and_then(|n| decl.param_names.iter().position(|p| p == n))
-                {
-                    bound.push((pos, *v));
-                }
-            }
-            for (pos, var) in bound {
+            for (pos, var) in bind_arguments(&decl, binds_recv, recv, args, kwargs) {
                 let Some(r) = self.ro.get(&var) else {
                     continue;
                 };
                 // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
-                let paths = u8::try_from(pos)
-                    .ok()
-                    .and_then(|p| callee.mutated_param_paths.get(&p));
-                let mutates = if r.shallow_copy {
-                    paths.is_some_and(|p| p.iter().any(|path| !path.is_empty()))
-                } else {
-                    pos < 64 && callee.mutates_params & (1u64 << pos) != 0
-                };
+                // A shallow copy shares only the objects below its top level: rebinding its
+                // attributes changes the copy alone.
+                let mutates = self
+                    .facts_run_by_call(inst.span, key, callee)
+                    .iter()
+                    .any(|facts| {
+                        if r.shallow_copy {
+                            u8::try_from(pos)
+                                .ok()
+                                .and_then(|p| facts.changed_param_attrs.get(&p))
+                                .is_some_and(|attrs| !attrs.is_empty())
+                        } else {
+                            pos < 64 && facts.mutates_params & (1u64 << pos) != 0
+                        }
+                    });
                 if mutates {
                     let hop = CallHop {
                         caller: self.key.clone(),
@@ -1651,10 +2349,9 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         .iter()
                         .filter(|w| w.attr == *attr)
                         .collect();
-                    // Filters 3 and 4: memo dictionaries and stored hashes (`self._hash`,
-                    // which a deserialization hook recomputes), disjoint constant keys.
+                    // Filter 4: stored hashes (`self._hash`, which a deserialization hook
+                    // recomputes), disjoint constant keys.
                     if writes.is_empty()
-                        || is_memo_attr(attr)
                         || is_stored_hash(attr)
                         || disjoint_keys(
                             read_keys.iter().copied(),
@@ -1663,10 +2360,10 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     {
                         continue;
                     }
-                    // Filters 2 and 3: lazy initialization, memo-shaped writes.
+                    // Filters 2 and 3: lazy initialization, memo dictionaries.
                     let lazy = lazy_init_branches(f, attr);
                     let first = self_attr_writes(f, attr).into_iter().find(|w| {
-                        !w.memo_shaped && !lazy.iter().any(|b| dominates(f, *b, w.block))
+                        !is_memo_write(attr, w) && !lazy.iter().any(|b| dominates(f, *b, w.block))
                     });
                     let Some(write) = first else {
                         continue;
@@ -1729,77 +2426,19 @@ fn private_methods_named_in_initializers<'m>(
 }
 
 /// Filter 2 (`MUT107`): the initializing branches of the `None` / falsy guards of
-/// `self.<attr>` in `f` — the `then` block of `if self.<attr> is None:` / `== None` /
-/// `if not self.<attr>:`, the `else` block of `is not None` / `!= None` / `if self.<attr>:`.
-/// Only a block the guard alone leads to counts: an `if` without `else` falls through to a
-/// block that the other branch reaches too.
+/// `self.<attr>` in `f` (`heki_effect::guards::lazy_init_branches`, which the effect lane's
+/// lazy initialization shares).
 fn lazy_init_branches(f: &IrFunction, attr: &str) -> Vec<heki_ir::BlockId> {
     let self_vars = f
         .params
         .first()
         .map(|p| self_aliases(f, p.var))
         .unwrap_or_default();
-    let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
-    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-        if let Some(d) = inst.kind.dst() {
-            defs.insert(d, &inst.kind);
-        }
-    }
-    let loads_attr = |v: &VarId| {
-        let mut v = *v;
-        while let Some(InstKind::Copy { src, .. }) = defs.get(&v) {
-            v = *src;
-        }
-        matches!(defs.get(&v), Some(InstKind::AttrLoad { obj, attr: a, .. }) if self_vars.contains(obj) && a == attr)
-    };
-    let is_none = |v: &VarId| {
-        matches!(
-            defs.get(v),
-            Some(InstKind::Const {
-                literal: ConstLiteral::None,
-                ..
-            })
-        )
-    };
-    let none_test =
-        |l: &VarId, r: &VarId| (loads_attr(l) && is_none(r)) || (is_none(l) && loads_attr(r));
-    let preds = f.predecessors();
-    let mut out = Vec::new();
-    for bb in &f.blocks {
-        let Terminator::Branch {
-            cond,
-            then_bb,
-            else_bb,
-        } = &bb.terminator
-        else {
-            continue;
-        };
-        let init = match defs.get(cond) {
-            Some(InstKind::Compare {
-                op: CompareOpKind::Is | CompareOpKind::Eq,
-                lhs,
-                rhs,
-                ..
-            }) if none_test(lhs, rhs) => *then_bb,
-            Some(InstKind::Compare {
-                op: CompareOpKind::IsNot | CompareOpKind::NotEq,
-                lhs,
-                rhs,
-                ..
-            }) if none_test(lhs, rhs) => *else_bb,
-            Some(InstKind::UnaryOp {
-                op: heki_ir::UnaryOpKind::Not,
-                operand,
-                ..
-            }) if loads_attr(operand) => *then_bb,
-            _ if loads_attr(cond) => *else_bb,
-            _ => continue,
-        };
-        if preds[init.0 as usize] == [bb.id] {
-            out.push(init);
-        }
-    }
-    out
+    heki_effect::guards::lazy_init_branches(f)
+        .into_iter()
+        .filter(|b| b.attr == attr && self_vars.contains(&b.obj))
+        .map(|b| b.init)
+        .collect()
 }
 
 /// Whether every path from the entry of `f` to block `b` runs through block `d` (normal and
@@ -1888,7 +2527,7 @@ pub(crate) fn mut203(
     for rule in &cx.config.read_owners {
         rules.push(ReadOwnerRule {
             name: &rule.name,
-            targets: parse_targets(
+            targets: parse_read_targets(
                 cx,
                 &all_classes,
                 &rule.targets,
@@ -2103,4 +2742,6 @@ pub(crate) fn delegated_reports(
 
 mod call_owners;
 
-pub(crate) use call_owners::{CallTargetPattern, mut204, parse_call_targets, site_callee};
+pub(crate) use call_owners::{
+    CallTargetPattern, called_targets, group_texts, mut204, parse_call_targets, site_callee,
+};

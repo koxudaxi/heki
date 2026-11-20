@@ -81,6 +81,7 @@ fn semantic_fixtures_gate_json() {
         (78, "MUT201"),
         (92, "MUT202"),
         (108, "EFF101"),
+        (143, "EFF102"),
     ]
     .iter()
     .map(|(l, c)| (*l, (*c).to_owned()))
@@ -132,6 +133,37 @@ fn inline_suppressions_ignore_hashes_in_strings() {
     assert_eq!(lines.len(), 2, "{stdout}");
     assert!(lines[0].starts_with("a.py:4:5: EFF101 "), "{stdout}");
     assert!(lines[1].starts_with("a.py:7:5: EFF101 "), "{stdout}");
+}
+
+#[test]
+fn inline_suppressions_and_source_lines_in_files_with_cr_or_crlf_line_breaks() {
+    let p = Project::new("line_breaks");
+    for (file, br) in [("cr.py", "\r"), ("crlf.py", "\r\n"), ("lf.py", "\n")] {
+        let src = [
+            "import time  # heki: ignore[EFF101]",
+            "",
+            "async def h():",
+            "    time.sleep(1)  # heki: ignore[EFF101]",
+            "    time.sleep(2)",
+            "",
+        ]
+        .join(br);
+        p.write(file, &src);
+    }
+    let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(code, 1);
+    // Each file reports only the unsuppressed call, on its own line 5.
+    let starts: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.split(" EFF101 ").next().unwrap())
+        .collect();
+    assert_eq!(
+        starts,
+        ["cr.py:5:5:", "crlf.py:5:5:", "lf.py:5:5:"],
+        "{stdout}"
+    );
+    let (_, full, _) = p.heki(&["cr.py"]);
+    assert!(full.contains("\n5 |     time.sleep(2)\n"), "{full}");
 }
 
 #[test]
@@ -217,4 +249,232 @@ fn output_formats_and_config_selection() {
     assert!(!stdout.contains("EFF105"));
     let (_, stdout, _) = p.heki(&["--output-format", "concise", "--extend-select", "EFF105"]);
     assert!(stdout.contains("src/pkg/fs.py:2:12: EFF105"), "{stdout}");
+}
+
+#[test]
+fn sarif_columns_and_carets_after_non_ascii_text() {
+    let p = Project::new("non_ascii_columns");
+    p.write(
+        "a.py",
+        "import time\n\nasync def h():\n    label = \"\u{e9}\"; time.sleep(1)\n",
+    );
+    let (_, full, _) = p.heki(&[]);
+    // Byte column 19 in text output; the caret sits under `time` (the accented letter is one column).
+    assert!(full.starts_with("a.py:4:19: EFF101"), "{full}");
+    assert!(
+        full.contains("4 |     label = \"\u{e9}\"; time.sleep(1)\n  |                  ^\n"),
+        "{full}"
+    );
+    let (_, sarif, _) = p.heki(&["--output-format", "sarif"]);
+    let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    let result = &v["runs"][0]["results"][0];
+    for loc in [&result["locations"][0], &result["relatedLocations"][0]] {
+        assert_eq!(
+            loc["physicalLocation"]["region"]["startColumn"], 18,
+            "{loc}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_names_with_backslashes_and_uri_delimiters_are_reported_as_they_are() {
+    let p = Project::new("odd_names");
+    let quadratic = "import time\n\n\nasync def h():\n    time.sleep(1)\n\n\ndef f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+    p.write("a\\b.py", quadratic).write("c#d.py", quadratic);
+    let (_, concise, _) = p.heki(&["--output-format", "concise"]);
+    let paths: Vec<&str> = concise
+        .lines()
+        .map(|l| l.split(':').next().unwrap())
+        .collect();
+    // On POSIX `\` is part of the name, not a separator.
+    assert_eq!(
+        paths,
+        ["a\\b.py", "a\\b.py", "c#d.py", "c#d.py"],
+        "{concise}"
+    );
+    let (_, sarif, _) = p.heki(&["--output-format", "sarif"]);
+    let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    let uris: Vec<&str> = v["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(uris, ["a%5Cb.py", "a%5Cb.py", "c%23d.py", "c%23d.py"]);
+    let (_, diff, _) = p.heki(&["--diff", "a\\b.py"]);
+    assert!(
+        diff.starts_with("--- \"a/a\\\\b.py\"\n+++ \"b/a\\\\b.py\"\n"),
+        "{diff}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn github_output_never_lets_project_text_start_a_log_line() {
+    let p = Project::new("github_logs");
+    p.write("a.py", "x = 1\n").write(
+        "b.toml",
+        "version = 2\n[[entries]]\npath = \"a.py\"\nqualname = \"f\"\nrule_code = \"EFF101\"\ntarget = \"x\\n::error file=a.py,line=1::forged\"\ncount = 1\n",
+    );
+    p.write("bad\n::error file=a.py::forged.py", "def f(:\n");
+    let (code, stdout, stderr) = p.heki(&["--baseline", "b.toml", "--output-format", "github"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    // The stale entry's note and the syntax error both stay on one line each.
+    assert_eq!(stderr.lines().count(), 2, "{stderr}");
+    assert!(stderr.lines().all(|l| !l.starts_with("::")), "{stderr}");
+    assert!(
+        stderr.contains("`x%0A::error file=a.py,line=1::forged` can shrink"),
+        "{stderr}"
+    );
+    // Other formats print the text as it is.
+    let (_, _, text) = p.heki(&["--baseline", "b.toml"]);
+    assert!(text.contains("`x\n::error"), "{text}");
+}
+
+#[test]
+fn ratchet_baselines_listing_one_key_twice_are_rejected() {
+    let p = Project::new("baseline_twice");
+    p.write("a.py", BLOCKING);
+    let entry = |count: &str| {
+        format!(
+            "[[entries]]\npath = \"a.py\"\nqualname = \"handler\"\nrule_code = \"EFF101\"\ntarget = \"time.sleep\"\ncount = {count}\n"
+        )
+    };
+    // Their sum would not fit the count (and would wrap to an allowance of 0).
+    p.write(
+        "b.toml",
+        &format!("version = 2\n{}{}", entry("4294967295"), entry("1")),
+    );
+    let (code, stdout, stderr) = p.heki(&["--baseline", "b.toml"]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains(
+            "baseline b.toml lists a.py::handler EFF101 `time.sleep` more than once; keep one entry"
+        ),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn update_baseline_only_shrinks_an_existing_baseline() {
+    let p = Project::new("baseline_shrinks");
+    p.write("a.py", BLOCKING);
+    let update = ["--baseline", "b.toml", "--update-baseline"];
+    assert_eq!(p.heki(&update).0, 0);
+    let recorded = std::fs::read_to_string(p.dir.join("b.toml")).unwrap();
+    // A second call in the recorded function grows its entry: reported, not taken in.
+    p.write("a.py", &format!("{BLOCKING}    time.sleep(2)\n"));
+    let (code, stdout, stderr) = p.heki(&[&update[..], &["--output-format", "concise"]].concat());
+    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+    assert!(
+        stderr.contains("allows 1 site(s), found 2")
+            && stderr.contains("error: baseline b.toml not updated: 1 entry(ies) grew"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(p.dir.join("b.toml")).unwrap(),
+        recorded
+    );
+    // A version this heki does not know is not overwritten either.
+    p.write("b.toml", &recorded.replace("version = 2", "version = 9"));
+    let (code, _, stderr) = p.heki(&update);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("has version 9"), "{stderr}");
+    assert!(
+        std::fs::read_to_string(p.dir.join("b.toml"))
+            .unwrap()
+            .contains("version = 9")
+    );
+}
+
+#[test]
+fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
+    let p = Project::new("keep_on_errors");
+    p.write("a.py", BLOCKING)
+        .write("b.py", "def f(x):\n    x.append(1)\n");
+    let update = ["--baseline", "b.toml", "--update-baseline"];
+    assert_eq!(p.heki(&update).0, 0);
+    let snapshot = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_heki"))
+            .arg("snapshot")
+            .args(args)
+            .current_dir(&p.dir)
+            .output()
+            .unwrap()
+    };
+    assert!(snapshot(&["--write"]).status.success());
+    let read = |f: &str| std::fs::read_to_string(p.dir.join(f)).unwrap();
+    let (baseline, snap) = (read("b.toml"), read(".heki-summary-snapshot.json"));
+    // A syntax error drops both files from the run: writing the rest would forget them.
+    p.write("a.py", "def f(:\n").write("b.py", "def f(:\n");
+    let (code, _, stderr) = p.heki(&update);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("error: baseline b.toml not written: 2 file(s) could not be analyzed"),
+        "{stderr}"
+    );
+    let out = snapshot(&["--write"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("not written: 2 file(s) could not be analyzed")
+    );
+    assert_eq!(
+        (read("b.toml"), read(".heki-summary-snapshot.json")),
+        (baseline, snap)
+    );
+}
+
+/// An `async def` with `n` blocking calls on lines of their own (from line 4).
+fn sleeps(n: usize) -> String {
+    let mut src = String::from("import time\n\nasync def h():\n");
+    for i in 0..n {
+        src.push_str(&format!("    time.sleep({i})\n"));
+    }
+    src
+}
+
+#[test]
+fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
+    let p = Project::new("fold_after_baseline");
+    p.write("a.py", &sleeps(11));
+    let concise = ["--output-format", "concise"];
+    let (code, stdout, _) = p.heki(&concise);
+    assert_eq!(code, 1);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
+    // Suppressing the first call leaves the other ten, below the folding threshold.
+    p.write(
+        "a.py",
+        &sleeps(11).replacen("time.sleep(0)", "time.sleep(0)  # heki: ignore[EFF101]", 1),
+    );
+    let (code, stdout, _) = p.heki(&concise);
+    assert_eq!(code, 1);
+    assert_eq!(stdout.lines().count(), 10, "{stdout}");
+    assert!(stdout.starts_with("a.py:5:5: EFF101 "), "{stdout}");
+    // The baseline records every site: a twelfth call is a regression.
+    p.write("a.py", &sleeps(11));
+    let baseline = ["--baseline", "b.toml"];
+    assert_eq!(
+        p.heki(&[&baseline[..], &["--update-baseline"]].concat()).0,
+        0
+    );
+    assert!(
+        std::fs::read_to_string(p.dir.join("b.toml"))
+            .unwrap()
+            .contains("count = 11")
+    );
+    p.write("a.py", &sleeps(12));
+    let (code, stdout, stderr) = p.heki(&[&baseline[..], &concise[..]].concat());
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("allows 11 site(s), found 12"), "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("(+11 more async call sites"), "{stdout}");
 }

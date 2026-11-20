@@ -13,10 +13,35 @@ the allowed readers:
 
 - directly (`ref.children`), also on `self` and through local aliases;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
-  with a constant name;
-- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`.
+  with a constant name: a string literal or a module-level `Final` string constant;
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a `Final`
+  constant for the key.
 
-A target names a class and an attribute; it covers the class's subclasses too.
+A target names a class and an attribute; it covers the class's subclasses too. A container
+entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
+read target names `Class.attr` (an entry is a configuration error).
+
+The read object's class is the one heki infers for it, with annotations as hints: a
+parameter, local, attribute, or return annotation, including the items of `list[...]`,
+`Sequence[...]`, `Iterable[...]`, `Iterator[...]`, `Generator[...]`, `dict[...]`,
+`Mapping[...]`, `tuple[...]`, and `set[...]`; a constructor call; and what the object comes
+from: a loop over such a container (`for model in models`), a subscript (`models[0]`,
+`by_name["a"]`), unpacking (`model, _ = pair`), `dict` views and `get` / `pop`, `enumerate`,
+`zip`, `reversed`, `sorted`, `iter`, `next`, `list` / `tuple` / `set`, `itertools.chain`, a
+display, the items appended to a local list, or a comprehension or generator expression. A
+method call or a `@property` / `cached_property` read has the return annotation of the
+definition the receiver's class finds first along its MRO, as for a type checker (`typing.Self`
+is the receiver's class); a copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`,
+`model_copy`) has its original's class, calling a `functools.partial` object returns what the
+wrapped function returns, and `typing.cast` names the class. A variable rebound in a loop
+(`node = node.parent`) or assigned on some paths only (a walrus inside `and` / `or`) has the
+classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
+annotation or from different assignments) is each of them, and an `isinstance` check narrows it
+in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
+also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
+classes that implement it structurally (having every member it defines; at most eight, counting
+a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
+or return, `Any`, a value of more than three classes) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the read is reported at every call
@@ -89,4 +114,5 @@ No automatic fix.
   - `message`: appended to every message of the contract.
 
 Known limitation: a read through a parameter without a project-class annotation
-(`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown.
+(`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown
+there; unlike a write, a read is not handed to the caller that knows it.

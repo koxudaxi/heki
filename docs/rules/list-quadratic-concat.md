@@ -43,5 +43,10 @@ The fix is applied by `heki check --fix` only when heki proves it safe:
 - no exception handler can observe an older binding of another name aliasing it.
 
 Otherwise the diagnostic explains which proof obligation blocks the fix, and nothing is
-rewritten. For example `for v in x: x = x + [v]` terminates, but `x.append(v)` would loop
-forever: heki reports it as disproved and never touches it. Type annotations are never trusted.
+rewritten. A disproved candidate is not reported at all: `for v in x: x = x + [v]` terminates,
+but `x.append(v)` would loop forever, so heki says nothing there and never touches it. Type
+annotations are never trusted.
+
+The fix rewrites a plain `x = x + [...]` statement. For other shapes of the same update (a
+parenthesized `x = (x + [i])` or `x = (x) + [i]`, an annotated `x: list = x + [i]`), the
+diagnostic says that the rewrite is proven safe and leaves it to be made by hand.

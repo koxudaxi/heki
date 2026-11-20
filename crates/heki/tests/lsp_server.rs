@@ -204,19 +204,21 @@ fn lsp_unsaved_and_outside_documents_and_stats_before_indexing() {
         "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n",
     );
     lsp.notify("initialized", json!({}));
-    // The unsaved file is checked against an index that does not know it yet: its local
-    // rules run (`OPT101`), its interprocedural facts wait for the first edit.
+    // The unsaved files are indexed with the project, as they will be once saved: their
+    // interprocedural facts (`MUT101`) are there from the start.
     let diags = lsp.diagnostics(&unsaved, |d| !d.is_empty());
-    assert_eq!(codes(&diags), vec!["OPT101"]);
+    assert_eq!(codes(&diags), vec!["MUT101", "OPT101"]);
     assert_eq!(
-        diags[0]["range"]["start"],
+        diags[1]["range"]["start"],
         json!({"line": 22, "character": 8})
     );
     lsp.diagnostics(&other, <[Value]>::is_empty);
     let diags = lsp.diagnostics(&lost, |d| !d.is_empty());
     assert_eq!(codes(&diags), vec!["OPT101"]);
     lsp.ready();
-    // Once indexed: the first edit summarizes the new file (`MUT101` needs its summaries).
+    // Whether the documents opened before indexing are analyzed again once the index is ready
+    // depends on which of their analyses ran first; count the edits from here.
+    let edits_before = lsp.settle()["edited_reanalyses"].as_u64().unwrap();
     lsp.change(&unsaved, 2, UNSAVED);
     let diags = lsp.diagnostics(&unsaved, |d| d.len() == 2);
     assert_eq!(codes(&diags), vec!["MUT101", "OPT101"]);
@@ -229,8 +231,8 @@ fn lsp_unsaved_and_outside_documents_and_stats_before_indexing() {
         "textDocument/didSave",
         json!({"textDocument": {"uri": uri_in(&p.dir, "pkg/ghost.py")}}),
     );
-    let stats = lsp.request("heki/stats", Value::Null);
-    assert_eq!(stats["edited_reanalyses"], 1, "{stats}");
+    let stats = lsp.settle();
+    assert_eq!(stats["edited_reanalyses"], edits_before + 1, "{stats}");
     lsp.stop(true);
 }
 
@@ -253,13 +255,13 @@ fn lsp_unsaved_module_next_to_its_indexed_stub() {
     lsp.open(&module, BOX);
     lsp.opened(1);
     lsp.notify("initialized", json!({}));
-    // The stub's summaries do not stand in for the document's own methods (the index knows
-    // `Box.add` from the stub only, and `Box.drop` not at all): no `MUT101` before the
-    // document is summarized.
-    lsp.diagnostics(&module, <[Value]>::is_empty);
+    // The document is indexed with the project and outranks the stub: its own methods are
+    // summarized (`Box.add`, and `Box.drop`, which the stub does not declare).
+    let diags = lsp.diagnostics(&module, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["MUT101", "MUT101"]);
     lsp.ready();
     lsp.change(&module, 2, BOX);
-    let diags = lsp.diagnostics(&module, |d| !d.is_empty());
+    let diags = lsp.diagnostics(&module, |d| d.len() == 2);
     assert_eq!(codes(&diags), vec!["MUT101", "MUT101"]);
     assert_eq!(
         diags[1]["range"]["start"],
@@ -461,5 +463,213 @@ fn lsp_applies_document_changes_in_message_order() {
     assert_eq!(stats["open_documents"], 1, "{stats}");
     assert_eq!(lsp.latest[&a], Vec::<Value>::new());
     assert_eq!(lsp.latest[&b], Vec::<Value>::new());
+    lsp.stop(true);
+}
+
+/// A server indexing `p`, ready for documents (`capabilities` of the client).
+fn ready_server(p: &Project, capabilities: Value) -> Lsp {
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": capabilities}),
+    );
+    lsp.notify("initialized", json!({}));
+    lsp.ready();
+    lsp
+}
+
+#[test]
+fn lsp_positions_and_suppressions_in_documents_with_cr_line_breaks() {
+    let p = Project::new("lsp_cr");
+    let text = "import time  # heki: ignore[EFF101]\r\rasync def h():\r    time.sleep(1)\r";
+    p.write("a.py", text);
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.open(&a, text);
+    let diags = lsp.diagnostics(&a, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["EFF101"]);
+    assert_eq!(
+        diags[0]["range"]["start"],
+        json!({"line": 3, "character": 4})
+    );
+    // The suppression goes at the end of that line, before its line break.
+    let actions = lsp.code_actions(&a, &diags[0]["range"], &diags);
+    assert_eq!(
+        actions[0]["edit"]["changes"][&a][0]["range"]["start"],
+        json!({"line": 3, "character": 17})
+    );
+    lsp.stop(true);
+}
+
+#[test]
+fn lsp_withholds_suppressions_that_would_land_in_a_continuation_or_a_string() {
+    let p = Project::new("lsp_suppress_where");
+    let text = "import time\n\n\nasync def a():\n    return time.sleep(1) \\\n        or 0\n\n\nasync def b():\n    return time.sleep(2) or \"\"\"x\n    y\"\"\"\n\n\nasync def c():\n    return (time.sleep(3),\n            0)\n";
+    p.write("a.py", text);
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.open(&a, text);
+    let diags = lsp.diagnostics(&a, |d| d.len() == 3);
+    assert_eq!(codes(&diags), vec!["EFF101", "EFF101", "EFF101"]);
+    // A comment after the `\` would end the statement there; one on the `"""` line would be
+    // part of the string. Inside brackets a comment is fine.
+    for (d, offered) in diags.iter().zip([false, false, true]) {
+        let actions = lsp.code_actions(&a, &d["range"], std::slice::from_ref(d));
+        assert_eq!(!actions.is_empty(), offered, "{d}: {actions:#?}");
+    }
+    lsp.stop(true);
+}
+
+#[test]
+fn lsp_exit_codes_follow_the_shutdown_handshake() {
+    let p = Project::new("lsp_exit");
+    let status = |lsp: &mut Lsp| {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = lsp.child.try_wait().unwrap() {
+                return status.code();
+            }
+            assert!(
+                started.elapsed() < common::lsp::TIMEOUT,
+                "the server never ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    // A client may take its time between `shutdown` and `exit`; `exit` ends the process with 0
+    // even while stdin stays open.
+    let mut lsp = ready_server(&p, json!({}));
+    assert_eq!(lsp.request("shutdown", Value::Null), Value::Null);
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    assert!(
+        lsp.child.try_wait().unwrap().is_none(),
+        "ended before `exit`"
+    );
+    lsp.notify("exit", Value::Null);
+    assert_eq!(status(&mut lsp), Some(0));
+    // `exit` without `shutdown`, or stdin closing without either: 1.
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.notify("exit", Value::Null);
+    assert_eq!(status(&mut lsp), Some(1));
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.stdin = None;
+    assert_eq!(status(&mut lsp), Some(1));
+}
+
+#[test]
+fn lsp_code_actions_only_edit_the_analyzed_version() {
+    let p = Project::new("lsp_stale_actions");
+    let text =
+        "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+    p.write("a.py", text);
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"workspaceEdit": {"documentChanges": true}}}),
+    );
+    lsp.open(&a, text);
+    let diags = lsp.diagnostics(&a, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["OPT101"]);
+    // An edit inside the debounce: the published fix was computed on version 1.
+    lsp.change(&a, 2, &text.replace("x + [i]", "x + [0]"));
+    let stale = lsp.request(
+        "textDocument/codeAction",
+        json!({"textDocument": {"uri": a}, "range": diags[0]["range"], "context": {"diagnostics": diags}}),
+    );
+    assert_eq!(stale, Value::Null);
+    lsp.settle();
+    let diags = lsp.latest[&a].clone();
+    let actions = lsp.code_actions(&a, &diags[0]["range"], &diags);
+    assert_eq!(actions.len(), 2, "{actions:#?}");
+    // Versioned edits for a client that applies them: it rejects them for any other version.
+    let change = &actions[0]["edit"]["documentChanges"][0];
+    assert_eq!(change["textDocument"], json!({"uri": a, "version": 2}));
+    assert_eq!(change["edits"][0]["newText"], "x.append(0)");
+    assert_eq!(
+        actions[1]["edit"]["documentChanges"][0]["textDocument"]["version"],
+        2
+    );
+    lsp.stop(true);
+}
+
+#[test]
+fn lsp_keeps_open_documents_through_reloads_and_deletions_until_they_close() {
+    let p = Project::new("lsp_unsaved_reload");
+    let caller = "from helper import wait\n\n\nasync def handler():\n    wait()\n";
+    p.write("caller.py", caller);
+    let (helper, handler) = (uri_in(&p.dir, "helper.py"), uri(&p.dir.join("caller.py")));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}),
+    );
+    // A new module, never saved, that the caller already imports.
+    lsp.open(&helper, "import time\n\n\ndef wait():\n    time.sleep(1)\n");
+    lsp.open(&handler, caller);
+    let eff101 = |lsp: &mut Lsp| {
+        lsp.settle();
+        codes(&lsp.latest[&handler]) == ["EFF101"]
+    };
+    assert!(eff101(&mut lsp));
+    // A configuration change indexes the workspace again, with the open documents.
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n\n[tool.heki]\n");
+    let config = uri(&p.dir.join("pyproject.toml"));
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes": [{"uri": config, "type": 2}]}),
+    );
+    assert!(eff101(&mut lsp), "{:?}", lsp.latest[&handler]);
+    // The caller's file is deleted on the disk while its document stays open.
+    std::fs::remove_file(p.dir.join("caller.py")).unwrap();
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes": [{"uri": handler, "type": 3}]}),
+    );
+    assert!(eff101(&mut lsp), "{:?}", lsp.latest[&handler]);
+    // Closed, the never-saved helper leaves the project.
+    lsp.notify(
+        "textDocument/didClose",
+        json!({"textDocument": {"uri": helper}}),
+    );
+    lsp.notify(
+        "textDocument/didSave",
+        json!({"textDocument": {"uri": handler}, "text": caller}),
+    );
+    lsp.settle();
+    assert_eq!(lsp.latest[&handler], Vec::<Value>::new());
+    let stats = lsp.request("heki/stats", Value::Null);
+    assert_eq!(stats["indexed_files"], 1, "{stats}");
+    lsp.stop(true);
+}
+
+#[test]
+fn lsp_reports_invalid_rule_options_as_a_failed_load() {
+    let p = Project::new("lsp_bad_targets");
+    let text = "import time\n\n\nasync def h():\n    time.sleep(1)\n";
+    p.write("a.py", text);
+    let a = uri(&p.dir.join("a.py"));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}),
+    );
+    lsp.open(&a, text);
+    assert_eq!(
+        codes(&lsp.diagnostics(&a, |d| !d.is_empty())),
+        vec!["EFF101"]
+    );
+    // A write owner whose target lacks its class: `heki check` exits with 2 before reporting.
+    p.write(
+        "heki.toml",
+        "[[write-owners]]\nname = \"store\"\ntargets = [\"fields\"]\n",
+    );
+    assert_eq!(p.check(&[]).0, 2);
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes": [{"uri": uri(&p.dir.join("heki.toml")), "type": 1}]}),
+    );
+    let log = lsp.log("invalid write-owners target `fields`");
+    assert_eq!(log["params"]["type"], 2);
+    let stats = lsp.settle();
+    assert_eq!(stats["ready"], false, "{stats}");
+    assert_eq!(lsp.latest[&a], Vec::<Value>::new());
     lsp.stop(true);
 }

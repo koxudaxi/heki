@@ -44,3 +44,4 @@ def cells_through_nested_scopes(items: list) -> object:
             return acc
 
     return middle, Holder, [lambda: item for item in items], [(item for _ in ()) for item in items]
+

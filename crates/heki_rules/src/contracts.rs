@@ -1,11 +1,11 @@
 //! The declared contracts the summaries depend on ([`heki_effect::Contracts`]), built from the
-//! configuration: the `readonly-returns` producers (`MUT202`) and the `invalidation` contracts
-//! (`MUT109`). `heki check` and the LSP engine hand them to the analysis, so a wrapper of a
+//! configuration: the `readonly-returns` producers (`MUT202`), the `invalidation` contracts
+//! (`MUT109`), and whether any ownership contract is declared. `heki check` and the LSP engine hand them to the analysis, so a wrapper of a
 //! producer and an invalidator reached through calls are known across files without IR.
 
 use crate::mut_rules::ReadOnlyProducers;
-use crate::{DottedPattern, RuleConfigError};
-use heki_effect::Contracts;
+use crate::{DottedPattern, RuleConfigError, RuleSelection};
+use heki_effect::{Contracts, TypedWrites};
 use heki_env::HekiConfig;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -50,6 +50,8 @@ impl InvalidationNames {
 /// [`Contracts`] over a configuration's `readonly-returns` and `invalidation` entries.
 #[derive(Debug)]
 pub(crate) struct ConfigContracts {
+    /// [`Contracts::ownership`].
+    ownership: bool,
     producers: ReadOnlyProducers,
     pub(crate) invalidations: Vec<InvalidationNames>,
     /// The masks of [`Contracts::invalidator_of`] by name.
@@ -119,6 +121,7 @@ impl ConfigContracts {
             });
         }
         Ok(Self {
+            ownership: declares_ownership(config),
             producers: ReadOnlyProducers::new(config)?,
             invalidations,
             invalidators: NameMasks::default(),
@@ -127,6 +130,10 @@ impl ConfigContracts {
 }
 
 impl Contracts for ConfigContracts {
+    fn ownership(&self) -> bool {
+        self.ownership
+    }
+
     fn readonly_producer(&self, fqn: &str) -> Option<bool> {
         self.producers.deep_for(fqn)
     }
@@ -150,6 +157,14 @@ impl Contracts for ConfigContracts {
     fn target_of(&self, classes: &[String], attr: &str) -> u64 {
         mask(&self.invalidations, |c| c.target(classes, attr).is_some())
     }
+
+    fn names_class(&self, classes: &[String]) -> bool {
+        self.invalidations.iter().any(|c| {
+            c.targets
+                .iter()
+                .any(|(_, class, _)| classes.iter().any(|name| class.matches(name)))
+        })
+    }
 }
 
 /// Bit `i` set for every contract `i` that `has` holds for.
@@ -162,13 +177,34 @@ fn mask(contracts: &[InvalidationNames], has: impl Fn(&InvalidationNames) -> boo
 }
 
 /// The contracts of `config` the summaries depend on (`None` when it declares no producer and no
-/// `invalidation` contract, so nothing is computed for them).
+/// ownership contract, so nothing is computed for them).
 pub fn summary_contracts(
     config: &HekiConfig,
 ) -> Result<Option<Arc<dyn Contracts>>, RuleConfigError> {
     let contracts = ConfigContracts::new(config)?;
-    if contracts.producers.is_empty() && contracts.invalidations.is_empty() {
+    if contracts.producers.is_empty() && !contracts.ownership {
         return Ok(None);
     }
     Ok(Some(Arc::new(contracts)))
+}
+
+/// [`Contracts::ownership`] of `config`.
+fn declares_ownership(config: &HekiConfig) -> bool {
+    !(config.write_owners.is_empty()
+        && config.read_owners.is_empty()
+        && config.effect_boundaries.is_empty()
+        && config.invalidation.is_empty())
+}
+
+/// Whether propagation carries typed writes for the rules `selection` runs on `config`: with an
+/// ownership contract (the gate of the other contract-only facts; `MUT201` and `EFF201` read
+/// the callers' typed write sites, and `EFF201`'s `IndirectHelper` sites depend on the callees'
+/// write facts), or with `MUT108`, which reads the callees' write facts. The readers assert it
+/// ([`heki_effect::ProjectIndex::propagates_typed_writes`]).
+pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrites {
+    if declares_ownership(config) || selection.is_enabled("MUT108") {
+        TypedWrites::Propagated
+    } else {
+        TypedWrites::Local
+    }
 }

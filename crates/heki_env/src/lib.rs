@@ -85,7 +85,9 @@ pub enum Severity {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct LintConfig {
-    pub select: Vec<String>,
+    /// `None` when the key is absent (the default rules); `Some([])` selects no rule before
+    /// `extend-select`, as in Ruff.
+    pub select: Option<Vec<String>>,
     pub extend_select: Vec<String>,
     pub ignore: Vec<String>,
     pub severity: BTreeMap<String, Severity>,
@@ -111,6 +113,13 @@ pub struct WriteOwnerRule {
     pub exempt_methods: Vec<String>,
     /// Appended to every `MUT201` message of this contract (`use Store.set_fields() instead`).
     pub message: Option<String>,
+    /// `"allow"` (default) or `"report"`: whether writes that construct the object they write
+    /// (allocated in the same call chain, held by nobody else yet) are reported.
+    pub fresh_objects: Option<String>,
+    /// `"report"`: also report (`MUT205`) writes of an attribute named like a target on an
+    /// object of unknown class, and computed attribute names written on a target class;
+    /// `"ignore"` (default) does not.
+    pub unresolved: Option<String>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -172,6 +181,9 @@ pub struct EffectBoundaryRule {
     /// Callees (dotted patterns) whose effects are allowed: paths through them are not
     /// followed.
     pub allowed_callees: Vec<String>,
+    /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
+    /// the object they write count as writes of the boundary.
+    pub fresh_objects: Option<String>,
     /// Appended to every `EFF201` message of this contract.
     pub message: Option<String>,
 }
@@ -205,17 +217,32 @@ pub struct InvalidationRule {
 /// `[[tool.heki.ecosystem]]` user addition / override of a Layer 2 ecosystem KB entry.
 ///
 /// `effects` holds Execution Effect names exactly as spelled in `kb/ecosystem/*.toml`
-/// (snake_case, e.g. `"blocking_net"`); `heki_kb` validates them when merging.
-/// An override replaces the built-in entry for the same `symbol` as a whole.
+/// (snake_case, e.g. `"blocking_net"`); `heki_kb` validates them when merging. An override
+/// sets the keys it lists (`None`: left out) on the built-in entry for the same `symbol`, whose
+/// other keys stay.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct EcosystemOverride {
     pub symbol: String,
-    pub effects: Vec<String>,
-    pub async_safe: bool,
+    pub effects: Option<Vec<String>>,
+    pub async_safe: Option<bool>,
     pub offloads_blocking_arg: Option<u8>,
-    pub excluded: bool,
-    pub copy_sanitizer: bool,
+    pub excluded: Option<bool>,
+    pub copy_sanitizer: Option<CopySanitizerSetting>,
+    /// The class of the instances the call returns (a factory).
+    pub return_type: Option<String>,
+    /// `EFF106`: a `with` over an instance of this class, or over the call's result, holds a
+    /// synchronous lock or a database transaction.
+    pub sync_lock_or_tx: Option<bool>,
+}
+
+/// `copy-sanitizer`: the depth of the copy the call returns (`"shallow"` / `"deep"`, validated
+/// by `heki_kb`), or `true` for a shallow copy and `false` for none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CopySanitizerSetting {
+    Flag(bool),
+    Depth(String),
 }
 
 /// Top-level `[tool.heki]` or `heki.toml` configuration.
@@ -235,8 +262,9 @@ pub struct HekiConfig {
     pub invalidation: Vec<InvalidationRule>,
     pub effect_boundaries: Vec<EffectBoundaryRule>,
     pub ecosystem: Vec<EcosystemOverride>,
-    /// Lower bound of `project.requires-python` in the project's `pyproject.toml`: the
-    /// `target-version` default (read by the loaders, not a `[tool.heki]` key).
+    /// The version `project.requires-python` of the project's `pyproject.toml` selects
+    /// ([`requires_python_lower_bound`]): the `target-version` default (read by the loaders,
+    /// not a `[tool.heki]` key).
     #[serde(skip)]
     pub requires_python: Option<PythonVersion>,
 }
@@ -286,24 +314,153 @@ fn sibling_requires_python(pyproject: &Path) -> Option<PythonVersion> {
         .requires_python()
 }
 
-/// The oldest Python minor version a PEP 440 `requires-python` specifier admits (the highest
-/// lower bound of its `>=`, `>`, `~=`, `==` and `===` clauses), clamped to the supported
-/// 3.11–3.15; `None` when no clause sets a lower bound. `>3.11` admits 3.11.1, so its bound is
-/// 3.11, as for `>=3.11`.
+/// The Python version a PEP 440 `requires-python` specifier selects: the oldest supported
+/// minor version (3.11–3.15) one of whose releases satisfies every clause (exclusions and
+/// patch-level bounds included: `>=3.11, !=3.11.*` selects 3.12). A specifier admitting only
+/// older or newer releases selects the nearest end (`>=3.9, <3.11` → 3.11, `>=3.16` → 3.15).
+/// `None` (the default version) when it cannot be parsed, admits nothing, or sets no lower
+/// bound and admits the default 3.12 (`<4`).
 pub fn requires_python_lower_bound(spec: &str) -> Option<PythonVersion> {
-    spec.split(',')
-        .filter_map(|clause| {
-            let clause = clause.trim();
-            let version = ["===", "~=", "==", ">=", ">"]
-                .iter()
-                .find_map(|op| clause.strip_prefix(op))?;
-            let mut parts = version.trim().trim_end_matches(".*").split('.');
-            let major = parts.next()?.parse().ok()?;
-            let minor = parts.next().map_or(Some(0), |m| m.parse().ok())?;
-            Some(PythonVersion { major, minor })
+    let clauses = spec
+        .split(',')
+        .map(VersionClause::parse)
+        .collect::<Option<Vec<_>>>()?;
+    let admits_minor = |major: u8, minor: u8| {
+        // A clause changes its verdict only at the patch levels it names: their neighbours
+        // stand for every release in between.
+        let mut patches = vec![0u32];
+        for c in &clauses {
+            if c.release.first() == Some(&u32::from(major))
+                && c.release.get(1) == Some(&u32::from(minor))
+            {
+                let p = c.release.get(2).copied().unwrap_or(0);
+                patches.extend([p.saturating_sub(1), p, p.saturating_add(1)]);
+            }
+        }
+        let release = |p: u32| [u32::from(major), u32::from(minor), p];
+        patches
+            .iter()
+            .any(|&p| clauses.iter().all(|c| c.admits(&release(p))))
+    };
+    let supported = [
+        PythonVersion::PY311,
+        PythonVersion::PY312,
+        PythonVersion::PY313,
+        PythonVersion::PY314,
+        PythonVersion::PY315,
+    ];
+    let has_lower_bound = clauses.iter().any(|c| {
+        matches!(
+            c.op,
+            VersionOp::Ge | VersionOp::Gt | VersionOp::Eq | VersionOp::Compatible
+        )
+    });
+    if !has_lower_bound && admits_minor(3, 12) {
+        return None;
+    }
+    if let Some(v) = supported
+        .into_iter()
+        .find(|v| admits_minor(v.major, v.minor))
+    {
+        return Some(v);
+    }
+    let oldest = (2..=4u8)
+        .flat_map(|major| (0..=40u8).map(move |minor| (major, minor)))
+        .find(|&(major, minor)| admits_minor(major, minor))?;
+    Some(if oldest < (3, 11) {
+        PythonVersion::PY311
+    } else {
+        PythonVersion::PY315
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionOp {
+    /// `===`: arbitrary equality, compared here as `==`.
+    Eq,
+    Ne,
+    Ge,
+    Gt,
+    Le,
+    Lt,
+    /// `~=`.
+    Compatible,
+}
+
+/// One clause of a version specifier, compared on release segments (pre-, post-, and
+/// development-release suffixes do not move a release across a minor version).
+#[derive(Debug)]
+struct VersionClause {
+    op: VersionOp,
+    release: Vec<u32>,
+    /// `== 3.11.*` / `!= 3.11.*`: a prefix match.
+    wildcard: bool,
+}
+
+impl VersionClause {
+    fn parse(clause: &str) -> Option<Self> {
+        let clause = clause.trim();
+        let (op, rest) = [
+            ("===", VersionOp::Eq),
+            ("~=", VersionOp::Compatible),
+            ("==", VersionOp::Eq),
+            ("!=", VersionOp::Ne),
+            (">=", VersionOp::Ge),
+            ("<=", VersionOp::Le),
+            (">", VersionOp::Gt),
+            ("<", VersionOp::Lt),
+        ]
+        .into_iter()
+        .find_map(|(text, op)| clause.strip_prefix(text).map(|rest| (op, rest.trim())))?;
+        let (version, wildcard) = match rest.strip_suffix(".*") {
+            Some(v) => (v, true),
+            None => (rest, false),
+        };
+        if wildcard && !matches!(op, VersionOp::Eq | VersionOp::Ne) {
+            return None;
+        }
+        let digits = version
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .map_or(version, |end| &version[..end]);
+        let release = digits
+            .trim_end_matches('.')
+            .split('.')
+            .map(|part| part.parse().ok())
+            .collect::<Option<Vec<u32>>>()?;
+        let compatible_needs_two = op == VersionOp::Compatible && release.len() < 2;
+        (!compatible_needs_two).then_some(Self {
+            op,
+            release,
+            wildcard,
         })
-        .max()
-        .map(|v| v.clamp(PythonVersion::PY311, PythonVersion::PY315))
+    }
+
+    fn admits(&self, version: &[u32]) -> bool {
+        let segment = |r: &[u32], i: usize| r.get(i).copied().unwrap_or(0);
+        let compare = |r: &[u32]| {
+            (0..version.len().max(r.len()))
+                .map(|i| segment(version, i).cmp(&segment(r, i)))
+                .find(|o| o.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        let prefix = |r: &[u32]| (0..r.len()).all(|i| segment(version, i) == r[i]);
+        let equal = if self.wildcard {
+            prefix(&self.release)
+        } else {
+            compare(&self.release).is_eq()
+        };
+        match self.op {
+            VersionOp::Eq => equal,
+            VersionOp::Ne => !equal,
+            VersionOp::Ge => compare(&self.release).is_ge(),
+            VersionOp::Gt => compare(&self.release).is_gt(),
+            VersionOp::Le => compare(&self.release).is_le(),
+            VersionOp::Lt => compare(&self.release).is_lt(),
+            VersionOp::Compatible => {
+                compare(&self.release).is_ge() && prefix(&self.release[..self.release.len() - 1])
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -379,8 +536,8 @@ impl HekiConfig {
         Ok(Self::default())
     }
 
-    /// Resolve `RuntimeProfile` from `target-version`, else the lower bound of
-    /// `project.requires-python`, else Python 3.12.
+    /// Resolve `RuntimeProfile` from `target-version`, else the version
+    /// `project.requires-python` selects, else Python 3.12.
     pub fn runtime_profile(&self) -> RuntimeProfile {
         let ver = self
             .target_version
@@ -422,6 +579,8 @@ allowed-writers = ["pkg.parser.generation.*"]
 forbidden-writers = ["pkg.render.*"]
 exempt-methods = ["__deepcopy__"]
 message = "use Store.set_fields() instead"
+fresh-objects = "report"
+unresolved = "report"
 
 [[tool.heki.read-owners]]
 name = "reference-children"
@@ -462,6 +621,7 @@ allow-writes = ["DataModel.base_classes"]
 write-universe = ["DataModel.*"]
 allowed-callees = ["pkg.logging.*"]
 message = "render must not mutate model state"
+fresh-objects = "allow"
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -470,6 +630,8 @@ message = "render must not mutate model state"
         assert_eq!(cfg.write_owners.len(), 1);
         assert_eq!(cfg.write_owners[0].exempt_methods, ["__deepcopy__"]);
         assert_eq!(cfg.write_owners[0].forbidden_writers, ["pkg.render.*"]);
+        assert_eq!(cfg.write_owners[0].fresh_objects.as_deref(), Some("report"));
+        assert_eq!(cfg.write_owners[0].unresolved.as_deref(), Some("report"));
         assert_eq!(
             cfg.write_owners[0].message.as_deref(),
             Some("use Store.set_fields() instead")
@@ -514,6 +676,7 @@ message = "render must not mutate model state"
                 write_universe: vec!["DataModel.*".into()],
                 allowed_callees: vec!["pkg.logging.*".into()],
                 message: Some("render must not mutate model state".into()),
+                fresh_objects: Some("allow".into()),
             }
         );
         assert!(cfg.readonly_returns[0].deep);
@@ -529,6 +692,47 @@ message = "render must not mutate model state"
         );
         assert!(cfg.ecosystem.is_empty());
         assert_eq!(cfg.lint.relax_async_in_tests, None);
+    }
+
+    #[test]
+    fn requires_python_selects_the_oldest_admitted_supported_version() {
+        let v = |minor| Some(PythonVersion { major: 3, minor });
+        for (spec, expected) in [
+            (">=3.11", v(11)),
+            (">= 3.11.2, <4", v(11)),
+            (">3.11", v(11)),
+            (">3.11.20", v(11)),
+            ("==3.11.*", v(11)),
+            ("==3.11.5", v(11)),
+            ("===3.13.1", v(13)),
+            (">=3.8", v(11)),
+            (">=3", v(11)),
+            ("~=3.12", v(12)),
+            ("~=3.12.4", v(12)),
+            (">=3.11, !=3.11.*", v(12)),
+            (">=3.11,!=3.11.*,!=3.12.*", v(13)),
+            (">=3.12.0rc1", v(12)),
+            ("!=3.12.*", v(11)),
+            ("<3.12", v(11)),
+            ("<=3.11.0", v(11)),
+            (">=3.9, <3.11", v(11)),
+            ("<3.11", v(11)),
+            (">=3.16", v(15)),
+            (">=4", v(15)),
+            // No lower bound and the default admitted: the default.
+            ("<3.14", None),
+            ("<4", None),
+            ("!=3.11.*", None),
+            // Nothing admitted, or not a specifier.
+            (">=3.12, <3.12", None),
+            (">=3.11.4, <3.11.2", None),
+            (">=three", None),
+            (">=3.*", None),
+            ("~=3", None),
+            ("3.11", None),
+        ] {
+            assert_eq!(requires_python_lower_bound(spec), expected, "{spec:?}");
+        }
     }
 
     #[test]
@@ -578,6 +782,19 @@ excluded = true
 [[tool.heki.ecosystem]]
 symbol = "mypkg.model.Model.clone"
 copy-sanitizer = true
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.model.Model.detach"
+copy-sanitizer = "deep"
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.db.open"
+return-type = "sqlite3.Connection"
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.db.Store.transaction"
+effects = []
+sync-lock-or-tx = true
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -586,23 +803,39 @@ copy-sanitizer = true
             vec![
                 EcosystemOverride {
                     symbol: "mypkg.http.fetch".into(),
-                    effects: vec!["blocking_net".into(), "unpooled_client_alloc".into()],
+                    effects: Some(vec!["blocking_net".into(), "unpooled_client_alloc".into()]),
                     ..EcosystemOverride::default()
                 },
                 EcosystemOverride {
                     symbol: "mypkg.workers.in_thread".into(),
-                    async_safe: true,
+                    async_safe: Some(true),
                     offloads_blocking_arg: Some(0),
                     ..EcosystemOverride::default()
                 },
                 EcosystemOverride {
                     symbol: "mypkg.log.trace".into(),
-                    excluded: true,
+                    excluded: Some(true),
                     ..EcosystemOverride::default()
                 },
                 EcosystemOverride {
                     symbol: "mypkg.model.Model.clone".into(),
-                    copy_sanitizer: true,
+                    copy_sanitizer: Some(CopySanitizerSetting::Flag(true)),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.model.Model.detach".into(),
+                    copy_sanitizer: Some(CopySanitizerSetting::Depth("deep".into())),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.db.open".into(),
+                    return_type: Some("sqlite3.Connection".into()),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.db.Store.transaction".into(),
+                    effects: Some(Vec::new()),
+                    sync_lock_or_tx: Some(true),
                     ..EcosystemOverride::default()
                 },
             ]
@@ -619,8 +852,11 @@ effects = ["blocking_db", "db_query"]
         let cfg: HekiConfig = toml::from_str(raw).unwrap();
         assert_eq!(cfg.ecosystem.len(), 1);
         assert_eq!(cfg.ecosystem[0].symbol, "mypkg.db.run_query");
-        assert_eq!(cfg.ecosystem[0].effects, vec!["blocking_db", "db_query"]);
-        assert!(!cfg.ecosystem[0].async_safe);
+        assert_eq!(
+            cfg.ecosystem[0].effects,
+            Some(vec!["blocking_db".into(), "db_query".into()])
+        );
+        assert_eq!(cfg.ecosystem[0].async_safe, None);
         assert_eq!(cfg.ecosystem[0].offloads_blocking_arg, None);
     }
 }

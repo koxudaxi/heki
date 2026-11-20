@@ -531,8 +531,6 @@ dependencies = [
  "heki_rules",
  "heki_semantic",
  "heki_soundness",
- "ignore",
- "rayon",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -570,6 +568,7 @@ dependencies = [
  "heki_ir",
  "heki_kb",
  "heki_semantic",
+ "rayon",
  "rustc-hash",
  "serde",
 ]
@@ -623,13 +622,13 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower-lsp",
+ "tower-service",
 ]
 
 [[package]]
 name = "heki_profile"
 version = "0.1.0"
 dependencies = [
- "serde",
  "serde_json",
  "thiserror",
 ]

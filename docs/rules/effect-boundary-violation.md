@@ -23,8 +23,12 @@ count for a read.
     `sleep`, or `blocking` for all six: blocking calls of the ecosystem knowledge base
     (`requests.get`, `sqlite3`, `open`, `subprocess.run`, `time.sleep`, ...);
   - `writes-targets`: writes to the `Class.attr` entries of `write-targets` (and their
-    subclasses), in every form `MUT201` follows; a class's own initialization is no write
-    (constructing a fresh object runs its `__init__`), as for `MUT201`;
+    subclasses), or to one entry of the container an attribute holds (`Class.attr["key"]`), in
+    every form `MUT201` follows, through the receivers whose class `MUT201` sees (the items of
+    annotated containers included); a class's own initialization is no write (constructing a
+    fresh object runs its `__init__`), and neither is a write that constructs the object it
+    writes (`fresh-objects = "allow"`, the default; a write the reached function makes to an
+    object it allocated), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
     `obj.__dict__["attr"]`, a property getter that reads it); an initializer reading its own
@@ -44,30 +48,32 @@ Each scope function is searched breadth first over the project call graph, so th
 chain is a shortest one. The search does not enter:
 
 - `allowed-callees` (project functions or ecosystem symbols, matched like `scopes`): their
-  effects are allowed;
+  effects are allowed, also when a helper hands them a field it was given
+  (`helper(model.fields)` writes nothing when `helper` only passes `fields` to an allowed
+  callee that changes it);
 - other functions of the scopes: each reports its own violations, so a violation is reported
   once, at the boundary, not again by every scope function above it;
 - `async def` functions called without `await` (calling one only creates a coroutine), and
   generators that are not iterated (calling a generator function only creates the generator;
   its body is searched where it is iterated, as for `EFF101`, and a generator a function
   returns where the object it returns is iterated);
-- functions an offloading decorator runs on another thread (`@sync_to_async`, ...).
+- functions an offloading decorator or API runs on another thread (`@sync_to_async`,
+  `asyncio.to_thread(f)`, ...).
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope
 function that starts the shortest chain (or at the blocking call, write, read, or call itself),
 with the chain as related information; `mutates-params` is reported at the function's
 definition. The report counts every distinct site of that kind the scope function reaches
-(`sites` in JSON), so a Ratchet baseline sees a second blocking call or write below a recorded
+(`sites` in JSON; for `mutates-params`, every change of a parameter, in the body making it), so
+a Ratchet baseline sees a second blocking call, write, or parameter change below a recorded
 report.
 
-`allow-writes` is only as precise as heki's view of which object each write changes. On a
-196,000-line code generator whose 124 declared passes a run-time check confirms (no pass writes a
-fact it does not declare), one boundary per pass reported 12 passes (25 reports): writes to
-objects the pass constructs or copies, state that property getters write while rendering, and
-store operations whose writes depend on their arguments. With every local and property type
-supplied by a type checker, it reported 36 passes. Treat its reports as candidates to review, or
-narrow the universe, rather than gating on it.
+`allow-writes` is only as precise as heki's view of which object each write changes. A write
+heki cannot tell apart from a write of the pass's input is reported: state that a property
+getter writes while rendering, or a store operation whose writes depend on its arguments. A
+write that constructs the object it writes is not (`fresh-objects = "allow"`). Treat its
+reports as candidates to review, or narrow the universe, rather than gating on it.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -113,7 +119,9 @@ No automatic fix.
 ## Options
 - `[[tool.heki.effect-boundaries]]`:
   - `name`: the boundary name, used in messages and in the diagnostic target
-    (`pure-render:blocking_net`, `pure-render:DataModel.fields`, `pure-render:mutates-params`).
+    (`pure-render:blocking_net`, `pure-render:DataModel.fields` for a write,
+    `pure-render:reads:DataModel.fields`, `pure-render:calls:GenerationStore.*`,
+    `pure-render:mutates-params`), so a read and a write of one field are two reports.
   - `scopes`: modules, classes, or functions (dotted names or globs).
   - `forbid`: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
     `blocking-sync`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`,
@@ -126,6 +134,8 @@ No automatic fix.
     `allow-writes` names them; the diagnostic target is the entry, with a glob attribute replaced
     by the written one (`pass:DataModel.fields` for `DataModel.*`).
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
+  - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
+    they write count, as for `[[tool.heki.write-owners]]`.
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
   - `message`: appended to every message of the boundary.

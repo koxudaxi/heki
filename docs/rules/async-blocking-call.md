@@ -9,8 +9,17 @@ Direct or indirect blocking network/DB/subprocess/sleep call reachable from `asy
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
 synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), database drivers
-(`sqlite3`, `psycopg`, `pymongo`, ...), subprocesses waiting for completion, `time.sleep`, and
-other blocking synchronization.
+(`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
+`conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
+waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
+`queue.Queue.get()` / `put()`, `Future.result()`, `concurrent.futures.wait()`; a zero timeout or
+`blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
+on its own flag parameter and its caller passes `False`: `close(wait=False)` over
+`shutdown(wait=wait)`). A function SQLAlchemy's
+`AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
+its database I/O through the session or connection it receives is awaited for it, its other
+blocking calls are reported. Where an argument decides what a library call does, a literal
+one is followed: `pd.read_csv("https://...")` downloads the file.
 
 Reading a `@property` or `functools.cached_property` attribute of a project class runs its
 getter, so the read counts as a call of the getter (`self.client` whose getter opens a
@@ -24,16 +33,28 @@ function iterating the parameter it is handed. A generator returned by a plain f
 where its caller iterates it. `next(gen)` runs the body only up to its first `yield`, which heki
 does not separate from the rest, so it is not followed.
 
+A call whose arguments switch off the callee's branch with the blocking call is not followed
+into it: `load(name, cache=False)` does not reach the request under `if cache:`. This covers
+constant arguments and the literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty
+displays), and tests the caller has already made on the same value: a call made only when
+`isinstance(self._input, PathLike)` is false does not reach the callee's branch for
+`isinstance(self._input, PathLike)`. A generator's branches are decided at the call that
+creates it. Lazy initialization does not relax this rule: a connection opened once still
+blocks the event loop that once.
+
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several
-boundaries reaching the same blocking call are grouped once ten or more of them exist (in the
-editor, per file).
+boundaries reaching the same blocking call are shown as one report with a count once more than
+ten of them are shown (in the editor, per file). Inline suppressions and Ratchet baselines see
+every boundary: suppressing the first one leaves the others reported, and a baseline counts each.
 
 It does not report:
 
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
   `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
-  `asyncer.asyncify`, and project wrappers that forward their callable to them);
+  `asyncer.asyncify`, and project wrappers that forward their callable to them; what the
+  offloaded function does besides blocking still counts where it is called, such as its
+  queries in a loop for `EFF103`);
 - functions decorated to run on a thread: `@sync_to_async` (also as a factory,
   `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
   and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
@@ -45,8 +66,10 @@ It does not report:
 - `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
   `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
   `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
-- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`,
-  `sqlalchemy.create_engine(...)`) and calls that only build an object (`Redis.pipeline()`, a
+- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`, except
+  that a `mongodb+srv://` URI literal is resolved in the constructor unless `connect=False`,
+  `pymysql.connect(..., defer_connect=True)`, `sqlalchemy.create_engine(...)`) and calls that
+  only build an object (`Redis.pipeline()`, a
   lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
 - spawning a process without waiting (`subprocess.Popen(...)`);
 - coroutine functions that only run through a synchronous driver (`asyncio.run`, ...);

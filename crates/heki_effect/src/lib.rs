@@ -11,41 +11,45 @@
 //!
 //! Pipeline (docs/ANALYSIS_AND_KB_SPEC.md section 2):
 //! 1. `resolver`: module names, import maps, project declarations, 4-priority receiver types, CHA.
-//! 2. `summary`: local (one function) effect extraction into `EffectSummary` + `CallSite`s.
-//! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint.
-//! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
+//! 2. `summary`: local (one function) effect extraction into `EffectSummary` + `CallSite`s,
+//!    with the guards of each effect and call site (`guards`).
+//! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint; `guards` maps a
+//!    callee's guards across each call site (pruning the effects an argument switches off).
+//! 4. `report`: Boundary-Only Reporting.
 
 mod callgraph;
+mod construction;
 pub mod consumption;
 mod contracts;
+pub mod guards;
+mod infer;
 mod invalidation;
 pub mod readonly;
 mod report;
 pub mod resolver;
 mod scc;
 mod summary;
+pub mod types;
 
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
-    delegates_to_callers, is_initializer, reach_across,
+    builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
-pub use report::{
-    BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
-    boundary_reports_in, group_by_root_cause,
-};
+pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path,
-    resolve_relative_module, self_aliases,
+    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ModuleLayout, ProjectDecls,
+    ReadOnlyAttr, ReadOnlyKind, StrConstant, TypeCtx, Val, aliases_of, detect_src_layout,
+    func_qualname, module_name_for_path, resolve_relative_module, self_aliases,
 };
-pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
+pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
 
 use heki_ast::Span;
 use heki_ir::ModuleIr;
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::SemanticModel;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,13 +77,17 @@ pub struct AttrKeyPath {
     pub const_key: Option<String>,
 }
 
-/// Typed field write site used for declarative Write Ownership (`MUT201`).
-/// Kept for compatibility; derived from `EffectSummary::typed_field_write_sites`.
+/// A project-class attribute write a function reaches through any number of calls: the facts
+/// of a typed write site without its position, chain, and object (`EffectSummary::
+/// typed_field_writes`). A caller asks it whether a callee already sees the type of what it
+/// writes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldWrite {
     pub class_qualname: String,
     pub attr: String,
-    pub kind: String,
+    pub kind: WriteKind,
+    /// `TypedFieldWriteSite::fresh`.
+    pub fresh: bool,
 }
 
 /// One hop in an interprocedural call chain (for Boundary-Only & LSP RelatedLocation).
@@ -90,6 +98,27 @@ pub struct CallHop {
     pub callee: String,
     pub span: Span,
     pub path: PathBuf,
+}
+
+fn is_zero(bits: &u64) -> bool {
+    *bits == 0
+}
+
+/// A call chain kept in a summary. Propagation copies a callee's chains into its callers, so
+/// the hops are shared: a chain through a call points to the hop that call made, and extending
+/// a chain copies pointers. `Arc` compares, orders, and hashes by value, so the chains do too.
+pub type SharedChain = Vec<Arc<CallHop>>;
+
+/// The hops of a kept chain, owned (what a report shows).
+pub fn owned_chain(chain: &[Arc<CallHop>]) -> Vec<CallHop> {
+    chain.iter().map(|hop| CallHop::clone(hop)).collect()
+}
+
+/// Zero the position of every hop of a kept chain (a hop shared with other chains is copied).
+fn zero_hop_spans(chain: &mut [Arc<CallHop>]) {
+    for hop in chain {
+        Arc::make_mut(hop).span = Span { start: 0, end: 0 };
+    }
 }
 
 /// Write site detail for MUT201.
@@ -103,7 +132,7 @@ pub struct TypedFieldWriteSite {
     /// function that performs it: the summary owner when `via_chain` is empty, else the
     /// last hop's callee.
     pub span: Span,
-    pub via_chain: Vec<CallHop>,
+    pub via_chain: SharedChain,
     /// Parameters of the summary owner the written object may be, as itself (bit 0: a
     /// method's own `self`), mapped through every hop. Empty for an object that is no
     /// parameter: a fresh instance, an attribute of one, a call result.
@@ -112,6 +141,163 @@ pub struct TypedFieldWriteSite {
     /// constructs itself (`Model(...)`, `cls(...)`, through copies) and fills before anyone
     /// else holds it (`MUT108`).
     pub fresh: bool,
+    /// The constant key of the entry the write changes in the container held in `attr`
+    /// (`obj.attr["k"] = v`, `del obj.attr[KEY]`, `obj.attr.pop("k")`, `obj.attr["k"][i] = v`):
+    /// the first key below the attribute, a string literal or a module-level `Final` string
+    /// constant. `None` for every other write (rebinding, a computed key, `clear()`, ...).
+    pub key: Option<String>,
+    /// Whether the write is part of constructing the object it writes (`fresh-objects`).
+    pub construction: Construction,
+}
+
+/// How a function's new object was made: a shallow copy shares the containers of the original
+/// (`copy.copy(x)`, `x.model_copy()`), a constructor call or a deep copy owns its containers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewKind {
+    Copy,
+    Own,
+}
+
+/// Conditions on the summary owner's own calls under which an object it holds is new and kept by
+/// nobody else (local facts; propagation resolves them against the callees' final summaries).
+/// One pointer: most objects carry none, and every bound call argument has one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct NewCond(Option<Box<CondParts>>);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CondParts {
+    /// The object comes from calls of these project functions: each must return a new object
+    /// (`EffectSummary::returns_new`).
+    pub returns: Vec<FuncKey>,
+    /// Earlier calls handed the object to these `(callee, parameter)`: none may keep it
+    /// (`EffectSummary::retains_params`).
+    pub keeps: Vec<(FuncKey, u8)>,
+}
+
+impl NewCond {
+    /// The conditions, sorted and without duplicates.
+    pub fn new(mut returns: Vec<FuncKey>, mut keeps: Vec<(FuncKey, u8)>) -> Self {
+        returns.sort();
+        returns.dedup();
+        keeps.sort();
+        keeps.dedup();
+        if returns.is_empty() && keeps.is_empty() {
+            return Self(None);
+        }
+        Self(Some(Box::new(CondParts { returns, keeps })))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub fn returns(&self) -> &[FuncKey] {
+        self.0.as_ref().map_or(&[], |c| &c.returns)
+    }
+
+    pub fn keeps(&self) -> &[(FuncKey, u8)] {
+        self.0.as_ref().map_or(&[], |c| &c.keeps)
+    }
+
+    /// Both conditions.
+    pub fn and(&self, other: &Self) -> Self {
+        Self::new(
+            self.returns()
+                .iter()
+                .chain(other.returns())
+                .cloned()
+                .collect(),
+            self.keeps().iter().chain(other.keeps()).cloned().collect(),
+        )
+    }
+}
+
+/// Whether a write is part of constructing the object it writes: the object was allocated in the
+/// same call chain (a constructor call, a copy, a project function returning a new object) and
+/// nothing else holds it yet. A shallow copy's containers are the original's, so only rebinding
+/// its attributes constructs it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Construction {
+    #[default]
+    No,
+    Yes,
+    /// Construction when `cond` holds; `own`: the object must own its containers (an in-place
+    /// change). Local summaries only.
+    Pending {
+        cond: NewCond,
+        own: bool,
+    },
+    /// The object is the summary owner's parameter `param`, kept by nobody before the write (when
+    /// `cond` holds; final summaries carry no condition): construction at a caller that hands it
+    /// a new object.
+    Param {
+        param: u8,
+        own: bool,
+        cond: NewCond,
+    },
+}
+
+/// What a call argument is for the construction of the objects its callee writes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewArg {
+    #[default]
+    Old,
+    /// A new object of the caller, kept by nobody before the call when `cond` holds.
+    New { kind: NewKind, cond: NewCond },
+    /// The caller's parameter `param`, kept by nobody before the call when `cond` holds.
+    Param { param: u8, cond: NewCond },
+}
+
+/// Whether a function returns a new object nobody else holds (`New` with a condition only in
+/// local summaries).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnsNew {
+    #[default]
+    No,
+    New {
+        kind: NewKind,
+        cond: NewCond,
+    },
+}
+
+impl ReturnsNew {
+    /// The kind of a resolved `New` (a final summary's).
+    pub fn kind(&self) -> Option<NewKind> {
+        match self {
+            Self::New { kind, cond } if cond.is_empty() => Some(*kind),
+            _ => None,
+        }
+    }
+}
+
+/// A write heki cannot tie to a class (`MUT205`): an attribute written on an object of unknown
+/// class, or a computed attribute name written on a project class. A local fact, never
+/// propagated.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct UnresolvedWriteSite {
+    pub what: Unresolved,
+    pub kind: WriteKind,
+    pub span: Span,
+    /// Parameters of the writing function the written object may be (bit 0: `self`).
+    pub obj_params: u64,
+    /// Whether the write constructs the object it writes (`fresh-objects`; a parameter is left
+    /// to the callers, `Construction::No`).
+    pub construction: Construction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unresolved {
+    /// `obj.<attr>` written (rebound, deleted, or its container changed) on an object of
+    /// unknown class.
+    Receiver(String),
+    /// A computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on
+    /// an instance of this project class (fqn).
+    Name(String),
 }
 
 /// Typed field read site for declarative Read Ownership (`MUT203`). A local fact: it is never
@@ -159,6 +345,20 @@ pub enum WriteKind {
     SetAttr,
     DictDirect,
     IndirectHelper,
+    /// An entry of an entry of the container held in the attribute changed in place
+    /// (`obj.attr["k"][name] = v`, `obj.attr["k"].append(v)`): `TypedFieldWriteSite::key` is the
+    /// first key.
+    ItemMut,
+}
+
+impl WriteKind {
+    /// Rebinding the attribute (or deleting it): the container it held, if any, is unchanged.
+    pub fn rebinds(self) -> bool {
+        matches!(
+            self,
+            Self::DirectAttr | Self::AttrDelete | Self::SetAttr | Self::DictDirect
+        )
+    }
 }
 
 /// A named slot of an object: an attribute (`obj.a`) or a constant string key (`obj["a"]`).
@@ -179,6 +379,7 @@ impl WriteKind {
             Self::SetAttr => "set_attr",
             Self::DictDirect => "dict_direct",
             Self::IndirectHelper => "indirect_helper",
+            Self::ItemMut => "item_mut",
         }
     }
 }
@@ -190,11 +391,21 @@ pub struct EffectSummary {
     pub direct_exec_effects: BTreeSet<ExecEffectKind>,
     pub transitive_exec_effects: BTreeSet<ExecEffectKind>,
     /// Shortest known call chain reaching each effect (direct or transitive).
-    pub exec_chains: BTreeMap<ExecEffectKind, Vec<CallHop>>,
+    pub exec_chains: BTreeMap<ExecEffectKind, SharedChain>,
 
     // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
     pub mutates_params: u64,
+    /// Parameters the function itself types with a project class (`self` of a method, an
+    /// annotated parameter): its typed write sites, and those of its callees, already cover
+    /// every change of them, so a caller passing an instance adds no `IndirectHelper` site.
+    pub typed_params: u64,
     pub escapes_params: u64,
+    /// Parameters the function returns a quadratic reallocation of on some path: the result of
+    /// a `QuadraticRealloc` call taking the parameter (`return np.append(acc, x)`,
+    /// `return pd.concat([df, part])`), or of a project call doing so whose result it returns
+    /// (`DATA101` follows an accumulation through such helpers).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reallocates_params: u64,
     /// Parameters iterated to exhaustion on every path that returns normally when the body
     /// runs at the call (`MUT106`: passing a single-pass iterator consumes it).
     pub consumes_params: u64,
@@ -209,6 +420,17 @@ pub struct EffectSummary {
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> attributes` of the argument whose objects are changed, in place or
+    /// deeper (`p.a.append(...)`, `p.a.b = v`), also through local copies and calls: the
+    /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`). A
+    /// shallow copy of the argument shares exactly these objects (`MUT202`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub changed_param_attrs: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> spans` of the function's own changes of the argument (a local fact,
+    /// never propagated: a rule walking the call graph counts each change once, in the body
+    /// making it; `EFF201` `mutates-params`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_change_sites: BTreeMap<u8, BTreeSet<Span>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself
     /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
     /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
@@ -224,7 +446,14 @@ pub struct EffectSummary {
     pub returns_self_attrs: BTreeSet<String>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
     pub invalidates_cached: BTreeSet<String>,
+    /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
+    /// The function's own writes of project-class attributes, the `IndirectHelper` writes of
+    /// its own call sites, and the write sites of its private callees ([`delegates_to_callers`]):
+    /// a private helper hands its writes to its callers, a public function reports its own
+    /// (`MUT201` reports at the outermost function of a chain of private helpers, `EFF201`
+    /// walks the call graph itself), so a public callee's write sites are not copied into its
+    /// callers; [`Self::typed_field_writes`] still has their facts.
     pub typed_field_write_sites: BTreeSet<TypedFieldWriteSite>,
     /// The function's own reads of project-class attributes (`MUT203`; never propagated).
     pub typed_field_read_sites: BTreeSet<TypedFieldReadSite>,
@@ -242,6 +471,15 @@ pub struct EffectSummary {
     /// Writes to `invalidation` targets that some normal path leaves unannounced: the function's
     /// own, and those the private helpers it calls pass up (`MUT109`; propagated).
     pub unmet_invalidation: BTreeSet<UnmetWrite>,
+    /// Parameters the function may keep beyond the call: stored in an object, a container, a
+    /// global, or a closure cell, yielded, captured by a closure, handed to code heki does not
+    /// follow, or to a project function that keeps them. Reading, writing, or passing a
+    /// parameter to project functions that do not keep it keeps nothing (`fresh-objects`).
+    pub retains_params: u64,
+    /// The function returns a new object that nothing else holds (`fresh-objects`).
+    pub returns_new: ReturnsNew,
+    /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
+    pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -266,26 +504,130 @@ pub struct EffectSummary {
     /// Module-relative class qualname of a method (`Outer.Inner`), as in `IrFunction`.
     pub owner_class_qualname: Option<String>,
     pub decorators: Vec<String>,
+
+    /// The guards every occurrence of an execution effect depends on (`guards`); an effect
+    /// without an entry runs whenever the function does.
+    pub exec_guards: BTreeMap<ExecEffectKind, EffectGuards>,
+
+    /// Execution effects an ecosystem entry naming the function keeps from its callers: every
+    /// one when it is `excluded`, the blocking ones when it is `async_safe` (applied to the
+    /// final summary, whatever the callees bring).
+    pub declared_hidden: BTreeSet<ExecEffectKind>,
+}
+
+/// An input of a function that a guard tests: parameter `param` itself, or its attribute
+/// `attr` (one the function never assigns).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GuardSubject {
+    pub param: u8,
+    pub attr: Option<String>,
+}
+
+/// What a guard tests about its subject.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardTest {
+    /// `if x:`.
+    Truthy,
+    /// `if x is None:` (`x == None`).
+    IsNone,
+    /// `isinstance(x, C)` / `isinstance(x, (C, D))`: the fully qualified classes, sorted.
+    IsInstance(Vec<String>),
+}
+
+/// A test of an input, and the outcome (`holds`) an effect needs to run.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct InputGuard {
+    pub subject: GuardSubject,
+    pub test: GuardTest,
+    pub holds: bool,
+}
+
+/// The guards common to every occurrence of one execution effect in a function.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectGuards {
+    /// Tests of the function's inputs that every occurrence needs.
+    pub inputs: BTreeSet<InputGuard>,
+    /// Lazy initialization: every occurrence runs only while an attribute of an object is
+    /// unset, and the function then sets it, so it runs at most once per object. The objects
+    /// come from the parameters in this mask (`0`: from none, such as a pooled connection or a
+    /// module global). `None`: some occurrence runs on every call.
+    pub once_per: Option<u64>,
+}
+
+/// The builtin class of a constant or display argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstClass {
+    None,
+    Bool,
+    Int,
+    Float,
+    Str,
+    Bytes,
+    List,
+    Tuple,
+    Set,
+    Dict,
+    /// `...`, a complex number.
+    Other,
+}
+
+/// A constant or display argument (or a literal default): its class and, where the value
+/// decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConstArg {
+    pub class: ConstClass,
+    pub truthy: Option<bool>,
+}
+
+/// What a caller knows about the value of a callee parameter at one call, when the argument
+/// binds the parameter exactly: the receiver, a keyword, a position before any `*` unpacking,
+/// or the literal default of an omitted parameter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgBinding {
+    pub constant: Option<ConstArg>,
+    /// The caller's own input the argument is (a guard subject of the caller).
+    pub input: Option<GuardSubject>,
+    /// Caller parameters the argument may come from: itself, its attributes and elements, and
+    /// the results of calls on them.
+    pub derived_params: u64,
+    /// The argument may be an object the caller constructs, or come from one.
+    pub derived_fresh: bool,
+    /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations
+    /// the argument stays one object: those that do not construct it.
+    pub stays_in_loops: u64,
 }
 
 impl EffectSummary {
+    /// Drop the execution effects in `hidden`, with their chains and guards, here and in what
+    /// iterating the returned object runs.
+    pub(crate) fn hide_exec_effects(&mut self, hidden: &BTreeSet<ExecEffectKind>) {
+        if hidden.is_empty() {
+            return;
+        }
+        self.direct_exec_effects.retain(|e| !hidden.contains(e));
+        self.transitive_exec_effects.retain(|e| !hidden.contains(e));
+        self.exec_chains.retain(|e, _| !hidden.contains(e));
+        self.exec_guards.retain(|e, _| !hidden.contains(e));
+        if let Some(iterated) = &mut self.iterated {
+            iterated.hide_exec_effects(hidden);
+        }
+    }
+
     /// Copy with every source location zeroed: Early Cutoff compares facts, not positions,
     /// so an edit that only moves code does not notify callers.
     pub fn without_locations(&self) -> Self {
         let mut out = self.clone();
         for chain in out.exec_chains.values_mut() {
-            for hop in chain {
-                hop.span = Span { start: 0, end: 0 };
-            }
+            zero_hop_spans(chain);
         }
         out.typed_field_write_sites = out
             .typed_field_write_sites
             .into_iter()
             .map(|mut site| {
                 site.span = Span { start: 0, end: 0 };
-                for hop in &mut site.via_chain {
-                    hop.span = Span { start: 0, end: 0 };
-                }
+                zero_hop_spans(&mut site.via_chain);
                 site
             })
             .collect();
@@ -297,21 +639,26 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.param_change_sites.clear();
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
-            for hop in &mut r.chain {
-                hop.span = Span { start: 0, end: 0 };
-            }
+            zero_hop_spans(&mut r.chain);
         }
+        out.unresolved_write_sites = out
+            .unresolved_write_sites
+            .into_iter()
+            .map(|mut site| {
+                site.span = Span { start: 0, end: 0 };
+                site
+            })
+            .collect();
         out.unmet_invalidation = out
             .unmet_invalidation
             .into_iter()
             .map(|mut w| {
                 w.span = Span { start: 0, end: 0 };
                 w.origin = Span { start: 0, end: 0 };
-                for hop in &mut w.via_chain {
-                    hop.span = Span { start: 0, end: 0 };
-                }
+                zero_hop_spans(&mut w.via_chain);
                 w
             })
             .collect();
@@ -325,25 +672,29 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites are left out: read sites are never propagated.
+    /// sites, parameter changes, and unresolved writes are left out: those are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
-        let without_reads = |s: &Self| Self {
+        let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
+            param_change_sites: BTreeMap::new(),
+            unresolved_write_sites: BTreeSet::new(),
             ..s.clone()
         };
-        without_reads(self) == without_reads(other) && self.same_facts(other)
+        without_local(self) == without_local(other) && self.same_facts(other)
     }
 
+    /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
+    /// of the callees).
     pub(crate) fn refresh_typed_field_writes(&mut self) {
-        self.typed_field_writes = self
-            .typed_field_write_sites
-            .iter()
-            .map(|s| TypedFieldWrite {
+        for s in &self.typed_field_write_sites {
+            let fact = TypedFieldWrite {
                 class_qualname: s.class_qualname.clone(),
                 attr: s.attr.clone(),
-                kind: s.kind.as_str().to_owned(),
-            })
-            .collect();
+                kind: s.kind,
+                fresh: s.fresh,
+            };
+            self.typed_field_writes.insert(fact);
+        }
         if let Some(i) = &mut self.iterated {
             i.refresh_typed_field_writes();
         }
@@ -413,6 +764,27 @@ pub struct ArgOrigin {
     /// Where the argument comes from among the objects that existed before the call (`MUT109`;
     /// only computed when an `invalidation` contract is configured).
     pub reach: Reach,
+    /// The `invalidation` targets a callee may write through the argument without knowing them
+    /// (`MUT109`; `None` unless a contract names `typed_field`, or an attribute of
+    /// `typed_instance`'s class).
+    pub targets: Option<Box<ArgTargets>>,
+    /// What the caller knows about the parameter's value (`None`: not bound exactly).
+    pub binding: Option<ArgBinding>,
+    /// The argument (for `typed_field`, the object holding the attribute) is a new object of the
+    /// caller, or its parameter, that nothing kept before this call (`fresh-objects`).
+    pub new_object: NewArg,
+}
+
+/// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
+/// contracts, which propagation cannot look up (it has no class hierarchy).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgTargets {
+    /// The contracts whose targets include the field the argument is (`typed_field`): changing
+    /// the value in place writes it.
+    pub field: u64,
+    /// `typed_instance` and its project bases when a contract names an attribute of one of
+    /// them (empty otherwise), for [`Contracts::target_of`] with the attributes a callee writes.
+    pub classes: Vec<String>,
 }
 
 impl ArgOrigin {
@@ -504,6 +876,43 @@ pub struct CallSite {
     /// What follows the call on every normal path of the caller (`MUT109`; only computed when
     /// an `invalidation` contract is configured).
     pub flow: Option<SiteFlow>,
+    /// Tests of the caller's inputs that hold whenever the call runs (`guards`).
+    pub guards: Vec<InputGuard>,
+    /// The call runs inside a lazy initialization of the caller (`EffectGuards::once_per`).
+    pub once_per: Option<u64>,
+    /// The loops around the call (bit `d - 1`: the one at depth `d`) in each iteration of which
+    /// a lazy initialization of the caller around the call is tested, on an object the loop does
+    /// not construct: across them, its effects run at most once (`EFF102` / `EFF103`).
+    pub once_loops: u64,
+    /// How the callees run when an API runs them for the caller (`Runner`).
+    pub runner: Runner,
+}
+
+/// How an API runs a callable it is handed ([`CallSite::runner`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Runner {
+    /// Called directly, on the caller's thread.
+    #[default]
+    Caller,
+    /// On a worker thread: an offloading API's callable (`asyncio.to_thread(f, x)`), a function
+    /// decorated with `@sync_to_async`. Everything it does happens, but its blocking effects
+    /// never block the caller's thread.
+    Worker,
+    /// On the caller's thread with a synchronous facade over an async database connection
+    /// (SQLAlchemy's `AsyncSession.run_sync(f)`, Layer 2 `sync_facade_arg`): its database I/O
+    /// through the facade is awaited for it; its other blocking calls block.
+    SyncFacade,
+}
+
+impl CallSite {
+    /// Whether the effect `e` of the callees does not block the caller's thread here.
+    pub fn hides(&self, e: ExecEffectKind) -> bool {
+        match self.runner {
+            Runner::Caller => false,
+            Runner::Worker => e.blocks(),
+            Runner::SyncFacade => e == ExecEffectKind::BlockingDb,
+        }
+    }
 }
 
 impl CallSite {
@@ -538,23 +947,35 @@ pub struct FileSummary {
     pub path: PathBuf,
     pub module_name: String,
     pub content_hash: String,
-    /// Final (interprocedurally propagated) summaries; filled by `ProjectIndex`.
-    pub functions: FxHashMap<FuncKey, EffectSummary>,
-    /// Project call edges `(caller, callee, span)` (reverse call graph source).
-    pub call_edges: Vec<(FuncKey, FuncKey, Span)>,
+    /// Final (interprocedurally propagated) summaries; filled by `ProjectIndex`. A final summary
+    /// that propagation leaves equal to the local one is that one.
+    pub functions: FxHashMap<FuncKey, Arc<EffectSummary>>,
     /// Local (one-function) summaries before propagation.
-    pub local_functions: FxHashMap<FuncKey, EffectSummary>,
+    pub local_functions: FxHashMap<FuncKey, Arc<EffectSummary>>,
     pub call_sites: Vec<CallSite>,
-    /// Declarations other modules need for name and receiver resolution.
-    pub decls: ModuleDecls,
+    /// Declarations other modules need for name and receiver resolution (shared with the
+    /// project declarations built from the index).
+    pub decls: Arc<ModuleDecls>,
     /// What summarizing the file read of the project declarations (completing its own
     /// declarations included): a change of any of these keys can change the summary. Recorded
-    /// for the language server's index only (`analyze_project_with_reads`, the incremental
+    /// for the language server's index only (`summarize_project_with_reads`, the incremental
     /// updates); empty otherwise.
     pub decl_reads: DeclKeys,
     /// The `MUT109` flow facts of the file's functions (local, IR-free; empty unless an
     /// `invalidation` contract is configured).
     pub flows: FxHashMap<FuncKey, FuncFlow>,
+}
+
+impl FileSummary {
+    /// Project call edges `(caller, callee, span)`, the source of the reverse call graph: every
+    /// resolved project callee of every call site.
+    pub fn call_edges(&self) -> impl Iterator<Item = (&FuncKey, &FuncKey, Span)> + '_ {
+        self.call_sites.iter().flat_map(|site| {
+            site.project_callees()
+                .iter()
+                .map(move |bc| (&site.caller, &bc.callee, site.span))
+        })
+    }
 }
 
 /// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
@@ -574,6 +995,8 @@ pub struct ModuleInput<'a> {
     pub path: PathBuf,
     pub module_name: String,
     pub is_package: bool,
+    /// [`ModuleLayout::root_is_package`] of the project.
+    pub root_is_package: bool,
     pub content_hash: String,
     pub semantic: &'a SemanticModel,
     pub ir: &'a ModuleIr,
@@ -589,6 +1012,10 @@ pub struct SiteEffect {
     pub callee: Option<FuncKey>,
     /// The effect comes from an awaited / driven `async def` callee (its own body).
     pub callee_is_async: bool,
+    /// Lazy initialization: the loops around the call (bit `d - 1`: the one at depth `d`)
+    /// across whose iterations the effect runs at most once per object, and the objects stay
+    /// the same (`EFF102` / `EFF103`).
+    pub once_loops: u64,
 }
 
 /// Incremental project-wide summary & reverse call-graph index.
@@ -600,16 +1027,29 @@ pub struct ProjectIndex {
     pub(crate) func_files: FxHashMap<FuncKey, PathBuf>,
     /// The declared contracts the summaries depend on (`None`: no contract facts).
     pub(crate) contracts: Option<Arc<dyn Contracts>>,
+    /// Propagation leaves typed writes where they are made: callers get neither the write sites
+    /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
+    /// enabled rule reads them; every function keeps its own.
+    pub(crate) skips_typed_writes: bool,
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
-pub(crate) fn is_stub(path: &Path) -> bool {
+pub fn is_stub(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "pyi")
+}
+
+/// Which of the files sharing a module name defines it, the greatest winning: an
+/// implementation before its `.pyi` stub, a package (`pkg/__init__.py`) before a module file of
+/// the same name (`pkg.py`, which Python never imports next to it), then the greater path. Full
+/// and incremental analysis both pick the owner this way, whatever order they meet the files in.
+pub(crate) fn module_precedence(path: &Path) -> (bool, bool, &Path) {
+    let package = path.file_stem().is_some_and(|s| s == "__init__");
+    (!is_stub(path), package, path)
 }
 
 /// Summarize every module of a project and propagate effects to a fixpoint.
 pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
-    analyze(modules, kb, false, None)
+    analyze_project_with(modules, kb, None)
 }
 
 /// [`analyze_project`] with the declared contracts the summaries depend on (`MUT202` producers,
@@ -619,32 +1059,63 @@ pub fn analyze_project_with(
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
 ) -> ProjectIndex {
-    analyze(modules, kb, false, contracts)
+    analyze_project_for(modules, kb, contracts, TypedWrites::Propagated)
 }
 
-/// [`analyze_project_with`] recording what each file's summary read of the project declarations
-/// (`FileSummary::decl_reads`), for an index that incremental updates keep current.
-pub fn analyze_project_with_reads(
+/// [`analyze_project_with`], propagating typed writes only when a rule reads them.
+pub fn analyze_project_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
+    typed_writes: TypedWrites,
 ) -> ProjectIndex {
-    analyze(modules, kb, true, contracts)
+    let files = summarize(modules, kb, false, contracts.as_deref());
+    ProjectIndex::build_for(files, contracts, typed_writes)
 }
 
-fn analyze(
+/// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
+/// `typed_field_writes`) from callees to callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedWrites {
+    Propagated,
+    /// No enabled rule reads propagated typed writes: each function keeps its own only.
+    Local,
+}
+
+/// The local summaries of every module of a project with `contracts`, recording what each read
+/// of the project declarations (`FileSummary::decl_reads`), for an index that incremental
+/// updates keep current. [`ProjectIndex::build_with`] propagates them; it needs no IR, so the
+/// caller can drop the modules first.
+pub fn summarize_project_with_reads(
+    modules: &[ModuleInput<'_>],
+    kb: &EffectiveEcosystemKb,
+    contracts: Option<&dyn Contracts>,
+) -> Vec<FileSummary> {
+    summarize(modules, kb, true, contracts)
+}
+
+fn summarize(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     track: bool,
-    contracts: Option<Arc<dyn Contracts>>,
-) -> ProjectIndex {
+    contracts: Option<&dyn Contracts>,
+) -> Vec<FileSummary> {
     let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
-    let files = modules
-        .iter()
+    if track {
+        // Every module's reads go to the one recorder of `decls`: one module at a time.
+        return modules
+            .iter()
+            .zip(own)
+            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+            .collect();
+    }
+    // A module's local summary depends on it and the declarations only (indexed collect: input
+    // order).
+    modules
+        .par_iter()
         .zip(own)
-        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts.as_deref()))
-        .collect();
-    ProjectIndex::build_with(files, contracts)
+        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+        .collect()
 }
 
 impl ProjectIndex {
@@ -653,12 +1124,28 @@ impl ProjectIndex {
         Self::build_with(files, None)
     }
 
+    /// Whether callers got the typed writes of their callees ([`TypedWrites`]).
+    pub fn propagates_typed_writes(&self) -> bool {
+        !self.skips_typed_writes
+    }
+
     /// [`Self::build`] for summaries extracted with `contracts`.
-    pub fn build_with(mut files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
-        // Index stubs first so a sibling `.py` implementation always owns the module's symbols.
-        files.sort_by_key(|f| !is_stub(&f.path));
+    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
+        Self::build_for(files, contracts, TypedWrites::Propagated)
+    }
+
+    /// [`Self::build_with`], propagating typed writes as `typed_writes` says; incremental
+    /// updates keep doing so.
+    pub fn build_for(
+        mut files: Vec<FileSummary>,
+        contracts: Option<Arc<dyn Contracts>>,
+        typed_writes: TypedWrites,
+    ) -> Self {
+        // The owners of shared module names last (`add_file_links` keeps them either way).
+        files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
+            skips_typed_writes: typed_writes == TypedWrites::Local,
             ..Self::default()
         };
         for mut file in files {
@@ -674,8 +1161,8 @@ impl ProjectIndex {
 
     /// Effects that run at `site` (in file `path`): the Layer 2 API's effects after the
     /// `is_awaited` filter, or the direct and transitive effects of each project callee's facts
-    /// the site runs in its caller's body ([`Self::delivery`]). Shared by Boundary-Only
-    /// Reporting and the loop rules.
+    /// the site runs in its caller's body ([`Self::delivery`]) whose guards the call does not
+    /// decide against (`guards`). Shared by Boundary-Only Reporting and the loop rules.
     pub fn site_effects(&self, path: &Path, site: &CallSite) -> Vec<SiteEffect> {
         let mut out = Vec::new();
         match &site.target {
@@ -688,6 +1175,7 @@ impl ProjectIndex {
                         chain: vec![callgraph::site_hop(site, path, symbol.clone())],
                         callee: None,
                         callee_is_async: false,
+                        once_loops: site.once_loops,
                     });
                 }
             }
@@ -711,12 +1199,23 @@ impl ProjectIndex {
                         .copied()
                         .collect();
                     for e in effects {
+                        if site.hides(e) {
+                            continue;
+                        }
+                        // A guard the call decides against: the effect does not run here.
+                        let Some(through) =
+                            guards::through_call(site, bc, facts.exec_guards.get(&e))
+                        else {
+                            continue;
+                        };
                         let tail = facts.exec_chains.get(&e).map_or(&[][..], Vec::as_slice);
+                        let chain = callgraph::extend_chain(&lead, tail, rewrite);
                         out.push(SiteEffect {
                             effect: e,
-                            chain: callgraph::extend_chain(&lead, tail, rewrite),
+                            chain: owned_chain(&chain),
                             callee: Some(bc.callee.clone()),
                             callee_is_async: callee.is_async,
+                            once_loops: through.once_loops,
                         });
                     }
                 }
@@ -736,6 +1235,10 @@ impl ProjectIndex {
 
     /// Final summary of `func`, if known.
     pub fn summary(&self, func: &FuncKey) -> Option<&EffectSummary> {
+        self.shared_summary(func).map(Arc::as_ref)
+    }
+
+    fn shared_summary(&self, func: &FuncKey) -> Option<&Arc<EffectSummary>> {
         self.files
             .get(self.func_files.get(func)?)?
             .functions
@@ -743,7 +1246,7 @@ impl ProjectIndex {
     }
 
     /// Declarations of every indexed module (for re-summarizing an edited module), preferring
-    /// `.py` implementations over `.pyi` stubs sharing a module name.
+    /// the owner ([`module_precedence`]) among the files sharing a module name.
     pub fn project_decls(&self) -> ProjectDecls {
         ProjectDecls::new(self.preferred_decls())
     }
@@ -753,28 +1256,22 @@ impl ProjectIndex {
         DeclPasses::new(self.preferred_decls())
     }
 
-    /// Every module's declarations, `.pyi` stubs first (a later `.py` sharing the module name
-    /// replaces them).
-    fn preferred_decls(&self) -> Vec<ModuleDecls> {
-        let mut entries: Vec<(bool, ModuleDecls)> = self
-            .files
-            .values()
-            .map(|f| (is_stub(&f.path), f.decls.clone()))
-            .collect();
-        entries.sort_by_key(|(stub, _)| !*stub);
-        entries.into_iter().map(|(_, d)| d).collect()
+    /// Every module's declarations in [`module_precedence`] order (a later file sharing a
+    /// module name replaces the earlier ones).
+    fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
+        let mut files: Vec<&FileSummary> = self.files.values().collect();
+        files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
+        files.into_iter().map(|f| Arc::clone(&f.decls)).collect()
     }
 
-    /// Preferred declarations currently indexed for `module_name` (`.py` over `.pyi`).
-    pub fn module_decls(&self, module_name: &str) -> Option<ModuleDecls> {
-        let mut stub = None;
-        for f in self.files.values().filter(|f| f.module_name == module_name) {
-            if !is_stub(&f.path) {
-                return Some(f.decls.clone());
-            }
-            stub = Some(f.decls.clone());
-        }
-        stub
+    /// Declarations currently indexed for `module_name`: those of its owner
+    /// ([`module_precedence`]).
+    pub fn module_decls(&self, module_name: &str) -> Option<Arc<ModuleDecls>> {
+        self.files
+            .values()
+            .filter(|f| f.module_name == module_name)
+            .max_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)))
+            .map(|f| Arc::clone(&f.decls))
     }
 
     /// Re-summarize one edited module against the index's declarations and update it.
@@ -783,11 +1280,11 @@ impl ProjectIndex {
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
     ) -> IncrementalUpdate {
-        let others: Vec<(bool, ModuleDecls)> = self
+        let others: Vec<(PathBuf, Arc<ModuleDecls>)> = self
             .files
             .values()
             .filter(|f| f.path != input.path)
-            .map(|f| (is_stub(&f.path), f.decls.clone()))
+            .map(|f| (f.path.clone(), Arc::clone(&f.decls)))
             .collect();
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
@@ -807,11 +1304,13 @@ impl ProjectIndex {
         kb: &EffectiveEcosystemKb,
         decls: &mut DeclPasses,
     ) -> (IncrementalUpdate, DeclKeys) {
-        let masked_by_impl = is_stub(&input.path)
-            && self.files.values().any(|f| {
-                f.module_name == input.module_name && f.path != input.path && !is_stub(&f.path)
-            });
-        let (changed, own) = if masked_by_impl {
+        // Another file owns the module name: its declarations stay the module's.
+        let masked = self.files.values().any(|f| {
+            f.module_name == input.module_name
+                && f.path != input.path
+                && module_precedence(&f.path) > module_precedence(&input.path)
+        });
+        let (changed, own) = if masked {
             (
                 DeclKeys::default(),
                 resolver::own_module_decls(input, kb, decls),
@@ -833,13 +1332,13 @@ impl ProjectIndex {
 
     /// Update a single file's summary and report whether downstream callers are affected.
     ///
-    /// `new_file` carries local facts (`local_functions`, `call_sites`, `call_edges`); its
+    /// `new_file` carries local facts (`local_functions`, `call_sites`); its
     /// final summaries are recomputed here. Callers are re-propagated only when a final
     /// summary of the file changed (location-insensitively) — **Early Cutoff**.
     pub fn update_file(&mut self, mut new_file: FileSummary) -> IncrementalUpdate {
         let path = new_file.path.clone();
         let old_file = self.files.remove(&path);
-        let mut previous: FxHashMap<FuncKey, EffectSummary> = FxHashMap::default();
+        let mut previous: FxHashMap<FuncKey, Arc<EffectSummary>> = FxHashMap::default();
         let mut owned_before: FxHashSet<FuncKey> = FxHashSet::default();
         if let Some(old) = &old_file {
             for (k, v) in &old.functions {
@@ -863,21 +1362,21 @@ impl ProjectIndex {
         let mut sync_candidates: FxHashSet<FuncKey> = own.clone();
         for file in old_file.iter().chain(std::iter::once(&new_file)) {
             sync_candidates.extend(file.local_functions.keys().cloned());
-            for (_, callee, _) in &file.call_edges {
+            for (_, callee, _) in file.call_edges() {
                 sync_candidates.insert(callee.clone());
             }
         }
         self.files.insert(path, new_file);
-        // A function the file stopped defining falls back to another file defining it (a
-        // `.pyi` stub next to its `.py` implementation), as a full build links it.
+        // A function the file stopped defining falls back to the highest-ranked other file
+        // defining it (a `.pyi` stub next to its `.py` implementation), as a full build links it.
         for func in owned_before.iter().filter(|f| !own.contains(*f)) {
             let fallback = self
                 .files
                 .values()
                 .filter(|f| f.local_functions.contains_key(func))
-                .map(|f| (is_stub(&f.path), &f.path))
-                .min();
-            if let Some((_, other)) = fallback {
+                .map(|f| &f.path)
+                .max_by(|a, b| module_precedence(a).cmp(&module_precedence(b)));
+            if let Some(other) = fallback {
                 self.func_files.insert(func.clone(), other.clone());
             }
         }
@@ -887,9 +1386,9 @@ impl ProjectIndex {
         let mut region = callgraph::scc_closure(self, &own);
         for func in &region {
             if !own.contains(func)
-                && let Some(s) = self.summary(func)
+                && let Some(s) = self.shared_summary(func)
             {
-                previous.insert(func.clone(), s.clone());
+                previous.insert(func.clone(), Arc::clone(s));
             }
         }
         callgraph::reset_to_local(self, &region);
@@ -1017,14 +1516,15 @@ impl ProjectIndex {
     }
 
     fn add_file_links(&mut self, file: &FileSummary) {
-        let file_is_stub = is_stub(&file.path);
         for func in file.local_functions.keys() {
-            let keep_impl = file_is_stub && self.func_files.get(func).is_some_and(|p| !is_stub(p));
-            if !keep_impl {
+            let owned_elsewhere = self.func_files.get(func).is_some_and(|p| {
+                p != &file.path && module_precedence(p) > module_precedence(&file.path)
+            });
+            if !owned_elsewhere {
                 self.func_files.insert(func.clone(), file.path.clone());
             }
         }
-        for (caller, callee, _) in &file.call_edges {
+        for (caller, callee, _) in file.call_edges() {
             self.reverse_call_graph
                 .entry(callee.clone())
                 .or_default()
@@ -1038,7 +1538,7 @@ impl ProjectIndex {
                 self.func_files.remove(func);
             }
         }
-        for (caller, callee, _) in &file.call_edges {
+        for (caller, callee, _) in file.call_edges() {
             if let Some(set) = self.reverse_call_graph.get_mut(callee) {
                 set.remove(caller);
                 if set.is_empty() {

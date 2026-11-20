@@ -124,6 +124,11 @@ fn binding<'a>(scope: &'a Value, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no binding `{name}` in `{}`", scope["name"]))
 }
 
+/// The names a scope declares `global` (`"global_decls"`) or `nonlocal` (`"nonlocal_decls"`).
+fn declared<'a>(scope: &'a Value, which: &str) -> Vec<&'a str> {
+    scope.get(which).map_or_else(Vec::new, strs)
+}
+
 fn reads(scope: &Value) -> BTreeMap<&str, &str> {
     scope["reads"]
         .as_array()
@@ -345,7 +350,7 @@ fn semantic_functions_closures_globals_and_mangling() {
 
     // `nonlocal` (twice) and free reads, also through an intermediate function.
     let bump = scope(&m, &["function closures", "function bump"]);
-    assert_eq!(binding(bump, "counter")["is_nonlocal_decl"], true);
+    assert_eq!(declared(bump, "nonlocal_decls"), ["counter"]);
     assert_eq!(reads(bump)["counter"], "enclosing");
     let later = scope(&m, &["function closures", "function reads_later"]);
     assert_eq!(reads(later)["defined_later"], "enclosing");
@@ -355,22 +360,23 @@ fn semantic_functions_closures_globals_and_mangling() {
     );
     assert_eq!(reads(innermost)["counter"], "enclosing");
 
-    // `global` (twice): module-bound names read as globals, others as builtins, also from an
-    // inner function of the declaring one.
+    // `global` (twice): a name the module binds, or a function writes under `global`, is a
+    // module global, also from an inner function of the declaring one.
     let globals = scope(&m, &["function global_forms"]);
-    assert_eq!(binding(globals, "COUNTER")["is_global_decl"], true);
+    assert!(declared(globals, "global_decls").contains(&"COUNTER"));
     assert_eq!(reads(globals)["COUNTER"], "global");
-    assert_eq!(reads(globals)["FRESH_GLOBAL"], "builtin");
+    assert_eq!(reads(globals)["FRESH_GLOBAL"], "global");
     let inner = scope(&m, &["function enclosing_global", "function inner"]);
     assert_eq!(reads(inner)["COUNTER"], "global");
-    assert_eq!(reads(inner)["ANOTHER_FRESH"], "builtin");
+    assert_eq!(reads(inner)["ANOTHER_FRESH"], "global");
 
     // Private name mangling: class bodies and their methods, nested classes, but not
     // all-underscore class names nor module-level names.
     let forms = scope(&m, &["class ClassForms"]);
     assert!(bindings(forms).contains("_ClassForms__private"));
     let method = scope(&m, &["class ClassForms", "function method"]);
-    assert_eq!(reads(method)["_ClassForms__class_level_name"], "builtin");
+    // The tour's `from os.path import *` may bind any name: no read of it is a known builtin.
+    assert_eq!(reads(method)["_ClassForms__class_level_name"], "global");
     let nested = scope(&m, &["class ClassForms", "class Nested"]);
     assert!(bindings(nested).contains("_Nested__inner"));
     assert!(bindings(scope(&m, &["class _"])).contains("__kept"));
@@ -404,6 +410,292 @@ fn semantic_functions_closures_globals_and_mangling() {
 }
 
 #[test]
+fn semantic_declarations_bind_nothing_by_themselves() {
+    let source = "\
+def reads_declared_global():
+    global ONLY_READ
+    return ONLY_READ
+
+def read_only_nonlocal():
+    y = 1
+    def inner():
+        nonlocal y
+        return y
+    return inner
+
+def comprehension_target_under_global(items):
+    global shadowed
+    [shadowed for shadowed in items]
+    return shadowed
+";
+    let m = dump_source("dump-semantic", "fe_declarations", source, "py312");
+    let reads_global = scope(&m, &["function reads_declared_global"]);
+    assert!(bindings(reads_global).is_empty());
+    assert_eq!(declared(reads_global, "global_decls"), ["ONLY_READ"]);
+    let inner = scope(&m, &["function read_only_nonlocal", "function inner"]);
+    assert!(bindings(inner).is_empty());
+    assert_eq!(declared(inner, "nonlocal_decls"), ["y"]);
+    assert_eq!(reads(inner)["y"], "enclosing");
+    // The inlined comprehension's target stays its own: the function only declares the name.
+    let shadow = scope(&m, &["function comprehension_target_under_global"]);
+    assert_eq!(bindings(shadow), BTreeSet::from(["items"]));
+    assert_eq!(declared(shadow, "global_decls"), ["shadowed"]);
+}
+
+#[test]
+fn semantic_globals_written_by_functions_and_star_imports_are_not_builtins() {
+    let source = "\
+def init():
+    global state
+    state = 1
+
+def get():
+    return state, len
+
+def declares_only():
+    global never_written
+    return never_written
+";
+    let m = dump_source("dump-semantic", "fe_nested_globals", source, "py312");
+    let get = scope(&m, &["function get"]);
+    assert_eq!(reads(get)["state"], "global");
+    assert_eq!(reads(get)["len"], "builtin");
+    let only = scope(&m, &["function declares_only"]);
+    assert_eq!(reads(only)["never_written"], "builtin");
+    // A star import may bind any name: no read is known to be the builtin.
+    let starred = format!("from os.path import *\n{source}");
+    let m = dump_source("dump-semantic", "fe_star_globals", &starred, "py312");
+    assert_eq!(reads(scope(&m, &["function get"]))["len"], "global");
+}
+
+#[test]
+fn semantic_parenthesized_annotation_binds_only_with_a_value() {
+    let source = "\
+x = 3
+def bare():
+    (x): int
+    return x
+def assigned():
+    (y): int = 1
+    return y
+";
+    let m = dump_source("dump-semantic", "fe_paren_ann", source, "py312");
+    let bare = scope(&m, &["function bare"]);
+    assert!(bindings(bare).is_empty());
+    assert_eq!(reads(bare)["x"], "global");
+    assert_eq!(reads(scope(&m, &["function assigned"]))["y"], "local");
+}
+
+#[test]
+fn semantic_inlined_comprehension_targets_are_cells_only_inside_it() {
+    let source = "\
+x = 7
+def f():
+    [x for x in ()]
+    return lambda: x
+fs = [lambda: i for i in range(2)]
+";
+    let m = dump_source("dump-semantic", "fe_comp_cells", source, "py312");
+    // The sibling lambda reads the module `x`, not the comprehension's.
+    let sibling = scope(&m, &["function f", "function <lambda>"]);
+    assert_eq!(reads(sibling)["x"], "global");
+    // A lambda inside a module-level comprehension captures its target.
+    let inside = scope(&m, &["function <lambda>"]);
+    assert_eq!(reads(inside)["i"], "enclosing");
+}
+
+#[test]
+fn semantic_explicit_class_cell_reads_are_closures() {
+    let source = "\
+def module_function():
+    return __class__
+class C:
+    def owner(self):
+        return __class__
+    class Inner:
+        x = __class__
+";
+    let m = dump_source("dump-semantic", "fe_class_cell", source, "py312");
+    assert_eq!(
+        reads(scope(&m, &["class C", "function owner"]))["__class__"],
+        "enclosing"
+    );
+    // A nested class body reads the outer class's cell; a module function has none.
+    assert_eq!(
+        reads(scope(&m, &["class C", "class Inner"]))["__class__"],
+        "enclosing"
+    );
+    assert_eq!(
+        reads(scope(&m, &["function module_function"]))["__class__"],
+        "builtin"
+    );
+}
+
+#[test]
+fn semantic_decorated_definitions_start_on_their_keyword_line() {
+    let source = "\
+@staticmethod
+def f(): pass
+
+@dataclass(
+    frozen=True,
+)
+# comment
+class C:
+    @property  # trailing
+    async def g(self): pass
+";
+    let m = dump_source("dump-semantic", "fe_decorated_lines", source, "py312");
+    assert_eq!(scope(&m, &["function f"])["line"], 2);
+    assert_eq!(scope(&m, &["class C"])["line"], 8);
+    assert_eq!(scope(&m, &["class C", "function g"])["line"], 10);
+}
+
+#[test]
+fn semantic_annotations_share_one_scope_per_block() {
+    let source = "\
+import sys
+if sys:
+    x: int
+else:
+    y: str
+def f():
+    local: bytes = b''
+    return local
+";
+    let m314 = dump_source("dump-semantic", "fe_annotation_blocks", source, "py314");
+    let module = &m314["scopes"][0];
+    let annotate: Vec<&Value> = children(&m314, module)
+        .into_iter()
+        .filter(|s| s["kind"] == "annotation")
+        .collect();
+    // One for the module's conditional annotations (at the first), one for `f`'s signature.
+    assert_eq!(annotate.len(), 2);
+    assert_eq!(annotate[0]["line"], 3);
+    assert_eq!(
+        reads(annotate[0]),
+        BTreeMap::from([("int", "builtin"), ("str", "builtin")])
+    );
+    // A function's own annotations get an `__annotate__` scope that is never evaluated.
+    let f = scope(&m314, &["function f"]);
+    let local = scope(&m314, &["function f", "annotation __annotate__"]);
+    assert!(reads(local).is_empty());
+    assert!(!reads(f).contains_key("bytes"));
+    // Before 3.14 CPython still records a function annotation's names in the function.
+    let m312 = dump_source("dump-semantic", "fe_annotation_blocks", source, "py312");
+    assert_eq!(reads(scope(&m312, &["function f"]))["bytes"], "builtin");
+}
+
+#[test]
+fn semantic_comprehensions_in_class_annotation_scopes_are_not_inlined() {
+    let source = "\
+class C:
+    a: [i for i in range(2)]
+    def m(self, x: {k: k for k in ()}): pass
+    type Alias = list[[j for j in range(2)]]
+def f(y: [n for n in ()]): pass
+";
+    let m = dump_source(
+        "dump-semantic",
+        "fe_class_annotation_comps",
+        source,
+        "py314",
+    );
+    let comprehension_parents: Vec<(&str, &str)> = m["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["kind"] == "comprehension")
+        .map(|s| {
+            let parent = &m["scopes"][s["parent"].as_u64().unwrap() as usize];
+            (
+                s["name"].as_str().unwrap(),
+                parent["kind"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // Annotation scopes of the class body see its names, so CPython keeps their comprehensions
+    // as scopes; `f`'s module-level annotation scope inlines its comprehension.
+    assert_eq!(
+        comprehension_parents,
+        [
+            ("<listcomp>", "annotation"),
+            ("<dictcomp>", "annotation"),
+            ("<listcomp>", "type_alias"),
+        ]
+    );
+}
+
+#[test]
+fn semantic_class_qualnames_and_methods_follow_python() {
+    let source = "\
+class Outer:
+    class Inner:
+        def method(self):
+            class InMethod:
+                pass
+            def helper():
+                pass
+    def outer_method(self):
+        pass
+def factory():
+    class Local:
+        def run(self):
+            pass
+";
+    let m = dump_source("dump-semantic", "fe_class_qualnames", source, "py312");
+    let named = |name: &str| {
+        m["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()
+    };
+    assert_eq!(named("Inner")["qualname"], "Outer.Inner");
+    assert_eq!(
+        named("InMethod")["qualname"],
+        "Outer.Inner.method.<locals>.InMethod"
+    );
+    assert_eq!(named("Local")["qualname"], "factory.<locals>.Local");
+    // Methods and nesting come from the class body itself, not from functions inside it.
+    assert_eq!(strs(&named("Inner")["methods"]), ["method"]);
+    assert_eq!(strs(&named("Outer")["methods"]), ["outer_method"]);
+    assert_eq!(named("InMethod")["parent_class"], Value::Null);
+    assert_eq!(named("Inner")["parent_class"], named("Outer")["id"]);
+}
+
+#[test]
+fn semantic_a_relative_future_import_is_an_ordinary_import() {
+    let source = "from .__future__ import annotations\nx: Limit = 1\n";
+    let m = dump_source("dump-semantic", "fe_relative_future", source, "py312");
+    assert_eq!(m["has_future_annotations"], false);
+    assert_eq!(reads(&m["scopes"][0])["Limit"], "builtin");
+    let future = dump_source(
+        "dump-semantic",
+        "fe_future",
+        "from __future__ import annotations\nx: Limit = 1\n",
+        "py312",
+    );
+    assert_eq!(future["has_future_annotations"], true);
+}
+
+#[test]
+fn semantic_generator_walrus_writes_the_declared_global() {
+    let source = "\
+def f():
+    global x
+    return (((x := i), x) for i in range(2))
+";
+    let m = dump_source("dump-semantic", "fe_walrus_global", source, "py312");
+    let genexpr = scope(&m, &["function f", "comprehension <genexpr>"]);
+    assert!(bindings(genexpr).contains("x"));
+    assert_eq!(declared(genexpr, "global_decls"), ["x"]);
+    assert!(declared(genexpr, "nonlocal_decls").is_empty());
+    assert_ne!(reads(genexpr)["x"], "enclosing");
+}
+
+#[test]
 fn semantic_comprehension_scopes_follow_pep709() {
     // Python 3.11: every comprehension is its own scope.
     let m311 = semantic(TOUR, "py311");
@@ -422,7 +714,7 @@ fn semantic_comprehension_scopes_follow_pep709() {
         .into_iter()
         .find(|s| bindings(s).contains("last"))
         .unwrap();
-    assert_eq!(binding(walrus_comp, "last")["is_nonlocal_decl"], true);
+    assert_eq!(declared(walrus_comp, "nonlocal_decls"), ["last"]);
 
     // Python 3.12+: list / set / dict comprehensions are inlined, generator expressions are not.
     let m312 = semantic(TOUR, "py312");
@@ -439,7 +731,7 @@ fn semantic_comprehension_scopes_follow_pep709() {
         .into_iter()
         .find(|s| bindings(s).contains("hit"))
         .unwrap();
-    assert_eq!(binding(twice, "hit")["is_nonlocal_decl"], true);
+    assert_eq!(declared(twice, "nonlocal_decls"), ["hit"]);
     let nested_gen = children(&m312, comps)
         .into_iter()
         .find(|s| reads(s).contains_key("cols"))
@@ -459,7 +751,8 @@ fn semantic_comprehension_scopes_follow_pep709() {
         .into_iter()
         .find(|s| s["kind"] == "comprehension")
         .unwrap();
-    assert_eq!(binding(module_gen, "seen")["is_global_decl"], true);
+    assert!(bindings(module_gen).contains("seen"));
+    assert_eq!(declared(module_gen, "global_decls"), ["seen"]);
 
     // Class-body comprehensions cannot read class-level names (CPython 3.12 symtable).
     let forms = scope(&m312, &["class ClassForms"]);
@@ -471,7 +764,7 @@ fn semantic_comprehension_scopes_follow_pep709() {
 #[test]
 fn semantic_annotation_scopes_follow_pep649() {
     // 3.14+: every `def` gets a sibling `__annotate__` scope; module / class annotations share
-    // one per body (the corpus keeps them last, where CPython opens it too).
+    // one per body, opened at the first annotation (the corpus keeps them last).
     let m314 = semantic(TOUR, "py314");
     let module = &m314["scopes"][0];
     let top = child_kinds(&m314, module);
@@ -486,14 +779,14 @@ fn semantic_annotation_scopes_follow_pep649() {
         ("annotation".to_owned(), "__annotate__".to_owned())
     );
     let annotate = children(&m314, module).last().copied().unwrap();
-    assert_eq!(reads(annotate)["int"], "builtin");
+    assert_eq!(reads(annotate)["int"], "global");
     let forms = scope(&m314, &["class ClassForms"]);
     assert_eq!(
         child_kinds(&m314, forms).last().unwrap(),
         &("annotation".to_owned(), "__annotate__".to_owned())
     );
     let class_annotate = children(&m314, forms).last().copied().unwrap();
-    assert_eq!(reads(class_annotate)["int"], "builtin");
+    assert_eq!(reads(class_annotate)["int"], "global");
 
     // 3.12: annotations are evaluated in place (module and class bodies, not function bodies).
     let m312 = semantic(TOUR, "py312");
@@ -502,7 +795,7 @@ fn semantic_annotation_scopes_follow_pep649() {
             .iter()
             .all(|(k, _)| k != "annotation")
     );
-    assert_eq!(reads(&m312["scopes"][0])["int"], "builtin");
+    assert_eq!(reads(&m312["scopes"][0])["int"], "global");
     let params = scope(&m312, &["function parameters"]);
     assert!(!reads(params).contains_key("int"));
 
@@ -526,11 +819,11 @@ fn semantic_newer_syntax() {
     // PEP 695 type aliases and generic functions / methods.
     let m = semantic(TOUR_312, "py312");
     assert!(bindings(&m["scopes"][0]).is_superset(&BTreeSet::from(["Alias", "Pair", "Variadic"])));
-    let alias = scope(&m, &["function Alias"]);
+    let alias = scope(&m, &["type_alias Alias"]);
     assert_eq!(reads(alias)["list"], "builtin");
     let pair = scope(&m, &["type_parameters Pair"]);
     assert_eq!(bindings(pair), BTreeSet::from(["K", "V"]));
-    let pair_value = scope(&m, &["type_parameters Pair", "function Pair"]);
+    let pair_value = scope(&m, &["type_parameters Pair", "type_alias Pair"]);
     assert_eq!(reads(pair_value)["K"], "enclosing");
     let variadic = scope(&m, &["type_parameters Variadic"]);
     assert_eq!(bindings(variadic), BTreeSet::from(["P", "Ts"]));
@@ -592,11 +885,10 @@ fn semantic_newer_syntax() {
     assert_eq!(reads(use_lazy)["json"], "global");
 }
 
-/// Forms where heki deliberately differs from CPython `symtable`, so they are not in the
-/// verified corpus: CPython evaluates type-parameter bounds, constraints and defaults in lazy
-/// scopes of their own and gives generic classes synthetic `.type_params` / `.generic_base`
-/// symbols; heki visits them in the type-parameter scope. Only the facts both agree on are
-/// asserted.
+/// PEP 695 / PEP 696: bounds, constraints, and defaults are evaluated lazily, each in a
+/// `type_variable` scope of its own under the type-parameter scope, and a `type` statement's value
+/// in a `type_alias` scope (`tests/symtable_verify/fixtures/type_parameters_313_315.py` holds the
+/// same shapes for the CPython comparison).
 #[test]
 fn semantic_type_parameter_bounds_defaults_and_generic_classes() {
     let source = "\
@@ -614,10 +906,44 @@ class Generic[K: Hashable, V = object](Base, metaclass=Meta):
     let m = dump_source("dump-semantic", "fe_type_params", source, "py314");
     let alias = scope(&m, &["type_parameters Constrained"]);
     assert_eq!(bindings(alias), BTreeSet::from(["P", "T", "Ts"]));
+    assert!(reads(alias).is_empty());
+    assert_eq!(
+        child_kinds(&m, alias),
+        [
+            ("type_variable", "T"),
+            ("type_variable", "Ts"),
+            ("type_variable", "P"),
+            ("type_alias", "Constrained"),
+        ]
+        .map(|(k, n)| (k.to_owned(), n.to_owned()))
+    );
+    let constraints = children(&m, alias)[0];
+    assert_eq!(reads(constraints)["int"], "builtin");
+    assert_eq!(
+        reads(scope(
+            &m,
+            &["type_parameters Constrained", "type_alias Constrained"]
+        ))["T"],
+        "enclosing"
+    );
     let bounded = scope(&m, &["type_parameters bounded"]);
     assert_eq!(bindings(bounded), BTreeSet::from(["T"]));
+    let lazy: Vec<BTreeMap<&str, &str>> = children(&m, bounded)
+        .into_iter()
+        .filter(|s| s["kind"] == "type_variable")
+        .map(reads)
+        .collect();
+    assert_eq!(
+        lazy,
+        [
+            BTreeMap::from([("Base", "builtin")]),
+            BTreeMap::from([("Default", "builtin")])
+        ]
+    );
     let generic = scope(&m, &["type_parameters Generic"]);
     assert_eq!(bindings(generic), BTreeSet::from(["K", "V"]));
+    // The bases and keywords are evaluated in the type-parameter scope.
+    assert_eq!(reads(generic)["Meta"], "builtin");
     let class_body = scope(&m, &["type_parameters Generic", "class Generic"]);
     assert_eq!(bindings(class_body), BTreeSet::from(["get"]));
     let get = scope(
@@ -628,17 +954,6 @@ class Generic[K: Hashable, V = object](Base, metaclass=Meta):
     let info = class(&m, "Generic");
     assert_eq!(strs(&info["bases"]), ["Base"]);
     assert_eq!(strs(&info["methods"]), ["get"]);
-    // The bound / default expressions are read somewhere in the model (heki: the
-    // type-parameter scope; CPython: their own lazy scopes).
-    let all_reads: BTreeSet<&str> = m["scopes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|s| reads(s).into_keys())
-        .collect();
-    for name in ["Base", "Default", "Hashable", "Meta", "object", "tuple"] {
-        assert!(all_reads.contains(name), "{name}");
-    }
 }
 
 // ============================================================================ IR: statements
@@ -1496,8 +1811,9 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
         .write(".hekiignore", "pkg/ignored/\n");
     std::fs::write(p.dir.join("pkg/latin1.py"), b"x = '\xff'\n").unwrap();
 
+    // Files that cannot be read or parsed are reported after the list, with exit code 2.
     let (code, stdout, stderr) = p.heki(&["assumptions", "pkg"]);
-    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(code, 2, "{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 18, "{stdout}");
     assert!(lines.iter().all(|l| l.starts_with("pkg/tour.py:")));
@@ -1512,23 +1828,25 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("warning: pkg/broken.py: 2 syntax error(s)"),
+        stderr.contains("error: pkg/broken.py:1:7: syntax error: "),
         "{stderr}"
     );
-    assert!(stderr.contains("warning: pkg/latin1.py: "), "{stderr}");
+    assert!(stderr.contains("error: pkg/latin1.py: "), "{stderr}");
 
-    // JSON records, sorted by position; a single file, a duplicate path and a missing one.
+    // JSON records, sorted by position; a single file and a duplicate path. A file named
+    // explicitly is read as Python whatever its extension, as `heki check` does.
     let (code, stdout, stderr) = p.heki(&[
         "assumptions",
         "pkg/tour.py",
         "pkg/tour.py",
         "pkg/notes.txt",
-        "missing.py",
         "--json",
     ]);
     assert_eq!(code, 0, "{stderr}");
     let records: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(records.len(), 18);
+    assert_eq!(records.len(), 19);
+    assert_eq!(records[0]["path"], "pkg/notes.txt");
+    let records = &records[1..];
     assert_eq!(records[0]["kind"], "eval");
     assert_eq!(records[0]["qualname"], "a1_hazards");
     assert_eq!(records[0]["path"], "pkg/tour.py");
@@ -1542,9 +1860,21 @@ fn assumptions_lists_a1_hazards_as_text_and_json() {
     assert_eq!(records[0]["column"], 5);
     assert!(stderr.is_empty(), "{stderr}");
 
+    // A path that does not exist is an input error, before anything is listed.
+    let (code, stdout, stderr) = p.heki(&["assumptions", "pkg/tour.py", "missing.py", "--json"]);
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("heki error: path `missing.py` does not exist"),
+        "{stderr}"
+    );
+
     // `--target-version` changes the IR (3.11 comprehension functions), not the hazards; an
-    // unknown tag falls back to the configured profile.
-    for version in ["py311", "py39"] {
+    // unknown tag is an error, as for `heki check`.
+    let (code, _, stderr) = p.heki(&["assumptions", "pkg/tour.py", "--target-version", "py39"]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("unknown target version `py39`"), "{stderr}");
+    for version in ["py311", "py315"] {
         let (code, stdout, _) = p.heki(&[
             "assumptions",
             "pkg/tour.py",
@@ -1594,7 +1924,7 @@ fn rule_and_explain_commands() {
     let (code, all, _) = heki(&["rule", "--all"]);
     assert_eq!(code, 0);
     let lines: Vec<&str> = all.lines().collect();
-    assert_eq!(lines.len(), 29, "{all}");
+    assert_eq!(lines.len(), 30, "{all}");
     assert!(lines[0].starts_with("MUT101   cached-property-stale-mutation "));
     assert!(
         all.lines()
@@ -1629,7 +1959,7 @@ fn rule_and_explain_commands() {
     let (code, stdout, _) = heki(&["rule", "--all", "--output-format", "json"]);
     assert_eq!(code, 0);
     let rules: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(rules.len(), 29);
+    assert_eq!(rules.len(), 30);
     for r in &rules {
         let doc = r["doc"].as_str().unwrap();
         // Every page has Ruff's sections, in order.
@@ -1667,6 +1997,7 @@ fn dump_commands_report_read_and_syntax_errors() {
     p.write("broken.py", "def f(:\n    pass\n")
         .write("ok.py", "x = [i for i in range(3)]\n");
     std::fs::write(p.dir.join("latin1.py"), b"x = '\xff'\n").unwrap();
+    std::fs::write(p.dir.join("declared.py"), b"# coding: latin-1\n\xe9 = 1\n").unwrap();
     for cmd in ["dump-semantic", "dump-ir"] {
         let (code, stdout, stderr) = p.heki(&[cmd, "missing.py"]);
         assert_eq!(code, 2);
@@ -1675,6 +2006,10 @@ fn dump_commands_report_read_and_syntax_errors() {
         let (code, _, stderr) = p.heki(&[cmd, "latin1.py"]);
         assert_eq!(code, 2);
         assert!(stderr.contains("valid UTF-8"), "{stderr}");
+        // A PEP 263 declaration selects the encoding: byte 0xE9 is the identifier `\u{e9}`.
+        let (code, stdout, stderr) = p.heki(&[cmd, "declared.py"]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stdout.contains("\"\u{e9}\""), "{stdout}");
         let (code, _, stderr) = p.heki(&[cmd, "broken.py"]);
         assert_eq!(code, 2);
         assert!(stderr.starts_with("heki error: parse errors: "), "{stderr}");
@@ -1715,6 +2050,41 @@ fn corpus_agrees_with_cpython_symtable() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("with 0 disagreements"), "{stdout}");
+}
+
+/// The symtable gate fails instead of passing vacuously: on a missing target, on a file CPython
+/// cannot parse (fixtures that need a newer CPython carry a marker in their name), on a run that
+/// compares nothing, and without a `heki` binary to compare.
+#[test]
+fn symtable_verifier_fails_when_it_compares_nothing() {
+    let p = Project::new("fe_verifier_gate");
+    p.write("broken.py", "def broken(:\n    pass\n");
+    let verify = |args: &[&str]| {
+        let out = Command::new(python())
+            .arg(repo_root().join("tests/symtable_verify/verify_symtable.py"))
+            .args(args)
+            .current_dir(&p.dir)
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let heki = env!("CARGO_BIN_EXE_heki");
+    let (code, stderr) = verify(&["--heki", heki, "no_such_dir"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("target `no_such_dir` does not exist"),
+        "{stderr}"
+    );
+    let (code, stderr) = verify(&["--heki", heki, "broken.py"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("broken.py: CPython"), "{stderr}");
+    assert!(stderr.contains("no file to verify"), "{stderr}");
+    let (code, stderr) = verify(&["broken.py"]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("--heki is required"), "{stderr}");
 }
 
 // =================================================================== `heki check` over the IR

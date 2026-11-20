@@ -22,7 +22,8 @@ The held resource must be type-certain:
 
 The rule reports the `await` or the call while the resource is certainly held (on every path),
 with the call chain to the network I/O as related information. Leaving the `with` block
-releases it.
+releases what that block acquired: a re-entrant lock entered again by a nested `with` stays held
+until the outer block exits.
 
 It does not report:
 

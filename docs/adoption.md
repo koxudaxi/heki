@@ -12,7 +12,10 @@ $ heki check --baseline heki-baseline.toml                     # fail on regress
 
 Entries are keyed by file, function, rule, and target (not by line number), so unrelated
 edits and reformatting do not break the baseline. When findings are fixed, `heki check` prints a
-note that the entry can shrink; run `--update-baseline` again to lock in the progress. Set
+note that the entry can shrink; run `--update-baseline` again to lock in the progress. On an
+existing baseline, `--update-baseline` checks first: when an entry grew or a new finding appeared,
+it reports them like `heki check`, leaves the file as it is, and exits with 1. To record new
+findings on purpose, delete the baseline and record it again. Set
 `baseline = "heki-baseline.toml"` in the configuration to use it without the flag.
 
 Each entry counts violation sites, not reports. A contract report at the caller of a private
@@ -23,8 +26,9 @@ allowed and found counts for every entry that grew.
 
 Baselines written before heki counted sites have no `version` key and keep counting reports: a
 new report is a regression, a second site behind a recorded report is not. `heki check` says so
-in a note, and `--update-baseline` rewrites the file with `version = 2`. A version this heki does
-not know is an error.
+in a note, and `--update-baseline` rewrites the file with `version = 2` (after comparing in the
+old unit, so nothing that grew is taken in). A version this heki does
+not know is an error, and so is a file listing one entry twice (a hand merge of two baselines).
 
 ## Effect snapshots (`MUT103`)
 
@@ -37,7 +41,9 @@ $ heki snapshot --write                        # writes .heki-summary-snapshot.j
 $ heki check --extend-select MUT103            # reports functions that gained effects
 ```
 
-Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
+A run that cannot analyze every file (a syntax error, an unreadable file) writes neither a
+snapshot nor a baseline: it reports the errors and exits with 2, so the entries of those files are
+not lost. Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
 same pull request; the diff of the JSON file shows reviewers what changed.
 
 ## pre-commit
@@ -71,15 +77,20 @@ GitHub Actions annotations:
 - run: uvx heki check --output-format github
 ```
 
-Code scanning (SARIF):
+Code scanning (SARIF; the job needs `permissions: security-events: write`):
 
 ```yaml
-- run: uvx heki check --output-format sarif > heki.sarif || true
-- uses: github/codeql-action/upload-sarif@v3
+- run: uvx heki check --output-format sarif > heki.sarif || test "$?" -eq 1
+- uses: github/codeql-action/upload-sarif@v4
   with:
     sarif_file: heki.sarif
 ```
 
+Findings (exit code `1`) become code-scanning alerts and keep the step green. A configuration,
+read, or syntax error (exit code `2`) still fails it: heki then writes SARIF for the files it
+could analyze, which would hide the others.
+
+SARIF results carry the message, the location, and the call chain (`relatedLocations`).
 `--output-format json` gives every field (evidence, blocker, related call chain, fix edits) for
 custom tooling.
 
@@ -90,6 +101,7 @@ custom tooling.
   state and the operations you care about and effect boundaries (`effect-boundaries`) for the
   code that must stay pure; `MUT201`, `MUT203`, `MUT204`, and `EFF201` report nothing until a
   contract exists.
-- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) for code where they
-  matter: async services, threaded code, and library APIs.
+- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) for code
+  where they matter: async services, threaded code, library APIs, and code that relies on frozen
+  dataclasses and `ReadOnly` fields.
 - Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
