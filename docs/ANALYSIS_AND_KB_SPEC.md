@@ -415,6 +415,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   the callees' `must_invalidate`. A callee's writes and announcements are taken where its body
   runs (`ProjectIndex::delivery`): a plain function at its call, a generator where it is iterated
   or inside the function it is handed to; only bodies run at their call count as announcing.
+  The written object's identity (`obj_params`, the parameters it may be as itself) decides an
+  initializer's own construction: its `self`, not the objects reached through `self`.
 - Reporting: private helpers never report and pass the obligation to their callers; a public
   function is relieved when every caller path announces the change after the call (a
   breadth-first walk over the callers; exempt callers count).

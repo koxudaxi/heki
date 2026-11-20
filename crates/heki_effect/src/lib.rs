@@ -34,7 +34,7 @@ pub mod types;
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
-    delegates_to_callers, is_initializer, reach_across,
+    builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{

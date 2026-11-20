@@ -28,7 +28,9 @@ It does not report:
 - a function named in `exempt-writers` (the owner's operations announce or batch the change
   themselves), nor calls from one;
 - writes to objects that did not exist before the call: the class's own initialization (an
-  initializer writing its own `self`) and objects the function constructs or copies, which
+  initializer writing its own `self`, directly or through a helper it hands `self` to; an
+  object reached through `self`'s attributes, such as a model it was given, existed before)
+  and objects the function constructs or copies, which
   nothing has derived facts from yet; objects it gets from a call are left alone too, since
   heki cannot tell whether they are new;
 - a function whose every caller announces the change after calling it (invalidation in bulk by

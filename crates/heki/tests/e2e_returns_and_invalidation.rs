@@ -1007,6 +1007,73 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
     assert!(diagnostics(&p, &["--select", "MUT109"]).is_empty());
 }
 
+const BINDING_CONFIG: &str = r#"[[tool.heki.invalidation]]
+name = "model"
+targets = ["Model.items", "Model.x"]
+invalidators = ["notify"]
+"#;
+const INITIALIZERS: &str = r#"class Model:
+    def __init__(self) -> None:
+        self.x = 0
+        _reset_x(self)
+
+
+def notify(m: Model) -> None:
+    pass
+
+
+def _reset_x(m: Model) -> None:
+    m.x = 0
+
+
+class Holder:
+    model: Model
+
+    def __init__(self, model: Model) -> None:
+        self.model = model
+        self.model.x = 1
+
+
+class Keeper:
+    model: Model
+
+    def __init__(self, model: Model) -> None:
+        self.model = model
+        _touch(self)
+
+
+def _touch(k: Keeper) -> None:
+    k.model.x = 2
+"#;
+
+#[test]
+fn mut109_initializers_build_only_their_own_self() {
+    let p = Project::new("mut109_initializers");
+    p.write("pyproject.toml", BINDING_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/models.py", INITIALIZERS);
+    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let m = "pkg/models.py";
+    // An initializer builds its own `self`, also through a helper it hands `self` to; an
+    // object reached through `self`'s attributes existed before (`Holder`, and `Keeper` through
+    // a helper).
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(m, 20, "MUT109", "Holder.__init__"),
+            d(m, 28, "MUT109", "Keeper.__init__"),
+        ],
+        "{diags:#?}"
+    );
+    assert!(
+        diags[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("(direct_attr) via `pkg.models._touch`"),
+        "{diags:#?}"
+    );
+}
+
 #[test]
 fn mut109_configuration_errors() {
     let p = inv_project("mut109_config");

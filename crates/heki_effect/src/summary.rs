@@ -2000,7 +2000,8 @@ impl<'a> Extractor<'a> {
         if let (Some(c), Some(events)) = (self.contracts, self.events.as_mut())
             && reach.any()
         {
-            let own_init = invalidation::is_initializer(self.key) && reach.params & 1 != 0;
+            let initializer = invalidation::is_initializer(self.key);
+            let own_init = invalidation::builds_written_object(initializer, reach, obj.params);
             // The class and its project bases: a target class covers its subclasses.
             let mut classes = vec![class.clone()];
             classes.extend(self.cx.project.ancestors_of(&class));
@@ -2022,6 +2023,7 @@ impl<'a> Extractor<'a> {
                         kind,
                         span,
                         reach,
+                        obj_params: obj.params,
                         flow: SiteFlow::default(),
                     },
                 ));

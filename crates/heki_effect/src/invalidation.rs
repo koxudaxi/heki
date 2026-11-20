@@ -76,6 +76,8 @@ pub struct FlowWrite {
     pub span: Span,
     /// Where the written object comes from.
     pub reach: Reach,
+    /// The parameters the written object may be, as itself (`TypedFieldWriteSite::obj_params`).
+    pub obj_params: u64,
     pub flow: SiteFlow,
 }
 
@@ -110,6 +112,9 @@ pub struct UnmetWrite {
     pub via_chain: SharedChain,
     /// Where the written object comes from, as the owner sees it.
     pub reach: Reach,
+    /// The owner's parameters the written object may be, as itself: `self` (bit 0) in an
+    /// initializer is the class's own initialization.
+    pub obj_params: u64,
 }
 
 /// The points of one function the flow analysis describes, by position (`block`, instruction
@@ -659,6 +664,7 @@ pub(crate) fn propagate_facts(
                 origin: w.span,
                 via_chain: Vec::new(),
                 reach: w.reach,
+                obj_params: w.obj_params,
             });
         }
     }
@@ -688,9 +694,8 @@ pub(crate) fn propagate_facts(
                     continue;
                 }
                 let reach = reach_across(u.reach, bc);
-                // An object the caller builds (its own initialization through a helper, or one it
-                // constructs, copies, or gets from a call) announces nothing.
-                if !reach.any() || initializer && reach.params & 1 != 0 {
+                let obj_params = bc.caller_params_of(u.obj_params);
+                if builds_written_object(initializer, reach, obj_params) {
                     continue;
                 }
                 if index.covered_after(site_path, &flow, bit) & bit != 0 {
@@ -707,11 +712,20 @@ pub(crate) fn propagate_facts(
                     origin: u.origin,
                     via_chain,
                     reach,
+                    obj_params,
                 });
             }
         }
     }
     s.unmet_invalidation = shortest_chains(unmet);
+}
+
+/// Whether a function builds the object it writes, so the write announces nothing: an object
+/// that did not exist before the call (`reach`: constructed, copied, or from a call), or, in an
+/// initializer, its own `self` (`obj_params` bit 0: the object itself, not one reached through
+/// its attributes).
+pub fn builds_written_object(initializer: bool, reach: Reach, obj_params: u64) -> bool {
+    !reach.any() || initializer && obj_params & 1 != 0
 }
 
 /// Where an object a callee reaches from its parameters (and module state) comes from in the
@@ -739,6 +753,7 @@ fn shortest_chains(set: BTreeSet<UnmetWrite>) -> BTreeSet<UnmetWrite> {
             w.kind,
             w.span,
             w.reach,
+            w.obj_params,
             w.via_chain.last().map(|h| h.callee.clone()),
             w.origin,
         )
