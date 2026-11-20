@@ -157,6 +157,8 @@ EffectSummary(f) = {
     param_change_sites:       Map<ParamIdx, Set<Span>>,    // own changes of parameter i only, never propagated
                                                            // (EFF201 mutates-params counts them)
     escapes_params:           Bitset,                      // stored in an attribute / container / global, or returned
+    reallocates_params:       Bitset,                      // parameter i comes back as a quadratic reallocation
+                                                           // of it (DATA101 through helpers)
     consumes_params:          Bitset,                      // iterated to exhaustion on every normal path (MUT106)
     unconditional_forwards:   Bitset,                      // passed on at calls that run on every normal path
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
@@ -453,8 +455,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      no query either; queries in migration functions excluded; the internals of ORM libraries
      excluded.
    - **`DATA101`**: only `df = pd.concat([df, ...])` / `arr = np.vstack([arr, ...])` whose SSA
-     `PhiNode` accumulates across the back edge (`LoopCarried`); one-off concatenation and padding
-     in a loop are excluded.
+     `PhiNode` accumulates across the back edge (`LoopCarried`), or a project call there whose
+     callee's `reallocates_params` covers the argument carrying the previous value; one-off
+     concatenation and padding in a loop are excluded.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of callers reach

@@ -95,6 +95,10 @@ pub struct CallHop {
     pub path: PathBuf,
 }
 
+fn is_zero(bits: &u64) -> bool {
+    *bits == 0
+}
+
 /// Write site detail for MUT201.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldWriteSite {
@@ -198,6 +202,12 @@ pub struct EffectSummary {
     // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
     pub mutates_params: u64,
     pub escapes_params: u64,
+    /// Parameters the function returns a quadratic reallocation of on some path: the result of
+    /// a `QuadraticRealloc` call taking the parameter (`return np.append(acc, x)`,
+    /// `return pd.concat([df, part])`), or of a project call doing so whose result it returns
+    /// (`DATA101` follows an accumulation through such helpers).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reallocates_params: u64,
     /// Parameters iterated to exhaustion on every path that returns normally when the body
     /// runs at the call (`MUT106`: passing a single-pass iterator consumes it).
     pub consumes_params: u64,

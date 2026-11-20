@@ -1,9 +1,10 @@
 //! Family 2 data rule: `DATA101` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::eff_rules::shortest;
+use crate::mut_rules::bind_arguments;
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
-use heki_effect::SiteEffect;
+use heki_effect::{Callee, SiteEffect, TypeCtx, Val};
 use heki_ir::{Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
@@ -18,6 +19,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
         return;
     }
     let sites = cx.sites_by_span(unit);
+    let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loop_carried.iter().all(|lc| !lc.self_accumulating) {
             continue;
@@ -29,8 +31,13 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 defs.insert(d, inst);
             }
         }
+        // Inferred only for an update through a project call.
+        let mut types: Option<FxHashMap<VarId, Val>> = None;
         for (lc, _) in accumulating_loops(f) {
-            // The first update (in block order) that is a quadratic reallocation.
+            // The first update (in block order) that is a quadratic reallocation of the previous
+            // value: the reallocating call itself, or a project call returning one of the
+            // argument that carries it (`acc = grow(acc)`, not `acc = step(acc)` where `step`
+            // reallocates something else and returns `acc`).
             let hit = lc.updates.iter().find_map(|v| {
                 let inst = defs.get(v)?;
                 if !matches!(
@@ -45,8 +52,12 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                     .flatten()
                     .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                     .collect();
-                shortest(&effects, ExecEffectKind::QuadraticRealloc)
-                    .map(|chain| (inst.span, chain.to_vec()))
+                let chain = shortest(&effects, ExecEffectKind::QuadraticRealloc)?;
+                let reallocates = chain.len() == 1 || {
+                    let types = types.get_or_insert_with(|| tcx.infer(f));
+                    reallocates_argument(cx, &tcx, types, f, inst, lc.phi_var)
+                };
+                reallocates.then(|| (inst.span, chain.to_vec()))
             });
             let Some((span, chain)) = hit else {
                 continue;
@@ -72,6 +83,81 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             );
         }
     }
+}
+
+/// Whether the project call `inst` returns a quadratic reallocation of an argument that carries
+/// `previous` (as itself, through copies, or in a display): a callee's `reallocates_params`.
+fn reallocates_argument(
+    cx: &CheckContext<'_>,
+    tcx: &TypeCtx<'_>,
+    types: &FxHashMap<VarId, Val>,
+    f: &IrFunction,
+    inst: &Inst,
+    previous: VarId,
+) -> bool {
+    let (callee, recv, args, kwargs) = match &inst.kind {
+        InstKind::Call {
+            callee_var,
+            args,
+            kwargs,
+            ..
+        } => (
+            tcx.resolve_call(callee_var.and_then(|v| types.get(&v))),
+            None,
+            args,
+            kwargs,
+        ),
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            ..
+        } => (
+            tcx.resolve_method(types.get(recv), method),
+            Some(*recv),
+            args,
+            kwargs,
+        ),
+        _ => return false,
+    };
+    let Callee::Project(keys, binds_recv) = callee else {
+        return false;
+    };
+    keys.iter().any(|key| {
+        let Some(summary) = cx.index.summary(key) else {
+            return false;
+        };
+        let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
+        bind_arguments(&decl, binds_recv, recv, args, kwargs)
+            .into_iter()
+            .any(|(pos, v)| {
+                pos < 64
+                    && summary.reallocates_params & (1u64 << pos) != 0
+                    && carries(f, v, previous)
+            })
+    })
+}
+
+/// Whether `v` is `previous`, a copy of it, or a display holding one.
+fn carries(f: &IrFunction, v: VarId, previous: VarId) -> bool {
+    let mut stack = vec![v];
+    let mut seen = Vec::new();
+    while let Some(v) = stack.pop() {
+        if v == previous {
+            return true;
+        }
+        if seen.contains(&v) {
+            continue;
+        }
+        seen.push(v);
+        match f.def_inst(v).map(|(_, i)| &i.kind) {
+            Some(InstKind::Copy { src, .. }) => stack.push(*src),
+            Some(InstKind::AllocBuiltin { elems, .. }) => stack.extend(elems.iter().copied()),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Self-accumulating loop-carried values of `f` with their natural loop. `loop_carried`

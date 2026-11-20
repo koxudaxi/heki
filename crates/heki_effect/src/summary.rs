@@ -1497,6 +1497,30 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// A returned result of the quadratic reallocation `symbol` taking a parameter, as itself or
+    /// in a display (`np.append(acc, x)`, `pd.concat([df, part])`): `reallocates_params`.
+    fn note_returned_realloc(&mut self, symbol: &str, call: &Call<'_>) {
+        let reallocates = self
+            .cx
+            .kb
+            .lookup(symbol)
+            .is_some_and(|e| e.effects.contains(&ExecEffectKind::QuadraticRealloc));
+        if !reallocates || !self.returned.contains_key(&call.dst) {
+            return;
+        }
+        for &arg in call.args {
+            let held: Vec<VarId> = match self.defs.get(&arg).map(|i| &i.kind) {
+                Some(InstKind::AllocBuiltin { elems, .. }) => elems.clone(),
+                _ => vec![arg],
+            };
+            for v in held {
+                if let Some((i, None)) = self.param_alias.get(&v) {
+                    self.summary.reallocates_params |= 1u64 << i;
+                }
+            }
+        }
+    }
+
     /// A change below the attribute `attr` of parameter `i` (of the object `p.attr` holds).
     fn change_below_param_attr(&mut self, i: u8, attr: String, span: Span) {
         self.summary
@@ -1775,6 +1799,7 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 self.external_call(bb, symbol.clone(), call.args, call.is_awaited, call.span);
+                self.note_returned_realloc(symbol, call);
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
                 if let Some(class) = &call.constructs {

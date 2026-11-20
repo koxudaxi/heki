@@ -494,6 +494,10 @@ fn transfer(
         }
     }
     t.escapes_params |= caller_params(facts.escapes_params, bc);
+    // Returning the callee's reallocation of its argument reallocates the caller's parameter.
+    if site.returned.is_some() {
+        t.reallocates_params |= caller_params(facts.reallocates_params, bc);
+    }
     // A generator passed to a callee that iterates it runs there.
     t.iterates_params |= caller_params(facts.iterates_params, bc);
     for w in &facts.typed_field_write_sites {

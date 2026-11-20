@@ -245,3 +245,49 @@ def by_key(orders, customers):
         ]
     );
 }
+
+#[test]
+fn an_accumulation_through_a_helper_needs_the_helper_to_reallocate_it() {
+    let p = Project::new("data101_helpers");
+    p.write(
+        "app.py",
+        r#"import numpy
+import pandas as pd
+
+
+def step(acc):
+    numpy.append([0], 1)
+    return acc
+
+
+def grow(acc):
+    return numpy.append(acc, 1)
+
+
+def grow_twice(acc):
+    return grow(acc)
+
+
+def combine(parts):
+    return pd.concat(parts)
+
+
+def unchanged(items: list[int]):
+    acc = numpy.array([])
+    for _ in items:
+        acc = step(acc)
+    return acc
+
+
+def through_helpers(items: list[int], frames: list[pd.DataFrame]):
+    acc = numpy.array([])
+    df = pd.DataFrame()
+    for _ in items:
+        acc = grow_twice(acc)
+    for part in frames:
+        df = combine([df, part])
+    return acc, df
+"#,
+    );
+    assert_eq!(lines(&p, "DATA101"), vec![33, 35]);
+}
