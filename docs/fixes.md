@@ -135,7 +135,7 @@ Would fix 1 issue(s) in 1 file(s).
 
 ## Profiles
 
-`--profile` reads a sampling profile you recorded offline:
+`--profile` reads a sampling profile you recorded offline. It is experimental; see [experimental.md](experimental.md).
 
 | Profiler | Command |
 | -------- | ------- |

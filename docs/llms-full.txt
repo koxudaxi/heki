@@ -1385,7 +1385,7 @@ Would fix 1 issue(s) in 1 file(s).
 
 ## Profiles
 
-`--profile` reads a sampling profile you recorded offline:
+`--profile` reads a sampling profile you recorded offline. It is experimental; see [experimental.md](https://heki.koxudaxi.dev/experimental/).
 
 | Profiler | Command |
 | -------- | ------- |
@@ -1648,7 +1648,7 @@ Options:
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
       --profile <PROFILE>
-          Offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
+          Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
       --watch
           Watch for file changes and re-run incrementally
   -h, --help

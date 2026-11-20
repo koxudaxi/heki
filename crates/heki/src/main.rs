@@ -106,7 +106,7 @@ struct CheckArgs {
     /// Generate or shrink-update the Ratchet baseline file.
     #[arg(long)]
     update_baseline: bool,
-    /// Offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko`
+    /// Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko`
     /// JSON): apply the `size-dependent` fixes in its hot functions (in every function with
     /// `--include-size-dependent`).
     #[arg(long)]
