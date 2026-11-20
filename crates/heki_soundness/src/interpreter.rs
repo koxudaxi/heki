@@ -76,7 +76,6 @@ impl BuiltinScope {
         !self.all_shadowed && !self.shadowed.contains(name)
     }
 
-    /// Module globals may be rebound dynamically (see `dynamic_globals`).
     pub fn dynamic_globals(&self) -> bool {
         self.dynamic_globals
     }
@@ -785,8 +784,8 @@ impl<'a> FnCtx<'a> {
         }
     }
 
-    /// Apply a Layer 1 entry to the arguments of a call (`offset` = 1 for methods: index 0 is
-    /// the receiver, already handled by the caller).
+    /// Apply a Layer 1 entry to the arguments of a call, each with its parameter position (a
+    /// method's receiver is position 0).
     fn apply_param_effects(
         st: &mut FrameState,
         effects: &[SoundnessParamEffect],
@@ -1599,7 +1598,6 @@ impl<'a> FnCtx<'a> {
         }
     }
 
-    /// Replay every reachable block once and collect each instruction's mutations.
     /// Every reachable block with its entry state (`run` gave every block in RPO one on its
     /// first pass).
     pub(crate) fn entered_blocks<'s>(
@@ -1611,6 +1609,7 @@ impl<'a> FnCtx<'a> {
             .filter_map(|&b| Some((b, an.block_in[b.0 as usize].clone()?)))
     }
 
+    /// Replay every reachable block once and collect each instruction's mutations.
     pub(crate) fn mutations(&self, an: &Analysis) -> FxHashMap<(BlockId, usize), Allocs> {
         let mut out = FxHashMap::default();
         for (b, st) in self.entered_blocks(an) {

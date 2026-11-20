@@ -911,7 +911,8 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
     }
 
-    /// Instructions whose span lies inside `span` rebind `name` or change `allocs`.
+    /// `EvalOrderPreserved`: no instruction inside `span` rebinds `name` or changes the objects
+    /// `acc` refers to.
     fn eval_order(
         &self,
         subject: &str,
@@ -1674,33 +1675,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             self.ck
                 .exact_type(&target, &st, rebuilt, &[Set, List, Tuple, Dict]),
         );
-        // Every instruction of the call expression is a pure builtin step in one block.
-        let mut impure: Option<String> = None;
-        let mut free: Vec<VarId> = Vec::new();
-        let mut inside: FxHashSet<VarId> = FxHashSet::default();
-        for bb in &f.blocks {
-            for (i, inst) in bb.insts.iter().enumerate() {
-                if inst.span.start < call.span.start || inst.span.end > call.span.end {
-                    continue;
-                }
-                if bb.id != call_at.0 {
-                    impure.get_or_insert_with(|| "the expression contains control flow".into());
-                    continue;
-                }
-                if let Some(d) = inst.kind.dst() {
-                    inside.insert(d);
-                }
-                let pre = self.state((bb.id, i));
-                let outer = (bb.id, i) == call_at;
-                if let Some(why) = pre.as_ref().and_then(|p| self.impure_step(p, inst, outer)) {
-                    impure.get_or_insert(why);
-                }
-                free.extend(inst.kind.operands());
-            }
-        }
-        free.retain(|v| !inside.contains(v));
-        free.sort_unstable();
-        free.dedup();
+        let (impure, free) = self.call_expression_steps(call, call_at);
         obs.push(self.ck.ob(
             K::SideEffectFree,
             &target,
@@ -1805,6 +1780,44 @@ impl<'a, 'c> Rules<'a, 'c> {
             Some(format!("`{callee}(...)` builds a new container on every iteration")),
             edits,
         ))
+    }
+
+    /// Whether every instruction of the call expression at `call_at` is a pure builtin step in
+    /// one block (`Some(why)` for the first that is not), and the values the expression reads
+    /// from outside itself.
+    fn call_expression_steps(
+        &self,
+        call: &Inst,
+        call_at: (BlockId, usize),
+    ) -> (Option<String>, Vec<VarId>) {
+        let f = self.f();
+        let mut impure: Option<String> = None;
+        let mut free: Vec<VarId> = Vec::new();
+        let mut inside: FxHashSet<VarId> = FxHashSet::default();
+        for bb in &f.blocks {
+            for (i, inst) in bb.insts.iter().enumerate() {
+                if inst.span.start < call.span.start || inst.span.end > call.span.end {
+                    continue;
+                }
+                if bb.id != call_at.0 {
+                    impure.get_or_insert_with(|| "the expression contains control flow".into());
+                    continue;
+                }
+                if let Some(d) = inst.kind.dst() {
+                    inside.insert(d);
+                }
+                let pre = self.state((bb.id, i));
+                let outer = (bb.id, i) == call_at;
+                if let Some(why) = pre.as_ref().and_then(|p| self.impure_step(p, inst, outer)) {
+                    impure.get_or_insert(why);
+                }
+                free.extend(inst.kind.operands());
+            }
+        }
+        free.retain(|v| !inside.contains(v));
+        free.sort_unstable();
+        free.dedup();
+        (impure, free)
     }
 
     /// Why one instruction of a hoisted expression is not a pure builtin step (`outer`: it is
@@ -2267,55 +2280,8 @@ impl<'a, 'c> Rules<'a, 'c> {
         let mut obs = self.base();
         obs.push(self.ck.exact_type(&name, &st, q, &[List]));
         obs.push(self.ck.unique(&name, &st, q));
-        // Every allocation of `q` is a display / `list(...)` outside the loop (rewritten to a
-        // deque) or the slice this candidate replaces.
         let allocs = st.allocs_of(q);
-        let mut init_sites = Vec::new();
-        let mut bad_alloc = None;
-        for a in &allocs {
-            let loc = self.cx().site_location(*a);
-            let ai = inst_at(f, loc);
-            let rewritten_slice = matches!(form, Some(FrontForm::SliceRebind { .. })) && loc == at;
-            let (init, unpacks) = match &ai.kind {
-                // A display or a comprehension. A starred target or pattern (`first, *rest =
-                // xs`) makes a list too, with no expression to turn into a deque.
-                InstKind::AllocBuiltin { kind: List, .. } => (
-                    true,
-                    self.m.text(ai.span).is_none_or(|t| !t.starts_with('[')),
-                ),
-                InstKind::Call {
-                    dst,
-                    callee_var,
-                    callee,
-                    args,
-                    kwargs,
-                    ..
-                } => (
-                    self.cx().builtin_callee(*callee_var, callee) == Some("list"),
-                    !kwargs.is_empty() || (0..args.len()).any(|i| f.is_starred(*dst, i)),
-                ),
-                _ => (false, false),
-            };
-            if init && !unpacks && !lp.body.contains(&loc.0) {
-                init_sites.push(loc);
-            } else if init && unpacks {
-                bad_alloc = Some(match ai.kind {
-                    InstKind::AllocBuiltin { .. } => format!(
-                        "the list is made by unpacking (line {}): there is no display to turn into a `deque`",
-                        self.line(ai.span.start)
-                    ),
-                    _ => format!(
-                        "`list(...)` with `*` / `**` arguments (line {}) has no `deque` equivalent: `deque` reads a second argument as `maxlen`",
-                        self.line(ai.span.start)
-                    ),
-                });
-            } else if !rewritten_slice {
-                bad_alloc = Some(format!(
-                    "it is also created at line {}",
-                    self.line(ai.span.start)
-                ));
-            }
-        }
+        let (init_sites, bad_alloc) = self.deque_init_sites(&allocs, at, lp, form);
         let aliases = self.alias_closure(&st, q);
         let mut bad_use = bad_alloc.clone();
         if bad_use.is_none() {
@@ -2427,6 +2393,66 @@ impl<'a, 'c> Rules<'a, 'c> {
             evidence,
             edits,
         ))
+    }
+
+    /// Every allocation of `q` (`allocs`) must be a display / `list(...)` outside the loop
+    /// (rewritten to a deque) or the slice this candidate replaces: the displays and calls to
+    /// rewrite, and why an allocation is neither (the last such one).
+    fn deque_init_sites(
+        &self,
+        allocs: &[crate::AllocId],
+        at: (BlockId, usize),
+        lp: &NaturalLoop,
+        form: Option<FrontForm>,
+    ) -> (Vec<(BlockId, usize)>, Option<String>) {
+        let f = self.f();
+        let mut init_sites = Vec::new();
+        let mut bad_alloc = None;
+        for a in allocs {
+            let loc = self.cx().site_location(*a);
+            let ai = inst_at(f, loc);
+            let rewritten_slice = matches!(form, Some(FrontForm::SliceRebind { .. })) && loc == at;
+            let (init, unpacks) = match &ai.kind {
+                // A display or a comprehension. A starred target or pattern (`first, *rest =
+                // xs`) makes a list too, with no expression to turn into a deque.
+                InstKind::AllocBuiltin { kind: List, .. } => (
+                    true,
+                    self.m.text(ai.span).is_none_or(|t| !t.starts_with('[')),
+                ),
+                InstKind::Call {
+                    dst,
+                    callee_var,
+                    callee,
+                    args,
+                    kwargs,
+                    ..
+                } => (
+                    self.cx().builtin_callee(*callee_var, callee) == Some("list"),
+                    !kwargs.is_empty() || (0..args.len()).any(|i| f.is_starred(*dst, i)),
+                ),
+                _ => (false, false),
+            };
+            if init && !unpacks && !lp.body.contains(&loc.0) {
+                init_sites.push(loc);
+            } else if init && unpacks {
+                bad_alloc = Some(match ai.kind {
+                    InstKind::AllocBuiltin { .. } => format!(
+                        "the list is made by unpacking (line {}): there is no display to turn into a `deque`",
+                        self.line(ai.span.start)
+                    ),
+                    _ => format!(
+                        "`list(...)` with `*` / `**` arguments (line {}) has no `deque` equivalent: `deque` reads a second argument as `maxlen`",
+                        self.line(ai.span.start)
+                    ),
+                });
+            } else if !rewritten_slice {
+                bad_alloc = Some(format!(
+                    "it is also created at line {}",
+                    self.line(ai.span.start)
+                ));
+            }
+        }
+        (init_sites, bad_alloc)
     }
 
     /// The edits turning the annotations of the deque's variables into `deque` ones: the

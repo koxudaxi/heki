@@ -87,8 +87,6 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
             format!("import collections{br}{br}"),
         ));
     }
-    // No other import: after the `__future__` block or the docstring, or at the top (below
-    // leading comments), followed by the blank lines isort wants before the next statement.
     let after_statement = blocks
         .iter()
         .flatten()
@@ -96,6 +94,17 @@ pub(crate) fn collections_import(source: &str, module_fn: &IrFunction) -> Option
         .chain(future_end)
         .max()
         .or(docstring_end);
+    first_import_edit(source, br, after_statement)
+}
+
+/// The edit for a module without other imports: after `after_statement`, the end of the
+/// `__future__` block or the docstring, or at the top (below leading comments), followed by the
+/// blank lines isort wants before the next statement.
+fn first_import_edit(
+    source: &str,
+    br: &str,
+    after_statement: Option<u32>,
+) -> Option<(Span, String)> {
     let anchor = after_statement.unwrap_or_else(|| after_leading_comments(source));
     // A blank line after the docstring or the `__future__` block, none below leading comments.
     let separated = after_statement.is_some();

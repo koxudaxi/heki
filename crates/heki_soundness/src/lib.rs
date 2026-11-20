@@ -316,7 +316,7 @@ mod invariant_tests {
             );
             checked += 1;
         }
-        // The walk saw the sources (lib, interpreter, liveness, obligations, opt_rules, edits).
+        // The walk saw the crate's sources, not an empty or a wrong directory.
         assert!(checked >= 6, "only {checked} source files checked");
     }
 }

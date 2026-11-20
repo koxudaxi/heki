@@ -104,7 +104,6 @@ pub(crate) fn is_plain_assign(between: &str) -> bool {
     between.trim() == "="
 }
 
-/// Leading whitespace of the line starting at `line_start`.
 pub(crate) fn indentation(source: &str, line_start: u32) -> &str {
     let rest = &source[line_start as usize..];
     let n = rest.len() - rest.trim_start_matches([' ', '\t']).len();

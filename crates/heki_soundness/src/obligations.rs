@@ -680,7 +680,7 @@ impl<'a, 'c> Checker<'a, 'c> {
         lp.body.contains(&b) || region.is_some_and(|r| within(self.cx.f.block(b).insts[i].span, r))
     }
 
-    /// The span of the first mutation of `allocs` among `blocks`, if any.
+    /// The first mutation of `allocs`, in source order, among the instructions `pred` accepts.
     pub fn first_mutation_in(
         &self,
         allocs: &[crate::AllocId],
@@ -699,7 +699,6 @@ impl<'a, 'c> Checker<'a, 'c> {
     }
 }
 
-/// `inner` lies inside `outer`.
 fn within(inner: Span, outer: Span) -> bool {
     inner.start >= outer.start && inner.end <= outer.end
 }
