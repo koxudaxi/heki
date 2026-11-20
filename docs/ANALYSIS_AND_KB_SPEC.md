@@ -407,6 +407,20 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`).
 
+The entries follow the public API of each package, with three conventions:
+- An async API is `async_safe` and carries no blocking effect: it is often called without a
+  direct `await` (`async with`, `asyncio.gather`, `asyncio.wait_for`), where the `is_awaited`
+  filter does not apply. Its loop-sensitive effects (`db_query`, `unpooled_client_alloc`) stay.
+- A constructor or factory that does no I/O until first use (`redis.Redis`, `pymongo.MongoClient`,
+  `sqlalchemy.create_engine`) carries only `unpooled_client_alloc`; a call that only builds an
+  object (`Redis.pipeline`, a lazy `QuerySet.filter`) carries only a `return_type`.
+- `db_query` is one statement sent to the database and waited for: reading the rows of an
+  executed statement (`sqlite3.Cursor.fetchone`) is not one, nor is a driver's `commit()`; an ORM
+  `Session.commit()` / `flush()` sends the pending writes and is.
+
+Lookups are exact, without inheritance or aliases (an entry names the class that a `return_type`,
+an annotation, or a constructor call produces), and the `heki_kb` unit tests pin every entry.
+
 ### 4.3 Line-number-independent Ratchet baseline (`heki_diagnostics`)
 - **Key**: `BaselineKey = (relative_posix_path, qualname, rule_id, normalized_target)` → `count`.
   Without line numbers, unrelated edits and reformatting do not break the baseline.

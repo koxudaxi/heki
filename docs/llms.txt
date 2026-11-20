@@ -5,7 +5,7 @@
 
 ## Docs
 
-- [Overview](https://heki.koxudaxi.dev/): heki (Japanese for "wall") is an experimental effect and alias checker for Python, written in
+- [Overview](https://heki.koxudaxi.dev/): heki (Japanese for "wall") checks **what Python code does** across functions and modules: which
 - [Scope and Limitations](https://heki.koxudaxi.dev/scope/): heki checks what Python code does across functions and modules: which objects it mutates,
 - [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable
 - [Getting Started](https://heki.koxudaxi.dev/getting-started/): From the root of a project (the directory with pyproject.toml):

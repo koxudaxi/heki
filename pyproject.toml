@@ -8,11 +8,11 @@ version = "0.1.0"
 description = "Experimental Effect & Alias semantic checker for Python — the 3rd static analysis layer alongside Ruff and ty"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -34,3 +34,6 @@ Issues = "https://github.com/koxudaxi/heki/issues"
 bindings = "bin"
 manifest-path = "crates/heki/Cargo.toml"
 module-name = "heki"
+# `heki_kb` embeds the catalog files at the repository root with `include_str!`, so the source
+# distribution has to carry them.
+include = [{ path = "kb/**/*.toml", format = "sdist" }]
