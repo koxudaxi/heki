@@ -186,7 +186,7 @@ def main() -> int:
     for p, t in files.items():
         # LF on every platform, as the checkout keeps them (`.gitattributes`): Python would
         # write CRLF on Windows.
-        p.write_text(text, encoding="utf-8", newline="\n")
+        p.write_text(t, encoding="utf-8", newline="\n")
     print(f"Wrote {', '.join(str(p.relative_to(ROOT)) for p in files)}.")
     return 0
 
