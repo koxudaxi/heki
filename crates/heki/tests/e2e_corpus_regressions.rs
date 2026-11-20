@@ -812,3 +812,76 @@ fn diff_headers_and_every_output_format_print_paths_from_the_working_directory()
     let concise = run(&["--output-format", "concise", absolute.to_str().unwrap()]);
     assert!(concise.starts_with("pkg/a.py:8:16: OPT120 "), "{concise}");
 }
+
+// ======================================================= declarations, star imports, elif
+
+const STAR_MODULE: &str = "from os.path import *\n\n_OPS = [\"moveTo\", \"lineTo\", \"closePath\"]\nPUBLIC = [\"a\", \"b\"]\nfrom os import *\n\n\ndef ops(segs):\n    out = []\n    for s in segs:\n        out.append(_OPS.index(s))\n        out.append(PUBLIC.index(s))\n    return out\n";
+
+const CLASS_ATTRIBUTES: &str = r#"class Base:
+    detail_only_fields = []
+
+    @classmethod
+    def fields(cls, all_fields: list[str]):
+        for field in cls.detail_only_fields:
+            all_fields.remove(field)
+
+
+class Pages(Base):
+    detail_only_fields = ["parent"]
+
+
+class Grown:
+    names = ["a"]
+
+    @classmethod
+    def fields(cls, all_fields: list[str]):
+        for field in cls.names:
+            all_fields.remove(field)
+
+    def add(self, x):
+        self.names.append(x)
+"#;
+
+const TWO_KEYS: &str = r#"def two_keys(comps, dum):
+    for i in range(len(comps)):
+        for dx in dum:
+            if dx[2] == i:
+                print(dx)
+            elif dx[3] == i:
+                print(i)
+
+
+def guarded(orders, customers):
+    out = []
+    for o in orders:
+        for c in customers:
+            if c is None:
+                continue
+            if o.cid == c.id:
+                out.append((o, c))
+    return out
+"#;
+
+#[test]
+fn module_constants_class_attributes_and_elif_comparisons() {
+    let p = Project::new("reg_decl_star_elif");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/star.py", STAR_MODULE)
+        .write("pkg/views.py", CLASS_ATTRIBUTES)
+        .write("pkg/pairs.py", TWO_KEYS);
+    let diags = diagnostics(&p, &["--select", "OPT112,OPT113"]);
+    // A star import rebinds only the public names bound before it; a class attribute read
+    // through `cls` is small when the class family only assigns small displays; an `elif`
+    // comparison only sees the pairs the `if` before it rejected (a join filtered by
+    // `continue` is still one).
+    assert_eq!(
+        reported(&diags),
+        pairs(&[
+            ("guarded", "OPT113"),
+            ("ops", "OPT112"),
+            ("Grown.fields", "OPT112"),
+        ]),
+        "{diags:#?}"
+    );
+    assert_eq!(diags[1]["target"], "PUBLIC");
+}

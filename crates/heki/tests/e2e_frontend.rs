@@ -1246,7 +1246,8 @@ fn ir_loop_bounds_and_loop_carried_values() {
             json!("unbounded"),
             small(2),
             json!("unbounded"),
-            json!("unbounded"),
+            // `range(0, 10, 2)`: a constant step counts too.
+            small(5),
             small(4),
             json!("unbounded"),
             small(5),

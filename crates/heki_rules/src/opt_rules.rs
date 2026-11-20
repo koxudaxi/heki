@@ -172,9 +172,11 @@ impl<'a, 'c> Sizes<'a, 'c> {
                 decls.small_global(&fqn).cloned()
             }
             InstKind::AttrLoad { obj, attr, .. } => match self.types.get(obj)? {
+                // A class attribute read through the class (`cls.order`).
+                Val::Ref(class) if decls.is_project_class(class) => decls.small_attr(class, attr),
                 Val::Ref(module) => decls.small_global(&format!("{module}.{attr}")).cloned(),
                 Val::Inst(class) => decls.small_attr(class, attr),
-                _ => None,
+                Val::Super(_) => None,
             },
             _ => None,
         }
@@ -525,8 +527,21 @@ impl<'a> Defs<'a> {
             && !picks_value
             && !branches.is_empty()
             && branches.iter().all(|&(from, then_bb, else_bb)| {
-                !self.continues(from, then_bb) && !self.false_side_works(&preds, else_bb)
+                !self.continues(from, then_bb)
+                    && !self.false_side_works(&preds, else_bb)
+                    && !self.after_other_work(&preds, from)
             })
+    }
+
+    /// Whether block `from` runs only on the false side of another branch whose true side does
+    /// work: an `elif` after an `if` that handles other pairs (`if a.x == b.k: ... elif a.y ==
+    /// b.k: ...` matches on two keys, so one index skips pairs the other test handles).
+    fn after_other_work(&self, preds: &[Vec<BlockId>], from: BlockId) -> bool {
+        let [p] = preds[from.0 as usize].as_slice() else {
+            return false;
+        };
+        matches!(self.f.block(*p).terminator, Terminator::Branch { then_bb, else_bb, .. }
+            if else_bb == from && then_bb != from && !self.continues(*p, then_bb))
     }
 
     /// Whether the false side of a branch, block `to`, does something: it is entered from the
