@@ -1,3 +1,4 @@
+use crate::facts::LoopHint;
 use crate::{
     A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
     FunctionId, FunctionKind, Inst, InstKind, IrFunction, LocalAnnotation, LoopBound,
@@ -35,6 +36,7 @@ pub fn build_module_ir(
         class_by_span,
         lazy_import_names,
         functions: Vec::new(),
+        loop_hints: Vec::new(),
         next_comp_id: 0,
         has_star_import: false,
     };
@@ -59,11 +61,19 @@ pub fn build_module_ir(
         body: FunctionBody::Suite(parsed.suite()),
     });
 
+    let mut functions = ctx.functions;
+    let constants = crate::facts::refine_loops(
+        &mut functions,
+        module_fn,
+        &ctx.loop_hints,
+        ctx.has_star_import,
+    );
     ModuleIr {
-        functions: ctx.functions,
+        functions,
         module_fn,
         has_future_annotations: semantic.has_future_annotations,
         has_star_import: ctx.has_star_import,
+        constants,
     }
 }
 
@@ -119,6 +129,9 @@ struct ModuleLowerer<'a> {
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
     functions: Vec<IrFunction>,
+    /// Syntax-level facts of every function's loops (in `IrFunction::loops` order), for the
+    /// loop-bound pass that runs once the whole module is lowered.
+    loop_hints: Vec<(FunctionId, Vec<LoopHint>)>,
     next_comp_id: u32,
     has_star_import: bool,
 }
@@ -213,6 +226,7 @@ impl<'a> ModuleLowerer<'a> {
             local_annotations: Vec::new(),
             var_names: Vec::new(),
             captured_vars: Vec::new(),
+            starred: Vec::new(),
             blocks: Vec::new(),
             loops: Vec::new(),
             loop_carried: Vec::new(),
@@ -251,7 +265,7 @@ impl<'a> ModuleLowerer<'a> {
             }
             FunctionBody::Expr(expr) => {
                 let val = builder.lower_expr(expr);
-                builder.terminate(Terminator::Return(Some(val)));
+                builder.terminate_at(Terminator::Return(Some(val)), Span::from(expr.range()));
             }
             FunctionBody::GenExpr(ge) => {
                 let outer_param = builder.fresh_var(Some(".0".to_string()));
@@ -299,7 +313,7 @@ impl<'a> ModuleLowerer<'a> {
                         b.emit_comp_element(kind, acc, elt, key, spec.span);
                     },
                 );
-                builder.terminate(Terminator::Return(Some(acc)));
+                builder.terminate_at(Terminator::Return(Some(acc)), spec.span);
             }
         }
 
@@ -325,6 +339,7 @@ struct ActiveLoop {
     bound: LoopBound,
     body_blocks: Vec<BlockId>,
     back_edges: Vec<BlockId>,
+    hint: LoopHint,
 }
 
 struct FnBuilder<'m, 'a> {
@@ -365,7 +380,11 @@ struct FnBuilder<'m, 'a> {
     exc_target_stack: Vec<BlockId>,
     loop_stack: Vec<ActiveLoop>,
     finished_loops: Vec<NaturalLoop>,
+    /// `finished_loops[i]`'s syntax-level facts.
+    finished_hints: Vec<LoopHint>,
     a1_hazards: Vec<A1Hazard>,
+    /// `*x` operands of displays and calls (`IrFunction::starred`).
+    starred: Vec<(VarId, u32)>,
 
     /// Lexical isolation map for PEP 709 inlined comprehension targets: `raw_name -> isolated_ssa_name`.
     comp_target_renames: Vec<FxHashMap<String, String>>,
@@ -395,6 +414,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             insts: Vec::new(),
             terminator: Terminator::Unreachable,
             exc_target: None,
+            term_span: None,
         };
         Self {
             module,
@@ -427,7 +447,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             exc_target_stack: Vec::new(),
             loop_stack: Vec::new(),
             finished_loops: Vec::new(),
+            finished_hints: Vec::new(),
             a1_hazards: Vec::new(),
+            starred: Vec::new(),
             comp_target_renames: Vec::new(),
         }
     }
@@ -447,6 +469,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             insts: Vec::new(),
             terminator: Terminator::Unreachable,
             exc_target,
+            term_span: None,
         });
         self.terminated.push(false);
         self.preds.push(Vec::new());
@@ -509,6 +532,25 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
         self.blocks[bb.0 as usize].terminator = term;
         self.terminated[bb.0 as usize] = true;
+    }
+
+    /// [`Self::terminate`] with the source span of the terminator's value: the `Branch`
+    /// condition or the `return` / `raise` statement.
+    fn terminate_at(&mut self, term: Terminator, span: Span) {
+        let bb = self.cur_bb;
+        if !self.terminated[bb.0 as usize] {
+            self.blocks[bb.0 as usize].term_span = Some(span);
+        }
+        self.terminate(term);
+    }
+
+    /// Record the `*x` operands of the display or call defining `dst`.
+    fn record_starred(&mut self, dst: VarId, operands: &[Expr]) {
+        for (i, e) in operands.iter().enumerate() {
+            if matches!(e, Expr::Starred(_)) {
+                self.starred.push((dst, i as u32));
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -813,7 +855,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Stmt::ClassDef(cls) => self.lower_class_def(cls),
             Stmt::Return(r) => {
                 let val = r.value.as_ref().map(|e| self.lower_expr(e));
-                self.terminate(Terminator::Return(val));
+                self.terminate_at(Terminator::Return(val), Span::from(r.range));
             }
             Stmt::Delete(d) => {
                 for target in &d.targets {
@@ -858,21 +900,24 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 if let Some(cause) = &r.cause {
                     let _ = self.lower_expr(cause);
                 }
-                self.terminate(Terminator::Raise(exc));
+                self.terminate_at(Terminator::Raise(exc), Span::from(r.range));
             }
             Stmt::Try(t) => self.lower_try(t),
             Stmt::Assert(a) => {
                 let cond = self.lower_expr(&a.test);
                 let ok_bb = self.new_block(true);
                 let fail_bb = self.new_block(true);
-                self.terminate(Terminator::Branch {
-                    cond,
-                    then_bb: ok_bb,
-                    else_bb: fail_bb,
-                });
+                self.terminate_at(
+                    Terminator::Branch {
+                        cond,
+                        then_bb: ok_bb,
+                        else_bb: fail_bb,
+                    },
+                    Span::from(a.test.range()),
+                );
                 self.switch_to(fail_bb);
                 let msg = a.msg.as_ref().map(|m| self.lower_expr(m));
-                self.terminate(Terminator::Raise(msg));
+                self.terminate_at(Terminator::Raise(msg), Span::from(a.range));
                 self.switch_to(ok_bb);
             }
             Stmt::Import(imp) => {
@@ -1364,7 +1409,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let preheader = self.cur_bb;
 
         let depth = (self.loop_stack.len() as u16) + 1;
-        let bound = classify_for_bound(f);
+        let (bound, retry_body) = classify_for_bound(f);
 
         // Allocate loop header (unsealed until back-edges are wired) and exit blocks.
         let header_bb = self.new_block(false);
@@ -1387,25 +1432,33 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             bound,
             body_blocks: vec![header_bb],
             back_edges: Vec::new(),
+            hint: LoopHint {
+                retry_body,
+                cap_tests: Vec::new(),
+            },
         });
 
         // Header block (depth d + 1): IterNext -> Branch(body, orelse/exit)
         self.switch_to(header_bb);
         let next_val = self.fresh_var(None);
+        let target_span = Span::from(f.target.range());
         self.emit(
             InstKind::IterNext {
                 dst: next_val,
                 iter: iter_var,
                 is_async: f.is_async,
             },
-            Span::from(f.target.range()),
+            target_span,
         );
         let body_bb = self.new_block(true);
-        self.terminate(Terminator::Branch {
-            cond: next_val,
-            then_bb: body_bb,
-            else_bb: orelse_bb,
-        });
+        self.terminate_at(
+            Terminator::Branch {
+                cond: next_val,
+                then_bb: body_bb,
+                else_bb: orelse_bb,
+            },
+            target_span,
+        );
 
         // Body (depth d + 1)
         self.switch_to(body_bb);
@@ -1432,7 +1485,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         self.seal_block(exit_bb);
         self.switch_to(exit_bb);
+        self.finish_loop(finished);
+    }
 
+    /// Record a lowered loop (its natural loop and its syntax-level hints).
+    fn finish_loop(&mut self, finished: ActiveLoop) {
         self.finished_loops.push(NaturalLoop {
             header: finished.header,
             preheader: finished.preheader,
@@ -1441,7 +1498,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             back_edges: finished.back_edges,
             bound: finished.bound,
             depth: finished.depth,
+            len_caps: Vec::new(),
         });
+        self.finished_hints.push(finished.hint);
     }
 
     fn lower_while(&mut self, w: &'a ast::StmtWhile) {
@@ -1467,16 +1526,23 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             bound,
             body_blocks: vec![header_bb],
             back_edges: Vec::new(),
+            hint: LoopHint {
+                retry_body: false,
+                cap_tests: len_cap_tests(&w.test),
+            },
         });
 
         self.switch_to(header_bb);
         let cond = self.lower_expr(&w.test);
         let body_bb = self.new_block(true);
-        self.terminate(Terminator::Branch {
-            cond,
-            then_bb: body_bb,
-            else_bb: orelse_bb,
-        });
+        self.terminate_at(
+            Terminator::Branch {
+                cond,
+                then_bb: body_bb,
+                else_bb: orelse_bb,
+            },
+            Span::from(w.test.range()),
+        );
 
         self.switch_to(body_bb);
         self.lower_suite(&w.body);
@@ -1500,16 +1566,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         self.seal_block(exit_bb);
         self.switch_to(exit_bb);
-
-        self.finished_loops.push(NaturalLoop {
-            header: finished.header,
-            preheader: finished.preheader,
-            body: finished.body_blocks,
-            exits: vec![finished.exit],
-            back_edges: finished.back_edges,
-            bound: finished.bound,
-            depth: finished.depth,
-        });
+        self.finish_loop(finished);
     }
 
     // -------------------------------------------------------------------------
@@ -1525,11 +1582,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         } else {
             self.new_block(true)
         };
-        self.terminate(Terminator::Branch {
-            cond,
-            then_bb,
-            else_bb: next_else_bb,
-        });
+        self.terminate_at(
+            Terminator::Branch {
+                cond,
+                then_bb,
+                else_bb: next_else_bb,
+            },
+            Span::from(if_stmt.test.range()),
+        );
 
         self.switch_to(then_bb);
         self.lower_suite(&if_stmt.body);
@@ -1546,11 +1606,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 } else {
                     self.new_block(true)
                 };
-                self.terminate(Terminator::Branch {
-                    cond: c,
-                    then_bb: c_then,
-                    else_bb: c_else,
-                });
+                self.terminate_at(
+                    Terminator::Branch {
+                        cond: c,
+                        then_bb: c_then,
+                        else_bb: c_else,
+                    },
+                    Span::from(test.range()),
+                );
                 self.switch_to(c_then);
                 self.lower_suite(&clause.body);
                 self.terminate(Terminator::Jump(merge_bb));
@@ -1677,11 +1740,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     finally_bb.unwrap_or(after_bb)
                 };
                 let cond = self.emit_const(ConstLiteral::Bool(true), Span::from(eh.range));
-                self.terminate(Terminator::Branch {
-                    cond,
-                    then_bb: handler_bb,
-                    else_bb: fallthrough_bb,
-                });
+                self.terminate_at(
+                    Terminator::Branch {
+                        cond,
+                        then_bb: handler_bb,
+                        else_bb: fallthrough_bb,
+                    },
+                    Span::from(eh.range),
+                );
 
                 self.switch_to(handler_bb);
                 let exc_var = eh
@@ -1730,22 +1796,29 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             } else {
                 self.new_block(true)
             };
-            let cond = self.emit_const(ConstLiteral::Bool(true), Span::from(case.pattern.range()));
-            self.terminate(Terminator::Branch {
-                cond,
-                then_bb: case_bb,
-                else_bb: next_bb,
-            });
+            let pattern_span = Span::from(case.pattern.range());
+            let cond = self.emit_const(ConstLiteral::Bool(true), pattern_span);
+            self.terminate_at(
+                Terminator::Branch {
+                    cond,
+                    then_bb: case_bb,
+                    else_bb: next_bb,
+                },
+                pattern_span,
+            );
             self.switch_to(case_bb);
             self.lower_pattern(&case.pattern, subject);
             if let Some(guard) = &case.guard {
                 let g = self.lower_expr(guard);
                 let body_bb = self.new_block(true);
-                self.terminate(Terminator::Branch {
-                    cond: g,
-                    then_bb: body_bb,
-                    else_bb: next_bb,
-                });
+                self.terminate_at(
+                    Terminator::Branch {
+                        cond: g,
+                        then_bb: body_bb,
+                        else_bb: next_bb,
+                    },
+                    Span::from(guard.range()),
+                );
                 self.switch_to(body_bb);
             }
             self.lower_suite(&case.body);
@@ -1853,6 +1926,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Expr::List(l) => {
                 let elems = l.elts.iter().map(|e| self.lower_expr(e)).collect();
                 let dst = self.fresh_var(None);
+                self.record_starred(dst, &l.elts);
                 self.emit(
                     InstKind::AllocBuiltin {
                         dst,
@@ -1866,6 +1940,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Expr::Tuple(t) => {
                 let elems = t.elts.iter().map(|e| self.lower_expr(e)).collect();
                 let dst = self.fresh_var(None);
+                self.record_starred(dst, &t.elts);
                 self.emit(
                     InstKind::AllocBuiltin {
                         dst,
@@ -1879,6 +1954,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Expr::Set(s) => {
                 let elems = s.elts.iter().map(|e| self.lower_expr(e)).collect();
                 let dst = self.fresh_var(None);
+                self.record_starred(dst, &s.elts);
                 self.emit(
                     InstKind::AllocBuiltin {
                         dst,
@@ -1957,11 +2033,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                         } else {
                             (merge_bb, next_bb)
                         };
-                        self.terminate(Terminator::Branch {
-                            cond: v,
-                            then_bb,
-                            else_bb,
-                        });
+                        self.terminate_at(
+                            Terminator::Branch {
+                                cond: v,
+                                then_bb,
+                                else_bb,
+                            },
+                            Span::from(val_expr.range()),
+                        );
                         self.switch_to(next_bb);
                     } else {
                         self.terminate(Terminator::Jump(merge_bb));
@@ -1999,11 +2078,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 let then_bb = self.new_block(true);
                 let else_bb = self.new_block(true);
                 let merge_bb = self.new_block(false);
-                self.terminate(Terminator::Branch {
-                    cond,
-                    then_bb,
-                    else_bb,
-                });
+                self.terminate_at(
+                    Terminator::Branch {
+                        cond,
+                        then_bb,
+                        else_bb,
+                    },
+                    Span::from(if_expr.test.range()),
+                );
 
                 self.switch_to(then_bb);
                 let tval = self.lower_expr(&if_expr.body);
@@ -2281,6 +2363,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 })
                 .collect();
             let dst = self.fresh_var(None);
+            self.record_starred(dst, &call.arguments.args);
             self.emit(
                 InstKind::MethodCall {
                     dst,
@@ -2319,6 +2402,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 })
                 .collect();
             let dst = self.fresh_var(None);
+            self.record_starred(dst, &call.arguments.args);
             self.emit(
                 InstKind::Call {
                     dst,
@@ -2497,24 +2581,29 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             bound,
             body_blocks: vec![header_bb],
             back_edges: Vec::new(),
+            hint: LoopHint::default(),
         });
 
         self.switch_to(header_bb);
         let next_val = self.fresh_var(None);
+        let target_span = Span::from(g.target.range());
         self.emit(
             InstKind::IterNext {
                 dst: next_val,
                 iter: iter_var,
                 is_async: g.is_async,
             },
-            Span::from(g.target.range()),
+            target_span,
         );
         let body_bb = self.new_block(true);
-        self.terminate(Terminator::Branch {
-            cond: next_val,
-            then_bb: body_bb,
-            else_bb: exit_bb,
-        });
+        self.terminate_at(
+            Terminator::Branch {
+                cond: next_val,
+                then_bb: body_bb,
+                else_bb: exit_bb,
+            },
+            target_span,
+        );
 
         self.switch_to(body_bb);
 
@@ -2535,11 +2624,14 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             let cond = self.lower_expr(cond_expr);
             let pass_bb = self.new_block(true);
             let skip_bb = self.new_block(true);
-            self.terminate(Terminator::Branch {
-                cond,
-                then_bb: pass_bb,
-                else_bb: skip_bb,
-            });
+            self.terminate_at(
+                Terminator::Branch {
+                    cond,
+                    then_bb: pass_bb,
+                    else_bb: skip_bb,
+                },
+                Span::from(cond_expr.range()),
+            );
             self.switch_to(skip_bb);
             let cur = self.cur_bb;
             if let Some(top) = self.loop_stack.last_mut() {
@@ -2566,16 +2658,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.seal_block(header_bb);
         self.seal_block(exit_bb);
         self.switch_to(exit_bb);
-
-        self.finished_loops.push(NaturalLoop {
-            header: finished.header,
-            preheader: finished.preheader,
-            body: finished.body_blocks,
-            exits: vec![finished.exit],
-            back_edges: finished.back_edges,
-            bound: finished.bound,
-            depth: finished.depth,
-        });
+        self.finish_loop(finished);
     }
 
     fn lower_subscript_index(
@@ -2676,6 +2759,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         let mut captured_vars: Vec<String> = self.captured_by_children.into_iter().collect();
         captured_vars.sort();
+        self.module
+            .loop_hints
+            .push((self.id, std::mem::take(&mut self.finished_hints)));
 
         IrFunction {
             id: self.id,
@@ -2691,6 +2777,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             local_annotations: self.local_annotations,
             var_names: self.var_names,
             captured_vars,
+            starred: self.starred,
             blocks: self.blocks,
             loops: self.finished_loops,
             loop_carried,
@@ -2713,21 +2800,36 @@ fn compute_loop_carried(
     let mut out = Vec::new();
     for lp in loops {
         let body_set: FxHashSet<BlockId> = lp.body.iter().copied().collect();
-        let mut def_deps: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+        // Definitions inside the loop: copies and phis pass a value on, every other instruction
+        // computes a new one from its operands (header phis are where values enter).
+        let mut passes: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+        let mut computes: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+        let mut order: Vec<VarId> = Vec::new();
         for &bb_id in &lp.body {
             let bb = &blocks[bb_id.0 as usize];
             for phi in &bb.phis {
                 if bb_id != lp.header {
                     let deps: Vec<VarId> = phi.incoming.iter().map(|(_, v)| *v).collect();
-                    def_deps.insert(phi.dst, deps);
+                    passes.insert(phi.dst, deps);
                 }
             }
             for inst in &bb.insts {
-                if let Some(dst) = inst.kind.dst() {
-                    def_deps.insert(dst, inst.kind.operands());
+                match &inst.kind {
+                    InstKind::Copy { dst, src } => {
+                        passes.insert(*dst, vec![*src]);
+                    }
+                    kind => {
+                        if let Some(dst) = kind.dst() {
+                            computes.insert(dst, kind.operands());
+                            order.push(dst);
+                        }
+                    }
                 }
             }
         }
+
+        let mut deps: FxHashMap<VarId, Vec<VarId>> = passes.clone();
+        deps.extend(computes.iter().map(|(v, ops)| (*v, ops.clone())));
 
         let header = &blocks[lp.header.0 as usize];
         for phi in &header.phis {
@@ -2745,7 +2847,8 @@ fn compute_loop_carried(
             if back_vars.is_empty() {
                 continue;
             }
-            let self_accumulating = reaches_var(&back_vars, phi.dst, &def_deps);
+            let updates =
+                accumulating_updates(&back_vars, phi.dst, &passes, &computes, &deps, &order);
             let var_name = var_names.get(phi.dst.0 as usize).and_then(|o| o.clone());
             out.push(LoopCarriedInfo {
                 loop_header: lp.header,
@@ -2753,11 +2856,46 @@ fn compute_loop_carried(
                 var_name,
                 init_vars,
                 back_vars,
-                self_accumulating,
+                self_accumulating: !updates.is_empty(),
+                updates,
             });
         }
     }
     out
+}
+
+/// The computed values that reach the back edge (`back_vars`) through copies and phis only and
+/// depend on `phi` (in `order`, the block order of their definitions). A path that only passes
+/// `phi` itself on (a branch leaving the variable unchanged) contributes nothing.
+fn accumulating_updates(
+    back_vars: &[VarId],
+    phi: VarId,
+    passes: &FxHashMap<VarId, Vec<VarId>>,
+    computes: &FxHashMap<VarId, Vec<VarId>>,
+    deps: &FxHashMap<VarId, Vec<VarId>>,
+    order: &[VarId],
+) -> Vec<VarId> {
+    // The values the back edge may carry: through copies and phis to computed values.
+    let mut sources: FxHashSet<VarId> = FxHashSet::default();
+    let mut seen: FxHashSet<VarId> = back_vars.iter().copied().collect();
+    let mut queue: VecDeque<VarId> = back_vars.iter().copied().collect();
+    while let Some(v) = queue.pop_front() {
+        if let Some(from) = passes.get(&v) {
+            for &x in from {
+                if seen.insert(x) {
+                    queue.push_back(x);
+                }
+            }
+        } else if computes.contains_key(&v) {
+            sources.insert(v);
+        }
+    }
+    order
+        .iter()
+        .copied()
+        .filter(|v| sources.contains(v))
+        .filter(|v| reaches_var(&computes[v], phi, deps))
+        .collect()
 }
 
 /// Whether `target` is one of `starts` or reachable from them through `deps` (breadth-first).
@@ -2795,21 +2933,30 @@ fn resolve_replacement(map: &FxHashMap<VarId, VarId>, mut v: VarId) -> VarId {
 // =============================================================================
 // Loop Bound Classification (Advisory & Profitability ONLY)
 // =============================================================================
-fn classify_for_bound(f: &ast::StmtFor) -> LoopBound {
+/// The bound of a `for` loop from its syntax, and whether its body is a retry body (a fixed
+/// trip count found later makes it a retry loop too, `facts::refine_loops`).
+fn classify_for_bound(f: &ast::StmtFor) -> (LoopBound, bool) {
     let iter_bound = classify_iter_expr_bound(&f.iter);
-    if is_retry_body(&f.body)
+    let retry_body = is_retry_body(&f.body);
+    if retry_body
         && (matches!(iter_bound, LoopBound::ConstSmall(_)) || target_looks_like_retry(&f.target))
     {
-        return LoopBound::RetryPattern;
+        return (LoopBound::RetryPattern, retry_body);
     }
-    iter_bound
+    (iter_bound, retry_body)
+}
+
+/// A literal display of at most 8 items without `*` unpacking.
+fn fixed_display(elts: &[Expr]) -> Option<LoopBound> {
+    (elts.len() <= 8 && !elts.iter().any(|e| matches!(e, Expr::Starred(_))))
+        .then_some(LoopBound::ConstSmall(elts.len() as u32))
 }
 
 fn classify_iter_expr_bound(iter: &Expr) -> LoopBound {
     match iter {
-        Expr::Tuple(t) if t.elts.len() <= 8 => LoopBound::ConstSmall(t.elts.len() as u32),
-        Expr::List(l) if l.elts.len() <= 8 => LoopBound::ConstSmall(l.elts.len() as u32),
-        Expr::Set(s) if s.elts.len() <= 8 => LoopBound::ConstSmall(s.elts.len() as u32),
+        Expr::Tuple(t) => fixed_display(&t.elts).unwrap_or(LoopBound::Unbounded),
+        Expr::List(l) => fixed_display(&l.elts).unwrap_or(LoopBound::Unbounded),
+        Expr::Set(s) => fixed_display(&s.elts).unwrap_or(LoopBound::Unbounded),
         Expr::Call(c) => {
             if matches!(c.func.as_ref(), Expr::Name(n) if n.id.as_str() == "range") {
                 if c.arguments.args.len() == 1 {
@@ -2857,6 +3004,36 @@ fn classify_while_bound(w: &ast::StmtWhile) -> LoopBound {
         return LoopBound::RetryPattern;
     }
     LoopBound::Unbounded
+}
+
+/// The comparisons a `while` test requires that may cap a length (`len(x) < N` and its
+/// mirrored and inclusive forms), as the test itself or one operand of a top-level `and`.
+fn len_cap_tests(test: &Expr) -> Vec<Span> {
+    let conjuncts: Vec<&Expr> = match test {
+        Expr::BoolOp(b) if matches!(b.op, ast::BoolOp::And) => b.values.iter().collect(),
+        other => vec![other],
+    };
+    let is_len = |e: &Expr| {
+        matches!(e, Expr::Call(c) if matches!(c.func.as_ref(), Expr::Name(n) if n.id.as_str() == "len")
+            && c.arguments.args.len() == 1
+            && c.arguments.keywords.is_empty())
+    };
+    conjuncts
+        .into_iter()
+        .filter_map(|e| match e {
+            Expr::Compare(c)
+                if c.ops.len() == 1
+                    && matches!(
+                        c.ops[0],
+                        ast::CmpOp::Lt | ast::CmpOp::LtE | ast::CmpOp::Gt | ast::CmpOp::GtE
+                    )
+                    && (is_len(&c.operands[0]) || is_len(&c.operands[1])) =>
+            {
+                Some(Span::from(c.range))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn looks_like_daemon_flag(name: &str) -> bool {

@@ -10,8 +10,10 @@
 //!   while `heki_effect` continues normally.
 
 mod builder;
+mod facts;
 
 pub use builder::build_module_ir;
+pub use facts::{FnIndex, LEN_CAP_MAX, ModuleConstants, SMALL_MAX, SmallDisplay};
 
 use heki_ast::Span;
 use heki_semantic::{ClassId, ScopeId};
@@ -41,6 +43,10 @@ pub enum FunctionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopBound {
+    /// The loop runs at most this many times whatever the data: its iterable is fixed by the
+    /// code (a display of at most [`SMALL_MAX`] items, a name or module constant bound to one
+    /// that nothing grows, `range(...)` of constants, or `enumerate` / `zip` / `reversed` /
+    /// `sorted` / `.items()` ... of one).
     ConstSmall(u32),
     RetryPattern,
     DaemonPolling,
@@ -56,6 +62,18 @@ pub struct NaturalLoop {
     pub back_edges: Vec<BlockId>,
     pub bound: LoopBound,
     pub depth: u16,
+    /// Values the loop's own test caps: `while len(acc) < N` (also as one `and` operand) with
+    /// a constant `N` of at most [`LEN_CAP_MAX`] (Profitability only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub len_caps: Vec<LenCap>,
+}
+
+/// `len(var)` is below `limit` whenever the loop's body starts an iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LenCap {
+    /// The SSA value the loop test measures (the header phi of a loop-carried accumulator).
+    pub var: VarId,
+    pub limit: u32,
 }
 
 /// Loop-carried SSA `PhiNode` metadata (used by `DATA101` and `OPT101`–`OPT103`).
@@ -66,9 +84,15 @@ pub struct LoopCarriedInfo {
     pub var_name: Option<String>,
     pub init_vars: Vec<VarId>,
     pub back_vars: Vec<VarId>,
-    /// True when at least one back-edge update depends transitively on `phi_var`
-    /// inside the loop (e.g. `x = x + [e]`, `d = {**d, k: v}`, `df = pd.concat([df, chunk])`).
+    /// True when some back-edge value is computed from `phi_var` inside the loop (`x = x +
+    /// [e]`, `d = {**d, k: v}`, `df = pd.concat([df, chunk])`), i.e. `updates` is not empty.
+    /// A path that only passes the previous value on (a branch leaving the variable unchanged)
+    /// is not an update.
     pub self_accumulating: bool,
+    /// The instruction results that reach the back edge through copies and phis only and are
+    /// computed from `phi_var` (the accumulating updates), in block order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub updates: Vec<VarId>,
 }
 
 /// A1 assumption hazard (disables `heki_soundness` on this function only; `heki_effect` continues).
@@ -548,6 +572,10 @@ pub struct BasicBlock {
     pub insts: Vec<Inst>,
     pub terminator: Terminator,
     pub exc_target: Option<BlockId>,
+    /// Source span of a `Branch` condition or a `return` / `raise` statement, for blocks whose
+    /// terminator uses a value (a block without instructions has no other position).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term_span: Option<Span>,
 }
 
 /// Type annotation recorded for local/attribute assignments (Advisory lane ONLY).
@@ -577,6 +605,11 @@ pub struct IrFunction {
     pub var_names: Vec<Option<String>>,
     /// Free variables captured by nested functions, lambdas, or generator expressions.
     pub captured_vars: Vec<String>,
+    /// Operands written with `*` (iterable unpacking): the `dst` of the display or call and
+    /// the operand's index in its `elems` / `args` (`[*xs]` is not a one-element list, and
+    /// `f(*xs)` passes the elements of `xs`, not `xs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub starred: Vec<(VarId, u32)>,
     pub blocks: Vec<BasicBlock>,
     pub loops: Vec<NaturalLoop>,
     pub loop_carried: Vec<LoopCarriedInfo>,
@@ -662,6 +695,18 @@ impl IrFunction {
         }
     }
 
+    /// Whether operand `index` of the display or call defining `dst` is written with `*`.
+    pub fn is_starred(&self, dst: VarId, index: usize) -> bool {
+        self.starred
+            .iter()
+            .any(|&(d, i)| d == dst && i as usize == index)
+    }
+
+    /// Source span of the terminator of `id` (`None` for jumps and the implicit return).
+    pub fn term_span(&self, id: BlockId) -> Option<Span> {
+        self.block(id).term_span
+    }
+
     /// Check whether any decorator ends with one of the provided names (e.g. `cached_property`).
     pub fn has_decorator(&self, names: &[&str]) -> bool {
         self.decorators.iter().any(|d| {
@@ -740,6 +785,10 @@ pub struct ModuleIr {
     /// may be rebound by it (`heki_soundness` builtin-shadowing protection, Assumption A1(b)).
     #[serde(default)]
     pub has_star_import: bool,
+    /// Module-level names the code fixes (integer constants and small displays), for the
+    /// size facts of [`FnIndex`] and the declarations other modules read.
+    #[serde(default)]
+    pub constants: ModuleConstants,
 }
 
 impl ModuleIr {
