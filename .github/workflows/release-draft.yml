@@ -268,13 +268,13 @@ jobs:
             - Attempt to read the read-boundary marker exactly once. Its Read request must be denied; do not retry, then continue normal analysis. Never copy, quote, or summarize its contents in any output.
 
             A change is breaking for heki when it is one of these, compared with the baseline release (each is a category):
-            1. Default Rule Changes: existing code gets new reports from the rules that are enabled by default (a new rule that is enabled by default, a rule turned on by default, or wider detection in a rule that is enabled by default), or a rule's default severity changes.
+            1. Default Rule Changes: existing code gets new reports from the rules that are enabled by default (a new rule that is enabled by default, a rule turned on by default, or wider detection in a rule that is enabled by default), a rule that is enabled by default becomes opt-in or is removed, or a rule's default severity changes.
             2. Rule Code and Name Changes: a rule code or a rule name (slug) changes.
-            3. Configuration and CLI Changes: configuration keys or their meaning, command-line options, or exit codes change.
+            3. Configuration and CLI Changes: configuration keys or their meaning, command-line options, or exit codes change. A change in how `requires-python` selects the target Python version is a change of configuration meaning.
             4. Output and Editor Integration Changes: fields of the JSON or SARIF output are removed or change meaning, the language server behavior that editors rely on changes, or the format of `--fix` rewrites changes.
             5. Python and Platform Support Changes: the supported Python versions or the supported platforms change.
 
-            These are not breaking: a change that only removes false reports, in a rule that is enabled by default or in an opt-in rule (a fixed false positive); new opt-in rules; new optional configuration keys and new fields of the output; and any change to an experimental feature. heki is experimental and any release may change it, but breaking changes are still listed so that users see them.
+            These are not breaking: a change that only removes false reports, in a rule that is enabled by default or in an opt-in rule (a fixed false positive), even though it narrows what the rule detects; new opt-in rules; new optional configuration keys and new fields of the output; and any change to an experimental feature. heki is experimental and any release may change it, but breaking changes are still listed so that users see them.
 
             If breaking changes are found, format them EXACTLY like this:
 

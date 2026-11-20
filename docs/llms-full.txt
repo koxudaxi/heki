@@ -2131,6 +2131,7 @@ $ uvx --from "zensical==0.1.2" zensical serve
 
 The Release Draft workflow (`.github/workflows/release-draft.yml`) keeps a draft GitHub release
 of the next version. Publishing the draft runs `release.yml`, which builds and publishes heki.
+A draft is published by hand, and only while no Release Draft run is queued or running.
 
 ### How a draft accumulates
 
@@ -2141,20 +2142,22 @@ when:
 
 - existing code gets new reports from the rules enabled by default: a new rule enabled by
   default, a rule turned on by default, or wider detection in a rule enabled by default;
+- a rule enabled by default becomes opt-in or is removed;
 - a rule's default severity changes;
 - a rule code or name changes;
-- configuration keys or their meaning, command-line options, or exit codes change;
+- configuration keys or their meaning, command-line options, or exit codes change, including how
+  `requires-python` selects the target Python version;
 - fields of the JSON or SARIF output are removed or change meaning;
 - the language server behavior that editors rely on changes;
 - the format of `--fix` rewrites changes;
 - the supported Python versions or platforms change.
 
 These are not breaking: a change that only removes false reports, in a default or an opt-in rule
-(a fixed false positive); new opt-in rules; new optional keys and new output fields; and any
-change to a feature that `docs/experimental.md` lists. The analysis context that Claude reads
-holds that page as the trusted checkout of `main` has it (while the page does not exist, no
-feature is experimental), and Claude describes each change to an experimental feature
-separately. The workflow then:
+(a fixed false positive), even though it narrows what the rule detects; new opt-in rules; new
+optional keys and new output fields; and any change to a feature that `docs/experimental.md`
+lists. The analysis context that Claude reads holds that page as the trusted checkout of `main`
+has it (while the page does not exist, no feature is experimental), and Claude describes each
+change to an experimental feature separately. The workflow then:
 
 - adds the breaking changes to the draft's `## Breaking Changes` section, under one heading per
   kind, the changes to experimental features to `## Experimental`, and a line
