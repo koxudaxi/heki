@@ -10,8 +10,8 @@ use crate::guards;
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
-    Facts, FuncKey, NewArg, NewCond, NewKind, ProjectIndex, ProtectedReturn, ReturnsNew, Shared,
-    SharedChain, SharedLine, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
+    Facts, FuncKey, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn, ReturnsNew,
+    Shared, SharedChain, SharedLine, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -274,6 +274,7 @@ fn recompute(
                 consumed = Some(consumed.map_or(here, |c| c & here));
             }
             return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
+            returned_origins_edge(&mut s, site, bc, callee);
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
@@ -500,6 +501,43 @@ fn return_flow_edge(
     })];
     chain.extend(tail);
     ProtectedReturn::add(&mut s.returns_protected, producer, produced, step, chain);
+}
+
+/// `MUT112` return flow across one call whose result the caller may return as itself: what the
+/// callee returns is what the caller returns there, with the argument bound to a parameter the
+/// callee returns in its place. A caller whose decorators may return something else, or that
+/// memoizes its result, keeps its own facts (`summary::keeps_returned_value`).
+fn returned_origins_edge(
+    s: &mut EffectSummary,
+    site: &CallSite,
+    bc: &BoundCallee,
+    callee: &EffectSummary,
+) {
+    let returned = callee.returns_origins;
+    if returned.is_empty()
+        || !site.returned.is_some_and(|step| step.from_object)
+        || !runs_at_call(callee, site)
+        || s.is_lru_cache
+        || !crate::summary::keeps_returned_value(&s.decorators)
+    {
+        return;
+    }
+    s.returns_origins.join(Origins {
+        params: 0,
+        elements: 0,
+        ..returned
+    });
+    for (j, arg) in bc.params.iter().enumerate().take(64) {
+        let Some(origins) = arg.origins.as_deref() else {
+            continue;
+        };
+        if returned.params & (1u64 << j) != 0 {
+            s.returns_origins.join(*origins);
+        }
+        if returned.elements & (1u64 << j) != 0 {
+            s.returns_origins.join(origins.element());
+        }
+    }
 }
 
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts
