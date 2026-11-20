@@ -2295,8 +2295,9 @@ release come from `CHANGELOG.md`.
 When the sync fails, for example because `CHANGELOG.md` has no section for the version, fix
 `main` in a pull request and run it again with
 `gh workflow run release-sync.yml --ref main -f tag=v<version>`. A run whose changes `main`
-already has opens nothing, and a run for an open sync pull request updates it. A pre-release
-leaves `main` as it is.
+already has opens nothing, and a run for an open sync pull request updates it. A pre-release,
+and a release older than the version `main` declares (a backport published late), leave `main`
+as it is.
 
 The builds can be tried without publishing:
 `gh workflow run release.yml --ref <branch> -f version=<version>` builds and checks the

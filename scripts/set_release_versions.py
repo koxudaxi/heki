@@ -17,7 +17,9 @@ published, in the pull request that brings `main` to the release. It writes:
 - with ``--changelog DATE``, `CHANGELOG.md`: the first ``## [VERSION] - Unreleased`` heading
   becomes ``## [VERSION] - DATE``, the ``[VERSION]`` link points to the release tag, and, when a
   section is headed ``[Unreleased]``, the ``[Unreleased]`` link to the changes since the tag. The
-  hand-written entries stay as they are.
+  hand-written entries stay as they are. A release older than the version the manifests declare
+  changes nothing: `main` has moved past it (a backport published late, or an old release synced
+  again).
 
 Each edit rewrites one value found by an exact pattern: a pattern that does not match exactly once
 stops the script before it writes any file, and so does a manifest that the edits leave with
@@ -40,6 +42,7 @@ RELEASE_VERSION = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?"
 )
 """A version that Cargo (SemVer) and PyPI (PEP 440) both accept, and order alike."""
+PRE_RELEASES = ("alpha", "beta", "rc")
 ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 TOML_TABLE_HEADER = re.compile(r"^\[", re.MULTILINE)
@@ -53,6 +56,16 @@ WORKSPACE_VERSION = "Cargo.toml `workspace.package.version`"
 
 def fail(message: str) -> NoReturn:
     sys.exit(f"cannot set the release version: {message}")
+
+
+def version_order(version: str, where: str) -> tuple[int, ...]:
+    """The sort key of a release version: a pre-release comes before its final release."""
+    match = RELEASE_VERSION.fullmatch(version)
+    if match is None:
+        fail(f"{where}: {version!r} is not a release version")
+    major, minor, patch, _, kind, number = match.groups()
+    pre = (PRE_RELEASES.index(kind), int(number)) if kind else (len(PRE_RELEASES), 0)
+    return int(major), int(minor), int(patch), *pre
 
 
 def declared_versions(pyproject: dict[str, Any], cargo: dict[str, Any]) -> dict[str, str]:
@@ -258,6 +271,11 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.version!r} is not a version in the form MAJOR.MINOR.PATCH, optionally "
             "followed by -alpha.N, -beta.N, or -rc.N"
         )
+    if args.changelog is not None:
+        declared = manifest_versions(args.root)[WORKSPACE_VERSION]
+        if version_order(declared, WORKSPACE_VERSION) > version_order(args.version, "the release"):
+            print(f"{args.version}: the manifests declare the later {declared}; nothing to change.")
+            return 0
     changed = []
     for path, text in release_files(args.root, args.version, args.changelog).items():
         if path.read_text(encoding="utf-8") != text:

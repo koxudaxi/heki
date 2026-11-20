@@ -105,6 +105,39 @@ def test_a_second_run_changes_nothing(checkout: Path, capsys) -> None:
     assert capsys.readouterr().out == "0.1.2: nothing to change.\n"
 
 
+def test_main_never_goes_back_to_an_older_release(checkout: Path, capsys) -> None:
+    release.main(["0.2.0", "--root", str(checkout)])
+    (checkout / "CHANGELOG.md").write_text(
+        "## [0.2.1] - Unreleased\n\n## [0.1.2] - 2026-11-25\n", encoding="utf-8"
+    )
+    before = texts(checkout)
+    capsys.readouterr()
+
+    release.main(["0.1.2", "--changelog", "2026-11-25", "--root", str(checkout)])
+
+    assert texts(checkout) == before
+    assert capsys.readouterr().out == (
+        "0.1.2: the manifests declare the later 0.2.0; nothing to change.\n"
+    )
+    # A build writes any version it is given.
+    release.main(["0.1.2", "--root", str(checkout)])
+    assert set(release.manifest_versions(checkout).values()) == {"0.1.2"}
+
+
+def test_release_versions_are_ordered_as_cargo_and_pypi_order_them() -> None:
+    ordered = [
+        "0.2.0-alpha.1",
+        "0.2.0-beta.1",
+        "0.2.0-rc.1",
+        "0.2.0-rc.2",
+        "0.2.0",
+        "0.2.1",
+        "0.10.0",
+    ]
+    keys = [release.version_order(version, "test") for version in ordered]
+    assert keys == sorted(keys) and len(set(keys)) == len(keys)
+
+
 @pytest.mark.parametrize(
     ("changelog", "expected"),
     [

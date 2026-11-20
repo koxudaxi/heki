@@ -5,7 +5,7 @@ name: Release Sync
 # `main` to it, `chore: sync release metadata for <version>` from the branch
 # `release/sync-<version>`: the version in `pyproject.toml`, `Cargo.toml`, and `Cargo.lock`, and
 # the release's CHANGELOG section dated with the publish date (`scripts/set_release_versions.py`).
-# A pre-release leaves `main` as it is.
+# A pre-release, and a release older than the version `main` declares, leave `main` as it is.
 #
 # - `workflow_dispatch` syncs `main` with a published release again, for example after the
 #   CHANGELOG was fixed for a run that failed. A run whose changes `main` already has opens
@@ -81,7 +81,7 @@ jobs:
           set -euo pipefail
           echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           if git diff --quiet; then
-            echo "::notice::main already declares this release; there is nothing to sync."
+            echo "::notice::main already has this release or a later one; there is nothing to sync."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
