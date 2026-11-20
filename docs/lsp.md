@@ -17,7 +17,10 @@ re-analyzes every function below it (whether a function only runs inside allowed
 whether its callers announce its writes, depends on all callers above it); with a contract on
 calls (`call-owners`, an effect boundary forbidding `calls`), also every function above it (a
 call of a target is reported at the callers of the private helper making it, and at the scope
-functions reaching it). Edits that change none of these, such as most comments, stop at the
+functions reaching it); with an effect boundary forbidding an execution effect, a function that
+changes its library calls also re-analyzes every function above it (a boundary's report names
+the call it reaches, and `allowed-callees` may allow one call of an effect and not another).
+Edits that change none of these, such as most comments, stop at the
 edited file. The diagnostics are the ones `heki check` reports for the saved files.
 
 Files created, changed, or deleted outside the editor (`git checkout`, code generators) are

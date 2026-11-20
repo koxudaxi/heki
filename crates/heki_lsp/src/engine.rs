@@ -7,7 +7,8 @@
 use globset::GlobSet;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, analyze_project_with_reads,
+    CallSite, CallTarget, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole,
+    analyze_project_with_reads,
 };
 use heki_rules::project::{
     ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, exclude_set, parse_source,
@@ -16,6 +17,7 @@ use heki_rules::project::{
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
     SnapshotError, SummarySnapshot, chain_facts, check_project, family_readers, find_rule,
+    forbids_execution_effects,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -123,11 +125,18 @@ struct ContractReach {
     /// any number of calls above it, and a call of a function without effects changes no
     /// summary.
     calls: bool,
+    /// An effect boundary forbidding an execution effect: its scope functions' reports name
+    /// the catalog calls any number of calls below them (`ExternalView`).
+    effects: bool,
 }
 
 /// Per function of one file: its project call sites without positions, and the cached
 /// properties it invalidates (see `Workspace::callee_files`).
 type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
+
+/// Per function of one file: the catalog calls it makes (symbol and effects, in order), while
+/// `ContractReach::effects` holds.
+type ExternalView = BTreeMap<FuncKey, Vec<CallTarget>>;
 
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the index is built).
@@ -192,6 +201,7 @@ impl Workspace {
                     .effect_boundaries
                     .iter()
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
+            effects: forbids_execution_effects(&env_cfg.effect_boundaries),
         };
         let Project { env, errors, .. } = project;
         let decls = index.decl_passes();
@@ -362,6 +372,22 @@ impl Workspace {
         out
     }
 
+    /// [`ExternalView`] of `path` (empty without `ContractReach::effects`).
+    fn external_view(&self, path: &Path) -> ExternalView {
+        let mut out = ExternalView::new();
+        let Some(file) = self.index.files.get(path).filter(|_| self.reach.effects) else {
+            return out;
+        };
+        for site in &file.call_sites {
+            if matches!(site.target, CallTarget::Layer2 { .. }) {
+                out.entry(site.caller.clone())
+                    .or_default()
+                    .push(site.target.clone());
+            }
+        }
+        out
+    }
+
     /// Files of the functions whose callers changed what they see of them: calls gained, lost,
     /// or bound differently (a function's `MUT201` / `MUT203` reports depend on the contexts
     /// it runs in), or the cached properties a caller invalidates (`MUT101`).
@@ -469,13 +495,14 @@ impl Workspace {
     /// of changed summaries, readers of changed declarations, callees whose callers changed,
     /// generators handed to changed functions, class families whose members changed, and the
     /// files with `MUT108` / `MUT110` reports above functions whose chain facts (`chains`,
-    /// before and after) changed.
+    /// before and after) or catalog calls (`externals`) changed.
     fn affected_by(
         &self,
         update: &heki_effect::IncrementalUpdate,
         change: &DeclKeys,
         callers: (&CallerView, &CallerView),
         chains: (&ChainFacts, &ChainFacts),
+        externals: (&ExternalView, &ExternalView),
     ) -> FxHashSet<PathBuf> {
         let mut affected: FxHashSet<PathBuf> = update
             .changed
@@ -498,6 +525,15 @@ impl Workspace {
         }
         if self.reach.calls {
             affected.extend(self.above_files(&changed));
+        }
+        let calling: Vec<&FuncKey> = externals
+            .0
+            .keys()
+            .chain(externals.1.keys())
+            .filter(|k| externals.0.get(*k) != externals.1.get(*k))
+            .collect();
+        if !calling.is_empty() {
+            affected.extend(self.above_files(&calling));
         }
         // A `MUT108` / `MUT110` call chain ends at the first function whose own body makes the
         // change and walks the calls of the functions before it: when a function moves the
@@ -619,14 +655,17 @@ impl Workspace {
         let callers_before = self.caller_view(&parsed.path);
         let chains_before = chain_facts(&self.index, &parsed.path);
         let sites_before = self.call_site_spans(&parsed.path);
+        let externals_before = self.external_view(&parsed.path);
         let (update, change) = self.summarize(&parsed);
         let callers_after = self.caller_view(&parsed.path);
         let chains_after = chain_facts(&self.index, &parsed.path);
+        let externals_after = self.external_view(&parsed.path);
         let mut affected = self.affected_by(
             &update,
             &change,
             (&callers_before, &callers_after),
             (&chains_before, &chains_after),
+            (&externals_before, &externals_after),
         );
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         // Call chains of other files show this file's call sites: when they move, those
@@ -690,6 +729,7 @@ impl Workspace {
         };
         let callers_before = self.caller_view(path);
         let chains_before = chain_facts(&self.index, path);
+        let externals_before = self.external_view(path);
         let update = self.index.remove_file(path);
         let change = match self.index.module_decls(&meta.module_name) {
             Some(remaining) => self.decls.replace(remaining),
@@ -701,6 +741,7 @@ impl Workspace {
             &change,
             (&callers_before, &CallerView::new()),
             (&chains_before, &ChainFacts::new()),
+            (&externals_before, &ExternalView::new()),
         );
         affected.extend(self.note_builtins(path, false));
         let mut v: Vec<PathBuf> = affected.into_iter().collect();

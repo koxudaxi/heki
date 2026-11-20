@@ -62,8 +62,9 @@ write-universe = ["Ledger.*"]
 
 [[tool.heki.effect-boundaries]]
 name = "render"
-scopes = ["pkg.walk_b.walk"]
-forbid = ["sleep"]
+scopes = ["pkg.gate.render", "pkg.walk_b.walk"]
+forbid = ["blocking-net", "sleep"]
+allowed-callees = ["requests.get"]
 [[tool.heki.readonly-returns]]
 name = "catalog"
 producers = ["pkg.catalog.Catalog.entry"]
@@ -137,7 +138,8 @@ const CHAIN_TOP: &str = "from pkg.chain_mid import relay\n\n\nclass Store:\n    
 
 // The index across files: two modules drive each other's private coroutine by hand
 // (`sync_driven_only`), a coroutine a sync function drives calls a blocking helper in another
-// module, and two functions in two modules call each other (one is a boundary's scope function).
+// module, two functions in two modules call each other (one is a boundary's scope function),
+// and a boundary allowing `requests.get` reaches a helper making two calls of it.
 const DRIVE_A: &str = "from pkg.drive_b import _cb\n\n\nasync def _ca():\n    return 1\n\n\ndef drive_b():\n    _cb().send(None)\n";
 const DRIVE_B: &str = "from pkg.drive_a import _ca\n\n\nasync def _cb():\n    return 1\n\n\ndef drive_a():\n    _ca().send(None)\n";
 const SLOW_LEAF: &str = "import time\n\n\ndef block():\n    time.sleep(1)\n";
@@ -146,6 +148,9 @@ const WORKER_DRIVER: &str = "from pkg.worker import _work\n\n\ndef drive():\n   
 const WALK_A: &str = "import time\n\nfrom pkg import walk_b\n\n\ndef walk(n):\n    if n > 0:\n        walk_b.walk(n - 1)\n";
 const WALK_B: &str =
     "from pkg import walk_a\n\n\ndef walk(n):\n    if n > 0:\n        walk_a.walk(n - 1)\n";
+const GATE_NET: &str =
+    "import requests\n\n\ndef fetch(url):\n    requests.get(url)\n    requests.get(url)\n";
+const GATE: &str = "from pkg.gate_net import fetch\n\n\ndef render(url):\n    fetch(url)\n";
 
 // Files: a module a caller already imports is created, then deleted; a stub is put next to a
 // module, then removed.
@@ -405,6 +410,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/worker_driver.py", WORKER_DRIVER),
         ("pkg/walk_a.py", WALK_A),
         ("pkg/walk_b.py", WALK_B),
+        ("pkg/gate_net.py", GATE_NET),
+        ("pkg/gate.py", GATE),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -585,8 +592,8 @@ fn steps_receiver_typing() -> Vec<Step> {
     ]
 }
 
-/// The index across files: facts its callers decide (`sync_driven_only`), and members of a call
-/// cycle in other files.
+/// The index across files: facts its callers decide (`sync_driven_only`), members of a call
+/// cycle in other files, and the catalog calls below an effect boundary.
 fn steps_effect_index() -> Vec<Step> {
     vec![
         Step::new(
@@ -621,6 +628,19 @@ fn steps_effect_index() -> Vec<Step> {
             vec![save("pkg/walk_a.py", WALK_A)],
         )
         .absent(&[("pkg/walk_b.py", "EFF201")]),
+        Step::new(
+            "the first of two allowed catalog calls below a boundary becomes a forbidden one",
+            vec![save(
+                "pkg/gate_net.py",
+                &GATE_NET.replacen("requests.get", "requests.put", 1),
+            )],
+        )
+        .present(&[("pkg/gate.py", "EFF201")]),
+        Step::new(
+            "both calls are allowed again",
+            vec![save("pkg/gate_net.py", GATE_NET)],
+        )
+        .absent(&[("pkg/gate.py", "EFF201")]),
     ]
 }
 

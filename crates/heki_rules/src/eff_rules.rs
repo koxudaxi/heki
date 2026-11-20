@@ -306,6 +306,17 @@ const FORBID_TOKENS: &[(&str, &[ExecEffectKind])] = &[
     ("calls", &[]),
 ];
 
+/// Whether an effect boundary forbids an execution effect: its reports then name the catalog
+/// calls of the functions below its scope functions, which no summary compares (a call of
+/// `requests.put` instead of an allowed `requests.get` leaves every summary as it was).
+pub fn forbids_execution_effects(boundaries: &[heki_env::EffectBoundaryRule]) -> bool {
+    boundaries.iter().flat_map(|b| &b.forbid).any(|token| {
+        FORBID_TOKENS
+            .iter()
+            .any(|(name, effects)| name == token && !effects.is_empty())
+    })
+}
+
 /// `UnknownForbid::expected`, built from [`FORBID_TOKENS`].
 static FORBID_EXPECTED: LazyLock<String> = LazyLock::new(|| {
     let tokens: Vec<String> = FORBID_TOKENS
