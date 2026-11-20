@@ -4,7 +4,7 @@ use crate::eff_rules::shortest;
 use crate::mut_rules::{CallInst, site_call};
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
-use heki_effect::{CallSite, Callee, SiteEffect};
+use heki_effect::{CallSite, SiteEffect};
 use heki_ir::{Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
@@ -96,23 +96,12 @@ fn reallocates_argument(
     inst: &Inst,
     previous: VarId,
 ) -> bool {
-    let Some(call) = site_call(f, sites, inst, false).or_else(|| site_call(f, sites, inst, true))
-    else {
-        return false;
-    };
-    let Callee::Project(keys, _) = &call.callee else {
-        return false;
-    };
-    keys.iter().any(|key| {
-        cx.index.summary(key).is_some_and(|summary| {
-            let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
-            call.bind(&decl).into_iter().any(|(pos, v)| {
-                pos < 64
-                    && summary.reallocates_params & (1u64 << pos) != 0
-                    && carries(f, v, previous)
-            })
+    let call = site_call(f, sites, inst, false).or_else(|| site_call(f, sites, inst, true));
+    call.iter()
+        .flat_map(|c| c.bound_arguments(cx))
+        .any(|(_, summary, pos, v)| {
+            pos < 64 && summary.reallocates_params & (1u64 << pos) != 0 && carries(f, v, previous)
         })
-    })
 }
 
 /// Whether `v` is `previous`, a copy of it, or a display holding one.

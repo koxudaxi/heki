@@ -1895,19 +1895,37 @@ pub(crate) struct CallParts<'i> {
     pub(crate) args: &'i [VarId],
     pub(crate) kwargs: &'i [(Option<String>, VarId)],
     pub(crate) callee: Callee,
+    /// The call site recording the project call ([`site_call`]).
+    pub(crate) site: Option<&'i CallSite>,
 }
 
 impl CallParts<'_> {
-    /// [`bind_arguments`] of the call for its callee `decl` (`binds_recv` from the callee).
-    pub(crate) fn bind(&self, decl: &heki_effect::FunctionDecl) -> Vec<(usize, VarId)> {
-        let binds_recv = matches!(self.callee, Callee::Project(_, true));
-        bind_arguments(
-            decl,
-            binds_recv,
-            self.recv.map(|(v, _)| v),
-            self.args,
-            self.kwargs,
-        )
+    /// `(callee, its summary, parameter position, argument)` for each argument the call binds
+    /// to a project callee the index summarizes ([`bind_arguments`]).
+    pub(crate) fn bound_arguments<'s, 'c>(
+        &'s self,
+        cx: &'s CheckContext<'c>,
+    ) -> impl Iterator<Item = (&'s FuncKey, &'c EffectSummary, usize, VarId)> + 's {
+        let binds_recv = self.site.is_some_and(|s| s.binds_recv);
+        let callees = self.site.into_iter().flat_map(|s| s.project_callees());
+        callees.flat_map(move |bc| {
+            let key = &bc.callee;
+            let summary = cx.index.summary(key);
+            let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
+            let bound = bind_arguments(
+                &decl,
+                binds_recv,
+                self.recv.map(|(v, _)| v),
+                self.args,
+                self.kwargs,
+            );
+            summary.into_iter().flat_map(move |s| {
+                bound
+                    .clone()
+                    .into_iter()
+                    .map(move |(pos, v)| (key, s, pos, v))
+            })
+        })
     }
 }
 
@@ -1919,7 +1937,7 @@ impl CallParts<'_> {
 /// after it, keyword arguments left unbound.
 pub(crate) fn site_call<'i>(
     f: &'i IrFunction,
-    sites: &[&CallSite],
+    sites: &[&'i CallSite],
     inst: &'i Inst,
     worker: bool,
 ) -> Option<CallParts<'i>> {
@@ -1948,6 +1966,7 @@ pub(crate) fn site_call<'i>(
             args: call.args,
             kwargs: call.kwargs,
             callee,
+            site: Some(site),
         });
     }
     let k = usize::from(site.handed_callable?);
@@ -1963,6 +1982,7 @@ pub(crate) fn site_call<'i>(
         args: &call.args[k + 1..],
         kwargs: &[],
         callee,
+        site: Some(site),
     })
 }
 
@@ -2039,9 +2059,8 @@ impl<'a> Mut202Fn<'a> {
         })
     }
 
-    /// The facts of `callee` that the call at `span` runs in this function: at the call, and
-    /// where the object it returns is iterated ([`facts_run_at`]); the summary itself when the
-    /// index has no site for the call.
+    /// The facts of `callee` that the call at `span` (a site of it) runs in this function: at
+    /// the call, and where the object it returns is iterated ([`facts_run_at`]).
     fn facts_run_by_call(
         &self,
         span: Span,
@@ -2050,17 +2069,13 @@ impl<'a> Mut202Fn<'a> {
     ) -> Vec<&'a EffectSummary> {
         let sites = self.function_sites();
         let calls_key = |s: &&&CallSite| s.project_callees().iter().any(|bc| bc.callee == *key);
-        let Some(call) = sites
+        let call = sites
             .iter()
             .filter(calls_key)
-            .find(|s| s.role == SiteRole::Call && s.span == span)
-        else {
-            return vec![callee];
-        };
+            .find(|s| s.role == SiteRole::Call && s.span == span);
         // The other sites of the object the call returns copy its target.
-        sites
-            .iter()
-            .filter(|s| s.target == call.target)
+        call.into_iter()
+            .flat_map(|call| sites.iter().filter(move |s| s.target == call.target))
             .filter(calls_key)
             .filter_map(|s| facts_run_at(self.cx.index, s, callee))
             .collect()
@@ -2081,6 +2096,7 @@ impl<'a> Mut202Fn<'a> {
             recv: call.recv,
             args: call.args,
             kwargs: call.kwargs,
+            site: None,
         })
     }
 
@@ -2302,69 +2318,42 @@ impl<'a> Mut202Fn<'a> {
         }
         // Passing a read-only value to a project function that mutates that parameter, also
         // through an offloading API that calls it on a worker thread.
-        let Some(CallParts {
-            recv,
-            args,
-            kwargs,
-            callee: Callee::Project(keys, binds_recv),
-        }) = site_call(self.f, self.function_sites(), inst, false)
+        let Some(call) = site_call(self.f, self.function_sites(), inst, false)
             .or_else(|| site_call(self.f, self.function_sites(), inst, true))
         else {
             return (None, Vec::new());
         };
-        let recv = recv.map(|(var, _)| var);
-        for (key, callee) in self.summarized(&keys) {
-            let decl = self
-                .cx
-                .decls
-                .function_decl(key)
-                .cloned()
-                .unwrap_or_default();
-            for (pos, var) in bind_arguments(&decl, binds_recv, recv, args, kwargs) {
-                let Some(r) = self.ro.get(&var) else {
-                    continue;
+        for (key, callee, pos, var) in call.bound_arguments(self.cx) {
+            let Some(r) = self.ro.get(&var) else {
+                continue;
+            };
+            // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
+            // A shallow copy shares only the objects below its top level: rebinding its
+            // attributes changes the copy alone.
+            let mutates = self
+                .facts_run_by_call(inst.span, key, callee)
+                .iter()
+                .any(|facts| {
+                    if r.shallow_copy {
+                        u8::try_from(pos)
+                            .ok()
+                            .and_then(|p| facts.changed_param_attrs.get(&p))
+                            .is_some_and(|attrs| !attrs.is_empty())
+                    } else {
+                        pos < 64 && facts.mutates_params & (1u64 << pos) != 0
+                    }
+                });
+            if mutates {
+                let hop = CallHop {
+                    caller: self.key.clone(),
+                    callee: key.fqn(),
+                    span: inst.span,
+                    path: self.unit.input.path.clone(),
                 };
-                // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
-                // A shallow copy shares only the objects below its top level: rebinding its
-                // attributes changes the copy alone.
-                let mutates = self
-                    .facts_run_by_call(inst.span, key, callee)
-                    .iter()
-                    .any(|facts| {
-                        if r.shallow_copy {
-                            u8::try_from(pos)
-                                .ok()
-                                .and_then(|p| facts.changed_param_attrs.get(&p))
-                                .is_some_and(|attrs| !attrs.is_empty())
-                        } else {
-                            pos < 64 && facts.mutates_params & (1u64 << pos) != 0
-                        }
-                    });
-                if mutates {
-                    let hop = CallHop {
-                        caller: self.key.clone(),
-                        callee: key.fqn(),
-                        span: inst.span,
-                        path: self.unit.input.path.clone(),
-                    };
-                    return (Some(r.clone()), vec![hop]);
-                }
+                return (Some(r.clone()), vec![hop]);
             }
         }
         (None, Vec::new())
-    }
-
-    /// The callees the index summarizes. One it does not (an index older than the
-    /// declarations the callee was resolved through) is skipped, never assumed.
-    fn summarized<'k>(&self, keys: &'k [FuncKey]) -> Vec<(&'k FuncKey, &'a EffectSummary)> {
-        let mut out = Vec::new();
-        for key in keys {
-            let Some(summary) = self.cx.index.summary(key) else {
-                continue;
-            };
-            out.push((key, summary));
-        }
-        out
     }
 }
 

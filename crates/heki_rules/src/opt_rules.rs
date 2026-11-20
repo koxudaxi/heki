@@ -13,7 +13,7 @@ use crate::mut_rules::site_call;
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
-use heki_effect::{CONTAINER_MUTATORS, CallSite, Callee, TypeCtx, Val};
+use heki_effect::{CONTAINER_MUTATORS, CallSite, TypeCtx, Val};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, ModuleConstants, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
@@ -392,20 +392,12 @@ impl<'d, 'a> ListUse<'d, 'a> {
             .filter(|s| s.caller == key)
             .collect();
         self.insts().any(|i| {
-            let Some(call) = site_call(f, &sites, i, false) else {
-                return false;
-            };
-            let Callee::Project(keys, _) = &call.callee else {
-                return false;
-            };
-            keys.iter().any(|key| {
-                cx.index.summary(key).is_some_and(|summary| {
-                    let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
-                    call.bind(&decl).into_iter().any(|(pos, v)| {
-                        pos < 64 && summary.mutates_params & (1u64 << pos) != 0 && self.is_list(v)
-                    })
+            let call = site_call(f, &sites, i, false);
+            call.iter()
+                .flat_map(|c| c.bound_arguments(cx))
+                .any(|(_, summary, pos, v)| {
+                    pos < 64 && summary.mutates_params & (1u64 << pos) != 0 && self.is_list(v)
                 })
-            })
         })
     }
 
