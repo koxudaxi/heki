@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import posixpath
 import re
 import tomllib
 from pathlib import Path
@@ -27,6 +28,7 @@ NUMBERED_ITEM = re.compile(r"\d+\. ")
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
 LINK = re.compile(r"\[([^\]]+)]\([^)]+\)")
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+LINK_TARGET = re.compile(r"(\]\()([^)\s]+)(\))")
 
 
 def page_url(site: str, path: str) -> str:
@@ -74,6 +76,42 @@ def description(text: str) -> str:
     return ""
 
 
+def absolute_links(text: str, path: str, site: str, repo: str) -> str:
+    """Resolve the page's relative links against its published URL.
+
+    `llms-full.txt` holds every page at one URL, so a link copied verbatim (`foo.md` on
+    `rules/index.md`) would resolve beside it. Pages become their site URLs, other files their
+    site paths, and files outside `docs/` their place in the repository.
+    """
+
+    def resolve(match: re.Match[str]) -> str:
+        target = match.group(2)
+        if is_external(target):
+            return match.group(0)
+        ref, hash_, anchor = target.partition("#")
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), ref)) if ref else path
+        if resolved.startswith("../"):
+            url = f"{repo}/blob/main/{resolved.removeprefix('../')}"
+        elif resolved.endswith(".md"):
+            url = page_url(site, resolved)
+        else:
+            url = f"{site}/{resolved}"
+        return f"{match.group(1)}{url}{hash_}{anchor}{match.group(3)}"
+
+    out = []
+    fence = None
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if fence:
+            fence = None if stripped.startswith(fence) else fence
+        elif stripped.startswith(FENCES):
+            fence = stripped[:3]
+        else:
+            line = LINK_TARGET.sub(resolve, line)
+        out.append(line)
+    return "".join(out)
+
+
 def title(text: str, fallback: str) -> str:
     for line in text.splitlines():
         if line.startswith("# "):
@@ -103,6 +141,7 @@ def walk(nav: list, section: str, out: list[tuple[str, str, str]]) -> None:
 def build() -> tuple[str, str]:
     project = tomllib.loads((ROOT / "zensical.toml").read_text(encoding="utf-8"))["project"]
     site = project["site_url"].rstrip("/")
+    repo = project["repo_url"].rstrip("/")
     pages: list[tuple[str, str, str]] = []
     walk(project["nav"], "Docs", pages)
     rules = sorted(p for p in (DOCS / "rules").glob("*.md") if p.name != "index.md")
@@ -124,7 +163,8 @@ def build() -> tuple[str, str]:
         page_title = name or title(text, path)
         desc = description(text.split("\n", 1)[1] if text.startswith("# ") else text)
         index.append(f"- [{page_title}]({page_url(site, path)}): {desc}")
-        full += ["", "---", "", f"Source: {page_url(site, path)}", "", text.strip(), ""]
+        body = absolute_links(text.strip(), path, site, repo)
+        full += ["", "---", "", f"Source: {page_url(site, path)}", "", body, ""]
     return "\n".join(index).strip() + "\n", "\n".join(full).strip() + "\n"
 
 

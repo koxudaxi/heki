@@ -80,34 +80,34 @@ Found 2 diagnostic(s) in 4 file(s).
 ## Why heki?
 
 - **Bugs that cross function boundaries.** A blocking call several helpers below an
-  `async def` ([`EFF101`](rules/async-blocking-call.md)), a database query or an HTTP client
-  created on every iteration of a loop ([`EFF103`](rules/loop-db-query.md),
-  [`EFF102`](rules/loop-unpooled-client.md)), a `@cached_property` left stale when another
-  method changes what it read ([`MUT101`](rules/cached-property-stale-mutation.md)), an
+  `async def` ([`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/)), a database query or an HTTP client
+  created on every iteration of a loop ([`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/),
+  [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/)), a `@cached_property` left stale when another
+  method changes what it read ([`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/)), an
   attribute `__hash__` reads changing after the object went into a `set`
-  ([`MUT107`](rules/hash-attr-mutation.md)), and a `Sequence` / `Mapping` argument changed in
-  place by a helper ([`MUT110`](rules/readonly-param-mutation.md)). Opt-in rules add frozen
-  dataclass and `ReadOnly` fields changed in place ([`MUT108`](rules/readonly-type-mutation.md)),
+  ([`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/)), and a `Sequence` / `Mapping` argument changed in
+  place by a helper ([`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/)). Opt-in rules add frozen
+  dataclass and `ReadOnly` fields changed in place ([`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/)),
   I/O while a `threading` lock or a database transaction is held
-  ([`EFF106`](rules/lock-or-tx-held-across-io.md)), and generators consumed twice
-  ([`MUT106`](rules/iterator-double-consumption.md)). A report that crosses functions shows its
+  ([`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/)), and generators consumed twice
+  ([`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/)). A report that crosses functions shows its
   call chain.
 - **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of
-  [`[tool.heki]` configuration](configuration.md): `write-owners`, `read-owners`, `call-owners`,
+  [`[tool.heki]` configuration](https://heki.koxudaxi.dev/configuration/): `write-owners`, `read-owners`, `call-owners`,
   `readonly-returns`, `invalidation`, and `effect-boundaries`. heki checks them through aliases,
   helpers, and subclasses, with no decorators and nothing running at run time.
-- **A safety net for reviews and coding agents.** The [language server](lsp.md) shows the
+- **A safety net for reviews and coding agents.** The [language server](https://heki.koxudaxi.dev/lsp/) shows the
   findings while you edit and re-checks only what an edit can affect.
-  [`heki snapshot`](adoption.md#effect-snapshots-mut103) records what every public function does
+  [`heki snapshot`](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103) records what every public function does
   (what it mutates, which I/O it reaches), and `MUT103` reports a function that gained an
-  effect, which a diff does not show. [Coding agents](coding-agents.md) get the same checks as
+  effect, which a diff does not show. [Coding agents](https://heki.koxudaxi.dev/coding-agents/) get the same checks as
   JSON.
 - **Fast, quiet, and easy to adopt.** About 1.5 seconds for a 200,000-line project. A report
-  needs evidence, so heki [stays quiet when it cannot tell](scope.md#when-heki-cannot-tell).
+  needs evidence, so heki [stays quiet when it cannot tell](https://heki.koxudaxi.dev/scope/#when-heki-cannot-tell).
   Configuration, suppression comments, and output formats follow Ruff, and a
-  [Ratchet baseline](adoption.md#ratchet-baselines) fails CI only on new findings.
+  [Ratchet baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) fails CI only on new findings.
 
 ## How heki differs
 
@@ -119,7 +119,7 @@ Found 2 diagnostic(s) in 4 file(s).
 
 heki leaves to these tools what they already cover (`EFF107` reports only tasks bound to a
 variable, because Ruff's `RUF006` reports the discarded ones), so use it next to them. See
-[Scope and limitations](scope.md) for what heki covers, where its knowledge comes from, and
+[Scope and limitations](https://heki.koxudaxi.dev/scope/) for what heki covers, where its knowledge comes from, and
 what it does not do.
 
 ## Rewrites proven under CPython's semantics
@@ -131,18 +131,18 @@ reference to the object blocks an in-place update, evaluation order and exceptio
 builtins count only while the module does not rebind them. Its scope analysis is checked against
 CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive rewrite changes
 the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
-the obligation instead of offering a fix. See [Fixes and safety](fixes.md).
+the obligation instead of offering a fix. See [Fixes and safety](https://heki.koxudaxi.dev/fixes/).
 
-See the [rules reference](rules/index.md) for all 29 rules.
+See the [rules reference](https://heki.koxudaxi.dev/rules/) for all 29 rules.
 
 ## Next steps
 
-- See what heki [covers and does not cover](scope.md).
-- [Install heki](installation.md) and [run it on a project](getting-started.md).
-- [Configure](configuration.md) rule selection, ownership contracts, and the Python version.
-- Read how [fixes are proven safe](fixes.md).
-- [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
-- Use it from [your editor](lsp.md) or [a coding agent](coding-agents.md).
+- See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
+- [Install heki](https://heki.koxudaxi.dev/installation/) and [run it on a project](https://heki.koxudaxi.dev/getting-started/).
+- [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, ownership contracts, and the Python version.
+- Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
+- [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
+- Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
 
 
 ---
@@ -253,7 +253,7 @@ is allowed. None of them follows the call into `load_user` or the alias into `ad
    `@sync_to_async` run a function on another thread, `logging` calls are never reported, `sqlite3.connect()` returns a
    `Connection`, `threading.Lock` is a synchronous lock. heki does not analyze the source of
    the standard library or of installed packages. Add your own APIs with
-   [`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem).
+   [`[[tool.heki.ecosystem]]`](https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem).
 3. **Contracts you declare.** What no type can say is declared once in configuration: who may
    write or read an attribute or call a function (`write-owners`, `read-owners`,
    `call-owners`), which returned objects are shared (`readonly-returns`), which changes must be
@@ -265,7 +265,7 @@ is allowed. None of them follows the call into `load_user` or the alias into `ad
    local constructors and imports first, then annotations, then attributes assigned in
    `__init__`, then the class hierarchy (up to eight overriding methods). The rewriting rules
    never read annotations, because a subclass can override any method; see
-   [Fixes and Safety](fixes.md).
+   [Fixes and Safety](https://heki.koxudaxi.dev/fixes/).
 
 ## When heki cannot tell
 
@@ -511,7 +511,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def handler` calls 
   network call. The `related` lines are the hops of that chain, so you can follow it across
   files (editors show them as clickable related information).
 - `heki rule EFF101` explains the rule, its exclusions, and what to do instead. The
-  [rules reference](rules/index.md) has the same text for every rule.
+  [rules reference](https://heki.koxudaxi.dev/rules/) has the same text for every rule.
 
 ## Fix what heki can prove
 
@@ -546,7 +546,7 @@ app/shared.py:4:9: OPT101 `rows = rows + [...]` copies the whole list on every i
 Found 1 diagnostic(s) in 1 file(s).
 ```
 
-See [Fixes and Safety](fixes.md).
+See [Fixes and Safety](https://heki.koxudaxi.dev/fixes/).
 
 ## Silence a diagnostic
 
@@ -558,7 +558,7 @@ user = load_user(user_id)  # heki: ignore[EFF101]
 
 `# heki: ignore` without codes silences every rule on the line; `# noqa: EFF101` works too.
 To keep a rule away from whole files, use `per-file-ignores` in the
-[configuration](configuration.md).
+[configuration](https://heki.koxudaxi.dev/configuration/).
 
 ## Choose the rules
 
@@ -660,7 +660,7 @@ message = "use GenerationStore.set_fields() instead"
   a target class are covered too.
 - `allowed-writers`: functions allowed to write (fully qualified or qualname, globs allowed).
 - `forbidden-writers`: when set, only writes by these functions are reported (matched like
-  `allowed-writers`); see [Allowed and forbidden functions](#allowed-and-forbidden-functions).
+  `allowed-writers`); see [Allowed and forbidden functions](https://heki.koxudaxi.dev/configuration/#allowed-and-forbidden-functions).
 - `exempt-methods`: construction and copy methods allowed to write the targets. A plain name
   (`__deepcopy__`) matches any method of that name; an entry with a dot or a glob
   (`DataModel.copy_deep`, `create_*`) is matched like `allowed-writers`.
@@ -1236,17 +1236,17 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| MUT101 | [cached-property-stale-mutation](cached-property-stale-mutation.md) | Mutating an attribute read by `@cached_property` without invalidating the cache. |  |
-| MUT103 | [summary-effect-regression](summary-effect-regression.md) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
-| MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
-| MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
-| MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
-| MUT109 | [write-without-invalidation](write-without-invalidation.md) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
-| MUT110 | [readonly-param-mutation](readonly-param-mutation.md) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
-| MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
-| MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
-| MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
-| MUT204 | [call-owner-violation](call-owner-violation.md) | Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`. |  |
+| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. |  |
+| MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
+| MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
+| MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
+| MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
+| MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
+| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
+| MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
+| MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
+| MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
+| MUT204 | [call-owner-violation](https://heki.koxudaxi.dev/rules/call-owner-violation/) | Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`. |  |
 
 ## Execution Effects (EFF)
 
@@ -1254,13 +1254,13 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| EFF101 | [async-blocking-call](async-blocking-call.md) | Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`. |  |
-| EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. |  |
-| EFF103 | [loop-db-query](loop-db-query.md) | Explicit DB query / external RPC executed inside a loop (N+1). |  |
-| EFF105 | [async-blocking-fs](async-blocking-fs.md) | Opt-in: blocking local filesystem I/O reachable from `async def`. | 🔌 |
-| EFF106 | [lock-or-tx-held-across-io](lock-or-tx-held-across-io.md) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | 🔌 |
-| EFF107 | [unretained-async-task](unretained-async-task.md) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | 🔌 |
-| EFF201 | [effect-boundary-violation](effect-boundary-violation.md) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. |  |
+| EFF101 | [async-blocking-call](https://heki.koxudaxi.dev/rules/async-blocking-call/) | Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`. |  |
+| EFF102 | [loop-unpooled-client](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. |  |
+| EFF103 | [loop-db-query](https://heki.koxudaxi.dev/rules/loop-db-query/) | Explicit DB query / external RPC executed inside a loop (N+1). |  |
+| EFF105 | [async-blocking-fs](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | Opt-in: blocking local filesystem I/O reachable from `async def`. | 🔌 |
+| EFF106 | [lock-or-tx-held-across-io](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | 🔌 |
+| EFF107 | [unretained-async-task](https://heki.koxudaxi.dev/rules/unretained-async-task/) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | 🔌 |
+| EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. |  |
 
 ## Data Pipelines (DATA)
 
@@ -1268,7 +1268,7 @@ Quadratic re-allocation of DataFrames and arrays across loop iterations.
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| DATA101 | [loop-carried-concat](loop-carried-concat.md) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. |  |
+| DATA101 | [loop-carried-concat](https://heki.koxudaxi.dev/rules/loop-carried-concat/) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. |  |
 
 ## Complexity Rewrites (OPT)
 
@@ -1276,16 +1276,16 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| OPT101 | [list-quadratic-concat](list-quadratic-concat.md) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
-| OPT102 | [set-dict-quadratic-merge](set-dict-quadratic-merge.md) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
-| OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
-| OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
-| OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
-| OPT112 | [loop-linear-list-lookup](loop-linear-list-lookup.md) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). |  |
-| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
-| OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
-| OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
-| OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
+| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
+| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
+| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
+| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
+| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
+| OPT112 | [loop-linear-list-lookup](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). |  |
+| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
+| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
+| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
+| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
 
 
 ---
@@ -1440,12 +1440,12 @@ A typical instruction for the agent:
 
 Agents that talk LSP (for example through an editor or an MCP bridge) can start
 `heki server` and use diagnostics, related information, and code actions directly, as editors
-do. See [Editors (LSP)](lsp.md).
+do. See [Editors (LSP)](https://heki.koxudaxi.dev/lsp/).
 
 ## Documentation for models
 
-The documentation is published in [llms.txt](llms.txt) form, an index of every page with a
-one-line description, and [llms-full.txt](llms-full.txt) with the full text of every page
+The documentation is published in [llms.txt](https://heki.koxudaxi.dev/llms.txt) form, an index of every page with a
+one-line description, and [llms-full.txt](https://heki.koxudaxi.dev/llms-full.txt) with the full text of every page
 including all rules.
 
 
