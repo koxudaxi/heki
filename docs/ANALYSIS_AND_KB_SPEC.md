@@ -200,6 +200,10 @@ class sharing it; an execution effect reached only through the override of a sub
 that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
 only when that class and the receiver's derive one from the other (an unknown receiver runs them
 all). An async client sharing a command mixin with a sync one runs the async implementation.
+Calling an `async def` that no decorator replaces gives a coroutine (`Ty::Coroutine`): its return
+annotation is what awaiting it gives (`await`, and the target of `async with`), and awaiting a
+future or a task gives an untracked result. The catalog types an external awaitable by what
+awaiting it gives.
 
 Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
 `pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
@@ -653,9 +657,15 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    `Connection.begin()`, `Engine.begin()`, `transaction.atomic()`, `psycopg.Connection.transaction()`,
    ...); an `await` or a call site reaching `BlockingNet` inside the region is reported.
 7. **`EFF107`** (opt-in): a `create_task` / `ensure_future` result bound to a named local is
-   reported when no alias of it is awaited, returned, yielded, stored, put in a container, passed
-   to a call, or captured; being only the receiver of `add_done_callback` / `set_name` does not
-   keep it, `cancel()` / `result()` / `exception()` do.
+   reported when no alias of it, nor a method bound to one (`task.cancel`, which holds the task),
+   is awaited, returned, yielded, stored, put in a container, passed to a call, or captured;
+   being only the receiver of `add_done_callback` / `set_name` does not keep it, `cancel()` /
+   `result()` / `exception()` do. A call whose argument (`coro` / `coro_or_future`) is known not
+   to be a coroutine makes no new task and is skipped: the result of project functions that
+   all create none (`FunctionDecl::makes_no_coroutine`: a plain `def` or a generator function
+   that no decorator replaces, `FunctionDecl::called_as_defined`; never a class's `__init__`),
+   or a value typed as one of `heki_kb::FUTURE_CLASSES` (an annotation, or a Layer 2
+   `return_type` such as `loop.run_in_executor` / `asyncio.gather` → `asyncio.Future`).
 8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`

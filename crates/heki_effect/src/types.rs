@@ -30,6 +30,9 @@ pub enum Ty {
     SelfType,
     /// A `functools.partial(f, ...)` object: calling it calls `f`.
     Partial(Box<Ty>),
+    /// The coroutine a call of an `async def` returns: awaiting it gives the inner type, what
+    /// the function's declaration says it returns.
+    Coroutine(Box<Ty>),
     /// An instance of one of two or three classes (sorted by class, one entry per class).
     Union(Vec<Obj>),
 }
@@ -176,6 +179,7 @@ impl Ty {
             | Ty::Super(_)
             | Ty::SelfType
             | Ty::Partial(_)
+            | Ty::Coroutine(_)
             | Ty::Union(_) => None,
         }
     }
@@ -185,7 +189,12 @@ impl Ty {
         match self {
             Ty::Inst(o) => std::slice::from_ref(o),
             Ty::Union(os) => os,
-            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => &[],
+            Ty::Ref(_)
+            | Ty::Class(_)
+            | Ty::Super(_)
+            | Ty::SelfType
+            | Ty::Partial(_)
+            | Ty::Coroutine(_) => &[],
         }
     }
 
@@ -211,9 +220,12 @@ impl Ty {
         match self {
             Ty::Inst(o) => f(o).map(Ty::Inst),
             Ty::Union(os) => Ty::of_members(os.iter().map(f).collect::<Option<Vec<_>>>()?),
-            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => {
-                Some(self.clone())
-            }
+            Ty::Ref(_)
+            | Ty::Class(_)
+            | Ty::Super(_)
+            | Ty::SelfType
+            | Ty::Partial(_)
+            | Ty::Coroutine(_) => Some(self.clone()),
         }
     }
 
@@ -245,6 +257,10 @@ impl Ty {
             (Ty::Ref(a), Ty::Class(b)) | (Ty::Class(b), Ty::Ref(a)) if a == b => {
                 Some(Ty::Class(b.clone()))
             }
+            // Either coroutine may be awaited: the result is either declared result.
+            (Ty::Coroutine(a), Ty::Coroutine(b)) => a.join(b).map(|t| Ty::Coroutine(Box::new(t))),
+            // Catalog awaitables carry their awaited result: join by it (EFF107 only misses).
+            (Ty::Coroutine(a), b) | (b, Ty::Coroutine(a)) => a.join(b),
             _ => match (self.members(), other.members()) {
                 (a, b) if !a.is_empty() && !b.is_empty() => {
                     Ty::of_members(a.iter().chain(b).cloned())
@@ -258,7 +274,7 @@ impl Ty {
         match self {
             Ty::Inst(o) => 1 + o.args.depth(),
             Ty::Union(os) => 1 + os.iter().map(|o| o.args.depth()).max().unwrap_or(0),
-            Ty::Partial(t) => 1 + t.depth(),
+            Ty::Partial(t) | Ty::Coroutine(t) => 1 + t.depth(),
             Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType => 1,
         }
     }
@@ -385,6 +401,19 @@ mod tests {
             Some(Ty::Ref("m.f".into()))
         );
         assert_eq!(Ty::Ref("m.f".into()).join(&model), None);
+        // Coroutines join what awaiting them gives.
+        let coroutine = |t: &Ty| Ty::Coroutine(Box::new(t.clone()));
+        assert_eq!(
+            coroutine(&model).join(&coroutine(&field)),
+            Some(coroutine(&both))
+        );
+        assert_eq!(
+            coroutine(&three).join(&coroutine(&Ty::inst("m.Tree"))),
+            None
+        );
+        // A coroutine and another value join by the coroutine's result.
+        assert_eq!(coroutine(&model).join(&model), Some(model.clone()));
+        assert_eq!(field.join(&coroutine(&model)), Some(both.clone()));
         // An empty display has no items: it takes the other side's items.
         let models = list(Elem::Of(model.clone()));
         assert_eq!(list(Elem::Empty).join(&models), Some(models.clone()));

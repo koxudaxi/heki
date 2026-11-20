@@ -27,6 +27,18 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop (followed by `return`, `break`, or `raise`): it runs once per run of the loop.
 - `EFF101` no longer reports `result()` or `exception()` of a `concurrent.futures.Future` known
   to be done: under `if f.done():`, or once `await asyncio.wrap_future(f)` has returned.
+- `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
+  passed to a call or stored, as in `self.addCleanup(task.cancel)` or
+  `loop.call_later(1, task.cancel)`: the bound method holds the task.
+- `EFF107` no longer reports a call that makes no new task because its argument is known not
+  to be a coroutine: the result of a plain `def` or a generator function, such as a method
+  returning a future (`asyncio.ensure_future(event.wait())`), or a future from
+  `loop.run_in_executor`, `loop.create_future`, `asyncio.gather`, `asyncio.wrap_future`, or an
+  annotation. The `coro=` and `coro_or_future=` keyword forms are checked the same way.
+- Calling an `async def` gives a coroutine: a method called on the result without `await` no
+  longer resolves on the function's return annotation, so the rules stop following it there.
+  `await` and `async with` still give the annotated type, and awaiting a future gives what it
+  holds, not the future.
 
 ## [0.1.2] - 2026-11-21
 
@@ -147,6 +159,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.2.0]: https://github.com/koxudaxi/heki/compare/v0.1.2...HEAD
 [0.1.2]: https://github.com/koxudaxi/heki/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/koxudaxi/heki/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/koxudaxi/heki/releases/tag/v0.1.0

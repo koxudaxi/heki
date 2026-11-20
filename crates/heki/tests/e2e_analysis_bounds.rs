@@ -1,6 +1,6 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
-//! narrowing through phis, the passes of the type inference, and the size of the Soundness
-//! lane's proof state.
+//! narrowing through phis, the passes of the type inference, the size of the Soundness lane's
+//! proof state, and the values `EFF107` follows from a task factory.
 
 mod common;
 
@@ -406,4 +406,40 @@ fn waits_on_a_future_look_up_the_awaits_before_them_once() {
             assert!(found[0]["message"].as_str().unwrap().contains(&more));
         }
     }
+}
+
+/// Task factories at the end of a long chain of copies of one coroutine (`EFF107`): what each
+/// call's argument is, and the values its task reaches, are indexed once per function instead of
+/// searched once per call.
+#[test]
+fn task_factories_at_the_end_of_a_copy_chain_take_linear_time() {
+    let (copies, calls) = (4000, 400);
+    let mut lines = vec![
+        "import asyncio".to_owned(),
+        String::new(),
+        String::new(),
+        "async def work():".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "async def spawn(background):".to_owned(),
+        "    v0 = work()".to_owned(),
+    ];
+    lines.extend((1..=copies).map(|i| format!("    v{i} = v{}", i - 1)));
+    lines.extend((0..calls).map(|j| format!("    t{j} = asyncio.create_task(v{copies})")));
+    // Every task but the first is kept, so that one report shows the rule ran.
+    lines.extend((1..calls).map(|j| format!("    background.add(t{j})")));
+    let p = Project::new("bounds_task_copies");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"EFF107\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let tasks: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF107")
+        .collect();
+    assert_eq!(tasks.len(), 1, "{tasks:?}");
+    assert_eq!(tasks[0]["target"], "asyncio.create_task->t0");
 }
