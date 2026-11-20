@@ -532,6 +532,26 @@ class C:
 }
 
 #[test]
+fn semantic_decorated_definitions_start_on_their_keyword_line() {
+    let source = "\
+@staticmethod
+def f(): pass
+
+@dataclass(
+    frozen=True,
+)
+# comment
+class C:
+    @property  # trailing
+    async def g(self): pass
+";
+    let m = dump_source("dump-semantic", "fe_decorated_lines", source, "py312");
+    assert_eq!(scope(&m, &["function f"])["line"], 2);
+    assert_eq!(scope(&m, &["class C"])["line"], 8);
+    assert_eq!(scope(&m, &["class C", "function g"])["line"], 10);
+}
+
+#[test]
 fn semantic_generator_walrus_writes_the_declared_global() {
     let source = "\
 def f():

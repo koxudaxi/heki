@@ -642,8 +642,17 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Line of the `def` / `async def` / `class` keyword, CPython's line of the definition:
+    /// a decorated statement's range starts at its first decorator.
+    fn definition_line(&self, stmt: heki_ast::TextRange, decorators: &[ast::Decorator]) -> u32 {
+        let start = decorators.last().map_or(stmt.start().to_usize(), |d| {
+            skip_trivia(self.source, d.range().end().to_usize())
+        });
+        self.lines.line(start as u32)
+    }
+
     fn visit_function_def(&mut self, func: &ast::StmtFunctionDef) {
-        let line = self.lines.line(func.range.start().to_u32());
+        let line = self.definition_line(func.range, &func.decorator_list);
         // Decorators and defaults are evaluated in the enclosing scope.
         for dec in &func.decorator_list {
             self.visit_expr(&dec.expression);
@@ -705,7 +714,7 @@ impl<'a> Analyzer<'a> {
     }
 
     fn visit_class_def(&mut self, cls: &ast::StmtClassDef) {
-        let line = self.lines.line(cls.range.start().to_u32());
+        let line = self.definition_line(cls.range, &cls.decorator_list);
         for dec in &cls.decorator_list {
             self.visit_expr(&dec.expression);
         }
@@ -1383,6 +1392,25 @@ impl Resolver<'_> {
 
         self.module_globals.resolve(name)
     }
+}
+
+/// The offset of the first token at or after `at`: whitespace, line continuations, and
+/// comments skipped.
+fn skip_trivia(source: &str, mut at: usize) -> usize {
+    let bytes = source.as_bytes();
+    while let Some(&b) = bytes.get(at) {
+        match b {
+            b' ' | b'\t' | b'\x0c' | b'\r' | b'\n' | b'\\' => at += 1,
+            b'#' => {
+                at = bytes[at..]
+                    .iter()
+                    .position(|&c| c == b'\n' || c == b'\r')
+                    .map_or(bytes.len(), |n| at + n);
+            }
+            _ => break,
+        }
+    }
+    at
 }
 
 fn sorted(names: &FxHashSet<String>) -> Vec<String> {
