@@ -1252,11 +1252,16 @@ impl<'a> FnCtx<'a> {
         span: Span,
         eff: &mut InstEffects,
     ) {
-        let entry = self.builtin_callee(callee_var, callee).and_then(|name| {
-            self.kb
-                .lookup(&format!("builtins.{name}"))
-                .map(|e| (name, e))
-        });
+        // `f(*xs)` passes the elements of `xs`: the Layer 1 positions no longer line up.
+        let unpacked = (0..args.len()).any(|i| self.f.is_starred(dst, i));
+        let entry = self
+            .builtin_callee(callee_var, callee)
+            .filter(|_| !unpacked)
+            .and_then(|name| {
+                self.kb
+                    .lookup(&format!("builtins.{name}"))
+                    .map(|e| (name, e))
+            });
         let Some((name, entry)) = entry else {
             Self::escape_all(
                 st,
@@ -1326,8 +1331,10 @@ impl<'a> FnCtx<'a> {
         span: Span,
         eff: &mut InstEffects,
     ) {
+        let unpacked = (0..args.len()).any(|i| self.f.is_starred(dst, i));
         let entry = st
             .exact_type(recv)
+            .filter(|_| !unpacked)
             .and_then(|k| self.kb.lookup(&format!("builtins.{}.{method}", k.name())));
         let Some(entry) = entry else {
             Self::escape_all(

@@ -1111,6 +1111,30 @@ const COUNTEREXAMPLES: &[Expect] = &[
         "cx_entry_reads_what_eq_changes",
         &[("OPT102", V::Blocked(REGROUPED))],
     ),
+    (
+        "cx_rebuilt_container_changed",
+        &[(
+            "OPT130",
+            V::Blocked("ValueLoopInvariant(list(...)): the built container is also bound or used"),
+        )],
+    ),
+    // `list(*args)`: the call's Layer 1 positions do not apply, so nothing is known of it.
+    (
+        "cx_rebuild_with_unpacked_argument",
+        &[(
+            "OPT130",
+            V::Blocked("ExactType(list(...)): its exact type is unknown (result of `list`)"),
+        )],
+    ),
+    (
+        "cx_rebuild_copy_with_argument",
+        &[(
+            "OPT130",
+            V::Blocked(
+                "SideEffectFree(set(...)): the expression evaluates more than builtin calls",
+            ),
+        )],
+    ),
 ];
 
 #[test]
@@ -1126,7 +1150,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 32/32"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 35/35"));
 }
 
 // ======================================================================== module-level facts

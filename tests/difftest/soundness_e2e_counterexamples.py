@@ -718,6 +718,66 @@ def old_entry_reads_what_eq_changes():
     return d[1]
 
 
+# ------------------------------------------------------------------------------
+# OPT130: what the hoisted constructor shares, expands, or receives
+# ------------------------------------------------------------------------------
+def cx_rebuilt_container_changed(n):
+    keys = list(range(9))
+    hits = 0
+    for _ in range(n):
+        if 0 in (tmp := list(keys)):
+            hits += 1
+            tmp.clear()
+    return hits
+
+
+def old_rebuilt_container_changed(n):
+    keys = list(range(9))
+    hits = 0
+    keys_list = list(keys)
+    for _ in range(n):
+        if 0 in (tmp := keys_list):
+            hits += 1
+            tmp.clear()
+    return hits
+
+
+def cx_rebuild_with_unpacked_argument(packed, items):
+    args = tuple(packed)
+    hits = 0
+    for x in items:
+        if x in list(*args):
+            hits += 1
+    return hits
+
+
+def old_rebuild_with_unpacked_argument(packed, items):
+    args = tuple(packed)
+    hits = 0
+    args_list = list(*args)
+    for x in items:
+        if x in args_list:
+            hits += 1
+    return hits
+
+
+def cx_rebuild_copy_with_argument(n):
+    keys = list(range(9))
+    hit = None
+    for i in range(n):
+        hit = i in set(keys.copy(1))
+    return hit
+
+
+def old_rebuild_copy_with_argument(n):
+    keys = list(range(9))
+    hit = None
+    hoisted = set(keys.copy(1))
+    for i in range(n):
+        hit = i in hoisted
+    return hit
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -773,6 +833,13 @@ def main() -> int:
         ),
         (cx_later_entry_before_collision, old_later_entry_before_collision, lambda f: f()),
         (cx_entry_reads_what_eq_changes, old_entry_reads_what_eq_changes, lambda f: f()),
+        (cx_rebuilt_container_changed, old_rebuilt_container_changed, lambda f: f(5)),
+        (
+            cx_rebuild_with_unpacked_argument,
+            old_rebuild_with_unpacked_argument,
+            lambda f: f((iter([1]),), [1, 1]),
+        ),
+        (cx_rebuild_copy_with_argument, old_rebuild_copy_with_argument, lambda f: f(0)),
     ]
     lines = []
     for cx, old, call in pairs:

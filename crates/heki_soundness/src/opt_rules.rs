@@ -1605,7 +1605,28 @@ impl<'a, 'c> Rules<'a, 'c> {
                     .value_loop_invariant(&self.var(v), &st, v, lp, region),
             );
         }
+        // A hoisted container is one object shared by every iteration: no use but the test
+        // may see it (`(tmp := list(keys))` then `tmp.clear()`).
+        obs.push(self.ck.ob(
+            K::ValueLoopInvariant,
+            &target,
+            match self.cx().uses(rebuilt) {
+                [UseSite::Inst(b, i)] if (*b, *i) == at => {
+                    established("only the membership test reads the built container")
+                }
+                _ => blocked(
+                    "the built container is also bound or used: the hoisted one would be shared by every iteration",
+                ),
+            },
+        ));
+        let unpacked = call
+            .kind
+            .dst()
+            .is_some_and(|d| (0..args.len()).any(|i| f.is_starred(d, i)));
         let raises = match (callee, args) {
+            _ if unpacked => Some(
+                "`*` passes the elements of the argument to the constructor: hoisting could raise or consume an iterator even when the loop runs zero times",
+            ),
             ("list" | "tuple", []) | ("set" | "frozenset" | "dict", []) => None,
             // Iterating a builtin container runs no user code (a number is not iterable).
             ("list" | "tuple", [a])
@@ -1701,14 +1722,16 @@ impl<'a, 'c> Rules<'a, 'c> {
             InstKind::Call { callee, .. } => Some(format!(
                 "`{callee}(...)` inside it may raise or run user code before the loop"
             )),
-            // A list or set method that only reads its receiver; not a dict's (copying a dict
-            // may compare its keys, running their `__eq__`, like `dict(d)`).
+            // A list or set method that only reads its receiver (`.copy()`, which takes no
+            // argument); not a dict's (copying a dict may compare its keys, running their
+            // `__eq__`, like `dict(d)`).
             InstKind::MethodCall {
                 recv,
                 method,
+                args,
                 kwargs,
                 ..
-            } if kwargs.is_empty() => match st
+            } if args.is_empty() && kwargs.is_empty() => match st
                 .exact_type(*recv)
                 .filter(|k| *k != Dict)
                 .and_then(|k| cx.kb.lookup(&format!("builtins.{}.{method}", k.name())))
