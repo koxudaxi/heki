@@ -74,13 +74,25 @@ fn add_callee_consumption(
     let mut found = Vec::new();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {
-            let (recv, args, kwargs) = match &inst.kind {
+            let (recv, args, kwargs, star_from) = match &inst.kind {
                 InstKind::MethodCall {
-                    recv, args, kwargs, ..
-                } => (Some(*recv), args, kwargs),
-                InstKind::Call { args, kwargs, .. } => (None, args, kwargs),
+                    recv,
+                    args,
+                    kwargs,
+                    star_from,
+                    ..
+                } => (Some(*recv), args, kwargs, star_from),
+                InstKind::Call {
+                    args,
+                    kwargs,
+                    star_from,
+                    ..
+                } => (None, args, kwargs, star_from),
                 _ => continue,
             };
+            // Past a `*` argument, the parameter an argument binds is not known.
+            let positional =
+                &args[..star_from.map_or(args.len(), |s| usize::from(s).min(args.len()))];
             let Some(Callee::Project(keys, binds_recv)) = flow.callees.get(&(bb.id, index)) else {
                 continue;
             };
@@ -94,7 +106,7 @@ fn add_callee_consumption(
                 if offset == 1 && !decl.is_classmethod {
                     bound.extend(recv.map(|r| (0, r)));
                 }
-                bound.extend(args.iter().enumerate().map(|(i, v)| (i + offset, *v)));
+                bound.extend(positional.iter().enumerate().map(|(i, v)| (i + offset, *v)));
                 for (name, v) in kwargs {
                     let pos = name
                         .as_ref()

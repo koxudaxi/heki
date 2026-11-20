@@ -347,6 +347,16 @@ def deciding_item(flags):
     return found, rest, list(it)
 
 
+def drain_second(first, second):
+    return first, list(second)
+
+
+def unknown_parameter(lines, pair):
+    it = iter(lines)
+    drain_second(*pair, it)
+    return list(it)
+
+
 def rebinding(lines):
     it = iter(lines)
     a = list(it)
