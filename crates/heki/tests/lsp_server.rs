@@ -286,6 +286,33 @@ fn lsp_unsaved_module_next_to_its_indexed_stub() {
     lsp.stop(true);
 }
 
+#[test]
+fn lsp_without_a_root_indexes_the_working_directory_its_documents_are_in() {
+    // Neither `initialize` nor a workspace folder names a root, so the server indexes its
+    // working directory. The process may get that directory spelled otherwise than the
+    // editor's document paths (an 8.3 short name such as `RUNNER~1` on Windows), and the
+    // documents still belong to the indexed project.
+    let p = Project::new("lsp_no_root");
+    let blocking = "import time\n\n\ndef helper():\n    time.sleep(1)\n";
+    let caller = "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n";
+    p.write("pkg/__init__.py", "")
+        .write("pkg/util.py", blocking)
+        .write("pkg/api.py", caller);
+    let api = uri(&p.dir.join("pkg/api.py"));
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": null, "capabilities": {}}),
+    );
+    lsp.notify("initialized", json!({}));
+    lsp.ready();
+    lsp.open(&api, caller);
+    let diags = lsp.diagnostics(&api, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["EFF101"]);
+    lsp.stop(true);
+}
+
+// Unix only: Windows does not remove a directory that is a process's working directory.
 #[cfg(unix)]
 #[test]
 fn lsp_without_a_root_in_a_removed_working_directory() {

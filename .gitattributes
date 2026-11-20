@@ -1,0 +1,5 @@
+# Every checkout holds the files with LF line breaks, also where Git converts them to CRLF by
+# default (Git for Windows): the build embeds the rule documentation and the knowledge bases
+# (`heki rule` prints them as written), and the tests compare outputs with files of the
+# repository.
+* text=auto eol=lf

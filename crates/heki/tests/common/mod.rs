@@ -70,6 +70,13 @@ impl Drop for Project {
     }
 }
 
+/// `path` as heki's reports write it: with `/` separators on every platform.
+pub fn report_path(path: &Path) -> String {
+    path.to_str()
+        .unwrap()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
 pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }

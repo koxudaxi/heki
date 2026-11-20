@@ -267,6 +267,8 @@ fn a_relative_import_past_the_top_level_package_binds_nothing() {
     assert!(!stdout.contains("pkg/mod.py"), "{stdout}");
 }
 
+// Unix only: the directory is made unreadable with permission bits; on Windows that takes an
+// access control list, which std cannot set.
 #[cfg(unix)]
 #[test]
 fn an_excluded_directory_is_never_entered() {

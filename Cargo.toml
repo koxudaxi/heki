@@ -59,6 +59,8 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "time", "sync"] }
 toml = "0.8"
 tower-lsp = "0.20"
+# The `file:` URIs of the end-to-end LSP tests (the version `tower-lsp` uses).
+url = "2.5"
 tower-service = "0.3"
 
 [workspace.lints.rust]
