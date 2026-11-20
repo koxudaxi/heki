@@ -61,7 +61,7 @@ app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes `valu
   |     ^
   = related: app/stats.py:9:5: `median` calls `app.stats.sort_values`
 
-Found 2 diagnostic(s) in 4 file(s).
+Found 2 diagnostic(s) in 3 file(s).
 ```
 
 > **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
