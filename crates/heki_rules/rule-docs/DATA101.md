@@ -5,8 +5,10 @@ the other quadratic reallocations of the ecosystem knowledge base. Only loop-car
 accumulation is reported: the result feeds the next iteration and is computed from the previous
 value, also when it grows on some iterations only. An update through a project function counts
 when that function returns a reallocation of the argument carrying the previous value, directly
-or through further helpers (`acc = grow(acc)` where `grow` returns `np.append(acc, x)`); a helper
-that reallocates something else and returns its argument unchanged does not. One-off
+or through further helpers (`acc = grow(acc)` where `grow` returns `np.append(acc, x)`), also
+when an `isinstance` test picks the method (`if isinstance(g, Grower): acc = g.grow(acc)`) or an
+offloading API runs it (`acc = await asyncio.to_thread(grow, acc)`); a helper that reallocates
+something else and returns its argument unchanged does not. One-off
 concatenations inside a loop are not reported, also on a branch that leaves the variable
 unchanged otherwise (`if step: x = np.append(edges, last)`), nor is writing into a buffer passed
 as `out=` (`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous
