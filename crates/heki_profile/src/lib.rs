@@ -61,9 +61,18 @@ fn parse_frame(frame: &str) -> Option<(String, String)> {
     Some((String::new(), frame.to_owned()))
 }
 
+/// The sum of sample weights, an error when it does not fit a `u64` (it would wrap and make
+/// every share wrong).
+fn total_weight(weights: impl IntoIterator<Item = u64>) -> Result<u64, ProfileError> {
+    weights.into_iter().try_fold(0u64, |sum, w| {
+        sum.checked_add(w)
+            .ok_or_else(|| ProfileError::Parse("sample weights overflow".into()))
+    })
+}
+
 /// Fold per-sample stacks (`leaf` last) into percentages.
-fn fold(stacks: Vec<(Vec<(String, String)>, u64)>) -> ProfileData {
-    let total: u64 = stacks.iter().map(|(_, n)| n).sum();
+fn fold(stacks: Vec<(Vec<(String, String)>, u64)>) -> Result<ProfileData, ProfileError> {
+    let total = total_weight(stacks.iter().map(|(_, n)| *n))?;
     let mut self_n: BTreeMap<(String, String), u64> = BTreeMap::new();
     let mut cum_n: BTreeMap<(String, String), u64> = BTreeMap::new();
     for (frames, n) in stacks {
@@ -90,7 +99,7 @@ fn fold(stacks: Vec<(Vec<(String, String)>, u64)>) -> ProfileData {
             );
         }
     }
-    ProfileData { sites }
+    Ok(ProfileData { sites })
 }
 
 /// Parse a collapsed stack dump (`frame;frame;leaf count` per line).
@@ -109,7 +118,7 @@ pub fn parse_collapsed(text: &str) -> Result<ProfileData, ProfileError> {
             .map_err(|_| ProfileError::Parse(trimmed.to_string()))?;
         stacks.push((stack.split(';').filter_map(parse_frame).collect(), count));
     }
-    Ok(fold(stacks))
+    fold(stacks)
 }
 
 fn column<'a>(table: &'a Value, name: &str) -> Result<&'a Vec<Value>, ProfileError> {
@@ -188,7 +197,7 @@ pub fn parse_gecko(text: &str) -> Result<ProfileData, ProfileError> {
             stacks.push((frames, weight));
         }
     }
-    Ok(fold(stacks))
+    fold(stacks)
 }
 
 /// Read a dump, detecting the format (`{` starts a gecko JSON dump).
@@ -257,6 +266,17 @@ mod tests {
         assert!(!p.is_hot(Path::new("src/app.py"), "missing"));
         assert!(parse_collapsed("no-count\n").is_err());
         assert!(parse_collapsed("a;b x\n").is_err());
+    }
+
+    #[test]
+    fn weights_that_overflow_the_total_are_an_error() {
+        let big = "a 9223372036854775808\nb 9223372036854775808\n";
+        assert!(matches!(
+            parse_collapsed(big),
+            Err(ProfileError::Parse(m)) if m.contains("overflow")
+        ));
+        let gecko = r#"{"threads": [{"samples": {"stack": [0, 0], "weight": [18446744073709551615, 1]}, "stackTable": {"frame": [0], "prefix": [null]}, "frameTable": {"func": [0]}, "funcTable": {"name": [0], "fileName": [0]}}], "shared": {"stringArray": ["f"]}}"#;
+        assert!(parse_gecko(gecko).is_err());
     }
 
     #[test]
