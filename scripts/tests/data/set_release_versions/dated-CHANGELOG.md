@@ -20,6 +20,6 @@ All notable changes to heki are documented here. The format follows
 
 The first public preview.
 
-[0.1.2]: https://github.com/koxudaxi/heki/releases/tag/v0.1.2
+[0.1.2]: https://github.com/koxudaxi/heki/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/koxudaxi/heki/releases/tag/v0.1.1
 [0.1.0]: https://github.com/koxudaxi/heki/releases/tag/v0.1.0

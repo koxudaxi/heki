@@ -142,23 +142,26 @@ def test_release_versions_are_ordered_as_cargo_and_pypi_order_them() -> None:
     ("changelog", "expected"),
     [
         (
+            # A link that does not end at `HEAD` is the author's.
             "## [Unreleased]\n\n## [0.1.2] - Unreleased\n\n- A fix.\n\n"
-            "[0.1.2]: https://example.com/compare\n",
+            "[0.1.2]: https://example.com/notes\n",
             "## [Unreleased]\n\n## [0.1.2] - 2026-11-25\n\n- A fix.\n\n"
             f"[Unreleased]: {REPOSITORY}/compare/v0.1.2...HEAD\n"
-            f"[0.1.2]: {REPOSITORY}/releases/tag/v0.1.2\n",
+            "[0.1.2]: https://example.com/notes\n",
         ),
         (
-            "## [Unreleased]\n\n## [0.1.2] - Unreleased\n\n"
+            # A missing link compares the previous release with the tag.
+            "## [Unreleased]\n\n## [0.1.2] - Unreleased\n\n## [0.1.1] - 2026-11-22\n\n"
             f"[unreleased]: {REPOSITORY}/compare/v0.1.1...HEAD\n"
             f"[0.1.1]: {REPOSITORY}/releases/tag/v0.1.1\n",
-            "## [Unreleased]\n\n## [0.1.2] - 2026-11-25\n\n"
+            "## [Unreleased]\n\n## [0.1.2] - 2026-11-25\n\n## [0.1.1] - 2026-11-22\n\n"
             f"[unreleased]: {REPOSITORY}/compare/v0.1.2...HEAD\n"
-            f"[0.1.2]: {REPOSITORY}/releases/tag/v0.1.2\n"
+            f"[0.1.2]: {REPOSITORY}/compare/v0.1.1...v0.1.2\n"
             f"[0.1.1]: {REPOSITORY}/releases/tag/v0.1.1\n",
         ),
         (
-            # Without an `[Unreleased]` section, no `[Unreleased]` link is written.
+            # A first release without a link shows its tag, and without an `[Unreleased]`
+            # section no `[Unreleased]` link is written.
             "## [0.1.2] - Unreleased\n\n- A fix.\n",
             f"## [0.1.2] - 2026-11-25\n\n- A fix.\n\n[0.1.2]: {REPOSITORY}/releases/tag/v0.1.2\n",
         ),
@@ -169,9 +172,15 @@ def test_release_versions_are_ordered_as_cargo_and_pypi_order_them() -> None:
         ),
         (
             # Only the first unreleased section is the release's.
-            "## [0.1.2] - Unreleased\n\n## [0.1.1] - Unreleased\n",
+            "## [0.1.2] - Unreleased\n\n## [0.1.1] - Unreleased\n\n"
+            f"[0.1.2]: {REPOSITORY}/compare/v0.1.0...HEAD\n",
             "## [0.1.2] - 2026-11-25\n\n## [0.1.1] - Unreleased\n\n"
-            f"[0.1.2]: {REPOSITORY}/releases/tag/v0.1.2\n",
+            f"[0.1.2]: {REPOSITORY}/compare/v0.1.0...v0.1.2\n",
+        ),
+        (
+            # A section dated and linked by hand stays as it is.
+            f"## [0.1.2] - 2026-11-21\n\n[0.1.2]: {REPOSITORY}/compare/v0.1.1...v0.1.2\n",
+            f"## [0.1.2] - 2026-11-21\n\n[0.1.2]: {REPOSITORY}/compare/v0.1.1...v0.1.2\n",
         ),
     ],
 )

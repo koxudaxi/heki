@@ -2283,9 +2283,10 @@ release come from `CHANGELOG.md`.
 3. The Release Sync workflow opens the pull request `chore: sync release metadata for <version>`
    from the branch `release/sync-<version>`, labeled `maintenance` to keep it out of the next
    draft's changes. It writes the version into the manifests and `Cargo.lock`, renames the
-   section heading to `## [<version>] - <publish date>` (the UTC date), points the `[<version>]`
-   link at the release tag and, when a section is headed `[Unreleased]`, the `[Unreleased]` link
-   at the changes since the tag. The entries stay as they were written.
+   section heading to `## [<version>] - <publish date>` (the UTC date), and makes the
+   `[<version>]` compare link end at the release tag instead of `HEAD` (a missing link compares
+   the previous release with the tag). When a section is headed `[Unreleased]`, its link compares
+   the tag with `HEAD`. The entries stay as they were written.
 4. GitHub creates the CI runs of a pull request that a workflow opens with `GITHUB_TOKEN` in an
    approval-required state, and the checks of a run started with `workflow_dispatch` do not
    count for the required checks of `main`. Close and reopen the pull request to start CI

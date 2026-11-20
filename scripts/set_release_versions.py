@@ -15,9 +15,11 @@ published, in the pull request that brings `main` to the release. It writes:
 - `Cargo.lock`: the version of every workspace member, without registry access, so that a build
   with ``--locked`` accepts the lock file;
 - with ``--changelog DATE``, `CHANGELOG.md`: the first ``## [VERSION] - Unreleased`` heading
-  becomes ``## [VERSION] - DATE``, the ``[VERSION]`` link points to the release tag, and, when a
-  section is headed ``[Unreleased]``, the ``[Unreleased]`` link to the changes since the tag. The
-  hand-written entries stay as they are. A release older than the version the manifests declare
+  becomes ``## [VERSION] - DATE``, and the ``[VERSION]`` link, a compare that ends at ``HEAD``,
+  ends at the release tag instead (a missing one compares the previous release with the tag, or
+  shows the tag of a first release). When a section is headed ``[Unreleased]``, the
+  ``[Unreleased]`` link compares the tag with ``HEAD``. The hand-written entries and links stay as
+  they are. A release older than the version the manifests declare
   changes nothing: `main` has moved past it (a backport published late, or an old release synced
   again).
 
@@ -48,6 +50,9 @@ ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 TOML_TABLE_HEADER = re.compile(r"^\[", re.MULTILINE)
 VERSION_LINE = re.compile(r'^version = "(?P<value>[^"]*)"$', re.MULTILINE)
 UNRELEASED_HEADING = re.compile(r"^## \[(?P<version>[^\]]+)\] - Unreleased$", re.MULTILINE)
+RELEASED_HEADING = re.compile(
+    r"^## \[(?P<version>[^\]]+)\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$", re.MULTILINE
+)
 UNRELEASED_SECTION = re.compile(r"^## \[Unreleased\]", re.MULTILINE | re.IGNORECASE)
 LINK_DEFINITION = re.compile(r"^\[(?P<label>[^\]]+)\]: (?P<url>\S+)$", re.MULTILINE)
 
@@ -178,17 +183,21 @@ def check_written(pyproject: str, cargo: str, lock: str, version: str, members: 
         fail(f"these entries do not declare {version}:\n{listing}")
 
 
-def set_link(text: str, label: str, url: str) -> str:
-    """Point the `[label]` link definition at `url`, adding it to the list when it is missing.
-
-    A new `[Unreleased]` goes first in the list, and a new version's link first after it.
-    """
-    definitions = list(LINK_DEFINITION.finditer(text))
-    named = [m for m in definitions if m["label"].lower() == label.lower()]
+def link_definition(text: str, label: str) -> re.Match[str] | None:
+    """The `[label]: <url>` line, if the CHANGELOG has one."""
+    named = [m for m in LINK_DEFINITION.finditer(text) if m["label"].lower() == label.lower()]
     if len(named) > 1:
         fail(f"CHANGELOG.md: [{label}] is defined {len(named)} times")
-    if named:
-        return text[: named[0].start("url")] + url + text[named[0].end("url") :]
+    return named[0] if named else None
+
+
+def with_url(text: str, definition: re.Match[str], url: str) -> str:
+    return text[: definition.start("url")] + url + text[definition.end("url") :]
+
+
+def with_new_link(text: str, label: str, url: str) -> str:
+    """Add a link definition: `[Unreleased]` first in the list, a version first after it."""
+    definitions = list(LINK_DEFINITION.finditer(text))
     line = f"[{label}]: {url}\n"
     before = [m for m in definitions if label == "Unreleased" or m["label"].lower() != "unreleased"]
     if before:
@@ -199,12 +208,24 @@ def set_link(text: str, label: str, url: str) -> str:
     return text.rstrip("\n") + "\n\n" + line
 
 
+def released_link(text: str, version: str, heading: re.Match[str], repository: str) -> str:
+    """Make the version's link end at its tag; a link that ends elsewhere is the author's."""
+    tag = f"v{version}"
+    definition = link_definition(text, version)
+    if definition is None:
+        previous = RELEASED_HEADING.search(text, heading.end())
+        if previous is None:
+            return with_new_link(text, version, f"{repository}/releases/tag/{tag}")
+        return with_new_link(text, version, f"{repository}/compare/v{previous['version']}...{tag}")
+    if definition["url"].endswith("...HEAD"):
+        return with_url(text, definition, definition["url"].removesuffix("HEAD") + tag)
+    return text
+
+
 def dated_changelog(text: str, version: str, date: str, repository: str) -> str:
     """Date the version's section and point its links at the release."""
-    released = re.compile(
-        rf"^## \[{re.escape(version)}\] - [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$", re.MULTILINE
-    )
-    if not released.search(text):
+    released = [m for m in RELEASED_HEADING.finditer(text) if m["version"] == version]
+    if not released:
         first = UNRELEASED_HEADING.search(text)
         if first is None:
             fail(f"CHANGELOG.md: no `## [{version}] - Unreleased` heading to date")
@@ -212,9 +233,16 @@ def dated_changelog(text: str, version: str, date: str, repository: str) -> str:
             found = first["version"]
             fail(f"CHANGELOG.md: the first unreleased section is [{found}], not [{version}]")
         text = text[: first.start()] + f"## [{version}] - {date}" + text[first.end() :]
-    text = set_link(text, version, f"{repository}/releases/tag/v{version}")
+        released = [m for m in RELEASED_HEADING.finditer(text) if m["version"] == version]
+    text = released_link(text, version, released[0], repository)
     if UNRELEASED_SECTION.search(text):
-        text = set_link(text, "Unreleased", f"{repository}/compare/v{version}...HEAD")
+        url = f"{repository}/compare/v{version}...HEAD"
+        unreleased = link_definition(text, "Unreleased")
+        text = (
+            with_new_link(text, "Unreleased", url)
+            if unreleased is None
+            else with_url(text, unreleased, url)
+        )
     return text
 
 
