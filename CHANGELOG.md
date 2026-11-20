@@ -64,7 +64,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - A value typed with a project `Protocol` and handed to a helper that does not type its
   parameter is an instance of the protocol and of its implementations: the helper's writes are
   `MUT201` writes of those classes, and `MUT205` reports a write to a protocol whose
-  implementations heki cannot list.
+  implementations heki cannot list. `MUT109` matches such a write against the targets of each
+  class once.
 - A call target naming no class (`reset`) gives `MUT204` the initialization of the classes
   defining the methods it names: `self.reset()` in their `__init__` is no report.
 - `MUT205` uses the class an `isinstance` test around a write narrows its object to.
