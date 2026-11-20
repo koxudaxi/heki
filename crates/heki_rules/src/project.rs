@@ -202,6 +202,12 @@ pub fn collect_files(
         }
         let mut builder = ignore::WalkBuilder::new(p);
         builder.add_custom_ignore_filename(".hekiignore");
+        // An excluded directory is never entered (it may not even be readable).
+        let (dir_root, dir_exclude) = (root.to_path_buf(), exclude.clone());
+        builder.filter_entry(move |e| {
+            !e.file_type().is_some_and(|t| t.is_dir())
+                || !is_excluded(&rel_posix(e.path(), &dir_root), &dir_exclude)
+        });
         for entry in builder.build() {
             let entry = entry.map_err(|cause| ProjectError::Walk {
                 path: p.clone(),

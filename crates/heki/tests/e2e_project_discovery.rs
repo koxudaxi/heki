@@ -261,3 +261,26 @@ fn a_relative_import_past_the_top_level_package_binds_nothing() {
     assert!(stdout.contains("pkg/sub/inner.py:5:5: EFF101 "), "{stdout}");
     assert!(!stdout.contains("pkg/mod.py"), "{stdout}");
 }
+
+#[cfg(unix)]
+#[test]
+fn an_excluded_directory_is_never_entered() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Project::new("disc_excluded_unreadable");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki]\nextend-exclude = [\"generated\"]\n",
+    )
+    .write(
+        "a.py",
+        "import time\n\n\nasync def go():\n    time.sleep(1)\n",
+    )
+    .write("generated/g.py", "x = 1\n");
+    let generated = p.dir.join("generated");
+    std::fs::set_permissions(&generated, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = concise(&p);
+    std::fs::set_permissions(&generated, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (code, stdout) = result;
+    assert_eq!(code, 1);
+    assert!(stdout.contains("a.py:5:5: EFF101 "), "{stdout}");
+}
