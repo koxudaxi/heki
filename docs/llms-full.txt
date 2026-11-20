@@ -569,7 +569,8 @@ $ heki check --ignore OPT110         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are all accepted. Opt-in rules
-(`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) are enabled only by their exact code or name.
+(`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) are enabled only by their exact
+code or name.
 
 ## Machine-readable output
 
@@ -634,7 +635,7 @@ command line are always checked.
 | Key | Meaning |
 | --- | ------- |
 | `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). |
-| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) need their exact code or name. |
+| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) need their exact code or name. |
 | `ignore` | Rules to disable (prefixes match every rule they cover). |
 | `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
 | `severity` | Rule → `"error"` or `"warning"` (affects output and SARIF level; both make `heki check` fail). |
@@ -1073,8 +1074,9 @@ custom tooling.
   state and the operations you care about and effect boundaries (`effect-boundaries`) for the
   code that must stay pure; `MUT201`, `MUT203`, `MUT204`, and `EFF201` report nothing until a
   contract exists.
-- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) for code where they
-  matter: async services, threaded code, and library APIs.
+- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) for code
+  where they matter: async services, threaded code, library APIs, and code that relies on frozen
+  dataclasses and `ReadOnly` fields.
 - Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
 
 

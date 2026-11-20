@@ -90,6 +90,7 @@ custom tooling.
   state and the operations you care about and effect boundaries (`effect-boundaries`) for the
   code that must stay pure; `MUT201`, `MUT203`, `MUT204`, and `EFF201` report nothing until a
   contract exists.
-- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) for code where they
-  matter: async services, threaded code, and library APIs.
+- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) for code
+  where they matter: async services, threaded code, library APIs, and code that relies on frozen
+  dataclasses and `ReadOnly` fields.
 - Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.

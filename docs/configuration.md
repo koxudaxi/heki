@@ -38,7 +38,7 @@ command line are always checked.
 | Key | Meaning |
 | --- | ------- |
 | `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). |
-| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) need their exact code or name. |
+| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) need their exact code or name. |
 | `ignore` | Rules to disable (prefixes match every rule they cover). |
 | `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
 | `severity` | Rule → `"error"` or `"warning"` (affects output and SARIF level; both make `heki check` fail). |
