@@ -2107,6 +2107,38 @@ When a budget is exceeded, find what grew before raising it:
 - `/usr/bin/time -l` (macOS) or `-v` (Linux) gives the peak of a run;
 - a counting global allocator in a scratch build gives the live bytes per phase.
 
+## Analysis cost
+
+heki's time and peak memory grow about linearly with the size of the source. The shapes that
+break this are rare in small samples and common in large generated files: a module of tens of
+thousands of lines, a function of several hundred. A new walk, fixpoint, or per-function state
+follows these rules:
+
+- A walk through the inputs of a phi, or through both operands of an expression, keeps its
+  answer per value and question. A depth limit does not bound it: with k inputs per step, depth
+  8 is k^8 paths. A loop header's phi is its own input once per `continue`, and chains of
+  `isinstance` tests and `match` statements multiply the inputs.
+- A fixpoint joins its facts and never replaces them, so each pass can only grow them, and it
+  also has a pass limit. Past the limit the facts are unknown, and no rule reports from them.
+- Facts are kept per SSA value, not per variable per block. State that grows with a function has
+  a budget proportional to the function's source bytes, as the IR and proof-state budgets in
+  [scope](https://heki.koxudaxi.dev/scope/) do. Past the budget the function gets no finding, never a guess.
+- A `finally` body is built once per way out of the `try`. Anything made per copy, such as a
+  class body, is made once.
+- Dead code is modeled too. A loop after a `return` has only its back edge, and copies around it
+  (`y = x; x = y`) can close a cycle. A walk along copies ends on such a cycle.
+- A rule that follows exception edges, one from each call that can raise, runs a dataflow over
+  blocks with one fact per tracked value. It never enumerates paths.
+
+Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without
+it, checked against a time limit: comparisons sharing an operand thirty deep, many `match`
+statements of slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many
+`continue`s and `isinstance` tests, and a long chain of assignments a loop carries.
+
+A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
+corpus of real projects before it is merged, every run under a memory cap and a timeout. No
+project may take tens of times more per byte than the rest.
+
 ## Documentation
 
 ```console
