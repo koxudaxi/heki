@@ -388,7 +388,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      function) gets a read-only origin tag.
   2. The tag flows within the function through `Copy`, attribute reads (with `deep = true`),
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
-     `model_copy(deep=True)`, and the Layer 2 `copy_sanitizer` entries).
+     `model_copy(deep=True)`, and the Layer 2 `copy_sanitizer` entries), and a slice of a value
+     inferred as a builtin sequence is a shallow copy (`readonly::subscript_step`, shared with the
+     return flow). A phi joins the tags of all its incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
      the call hop.

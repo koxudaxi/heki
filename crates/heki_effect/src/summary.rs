@@ -400,7 +400,15 @@ impl<'a> Extractor<'a> {
             ex.build_reach();
         }
         ex.build_aliases();
-        let returned = readonly::returned_values(f, &ex.defs, |kind| ex.derivations(kind));
+        let returned = readonly::returned_values(
+            f,
+            &ex.defs,
+            |kind| ex.derivations(kind),
+            |v| match ex.types.get(&v) {
+                Some(Val::Inst(class)) => Some(class.as_str()),
+                _ => None,
+            },
+        );
         ex.returned = returned;
         ex
     }

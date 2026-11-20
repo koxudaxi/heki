@@ -306,3 +306,56 @@ def copies_only(flag: bool) -> None:
         ]
     );
 }
+
+#[test]
+fn a_slice_of_a_shared_list_is_a_new_list_holding_the_shared_elements() {
+    let p = project("shared_slices", DEEP_SHARED);
+    p.write(
+        "app.py",
+        r#"import functools
+
+CACHE = [[1], [2]]
+
+
+def shared() -> list[list[int]]:
+    return CACHE
+
+
+@functools.cache
+def rows() -> list[int]:
+    return [1]
+
+
+def window() -> None:
+    w = shared()[:]
+    w.clear()
+    rows()[1:].append(2)
+
+
+def element_of_slice() -> None:
+    shared()[:][0].append(3)
+
+
+def window_of_unknown(xs) -> None:
+    w = xs()[:]
+    w.clear()
+
+
+def sliced() -> list[list[int]]:
+    return shared()[:]
+
+
+def through_wrapper() -> None:
+    sliced().clear()
+    sliced()[0].append(4)
+"#,
+    );
+    // A wrapper returning a slice hands out a new list holding the shared elements.
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![
+            at("app.py", 22, "element_of_slice"),
+            at("app.py", 36, "through_wrapper")
+        ]
+    );
+}

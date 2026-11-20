@@ -14,6 +14,35 @@ use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
+/// Builtin sequences whose slices are new objects holding the same elements (`xs[:]`,
+/// `xs[1:]`): a slice of one is a shallow copy. Other objects' slices may be views (`numpy`).
+pub const SLICE_COPYING_TYPES: &[&str] = &[
+    "builtins.list",
+    "builtins.bytearray",
+    "builtins.tuple",
+    "builtins.str",
+    "builtins.bytes",
+];
+
+/// The step from `obj` to what the `SubscriptLoad` `inst` reads from it: an item of target
+/// unpacking, a shallow copy for a slice of a builtin sequence (`obj_type`, its inferred class),
+/// or an element.
+pub fn subscript_step(f: &IrFunction, inst: &Inst, obj_type: Option<&str>) -> ReturnStep {
+    match &inst.kind {
+        InstKind::SubscriptLoad { index, .. }
+            if crate::consumption::is_unpacking(f, *index, inst.span) =>
+        {
+            ReturnStep::TARGET_ITEM
+        }
+        InstKind::SubscriptLoad { is_slice: true, .. }
+            if obj_type.is_some_and(|t| SLICE_COPYING_TYPES.contains(&t)) =>
+        {
+            ReturnStep::SHALLOW_COPY
+        }
+        _ => ReturnStep::ELEMENT,
+    }
+}
+
 /// Methods returning (views of) a container's elements.
 pub const ELEMENT_ACCESSORS: &[&str] = &["get", "__getitem__", "values", "items"];
 /// Methods returning a copy of their receiver.
@@ -201,10 +230,11 @@ impl ProtectedReturn {
 /// the derivations `derive` reports for an instruction (a call's receiver and first argument);
 /// it does not pass a deep copy, and a generator's or coroutine's caller gets a generator or a
 /// coroutine, never the returned value, so neither is walked.
-pub(crate) fn returned_values(
+pub(crate) fn returned_values<'t>(
     f: &IrFunction,
     defs: &FxHashMap<VarId, &Inst>,
     derive: impl Fn(&InstKind) -> Vec<(VarId, Derivation)>,
+    type_of: impl Fn(VarId) -> Option<&'t str>,
 ) -> FxHashMap<VarId, ReturnStep> {
     let mut steps: FxHashMap<VarId, ReturnStep> = FxHashMap::default();
     if !matches!(f.kind, heki_ir::FunctionKind::Sync) {
@@ -249,12 +279,8 @@ pub(crate) fn returned_values(
             InstKind::MakeIter { iterable, .. } => work.push((*iterable, step)),
             InstKind::IterNext { iter, .. } => work.push((*iter, step.after(ReturnStep::ELEMENT))),
             InstKind::AttrLoad { obj, .. } => work.push((*obj, step.after(ReturnStep::ELEMENT))),
-            InstKind::SubscriptLoad { obj, index, .. } => {
-                let derived = if crate::consumption::is_unpacking(f, *index, inst.span) {
-                    ReturnStep::TARGET_ITEM
-                } else {
-                    ReturnStep::ELEMENT
-                };
+            InstKind::SubscriptLoad { obj, .. } => {
+                let derived = subscript_step(f, inst, type_of(*obj));
                 work.push((*obj, step.after(derived)));
             }
             // A call's result derives from its receiver or first argument when it copies or
