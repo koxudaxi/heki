@@ -60,7 +60,8 @@ jobs:
       - name: "ADR-009 / ADR-016: ruff crates are used by heki_ast only"
         run: |
           for crate in ruff_python_parser ruff_python_ast ruff_text_size; do
-            users="$(cargo tree -i "$crate" -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u)"
+            # The ruff crates depend on each other; only heki's own crates count as users.
+            users="$(cargo tree -i "$crate" -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | grep -v '^ruff_' | sort -u)"
             if [ "$users" != "heki_ast" ]; then
               echo "$crate is used by: $users" >&2
               exit 1
@@ -115,8 +116,11 @@ jobs:
       - run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-uncovered-lines 3
         env:
           HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
-      - run: cargo llvm-cov report --summary-only
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      # On failure too: the summary lists the uncovered lines, the artifact has the full report.
+      - if: always()
+        run: cargo llvm-cov report --summary-only --show-missing-lines
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lcov
           path: lcov.info
