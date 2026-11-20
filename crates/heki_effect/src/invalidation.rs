@@ -151,6 +151,12 @@ type FlagEnv = Vec<(VarId, bool)>;
 impl<'f> Flags<'f> {
     /// The conditions of `f`, and whether a branch tests a flag.
     fn of(f: &'f IrFunction, consts: &'f FxHashMap<VarId, bool>) -> (Self, bool) {
+        // Without a boolean constant no condition is known and no phi is a flag.
+        if consts.is_empty() {
+            let phis = vec![Vec::new(); f.blocks.len()];
+            let defs = FxHashMap::default();
+            return (Self { consts, defs, phis }, false);
+        }
         let mut defs = FxHashMap::default();
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let Some(d) = inst.kind.dst() {
