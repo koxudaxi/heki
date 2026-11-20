@@ -8,7 +8,7 @@ Mutating an attribute read by `@cached_property` without invalidating the cache.
 
 !!! warning "Experimental"
 
-    Its precision outside a few code bases is still low. Experimental features can change or be removed in any release, and each change is listed in the release notes. See [Experimental Features](../experimental.md).
+    Its precision outside a few code bases is still low. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
 
 ## What it does
 Opt-in: enable it with `extend-select = ["MUT101"]`.

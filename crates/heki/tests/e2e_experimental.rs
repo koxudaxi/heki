@@ -8,9 +8,9 @@ use common::{Project, python, repo_root};
 use serde_json::{Value, json};
 use std::process::Command;
 
-const MUT101_NOTE: &str = "This rule is experimental. Its precision outside a few code bases is \
-    still low. Experimental features can change or be removed in any release, and each change is \
-    listed in the release notes.\n\n## What it does\n";
+const POLICY: &str = "Experimental features can still change in behavior or precision, or be \
+    removed, in any release, and each change is listed in the release notes. An opt-in rule that is \
+    not experimental is stable and only off by default.";
 
 #[test]
 fn rule_command_says_that_a_rule_is_experimental() {
@@ -19,7 +19,18 @@ fn rule_command_says_that_a_rule_is_experimental() {
     assert_eq!(code, 0);
     let summary = "# cached-property-stale-mutation (MUT101)\n\nMutating an attribute read by \
         `@cached_property` without invalidating the cache.\n\n";
-    assert!(doc.starts_with(&format!("{summary}{MUT101_NOTE}")), "{doc}");
+    let note = "This rule is experimental. Its precision outside a few code bases is still low.";
+    assert!(
+        doc.starts_with(&format!("{summary}{note} {POLICY}\n\n## What it does\n")),
+        "{doc}"
+    );
+    let (_, reader, _) = p.heki(&["rule", "MUT111"]);
+    let note = "This rule is experimental. It reports the readers of the stale writes `MUT101` \
+        finds, so it shares `MUT101`'s precision.";
+    assert!(
+        reader.contains(&format!(".\n\n{note} {POLICY}\n\n## What it does\n")),
+        "{reader}"
+    );
     let (_, stable, _) = p.heki(&["rule", "MUT107"]);
     assert!(!stable.to_lowercase().contains("experimental"), "{stable}");
 
@@ -100,6 +111,17 @@ fn docs_check_fails_on_a_stale_experimental_page() {
         ),
         "{page}"
     );
+    assert!(
+        page.contains("| `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |"),
+        "{page}"
+    );
+    let index = docs.0.read("docs/rules/index.md");
+    assert!(
+        index.contains(&format!(
+            " Opt-in rule.\n- \u{1f9ea} Experimental rule. {POLICY} See "
+        )),
+        "{index}"
+    );
     let rule_page = docs.0.read("docs/rules/cached-property-stale-mutation.md");
     assert!(
         rule_page.contains("· Opt-in · Experimental · ")
@@ -127,7 +149,7 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     let docs = DocsTree::new("experimental_marks");
     assert_eq!(docs.build_docs(&[]).0, 0);
     let heading =
-        "Experimental rules are marked differently from the registry (edit them by hand):";
+        "Experimental features are marked differently from the registry (edit them by hand):";
 
     // The row of an experimental rule says so.
     let (code, out) = docs.check_with(
@@ -174,12 +196,13 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     // A rule named in the text of a cell is not the row's rule.
     let (code, out) = docs.check_with(
         "ARCHITECTURE.md",
-        "| **MUT111** | Opt-in |",
-        "| **MUT111** | Opt-in (see `MUT101`) |",
+        "| **MUT106** | Opt-in |",
+        "| **MUT106** | Opt-in (see `MUT101`) |",
     );
     assert_eq!(code, 0, "{out}");
 
-    // The changelog section of the release that first shipped the rule calls it experimental.
+    // The changelog section of the release an entry names as `since` calls its target
+    // experimental: a rule by its code, an option by the command and the option.
     let (code, out) = docs.check_with(
         "CHANGELOG.md",
         "(experimental: its precision",
@@ -189,6 +212,17 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     assert!(
         out.starts_with(heading)
             && out.contains("CHANGELOG.md: [0.1.0] does not call MUT101 experimental"),
+        "{out}"
+    );
+    let (code, out) = docs.check_with(
+        "CHANGELOG.md",
+        "- `MUT111` and `heki check --profile` are experimental:",
+        "- `MUT111` is experimental, and so is the option:",
+    );
+    assert_eq!(code, 1);
+    assert!(
+        out.contains("CHANGELOG.md: [0.1.1] does not call heki check --profile experimental")
+            && !out.contains("MUT111"),
         "{out}"
     );
 }

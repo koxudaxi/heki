@@ -394,12 +394,11 @@ mod tests {
     #[test]
     fn experimental_entries_name_existing_rules_options_and_keys() {
         let existing = existing_targets();
-        for (kind, target) in [
-            (ExperimentalKind::CliOption, "heki check --profile"),
-            (ExperimentalKind::ConfigKey, "lint.relax-async-in-tests"),
-            (ExperimentalKind::ConfigKey, "write-owners"),
-        ] {
-            assert!(existing.contains(&(kind, target.to_owned())), "{target}");
+        for key in ["lint.relax-async-in-tests", "write-owners"] {
+            assert!(
+                existing.contains(&(ExperimentalKind::ConfigKey, key.to_owned())),
+                "{key}"
+            );
         }
         // A behavior is described in words: there is no name to look up.
         for f in EXPERIMENTAL_FEATURES

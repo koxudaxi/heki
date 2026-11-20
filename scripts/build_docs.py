@@ -7,9 +7,9 @@
 - `docs/experimental.md`: the experimental features (`crates/heki_rules/src/experimental.rs`).
 
 The hand-written pages are checked against the rules: the guides' lists of opt-in rules, and
-the experimental rules (in the README, `ARCHITECTURE.md`, and the site's pages, a table row
+the experimental features (in the README, `ARCHITECTURE.md`, and the site's pages, a table row
 that names a rule in a cell of its own says "experimental" exactly when the rule is; the
-`CHANGELOG.md` section of the release an experimental rule first shipped in calls it
+`CHANGELOG.md` section of the release an entry names as `since` calls its target
 experimental).
 
 Usage:
@@ -104,7 +104,7 @@ def badges(rule: dict) -> str:
     return " ".join(marks)
 
 
-def rules_index(rules: list[dict]) -> str:
+def rules_index(rules: list[dict], policy: str) -> str:
     lines = [
         GENERATED,
         "# Rules",
@@ -119,8 +119,7 @@ def rules_index(rules: list[dict]) -> str:
         "- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in "
         "functions a `--profile` dump shows hot (it can be slower for tiny inputs).",
         "- 🔌 Opt-in rule.",
-        "- 🧪 Experimental rule: it can change or be removed in any release "
-        "([Experimental Features](../experimental.md)).",
+        f"- 🧪 Experimental rule. {policy} See [Experimental Features](../experimental.md).",
         "",
     ]
     for family, (title, blurb) in FAMILIES.items():
@@ -225,7 +224,7 @@ def cli_page(heki: Path) -> str:
 
 def outputs(heki: Path, rules: list[dict], registry: dict) -> dict[Path, str]:
     files = {
-        RULES_DIR / "index.md": rules_index(rules),
+        RULES_DIR / "index.md": rules_index(rules, registry["policy"]),
         CLI_PAGE: cli_page(heki),
         EXPERIMENTAL_PAGE: experimental_page(registry, rules),
     }
@@ -289,8 +288,8 @@ def list_items(text: str):
         yield " ".join(item)
 
 
-def stale_experimental_marks(rules: list[dict]) -> list[str]:
-    """The hand-written pages' marks of experimental rules that disagree with the registry."""
+def stale_experimental_marks(rules: list[dict], registry: dict) -> list[str]:
+    """The hand-written pages' marks of experimental features that disagree with the registry."""
     codes = {r["code"] for r in rules}
     experimental = {r["code"]: r["experimental"] for r in rules if r["experimental"]}
     stale = []
@@ -308,15 +307,15 @@ def stale_experimental_marks(rules: list[dict]) -> list[str]:
         m.group(1): text[m.end() : n.start() if n else len(text)]
         for m, n in zip(starts, starts[1:])
     }
-    for code, feature in sorted(experimental.items()):
+    for feature in sorted(registry["features"], key=lambda f: f["id"]):
+        target = re.compile(rf"(?<![\w-]){re.escape(feature['target'])}(?![\w-])")
         section = sections.get(feature["since"])
         if section is not None and not any(
-            re.search(rf"\b{code}\b", item) and "experimental" in item.lower()
-            for item in list_items(section)
+            target.search(item) and "experimental" in item.lower() for item in list_items(section)
         ):
             stale.append(
-                f"{CHANGELOG.relative_to(ROOT)}: [{feature['since']}] does not call {code} "
-                "experimental"
+                f"{CHANGELOG.relative_to(ROOT)}: [{feature['since']}] does not call "
+                f"{feature['target']} experimental"
             )
     return stale
 
@@ -335,8 +334,8 @@ def main() -> int:
     registry = json.loads(run(args.heki, "dump-experimental"))
     disagreements = {
         "Opt-in rule lists in the guides disagree with the rules": stale_opt_in_lists(rules),
-        "Experimental rules are marked differently from the registry": stale_experimental_marks(
-            rules
+        "Experimental features are marked differently from the registry": (
+            stale_experimental_marks(rules, registry)
         ),
     }
     if any(disagreements.values()):

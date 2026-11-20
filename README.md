@@ -129,7 +129,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: I/O while a lock or a database transaction is held | `EFF106` |
 | Opt-in: a generator consumed twice | `MUT106` |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | `MUT101` |
-| Opt-in: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
+| Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
 
 ### A safety net for reviews and coding agents
 

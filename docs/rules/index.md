@@ -9,7 +9,7 @@ heki has 31 rules in four families. Every rule is enabled by default except the 
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
 - 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
 - 🔌 Opt-in rule.
-- 🧪 Experimental rule: it can change or be removed in any release ([Experimental Features](../experimental.md)).
+- 🧪 Experimental rule. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
 
 ## Mutation & State (MUT)
 
@@ -24,7 +24,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
 | MUT109 | [write-without-invalidation](write-without-invalidation.md) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
 | MUT110 | [readonly-param-mutation](readonly-param-mutation.md) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
-| MUT111 | [cached-property-stale-read](cached-property-stale-read.md) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 |
+| MUT111 | [cached-property-stale-read](cached-property-stale-read.md) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
 | MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |

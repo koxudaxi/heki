@@ -2,9 +2,13 @@
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Opt-in · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
+
+!!! warning "Experimental"
+
+    It reports the readers of the stale writes `MUT101` finds, so it shares `MUT101`'s precision. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
 
 ## What it does
 Checks for functions that read a `@functools.cached_property` that a method can leave stale: a

@@ -141,7 +141,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) |
 | Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) |
 | Opt-in: a generator consumed twice | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) |
-| Opt-in: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) |
+| Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) |
 
 ### A safety net for reviews and coding agents
@@ -1737,7 +1737,7 @@ heki has 31 rules in four families. Every rule is enabled by default except the 
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
 - 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
 - 🔌 Opt-in rule.
-- 🧪 Experimental rule: it can change or be removed in any release ([Experimental Features](https://heki.koxudaxi.dev/experimental/)).
+- 🧪 Experimental rule. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
 
 ## Mutation & State (MUT)
 
@@ -1752,7 +1752,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
 | MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
 | MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
-| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 |
+| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
 | MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
 | MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
@@ -1805,13 +1805,23 @@ Source: https://heki.koxudaxi.dev/experimental/
 
 # Experimental Features
 
-Experimental features can change or be removed in any release, and each change is listed in the release notes. A feature leaves this page when it becomes stable.
+Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. A feature leaves this page when it becomes stable.
 
 An experimental rule is never enabled by default: it runs only when `select` or `extend-select` names its code or name, and `heki check` then reports it like any other rule. `heki rule <CODE>` and the rule's page say that it is experimental.
 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
+| `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
+| `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
+
+## `cli-option.profile`
+
+- **Kind:** cli-option
+- **Target:** `heki check --profile`
+- **Since:** 0.1.1
+
+It reads the output of CPython 3.15's sampling profiler, and that format can still change.
 
 ## `rule.MUT101`
 
@@ -1820,6 +1830,14 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 - **Since:** 0.1.0
 
 Its precision outside a few code bases is still low.
+
+## `rule.MUT111`
+
+- **Kind:** rule
+- **Target:** [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/)
+- **Since:** 0.1.1
+
+It reports the readers of the stale writes `MUT101` finds, so it shares `MUT101`'s precision.
 
 
 ---
@@ -2372,7 +2390,7 @@ Mutating an attribute read by `@cached_property` without invalidating the cache.
 
 !!! warning "Experimental"
 
-    Its precision outside a few code bases is still low. Experimental features can change or be removed in any release, and each change is listed in the release notes. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+    Its precision outside a few code bases is still low. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
 
 ## What it does
 Opt-in: enable it with `extend-select = ["MUT101"]`.
@@ -2466,9 +2484,13 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-read/
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Opt-in · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
+
+!!! warning "Experimental"
+
+    It reports the readers of the stale writes `MUT101` finds, so it shares `MUT101`'s precision. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
 
 ## What it does
 Checks for functions that read a `@functools.cached_property` that a method can leave stale: a

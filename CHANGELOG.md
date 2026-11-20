@@ -5,6 +5,16 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.1.1] - Unreleased
+
+### Changed
+
+- `MUT111` and `heki check --profile` are experimental: `MUT111` reports the readers of the stale
+  writes `MUT101` finds, so it shares `MUT101`'s precision, and `--profile` reads the output of
+  CPython 3.15's sampling profiler, whose format can still change. The new
+  [Experimental Features](https://heki.koxudaxi.dev/experimental/) page lists every experimental
+  feature, and `heki rule` says when a rule is experimental.
+
 ## [0.1.0] - 2026-11-21
 
 The first public preview.
