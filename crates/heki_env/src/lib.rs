@@ -92,7 +92,7 @@ pub struct LintConfig {
     pub ignore: Vec<String>,
     pub severity: BTreeMap<String, Severity>,
     pub per_file_ignores: BTreeMap<String, Vec<String>>,
-    /// `EFF101` / `EFF105` context relaxation for test code (`test_*` functions and files under
+    /// `EFF101` / `EFF105` / `EFF106` context relaxation for test code (`test_*` functions and files under
     /// `tests/`). Defaults to `true`; set `false` to check test files (e.g. rule fixtures).
     pub relax_async_in_tests: Option<bool>,
 }
@@ -252,7 +252,6 @@ pub struct HekiConfig {
     pub target_version: Option<String>,
     pub exclude: Option<Vec<String>>,
     pub extend_exclude: Vec<String>,
-    pub ignore_file: Option<PathBuf>,
     pub baseline: Option<PathBuf>,
     pub lint: LintConfig,
     pub write_owners: Vec<WriteOwnerRule>,

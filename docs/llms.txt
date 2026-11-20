@@ -5,15 +5,15 @@
 
 ## Docs
 
-- [Overview](https://heki.koxudaxi.dev/): heki (壁, Japanese for "wall") checks what Python code does across functions and modules: which objects it mutates, which references it shares, and which blocking, network, or database work it reaches
-- [Scope and Limitations](https://heki.koxudaxi.dev/scope/): heki checks what Python code does across functions and modules: which objects it mutates, which references it shares, and which blocking, network, or database work it reaches
-- [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable
-- [Getting Started](https://heki.koxudaxi.dev/getting-started/): With no arguments heki checks every Python file under the current directory, honoring .gitignore, .hekiignore, and the exclude setting
+- [Overview](https://heki.koxudaxi.dev/): heki (壁, Japanese for "wall") is a semantic linter for what Python leaves open
+- [Scope and Limitations](https://heki.koxudaxi.dev/scope/): This page says what heki checks, what it leaves to other tools, where its knowledge comes from, and what it does when it cannot tell
+- [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable: its Python package ships only that executable and installs no Python dependencies into your environment
+- [Getting Started](https://heki.koxudaxi.dev/getting-started/): This page runs heki on a project, reads a diagnostic, applies a fix, and picks the rules
 
 ## Usage
 
-- [Configuration](https://heki.koxudaxi.dev/configuration/): heki reads [tool.heki] from pyproject.toml, or a heki.toml / .heki.toml file (same keys without the tool.heki prefix)
-- [Fixes and Safety](https://heki.koxudaxi.dev/fixes/): Every OPT rule detects a quadratic or linear-per-iteration pattern and knows a faster equivalent
+- [Configuration](https://heki.koxudaxi.dev/configuration/): heki reads [tool.heki] from pyproject.toml, or a heki.toml / .heki.toml file with the same keys without the tool.heki prefix
+- [Fixes and Safety](https://heki.koxudaxi.dev/fixes/): heki check --fix rewrites an OPT finding only when heki proves that the rewrite keeps what the program does
 - [Adopting heki in a Code Base](https://heki.koxudaxi.dev/adoption/): An existing code base usually has findings you cannot fix at once
 - [CLI Reference](https://heki.koxudaxi.dev/cli-reference/): Exit codes: 0 no diagnostics, 1 diagnostics (or Ratchet regressions, or pending --diff changes), 2 configuration / I/O / syntax errors
 
@@ -23,12 +23,12 @@
 
 ## Integrations
 
-- [Editors (LSP)](https://heki.koxudaxi.dev/lsp/): heki server (alias heki lsp) is a Language Server Protocol server on stdin / stdout
-- [Coding Agents](https://heki.koxudaxi.dev/coding-agents/): heki's output is designed to be acted on by people and by coding agents (Claude Code, Codex, Cursor, and similar): every diagnostic says what was proven, where the evidence is, and what blocks a fix
+- [Editors (LSP)](https://heki.koxudaxi.dev/lsp/): heki server (alias heki lsp) is a Language Server Protocol server on stdin / stdout: it shows heki's diagnostics and fixes while you edit, with the results heki check reports
+- [Coding Agents](https://heki.koxudaxi.dev/coding-agents/): heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it gives people: every diagnostic says what was proven, where the evidence is, and what blocks a fix
 
 ## Docs
 
-- [Development](https://heki.koxudaxi.dev/development/): The tests are end to end first: they run the real heki binary and the real LSP server (heki server --stdio) on small projects
+- [Development](https://heki.koxudaxi.dev/development/): This page covers building and testing heki, its checks against CPython, the memory budget, the documentation, and the crates
 
 ## Rules
 
