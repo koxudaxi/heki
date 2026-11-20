@@ -405,6 +405,10 @@ fn mut101_held_attributes_cross_modules() {
 const DISCARDED: &str = r#"from functools import cached_property
 
 
+def note(message):
+    print(message)
+
+
 class Registry:
     def __init__(self):
         self.finalized = False
@@ -440,6 +444,16 @@ class Registry:
         names = self._index()
         return (self._tasks, names)
 
+    def _names_of(self):
+        for name in self._tasks:
+            yield name
+
+    @cached_property
+    def noted(self):
+        note("tasks")
+        self._names_of()
+        return self._tasks
+
     def register(self, name, task):
         self._tasks[name] = task
 "#;
@@ -460,16 +474,18 @@ fn mut101_getters_calling_self_methods_for_their_effects() {
             )
         })
         .collect();
-    // Not reported: `register` for `tasks`. Reported: `register` for the getters that read
-    // what their discarded call writes (`indexed`, `with_state`) or use its result (`summary`).
+    // Not reported: `register` for `tasks`, and for `noted`, whose calls run nothing that
+    // reaches the value (a function on no `self`, a generator method's body runs only when its
+    // result is iterated). Reported: `register` for the getters that read what their discarded
+    // call writes (`indexed`, `with_state`) or use its result (`summary`).
     assert_eq!(
         got,
         vec![
-            (12, "Registry.finalize", "with_state"),
-            (17, "Registry._index", "indexed"),
-            (40, "Registry.register", "indexed"),
-            (40, "Registry.register", "summary"),
-            (40, "Registry.register", "with_state"),
+            (16, "Registry.finalize", "with_state"),
+            (21, "Registry._index", "indexed"),
+            (54, "Registry.register", "indexed"),
+            (54, "Registry.register", "summary"),
+            (54, "Registry.register", "with_state"),
         ],
         "{found:#?}"
     );

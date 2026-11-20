@@ -245,6 +245,8 @@ fn recompute(
     let resolver = Resolver { index, in_scc };
     // The local facts first: the sites the edges add are resolved already.
     resolver.resolve_own(&mut s);
+    // The callees of the `self` calls of a getter holding attributes by reference.
+    let mut self_calls: Vec<(&CallSite, &EffectSummary)> = Vec::new();
     for (site_path, i) in out.get(func).into_iter().flatten() {
         let site = &index.files[site_path].call_sites[*i];
         // `MUT106`: the call consumes what every function it may run consumes.
@@ -254,6 +256,9 @@ fn recompute(
                 consumed = Some(0);
                 continue;
             };
+            if site.recv_is_self && !local.returns_self_attrs.is_empty() {
+                self_calls.push((site, callee));
+            }
             let here = apply_edge(
                 index,
                 &mut s,
@@ -273,8 +278,7 @@ fn recompute(
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
     if !s.returns_self_attrs.is_empty() {
-        let sites = out.get(func).map(Vec::as_slice).unwrap_or(&[]);
-        drop_attrs_read_by_discarded_calls(index, sites, local, &mut s);
+        drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }
     let hidden = std::mem::take(&mut s.declared_hidden);
     s.hide_exec_effects(&hidden);
@@ -298,10 +302,10 @@ fn recompute(
 /// `self` calls whose results it discards read, when such a call writes an attribute that
 /// reaches the cached value: one the getter reads itself or through a call reaching the value
 /// (the attributes it returns included), so the call may have derived it from what it reads.
-fn drop_attrs_read_by_discarded_calls(
-    index: &ProjectIndex,
-    sites: &[(PathBuf, usize)],
-    local: &EffectSummary,
+fn drop_attrs_read_by_discarded_calls<'s>(
+    index: &'s ProjectIndex,
+    self_calls: &[(&'s CallSite, &'s EffectSummary)],
+    local: &'s EffectSummary,
     s: &mut EffectSummary,
 ) {
     let mut reaching: BTreeSet<&str> = local
@@ -311,28 +315,21 @@ fn drop_attrs_read_by_discarded_calls(
         .collect();
     // `(reads, writes)` of each callee of a discarded `self` call.
     let mut discarded: Vec<(BTreeSet<&str>, BTreeSet<&str>)> = Vec::new();
-    for (path, i) in sites {
-        let site = &index.files[path].call_sites[*i];
-        if !site.recv_is_self {
+    for &(site, callee) in self_calls {
+        // What runs in the getter's body (a generator method's body does not run at the
+        // call), as for the edge itself (`transfer`).
+        let delivered = delivery(|k| index.summary(k), site, callee)
+            .filter(|d| d.into == Facts::Body)
+            .and_then(|d| callee.facts(d.from));
+        let Some(facts) = delivered.filter(|_| callee.owner_class_qualname.is_some()) else {
             continue;
-        }
-        for bc in site.project_callees() {
-            let Some(callee) = index.summary(&bc.callee) else {
-                continue;
-            };
-            let delivered = delivery(|k| index.summary(k), site, callee)
-                .filter(|d| d.into == Facts::Body)
-                .and_then(|d| callee.facts(d.from));
-            let Some(facts) = delivered.filter(|_| callee.owner_class_qualname.is_some()) else {
-                continue;
-            };
-            let reads = facts.reads_self_attrs.iter().map(|r| r.attr.as_str());
-            if site.result_discarded {
-                let writes = facts.mutates_self_attrs.iter().map(|w| w.attr.as_str());
-                discarded.push((reads.collect(), writes.collect()));
-            } else {
-                reaching.extend(reads);
-            }
+        };
+        let reads = facts.reads_self_attrs.iter().map(|r| r.attr.as_str());
+        if site.result_discarded {
+            let writes = facts.mutates_self_attrs.iter().map(|w| w.attr.as_str());
+            discarded.push((reads.collect(), writes.collect()));
+        } else {
+            reaching.extend(reads);
         }
     }
     let mut dropped: BTreeSet<&str> = BTreeSet::new();
