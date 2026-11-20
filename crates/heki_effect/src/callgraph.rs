@@ -452,26 +452,26 @@ fn apply_edge(
     // call hands over.
     let here = (d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site))
         .then_some(resolver);
-    transfer(
-        target, own_writes, caller, site, bc, callee, facts, &lead, rewrite, here,
-    );
+    transfer(target, own_writes, site, bc, callee, facts, &lead, rewrite);
+    if !index.skips_typed_writes {
+        transfer_typed_writes(
+            target, caller, site, bc, callee, facts, &lead, rewrite, here,
+        );
+    }
 }
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
-/// build each chain ([`extend_chain`]). `here` resolves the construction of the writes of facts
-/// that run during the call (`None`: they construct nothing).
+/// build each chain ([`extend_chain`]).
 #[allow(clippy::too_many_arguments)]
 fn transfer(
     t: &mut EffectSummary,
     own_writes: &BTreeMap<u8, BTreeSet<String>>,
-    caller: &FuncKey,
     site: &CallSite,
     bc: &BoundCallee,
     callee: &EffectSummary,
     facts: &EffectSummary,
     lead: &[Arc<CallHop>],
     rewrite: bool,
-    here: Option<&Resolver<'_>>,
 ) {
     let origin = |k: usize| bc.params.get(k);
 
@@ -573,6 +573,34 @@ fn transfer(
                 const_key: None,
             });
         }
+    }
+    t.escapes_params |= caller_params(facts.escapes_params, bc);
+    // A generator passed to a callee that iterates it runs there.
+    t.iterates_params |= caller_params(facts.iterates_params, bc);
+}
+
+/// The typed writes a call hands its caller: an `IndirectHelper` site for each typed field or
+/// instance the callee changes without seeing its type, the callee's write facts, and (from a
+/// private callee, or for what iterating the callee's result runs) its write sites. `here`
+/// resolves the construction of the writes of facts that run during the call (`None`: they
+/// construct nothing).
+#[allow(clippy::too_many_arguments)]
+fn transfer_typed_writes(
+    t: &mut EffectSummary,
+    caller: &FuncKey,
+    site: &CallSite,
+    bc: &BoundCallee,
+    callee: &EffectSummary,
+    facts: &EffectSummary,
+    lead: &[Arc<CallHop>],
+    rewrite: bool,
+    here: Option<&Resolver<'_>>,
+) {
+    let origin = |k: usize| bc.params.get(k);
+    for (&i, paths) in &facts.mutated_param_paths {
+        let Some(o) = origin(usize::from(i)) else {
+            continue;
+        };
         let mut indirect = Vec::new();
         if let Some((class, attr)) = &o.typed_field
             && paths.contains("")
@@ -631,9 +659,6 @@ fn transfer(
             }
         }
     }
-    t.escapes_params |= caller_params(facts.escapes_params, bc);
-    // A generator passed to a callee that iterates it runs there.
-    t.iterates_params |= caller_params(facts.iterates_params, bc);
     // Typed writes: every callee's facts reach the caller. A private callee hands its write
     // sites to its callers too, a public one reports its own; what iterating a plain function's
     // result runs (`rewrite`) runs nowhere in the function, so its sites go to whoever iterates.

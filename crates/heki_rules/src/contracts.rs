@@ -4,8 +4,8 @@
 //! producer and an invalidator reached through calls are known across files without IR.
 
 use crate::mut_rules::ReadOnlyProducers;
-use crate::{DottedPattern, RuleConfigError};
-use heki_effect::Contracts;
+use crate::{DottedPattern, RuleConfigError, RuleSelection};
+use heki_effect::{Contracts, TypedWrites};
 use heki_env::HekiConfig;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -121,10 +121,7 @@ impl ConfigContracts {
             });
         }
         Ok(Self {
-            ownership: !(config.write_owners.is_empty()
-                && config.read_owners.is_empty()
-                && config.effect_boundaries.is_empty()
-                && config.invalidation.is_empty()),
+            ownership: declares_ownership(config),
             producers: ReadOnlyProducers::new(config)?,
             invalidations,
             invalidators: NameMasks::default(),
@@ -181,4 +178,25 @@ pub fn summary_contracts(
         return Ok(None);
     }
     Ok(Some(Arc::new(contracts)))
+}
+
+/// [`Contracts::ownership`] of `config`.
+fn declares_ownership(config: &HekiConfig) -> bool {
+    !(config.write_owners.is_empty()
+        && config.read_owners.is_empty()
+        && config.effect_boundaries.is_empty()
+        && config.invalidation.is_empty())
+}
+
+/// Whether propagation carries typed writes for the rules `selection` runs on `config`: with an
+/// ownership contract (the gate of the other contract-only facts; `MUT201` and `EFF201` read
+/// the callers' typed write sites, and `EFF201`'s `IndirectHelper` sites depend on the callees'
+/// write facts), or with `MUT108`, which reads the callees' write facts. The readers assert it
+/// ([`heki_effect::ProjectIndex::propagates_typed_writes`]).
+pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrites {
+    if declares_ownership(config) || selection.is_enabled("MUT108") {
+        TypedWrites::Propagated
+    } else {
+        TypedWrites::Local
+    }
 }

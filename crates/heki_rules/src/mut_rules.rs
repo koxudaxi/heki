@@ -1032,6 +1032,10 @@ pub(crate) fn mut201(
     if !writes && !unresolved || cx.config.write_owners.is_empty() {
         return Ok(());
     }
+    debug_assert!(
+        cx.index.propagates_typed_writes(),
+        "`typed_writes` decides for MUT201"
+    );
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
     for rule in &cx.config.write_owners {

@@ -17,7 +17,7 @@ pub mod project;
 pub mod selection;
 pub mod snapshot;
 
-pub use contracts::{MAX_INVALIDATIONS, summary_contracts};
+pub use contracts::{MAX_INVALIDATIONS, summary_contracts, typed_writes};
 pub use mut_rules::{CHAIN_RULES, ChainFacts, chain_facts, family_readers};
 pub use selection::{RuleSelection, SelectionError};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};

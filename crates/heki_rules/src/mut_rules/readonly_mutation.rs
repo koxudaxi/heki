@@ -43,6 +43,10 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     if !fields && !params {
         return;
     }
+    debug_assert!(
+        !fields || cx.index.propagates_typed_writes(),
+        "`typed_writes` decides for MUT108"
+    );
     let mut rule = Rule {
         cx,
         fields,

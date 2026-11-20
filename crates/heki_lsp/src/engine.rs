@@ -267,6 +267,7 @@ impl Workspace {
         // A configuration error is reported by every check (`check_project`); without valid
         // contracts the summaries carry no contract facts.
         let contracts = heki_rules::summary_contracts(env_cfg).ok().flatten();
+        let typed_writes = heki_rules::typed_writes(env_cfg, &selection);
         let summaries =
             summarize_project_with_reads(&project.inputs(), &project.env.kb, contracts.as_deref());
         let files = project
@@ -299,7 +300,7 @@ impl Workspace {
             errors,
         } = project;
         drop(parsed);
-        let index = ProjectIndex::build_with(summaries, contracts);
+        let index = ProjectIndex::build_for(summaries, contracts, typed_writes);
         let decls = index.decl_passes();
         let stats = EngineStats {
             indexed_files: index.files.len(),

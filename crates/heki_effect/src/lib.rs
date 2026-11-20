@@ -929,6 +929,10 @@ pub struct ProjectIndex {
     pub(crate) func_files: FxHashMap<FuncKey, PathBuf>,
     /// The declared contracts the summaries depend on (`None`: no contract facts).
     pub(crate) contracts: Option<Arc<dyn Contracts>>,
+    /// Propagation leaves typed writes where they are made: callers get neither the write sites
+    /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
+    /// enabled rule reads them; every function keeps its own.
+    pub(crate) skips_typed_writes: bool,
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
@@ -948,8 +952,27 @@ pub fn analyze_project_with(
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
 ) -> ProjectIndex {
+    analyze_project_for(modules, kb, contracts, TypedWrites::Propagated)
+}
+
+/// [`analyze_project_with`], propagating typed writes only when a rule reads them.
+pub fn analyze_project_for(
+    modules: &[ModuleInput<'_>],
+    kb: &EffectiveEcosystemKb,
+    contracts: Option<Arc<dyn Contracts>>,
+    typed_writes: TypedWrites,
+) -> ProjectIndex {
     let files = summarize(modules, kb, false, contracts.as_deref());
-    ProjectIndex::build_with(files, contracts)
+    ProjectIndex::build_for(files, contracts, typed_writes)
+}
+
+/// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
+/// `typed_field_writes`) from callees to callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedWrites {
+    Propagated,
+    /// No enabled rule reads propagated typed writes: each function keeps its own only.
+    Local,
 }
 
 /// The local summaries of every module of a project with `contracts`, recording what each read
@@ -994,12 +1017,28 @@ impl ProjectIndex {
         Self::build_with(files, None)
     }
 
+    /// Whether callers got the typed writes of their callees ([`TypedWrites`]).
+    pub fn propagates_typed_writes(&self) -> bool {
+        !self.skips_typed_writes
+    }
+
     /// [`Self::build`] for summaries extracted with `contracts`.
-    pub fn build_with(mut files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
+    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
+        Self::build_for(files, contracts, TypedWrites::Propagated)
+    }
+
+    /// [`Self::build_with`], propagating typed writes as `typed_writes` says; incremental
+    /// updates keep doing so.
+    pub fn build_for(
+        mut files: Vec<FileSummary>,
+        contracts: Option<Arc<dyn Contracts>>,
+        typed_writes: TypedWrites,
+    ) -> Self {
         // Index stubs first so a sibling `.py` implementation always owns the module's symbols.
         files.sort_by_key(|f| !is_stub(&f.path));
         let mut index = Self {
             contracts,
+            skips_typed_writes: typed_writes == TypedWrites::Local,
             ..Self::default()
         };
         for mut file in files {
