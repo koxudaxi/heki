@@ -5,7 +5,7 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-21
 
 The first public preview.
 
