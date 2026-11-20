@@ -152,7 +152,7 @@ def rule_page(rule: dict, policy: str) -> str:
             GENERATED,
             f"# {rule['slug']} ({rule['code']})",
             "",
-            f"Family: {title} · {' · '.join(state)} · {fix_label(rule)}",
+            f"Family: {title} · {' · '.join(state)} · Severity `{rule['default_severity']}` · {fix_label(rule)}",
             "",
             rule["summary"],
             "",

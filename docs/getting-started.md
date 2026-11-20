@@ -34,7 +34,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `handler` reaches the bloc
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[error]` | its severity |
+| `[error]` | its severity: `error`, or `warning` for the `OPT` rules (slower code, not wrong code); both make `heki check` fail |
 | the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
@@ -70,7 +70,7 @@ also handed to other code inside the loop:
 
 ```console
 $ heki check app/shared.py
-app/shared.py:4:9: OPT101 (list-quadratic-concat) [error] `rows = rows + [...]` copies the whole list on every iteration (quadratic)
+app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning] `rows = rows + [...]` copies the whole list on every iteration (quadratic)
   |
 4 |         rows = rows + [item]
   |         ^

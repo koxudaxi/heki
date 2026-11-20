@@ -2,7 +2,7 @@
 
 # read-owner-violation (MUT203)
 
-Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
 
 Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.
 

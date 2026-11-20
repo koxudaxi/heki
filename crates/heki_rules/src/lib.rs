@@ -66,6 +66,17 @@ pub struct RuleMeta {
     pub doc: &'static str,
 }
 
+impl RuleMeta {
+    /// The severity of the rule's diagnostics unless `lint.severity` names the rule: `warning`
+    /// for the `OPT` family (slower code, not wrong code), `error` for the others.
+    pub const fn default_severity(&self) -> Severity {
+        match self.family {
+            RuleFamily::Opt => Severity::Warning,
+            RuleFamily::Mut | RuleFamily::Eff | RuleFamily::Data => Severity::Error,
+        }
+    }
+}
+
 /// Core v1.0 rule catalog (empirically validated in Stage 0-A + `dcg` study).
 pub const CORE_RULES: &[RuleMeta] = &[
     RuleMeta {
@@ -692,9 +703,9 @@ impl<'a> CheckContext<'a> {
         }
     }
 
-    /// Build a diagnostic (severity from `lint.severity`, default `error`); `None` when `code`
-    /// does not run on `unit`. `message` is one sentence saying what happens; what to do about
-    /// it goes into `help`, never into the message.
+    /// Build a diagnostic (severity from `lint.severity`, else `RuleMeta::default_severity`);
+    /// `None` when `code` does not run on `unit`. `message` is one sentence saying what
+    /// happens; what to do about it goes into `help`, never into the message.
     #[allow(clippy::too_many_arguments)]
     pub fn emit<'o>(
         &self,
@@ -719,7 +730,7 @@ impl<'a> CheckContext<'a> {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(meta.code) || k.eq_ignore_ascii_case(meta.slug))
             .map(|(_, v)| *v)
-            .unwrap_or(Severity::Error);
+            .unwrap_or(meta.default_severity());
         let (line, column) = unit.lines.line_col(span.start);
         out.push(Diagnostic {
             path: unit.input.path.clone(),

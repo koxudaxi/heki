@@ -5,6 +5,14 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.2.0] - Unreleased
+
+### Changed
+
+- The `OPT` rules default to severity `warning` instead of `error`: they report slower code,
+  not wrong code. The exit code does not change (a warning still makes `heki check` exit 1),
+  only the output label and the SARIF level. `[tool.heki.lint.severity]` still overrides it.
+
 ## [0.1.2] - 2026-11-21
 
 ### Fixed

@@ -2,7 +2,7 @@
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
 

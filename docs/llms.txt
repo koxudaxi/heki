@@ -33,34 +33,34 @@
 
 ## Rules
 
-- [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix
-- [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Opt-in · No automatic fix
-- [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
-- [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Opt-in · Experimental · No automatic fix
-- [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
-- [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix
-- [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
-- [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
-- [iterator-double-consumption (MUT106)](https://heki.koxudaxi.dev/rules/iterator-double-consumption/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
-- [list-front-insert (OPT121)](https://heki.koxudaxi.dev/rules/list-front-insert/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
-- [list-front-pop (OPT120)](https://heki.koxudaxi.dev/rules/list-front-pop/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
-- [list-quadratic-concat (OPT101)](https://heki.koxudaxi.dev/rules/list-quadratic-concat/): Family: Complexity Rewrites (OPT) · Enabled by default · Safe fix (--fix)
-- [lock-or-tx-held-across-io (EFF106)](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/): Family: Execution Effects (EFF) · Opt-in · No automatic fix
-- [loop-carried-concat (DATA101)](https://heki.koxudaxi.dev/rules/loop-carried-concat/): Family: Data Pipelines (DATA) · Enabled by default · No automatic fix
-- [loop-db-query (EFF103)](https://heki.koxudaxi.dev/rules/loop-db-query/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix
-- [loop-invariant-container-rebuild (OPT130)](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
-- [loop-linear-dedup (OPT111)](https://heki.koxudaxi.dev/rules/loop-linear-dedup/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
-- [loop-linear-list-lookup (OPT112)](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/): Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
-- [loop-linear-membership (OPT110)](https://heki.koxudaxi.dev/rules/loop-linear-membership/): Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (--fix --include-size-dependent)
-- [loop-unpooled-client (EFF102)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/): Family: Execution Effects (EFF) · Enabled by default · No automatic fix
-- [nested-loop-equijoin (OPT113)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/): Family: Complexity Rewrites (OPT) · Enabled by default · No automatic fix
-- [read-owner-violation (MUT203)](https://heki.koxudaxi.dev/rules/read-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
-- [readonly-param-mutation (MUT110)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
-- [readonly-return-mutation (MUT202)](https://heki.koxudaxi.dev/rules/readonly-return-mutation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
-- [readonly-type-mutation (MUT108)](https://heki.koxudaxi.dev/rules/readonly-type-mutation/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
-- [set-dict-quadratic-merge (OPT102)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/): Family: Complexity Rewrites (OPT) · Enabled by default · Safe fix (--fix)
-- [summary-effect-regression (MUT103)](https://heki.koxudaxi.dev/rules/summary-effect-regression/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
-- [unresolved-guarded-write (MUT205)](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
-- [unretained-async-task (EFF107)](https://heki.koxudaxi.dev/rules/unretained-async-task/): Family: Execution Effects (EFF) · Opt-in · No automatic fix
-- [write-owner-violation (MUT201)](https://heki.koxudaxi.dev/rules/write-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
-- [write-without-invalidation (MUT109)](https://heki.koxudaxi.dev/rules/write-without-invalidation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+- [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Enabled by default · Severity error · No automatic fix
+- [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Opt-in · Severity error · No automatic fix
+- [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Opt-in · Experimental · Severity error · No automatic fix
+- [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Opt-in · Experimental · Severity error · No automatic fix
+- [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
+- [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Enabled by default · Severity error · No automatic fix
+- [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
+- [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · No automatic fix
+- [iterator-double-consumption (MUT106)](https://heki.koxudaxi.dev/rules/iterator-double-consumption/): Family: Mutation & State (MUT) · Opt-in · Severity error · No automatic fix
+- [list-front-insert (OPT121)](https://heki.koxudaxi.dev/rules/list-front-insert/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)
+- [list-front-pop (OPT120)](https://heki.koxudaxi.dev/rules/list-front-pop/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)
+- [list-quadratic-concat (OPT101)](https://heki.koxudaxi.dev/rules/list-quadratic-concat/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Safe fix (--fix)
+- [lock-or-tx-held-across-io (EFF106)](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/): Family: Execution Effects (EFF) · Opt-in · Severity error · No automatic fix
+- [loop-carried-concat (DATA101)](https://heki.koxudaxi.dev/rules/loop-carried-concat/): Family: Data Pipelines (DATA) · Enabled by default · Severity error · No automatic fix
+- [loop-db-query (EFF103)](https://heki.koxudaxi.dev/rules/loop-db-query/): Family: Execution Effects (EFF) · Enabled by default · Severity error · No automatic fix
+- [loop-invariant-container-rebuild (OPT130)](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)
+- [loop-linear-dedup (OPT111)](https://heki.koxudaxi.dev/rules/loop-linear-dedup/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)
+- [loop-linear-list-lookup (OPT112)](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · No automatic fix
+- [loop-linear-membership (OPT110)](https://heki.koxudaxi.dev/rules/loop-linear-membership/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)
+- [loop-unpooled-client (EFF102)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/): Family: Execution Effects (EFF) · Enabled by default · Severity error · No automatic fix
+- [nested-loop-equijoin (OPT113)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · No automatic fix
+- [read-owner-violation (MUT203)](https://heki.koxudaxi.dev/rules/read-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
+- [readonly-param-mutation (MUT110)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
+- [readonly-return-mutation (MUT202)](https://heki.koxudaxi.dev/rules/readonly-return-mutation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
+- [readonly-type-mutation (MUT108)](https://heki.koxudaxi.dev/rules/readonly-type-mutation/): Family: Mutation & State (MUT) · Opt-in · Severity error · No automatic fix
+- [set-dict-quadratic-merge (OPT102)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Safe fix (--fix)
+- [summary-effect-regression (MUT103)](https://heki.koxudaxi.dev/rules/summary-effect-regression/): Family: Mutation & State (MUT) · Opt-in · Severity error · No automatic fix
+- [unresolved-guarded-write (MUT205)](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
+- [unretained-async-task (EFF107)](https://heki.koxudaxi.dev/rules/unretained-async-task/): Family: Execution Effects (EFF) · Opt-in · Severity error · No automatic fix
+- [write-owner-violation (MUT201)](https://heki.koxudaxi.dev/rules/write-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix
+- [write-without-invalidation (MUT109)](https://heki.koxudaxi.dev/rules/write-without-invalidation/): Family: Mutation & State (MUT) · Enabled by default · Severity error · No automatic fix

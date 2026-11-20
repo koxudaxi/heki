@@ -2,7 +2,7 @@
 
 # loop-carried-concat (DATA101)
 
-Family: Data Pipelines (DATA) · Enabled by default · No automatic fix
+Family: Data Pipelines (DATA) · Enabled by default · Severity `error` · No automatic fix
 
 Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.
 

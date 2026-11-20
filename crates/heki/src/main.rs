@@ -146,6 +146,7 @@ struct RuleRecord {
     #[serde(flatten)]
     rule: &'static RuleMeta,
     experimental: Option<&'static ExperimentalFeature>,
+    default_severity: heki_env::Severity,
 }
 
 impl RuleRecord {
@@ -153,6 +154,7 @@ impl RuleRecord {
         Self {
             rule,
             experimental: experimental_rule(rule.code),
+            default_severity: rule.default_severity(),
         }
     }
 }
