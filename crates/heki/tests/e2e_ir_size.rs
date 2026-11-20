@@ -1,5 +1,6 @@
-//! The size of a function's IR, end to end through `heki dump-ir`: code no path reaches, and
-//! `with` exits and `finally` bodies copied once per way out.
+//! The size of a function's IR, end to end through `heki dump-ir`: code no path reaches, `with`
+//! exits and `finally` bodies copied once per way out, and the budget past which a function is
+//! left unmodeled.
 
 mod common;
 
@@ -173,4 +174,220 @@ def remove_path(entry):
     p.write("m.py", src);
     let (code, stdout, stderr) = p.check(&["--extend-select", "EFF105,EFF106,EFF107,MUT106"]);
     assert_eq!(code, 0, "{stdout}{stderr}");
+}
+
+// ======================================================================= nested statements
+
+/// A deterministic generator of functions nesting `with`, `try` / `finally`, `try` / `except`,
+/// loops, and branches up to a depth, with `return` / `break` / `continue` taken on some or
+/// every path (leaving code no path reaches). A `finally`
+/// body holds no way out of itself and no `finally` of its own (PEP 765 warns on the first):
+/// then each `finally` body is copied once per way out of its `try`, which keeps the IR
+/// within a constant times the statements times the frames around them.
+struct Shapes {
+    state: u64,
+    max_depth: usize,
+    out: Vec<String>,
+    statements: usize,
+    frames: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Context {
+    depth: usize,
+    /// A `break` / `continue` here stays in a loop of the same `finally` body (or of none).
+    in_loop: bool,
+    in_finally: bool,
+}
+
+impl Shapes {
+    fn pick(&mut self, n: usize) -> usize {
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((self.state >> 33) % n as u64) as usize
+    }
+
+    fn suite(&mut self, cx: Context, pad: &str) {
+        for _ in 0..=self.pick(2) {
+            self.statement(cx, pad);
+        }
+    }
+
+    fn statement(&mut self, cx: Context, pad: &str) {
+        self.statements += 1;
+        let mut kinds = vec!["call", "assign"];
+        if cx.depth < self.max_depth {
+            for _ in 0..2 {
+                kinds.extend(["with", "try_except", "for", "while", "if"]);
+                if !cx.in_finally {
+                    kinds.push("try_finally");
+                }
+            }
+        }
+        if cx.in_loop {
+            kinds.extend(["break", "continue"]);
+        }
+        if !cx.in_finally {
+            kinds.push("return");
+        }
+        let kind = kinds[self.pick(kinds.len())];
+        let inner = format!("{pad}    ");
+        let nested = Context {
+            depth: cx.depth + 1,
+            ..cx
+        };
+        let n = self.pick(3);
+        match kind {
+            "call" => self.out.push(format!("{pad}f{n}(x{n})")),
+            "assign" => {
+                let m = self.pick(3);
+                self.out.push(format!("{pad}x{n} = g(x{m})"));
+            }
+            "break" | "continue" | "return" => {
+                let exit = if kind == "return" { "return x2" } else { kind };
+                // An exit taken on every path leaves the rest of its suite dead.
+                if n == 0 {
+                    self.out.push(format!("{pad}{exit}"));
+                } else {
+                    self.out.push(format!("{pad}if x{n}:\n{inner}{exit}"));
+                }
+            }
+            "with" => {
+                self.frames += 1;
+                self.out.push(format!("{pad}with LOCK{n}:"));
+                self.suite(nested, &inner);
+            }
+            "try_finally" => {
+                self.frames += 1;
+                self.out.push(format!("{pad}try:"));
+                self.suite(nested, &inner);
+                self.out.push(format!("{pad}finally:"));
+                let finally = Context {
+                    in_loop: false,
+                    in_finally: true,
+                    ..nested
+                };
+                self.suite(finally, &inner);
+            }
+            "try_except" => {
+                self.out.push(format!("{pad}try:"));
+                self.suite(nested, &inner);
+                self.out.push(format!("{pad}except E:"));
+                self.suite(nested, &inner);
+            }
+            "for" | "while" => {
+                let header = if kind == "for" {
+                    "for x2 in x0:"
+                } else {
+                    "while x1:"
+                };
+                self.out.push(format!("{pad}{header}"));
+                let body = Context {
+                    in_loop: true,
+                    ..nested
+                };
+                self.suite(body, &inner);
+            }
+            _ => {
+                self.out.push(format!("{pad}if x{n}:"));
+                self.suite(nested, &inner);
+                self.out.push(format!("{pad}else:"));
+                self.suite(nested, &inner);
+            }
+        }
+    }
+}
+
+#[test]
+fn nested_exits_and_frames_keep_the_ir_linear() {
+    for seed in 1..=4u64 {
+        let mut shapes = Shapes {
+            state: seed,
+            max_depth: 6,
+            out: Vec::new(),
+            statements: 0,
+            frames: 0,
+        };
+        let mut bounds = Vec::new();
+        for i in 0..40 {
+            shapes.statements = 0;
+            shapes.frames = 0;
+            shapes.out.push(format!("def case{i}(x0, x1, x2):"));
+            let top = Context {
+                depth: 0,
+                in_loop: false,
+                in_finally: false,
+            };
+            shapes.suite(top, "    ");
+            shapes.out.push(String::new());
+            bounds.push((shapes.statements, shapes.frames));
+        }
+        let ir = dump_ir(&format!("ir_size_nested_{seed}"), &shapes.out.join("\n"));
+        for (i, &(statements, frames)) in bounds.iter().enumerate() {
+            let f = function(&ir, &format!("case{i}"));
+            assert!(
+                hazards(f).is_empty(),
+                "seed {seed} case{i}: {:?}",
+                hazards(f)
+            );
+            let bound = 16 * statements * (frames + 1);
+            assert!(
+                units(f) <= bound,
+                "seed {seed} case{i}: {} units, bound {bound}",
+                units(f)
+            );
+        }
+    }
+}
+
+// ============================================================================== budget
+
+/// `depth` nested `try` statements, each returning early, so each `finally` body is copied
+/// three times per copy of the one around it.
+fn nested_finally(depth: usize) -> String {
+    let mut lines = vec!["def nested(xs):".to_owned()];
+    let mut pad = "    ".to_owned();
+    for i in 0..depth {
+        lines.push(format!("{pad}try:"));
+        lines.push(format!("{pad}    if xs:"));
+        lines.push(format!("{pad}        return {i}"));
+        lines.push(format!("{pad}    g{i}(xs)"));
+        lines.push(format!("{pad}finally:"));
+        pad.push_str("    ");
+    }
+    lines.push(format!("{pad}for x in xs:"));
+    lines.push(format!("{pad}    h(x)"));
+    lines.push("\n\ndef small(xs):\n    return len(xs)\n".to_owned());
+    lines.join("\n")
+}
+
+#[test]
+fn a_function_past_its_ir_budget_is_one_opaque_call() {
+    let src = nested_finally(14);
+    let ir = dump_ir("ir_size_budget", &src);
+    let f = function(&ir, "nested");
+    assert_eq!(hazards(f), ["unmodeled"]);
+    // The body is one call of an unknown callable with the parameters, whose result returns.
+    let blocks = f["blocks"].as_array().unwrap();
+    assert_eq!(blocks.len(), 1);
+    let insts = blocks[0]["insts"].as_array().unwrap();
+    assert_eq!(insts.len(), 2);
+    assert_eq!(insts[1]["kind"]["Call"]["args"], serde_json::json!([0]));
+    assert!(
+        blocks[0]["terminator"]["Return"].is_u64(),
+        "{:#}",
+        blocks[0]
+    );
+    // The other functions of the module are modeled.
+    assert!(hazards(function(&ir, "small")).is_empty());
+
+    let p = Project::new("ir_size_budget_check");
+    p.write("m.py", &src);
+    let (code, stdout, stderr) = p.heki(&["assumptions", "."]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("[nested] A1 hazard: unmodeled"), "{stdout}");
+    let (code, _, stderr) = p.check(&[]);
+    assert_eq!(code, 0, "{stderr}");
 }

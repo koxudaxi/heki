@@ -95,6 +95,10 @@ pub struct LoopCarriedInfo {
     pub updates: Vec<VarId>,
 }
 
+/// The `A1Hazard` kind of a function whose IR would pass its size budget: its body is one call
+/// of an unknown callable with every parameter, so nothing in it is modeled.
+pub const UNMODELED: &str = "unmodeled";
+
 /// A1 assumption hazard (disables `heki_soundness` on this function only; `heki_effect` continues).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct A1Hazard {

@@ -9,7 +9,11 @@ real code bases:
   their chains (`EffectSummary::typed_field_write_sites`), and the write facts of every callee;
 - a blocking call below `async def` entry points (execution-effect chains);
 - many small modules and classes: every file's check reads the declarations of the project,
-  which the language-server engine remembers per file (`--watch` runs that engine).
+  which the language-server engine remembers per file (`--watch` runs that engine);
+- functions whose IR copies multiply: `finally` bodies nested deep, each `try` returning
+  early (each copy of a `finally` body copies the ones inside it once per way out), and a
+  loop after a `return` that no path enters. Past its budget a function is left unmodeled,
+  so none of them costs more than its budget.
 
 Each mode runs three times and the lowest peak counts. The peak is the physical footprint on
 macOS (`/usr/bin/time -l`; unlike the resident set size it does not drop when the system
@@ -35,6 +39,8 @@ from pathlib import Path
 LAYERS = 24
 STEPS = 6
 SHAPE_MODULES = 600
+# `finally` bodies nested this deep pass a function's IR budget.
+COPIES_DEPTH = 16
 
 # Peak budgets in MiB per platform and mode: the lowest of three runs plus about 8 %. Lower a
 # budget when a change makes heki smaller; raise one only with the measurement that justifies it.
@@ -125,6 +131,18 @@ def shape_module(k: int) -> str:
     return "\n".join(lines)
 
 
+def copies_module(depth: int) -> str:
+    lines = ["def nested(xs):"]
+    pad = "    "
+    for i in range(depth):
+        lines += [f"{pad}try:", f"{pad}    if xs:", f"{pad}        return {i}", f"{pad}finally:"]
+        pad += "    "
+    lines += [f"{pad}for x in xs:", f"{pad}    print(x)", "", ""]
+    lines += ["def dead(xs):", "    return xs", "    for x in xs:", "        print(x)"]
+    lines += ["    print(xs)"]
+    return "\n".join(lines) + "\n"
+
+
 # The `owners` mode's configuration: a write-owner contract on the fields the layers write.
 OWNERS = """\
 target-version = "py312"
@@ -158,6 +176,7 @@ def generate(root: Path) -> int:
         "pkg/models.py": MODELS,
         "pkg/entry.py": entry_module(),
         "pkg/shapes/__init__.py": "",
+        "pkg/copies.py": copies_module(COPIES_DEPTH),
     }
     for i in range(LAYERS):
         files[f"pkg/layer{i}.py"] = layer_module(i)

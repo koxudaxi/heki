@@ -16,6 +16,21 @@ use std::collections::VecDeque;
 /// `__match_args__[i]`.
 const MATCH_ARGS: &str = "__match_args__";
 
+/// The units of work and memory a function's lowering may take (a block, an instruction, a
+/// phi, a name's value in a block, a block a name's lookup passes): a multiple of its source
+/// size, within bounds, far above what real code takes (under one unit per byte). A `finally`
+/// body is lowered once per way out of its `try`, so copies of nested `finally` bodies
+/// multiply; past the budget the function is left unmodeled ([`crate::UNMODELED`]) instead of
+/// growing.
+const UNITS_PER_SOURCE_BYTE: usize = 8;
+const MIN_UNITS: usize = 4096;
+const MAX_UNITS: usize = 100_000;
+
+fn unit_budget(span: Span) -> usize {
+    let source_bytes = span.end.saturating_sub(span.start) as usize;
+    (source_bytes * UNITS_PER_SOURCE_BYTE + MIN_UNITS).min(MAX_UNITS)
+}
+
 /// Build SSA-CFG IR for every executable body in `parsed` (module top-level, class bodies,
 /// functions/methods, lambdas, generator expressions, and non-inlined comprehensions).
 pub fn build_module_ir(
@@ -620,6 +635,11 @@ struct FnBuilder<'m, 'a> {
 
     /// Lexical isolation map for PEP 709 inlined comprehension targets: `raw_name -> isolated_ssa_name`.
     comp_target_renames: Vec<FxHashMap<String, String>>,
+
+    /// IR units left of the function's budget ([`unit_budget`]).
+    units_left: usize,
+    /// The budget ran out: no further statement is lowered, and `finish` replaces the body.
+    unmodeled: bool,
 }
 
 impl<'m, 'a> FnBuilder<'m, 'a> {
@@ -690,6 +710,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             starred: Vec::new(),
             introspection_locals: FxHashMap::default(),
             comp_target_renames: Vec::new(),
+            units_left: unit_budget(span),
+            unmodeled: false,
+        }
+    }
+
+    /// Take one IR unit of the budget.
+    fn spend_unit(&mut self) {
+        match self.units_left.checked_sub(1) {
+            Some(left) => self.units_left = left,
+            None => self.unmodeled = true,
         }
     }
 
@@ -700,6 +730,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     fn new_block(&mut self, sealed: bool) -> BlockId {
+        self.spend_unit();
         let id = BlockId(self.blocks.len() as u32);
         // A block gets its exception edge with its first instruction that may raise.
         self.blocks.push(BasicBlock {
@@ -749,6 +780,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     fn emit(&mut self, kind: InstKind, span: Span) {
+        self.spend_unit();
         self.ensure_open_block();
         let bb = self.cur_bb;
         if kind.may_raise() {
@@ -859,7 +891,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     fn write_local(&mut self, name: &str, bb: BlockId, val: VarId) {
-        self.current_def.insert((bb, name.to_string()), val);
+        if self
+            .current_def
+            .insert((bb, name.to_string()), val)
+            .is_none()
+        {
+            self.spend_unit();
+        }
     }
 
     fn write_var(&mut self, raw_name: &str, val: VarId, span: Span) {
@@ -1002,7 +1040,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 SsaTask::Read(bb) => {
                     if let Some(&val) = self.current_def.get(&(bb, name.to_string())) {
                         values.push(self.canonical_var(val));
-                    } else if !self.sealed[bb.0 as usize] {
+                        continue;
+                    }
+                    // Every block the walk passes takes a unit: past the budget the body is
+                    // replaced, and any value ends the walk.
+                    self.spend_unit();
+                    if self.unmodeled {
+                        return self.fresh_var(Some(name.to_string()));
+                    }
+                    if !self.sealed[bb.0 as usize] {
                         let phi_var = self.fresh_var(Some(name.to_string()));
                         self.incomplete_phis
                             .entry(bb)
@@ -1097,6 +1143,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             return s;
         }
 
+        self.spend_unit();
         self.blocks[bb.0 as usize].phis.push(PhiNode {
             dst: phi_var,
             incoming,
@@ -1206,6 +1253,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     fn lower_stmt(&mut self, stmt: &'a Stmt) {
+        if self.unmodeled {
+            return;
+        }
         self.ensure_open_block();
         match stmt {
             Stmt::FunctionDef(func) => self.lower_function_def(func),
@@ -3604,11 +3654,65 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
+    /// The function's IR passed its budget: its body becomes one call of an unknown callable
+    /// with every parameter (whose result a function returns), and an A1 hazard says that
+    /// nothing in it is modeled.
+    fn replace_body_with_opaque_call(&mut self) {
+        let callee = self.fresh_var(None);
+        let result = self.fresh_var(None);
+        let insts = vec![
+            Inst {
+                kind: InstKind::Const {
+                    dst: callee,
+                    literal: ConstLiteral::Other,
+                },
+                span: self.span,
+            },
+            Inst {
+                kind: InstKind::Call {
+                    dst: result,
+                    callee_var: Some(callee),
+                    callee: String::new(),
+                    args: self.params.iter().map(|p| p.var).collect(),
+                    kwargs: Vec::new(),
+                    is_awaited: false,
+                    star_from: None,
+                },
+                span: self.span,
+            },
+        ];
+        let returns_value = !self.is_module_body && !self.is_class_body;
+        self.blocks = vec![BasicBlock {
+            id: BlockId(0),
+            phis: Vec::new(),
+            insts,
+            terminator: Terminator::Return(returns_value.then_some(result)),
+            exc_target: None,
+            term_span: None,
+        }];
+        self.terminated = vec![true];
+        self.may_raise = vec![false];
+        self.preds = vec![Vec::new()];
+        self.sealed = vec![true];
+        self.incomplete_phis.clear();
+        self.var_replacements.clear();
+        self.finished_loops.clear();
+        self.finished_hints.clear();
+        self.starred.clear();
+        self.a1_hazards.push(A1Hazard {
+            kind: crate::UNMODELED.to_owned(),
+            span: self.span,
+        });
+    }
+
     // -------------------------------------------------------------------------
     // Finalization: seal remaining blocks, apply trivial-Phi replacements,
     // and compute `LoopCarriedInfo` for every natural loop.
     // -------------------------------------------------------------------------
     fn finish(mut self) -> IrFunction {
+        if self.unmodeled {
+            self.replace_body_with_opaque_call();
+        }
         for idx in 0..self.blocks.len() {
             self.seal_block(BlockId(idx as u32));
         }
