@@ -817,3 +817,29 @@ fn module_names_bound_along_a_long_attribute_chain_take_a_bounded_walk() {
     }
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
 }
+
+/// One function making twenty thousand project calls (`Base.reset(obj, ...)` with eight
+/// operands each), about as many as its IR budget models: `MUT202` maps each call instruction
+/// to its call site and tests its operands' definitions, which it looks up in the function's
+/// definitions once built, not by walking the function per operand.
+#[test]
+fn many_calls_in_one_function_look_up_their_operands_once() {
+    let mut lines = vec![
+        "class Base:".to_owned(),
+        "    def reset(self, *args):".to_owned(),
+        "        pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def run(obj):".to_owned(),
+    ];
+    lines.extend(
+        (0..20_000).map(|_| "    Base.reset(obj, obj, obj, obj, obj, obj, obj, obj)".to_owned()),
+    );
+    let p = Project::new("bounds_many_call_operands");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT202\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}

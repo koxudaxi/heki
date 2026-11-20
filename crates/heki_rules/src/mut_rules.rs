@@ -14,7 +14,7 @@ use heki_effect::{
     WriteKind, self_attr_writes,
 };
 use heki_env::HekiConfig;
-use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
+use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1998,14 +1998,15 @@ impl CallParts<'_> {
     }
 }
 
-/// The project call the call instruction `inst` of `f` makes as its call site records it
-/// (among `f`'s `sites`): the callees the summaries resolved, with the values the
-/// `isinstance` tests around it narrow, which a resolution with `f`'s inferred values would
-/// not see. `worker`: instead the callable an offloading API runs on a worker thread
-/// (`asyncio.to_thread(grow, acc)` runs `grow(acc)`), which takes the positional arguments
-/// after it, keyword arguments left unbound.
+/// The project call the call instruction `inst` of a function makes as its call site records
+/// it (among the function's `sites`; `def` gives each variable's defining instruction): the
+/// callees the summaries resolved, with the values the `isinstance` tests around it narrow,
+/// which a resolution with the function's inferred values would not see. `worker`: instead
+/// the callable an offloading API runs on a worker thread (`asyncio.to_thread(grow, acc)` runs
+/// `grow(acc)`), which takes the positional arguments after it, keyword arguments left
+/// unbound.
 pub(crate) fn site_call<'i>(
-    f: &'i IrFunction,
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     sites: &[&'i CallSite],
     inst: &'i Inst,
     worker: bool,
@@ -2022,7 +2023,7 @@ pub(crate) fn site_call<'i>(
             && s.runner == runner
             && !s.project_callees().is_empty()
     })?;
-    if wraps_call_at_own_span(f, inst, &call) {
+    if wraps_call_at_own_span(def, inst, &call) {
         return None;
     }
     let callee = Callee::Project(
@@ -2043,7 +2044,7 @@ pub(crate) fn site_call<'i>(
     }
     let k = usize::from(site.handed_callable?);
     let callable = *call.args.get(k)?;
-    let recv = match f.def_inst(callable).map(|(_, i)| &i.kind) {
+    let recv = match def(callable).map(|i| &i.kind) {
         Some(InstKind::AttrLoad { obj, attr, .. }) if site.binds_recv => {
             Some((*obj, attr.as_str()))
         }
@@ -2063,16 +2064,17 @@ pub(crate) fn site_call<'i>(
 /// shares its span (a comprehension's `acc.append(elt)` carries the span of `elt`); when that
 /// expression is a call, the call site at the span is the expression's, not the synthesized
 /// instruction's.
-fn wraps_call_at_own_span(f: &IrFunction, inst: &Inst, call: &CallInst<'_>) -> bool {
+fn wraps_call_at_own_span<'i>(
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+    inst: &Inst,
+    call: &CallInst<'_>,
+) -> bool {
     call.recv
         .map(|(recv, _)| recv)
         .into_iter()
         .chain(call.args.iter().copied())
         .chain(call.kwargs.iter().map(|(_, v)| *v))
-        .any(|v| {
-            f.def_inst(v)
-                .is_some_and(|(_, def)| def.span == inst.span && CallInst::of(&def.kind).is_some())
-        })
+        .any(|v| def(v).is_some_and(|d| d.span == inst.span && CallInst::of(&d.kind).is_some()))
 }
 
 const MUTABLE_BUILTINS: &[&str] = &[
@@ -2106,6 +2108,8 @@ struct Mut202Fn<'a> {
     tcx: &'a TypeCtx<'a>,
     returns: &'a ReadOnlyReturns,
     f: &'a IrFunction,
+    /// The defining instruction of each of `f`'s variables, looked up per call operand.
+    ix: FnIndex<'a>,
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
     ro: FxHashMap<VarId, Ro>,
@@ -2127,6 +2131,7 @@ impl<'a> Mut202Fn<'a> {
             tcx,
             returns,
             f,
+            ix: FnIndex::new(f, &unit.input.ir.constants),
             key: CheckContext::key(unit, f),
             types: tcx.infer(f),
             ro: FxHashMap::default(),
@@ -2176,7 +2181,8 @@ impl<'a> Mut202Fn<'a> {
         'a: 'i,
     {
         // A project call as the summaries resolved it; any other call by the inferred values.
-        if let Some(call) = site_call(self.f, self.function_sites(), inst, false) {
+        if let Some(call) = site_call(&|v| self.ix.def_inst(v), self.function_sites(), inst, false)
+        {
             return Some(call);
         }
         let call = CallInst::of(&inst.kind)?;
@@ -2408,8 +2414,9 @@ impl<'a> Mut202Fn<'a> {
         }
         // Passing a read-only value to a project function that mutates that parameter, also
         // through an offloading API that calls it on a worker thread.
-        let Some(call) = site_call(self.f, self.function_sites(), inst, false)
-            .or_else(|| site_call(self.f, self.function_sites(), inst, true))
+        let def = |v| self.ix.def_inst(v);
+        let Some(call) = site_call(&def, self.function_sites(), inst, false)
+            .or_else(|| site_call(&def, self.function_sites(), inst, true))
         else {
             return (None, Vec::new());
         };
