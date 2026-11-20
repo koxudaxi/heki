@@ -35,7 +35,11 @@ $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/difftest/counterexamples.py
 ```
 
-- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15).
+- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15):
+  the scope tree (kind, name, definition line, parent), bindings, parameters, `global` /
+  `nonlocal` declarations, and every read. Every target must exist and every file must parse on
+  the running CPython, except fixtures marked for a newer one in their name (`312_315`,
+  `313_315`, `_314`, `pep810`); a run that compares no file fails.
 - `verify_soundness_kb.py` checks every claim of the Layer 1 knowledge base
   (`kb/soundness/builtins.toml`) on the running interpreter.
 - `counterexamples.py` shows that the naive rewrites heki refuses really change behavior.

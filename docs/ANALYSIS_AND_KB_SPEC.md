@@ -27,8 +27,9 @@ resolution are heki's own (`heki_semantic`).
     materialized when the name is first evaluated, not when the module loads.
 - **Bidirectional comparison with CPython `symtable` (quality assurance)**:
   - Following datamodel-code-generator's `scripts/_source_model.py:verify()`, the scope tree
-    (kind and line), bound names, `global` / `nonlocal`, and the kind of every reference (local /
-    enclosing / global / builtin) are compared automatically with the real `symtable` of CPython
+    (kind, name, line, and parent), bound names and parameters, `global` / `nonlocal`
+    declarations, and the kind of every reference (local / enclosing / global / builtin) are
+    compared automatically with the real `symtable` of CPython
     3.11–3.15, which keeps the divergence from the language at zero
     (`tests/symtable_verify/verify_symtable.py`).
 

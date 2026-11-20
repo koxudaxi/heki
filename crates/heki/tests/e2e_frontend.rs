@@ -1974,6 +1974,41 @@ fn corpus_agrees_with_cpython_symtable() {
     assert!(stdout.contains("with 0 disagreements"), "{stdout}");
 }
 
+/// The symtable gate fails instead of passing vacuously: on a missing target, on a file CPython
+/// cannot parse (fixtures that need a newer CPython carry a marker in their name), on a run that
+/// compares nothing, and without a `heki` binary to compare.
+#[test]
+fn symtable_verifier_fails_when_it_compares_nothing() {
+    let p = Project::new("fe_verifier_gate");
+    p.write("broken.py", "def broken(:\n    pass\n");
+    let verify = |args: &[&str]| {
+        let out = Command::new(python())
+            .arg(repo_root().join("tests/symtable_verify/verify_symtable.py"))
+            .args(args)
+            .current_dir(&p.dir)
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let heki = env!("CARGO_BIN_EXE_heki");
+    let (code, stderr) = verify(&["--heki", heki, "no_such_dir"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("target `no_such_dir` does not exist"),
+        "{stderr}"
+    );
+    let (code, stderr) = verify(&["--heki", heki, "broken.py"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("broken.py: CPython"), "{stderr}");
+    assert!(stderr.contains("no file to verify"), "{stderr}");
+    let (code, stderr) = verify(&["broken.py"]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("--heki is required"), "{stderr}");
+}
+
 // =================================================================== `heki check` over the IR
 
 /// The rules and the soundness lane walk every instruction kind the frontend emits.
