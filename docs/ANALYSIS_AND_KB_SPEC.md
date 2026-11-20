@@ -583,7 +583,9 @@ which module imports which.
    never leaves at its header), the blocks the forward analysis follows too. An object the
    function stores in another object there (an attribute, an item, a display, `setattr`, a
    container method) is an element of that object; one stored in a global or a closure cell is
-   held. A project call's result the walk reaches is one of `returns_results` (the call's
+   held. One walk takes each stored value and the values it copies (through copies and phis)
+   with each place once, for all the stores; past a budget of such pairs proportional to the
+   function's source, what the function returns is unknown. A project call's result the walk reaches is one of `returns_results` (the call's
    span, and whether the object is the result or an element of it), and each argument of such a
    call gets `ArgOrigin::origins` from the same walk: its own origins and, in turn, the calls
    whose results it may be. Propagation (`returned_results`) adds what those calls return: each
