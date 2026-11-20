@@ -24,6 +24,10 @@ pub const CHA_CANDIDATE_LIMIT: usize = 8;
 /// Upper bound on re-export alias chasing (`pkg.__init__` re-exporting `pkg.sub.Foo`).
 const MAX_ALIAS_CHASE: usize = 8;
 
+/// Decorators that leave a generator function's call result a generator.
+const GENERATOR_KEEPING_DECORATORS: &[&str] =
+    &["staticmethod", "classmethod", "abstractmethod", "override"];
+
 const BUILTIN_TYPES: &[&str] = &[
     "list",
     "dict",
@@ -146,6 +150,10 @@ pub struct FunctionDecl {
     /// Resolved return annotation (class fqn), Advisory only.
     pub return_type: Option<String>,
     pub param_names: Vec<String>,
+    /// Calling it returns a fresh (async) generator: a generator function without decorators
+    /// other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
+    /// `@contextmanager` generator returns a context manager). `MUT106` single-pass sources.
+    pub is_generator: bool,
 }
 
 /// Per-module declarations other modules need (stored in `FileSummary`, IR-free).
@@ -669,6 +677,14 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .as_deref()
                 .and_then(|a| decls.resolve_annotation(a)),
             param_names: f.params.iter().map(|p| p.name.clone()).collect(),
+            is_generator: matches!(
+                f.kind,
+                FunctionKind::Generator | FunctionKind::AsyncGenerator
+            ) && f.decorators.iter().all(|d| {
+                let base = d.split('(').next().unwrap_or(d).trim();
+                let last = base.rsplit('.').next().unwrap_or(base);
+                GENERATOR_KEEPING_DECORATORS.contains(&last)
+            }),
         };
         decls.functions.insert(f.qualname.clone(), decl);
     }

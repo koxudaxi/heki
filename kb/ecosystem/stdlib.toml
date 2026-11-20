@@ -144,6 +144,52 @@ symbol = "asyncio.wait_for"
 async_safe = true
 opaque_to_layer3 = true
 
+# --- Event loop factories (EFF107 resolves `loop.create_task`) ---
+
+[[entries]]
+symbol = "asyncio.get_running_loop"
+return_type = "asyncio.AbstractEventLoop"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.get_event_loop"
+return_type = "asyncio.AbstractEventLoop"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.new_event_loop"
+return_type = "asyncio.AbstractEventLoop"
+opaque_to_layer3 = true
+
+# --- Synchronous locks (EFF106, opt-in) ---
+# A `with` block over an instance holds the lock. The `asyncio` / `anyio` locks are async-safe
+# and deliberately NOT registered.
+
+[[entries]]
+symbol = "threading.Lock"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.RLock"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Semaphore"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.BoundedSemaphore"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Condition"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
 # --- Offloads blocking work (argument index of the offloaded callable) ---
 
 [[entries]]
