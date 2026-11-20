@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 30 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 31 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
@@ -23,6 +23,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
 | MUT109 | [write-without-invalidation](write-without-invalidation.md) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
 | MUT110 | [readonly-param-mutation](readonly-param-mutation.md) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
+| MUT111 | [cached-property-stale-read](cached-property-stale-read.md) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
 | MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |

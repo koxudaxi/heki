@@ -342,4 +342,4 @@ The proofs heki can make, on five axes:
 | Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT201`–`MUT204` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT201`–`MUT204` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT201`–`MUT204` |

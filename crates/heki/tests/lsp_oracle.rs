@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT108"]
+extend-select = ["MUT108", "MUT111"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -376,6 +376,16 @@ const TAGGED: &str =
 const UNTAGGED: &str =
     "from pkg.model import Registry\n\n\nclass TaggedRegistry(Registry):\n    label: str = \"t\"\n";
 
+// Stale cached properties (`MUT111`): a module reads a cached property of `Journal` (another
+// module) whose writer leaves it stale, and reads it on a subclass in a third module whose
+// override replaces the writer with one that only drops the cached value, then calls it through
+// `super()` instead (the declarations stay the same).
+const JOURNAL: &str = "from functools import cached_property\n\n\nclass Journal:\n    def __init__(self, entries):\n        self.entries = entries\n\n    @cached_property\n    def latest(self):\n        return self.entries[-1]\n\n    def refresh(self, entries):\n        self.entries = entries\n";
+const JOURNAL_INVALIDATING: &str = "from functools import cached_property\n\n\nclass Journal:\n    def __init__(self, entries):\n        self.entries = entries\n\n    @cached_property\n    def latest(self):\n        return self.entries[-1]\n\n    def refresh(self, entries):\n        self.entries = entries\n        self.__dict__.pop(\"latest\", None)\n";
+const SAFE_JOURNAL: &str = "from pkg.journal import Journal\n\n\nclass SafeJournal(Journal):\n    def refresh(self, entries):\n        self.__dict__.pop(\"latest\", None)\n";
+const SAFE_JOURNAL_DELEGATING: &str = "from pkg.journal import Journal\n\n\nclass SafeJournal(Journal):\n    def refresh(self, entries):\n        super().refresh(list(entries))\n";
+const HEADLINE: &str = "from pkg.journal import Journal\nfrom pkg.safe_journal import SafeJournal\n\n\ndef headline(journal: Journal):\n    return journal.latest\n\n\ndef safe_headline(journal: SafeJournal):\n    return journal.latest\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -500,6 +510,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/async_user.py", ASYNC_USER),
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
+        ("pkg/journal.py", JOURNAL),
+        ("pkg/headline.py", HEADLINE),
+        ("pkg/safe_journal.py", SAFE_JOURNAL),
         ("pkg/fresh_ops.py", FRESH_OPS),
         ("pkg/fresh_build.py", FRESH_BUILD),
         ("pkg/strict_ops.py", STRICT_OPS),
@@ -1316,6 +1329,44 @@ fn steps_inherited_writers() -> Vec<Step> {
     ]
 }
 
+/// `MUT111`: the readers of a cached property follow its writers in other modules (the stale
+/// writes of a file, `heki_rules::stale_writes_by_file`): an invalidation added and removed, the
+/// writer moving, and a subclass's override that starts and stops reaching the writer through
+/// `super()` (`safe_headline` is reported only in between; `headline` stays).
+fn steps_mut111() -> Vec<Step> {
+    let moved = JOURNAL.replace(
+        "    def refresh",
+        "    # Replace every entry.\n    def refresh",
+    );
+    vec![
+        Step::new(
+            "a reader in another module of a cached property left stale",
+            Vec::new(),
+        )
+        .present(&[("pkg/headline.py", "MUT111"), ("pkg/journal.py", "MUT101")]),
+        Step::new(
+            "the writer invalidates the cached property",
+            vec![save("pkg/journal.py", JOURNAL_INVALIDATING)],
+        )
+        .absent(&[("pkg/headline.py", "MUT111"), ("pkg/journal.py", "MUT101")]),
+        Step::new(
+            "the writer stops invalidating it, one line lower",
+            vec![Action::Save("pkg/journal.py", moved)],
+        )
+        .present(&[("pkg/headline.py", "MUT111")]),
+        Step::new(
+            "the subclass's override reaches the writer through `super()`",
+            vec![save("pkg/safe_journal.py", SAFE_JOURNAL_DELEGATING)],
+        )
+        .present(&[("pkg/headline.py", "MUT111")]),
+        Step::new(
+            "the override replaces the writer again",
+            vec![save("pkg/safe_journal.py", SAFE_JOURNAL)],
+        )
+        .present(&[("pkg/headline.py", "MUT111")]),
+    ]
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -1454,6 +1505,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut202_mut109());
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());
+    steps.extend(steps_mut111());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
     steps.extend([
@@ -1549,8 +1601,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT108\"]",
-                "extend-select = [\"MUT108\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT108\", \"MUT111\"]",
+                "extend-select = [\"MUT108\", \"MUT111\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),

@@ -378,7 +378,10 @@ of `MUT108` / `MUT110` reports are no summary facts: the rule walks the own summ
 calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
 the first function whose body makes the change. The language server compares these facts of the
 edited file's functions that change a parameter in place (`heki_rules::chain_facts`) and
-re-checks the files with such reports above a function whose facts changed.
+re-checks the files with such reports above a function whose facts changed. Likewise, while
+`MUT111` is selected, it keeps the stale writes `MUT101` finds in each file's methods, with the
+classes whose instances run each writer (`heki_rules::stale_writes_by_file`), as of the file's
+latest analysis; when they change, the files reading those cached properties are re-checked.
 
 The incremental index also records what summarizing each file read of the project declarations
 (`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the
@@ -388,7 +391,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -418,8 +421,22 @@ which module imports which.
    the attributes the `self` methods and properties it calls read (final summary). A starred
    display element (`(*self.a,)`) is a copy: the IR lowers it to a copy named `.unpacked`.
 5. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
-   stale writes of a method are known without its IR; `MUT101` reports those of the checked
-   methods.
+   stale writes of a method are known without its IR: `MUT101` reports those of the checked
+   methods, and `MUT111` reads those of every method.
+
+#### `MUT111`: readers of a stale `@cached_property` (opt-in)
+1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
+   `getattr(obj, "p")`, `obj.__dict__["p"]` / `.get("p")`), whose class `K` heki knows.
+2. For `K` and each project subclass `X` of it, the getter an instance of `X` runs for `p` (the
+   first definition along its MRO); a `@cached_property` getter is a candidate.
+3. Its stale writes are `MUT101`'s (whatever is selected, suppressions included). A write by `m`
+   reaches the read when `m` runs on an instance of `X`: `m` is the first definition of its
+   name along `X`'s MRO, or every definition before it calls the next one on `self`
+   (`super().name()`) and does not invalidate `p` itself.
+4. One report per function and property name, at the first read a write reaches; the target is
+   `Class.p` of the property, the message names the first write that runs on an instance of `K`
+   itself (else the first), and every reaching write is a related location. A getter or helper
+   that reads `p` is reported itself; its callers are not.
 
 #### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
 - The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,

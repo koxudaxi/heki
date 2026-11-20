@@ -2,7 +2,7 @@
 
 | Item | Content |
 |---|---|
-| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (30 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
+| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (31 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
 | Date | 2026-11-20 |
 | Target language | Python (verified on CPython 3.11–3.15, including PEP 709, PEP 649 `__annotate__`, and PEP 810 `lazy import`) |
 | Implementation language | Rust: a single binary with a CLI and an incremental LSP server, distributed with `maturin`. Only the frontend uses `ruff_python_parser` / `ruff_python_ast` (`tag = "0.17.5"`), isolated in `heki_ast`. |
@@ -392,7 +392,7 @@ versions.
 The adopted, rejected, and candidate rules are fixed by the Stage 0-A measurements (339
 repositories, 18.1 million lines, all 171 samples reviewed by hand), the Wave 2 measurements
 (19 million lines), and the study of datamodel-code-generator's 20,000 lines of in-house checkers.
-The 30 rules are listed in the [rules reference](docs/rules/index.md).
+The 31 rules are listed in the [rules reference](docs/rules/index.md).
 
 ### Family 1: Mutation & State Effect (`MUT`: hardening mature production code)
 
@@ -405,6 +405,7 @@ The 30 rules are listed in the [rules reference](docs/rules/index.md).
 | **MUT108** | Opt-in | **In-place changes to read-only fields**: a field of a `@dataclass(frozen=True)`, `NamedTuple`, or `dataclass_transform(frozen_default=True)` class, a `Final` / `ReadOnly` attribute, or a `ReadOnly` `TypedDict` key changed in place, directly, through an alias, or through a helper (type checkers stop only rebinding) | Rebinding and `del` (type checkers' domain), `setattr` / `object.__setattr__` / `__dict__` bypasses, initializers and helpers that only run inside them, instances the function constructs itself, `field(compare=False)` fields, value-side changes (dcg: 4 reports, all correct and deliberate; Stage 0-A: 99 field reports, deliberate in-place updates of frozen records, hence opt-in) |
 | **MUT109** | When configured (contract) | **Announced changes**: a write to a `[[tool.heki.invalidation]]` target (directly, through an alias, or through a helper) must reach one of the contract's invalidators on every path to the function's normal return, directly, in each branch, behind a boolean flag set after the write, or through calls; private helpers pass the obligation to their callers, and a function every caller path of which announces the change after the call is not reported | Writes a helper makes through an argument it does not type count at the call; an initializer is exempt only for its own `self`. Exception paths, objects the function constructs, copies, or gets from a call, `exempt-writers`; deferred context managers are not followed (dcg: every current site passes; 1 design-level report, `DataType.replace_reference`) |
 | **MUT110** | On | **Read-only parameters changed by a helper**: a `Sequence` / `Mapping` / `ReadOnly[...]` parameter (after `Optional` / `\| None` / `Annotated`) handed, as itself or through a local alias, to a function that changes it in place, directly or through further helpers (type checkers trust the helper's signature, so an unannotated or `Any` helper hides the change), reported at the call with the chain | Shares `MUT108`'s analysis; changes in the function itself (type checkers), value-side changes, copies, helper parameters annotated mutable or read-only, variadic parameters (Stage 0-A: 5 reports, all genuine; datamodel-code-generator and the heki corpus: none) |
+| **MUT111** | Opt-in | **Readers of a stale `@cached_property`**: a function whose own body reads a cached property (on `self` or on any object of the class, also through `getattr` and `__dict__`) that a `MUT101` write leaves stale on the instances the object may be, reported once per function and property with the writers as related locations: under a Ratchet baseline, a new reader of a value known to go stale is one new diagnostic | `MUT101`'s findings, whatever is selected (no second notion of staleness); a writer counts for the instances that run it (the first definition along the MRO, or one reached through `super()` by overrides that do not invalidate); the functions calling a reading getter or helper are not reported (datamodel-code-generator: 11 readers, all of the three stale properties; the corpus: 38 in mkdocs, of two `File` properties its setters leave stale) |
 | **MUT201** | When configured (contract) | **Declared write ownership**: writes to the classes and attributes listed in `[[tool.heki.write-owners]]` (through local aliases, container operations `.append()` / `[k] =`, `__dict__` / `setattr`, and helpers in other functions) are limited to the allowed modules and classes (stores, services) | Declared in `pyproject.toml` only (no decorators, no run-time cost). `exempt-methods` for construction and copy methods; a class family's initializer may initialize its own `self`; a function that only runs inside allowed contexts is not reported; `message` is appended to the report. With the Ratchet baseline an existing code base migrates step by step (generalizes datamodel-code-generator's `check_generation_store_usage.py`: 1,665 lines, 1,323 lines of tests, and 13 run-time witnesses) |
 | **MUT202** | When configured (contract) | **Declared read-only returns**: the shared objects returned by the functions and caches listed in `[[tool.heki.readonly-returns]]` (and the containers below them) must not be mutated by callers or downstream functions, including the values returned through wrappers: a function returning a producer's or `@lru_cache` function's result (unless copied) becomes a producer itself, across modules (`returns_protected`, propagated bottom-up) | Checked statically through cross-function `mutates_params` and alias tracking (replaces the run-time fingerprint monitoring of datamodel-code-generator's `tests/checks/schema_graph.py`) |
 | **MUT203** | When configured (contract) | **Declared read ownership**: reads of the classes and attributes listed in `[[tool.heki.read-owners]]` (local aliases, `getattr`, and `__dict__` included) are limited to the allowed readers (the read side of `MUT201`) | The same patterns, subclass expansion, initializer rule, `exempt-methods`, delegation from private helpers to their callers, allowed-context rule, and `message` as `MUT201`. Read sites are kept as local facts and the rule walks the reverse call graph, so summaries do not grow with propagated reads |
@@ -562,13 +563,14 @@ heki/
   are re-checked: each file's summary and check record what they read of the declarations
   (modules looked up, subclass lists, property names, class facts). So are the files of
   functions whose callers changed their calls (their contract reports depend on their callers),
-  the class families of changed methods, the `MUT108` / `MUT110` reports above a function whose
+  the class families of changed methods, the readers of the cached properties whose stale writes
+  (`MUT111`) a re-analyzed file changed, the `MUT108` / `MUT110` reports above a function whose
   own in-place changes or calls changed (their call chains walk the functions' own summaries and
   calls down to the first body that makes the change), and the diagnostics showing a call site
   that only moved; those positions are re-propagated into the callers' summaries without changing
   facts. Files changed on disk and configuration changes are followed.
   `crates/heki/tests/lsp_oracle.rs` compares the server with `heki check` after every step of an
-  editing session (107 steps, and a second session of 20 steps over file, layout, buffer, and
+  editing session (112 steps, and a second session of 20 steps over file, layout, buffer, and
   baseline changes).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
 - **LSP features**: the call chains of `EFF101` / `MUT201` and others, and each diagnostic's
@@ -680,7 +682,7 @@ message = "render entry points must not mutate model state"
 | M7 | The incremental LSP server and `--watch` |
 | M8 | End-to-end test suite through the real binary and LSP process; 100% of reachable lines |
 | M9 | CI / release / documentation workflows and the user guide |
-| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT109`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, the `MUT202` return flow, `MUT205`, and contract keys, entries, and fresh objects (30 rules) |
+| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT109`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, the `MUT202` return flow, `MUT205`, `MUT111`, and contract keys, entries, and fresh objects (31 rules) |
 
 ### Gates for every release (from Stage 0-B)
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.

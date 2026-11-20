@@ -17,14 +17,18 @@ The first public preview.
   `concise`, `json`, `github`, `sarif`; paths relative to the working directory, as in Ruff),
   and exit codes `0` / `1` / `2`. The target Python version (`py311` to `py315`) comes from
   `requires-python` or `--target-version`, and `--watch` re-checks on every change.
-- 30 rules in four families:
+- 31 rules in four families:
   - Mutation and state: `MUT101`, `MUT107`, `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`,
-    `MUT204`, `MUT205`, and the opt-in `MUT103`, `MUT106`, and `MUT108`.
+    `MUT204`, `MUT205`, and the opt-in `MUT103`, `MUT106`, `MUT108`, and `MUT111`.
   - Execution effects: `EFF101`, `EFF102`, `EFF103`, `EFF201`, and the opt-in `EFF105`,
     `EFF106`, and `EFF107`.
   - Data pipelines: `DATA101`.
   - Complexity rewrites: `OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`, `OPT112`, `OPT113`,
     `OPT120`, `OPT121`, and `OPT130`.
+- `MUT111` (`cached-property-stale-read`, opt-in) reports each function that reads a
+  `@cached_property` that a method can leave stale (a `MUT101` finding), with the writers as
+  related locations; under a Ratchet baseline, a new reader of a stale value is one new
+  diagnostic.
 - Proven-safe rewrites: `heki check --fix` applies the unconditional `OPT101` / `OPT102` fixes,
   `--include-size-dependent` adds the size-dependent ones in every function, `--profile` alone
   applies them in the hot functions of a sampling profile (CPython 3.15's profiler or py-spy),

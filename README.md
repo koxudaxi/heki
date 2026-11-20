@@ -97,6 +97,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: a frozen or `ReadOnly` field changed in place | `MUT108` |
 | Opt-in: I/O while a lock or a database transaction is held | `EFF106` |
 | Opt-in: a generator consumed twice | `MUT106` |
+| Opt-in: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
 
 ### Your conventions, checked
 
@@ -203,7 +204,7 @@ $ heki server                                   # LSP server for editors
 - [Getting started](https://heki.koxudaxi.dev/getting-started/)
 - [Scope and limitations](https://heki.koxudaxi.dev/scope/)
 - [Configuration](https://heki.koxudaxi.dev/configuration/)
-- [Rules](https://heki.koxudaxi.dev/rules/) (30 rules)
+- [Rules](https://heki.koxudaxi.dev/rules/) (31 rules)
 - [Fixes and safety](https://heki.koxudaxi.dev/fixes/)
 - [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/)
 - [Editors (LSP)](https://heki.koxudaxi.dev/lsp/) and

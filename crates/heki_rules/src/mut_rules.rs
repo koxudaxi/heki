@@ -17,7 +17,7 @@ use heki_env::HekiConfig;
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ==================================================================================== MUT101
 
@@ -330,18 +330,37 @@ fn stale_writes<'m, 'a>(
     }
 }
 
-pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
-    if !cx.selection.is_enabled("MUT101") {
+/// `MUT101` (writes that leave a `@cached_property` stale) and `MUT111` (opt-in: the functions
+/// reading such a property), from one analysis of the class families.
+pub(crate) fn mut101_mut111(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
+    let report_writes = cx.selection.is_enabled("MUT101");
+    let report_reads = cx.selection.is_enabled("MUT111");
+    if !report_writes && !report_reads {
         return;
     }
+    let classes = ClassMethods::new(cx.units, cx.index);
+    let reads = if report_reads {
+        stale_reads::CachedReads::of(cx)
+    } else {
+        stale_reads::CachedReads::default()
+    };
+    let read_classes = reads.property_classes();
     let mut seen = FxHashSet::default();
-    for_each_class_family(cx, |methods, family, init_called| {
-        // Only checked methods are reported.
-        let writers = |m: &Method<'_>| m.checked.is_some();
-        stale_writes(cx.index, methods, family, init_called, writers, |w| {
+    let mut stale: FxHashMap<&FuncKey, Vec<StaleWrite<'_, '_>>> = FxHashMap::default();
+    for (class, methods) in &classes.by_class {
+        let family = classes.family(cx.decls, class);
+        let reported = report_writes && family.iter().any(|m| m.checked.is_some());
+        let read = read_classes.contains(class);
+        if !reported && !read {
+            continue;
+        }
+        let init_called = private_methods_called_from_init(cx.index, &family);
+        let writers = |m: &Method<'_>| read || m.checked.is_some();
+        stale_writes(cx.index, methods, &family, &init_called, writers, |w| {
             // An overriding `@cached_property` shares the instance `__dict__` slot: one report
             // per property name.
             if let Some(Checked { unit, .. }) = w.writer.checked
+                && reported
                 && seen.insert((w.writer.key.clone(), w.attr, w.prop.name().to_owned()))
             {
                 let p_name = w.prop.name();
@@ -367,8 +386,63 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     &[],
                 );
             }
+            if read {
+                stale.entry(&w.prop.key).or_default().push(w);
+            }
         });
-    });
+    }
+    if report_reads {
+        reads.report(cx, &stale, out);
+    }
+}
+
+/// A write `MUT101` finds, whatever is selected: the cached property, the writer, the attribute,
+/// the write, and the project classes whose instances run the writer (`MUT111` reports the
+/// readers of their instances).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StaleWriteKey {
+    pub prop: FuncKey,
+    pub writer: FuncKey,
+    pub attr: String,
+    pub span: Span,
+    pub running: BTreeSet<String>,
+}
+
+/// The writes `MUT101` finds in the methods of the files `wanted` admits, by file, whatever is
+/// selected. The language server re-checks the readers of a property (`MUT111`) when the writes
+/// of a file change.
+pub fn stale_writes_by_file(
+    index: &ProjectIndex,
+    decls: &ProjectDecls,
+    wanted: impl Fn(&Path) -> bool,
+) -> FxHashMap<PathBuf, BTreeSet<StaleWriteKey>> {
+    let classes = ClassMethods::new(&[], index);
+    let mut out: FxHashMap<PathBuf, BTreeSet<StaleWriteKey>> = FxHashMap::default();
+    for (class, methods) in &classes.by_class {
+        let family = classes.family(decls, class);
+        if !family.iter().any(|m| wanted(m.path)) {
+            continue;
+        }
+        let init_called = private_methods_called_from_init(index, &family);
+        let writers = |m: &Method<'_>| wanted(m.path);
+        stale_writes(index, methods, &family, &init_called, writers, |w| {
+            out.entry(w.writer.path.to_path_buf())
+                .or_default()
+                .insert(StaleWriteKey {
+                    prop: w.prop.key.clone(),
+                    writer: w.writer.key.clone(),
+                    attr: w.attr.to_owned(),
+                    span: w.span,
+                    running: stale_reads::classes_running(
+                        index,
+                        decls,
+                        &w.writer.key,
+                        w.prop.name(),
+                    ),
+                });
+        });
+    }
+    out
 }
 
 /// Whether a function's summary says that it invalidates the cached property `prop` somewhere
@@ -628,6 +702,8 @@ fn private_methods_called_from_init(
     }
     out
 }
+
+mod stale_reads;
 
 // ==================================================================================== MUT201
 

@@ -15,7 +15,8 @@ use heki_rules::project::{
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
-    SnapshotError, SummarySnapshot, chain_facts, check_project, family_readers, find_rule,
+    SnapshotError, StaleWriteKey, SummarySnapshot, chain_facts, check_project, family_readers,
+    find_rule, stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -138,6 +139,10 @@ pub struct Workspace {
     /// The indexed files that may patch `builtins` (they import it or touch `__builtins__`):
     /// while there is one, no module trusts builtin names (Assumption A1(b)).
     patching_builtins: FxHashSet<PathBuf>,
+    /// The writes that leave a `@cached_property` stale (`MUT101`'s) in the methods of each file,
+    /// as of the file's latest analysis; kept while `MUT111` is selected: the files reading a
+    /// property whose writes change need a new check.
+    stale_writes: FxHashMap<PathBuf, BTreeSet<StaleWriteKey>>,
     /// What the configured contracts read across functions (`Workspace::affected_by`).
     reach: ContractReach,
     stats: EngineStats,
@@ -375,6 +380,11 @@ impl Workspace {
         };
         check_project(&[], &env.cfg, &env.kb, &index, &selection, &extras)
             .map_err(EngineError::Rules)?;
+        let stale_writes = if selection.is_enabled("MUT111") {
+            stale_writes_by_file(&index, decls.completed(), |_| true)
+        } else {
+            FxHashMap::default()
+        };
         let stats = EngineStats {
             indexed_files: index.files.len(),
             ..EngineStats::default()
@@ -394,6 +404,7 @@ impl Workspace {
                 chain_reports: FxHashSet::default(),
                 check_reads: CheckReads::default(),
                 patching_builtins,
+                stale_writes,
                 reach,
                 stats,
             },
@@ -620,6 +631,49 @@ impl Workspace {
             return Vec::new();
         }
         self.check_reads.paths().cloned().collect()
+    }
+
+    /// Record the stale writes (`MUT101`'s) in the methods of `path` against the current index;
+    /// when they changed, the files reading the cached properties they leave stale (`MUT111`)
+    /// may report differently: returns those files.
+    fn note_stale_writes(&mut self, path: &Path) -> Vec<PathBuf> {
+        if !self.selection.is_enabled("MUT111") {
+            return Vec::new();
+        }
+        let now = stale_writes_by_file(&self.index, self.decls.completed(), |p| p == path)
+            .remove(path)
+            .unwrap_or_default();
+        let before = if now.is_empty() {
+            self.stale_writes.remove(path)
+        } else {
+            self.stale_writes.insert(path.to_path_buf(), now.clone())
+        }
+        .unwrap_or_default();
+        let props: BTreeSet<&str> = before
+            .symmetric_difference(&now)
+            .map(|w| {
+                w.prop
+                    .qualname
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&w.prop.qualname)
+            })
+            .collect();
+        if props.is_empty() {
+            return Vec::new();
+        }
+        self.index
+            .files
+            .values()
+            .filter(|f| {
+                f.local_functions.values().any(|s| {
+                    s.typed_field_read_sites
+                        .iter()
+                        .any(|r| props.contains(r.attr.as_str()))
+                })
+            })
+            .map(|f| f.path.clone())
+            .collect()
     }
 
     /// Re-summarize one parsed file; returns the update, what changed in the declarations, and
@@ -861,6 +915,7 @@ impl Workspace {
             (&ecosystem_before, &ecosystem_after),
         );
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
+        affected.extend(self.note_stale_writes(&parsed.path));
         // Call chains of other files show this file's call sites: when they move, those
         // diagnostics move with them (the summaries copying them were re-propagated).
         if sites_moved {
@@ -933,6 +988,7 @@ impl Workspace {
             (&ecosystem_before, &EcosystemView::new()),
         );
         affected.extend(self.note_builtins(path, false));
+        affected.extend(self.note_stale_writes(path));
         let mut v: Vec<PathBuf> = affected.into_iter().collect();
         v.sort();
         v

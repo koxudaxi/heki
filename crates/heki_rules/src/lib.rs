@@ -1,7 +1,7 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -19,7 +19,9 @@ pub mod snapshot;
 
 pub use contracts::{MAX_INVALIDATIONS, summary_contracts, typed_writes};
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
-pub use mut_rules::{CHAIN_RULES, ChainFacts, chain_facts, family_readers};
+pub use mut_rules::{
+    CHAIN_RULES, ChainFacts, StaleWriteKey, chain_facts, family_readers, stale_writes_by_file,
+};
 pub use selection::{RuleSelection, SelectionError};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
@@ -134,6 +136,16 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).",
         doc: include_str!("../rule-docs/MUT110.md"),
+    },
+    RuleMeta {
+        code: "MUT111",
+        slug: "cached-property-stale-read",
+        family: RuleFamily::Mut,
+        default_enabled: false,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).",
+        doc: include_str!("../rule-docs/MUT111.md"),
     },
     RuleMeta {
         code: "MUT201",
@@ -508,7 +520,7 @@ pub fn check_project(
         text_of: extras.text_of,
     };
     let mut out = Vec::new();
-    mut_rules::mut101(&cx, &mut out);
+    mut_rules::mut101_mut111(&cx, &mut out);
     mut_rules::mut107(&cx, &mut out);
     mut_rules::mut108_mut110(&cx, &mut out);
     mut_rules::mut109(&cx, &mut out)?;
@@ -650,24 +662,33 @@ impl<'a> CheckContext<'a> {
         chain
             .iter()
             .map(|hop| {
-                // A hop in a file that is not checked: its position comes from its text.
-                let (line, column) = self
-                    .unit(&hop.path)
-                    .map(|u| u.lines.line_col(hop.span.start))
-                    .or_else(|| {
-                        let text = (self.text_of?)(&hop.path)?;
-                        Some(LineIndex::from_source(&text).line_col(hop.span.start))
-                    })
-                    .unwrap_or((0, 0));
-                RelatedLocation {
-                    path: hop.path.clone(),
-                    line,
-                    column,
-                    span: hop.span,
-                    message: format!("`{}` calls `{}`", hop.caller.qualname, hop.callee),
-                }
+                self.related_at(
+                    &hop.path,
+                    hop.span,
+                    format!("`{}` calls `{}`", hop.caller.qualname, hop.callee),
+                )
             })
             .collect()
+    }
+
+    /// A related location at `span` of `path`.
+    pub fn related_at(&self, path: &Path, span: Span, message: String) -> RelatedLocation {
+        // A file that is not checked: the position comes from its text.
+        let (line, column) = self
+            .unit(path)
+            .map(|u| u.lines.line_col(span.start))
+            .or_else(|| {
+                let text = (self.text_of?)(path)?;
+                Some(LineIndex::from_source(&text).line_col(span.start))
+            })
+            .unwrap_or((0, 0));
+        RelatedLocation {
+            path: path.to_path_buf(),
+            line,
+            column,
+            span,
+            message,
+        }
     }
 
     /// Build a diagnostic (severity from `lint.severity`, default `error`); `None` when `code`

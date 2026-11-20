@@ -97,6 +97,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](rules/readonly-type-mutation.md) |
 | Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](rules/lock-or-tx-held-across-io.md) |
 | Opt-in: a generator consumed twice | [`MUT106`](rules/iterator-double-consumption.md) |
+| Opt-in: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](rules/cached-property-stale-read.md) |
 
 ### Your conventions, checked
 
@@ -173,7 +174,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - See what heki [covers and does not cover](scope.md).
 - [Install heki](installation.md) and [run it on a project](getting-started.md).
 - [Configure](configuration.md) rule selection, contracts, and the Python version.
-- Browse the [30 rules](rules/index.md).
+- Browse the [31 rules](rules/index.md).
 - Read how [fixes are proven safe](fixes.md).
 - [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
 - Use it from [your editor](lsp.md) or [a coding agent](coding-agents.md).
