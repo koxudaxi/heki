@@ -167,17 +167,61 @@ pub struct EcosystemEntry {
     pub sync_lock_or_tx: bool,
 }
 
-/// Validate a `[[tool.heki.ecosystem]]` override into a Layer 2 entry.
-/// `opaque_to_layer3` is decided when merging (see [`EffectiveEcosystemKb::load_builtin`]).
-impl TryFrom<&EcosystemOverride> for EcosystemEntry {
+/// A validated `[[tool.heki.ecosystem]]` entry: the keys it sets on the entry for `symbol`
+/// (`None`: left out, the built-in value stays).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EcosystemPatch {
+    pub symbol: String,
+    pub effects: Option<Vec<ExecEffectKind>>,
+    pub async_safe: Option<bool>,
+    pub offloads_blocking_arg: Option<u8>,
+    pub excluded: Option<bool>,
+    pub copy_sanitizer: Option<bool>,
+    pub return_type: Option<String>,
+    pub sync_lock_or_tx: Option<bool>,
+}
+
+impl EcosystemPatch {
+    fn apply(&self, entry: &mut EcosystemEntry) {
+        if let Some(effects) = &self.effects {
+            entry.effects.clone_from(effects);
+        }
+        if let Some(v) = self.async_safe {
+            entry.async_safe = v;
+        }
+        if let Some(k) = self.offloads_blocking_arg {
+            entry.offloads_blocking_arg = Some(k);
+        }
+        if let Some(v) = self.excluded {
+            entry.excluded = v;
+        }
+        if let Some(v) = self.copy_sanitizer {
+            entry.copy_sanitizer = v;
+        }
+        if let Some(t) = &self.return_type {
+            entry.return_type = Some(t.clone());
+        }
+        if let Some(v) = self.sync_lock_or_tx {
+            entry.sync_lock_or_tx = v;
+        }
+    }
+}
+
+/// Validate a `[[tool.heki.ecosystem]]` override (its effect names).
+impl TryFrom<&EcosystemOverride> for EcosystemPatch {
     type Error = KbError;
 
     fn try_from(value: &EcosystemOverride) -> Result<Self, KbError> {
         let effects = value
             .effects
-            .iter()
-            .map(|name| ExecEffectKind::from_kb_name(name))
-            .collect::<Result<Vec<_>, _>>()?;
+            .as_ref()
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| ExecEffectKind::from_kb_name(name))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         Ok(Self {
             symbol: value.symbol.clone(),
             effects,
@@ -185,9 +229,8 @@ impl TryFrom<&EcosystemOverride> for EcosystemEntry {
             offloads_blocking_arg: value.offloads_blocking_arg,
             excluded: value.excluded,
             copy_sanitizer: value.copy_sanitizer,
-            opaque_to_layer3: false,
-            return_type: None,
-            sync_lock_or_tx: false,
+            return_type: value.return_type.clone(),
+            sync_lock_or_tx: value.sync_lock_or_tx,
         })
     }
 }
@@ -242,27 +285,31 @@ impl EffectiveEcosystemKb {
         }
     }
 
-    /// Embed `kb/ecosystem/*.toml` via `include_str!` and merge user `overrides`.
-    /// User overrides take precedence over built-in entries for the same `symbol` (the whole
-    /// entry is replaced). An override inside an opaque package stays `opaque_to_layer3`.
-    pub fn load_builtin(overrides: &[EcosystemEntry]) -> Result<Self, KbError> {
-        let mut raw = Vec::new();
+    /// Embed `kb/ecosystem/*.toml` via `include_str!` and merge user `overrides`, in order:
+    /// each sets the keys it lists on the entry for its `symbol` (a built-in one, or a new
+    /// one). A new entry inside an opaque package is `opaque_to_layer3`.
+    pub fn load_builtin(overrides: &[EcosystemPatch]) -> Result<Self, KbError> {
+        let mut raw: BTreeMap<String, EcosystemEntry> = BTreeMap::new();
         let mut opaque_packages = Vec::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
             let parsed = parse_ecosystem_file(file, text)?;
-            raw.extend(parsed.entries);
+            raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
             opaque_packages.extend(parsed.opaque_packages);
         }
         opaque_packages.sort();
         opaque_packages.dedup();
-        for entry in overrides {
-            let mut entry = entry.clone();
-            let package = top_level_package(&entry.symbol);
-            entry.opaque_to_layer3 |= opaque_packages.iter().any(|p| p == package);
-            // `materialize` inserts in order, so overrides (pushed last) replace built-ins.
-            raw.push(entry);
+        for patch in overrides {
+            let package = top_level_package(&patch.symbol);
+            let entry = raw
+                .entry(patch.symbol.clone())
+                .or_insert_with(|| EcosystemEntry {
+                    symbol: patch.symbol.clone(),
+                    opaque_to_layer3: opaque_packages.iter().any(|p| p == package),
+                    ..EcosystemEntry::default()
+                });
+            patch.apply(entry);
         }
-        Ok(Self::materialize(raw, opaque_packages))
+        Ok(Self::materialize(raw.into_values().collect(), opaque_packages))
     }
 
     pub fn lookup(&self, symbol: &str) -> Option<&EcosystemEntry> {
@@ -1528,78 +1575,120 @@ mod tests {
     }
 
     #[test]
-    fn layer2_user_overrides_take_precedence() {
+    fn layer2_user_overrides_set_only_the_keys_they_list() {
         let builtin = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let patch = |symbol: &str| EcosystemPatch {
+            symbol: symbol.into(),
+            ..EcosystemPatch::default()
+        };
         let overrides = [
-            // Replaces the built-in `time.sleep` entry as a whole.
-            EcosystemEntry {
-                symbol: "time.sleep".into(),
-                excluded: true,
-                ..EcosystemEntry::default()
+            EcosystemPatch {
+                excluded: Some(true),
+                ..patch("time.sleep")
+            },
+            // The factory keeps the return type the override does not mention.
+            EcosystemPatch {
+                effects: Some(vec![BlockingDb]),
+                ..patch("sqlite3.connect")
             },
             // A project-local symbol is added and is not opaque.
-            EcosystemEntry {
-                symbol: "mypkg.http.fetch".into(),
-                effects: vec![BlockingNet],
-                ..EcosystemEntry::default()
+            EcosystemPatch {
+                effects: Some(vec![BlockingNet]),
+                ..patch("mypkg.http.fetch")
+            },
+            EcosystemPatch {
+                return_type: Some("sqlite3.Connection".into()),
+                ..patch("mypkg.db.open")
+            },
+            EcosystemPatch {
+                sync_lock_or_tx: Some(true),
+                ..patch("mypkg.db.open")
             },
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&overrides).unwrap();
+        let got = |symbol: &str| kb.lookup(symbol).cloned().unwrap();
         assert_eq!(
-            kb.lookup("time.sleep"),
-            Some(&EcosystemEntry {
+            got("time.sleep"),
+            EcosystemEntry {
                 symbol: "time.sleep".into(),
                 excluded: true,
-                opaque_to_layer3: true,
-                ..EcosystemEntry::default()
-            })
+                ..entry(&[Sleep])
+            }
         );
         assert_eq!(
-            kb.lookup("mypkg.http.fetch"),
-            Some(&EcosystemEntry {
+            got("sqlite3.connect"),
+            EcosystemEntry {
+                symbol: "sqlite3.connect".into(),
+                ..returning("sqlite3.Connection", entry(&[BlockingDb]))
+            }
+        );
+        assert_eq!(
+            got("mypkg.http.fetch"),
+            EcosystemEntry {
                 symbol: "mypkg.http.fetch".into(),
                 effects: vec![BlockingNet],
                 ..EcosystemEntry::default()
-            })
+            }
         );
-        assert_eq!(kb.entries.len(), builtin.entries.len() + 1);
+        // Later overrides of a symbol add to the earlier ones.
+        assert_eq!(
+            got("mypkg.db.open"),
+            EcosystemEntry {
+                symbol: "mypkg.db.open".into(),
+                return_type: Some("sqlite3.Connection".into()),
+                sync_lock_or_tx: true,
+                ..EcosystemEntry::default()
+            }
+        );
+        assert_eq!(kb.entries.len(), builtin.entries.len() + 2);
         assert_eq!(kb.opaque_packages, builtin.opaque_packages);
         assert_ne!(kb.digest, builtin.digest);
     }
 
     #[test]
-    fn user_override_config_converts_to_entry() {
+    fn user_override_config_converts_to_patch() {
         let ok = EcosystemOverride {
             symbol: "mypkg.workers.in_thread".into(),
-            effects: vec!["blocking_sync".into()],
-            async_safe: true,
+            effects: Some(vec!["unpooled_client_alloc".into()]),
+            async_safe: Some(true),
             offloads_blocking_arg: Some(0),
-            excluded: false,
-            copy_sanitizer: true,
+            excluded: Some(false),
+            copy_sanitizer: Some(true),
+            return_type: Some("mypkg.workers.Handle".into()),
+            sync_lock_or_tx: Some(false),
         };
         assert_eq!(
-            EcosystemEntry::try_from(&ok).unwrap(),
-            EcosystemEntry {
+            EcosystemPatch::try_from(&ok).unwrap(),
+            EcosystemPatch {
                 symbol: "mypkg.workers.in_thread".into(),
-                effects: vec![BlockingSync],
-                async_safe: true,
+                effects: Some(vec![UnpooledClientAlloc]),
+                async_safe: Some(true),
                 offloads_blocking_arg: Some(0),
-                excluded: false,
-                copy_sanitizer: true,
-                opaque_to_layer3: false,
-                return_type: None,
-                // Overrides cannot declare locks or transactions (`[[tool.heki.ecosystem]]`
-                // has no such key).
-                sync_lock_or_tx: false,
+                excluded: Some(false),
+                copy_sanitizer: Some(true),
+                return_type: Some("mypkg.workers.Handle".into()),
+                sync_lock_or_tx: Some(false),
+            }
+        );
+        // Keys left out stay unset.
+        let bare = EcosystemOverride {
+            symbol: "mypkg.f".into(),
+            ..EcosystemOverride::default()
+        };
+        assert_eq!(
+            EcosystemPatch::try_from(&bare).unwrap(),
+            EcosystemPatch {
+                symbol: "mypkg.f".into(),
+                ..EcosystemPatch::default()
             }
         );
         for bad in ["blocking-net", "BlockingNet", "network", ""] {
             let cfg = EcosystemOverride {
                 symbol: "mypkg.f".into(),
-                effects: vec!["sleep".into(), bad.into()],
+                effects: Some(vec!["sleep".into(), bad.into()]),
                 ..EcosystemOverride::default()
             };
-            let result = EcosystemEntry::try_from(&cfg);
+            let result = EcosystemPatch::try_from(&cfg);
             assert!(
                 matches!(&result, Err(KbError::InvalidEffect(name)) if name == bad),
                 "{bad}: {result:?}"

@@ -34,6 +34,33 @@ fn check(name: &str, rel: &str, source: &str, rules: &str) -> Vec<(u64, String, 
         .collect()
 }
 
+/// [`check`] of `source` at `rel` with the `[tool.heki]` table `config` in `pyproject.toml`.
+fn check_configured(
+    name: &str,
+    config: &str,
+    rel: &str,
+    source: &str,
+    rules: &str,
+) -> Vec<(u64, String, String, String)> {
+    let p = Project::new(name);
+    p.write("pyproject.toml", &format!("[project]\nname = \"t\"\n\n{config}"));
+    p.write(rel, source);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", rules]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["target"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
 fn d(line: u64, rule: &str, qualname: &str, target: &str) -> (u64, String, String, String) {
     (line, rule.into(), qualname.into(), target.into())
 }
@@ -1093,6 +1120,85 @@ fn pandas_io_and_quadratic_concatenation() {
             d(27, "DATA101", "tp_self_accumulation", "arr"),
             d(30, "DATA101", "tp_self_accumulation", "grid"),
             d(33, "DATA101", "tp_self_accumulation", "flat"),
+        ]
+    );
+}
+
+const OVERRIDES: &str = r#"
+[[tool.heki.ecosystem]]
+symbol = "sqlite3.connect"
+effects = ["blocking_db"]
+
+[[tool.heki.ecosystem]]
+symbol = "vendor.db.open"
+return-type = "sqlite3.Connection"
+
+[[tool.heki.ecosystem]]
+symbol = "vendor.locks.Gate"
+sync-lock-or-tx = true
+"#;
+
+const OVERRIDDEN: &str = r#"import sqlite3
+
+import requests
+import vendor.db
+import vendor.locks
+
+
+def tp_factory_keeps_its_return_type(path, ids):
+    conn = sqlite3.connect(path)
+    for i in ids:
+        conn.execute("SELECT ?", (i,))
+
+
+def tn_override_drops_the_allocation(paths):
+    for p in paths:
+        sqlite3.connect(p)
+
+
+
+def tp_declared_factory(ids):
+    conn = vendor.db.open()
+    for i in ids:
+        conn.execute("SELECT ?", (i,))
+
+
+def tp_declared_lock(url):
+    with vendor.locks.Gate():
+        requests.get(url)
+"#;
+
+/// An override sets the keys it lists and keeps the built-in entry's others; `return-type` and
+/// `sync-lock-or-tx` declare factories and locks.
+#[test]
+fn overrides_set_only_the_keys_they_list() {
+    assert_eq!(
+        check_configured(
+            "catalog_overrides",
+            OVERRIDES,
+            "app/overridden.py",
+            OVERRIDDEN,
+            "EFF101,EFF102,EFF103,EFF106"
+        ),
+        vec![
+            d(
+                11,
+                "EFF103",
+                "tp_factory_keeps_its_return_type",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                23,
+                "EFF103",
+                "tp_declared_factory",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                28,
+                "EFF106",
+                "tp_declared_lock",
+                "vendor.locks.Gate->requests.get"
+            ),
         ]
     );
 }

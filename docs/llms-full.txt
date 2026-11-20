@@ -867,8 +867,11 @@ excluded = true               # never reported
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread. |
 | `excluded` | Never reported (logging and similar). |
 | `copy-sanitizer` | Returns a copy (ends `MUT202` protection). |
+| `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
+| `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 
-An override replaces the built-in entry for the same symbol as a whole.
+An override sets the keys it lists on the built-in entry for the same symbol; the keys it
+leaves out keep their built-in values (`effects = []` removes every effect).
 
 ## Inline suppressions
 

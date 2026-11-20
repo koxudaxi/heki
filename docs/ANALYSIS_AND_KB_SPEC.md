@@ -546,7 +546,8 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
 `opaque_to_layer3` (reserved for Layer 3). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
-`offloads-blocking-arg`, `excluded`, `copy-sanitizer`).
+`offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`): an
+override sets the keys it lists and keeps the built-in entry's others.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a
