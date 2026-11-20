@@ -968,10 +968,15 @@ fn module_names_and_relative_imports() {
 #[test]
 fn src_layout_detection() {
     let root = std::env::temp_dir().join(format!("heki_effect_src_layout_{}", std::process::id()));
-    std::fs::create_dir_all(root.join("src/pkg")).unwrap();
     assert!(!detect_src_layout(&root));
+    // A namespace package (no `__init__.py`) under `src/` is laid out like a regular one.
+    std::fs::create_dir_all(root.join("src/pkg")).unwrap();
+    assert!(detect_src_layout(&root));
     std::fs::write(root.join("src/pkg/__init__.py"), "").unwrap();
     assert!(detect_src_layout(&root));
+    // `src` itself a package: imported as `src.pkg`.
+    std::fs::write(root.join("src/__init__.py"), "").unwrap();
+    assert!(!detect_src_layout(&root));
     std::fs::remove_dir_all(&root).unwrap();
 }
 

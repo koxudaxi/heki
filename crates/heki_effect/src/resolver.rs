@@ -64,14 +64,15 @@ const BUILTIN_TYPES: &[&str] = &[
 
 // ------------------------------------------------------------------------------ module names
 
-/// `src/` layout: some `root/src/<pkg>/__init__.py` exists.
+/// `src/` layout: `root/src` is a source root, not a package. It holds the project's top-level
+/// packages, namespace packages, and modules (the layout packaging tools install from), unless
+/// it is a regular package itself (`src/__init__.py`, or a stub for one), imported as `src`.
 pub fn detect_src_layout(root: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(root.join("src")) else {
-        return false;
-    };
-    entries
-        .flatten()
-        .any(|e| e.path().join("__init__.py").is_file())
+    let src = root.join("src");
+    src.is_dir()
+        && !["__init__.py", "__init__.pyi"]
+            .iter()
+            .any(|f| src.join(f).is_file())
 }
 
 /// Module name of `rel` (the normalized project-relative path `rel_posix` produces):

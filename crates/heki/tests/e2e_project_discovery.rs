@@ -1,0 +1,53 @@
+//! Project and module discovery end to end: source roots, which file owns a module name, the
+//! target version, and how imports bind names (what `heki check` links across modules).
+
+mod common;
+
+use common::Project;
+
+/// `import time` + a blocking helper.
+const BLOCKING_WAIT: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
+
+/// `heki check --output-format concise` of the project: `(exit code, stdout)`.
+fn concise(p: &Project) -> (i32, String) {
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_ne!(code, 2, "{stderr}");
+    (code, stdout)
+}
+
+#[test]
+fn src_directories_are_source_roots_unless_they_are_packages() {
+    // A namespace package under `src/` (no `__init__.py`): `acme.io` links.
+    let p = Project::new("disc_src_namespace");
+    p.write("src/acme/io.py", BLOCKING_WAIT).write(
+        "src/acme/api.py",
+        "from acme.io import wait\n\n\nasync def go():\n    wait()\n",
+    );
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("src/acme/api.py:5:5: EFF101 "), "{stdout}");
+    assert!(stdout.contains("`acme.io.wait`"), "{stdout}");
+
+    // Modules directly under `src/` are top-level modules.
+    let p = Project::new("disc_src_modules");
+    p.write("src/helpers.py", BLOCKING_WAIT).write(
+        "src/main.py",
+        "from helpers import wait\n\n\nasync def go():\n    wait()\n",
+    );
+    assert!(concise(&p).1.contains("src/main.py:5:5: EFF101 "));
+
+    // `src` is a package itself: its modules are `src.*`.
+    let p = Project::new("disc_src_package");
+    p.write("src/__init__.py", "")
+        .write("src/helpers.py", BLOCKING_WAIT)
+        .write(
+            "src/main.py",
+            "from src.helpers import wait\n\n\nasync def go():\n    wait()\n",
+        );
+    assert!(concise(&p).1.contains("`src.helpers.wait`"));
+    p.write(
+        "src/main.py",
+        "from helpers import wait\n\n\nasync def go():\n    wait()\n",
+    );
+    assert_eq!(concise(&p), (0, String::new()));
+}

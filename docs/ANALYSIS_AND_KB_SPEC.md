@@ -132,6 +132,11 @@ the targets of write and read boundaries.
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
+Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
+`pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
+`src/acme/io.py` is `acme.io`, for regular and namespace packages and for modules directly under
+`src/`.
+
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
 cannot be resolved is not followed (`unknown_calls`); an external function that Layer 2 does not
