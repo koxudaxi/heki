@@ -245,7 +245,14 @@ A function decorated with a catalog entry offloading argument 0, applied directl
 (`@sync_to_async`, `@sync_to_async(thread_sensitive=False)`), is `d(f)`: calling it is a call of
 `d` with the function as its offloaded argument (`FunctionDecl::offloaded_by`, resolved through
 imports and re-exports when the declarations are completed; every definition of the name must be
-decorated so), and its body never runs at the call.
+decorated so), and its body runs at the call on a worker thread: a site of its own, marked
+`CallSite::on_worker`. The callable an offloading API is given runs so too, as a call of the
+project function with the positional arguments after it (`asyncio.to_thread(f, a)` calls `f(a)`,
+`loop.run_in_executor(None, f, a)` too; keyword arguments are left unbound, since some APIs take
+their own). Every fact of such a site moves to the caller except the blocking effects, which do
+not block the caller's thread: its queries per item (`EFF103`), its clients (`EFF102`), and its
+changes to shared objects (`MUT202`, which reads the offloading call the same way) count, and
+`EFF201` does not enter it.
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still

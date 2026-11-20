@@ -52,6 +52,22 @@ pub const CONTAINER_MUTATORS: &[&str] = &[
 /// Execution effects `EFF101` treats as blocking the event loop.
 pub const BLOCKING_EFFECTS: &[ExecEffectKind] = ExecEffectKind::BLOCKING;
 
+/// The callable an offloading API runs on a worker thread at a call of `symbol`, and where the
+/// positional arguments it passes start: `asyncio.to_thread(f, a, b)` runs `f(a, b)`. `None`
+/// when `*` unpacking may move the callable.
+pub fn offloaded_callable(
+    kb: &EffectiveEcosystemKb,
+    symbol: &str,
+    args: &[VarId],
+    star_from: Option<u8>,
+) -> Option<(VarId, usize)> {
+    let k = usize::from(kb.lookup(symbol)?.offloads_blocking_arg?);
+    if star_from.is_some_and(|s| usize::from(s) <= k) {
+        return None;
+    }
+    Some((*args.get(k)?, k + 1))
+}
+
 /// Summarize every function of one module (local facts only; see `ProjectIndex::build`).
 /// Summarize one module against the project declarations. `own` is the module's own completed
 /// declarations with what completing them read; with `track`, what the summary reads of
@@ -1760,8 +1776,10 @@ impl<'a> Extractor<'a> {
                         guards: Vec::new(),
                         once_per: None,
                         once_loops: 0,
+                        on_worker: false,
                     });
                 }
+                self.offloaded_call(bb, symbol, call);
                 None
             }
             Callee::Project(keys, binds_recv) => {
@@ -1772,19 +1790,21 @@ impl<'a> Extractor<'a> {
                 let mut callees = Vec::new();
                 let mut bindings = Vec::new();
                 let mut offloaders: Vec<String> = Vec::new();
+                // The bodies an offloading decorator runs on a worker thread.
+                let mut on_worker = Vec::new();
                 let mut any_async = false;
                 let unknown = FunctionDecl::default();
                 let loops = self.loops_around(bb);
                 for key in keys {
                     let cx = self.cx;
                     let decl = cx.project.function_decl(key).unwrap_or(&unknown);
-                    if let Some(symbol) = &decl.offloaded_by {
-                        if !offloaders.contains(symbol) {
-                            offloaders.push(symbol.clone());
-                        }
-                        continue;
+                    let offloaded = decl.offloaded_by.is_some();
+                    if let Some(symbol) = &decl.offloaded_by
+                        && !offloaders.contains(symbol)
+                    {
+                        offloaders.push(symbol.clone());
                     }
-                    any_async |= decl.is_async;
+                    any_async |= decl.is_async && !offloaded;
                     if let (Some(c), Some(_)) = (self.contracts, &self.events)
                         && !decl.is_generator
                     {
@@ -1859,13 +1879,18 @@ impl<'a> Extractor<'a> {
                     while params.last().is_some_and(ArgOrigin::is_empty) {
                         params.pop();
                     }
-                    callees.push(BoundCallee {
+                    let bc = BoundCallee {
                         callee: key.clone(),
                         params,
-                    });
-                    bindings.push((key.clone(), bound));
+                    };
+                    if offloaded {
+                        on_worker.push(bc);
+                    } else {
+                        callees.push(bc);
+                        bindings.push((key.clone(), bound));
+                    }
                 }
-                // `@d def f` is `f = d(f)`: the call runs `d(f)`, which offloads `f`.
+                // `@d def f` is `f = d(f)`: the call runs `d(f)`, which runs `f` on a worker.
                 for symbol in offloaders {
                     let offloaded: Vec<VarId> = call.value.into_iter().collect();
                     let passed = Passed {
@@ -1874,6 +1899,9 @@ impl<'a> Extractor<'a> {
                         star_from: None,
                     };
                     self.external_call(bb, symbol, passed, call.is_awaited, call.span);
+                }
+                if !on_worker.is_empty() {
+                    self.worker_site(bb, on_worker, call);
                 }
                 if callees.is_empty() {
                     return None;
@@ -1912,6 +1940,61 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// The site of `callees` an offloading API runs on a worker thread for `call`
+    /// (`CallSite::on_worker`).
+    fn worker_site(&mut self, bb: BlockId, callees: Vec<BoundCallee>, call: &Call<'_>) {
+        if let Some(events) = self.events.as_mut() {
+            events
+                .calls
+                .push((self.pos.0, self.pos.1, self.sites.len()));
+        }
+        let site = self.site(bb, CallTarget::Project(callees), false, call.span);
+        self.sites.push(CallSite {
+            recv_is_self: call.recv_is_self,
+            on_worker: true,
+            ..site
+        });
+    }
+
+    /// An offloading API's callable (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None,
+    /// f, *args)`) runs on a worker thread at the call: a project function there is called
+    /// with the positional arguments after it. Keyword arguments are left unbound: some APIs
+    /// forward them, others take their own.
+    fn offloaded_call(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
+        let Some((callable, first)) =
+            offloaded_callable(self.cx.kb, symbol, call.args, call.star_from)
+        else {
+            return;
+        };
+        let (callee, recv, recv_is_self) = match self.bound_method(callable) {
+            Some((recv, method)) => {
+                let callee = self.cx.resolve_method(self.types.get(&recv), &method);
+                let (origin, is_self) = self.receiver(recv, bb);
+                (callee, Some(origin), is_self)
+            }
+            None => (self.cx.resolve_call(self.types.get(&callable)), None, false),
+        };
+        let Callee::Project(..) = &callee else {
+            return;
+        };
+        let after = u8::try_from(first).unwrap_or(u8::MAX);
+        let worker = Call {
+            dst: call.dst,
+            value: Some(callable),
+            recv,
+            args: &call.args[first..],
+            kwargs: &[],
+            star_from: call.star_from.map(|s| s - after),
+            is_awaited: false,
+            recv_is_self,
+            constructs: None,
+            span: call.span,
+        };
+        if let Some((site, _)) = self.call(bb, &callee, &worker) {
+            self.sites[site].on_worker = true;
+        }
+    }
+
     /// A call site in block `bb` with the caller's guards there.
     fn site(&self, bb: BlockId, target: CallTarget, is_awaited: bool, span: Span) -> CallSite {
         let cx = self.guard_inputs();
@@ -1930,6 +2013,7 @@ impl<'a> Extractor<'a> {
             guards: self.guards.facts_at(&cx, bb),
             once_per: self.guards.once_per_at(&cx, bb),
             once_loops: self.guards.once_loops_at(&cx, bb, self.loops_around(bb)),
+            on_worker: false,
         }
     }
 
@@ -2142,6 +2226,7 @@ fn role_site(
         guards: site.guards.clone(),
         once_per: site.once_per,
         once_loops: 0,
+        on_worker: site.on_worker,
     }
 }
 

@@ -1312,6 +1312,46 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
+    /// The call an offloading API makes on a worker thread (`asyncio.to_thread(clear, xs)` calls
+    /// `clear(xs)`; keyword arguments are left unbound), when its callable is a project one.
+    fn worker_call_of<'i>(&self, kind: &'i InstKind) -> Option<CallParts<'i>>
+    where
+        'a: 'i,
+    {
+        let (InstKind::Call {
+            args, star_from, ..
+        }
+        | InstKind::MethodCall {
+            args, star_from, ..
+        }) = kind
+        else {
+            return None;
+        };
+        let Callee::External(symbol) = self.call_of(kind)?.callee else {
+            return None;
+        };
+        let (callable, first) =
+            heki_effect::offloaded_callable(self.cx.kb, &symbol, args, *star_from)?;
+        let (recv, callee) = match self.f.def_inst(callable).map(|(_, i)| &i.kind) {
+            Some(InstKind::AttrLoad { obj, attr, .. })
+                if self
+                    .tcx
+                    .resolve_attr_load(self.types.get(obj), attr)
+                    .is_none() =>
+            {
+                let callee = self.tcx.resolve_method(self.types.get(obj), attr);
+                (Some((*obj, attr.as_str())), callee)
+            }
+            _ => (None, self.tcx.resolve_call(self.types.get(&callable))),
+        };
+        matches!(callee, Callee::Project(..)).then_some(CallParts {
+            recv,
+            args: &args[first..],
+            kwargs: &[],
+            callee,
+        })
+    }
+
     /// The read-only origin of a call's (or a property read's) result: a declared producer, an
     /// `@lru_cache` function, or a project function that returns one's value (its summary's
     /// `returns_protected`), reached through the call at `span`.
@@ -1515,13 +1555,17 @@ impl<'a> Mut202Fn<'a> {
         if direct.is_some() {
             return (direct.cloned(), Vec::new());
         }
-        // Passing a read-only value to a project function that mutates that parameter.
+        // Passing a read-only value to a project function that mutates that parameter, also
+        // through an offloading API that calls it on a worker thread.
         let Some(CallParts {
             recv,
             args,
             kwargs,
             callee: Callee::Project(keys, binds_recv),
-        }) = self.call_of(&inst.kind)
+        }) = self
+            .call_of(&inst.kind)
+            .filter(|c| matches!(c.callee, Callee::Project(..)))
+            .or_else(|| self.worker_call_of(&inst.kind))
         else {
             return (None, Vec::new());
         };

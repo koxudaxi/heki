@@ -1596,7 +1596,9 @@ It does not report:
 
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
   `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
-  `asyncer.asyncify`, and project wrappers that forward their callable to them);
+  `asyncer.asyncify`, and project wrappers that forward their callable to them; what the
+  offloaded function does besides blocking still counts where it is called, such as its
+  queries in a loop for `EFF103`);
 - functions decorated to run on a thread: `@sync_to_async` (also as a factory,
   `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
   and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
@@ -1938,7 +1940,8 @@ chain is a shortest one. The search does not enter:
   generators that are not iterated (calling a generator function only creates the generator;
   its body is searched where it is iterated, as for `EFF101`, and a generator a function
   returns where the object it returns is iterated);
-- functions an offloading decorator runs on another thread (`@sync_to_async`, ...).
+- functions an offloading decorator or API runs on another thread (`@sync_to_async`,
+  `asyncio.to_thread(f)`, ...).
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope
@@ -2525,7 +2528,8 @@ and iterating a `Query` (`for row in session.query(User):` in an outer loop, a c
 `list(query)`),
 the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
 variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
-that reach them, including the getter of a property read in the loop and a generator iterated in
+that reach them, also when an offloading API runs them on a worker thread per item (`await
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
@@ -3131,7 +3135,8 @@ Checks mutations of objects returned by a shared producer:
   and recursion.
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
-that mutate their argument are followed, also on the call result itself
+that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`) are
+followed, also on the call result itself
 (`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
 reference), and the deep copy sanitizers of the ecosystem knowledge base clear

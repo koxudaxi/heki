@@ -46,7 +46,9 @@ It does not report:
 
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
   `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
-  `asyncer.asyncify`, and project wrappers that forward their callable to them);
+  `asyncer.asyncify`, and project wrappers that forward their callable to them; what the
+  offloaded function does besides blocking still counts where it is called, such as its
+  queries in a loop for `EFF103`);
 - functions decorated to run on a thread: `@sync_to_async` (also as a factory,
   `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
   and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so

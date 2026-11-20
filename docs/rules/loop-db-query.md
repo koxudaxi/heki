@@ -14,7 +14,8 @@ and iterating a `Query` (`for row in session.query(User):` in an outer loop, a c
 `list(query)`),
 the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
 variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
-that reach them, including the getter of a property read in the loop and a generator iterated in
+that reach them, also when an offloading API runs them on a worker thread per item (`await
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
 the loop (its body runs where it is iterated, as for `EFF101`).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),

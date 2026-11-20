@@ -17,7 +17,8 @@ Checks mutations of objects returned by a shared producer:
   and recursion.
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
-that mutate their argument are followed, also on the call result itself
+that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`) are
+followed, also on the call result itself
 (`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
 reference), and the deep copy sanitizers of the ecosystem knowledge base clear

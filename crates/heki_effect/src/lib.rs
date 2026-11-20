@@ -43,7 +43,7 @@ pub use resolver::{
     ReadOnlyKind, TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path,
     resolve_relative_module, self_aliases,
 };
-pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
+pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
 
 use heki_ast::Span;
 use heki_ir::ModuleIr;
@@ -625,6 +625,10 @@ pub struct CallSite {
     /// a lazy initialization of the caller around the call is tested, on an object the loop does
     /// not construct: across them, its effects run at most once (`EFF102` / `EFF103`).
     pub once_loops: u64,
+    /// The callees run on a worker thread: an offloading API's callable (`asyncio.to_thread(f,
+    /// x)`, a function decorated with `@sync_to_async`). Everything they do happens, but their
+    /// blocking effects never block the caller's thread.
+    pub on_worker: bool,
 }
 
 impl CallSite {
@@ -837,6 +841,9 @@ impl ProjectIndex {
                         .copied()
                         .collect();
                     for e in effects {
+                        if site.on_worker && e.blocks() {
+                            continue;
+                        }
                         // A guard the call decides against: the effect does not run here.
                         let Some(through) =
                             guards::through_call(site, bc, facts.exec_guards.get(&e))

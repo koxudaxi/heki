@@ -378,7 +378,8 @@ impl Boundary<'_> {
     /// Which facts of a project callee count at `site`, run where the site's caller runs
     /// `into` ([`heki_effect::ProjectIndex::delivery`]): `allowed-callees` names neither the
     /// callee whose body runs nor the function iterating its result (`SiteRole::Through`). A
-    /// function returning a generator is not checked itself: its own body does not run there.
+    /// function returning a generator is not checked itself: its own body does not run there,
+    /// nor does a callee run on a worker thread (`CallSite::on_worker`).
     fn counts<'s>(
         &self,
         cx: &CheckContext<'_>,
@@ -386,6 +387,9 @@ impl Boundary<'_> {
         callee: &FuncKey,
         into: Facts,
     ) -> Option<heki_effect::Delivery<'s>> {
+        if site.on_worker {
+            return None;
+        }
         let s = cx.index.summary(callee)?;
         let d = cx.index.delivery(site, s).filter(|d| d.into == into)?;
         let runs_body = d.from == s.body_facts();

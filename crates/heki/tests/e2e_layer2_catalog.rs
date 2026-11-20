@@ -1814,3 +1814,86 @@ fn declarations_of_project_functions_apply_to_their_callers() {
         ]
     );
 }
+
+const WORKER_CALLBACKS: &str = r#"import asyncio
+import functools
+
+from asgiref.sync import sync_to_async
+from sqlalchemy.orm import Session
+
+
+@functools.cache
+def cached():
+    return [1, 2]
+
+
+def clear(xs):
+    xs.clear()
+
+
+def load_one(session: Session, i):
+    session.execute("SELECT 1")
+
+
+@sync_to_async
+def load_one_offloaded(session: Session, i):
+    session.execute("SELECT 1")
+
+
+async def tp_worker_mutates_a_shared_list():
+    await asyncio.to_thread(clear, cached())
+
+
+async def tp_queries_per_item_on_a_worker(session: Session, ids):
+    loop = asyncio.get_running_loop()
+    for i in ids:
+        await load_one_offloaded(session, i)
+        await asyncio.to_thread(load_one, session, i)
+        await loop.run_in_executor(None, load_one, session, i)
+
+
+async def tn_worker_does_not_block_the_loop(session: Session):
+    await load_one_offloaded(session, 1)
+    await asyncio.to_thread(load_one, session, 1)
+"#;
+
+/// A callable an offloading API runs on a worker thread does everything it does there: its
+/// writes to shared objects and its queries per item count, its blocking calls do not block the
+/// event loop.
+#[test]
+fn offloaded_callables_run_on_a_worker() {
+    assert_eq!(
+        check(
+            "catalog_worker_callbacks",
+            "app/workers.py",
+            WORKER_CALLBACKS,
+            "EFF101,EFF103,MUT202"
+        ),
+        vec![
+            d(
+                27,
+                "MUT202",
+                "tp_worker_mutates_a_shared_list",
+                "app.workers.cached"
+            ),
+            d(
+                33,
+                "EFF103",
+                "tp_queries_per_item_on_a_worker",
+                "sqlalchemy.orm.Session.execute"
+            ),
+            d(
+                34,
+                "EFF103",
+                "tp_queries_per_item_on_a_worker",
+                "sqlalchemy.orm.Session.execute"
+            ),
+            d(
+                35,
+                "EFF103",
+                "tp_queries_per_item_on_a_worker",
+                "sqlalchemy.orm.Session.execute"
+            ),
+        ]
+    );
+}

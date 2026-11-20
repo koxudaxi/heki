@@ -358,6 +358,10 @@ fn transfer(
         .iter()
         .chain(&facts.transitive_exec_effects)
     {
+        // Work run on a worker thread does not block the caller's thread.
+        if site.on_worker && e.blocks() {
+            continue;
+        }
         let Some(mut through) = guards::through_call(site, bc, facts.exec_guards.get(e)) else {
             continue;
         };
