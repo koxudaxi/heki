@@ -68,6 +68,18 @@ deep = true
 name = "index"
 targets = ["Node.kids"]
 invalidators = ["Index.refresh"]
+
+[[tool.heki.effect-boundaries]]
+name = "shelf-view"
+scopes = ["pkg.shelf_view"]
+forbid = ["writes-targets"]
+write-targets = ["Shelf.items"]
+allowed-callees = ["pkg.shelf_ops.empty"]
+
+[[tool.heki.write-owners]]
+name = "shelf"
+targets = ["Shelf.items"]
+allowed-writers = ["pkg.shelf_ops.empty"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -223,6 +235,12 @@ const PLANTER: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import 
 const KID_GEN: &str = "from pkg.nodes import Node\n\n\ndef _grow_kids(node: Node, kid):\n    node.kids.append(kid)\n    return [kid]\n";
 const KID_GEN_GENERATOR: &str = "from pkg.nodes import Node\n\n\ndef _grow_kids(node: Node, kid):\n    node.kids.append(kid)\n    yield kid\n";
 const KID_USER: &str = "from pkg.kid_gen import _grow_kids\nfrom pkg.nodes import Index, Node\n\n\ndef plant_all(index: Index, node: Node, kid):\n    pending = _grow_kids(node, kid)\n    index.refresh()\n    for _ in pending:\n        pass\n";
+// Helpers handed a typed field (`EFF201` / `MUT201` `indirect_helper` writes): `refill` only
+// leaves the change to `empty`, which the boundary and the owner allow, then also changes the
+// list itself. Its summary already says that it changes its parameter, so it stays the same.
+const SHELF: &str = "class Shelf:\n    def __init__(self):\n        self.items = []\n";
+const SHELF_OPS: &str = "def empty(xs):\n    xs.clear()\n\n\ndef refill(xs):\n    empty(xs)\n";
+const SHELF_VIEW: &str = "from pkg.shelf import Shelf\nfrom pkg.shelf_ops import refill\n\n\ndef show(s: Shelf):\n    refill(s.items)\n";
 const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n";
 
 // Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
@@ -349,6 +367,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/planter.py", PLANTER),
         ("pkg/kid_gen.py", KID_GEN),
         ("pkg/kid_user.py", KID_USER),
+        ("pkg/shelf.py", SHELF),
+        ("pkg/shelf_ops.py", SHELF_OPS),
+        ("pkg/shelf_view.py", SHELF_VIEW),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -866,6 +887,31 @@ fn steps_mut202_mut109() -> Vec<Step> {
     ]
 }
 
+/// A helper handed a typed field starts changing it itself, besides through the allowed
+/// callee, while its final summary stays the same: the writes the boundary and the owner
+/// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`).
+fn steps_indirect_helpers() -> Vec<Step> {
+    let changing = SHELF_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
+    vec![
+        Step::new(
+            "a helper handed a field also changes it outside the allowed callee",
+            vec![Action::Save("pkg/shelf_ops.py", changing)],
+        )
+        .present(&[
+            ("pkg/shelf_view.py", "EFF201"),
+            ("pkg/shelf_view.py", "MUT201"),
+        ]),
+        Step::new(
+            "the helper leaves the change to the allowed callee again",
+            vec![save("pkg/shelf_ops.py", SHELF_OPS)],
+        )
+        .absent(&[
+            ("pkg/shelf_view.py", "EFF201"),
+            ("pkg/shelf_view.py", "MUT201"),
+        ]),
+    ]
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -999,6 +1045,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_body_runs());
     steps.extend(steps_small_displays());
     steps.extend(steps_mut202_mut109());
+    steps.extend(steps_indirect_helpers());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(

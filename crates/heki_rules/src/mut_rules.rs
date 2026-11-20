@@ -8,9 +8,9 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, Facts,
-    FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared, TypeCtx, Val, WriteKind,
-    self_aliases,
+    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, Delivery,
+    EffectSummary, Facts, FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep, Shared,
+    TypeCtx, TypedFieldWriteSite, Val, WriteKind, self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -842,6 +842,151 @@ fn holds_write(
     })
 }
 
+/// Whether the helper `bc` calls changes the typed field `w` (an `IndirectHelper` write) that
+/// its caller hands it, as the field's value or as the instance holding it, itself or through
+/// the callees it hands the argument to. `delivers` says what of a callee runs at a call
+/// (`None`: nothing that counts, such as a callee the contract allows). The helper's summary
+/// also holds what its callees change, so a change made only inside allowed callees is no write
+/// of the helper's caller.
+pub(crate) fn helper_changes_field<'s>(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'s>,
+    bc: &BoundCallee,
+    w: &TypedFieldWriteSite,
+    delivers: impl Fn(&'s CallSite, &FuncKey) -> Option<Delivery<'s>>,
+) -> bool {
+    bc.params.iter().enumerate().any(|(k, o)| {
+        let want = if o
+            .typed_field
+            .as_ref()
+            .is_some_and(|(class, attr)| *class == w.class_qualname && *attr == w.attr)
+        {
+            ParamChange::Any
+        } else if o.typed_instance.as_ref() == Some(&w.class_qualname) {
+            ParamChange::Attr(&w.attr)
+        } else {
+            return false;
+        };
+        changes_param(cx, sites, &bc.callee, k, want, &delivers)
+    })
+}
+
+/// Whether the helper call behind the `IndirectHelper` write `w` (its last hop) changes the
+/// field outside the functions `allowed` names. A call that is no longer found counts.
+fn indirect_write_outside(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    w: &TypedFieldWriteSite,
+    allowed: impl Fn(&FuncKey) -> bool,
+) -> bool {
+    let Some(hop) = w.via_chain.last() else {
+        return true;
+    };
+    let helpers: Vec<&BoundCallee> = sites
+        .get(&hop.caller)
+        .into_iter()
+        .flatten()
+        .filter(|(_, s)| s.span == hop.span)
+        .flat_map(|(_, s)| s.project_callees())
+        .filter(|bc| bc.callee.fqn() == hop.callee)
+        .collect();
+    helpers.is_empty()
+        || helpers.into_iter().any(|bc| {
+            helper_changes_field(cx, sites, bc, w, |site, callee| {
+                if allowed(callee) {
+                    return None;
+                }
+                let summary = cx.index.summary(callee)?;
+                cx.index
+                    .delivery(site, summary)
+                    .filter(|d| d.into == Facts::Body)
+            })
+        })
+}
+
+/// What change of a parameter counts: any in-place change of it or below it, or a change of
+/// its attribute (rebinding it, or changing its value in place).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ParamChange<'a> {
+    Any,
+    Attr(&'a str),
+}
+
+/// Whether `func` changes its parameter `k` as `want` says, in its own body or through the
+/// callees it hands the parameter to. A callee whose facts arrive other than as its body (what
+/// iterating a plain function's result runs) counts as changing it: that is not followed.
+fn changes_param<'s>(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'s>,
+    func: &FuncKey,
+    k: usize,
+    want: ParamChange<'_>,
+    delivers: &impl Fn(&'s CallSite, &FuncKey) -> Option<Delivery<'s>>,
+) -> bool {
+    let mut stack = vec![(func.clone(), k, want)];
+    let mut seen: FxHashSet<(FuncKey, usize, ParamChange<'_>)> = FxHashSet::default();
+    while let Some((func, k, want)) = stack.pop() {
+        if !seen.insert((func.clone(), k, want)) {
+            continue;
+        }
+        let local = cx
+            .index
+            .file_of(&func)
+            .and_then(|p| cx.index.files[p].local_functions.get(&func));
+        let changed_here = match want {
+            ParamChange::Any => {
+                k < 64 && local.is_some_and(|s| s.mutates_params & (1u64 << k) != 0)
+            }
+            ParamChange::Attr(attr) => u8::try_from(k)
+                .ok()
+                .and_then(|k| local?.mutated_param_paths.get(&k))
+                .is_some_and(|paths| paths.contains(attr)),
+        };
+        if changed_here {
+            return true;
+        }
+        for (_, site) in sites.get(&func).into_iter().flatten() {
+            for callee in site.project_callees() {
+                let handed: Vec<(usize, ParamChange<'_>)> = callee
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, o)| match (&o.param, want) {
+                        (Some((p, None)), _) if usize::from(*p) == k => Some((j, want)),
+                        (Some((p, Some(attr))), ParamChange::Attr(a))
+                            if usize::from(*p) == k && a != attr =>
+                        {
+                            None
+                        }
+                        (Some((p, Some(_))), _) if usize::from(*p) == k => {
+                            Some((j, ParamChange::Any))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if handed.is_empty() {
+                    continue;
+                }
+                let (Some(summary), Some(d)) = (
+                    cx.index.summary(&callee.callee),
+                    delivers(site, &callee.callee),
+                ) else {
+                    continue;
+                };
+                if d.from != summary.body_facts() {
+                    return true;
+                }
+                stack.extend(
+                    handed
+                        .into_iter()
+                        .map(|(j, next)| (callee.callee.clone(), j, next)),
+                );
+            }
+        }
+    }
+    false
+}
+
 /// `base`, then `: note` when the contract sets a `message`.
 pub(crate) fn with_note(base: String, note: Option<&str>) -> String {
     match note {
@@ -1013,6 +1158,15 @@ pub(crate) fn mut201(
                             is_private(&k.qualname) || !holds_write(cx, k, site, i + 1 == last)
                         }) || delegates(cx, sites, key)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
+                        {
+                            continue;
+                        }
+                        // A helper handed the field that changes it only inside allowed
+                        // writers or exempt methods.
+                        if site.kind == WriteKind::IndirectHelper
+                            && !indirect_write_outside(cx, sites, site, |callee| {
+                                rule.allowance.allows(callee)
+                            })
                         {
                             continue;
                         }

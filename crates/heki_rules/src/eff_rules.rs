@@ -2,8 +2,8 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargetPattern, ContractTarget, SiteId, initializes_itself, parse_call_targets,
-    parse_targets, patterns, project_classes, site_callee, with_note,
+    CallTargetPattern, ContractTarget, SiteId, helper_changes_field, initializes_itself,
+    parse_call_targets, parse_targets, patterns, project_classes, site_callee, with_note,
 };
 use crate::opt_rules::Sizes;
 use crate::{
@@ -633,7 +633,7 @@ impl<'a> Reach<'a> {
             };
             let own: &[(&'a Path, &'a CallSite)] = sites.get(&func).map_or(&[], Vec::as_slice);
             if b.checks_writes() && runs_body {
-                reach.collect_writes(cx, b, i, &func, own);
+                reach.collect_writes(cx, sites, b, i, &func, own);
             }
             if b.reads_targets && runs_body {
                 reach.collect_reads(cx, b, i, &func);
@@ -715,6 +715,7 @@ impl<'a> Reach<'a> {
     fn collect_writes(
         &mut self,
         cx: &CheckContext<'_>,
+        sites: &SitesByCaller<'_>,
         b: &Boundary<'_>,
         i: usize,
         func: &FuncKey,
@@ -729,13 +730,18 @@ impl<'a> Reach<'a> {
             let extra = match (w.via_chain.as_slice(), w.kind) {
                 ([], _) => None,
                 // A helper of the scopes counts too: it cannot see the type of the field it
-                // is handed, so the function handing it over reports the write.
+                // is handed, so the function handing it over reports the write. The helper's
+                // summary also holds what its callees change, so the write counts only when the
+                // helper changes the argument outside `allowed-callees`.
                 ([hop], WriteKind::IndirectHelper)
                     if own.iter().any(|(_, site)| {
                         site.span == hop.span
                             && site.project_callees().iter().any(|bc| {
                                 bc.callee.fqn() == hop.callee
                                     && b.counts(cx, site, &bc.callee, Facts::Body).is_some()
+                                    && helper_changes_field(cx, sites, bc, w, |site, callee| {
+                                        b.counts(cx, site, callee, Facts::Body)
+                                    })
                             })
                     }) =>
                 {

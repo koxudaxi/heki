@@ -113,3 +113,87 @@ fn two_invalidation_contracts_on_one_write_are_two_reports() {
         vec![(13, "one:Model.value".to_owned(), 1)]
     );
 }
+
+/// Helpers handed `Model.items`, or the model holding it, that change it themselves, through a
+/// further helper, or only through `clear_allowed`.
+const HANDED_FIELD: &str = r#"class Model:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+
+
+def clear_allowed(xs):
+    xs.clear()
+
+
+def only_allowed(xs):
+    clear_allowed(xs)
+
+
+def also_own(xs):
+    xs.append(1)
+    clear_allowed(xs)
+
+
+def through_other(xs):
+    other(xs)
+
+
+def other(xs):
+    xs.pop()
+
+
+def holder_only_allowed(m):
+    clear_allowed(m.items)
+
+
+def holder_own(m):
+    m.items.clear()
+
+
+def render(m: Model) -> None:
+    only_allowed(m.items)
+
+
+def render_own(m: Model) -> None:
+    also_own(m.items)
+
+
+def render_other(m: Model) -> None:
+    through_other(m.items)
+
+
+def render_holder(m: Model) -> None:
+    holder_only_allowed(m)
+
+
+def render_holder_own(m: Model) -> None:
+    holder_own(m)
+"#;
+
+#[test]
+fn a_helper_handed_a_field_writes_it_only_where_no_allowed_callee_does() {
+    let p = project(
+        "boundary_allowed_helper",
+        "[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"app.render*\"]\nforbid = [\"writes-targets\"]\nwrite-targets = [\"Model.items\"]\nallowed-callees = [\"app.clear_allowed\"]\n",
+    );
+    p.write("app.py", HANDED_FIELD);
+    let target = || "pure:Model.items".to_owned();
+    assert_eq!(
+        reports(&p, "EFF201"),
+        vec![(40, target(), 1), (44, target(), 1), (52, target(), 1)]
+    );
+}
+
+#[test]
+fn a_helper_handed_a_field_writes_it_only_where_no_allowed_writer_does() {
+    let p = project(
+        "owner_allowed_helper",
+        "[[tool.heki.write-owners]]\nname = \"owner\"\ntargets = [\"Model.items\"]\nallowed-writers = [\"app.clear_allowed\"]\n",
+    );
+    p.write("app.py", HANDED_FIELD);
+    let target = || "Model.items".to_owned();
+    assert_eq!(
+        reports(&p, "MUT201"),
+        vec![(40, target(), 1), (44, target(), 1), (52, target(), 1)]
+    );
+}
