@@ -8,7 +8,7 @@ use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
     baseline_key, render, unified_diff,
 };
-use heki_effect::{analyze_project, analyze_project_with};
+use heki_effect::{ProjectIndex, analyze_project, analyze_project_with};
 use heki_profile::ProfileData;
 use heki_rules::project::{ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
@@ -69,9 +69,10 @@ pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&ProfileData>) 
     }
 }
 
-/// One analysis pass: the project and its diagnostics after inline suppressions.
+/// One analysis pass: the project, its index, and its diagnostics after inline suppressions.
 struct Analyzed {
     project: Project,
+    index: ProjectIndex,
     diags: Vec<Diagnostic>,
 }
 
@@ -105,7 +106,11 @@ fn analyze(
     drop(inputs);
     retain_unsuppressed(&mut diags, &project.files);
     annotate_hot(&mut diags, hot);
-    Ok(Analyzed { project, diags })
+    Ok(Analyzed {
+        project,
+        index,
+        diags,
+    })
 }
 
 /// Whether `--fix` / `--diff` applies this diagnostic's fix: `safe` + `unconditional` rules
@@ -242,8 +247,17 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         }
         eprintln!("Fixed {fixes} issue(s) in {} file(s).", files.len());
     }
-    let Analyzed { project, diags } = analyze(args, hot.as_ref(), None)?;
-    report(args, &project, diags)
+    let Analyzed {
+        project,
+        index,
+        diags,
+    } = analyze(args, hot.as_ref(), None)?;
+    let code = report(args, &project, diags);
+    // The process ends here: freeing the index and the parsed files one allocation at a time
+    // would only cost time (a tenth of the run on large projects).
+    std::mem::forget(index);
+    std::mem::forget(project);
+    code
 }
 
 /// Baseline handling, rendering, summary, and exit code of one analyzed run.
