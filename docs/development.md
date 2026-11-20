@@ -64,7 +64,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_kb` | the knowledge bases: Layer 1 (builtins semantics for the soundness lane) and Layer 2 (ecosystem effects) |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
-| `heki_rules` | the 17 rules, rule selection, project discovery |
+| `heki_rules` | the 25 rules, rule selection, project discovery |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
 | `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |

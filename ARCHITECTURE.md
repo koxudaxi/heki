@@ -34,9 +34,9 @@
 
 1. **Advisory / Effect レーン（`heki_effect`）** — 標準 `typing`・`self` 属性・軽量クラス階層を使うコールグラフ解析
    - **族 1：Mutation & State Effect（`MUT`）**：
-     - 自動推論系（`MUT1xx`）：`@cached_property` 等のキャッシュ依存属性の無効化なし書き換え、関数間副作用スナップショット CI 検知（＋ 候補：キャッシュ／定数汚染、反復中変更、`Iterator` 二重消費、`__hash__` 依存変更）。
-     - 宣言的境界系（`MUT2xx`）：`pyproject.toml` で宣言した **Write Ownership（書き込み境界）** と **Read-Only Return（共有オブジェクト不変性）** の関数跨ぎ・別名経由違反検知。
-   - **族 2：Execution Effect（`EFF` / `DATA`）**：`async` イベントループ阻害、ループ内クライアント・接続プール再生成、明示的ループ内 DB クエリ、ループキャリー `pd.concat`/`np.vstack` 二乗累積（＋ 候補：ロック保持中 `await`、非エスケープ `create_task`、リソースリーク）。
+     - 自動推論系（`MUT1xx`）：`@cached_property` 等のキャッシュ依存属性の無効化なし書き換え、関数間副作用スナップショット CI 検知、`__hash__` 依存属性の変更（`MUT107`）、単一パス `Iterator` 二重消費（`MUT106`、オプトイン）。
+     - 宣言的境界系（`MUT2xx`）：`pyproject.toml` で宣言した **Write Ownership（書き込み境界）**・**Read Ownership（読み取り境界）**・**Read-Only Return（共有オブジェクト不変性）** の関数跨ぎ・別名経由違反検知。
+   - **族 2：Execution Effect（`EFF` / `DATA`）**：`async` イベントループ阻害、ループ内クライアント・接続プール再生成、明示的ループ内 DB クエリ、ループキャリー `pd.concat`/`np.vstack` 二乗累積、同期ロック／DB トランザクション保持中の `await`・ネットワーク I/O（`EFF106`）と非保持 `create_task`（`EFF107`）（以上オプトイン）、`pyproject.toml` で宣言する **Effect 境界**（`EFF201`）。
 2. **Soundness / Alias レーン（`heki_soundness`）** — 型注釈を信用しない保守的抽象解釈（誤変換ゼロ）
    - **族 3：Complexity Rewrite（`OPT`）**：一意性（フレーム性）・派生参照・厳密型・オブジェクト内容不変性に基づく意味保存な計算量改善（$O(n^2) \to O(n)$）。
 
@@ -142,7 +142,8 @@ EffectSummary(f) = {
     reads_self_attrs:         Set<AttrKeyPath>,    // self.<attr>（dict 定数キー含む）の読み取り
     mutates_self_attrs:       Set<AttrKeyPath>,    // self.<attr> の再代入またはインプレース変更
     invalidates_cached:       Set<AttrName>,       // del self.<prop> / self.__dict__.pop("<prop>", ...) 等
-    typed_field_writes:       Set<(ClassId, AttrName, WriteKind)>, // 任意の型・属性への直接・間接書込（MUT201）
+    typed_field_writes:       Set<(ClassId, AttrName, WriteKind)>, // 任意の型・属性への直接・間接書込（MUT201 / EFF201）
+    typed_field_read_sites:   Set<(ClassId, AttrName, ReadKind)>,  // 任意の型・属性の直接読み取り（MUT203。ローカル事実のみで伝播しない）
     mutates_return_of:        Set<CallSite>,       // 共有ファクトリ戻り値の別名経由破壊（MUT202）
 
     // オフロード・非同期コンテキスト伝播
@@ -220,17 +221,20 @@ Stage 0-A 事前実測（339 リポジトリ・1,810 万行・171 サンプル�
 |---|---|---|---|
 | **MUT101** | 既定有効（厳格版） | **`@cached_property` 依存属性の無効化なし書き換え**：`@cached_property` が読む `self.<attr>` を、初期化フック以外のメソッド（間接呼び出し含む）がキャッシュクリアなしで再代入またはインプレース変更する | 2 段初期化フック（`model_post_init`/`_init_*`/`_configure_*`/`_open` 等）・メモ dict（`_cache[k]=v`）・互いに素な定数 dict キー・ネストクラス `__init__` を除外（Stage 0-A 実測知見） |
 | **MUT103** | スナップショット運用時 | **関数間副作用・可変性の CI リグレッション（`heki snapshot summary`）**：スナップショット固定済み関数に新たな引数変更・エスケープ・`Blocking` Effect が混入した PR 差分を検出 | Zero-Config のスナップショット差分モードで動作 |
-| **MUT201** | 設定時有効（契約型） | **宣言的 Write Ownership（書き込み境界）**：`[[tool.heki.write-owners]]` で指定した型・属性（ローカル別名・コンテナ操作 `.append()`/`[k]=`・`__dict__`/`setattr`・関数跨ぎ helper 経由含む）への書き込みを、許可されたモジュール／クラス（Store / Service 等）内に限定する | `pyproject.toml` 宣言のみ（デコレータ不要・実行時コスト 0）。行番号非依存 Ratchet ベースライン併用で既存コードから段階移行可能（dcg `check_generation_store_usage.py` 1,665 行＋テスト 1,323 行＋ランタイム witness 13 件を一般化） |
+| **MUT106** | オプトイン | **単一パス `Iterator` / `Generator` の二重消費**：SSA で再束縛されていない単一パスイテレータ（ジェネレータ式・`iter`/`zip`/`map` 等・プロジェクト内ジェネレータ関数・`Iterator`/`Generator` 注釈）を 2 回目に消費し、無言で空になる | 1 回目の消費から 2 回目へ CFG 上で到達可能な場合のみ（排他分岐は非報告）。`break` で抜ける部分消費・`next()` 前進は 1 回目に数えない。ループ外で作ったイテレータのループ内消費も検出。関数跨ぎは引数を全量消費する関数の要約で追跡 |
+| **MUT107** | 既定有効 | **`__hash__` 依存属性の変更**：`__hash__` が読む `self.<attr>` を、初期化フック以外のメソッド（サブクラス含む）が変更する（`set`/`dict` に格納済みのインスタンスが見つからなくなる） | `MUT101` と同じ 2 段初期化フック・メモ dict・互いに素な定数 dict キーに加え、`None` ガード直下の lazy-init と `__hash__` 自身のキャッシュ属性（`self._hash` 等）を除外（Stage 0-A Wave 2：成熟 OSS 21.2%） |
+| **MUT201** | 設定時有効（契約型） | **宣言的 Write Ownership（書き込み境界）**：`[[tool.heki.write-owners]]` で指定した型・属性（ローカル別名・コンテナ操作 `.append()`/`[k]=`・`__dict__`/`setattr`・関数跨ぎ helper 経由含む）への書き込みを、許可されたモジュール／クラス（Store / Service 等）内に限定する | `pyproject.toml` 宣言のみ（デコレータ不要・実行時コスト 0）。構築・複製メソッドの `exempt-methods`、対象クラス系列の初期化メソッドによる自身（`self`）の初期化の許可、診断への `message` 付加。行番号非依存 Ratchet ベースライン併用で既存コードから段階移行可能（dcg `check_generation_store_usage.py` 1,665 行＋テスト 1,323 行＋ランタイム witness 13 件を一般化） |
 | **MUT202** | 設定時有効（契約型） | **宣言的 Read-Only Return（共有オブジェクト不変性）**：`[[tool.heki.readonly-returns]]` で指定した関数・キャッシュが返す共有オブジェクト（および配下コンテナ）を呼び出し側・下流の関数が mutate することを禁止する | 関数跨ぎ `mutates_params` と alias 追跡で静的検証（dcg `tests/checks/schema_graph.py` のランタイム指紋監視を静的化） |
+| **MUT203** | 設定時有効（契約型） | **宣言的 Read Ownership（読み取り境界）**：`[[tool.heki.read-owners]]` で指定した型・属性の読み取り（ローカル別名・`getattr`・`__dict__` 含む）を、許可されたリーダー外で禁止する（`MUT201` の読み取り側） | `MUT201` と同じパターン・サブクラス展開・初期化・`exempt-methods`・private helper の呼び出し元委譲・`message`。読み取りサイトはローカル事実のみ保持し、委譲は規則側で逆コールグラフを辿る（伝播による要約肥大を回避） |
 
 *(Stage 0-A で実測した **`MUT102`（`MUT102a` 深いミューテーション / `MUT102b` Rep Exposure）** は、ヒット密度が低く大半が意図的イディオムであったため **正式不採用** とする：[ADR-014](docs/DESIGN_HISTORY_AND_ADR.md#adr-014)。)*
 
-#### 次期 v1.x 候補（Stage 0-A Wave 2：339 リポジトリ / 1,902 万行実測＋目視監査済み）
-- **採用有力（v1.x 第一弾）**：
+#### v1.x 第一弾（Stage 0-A Wave 2：339 リポジトリ / 1,902 万行実測＋目視監査に基づき実装済み）
+- **既定有効**：
   - **`MUT107`**：`__hash__` 依存属性の変更（成熟 OSS **21.2%**、目視精度 ~83%、`MUT101` と同等の lazy-init 除外で ~95% 見込み）。
   - **`OPT112`**：ループ内 `list.index` / `list.remove`（全リポジトリ **52.5%**・成熟 OSS **81.4%**、型付き / `ExactType` `list` 限定）。
   - **`OPT113`**：ネストループ等結合（`for a in A: for b in B: if a.k == b.k:`、成熟 OSS **10.2%**、目視精度 ~90%）。
-- **狭く厳格なら採用（v1.x オプトイン）**：
+- **オプトイン（狭く厳格）**：
   - **`EFF106`**：型確定した同期 `threading.Lock` / DB `.begin()` 保持中の `await` / HTTP（2.1%、発生時は致命的デッドロック）。
   - **`MUT106`**：SSA で再束縛されていない単一パス `Iterator`/`Generator` の二重消費。
   - **`EFF107`**：ローカル変数へ束縛後に非エスケープで GC 消失する `asyncio.create_task`（裸の呼び出しは Ruff `RUF006` と重複するため除外）。
@@ -244,16 +248,18 @@ Stage 0-A 事前実測（339 リポジトリ・1,810 万行・171 サンプル�
 |---|---|---|---|
 | **EFF101** | 既定有効 | Web/Async **37.6%**（間接 82%） | `async def` からの直接・間接ブロッキング到達（Net/DB/Subprocess/Sync/Sleep）。`OffloadsBlocking`（ラッパー伝播含む）、Sync-over-Async 緩和、`await` 済み呼び出し除外、`subprocess.Popen` 除外、境界報告＋原因別集約、`logging`/`print` 除外 |
 | **EFF105** | オプトイン | — | `async def` からのローカルファイル I/O 到達（`BlockingFS`、`--select EFF105`） |
+| **EFF106** | オプトイン | 2.1%（発生時は致命的） | 型確定した同期ロック（`threading.Lock`/`RLock`/`Semaphore`/`BoundedSemaphore`/`Condition`）または DB トランザクション（`.begin()`/`.begin_nested()`/`transaction.atomic()` 等）を `with` で保持したままの `await`・`BlockingNet`（関数跨ぎ含む）。非同期ロック・`async with` は対象外、オフロード・テスト緩和は `EFF101` と整合 |
+| **EFF107** | オプトイン | — | ローカル変数へ束縛したのに `await`・返却・保存・引数渡し・クロージャ捕捉のいずれもされない `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future`（GC による消失）。戻り値を捨てる裸の呼び出しは Ruff `RUF006` と重複するため対象外、`TaskGroup.create_task` も対象外 |
+| **EFF201** | 設定時有効（契約型） | — | **宣言的 Effect 境界**：`[[tool.heki.effect-boundaries]]` の `scopes` に一致する関数から、禁止 Effect（`blocking-*`・`sleep`・`blocking`・`mutates-params`・`writes-targets`）への直接・推移的到達を禁止。`allowed-callees` 経由の経路と他のスコープ関数の内部は辿らない（境界のみ報告）。最短コールチェーンを関連位置に付与 |
 | **EFF102** | 既定有効 | Web/Async **44.1%** / DB **48.5%**（間接 90〜93%） | ループ内での HTTP クライアント・セッション・接続プールの都度生成（関数跨ぎ含む）。`for.iter` 除外、`ConstSmall`/`RetryPattern`/`DaemonPolling` 緩和 |
 | **EFF103** | 既定有効 | DB **47.6%**（間接 74%） | ループ内での明示的 DB クエリ・外部 RPC（N+1、関数跨ぎ含む）。`for.iter`・DDL・マイグレーション・ORM 内部・バルク API 除外。**ORM 暗黙的遅延ロードは対象外（Known Limitation）** |
 | **DATA101** | 既定有効 | Data/ML **19.5%**（`LoopCarried` 適用後 ~90% 精度） | ループキャリーな `pandas.concat` / `numpy.vstack` / `numpy.append` 二乗累積。**SSA の `LoopCarried` 判定を必須**とし、単発結合・パディングを除外 |
 
 *(Stage 0-A で実測した **`DATA102`（`df.iterrows()`）** は単一式構文リンターと重複するため **正式不採用** とする。)*
 
-#### 次期コーパス実測候補（v1.x — 事前計測ゲート通過後に採否決定）
-- **`EFF106`**：同期ロック（`threading.Lock`）または DB トランザクション保持中の `await` / 外部 HTTP 呼び出し。
-- **`EFF107`**：戻り値を変数・コレクションへ保持しない `asyncio.create_task(...)`（GC によるタスク消失、変数束縛後の非エスケープ含む）。
-- **`EFF108`**：関数跨ぎ・例外経路でのファイル／接続／カーソル未クローズ。
+#### v1.x 候補の採否（Stage 0-A Wave 2）
+- **実装済み（オプトイン）**：`EFF106`（同期ロック／DB トランザクション保持中の `await` / 外部 HTTP 呼び出し）、`EFF107`（変数束縛後に保持されない `asyncio.create_task(...)`）。
+- **不採用**：`EFF108`（関数跨ぎ・例外経路でのファイル／接続／カーソル未クローズ：Ruff `SIM115` と重複＋高ノイズ）。
 
 ### 族 3：Complexity Rewrite（`OPT` — Alias 解析の副産物としての $O(n^2)$ 最適化）
 
@@ -266,10 +272,12 @@ Stage 0-A 事前実測（339 リポジトリ・1,810 万行・171 サンプル�
 | **OPT111** | ループ内 `if v not in seen: seen.append(v)` → 補助 `set` 併用 | `size-dependent` | 提案のみ | Safety: `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, ハッシュ整合組み込み型要素, 削除なし / Profit: `NotConstSmall` |
 | **OPT120** / **OPT121** | `q.pop(0)` / `q.insert(0, v)` / `del q[0]` / `q = q[1:]` → `collections.deque` | `size-dependent` | 提案のみ | Safety: `Unique(q)`, 非エスケープ, `deque` 等価操作のみ / Profit: `NotConstSmall`, **両端（`0`, `-1`）以外の任意添字 `q[i]` なし** |
 | **OPT130** | ループ内不変コンテナ再構築（`e in set(keys)` 等）→ ループ外巻き上げ | `size-dependent` | 提案のみ | Safety: 全引数 `ValueLoopInvariant`, 副作用なし, `ZeroTripExceptionSafe`, 変更なし / Profit: `NotConstSmall` |
+| **OPT112** | ループ内 `list.index` / `list.remove` / `list.count`（$O(n^2)$ 探索）→ ループ外の `dict` / `set` 索引 | `size-dependent` | なし（Advisory レーンの提案のみ） | 受け手が組み込み `list` と確定（リテラル・`list(...)`・PEP 484 注釈）、ループを跨いで生存する受け手、`Unbounded` ループ、定数小リスト除外（`NotConstSmall`）、直後に必ずループを抜ける 1 回限りの呼び出し除外 |
+| **OPT113** | ネストループ等結合（`for a in A: for b in B: if a.k == b.k:`、$O(n \cdot m)$）→ `B` の `dict` 索引化（$O(n + m)$） | `size-dependent` | なし（Advisory レーンの提案のみ） | 両ループ `Unbounded`、内側イテラブルが外側要素に依存しない、外側要素由来と内側要素由来の値の等値比較、内側ループ単位で 1 件に集約 |
+
+*(`OPT112` / `OPT113` は書き換えを伴わない Advisory レーン（`heki_rules`）の診断であり、`heki_soundness` には含めない（ADR-004）。)*
 
 #### 次期候補（v1.x）
-- **`OPT112`**：ループ内 `list.remove`/`index`/`count`（$O(n^2)$ 探索）。
-- **`OPT113`**：ネストループ等結合（`for a in A: for b in B: if a.id == b.id:` → dict index 提案）。
 - **`OPT131`**：ループ不変な重量計算呼び出し（`json.loads` / `sorted` / `re.compile` 以外の純粋重い変換）の巻き上げ。
 
 ---
@@ -374,11 +382,26 @@ MUT101 = "warning"
 name = "generation-store"
 targets = ["my_pkg.model.base.DataModel.fields"]
 allowed-writers = ["my_pkg.parser.generation.*"]
+exempt-methods = ["__deepcopy__", "copy_deep"]        # 構築・複製メソッド
+message = "use GenerationStore.set_fields() instead"  # 診断に付加
+
+[[tool.heki.read-owners]]                             # MUT203（MUT201 の読み取り側）
+name = "reference-children"
+targets = ["my_pkg.reference.Reference.children"]
+allowed-readers = ["*GenerationIndex*", "*GenerationStore*"]
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
 producers = ["my_pkg.parser._schema_graph.SchemaGraphBuilder.schema"]
 deep = true
+
+[[tool.heki.effect-boundaries]]                       # EFF201
+name = "pure-render"
+scopes = ["*.render", "*.render_module_code", "my_pkg.domain.*"]
+forbid = ["writes-targets", "blocking"]               # blocking-net/db/fs/subprocess/sync, sleep, mutates-params も可
+write-targets = ["DataModel.*", "DataType.*"]
+allowed-callees = ["my_pkg.logging.*"]
+message = "render entry points must not mutate model state"
 ```
 
 ### 9.3 インライン抑止（Ruff `RUF100` 非衝突）

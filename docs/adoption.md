@@ -52,8 +52,9 @@ custom tooling.
 ## Rolling out rules
 
 - Start with the default rules and a baseline, or `--select` one family at a time.
-- Declare ownership contracts (`write-owners`) for the shared state you care about; `MUT201`
-  reports nothing until a contract exists.
-- Keep the opt-in rules (`EFF105`, `MUT103`) for code where they matter: async services and
-  library APIs.
+- Declare ownership contracts (`write-owners`, `read-owners`) for the shared state you care
+  about and effect boundaries (`effect-boundaries`) for the code that must stay pure; `MUT201`,
+  `MUT203`, and `EFF201` report nothing until a contract exists.
+- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) for code where they
+  matter: async services, threaded code, and library APIs.
 - Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
