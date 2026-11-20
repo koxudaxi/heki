@@ -11,6 +11,11 @@ use heki_semantic::{ClassId, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 
+/// The attribute a positional class-pattern argument reads (`case Point(x)`), named by the
+/// class's `__match_args__`, which the IR does not resolve: its `AttrLoad` names the slot,
+/// `__match_args__[i]`.
+const MATCH_ARGS: &str = "__match_args__";
+
 /// Build SSA-CFG IR for every executable body in `parsed` (module top-level, class bodies,
 /// functions/methods, lambdas, generator expressions, and non-inlined comprehensions).
 pub fn build_module_ir(
@@ -1889,40 +1894,24 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         for (idx, case) in m.cases.iter().enumerate() {
             let is_last = idx + 1 == m.cases.len();
-            let case_bb = self.new_block(true);
             let next_bb = if is_last {
                 merge_bb
             } else {
-                self.new_block(true)
+                self.new_block(false)
             };
-            let pattern_span = Span::from(case.pattern.range());
-            let cond = self.emit_const(ConstLiteral::Bool(true), pattern_span);
-            self.terminate_at(
-                Terminator::Branch {
-                    cond,
-                    then_bb: case_bb,
-                    else_bb: next_bb,
-                },
-                pattern_span,
-            );
-            self.switch_to(case_bb);
-            self.lower_pattern(&case.pattern, subject);
+            let mut captures = Vec::new();
+            self.lower_pattern(&case.pattern, subject, next_bb, &mut captures);
+            for (name, value, span) in captures {
+                self.write_var(name, value, span);
+            }
             if let Some(guard) = &case.guard {
                 let g = self.lower_expr(guard);
-                let body_bb = self.new_block(true);
-                self.terminate_at(
-                    Terminator::Branch {
-                        cond: g,
-                        then_bb: body_bb,
-                        else_bb: next_bb,
-                    },
-                    Span::from(guard.range()),
-                );
-                self.switch_to(body_bb);
+                self.branch_on_test(g, next_bb, Span::from(guard.range()));
             }
             self.lower_suite(&case.body);
             self.terminate(Terminator::Jump(merge_bb));
             if !is_last {
+                self.seal_block(next_bb);
                 self.switch_to(next_bb);
             }
         }
@@ -1931,56 +1920,255 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.switch_to(merge_bb);
     }
 
-    fn lower_pattern(&mut self, pat: &'a Pattern, subject: VarId) {
+    /// Continue in a new block when `cond` holds; otherwise go to `fail`.
+    fn branch_on_test(&mut self, cond: VarId, fail: BlockId, span: Span) {
+        let ok_bb = self.new_block(true);
+        self.terminate_at(
+            Terminator::Branch {
+                cond,
+                then_bb: ok_bb,
+                else_bb: fail,
+            },
+            span,
+        );
+        self.switch_to(ok_bb);
+    }
+
+    /// A test of the subject's shape (its type, length, or keys) the IR does not model: an
+    /// opaque value, so both outcomes stay possible.
+    fn structural_test(&mut self, fail: BlockId, span: Span) {
+        let cond = self.emit_const(ConstLiteral::Other, span);
+        self.branch_on_test(cond, fail, span);
+    }
+
+    /// Lower the tests of `pat` against `subject` (PEP 634), going to `fail` when one fails,
+    /// and collect the values its capture patterns bind. The bindings are written only once
+    /// the whole pattern matched: a failed alternative binds nothing.
+    fn lower_pattern(
+        &mut self,
+        pat: &'a Pattern,
+        subject: VarId,
+        fail: BlockId,
+        captures: &mut Vec<(&'a str, VarId, Span)>,
+    ) {
+        let span = Span::from(pat.range());
         match pat {
             Pattern::MatchValue(mv) => {
-                let _ = self.lower_expr(&mv.value);
+                let value = self.lower_expr(&mv.value);
+                let cond = self.fresh_var(None);
+                self.emit(
+                    InstKind::Compare {
+                        dst: cond,
+                        op: CompareOpKind::Eq,
+                        lhs: subject,
+                        rhs: value,
+                    },
+                    span,
+                );
+                self.branch_on_test(cond, fail, span);
             }
-            Pattern::MatchSingleton(_) => {}
+            Pattern::MatchSingleton(ms) => {
+                let literal = match ms.value {
+                    ast::Singleton::None => ConstLiteral::None,
+                    ast::Singleton::True => ConstLiteral::Bool(true),
+                    ast::Singleton::False => ConstLiteral::Bool(false),
+                };
+                let value = self.emit_const(literal, span);
+                let cond = self.fresh_var(None);
+                self.emit(
+                    InstKind::Compare {
+                        dst: cond,
+                        op: CompareOpKind::Is,
+                        lhs: subject,
+                        rhs: value,
+                    },
+                    span,
+                );
+                self.branch_on_test(cond, fail, span);
+            }
             Pattern::MatchSequence(ms) => {
-                for p in &ms.patterns {
-                    self.lower_pattern(p, subject);
+                self.structural_test(fail, span);
+                let star = ms
+                    .patterns
+                    .iter()
+                    .position(|p| matches!(p, Pattern::MatchStar(_)));
+                let len = ms.patterns.len();
+                for (i, sub) in ms.patterns.iter().enumerate() {
+                    if let Pattern::MatchStar(st) = sub {
+                        // `*rest` is a new list of the items between the fixed positions.
+                        let rest = self.unpacked_list(subject, Span::from(st.range));
+                        if let Some(name) = &st.name {
+                            captures.push((name.as_str(), rest, Span::from(name.range)));
+                        }
+                        continue;
+                    }
+                    // Items after the star are counted from the end.
+                    let index = match star {
+                        Some(s) if i > s => -((len - i) as i64),
+                        _ => i as i64,
+                    };
+                    let item = self.pattern_item(subject, index, span, Span::from(sub.range()));
+                    self.lower_pattern(sub, item, fail, captures);
                 }
             }
             Pattern::MatchMapping(mm) => {
-                for k in &mm.keys {
-                    let _ = self.lower_expr(k);
-                }
-                for p in &mm.patterns {
-                    self.lower_pattern(p, subject);
+                self.structural_test(fail, span);
+                for (key, sub) in mm.keys.iter().zip(&mm.patterns) {
+                    let index = self.lower_expr(key);
+                    let value = self.fresh_var(None);
+                    self.emit(
+                        InstKind::SubscriptLoad {
+                            dst: value,
+                            obj: subject,
+                            index,
+                            key_const: extract_const_str(key),
+                            is_slice: false,
+                            slice_lower_const: None,
+                            slice_upper_const: None,
+                        },
+                        Span::from(sub.range()),
+                    );
+                    self.lower_pattern(sub, value, fail, captures);
                 }
                 if let Some(rest) = &mm.rest {
-                    self.write_var(rest.as_str(), subject, Span::from(rest.range));
+                    // `**rest` is a new dict of the other items.
+                    let dst = self.fresh_var(None);
+                    self.emit(
+                        InstKind::DictLiteral {
+                            dst,
+                            entries: vec![DictEntry::Unpack { dict: subject }],
+                        },
+                        Span::from(rest.range),
+                    );
+                    captures.push((rest.as_str(), dst, Span::from(rest.range)));
                 }
             }
             Pattern::MatchClass(mc) => {
                 let _ = self.lower_expr(&mc.cls);
-                for p in &mc.arguments.patterns {
-                    self.lower_pattern(p, subject);
-                }
-                for kw in &mc.arguments.keywords {
-                    self.lower_pattern(&kw.pattern, subject);
+                self.structural_test(fail, span);
+                // A positional sub-pattern reads the attribute `__match_args__` names, which
+                // the IR does not know.
+                let positional = mc
+                    .arguments
+                    .patterns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (format!("{MATCH_ARGS}[{i}]"), p));
+                let keywords = mc
+                    .arguments
+                    .keywords
+                    .iter()
+                    .map(|kw| (kw.attr.to_string(), &kw.pattern));
+                for (attr, sub) in positional.chain(keywords).collect::<Vec<_>>() {
+                    let value = self.fresh_var(None);
+                    self.emit(
+                        InstKind::AttrLoad {
+                            dst: value,
+                            obj: subject,
+                            attr,
+                        },
+                        Span::from(sub.range()),
+                    );
+                    self.lower_pattern(sub, value, fail, captures);
                 }
             }
-            Pattern::MatchStar(ms) => {
-                if let Some(name) = &ms.name {
-                    self.write_var(name.as_str(), subject, Span::from(name.range));
-                }
-            }
+            // Only inside a sequence pattern (above).
+            Pattern::MatchStar(_) => {}
             Pattern::MatchAs(ma) => {
                 if let Some(p) = &ma.pattern {
-                    self.lower_pattern(p, subject);
+                    self.lower_pattern(p, subject, fail, captures);
                 }
                 if let Some(name) = &ma.name {
-                    self.write_var(name.as_str(), subject, Span::from(name.range));
+                    captures.push((name.as_str(), subject, Span::from(name.range)));
                 }
             }
-            Pattern::MatchOr(mo) => {
-                for p in &mo.patterns {
-                    self.lower_pattern(p, subject);
+            Pattern::MatchOr(mo) => self.lower_or_pattern(mo, subject, fail, captures),
+        }
+    }
+
+    /// `p1 | p2 | ...`: the first alternative that matches binds the names (every alternative
+    /// binds the same ones).
+    fn lower_or_pattern(
+        &mut self,
+        mo: &'a ast::PatternMatchOr,
+        subject: VarId,
+        fail: BlockId,
+        captures: &mut Vec<(&'a str, VarId, Span)>,
+    ) {
+        let join_bb = self.new_block(false);
+        let prefix = format!(".or_{}", self.var_names.len());
+        let mut bound: Vec<(&'a str, Span)> = Vec::new();
+        for (idx, alt) in mo.patterns.iter().enumerate() {
+            let alt_fail = if idx + 1 == mo.patterns.len() {
+                fail
+            } else {
+                self.new_block(false)
+            };
+            let mut alt_captures = Vec::new();
+            self.lower_pattern(alt, subject, alt_fail, &mut alt_captures);
+            for (name, value, span) in alt_captures {
+                self.write_local(&format!("{prefix}_{name}"), self.cur_bb, value);
+                if !bound.iter().any(|(n, _)| *n == name) {
+                    bound.push((name, span));
                 }
+            }
+            self.terminate(Terminator::Jump(join_bb));
+            if alt_fail != fail {
+                self.seal_block(alt_fail);
+                self.switch_to(alt_fail);
             }
         }
+        self.seal_block(join_bb);
+        self.switch_to(join_bb);
+        for (name, span) in bound {
+            let value = self.read_local_ssa(&format!("{prefix}_{name}"), join_bb, span);
+            captures.push((name, value, span));
+        }
+    }
+
+    /// Item `index` of a sequence pattern's subject (negative: counted from the end).
+    fn pattern_item(&mut self, subject: VarId, index: i64, pattern: Span, item: Span) -> VarId {
+        // The index belongs to the pattern, not to the item: not the target unpacking of an
+        // assignment (`heki_effect::consumption::is_unpacking`), which consumes an iterator.
+        let index_var = self.emit_const(ConstLiteral::Int(index), pattern);
+        let dst = self.fresh_var(None);
+        self.emit(
+            InstKind::SubscriptLoad {
+                dst,
+                obj: subject,
+                index: index_var,
+                key_const: None,
+                is_slice: false,
+                slice_lower_const: None,
+                slice_upper_const: None,
+            },
+            item,
+        );
+        dst
+    }
+
+    /// A new list holding items of `source` (`[*source]`): what a starred target or pattern
+    /// binds.
+    fn unpacked_list(&mut self, source: VarId, span: Span) -> VarId {
+        let elem = self.fresh_var(Some(crate::UNPACKED.to_owned()));
+        self.emit(
+            InstKind::Copy {
+                dst: elem,
+                src: source,
+            },
+            span,
+        );
+        let dst = self.fresh_var(None);
+        self.starred.push((dst, 0));
+        self.emit(
+            InstKind::AllocBuiltin {
+                dst,
+                kind: BuiltinKind::List,
+                elems: vec![elem],
+            },
+            span,
+        );
+        dst
     }
 
     // -------------------------------------------------------------------------

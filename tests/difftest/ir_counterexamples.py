@@ -468,6 +468,57 @@ def old_membership_in_chained_comparison(n):
     return hit
 
 
+# ------------------------------------------------------------------------------
+# Capture patterns bind the matched component, not the subject
+# ------------------------------------------------------------------------------
+def cx_sequence_pattern_capture(items, shared):
+    match [shared]:
+        case [acc]:
+            for x in items:
+                acc = acc + [x]
+            return len(acc)
+
+
+def old_sequence_pattern_capture(items, shared):
+    match [shared]:
+        case [acc]:
+            for x in items:
+                acc.append(x)
+            return len(acc)
+
+
+def cx_as_pattern_capture(items, shared):
+    match [shared]:
+        case [[] as acc]:
+            for x in items:
+                acc = acc + [x]
+            return len(acc)
+
+
+def old_as_pattern_capture(items, shared):
+    match [shared]:
+        case [[] as acc]:
+            for x in items:
+                acc.append(x)
+            return len(acc)
+
+
+def cx_mapping_pattern_capture(items, shared):
+    match {"k": shared}:
+        case {"k": acc}:
+            for x in items:
+                acc = {**acc, x: x}
+            return len(acc)
+
+
+def old_mapping_pattern_capture(items, shared):
+    match {"k": shared}:
+        case {"k": acc}:
+            for x in items:
+                acc[x] = x
+            return len(acc)
+
+
 def run(call, fn):
     try:
         return repr(call(fn))
@@ -539,6 +590,9 @@ def main() -> int:
             with_owned(list),
         ),
         (cx_membership_in_chained_comparison, old_membership_in_chained_comparison, lambda f: f(1)),
+        (cx_sequence_pattern_capture, old_sequence_pattern_capture, with_owned(list)),
+        (cx_as_pattern_capture, old_as_pattern_capture, with_owned(list)),
+        (cx_mapping_pattern_capture, old_mapping_pattern_capture, with_owned(dict)),
     ]
     lines = []
     for cx, old, call in pairs:

@@ -1226,6 +1226,10 @@ const IR_COUNTEREXAMPLES: &[Expect] = &[
         "old_membership_in_chained_comparison",
         &[("OPT110", V::Hand)],
     ),
+    // A capture binds an item of the subject, which may be the caller's list.
+    ("cx_sequence_pattern_capture", &[]),
+    ("cx_as_pattern_capture", &[]),
+    ("cx_mapping_pattern_capture", &[]),
 ];
 
 const CAPTURED: &[(&str, V)] = &[(

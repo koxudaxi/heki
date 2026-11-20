@@ -195,3 +195,73 @@ fn a_chained_comparison_evaluates_each_operand_once_and_stops_at_a_false_link() 
         "{first_block:#}"
     );
 }
+
+// ============================================================================ match patterns
+
+const INVALIDATION: &str = "[project]\nname = \"t\"\n\n[[tool.heki.invalidation]]\nname = \"m\"\ntargets = [\"Model.value\"]\ninvalidators = [\"case.notify\"]\n";
+
+const MODEL: &str =
+    "class Model:\n    def __init__(self):\n        self.value = 0\n\n\ndef notify():\n    pass\n";
+
+#[test]
+fn a_refutable_case_may_not_match() {
+    let src = format!(
+        "{MODEL}\n\ndef value_case(model: Model, code):\n    model.value = 1\n    match code:\n        case 0:\n            notify()\n\n\ndef class_case(model: Model, code):\n    model.value = 1\n    match code:\n        case int():\n            notify()\n\n\ndef wildcard(model: Model, code):\n    model.value = 1\n    match code:\n        case 0:\n            notify()\n        case _:\n            notify()\n\n\ndef capture(model: Model, code):\n    model.value = 1\n    match code:\n        case found:\n            notify()\n"
+    );
+    let p = Project::new("ir_refutable_cases");
+    p.write("pyproject.toml", INVALIDATION)
+        .write("case.py", &src);
+    let got: Vec<String> = diagnostics(&p, &["--select", "MUT109"])
+        .iter()
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    // A path where `code` matches no case returns without the invalidator; a wildcard or
+    // capture pattern always matches.
+    assert_eq!(got, ["value_case", "class_case"]);
+}
+
+#[test]
+fn patterns_bind_the_matched_items() {
+    let src = "def items(subject):\n    match subject:\n        case [first, *middle, last]:\n            return first, middle, last\n        case {\"k\": value, **rest}:\n            return value, rest\n";
+    let ir = dump_ir("ir_pattern_items", src, "py315");
+    let f = function(&ir, "items");
+    let insts: Vec<&Value> = f["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .collect();
+    let def_of = |var: &Value| {
+        insts
+            .iter()
+            .find(|i| i["kind"].as_object().unwrap().values().next().unwrap()["dst"] == *var)
+            .map(|i| i["kind"].clone())
+    };
+    let copy_of = |name: &str| -> Value {
+        let idx = f["var_names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|n| n == name)
+            .unwrap();
+        def_of(&Value::from(idx)).unwrap()["Copy"]["src"].clone()
+    };
+    let subscript_index = |name: &str| {
+        let load = def_of(&copy_of(name)).unwrap();
+        let index = &load["SubscriptLoad"]["index"];
+        def_of(index).unwrap()["Const"]["literal"]["int"]
+            .as_i64()
+            .unwrap()
+    };
+    assert_eq!(subscript_index("first"), 0);
+    assert_eq!(subscript_index("last"), -1);
+    assert!(def_of(&copy_of("middle")).unwrap()["AllocBuiltin"]["kind"] == "list");
+    assert!(
+        def_of(&copy_of("rest"))
+            .unwrap()
+            .get("DictLiteral")
+            .is_some()
+    );
+    let value = def_of(&copy_of("value")).unwrap();
+    assert_eq!(value["SubscriptLoad"]["key_const"], "k");
+}
