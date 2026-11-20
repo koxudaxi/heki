@@ -1745,7 +1745,10 @@ opaque_to_layer3 = true
 
 # --- Key-value: redis (sync) ---
 # Clients connect lazily, on the first command. `pipeline()` only buffers commands until
-# `execute()`. `scan` is called in a cursor loop by design, so it is no `db_query`.
+# `execute()`: a buffered command returns the pipeline itself, so calls chain
+# (`pipe.set(k, v).incr(n).execute()`). `watch()` sends `WATCH` at once; the commands a watching
+# pipeline then runs immediately (until `multi()`) are not told apart from buffered ones, the
+# `watch()` call is reported. `scan` is called in a cursor loop by design, so it is no `db_query`.
 # `redis.StrictRedis` is an alias of `redis.Redis`.
 
 [[entries]]
@@ -1778,6 +1781,156 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "redis.client.Pipeline.execute"
 effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.watch"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.get"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.set"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.setex"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.mget"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.mset"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.delete"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.exists"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.expire"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.ttl"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.incr"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.decr"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hget"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hset"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hmget"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hgetall"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hdel"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lpush"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.rpush"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lpop"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.rpop"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lrange"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.sadd"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.srem"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.smembers"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zadd"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zrange"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.publish"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.keys"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.eval"
+return_type = "redis.client.Pipeline"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1931,7 +2084,8 @@ effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 # --- Key-value: redis.asyncio ---
-# Commands return awaitables; `pipeline()` is a plain method returning an async pipeline.
+# Commands return awaitables; `pipeline()` is a plain method returning an async pipeline, whose
+# buffered commands return the pipeline (as for `redis`) and whose `watch()` is a coroutine.
 
 [[entries]]
 symbol = "redis.asyncio.Redis"
@@ -1963,6 +2117,186 @@ opaque_to_layer3 = true
 symbol = "redis.asyncio.client.Pipeline.execute"
 effects = ["db_query"]
 async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.watch"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.get"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.set"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.setex"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.mget"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.mset"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.delete"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.exists"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.expire"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.ttl"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.incr"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.decr"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hget"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hset"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hmget"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hgetall"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hdel"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lpush"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.rpush"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lpop"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.rpop"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lrange"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.sadd"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.srem"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.smembers"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zadd"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zrange"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.publish"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.keys"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.eval"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
 opaque_to_layer3 = true
 
 [[entries]]

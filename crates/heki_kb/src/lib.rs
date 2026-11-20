@@ -943,7 +943,7 @@ mod tests {
                     with_prefix("pymysql.cursors.Cursor", DBAPI_EXECUTES),
                     with_prefix("django.db.backends.utils.CursorWrapper", DBAPI_EXECUTES),
                     with_prefix(qs, QUERYSET_RUNS),
-                    s(&["redis.client.Pipeline.execute"]),
+                    s(&["redis.client.Pipeline.execute", "redis.client.Pipeline.watch"]),
                     with_prefix("redis.Redis", REDIS_COMMANDS),
                     s(&["pymongo.database.Database.command"]),
                     with_prefix("pymongo.collection.Collection", MONGO_COLLECTION_OPS),
@@ -1054,8 +1054,12 @@ mod tests {
                 returning("redis.Redis", entry(&[UnpooledClientAlloc])),
             ),
             (
-                // Only buffers commands until `execute()`.
-                s(&["redis.Redis.pipeline"]),
+                // Only buffers commands until `execute()`; a buffered command returns the pipeline.
+                [
+                    s(&["redis.Redis.pipeline"]),
+                    with_prefix("redis.client.Pipeline", REDIS_COMMANDS),
+                ]
+                .concat(),
                 returning("redis.client.Pipeline", entry(&[])),
             ),
             (
@@ -1087,7 +1091,10 @@ mod tests {
                     ),
                     s(&["psycopg.AsyncCursor.executemany"]),
                     async_queryset_runs,
-                    s(&["redis.asyncio.client.Pipeline.execute"]),
+                    s(&[
+                        "redis.asyncio.client.Pipeline.execute",
+                        "redis.asyncio.client.Pipeline.watch",
+                    ]),
                     with_prefix("redis.asyncio.Redis", REDIS_COMMANDS),
                     s(&["pymongo.asynchronous.database.AsyncDatabase.command"]),
                     with_prefix(
@@ -1167,7 +1174,11 @@ mod tests {
                 )),
             ),
             (
-                s(&["redis.asyncio.Redis.pipeline"]),
+                [
+                    s(&["redis.asyncio.Redis.pipeline"]),
+                    with_prefix("redis.asyncio.client.Pipeline", REDIS_COMMANDS),
+                ]
+                .concat(),
                 async_safe(returning("redis.asyncio.client.Pipeline", entry(&[]))),
             ),
             (
@@ -1432,8 +1443,8 @@ mod tests {
     }
 
     /// Calls that do no I/O, or whose effect depends on what the catalog cannot see, are left
-    /// out: client-side cursors already hold their rows, boto3 signs URLs locally, pipelines
-    /// buffer commands, `to_csv()` without a path returns a string, `read_html` parses text as
+    /// out: client-side cursors already hold their rows, boto3 signs URLs locally,
+    /// `to_csv()` without a path returns a string, `read_html` parses text as
     /// often as it fetches, and `sessionmaker()` builds `AsyncSession`s with `class_=AsyncSession`.
     #[test]
     fn layer2_leaves_local_and_undecidable_calls_unregistered() {
@@ -1448,8 +1459,6 @@ mod tests {
             "boto3.client.get_paginator",
             "httpx.Client.build_request",
             "httpx.AsyncClient.build_request",
-            "redis.client.Pipeline.set",
-            "redis.asyncio.client.Pipeline.set",
             "pandas.DataFrame.to_csv",
             // A session only holds configuration; its `client()` / `resource()` allocate.
             "boto3.Session",

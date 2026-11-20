@@ -721,6 +721,27 @@ def tn_scan_cursor_loop(r: redis.Redis):
 
 async def tp_scan_blocks(r: redis.Redis):
     return r.scan(0)
+
+
+async def tp_pipeline_chains(r: redis.Redis):
+    r.pipeline().set("k", "v").incr("n").execute()
+
+
+async def tp_watching_pipeline(r: redis.Redis):
+    with r.pipeline() as pipe:
+        pipe.watch("k")
+        pipe.multi()
+        pipe.set("k", "v")
+        pipe.execute()
+
+
+async def tn_async_pipelines(r: aioredis.Redis):
+    await r.pipeline().set("k", "v").execute()
+    async with r.pipeline() as pipe:
+        await pipe.watch("k")
+        pipe.multi()
+        pipe.set("k", "v")
+        await pipe.execute()
 "#;
 
 #[test]
@@ -795,6 +816,25 @@ fn redis_and_pymongo_block_on_commands_not_on_clients_or_pipelines() {
             ),
             // `SCAN` blocks, though its cursor loop is no N+1 query.
             d(89, "EFF101", "tp_scan_blocks", "redis.Redis.scan"),
+            // Buffered commands return the pipeline; `WATCH` is sent at once.
+            d(
+                93,
+                "EFF101",
+                "tp_pipeline_chains",
+                "redis.client.Pipeline.execute"
+            ),
+            d(
+                98,
+                "EFF101",
+                "tp_watching_pipeline",
+                "redis.client.Pipeline.watch"
+            ),
+            d(
+                101,
+                "EFF101",
+                "tp_watching_pipeline",
+                "redis.client.Pipeline.execute"
+            ),
         ]
     );
 }
