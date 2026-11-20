@@ -490,8 +490,8 @@ impl Workspace {
         out.into_iter().collect()
     }
 
-    /// The files an update of the index affects besides the updated file: callers of changed
-    /// summaries, readers of changed declarations, callees whose callers changed, generators
+    /// The files an update of the index affects besides the updated file: the files of changed
+    /// summaries and of their callers, readers of changed declarations, callees whose callers changed, generators
     /// handed to changed functions, class families whose members changed, the files with
     /// `MUT108` / `MUT110` reports above functions whose chain facts (`chains`, before and
     /// after) changed, and with an effect boundary the files above functions whose ecosystem
@@ -504,9 +504,12 @@ impl Workspace {
         chains: (&ChainFacts, &ChainFacts),
         ecosystem: (&EcosystemView, &EcosystemView),
     ) -> FxHashSet<PathBuf> {
+        // The functions whose facts changed include the other members of a call cycle through
+        // the file: their own reports (`MUT103` against the snapshot, ...) read them.
         let mut affected: FxHashSet<PathBuf> = update
             .affected_callers
             .iter()
+            .chain(&update.changed)
             .filter_map(|k: &FuncKey| self.index.file_of(k).map(Path::to_path_buf))
             .collect();
         affected.extend(self.reading(change));

@@ -1547,9 +1547,8 @@ const FETCHER: &str =
     "import requests\n\n\ndef fetch(url):\n    requests.get(url)\n    return requests.get(url)\n";
 // Two public functions calling each other (one recursive component across files), in the
 // effect snapshot.
-const PING: &str = "import time\n\nfrom app import pong\n\n\ndef f(n):\n    if n:\n        return pong.g(n - 1)\n    return 0\n";
-const PONG: &str =
-    "from app import ping\n\n\ndef g(n):\n    if n:\n        return ping.f(n - 1)\n    return 0\n";
+const PING: &str = "from app import pong\n\n\ndef f(n, seen):\n    if n:\n        return pong.g(n - 1, seen)\n    return 0\n";
+const PONG: &str = "from app import ping\n\n\ndef g(n, seen):\n    if n:\n        return ping.f(n - 1, seen)\n    return 0\n";
 // An `async def` reaching a blocking call in another file, with a comment above the call.
 const SLOW: &str = "import time\n\n\ndef wait():\n    #x\n    time.sleep(1)\n";
 const HANDLER: &str = "from app.slow import wait\n\n\nasync def handle():\n    wait()\n";
@@ -1589,6 +1588,7 @@ fn edge_steps() -> Vec<Step> {
     ];
     steps.extend(steps_shared_module_name());
     steps.extend(steps_boundary_calls());
+    steps.extend(steps_recursive_snapshot());
     steps
 }
 
@@ -1648,6 +1648,22 @@ fn steps_boundary_calls() -> Vec<Step> {
             vec![save("app/fetcher.py", FETCHER)],
         )
         .absent(&[("app/render.py", "EFF201")]),
+    ]
+}
+
+/// `MUT103`: both members of a recursive component across files gain the effect.
+fn steps_recursive_snapshot() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a function calling a function in another file that calls it back mutates an argument",
+            vec![save(
+                "app/ping.py",
+                &PING.replace("    return 0\n", "    seen.append(n)\n    return 0\n"),
+            )],
+        )
+        .present(&[("app/ping.py", "MUT103"), ("app/pong.py", "MUT103")]),
+        Step::new("it stops mutating it", vec![save("app/ping.py", PING)])
+            .absent(&[("app/ping.py", "MUT103"), ("app/pong.py", "MUT103")]),
     ]
 }
 
