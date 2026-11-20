@@ -11,13 +11,16 @@
 //!
 //! Pipeline (docs/ANALYSIS_AND_KB_SPEC.md section 2):
 //! 1. `resolver`: module names, import maps, project declarations, 4-priority receiver types, CHA.
-//! 2. `summary`: local (one function) effect extraction into `EffectSummary` + `CallSite`s.
-//! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint.
+//! 2. `summary`: local (one function) effect extraction into `EffectSummary` + `CallSite`s,
+//!    with the guards of each effect and call site (`guards`).
+//! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint; `guards` maps a
+//!    callee's guards across each call site (pruning the effects an argument switches off).
 //! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
 
 mod callgraph;
 pub mod consumption;
 mod contracts;
+pub mod guards;
 mod invalidation;
 pub mod readonly;
 mod report;
@@ -266,6 +269,94 @@ pub struct EffectSummary {
     /// Module-relative class qualname of a method (`Outer.Inner`), as in `IrFunction`.
     pub owner_class_qualname: Option<String>,
     pub decorators: Vec<String>,
+
+    /// The guards every occurrence of an execution effect depends on (`guards`); an effect
+    /// without an entry runs whenever the function does.
+    pub exec_guards: BTreeMap<ExecEffectKind, EffectGuards>,
+}
+
+/// An input of a function that a guard tests: parameter `param` itself, or its attribute
+/// `attr` (one the function never assigns).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GuardSubject {
+    pub param: u8,
+    pub attr: Option<String>,
+}
+
+/// What a guard tests about its subject.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardTest {
+    /// `if x:`.
+    Truthy,
+    /// `if x is None:` (`x == None`).
+    IsNone,
+    /// `isinstance(x, C)` / `isinstance(x, (C, D))`: the fully qualified classes, sorted.
+    IsInstance(Vec<String>),
+}
+
+/// A test of an input, and the outcome (`holds`) an effect needs to run.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct InputGuard {
+    pub subject: GuardSubject,
+    pub test: GuardTest,
+    pub holds: bool,
+}
+
+/// The guards common to every occurrence of one execution effect in a function.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectGuards {
+    /// Tests of the function's inputs that every occurrence needs.
+    pub inputs: BTreeSet<InputGuard>,
+    /// Lazy initialization: every occurrence runs only while an attribute of an object is
+    /// unset, and the function then sets it, so it runs at most once per object. The objects
+    /// come from the parameters in this mask (`0`: from none, such as a pooled connection or a
+    /// module global). `None`: some occurrence runs on every call.
+    pub once_per: Option<u64>,
+}
+
+/// The builtin class of a constant or display argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstClass {
+    None,
+    Bool,
+    Int,
+    Float,
+    Str,
+    Bytes,
+    List,
+    Tuple,
+    Set,
+    Dict,
+    /// `...`, a complex number.
+    Other,
+}
+
+/// A constant or display argument (or a literal default): its class and, where the value
+/// decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ConstArg {
+    pub class: ConstClass,
+    pub truthy: Option<bool>,
+}
+
+/// What a caller knows about the value of a callee parameter at one call, when the argument
+/// binds the parameter exactly: the receiver, a keyword, a position before any `*` unpacking,
+/// or the literal default of an omitted parameter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgBinding {
+    pub constant: Option<ConstArg>,
+    /// The caller's own input the argument is (a guard subject of the caller).
+    pub input: Option<GuardSubject>,
+    /// Caller parameters the argument may come from: itself, its attributes and elements, and
+    /// the results of calls on them.
+    pub derived_params: u64,
+    /// The argument may be an object the caller constructs, or come from one.
+    pub derived_fresh: bool,
+    /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations
+    /// the argument stays one object: those that do not construct it.
+    pub stays_in_loops: u64,
 }
 
 impl EffectSummary {
@@ -413,6 +504,8 @@ pub struct ArgOrigin {
     /// Where the argument comes from among the objects that existed before the call (`MUT109`;
     /// only computed when an `invalidation` contract is configured).
     pub reach: Reach,
+    /// What the caller knows about the parameter's value (`None`: not bound exactly).
+    pub binding: Option<ArgBinding>,
 }
 
 impl ArgOrigin {
@@ -504,6 +597,14 @@ pub struct CallSite {
     /// What follows the call on every normal path of the caller (`MUT109`; only computed when
     /// an `invalidation` contract is configured).
     pub flow: Option<SiteFlow>,
+    /// Tests of the caller's inputs that hold whenever the call runs (`guards`).
+    pub guards: Vec<InputGuard>,
+    /// The call runs inside a lazy initialization of the caller (`EffectGuards::once_per`).
+    pub once_per: Option<u64>,
+    /// The loops around the call (bit `d - 1`: the one at depth `d`) in each iteration of which
+    /// a lazy initialization of the caller around the call is tested, on an object the loop does
+    /// not construct: across them, its effects run at most once (`EFF102` / `EFF103`).
+    pub once_loops: u64,
 }
 
 impl CallSite {
@@ -589,6 +690,10 @@ pub struct SiteEffect {
     pub callee: Option<FuncKey>,
     /// The effect comes from an awaited / driven `async def` callee (its own body).
     pub callee_is_async: bool,
+    /// Lazy initialization: the loops around the call (bit `d - 1`: the one at depth `d`)
+    /// across whose iterations the effect runs at most once per object, and the objects stay
+    /// the same (`EFF102` / `EFF103`).
+    pub once_loops: u64,
 }
 
 /// Incremental project-wide summary & reverse call-graph index.
@@ -674,8 +779,8 @@ impl ProjectIndex {
 
     /// Effects that run at `site` (in file `path`): the Layer 2 API's effects after the
     /// `is_awaited` filter, or the direct and transitive effects of each project callee's facts
-    /// the site runs in its caller's body ([`Self::delivery`]). Shared by Boundary-Only
-    /// Reporting and the loop rules.
+    /// the site runs in its caller's body ([`Self::delivery`]) whose guards the call does not
+    /// decide against (`guards`). Shared by Boundary-Only Reporting and the loop rules.
     pub fn site_effects(&self, path: &Path, site: &CallSite) -> Vec<SiteEffect> {
         let mut out = Vec::new();
         match &site.target {
@@ -688,6 +793,7 @@ impl ProjectIndex {
                         chain: vec![callgraph::site_hop(site, path, symbol.clone())],
                         callee: None,
                         callee_is_async: false,
+                        once_loops: site.once_loops,
                     });
                 }
             }
@@ -711,12 +817,19 @@ impl ProjectIndex {
                         .copied()
                         .collect();
                     for e in effects {
+                        // A guard the call decides against: the effect does not run here.
+                        let Some(through) =
+                            guards::through_call(site, bc, facts.exec_guards.get(&e))
+                        else {
+                            continue;
+                        };
                         let tail = facts.exec_chains.get(&e).map_or(&[][..], Vec::as_slice);
                         out.push(SiteEffect {
                             effect: e,
                             chain: callgraph::extend_chain(&lead, tail, rewrite),
                             callee: Some(bc.callee.clone()),
                             callee_is_async: callee.is_async,
+                            once_loops: through.once_loops,
                         });
                     }
                 }

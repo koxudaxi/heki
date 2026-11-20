@@ -786,11 +786,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     // Parameters & Statements
     // -------------------------------------------------------------------------
     fn bind_parameters(&mut self, params: &ast::Parameters) {
-        for p in params
+        let positional = params.posonlyargs.len() + params.args.len();
+        for (i, p) in params
             .posonlyargs
             .iter()
             .chain(params.args.iter())
             .chain(params.kwonlyargs.iter())
+            .enumerate()
         {
             let name = p.parameter.name.to_string();
             let var = self.fresh_var(Some(name.clone()));
@@ -804,6 +806,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 name,
                 var,
                 has_default: p.default.is_some(),
+                default: p.default.as_deref().and_then(literal_default),
+                kw_only: i >= positional,
                 is_vararg: false,
                 is_kwarg: false,
                 annotation,
@@ -821,6 +825,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 name,
                 var,
                 has_default: false,
+                default: None,
+                kw_only: false,
                 is_vararg: true,
                 is_kwarg: false,
                 annotation,
@@ -838,6 +844,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 name,
                 var,
                 has_default: false,
+                default: None,
+                kw_only: false,
                 is_vararg: false,
                 is_kwarg: true,
                 annotation,
@@ -2358,6 +2366,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let span = Span::from(call.range());
         let callee_dotted = expr_dotted_name(&call.func)
             .unwrap_or_else(|| self.module.slice_text(Span::from(call.func.range())));
+        let star_from = call
+            .arguments
+            .args
+            .iter()
+            .position(|a| matches!(a, Expr::Starred(_)))
+            .map(|i| u8::try_from(i).unwrap_or(u8::MAX));
 
         if let Expr::Attribute(attr) = call.func.as_ref() {
             // Check A1 hazards for dotted calls like `sys._getframe`, `gc.get_objects`, `inspect.currentframe`.
@@ -2395,6 +2409,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     args,
                     kwargs,
                     is_awaited,
+                    star_from,
                 },
                 span,
             );
@@ -2434,6 +2449,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     args,
                     kwargs,
                     is_awaited,
+                    star_from,
                 },
                 span,
             );
@@ -2468,6 +2484,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                         args: vec![v],
                         kwargs: Vec::new(),
                         is_awaited: false,
+                        star_from: None,
                     },
                     elt_span,
                 );
@@ -2555,6 +2572,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     args,
                     kwargs: Vec::new(),
                     is_awaited: false,
+                    star_from: None,
                 },
                 span,
             );
@@ -3521,6 +3539,21 @@ fn extract_const_str(expr: &Expr) -> Option<String> {
     match expr {
         Expr::StringLiteral(s) => Some(s.value.to_str().to_string()),
         _ => None,
+    }
+}
+
+/// The literal a parameter default is (`None`, `False`, `-1`, `0.5`, `""`, `b""`).
+fn literal_default(expr: &Expr) -> Option<ConstLiteral> {
+    match expr {
+        Expr::NoneLiteral(_) => Some(ConstLiteral::None),
+        Expr::BooleanLiteral(b) => Some(ConstLiteral::Bool(b.value)),
+        Expr::StringLiteral(s) => Some(ConstLiteral::Str(s.value.to_str().to_string())),
+        Expr::BytesLiteral(_) => Some(ConstLiteral::Bytes),
+        Expr::NumberLiteral(ast::ExprNumberLiteral {
+            value: ast::Number::Float(f),
+            ..
+        }) => Some(ConstLiteral::Float(f.to_string())),
+        _ => extract_const_int(expr).map(ConstLiteral::Int),
     }
 }
 

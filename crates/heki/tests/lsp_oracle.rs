@@ -90,6 +90,18 @@ const REMOTE_BLOCKING: &str = "import requests\n\n\nclass Client:\n    @property
 const READER: &str =
     "from pkg.remote import Client\n\n\nasync def load(c: Client):\n    return c.data\n";
 
+// Guarded effects (`EFF102`): loops in other modules call a helper with a constant argument
+// and with its default; the helper gains the `if cache:` guard the constant switches off, its
+// default changes, and it loses the guard again. A connection class gains, then loses, a lazy
+// initialization that a loop calls on one object.
+const GUARD_NET: &str = "from urllib.request import urlopen\n\n\ndef fetch(url, cache=True):\n    return urlopen(url)\n";
+const GUARD_NET_GUARDED: &str = "from urllib.request import urlopen\n\n\ndef fetch(url, cache=True):\n    if cache:\n        return urlopen(url)\n    return None\n";
+const GUARD_USE: &str = "from pkg.guard_net import fetch\n\n\ndef sync(urls):\n    for u in urls:\n        fetch(u, cache=False)\n";
+const GUARD_DEFAULT_USE: &str =
+    "from pkg.guard_net import fetch\n\n\ndef sync(urls):\n    for u in urls:\n        fetch(u)\n";
+const GUARD_CONN: &str = "from urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    def send(self):\n        self._sock = urlopen(\"https://example.com\")\n";
+const GUARD_CONN_USE: &str = "from pkg.guard_conn import Conn\n\n\ndef run(c: Conn, xs):\n    for x in xs:\n        c.send()\n";
+
 // Contracts: private helpers writing / reading guarded attributes report themselves without
 // callers, nothing when only allowed functions call them, and at a non-allowed caller.
 const MODEL: &str = "class Registry:\n    def __init__(self):\n        self.entries = []\n\n\nclass Vault:\n    def __init__(self):\n        self.secret = \"\"\n";
@@ -258,6 +270,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/keys.py", KEYS),
         ("pkg/remote.py", REMOTE),
         ("pkg/reader.py", READER),
+        ("pkg/guard_net.py", GUARD_NET),
+        ("pkg/guard_use.py", GUARD_USE),
+        ("pkg/guard_default_use.py", GUARD_DEFAULT_USE),
+        ("pkg/guard_conn.py", GUARD_CONN),
+        ("pkg/guard_conn_use.py", GUARD_CONN_USE),
         ("pkg/model.py", MODEL),
         ("pkg/ops.py", OPS),
         ("pkg/store.py", STORE),
@@ -856,6 +873,9 @@ fn steps() -> Vec<Step> {
             ("pkg/ops.py", "MUT201"),
             ("pkg/ops.py", "MUT203"),
             ("pkg/svc_user.py", "EFF101"),
+            ("pkg/guard_use.py", "EFF102"),
+            ("pkg/guard_default_use.py", "EFF102"),
+            ("pkg/guard_conn_use.py", "EFF102"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(
@@ -933,6 +953,45 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/remote.py", REMOTE)],
         )
         .absent(&[("pkg/reader.py", "EFF101")]),
+        // Guarded effects across modules.
+        Step::new(
+            "a helper in another file gains the guard its caller's constant switches off",
+            vec![save("pkg/guard_net.py", GUARD_NET_GUARDED)],
+        )
+        .present(&[("pkg/guard_default_use.py", "EFF102")])
+        .absent(&[("pkg/guard_use.py", "EFF102")]),
+        Step::new(
+            "the guarded parameter's default becomes falsy",
+            vec![save(
+                "pkg/guard_net.py",
+                &GUARD_NET_GUARDED.replace("cache=True", "cache=False"),
+            )],
+        )
+        .absent(&[("pkg/guard_default_use.py", "EFF102")]),
+        Step::new(
+            "the helper loses its guard",
+            vec![save("pkg/guard_net.py", GUARD_NET)],
+        )
+        .present(&[
+            ("pkg/guard_use.py", "EFF102"),
+            ("pkg/guard_default_use.py", "EFF102"),
+        ]),
+        Step::new(
+            "a connection class in another file connects lazily",
+            vec![save(
+                "pkg/guard_conn.py",
+                &GUARD_CONN.replace(
+                    "        self._sock = urlopen",
+                    "        if self._sock is None:\n            self._sock = urlopen",
+                ),
+            )],
+        )
+        .absent(&[("pkg/guard_conn_use.py", "EFF102")]),
+        Step::new(
+            "the connection class connects on every call again",
+            vec![save("pkg/guard_conn.py", GUARD_CONN)],
+        )
+        .present(&[("pkg/guard_conn_use.py", "EFF102")]),
     ];
     // 4. `MUT108`, `MUT110`, then where bodies run.
     steps.extend(steps_mut108());
