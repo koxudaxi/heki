@@ -9,7 +9,8 @@ Explicit DB query / external RPC executed inside a loop (N+1).
 ## What it does
 Checks loops that run a database query on every iteration (the "N+1 queries" problem):
 `cursor.execute(...)`, `session.execute(...)`, Django `QuerySet` methods, `pymongo` and `redis`
-commands, and project functions that reach them.
+commands, and project functions that reach them, including the getter of a property read in
+the loop.
 
 It does not report DDL statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
 (`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'

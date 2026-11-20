@@ -7,9 +7,11 @@ Family: Mutation & State (MUT) · Enabled by default · No automatic fix
 Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).
 
 ## What it does
-Checks methods that rebind or mutate an attribute that the class's `__hash__` reads (directly
-or through a `self.helper()` call), when the class or one of its subclasses changes the
-attribute after initialization.
+Checks methods that rebind or mutate an attribute that the class's `__hash__` reads (directly,
+through a `self.helper()` call, or through the getter of a property it reads, such as
+`hash(self.key)` where the `@property` `key` reads `self.name`), when the class or one of its
+subclasses changes the attribute after initialization. A property that also defines a setter
+or deleter is not followed.
 
 The rule reports the write itself, once per method and attribute. It does not report:
 

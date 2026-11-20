@@ -1,5 +1,5 @@
 //! Incremental LSP server for `heki server` / `heki lsp`, and the engine behind
-//! `heki check --watch` (ADR-017, docs/DETAILED_SPEC_M3_M7.md section 5).
+//! `heki check --watch` (ADR-017, ARCHITECTURE.md section 8).
 //!
 //! - The background workspace index keeps `heki_effect::ProjectIndex` (lightweight
 //!   `FileSummary` + reverse call graph) and drops IR bodies.

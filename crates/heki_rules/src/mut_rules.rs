@@ -1,5 +1,5 @@
 //! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT201`, `MUT202`, `MUT203`
-//! (docs/DETAILED_SPEC_M3_M7.md section 3.2).
+//! (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
 use heki_ast::Span;

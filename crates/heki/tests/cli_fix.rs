@@ -1,5 +1,5 @@
 //! `heki check --fix` / `--diff` / `--profile` and `heki snapshot` + `MUT103`, end to end
-//! (docs/DETAILED_SPEC_M3_M7.md sections 4.6–4.8).
+//! (docs/fixes.md, ARCHITECTURE.md section 3.3).
 //!
 //! The differential gate runs `tests/difftest/opt_rewrites.py` on real CPython before and after
 //! the fixes and requires byte-identical output.

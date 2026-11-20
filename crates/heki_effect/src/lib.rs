@@ -9,7 +9,7 @@
 //!   (**Early Cutoff**): if summaries did not change (>95% of edits), reverse call-graph
 //!   propagation is skipped completely.
 //!
-//! Pipeline (docs/DETAILED_SPEC_M3_M7.md section 2):
+//! Pipeline (docs/ANALYSIS_AND_KB_SPEC.md section 2):
 //! 1. `resolver`: module names, import maps, project declarations, 4-priority receiver types, CHA.
 //! 2. `summary`: local (one function) effect extraction into `EffectSummary` + `CallSite`s.
 //! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint.
@@ -306,7 +306,8 @@ pub enum CallTarget {
     },
 }
 
-/// A call site retained in `FileSummary` (IR-free) for propagation and rule evaluation.
+/// A call site retained in `FileSummary` (IR-free) for propagation and rule evaluation. Reading
+/// a property (`obj.attr` whose `attr` is a getter) is one too: it calls the getter, at the read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallSite {
     pub caller: FuncKey,
@@ -315,7 +316,7 @@ pub struct CallSite {
     pub span: Span,
     /// Natural-loop nesting depth of the call (`EFF102` / `EFF103`).
     pub loop_depth: u16,
-    /// Receiver is the calling method's `self` (`self.helper()`, `super().m()`).
+    /// Receiver is the calling method's `self` (`self.helper()`, `super().m()`, `self.prop`).
     pub recv_is_self: bool,
     /// The returned coroutine is driven by hand (`.send(None)` or a `run_sync` driver).
     pub drives_coroutine_manually: bool,

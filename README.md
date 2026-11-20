@@ -1,9 +1,13 @@
 # heki
 
-heki (壁, "wall") is an effect and alias checker for Python, written in Rust. It is the third
-layer of static analysis next to a linter such as Ruff and a type checker such as ty: it follows
-**what code does** across functions and modules — which objects it mutates, which references it
-shares, and which blocking, network, or database work it reaches.
+heki (Japanese for "wall") is an experimental effect and alias checker for Python, written in
+Rust. It is the third layer of static analysis next to a linter such as Ruff and a type checker
+such as ty: it follows **what code does** across functions and modules — which objects it
+mutates, which references it shares, and which blocking, network, or database work it reaches.
+
+> **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
+> and output formats can change between releases without a deprecation period. Try it on your
+> code and report what it gets wrong, but do not depend on its output staying the same yet.
 
 ```console
 $ heki check
@@ -42,6 +46,20 @@ Found 2 diagnostic(s) in 4 file(s).
   `# heki: ignore[CODE]` and `# noqa`, `full` / `concise` / `json` / `github` / `sarif` output,
   exit codes `0` / `1` / `2`, and line-number-independent Ratchet baselines.
 
+## Scope
+
+- heki follows effects and aliases through calls. It is neither a linter nor a type checker
+  and leaves their checks to them.
+- Its knowledge comes from its own analysis, a catalog of library behavior, contracts you
+  declare in `pyproject.toml`, and type annotations, which only help it resolve calls: rewrites
+  never trust them.
+- When it cannot tell, it stays quiet: a rewrite needs a proof and a report needs evidence. The
+  price is missed findings, which annotations, catalog entries, and contracts close.
+- It does not model `__getattr__` proxies, metaclasses, or framework machinery, and it never
+  runs your code.
+
+See [Scope and limitations](docs/scope.md) for the details.
+
 ## Installation
 
 ```console
@@ -63,6 +81,7 @@ $ heki server                                   # LSP server for editors
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
+- [Scope and limitations](docs/scope.md)
 - [Configuration](docs/configuration.md)
 - [Rules](docs/rules/index.md) (25 rules)
 - [Fixes and safety](docs/fixes.md)

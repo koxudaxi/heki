@@ -1,49 +1,82 @@
-# AGENTS.md — `heki` 開発・引き継ぎルール
+# AGENTS.md — Rules for Developing and Handing Over `heki`
 
-このリポジトリは Python 静的解析の第 3 層 **「`heki`（壁）：Effect & Alias 意味論チェッカー」**（Rust 製・単一バイナリ CLI ＋ 増分 LSP）です。
-実装・改修を行うすべてのエージェントは、以下の不変条件と手順を厳守してください。
+This repository is **heki**, the third layer of Python static analysis: an **Effect & Alias
+semantic checker** (a single Rust binary with a CLI and an incremental LSP server). Every agent
+that implements or changes anything here follows the invariants and procedures below.
 
-## 1. 必読ドキュメント（この順に読むこと）
-1. `ARCHITECTURE.md`（Baseline v4.1：全体設計・ルール体系・CLI/Config/LSP 仕様）
-2. `docs/IMPLEMENTATION_PLAN.md`（マイルストーン M1〜M7 と完了ゲート）
-3. `docs/DETAILED_SPEC_M3_M7.md`（**M3〜M7 実装ブループリント**：API 契約・アルゴリズム・エッジケース・受け入れゲート）
-4. `docs/ANALYSIS_AND_KB_SPEC.md`（IR・`EffectSummary`・`FrameState`・Proof Obligation・KB・実測データ）
-5. `docs/DESIGN_HISTORY_AND_ADR.md`（ADR-001〜ADR-017：なぜ棄却したかの履歴）
-6. `docs/HANDOFF_PROMPTS.md`（マイルストーン別実装プロンプト集・最終レビューチェックリスト）
+## 1. Required reading (in this order)
+1. `ARCHITECTURE.md`: the overall design, the rule families, and the CLI, configuration, and LSP.
+2. `docs/scope.md`: what heki checks and does not check, how it behaves when it cannot tell, and
+   the gate a new rule has to pass.
+3. `docs/ANALYSIS_AND_KB_SPEC.md`: the IR, `EffectSummary`, the Soundness lane's abstract domain
+   and proof obligations, the knowledge bases, and the Stage 0-A measurements.
+4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-017, what was decided and why the
+   alternatives were rejected.
 
-## 2. 絶対に破ってはならない Architecture Invariants
-1. **2 レーンの物理分離（ADR-004）**：
-   - `crates/heki_soundness` は `crates/heki_effect` に **絶対に依存させない**。
-   - `heki_soundness` は PEP 484 型注釈を信用せず、`EffectiveSoundnessKb`（Layer 1）と `RuntimeProfile` のみを使う。
-2. **パーサーの完全隔離（ADR-009 / ADR-016）**：
-   - `ruff_python_parser` / `ruff_python_ast` / `ruff_text_size` への直接依存は **`crates/heki_ast` のみ** に閉じ込める（バージョン `tag = "0.17.5"` 固定、Python 3.15 PEP 810 `lazy import` 対応維持）。
-3. **Layer 1 純化 ＆ Layer 3 潜入禁止（ADR-005）**：
-   - `kb/soundness/` に Advisory Effect を書かない。
-   - `heki_effect` の Layer 3 オンデマンド外部解析は、標準ライブラリおよび Layer 2 登録済みパッケージ（`opaque_packages`）内部へ絶対に潜らない。
-4. **Safety × Profitability 直交性（ADR-007 / ADR-011）**：
-   - 既定の `heki check --fix` が自動適用してよいのは **`safe` かつ `unconditional`（`OPT101`, `OPT102` 先頭累積 `{**d, ...}` 限定）のみ**。
-   - 独自デコレータ・独自契約 API・Lean 4・ネイティブ拡張・汎用インポート循環チェッカー（`tach` 領域）・個別フレームワーク勘ルールは **Non-Goal** であり追加しない。
-5. **LSP 増分実行の前提（ADR-017）**：
-   - `heki_effect::ProjectIndex` に IR 本体を常駐させず、軽量 `FileSummary` ＋ 逆コールグラフ ＋ Early Cutoff を維持する。
-6. **Ruff / `t-linter` 統一 UX（ADR-017）**：
-   - 設定キーは `[tool.heki]` kebab-case、抑止コメントは `# heki: ignore[...]`（主）＋ `# noqa:`（互換）、終了コードは `0 / 1 / 2`。
+When a document and the implementation disagree, update the document in the same change.
 
-## 3. 必須検証コマンド
+## 2. Architecture invariants (never break them)
+1. **Two physically separated lanes (ADR-004)**:
+   - `crates/heki_soundness` never depends on `crates/heki_effect`.
+   - `heki_soundness` never trusts PEP 484 annotations; it uses only `EffectiveSoundnessKb`
+     (Layer 1) and `RuntimeProfile`.
+2. **Parser isolation (ADR-009 / ADR-016)**:
+   - Only `crates/heki_ast` depends on `ruff_python_parser` / `ruff_python_ast` /
+     `ruff_text_size` (pinned to `tag = "0.17.5"`, which parses Python 3.15 PEP 810
+     `lazy import`).
+3. **A pure Layer 1 and no dives into known packages (ADR-005)**:
+   - `kb/soundness/` never holds advisory effects.
+   - The on-demand analysis of unregistered dependencies (Layer 3, planned) never enters the
+     standard library or packages registered in Layer 2 (`opaque_packages`).
+4. **Safety × Profitability orthogonality (ADR-007 / ADR-011)**:
+   - The default `heki check --fix` applies only fixes that are `safe` and `unconditional`
+     (`OPT101`, and `OPT102` with a leading `{**d, ...}` accumulator).
+   - Custom decorators, custom contract APIs, Lean 4, native extensions, a general import-cycle
+     checker (tach's domain), and framework-specific heuristic rules are non-goals: do not add
+     them.
+5. **Incremental LSP (ADR-017)**:
+   - `heki_effect::ProjectIndex` never keeps IR: it keeps the light `FileSummary`, the reverse
+     call graph, and Early Cutoff. Facts a rule needs across functions go into `EffectSummary` /
+     `FileSummary` and take part in the Early Cutoff comparison.
+6. **One interface with Ruff and `t-linter` (ADR-017)**:
+   - Configuration lives under `[tool.heki]` in kebab-case; suppression comments are
+     `# heki: ignore[...]` (primary) and `# noqa:` (compatible); exit codes are `0 / 1 / 2`.
+7. **English only**: everything in the repository (code, comments, documentation, tests, and
+   commit messages) is written in English.
+
+## 3. Required verification commands
 ```bash
-# Rust ワークスペース全体のビルド・テスト
-cargo check --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-
-# CLI 動作確認
+# Every line is covered except three parser-rejected arms (docs/development.md).
+cargo llvm-cov --workspace --summary-only --fail-uncovered-lines 3
+# The Soundness lane must not depend on the Advisory lane: no `heki_effect` here.
+cargo tree -p heki_soundness -e normal,build,dev
 cargo run -p heki -- rule --all
 
-# CPython 3.12 / 3.14 / 3.15 symtable 双方向突合（M1 完了条件：不一致 0 件）
+# heki_semantic against the CPython symtable, both ways (zero disagreements; CI runs 3.11-3.15)
 python3.15 tests/symtable_verify/verify_symtable.py --heki target/debug/heki tests/symtable_verify/fixtures/
-
-# 敵対的 Soundness 反例スイート（M6 完了条件：全件 Blocked / Disproved）
+# Layer 1 knowledge base sentinels
+python3.15 tests/sentinel/verify_soundness_kb.py
+# Adversarial Soundness counterexamples (every one Blocked or Disproved)
 python3.15 tests/difftest/counterexamples.py
+python3.15 tests/difftest/soundness_e2e_counterexamples.py
+# Generated documentation
+cargo build --release -p heki
+python3.15 scripts/build_docs.py --heki target/release/heki --check
+python3.15 scripts/build_llms_txt.py --check
 ```
 
-## 4. ルール追加・変更時の鉄則
-- 新ルール・フィルタ変更は必ず `tests/semantic/fixtures.py` または `tests/difftest/` に TP/TN 回帰テストを追加する。
-- Stage 0-A で実測不採用となったルール（`MUT102a/b`, `DATA102`, `EFF104`, `MUT104` の `ALL_CAPS` 定数, `EFF108`）を根拠なく復活させない。
+## 4. Adding or changing rules
+- A new rule passes the gate in `docs/scope.md`: what a single-file syntax check, a type checker,
+  or an import-graph checker can decide belongs to Ruff, ty, or tach; heki takes only what needs
+  control flow, the call graph, or alias facts. It is also measured on a corpus and reviewed by
+  hand before it is enabled by default (ADR-010).
+- Every new rule and every filter change comes with true-positive and true-negative regression
+  tests: end-to-end tests through the real binary in `crates/heki/tests/`, plus
+  `tests/semantic/fixtures.py` or `tests/difftest/` where they apply.
+- A rule's documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`; regenerate
+  `docs/rules/` and `llms.txt` with `scripts/build_docs.py` and `scripts/build_llms_txt.py`.
+- Rules the Stage 0-A measurements rejected (`MUT102a/b`, `DATA102`, `EFF104`, `MUT104` for
+  `ALL_CAPS` constants, `MUT105`, `EFF108`) are not revived without new evidence.

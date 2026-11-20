@@ -1,4 +1,4 @@
-//! `heki server --stdio` end to end over JSON-RPC (docs/DETAILED_SPEC_M3_M7.md section 5.3):
+//! `heki server --stdio` end to end over JSON-RPC (docs/lsp.md):
 //! initialize → initialized → didOpen → publishDiagnostics → codeAction → didChange (Early
 //! Cutoff) → didChange + didSave (propagation to callers and importers) → shutdown → exit.
 

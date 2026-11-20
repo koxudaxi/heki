@@ -1,4 +1,4 @@
-//! RPO worklist abstract interpretation (docs/DETAILED_SPEC_M3_M7.md section 4.2).
+//! RPO worklist abstract interpretation (docs/ANALYSIS_AND_KB_SPEC.md sections 3.1–3.2).
 //!
 //! - Allocation-site abstraction: every allocating instruction owns one [`AllocId`]; a site in
 //!   a loop summarizes all the objects it creates, so a variable still holding an object from

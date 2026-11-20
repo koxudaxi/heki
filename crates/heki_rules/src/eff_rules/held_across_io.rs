@@ -111,7 +111,8 @@ fn offense(
 ) -> Option<Offense> {
     match &inst.kind {
         InstKind::Await { .. } => Some(Offense::Await),
-        InstKind::Call { .. } | InstKind::MethodCall { .. } => {
+        // Reading a property runs its getter (a call site at the read).
+        InstKind::Call { .. } | InstKind::MethodCall { .. } | InstKind::AttrLoad { .. } => {
             // An awaited `async def` runs here too: its `await` is the report.
             let effects: Vec<SiteEffect> = sites
                 .get(&(qualname.to_owned(), inst.span))

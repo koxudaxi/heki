@@ -1,12 +1,15 @@
 //! Module names, import maps, project declarations, and the 4-priority lightweight receiver
 //! type resolution (Advisory lane only; never reports type errors).
 //!
-//! Priorities (docs/DETAILED_SPEC_M3_M7.md section 2.3):
+//! Priorities (docs/ANALYSIS_AND_KB_SPEC.md section 2.1):
 //! 1. Exact: local construction and direct imports (`LoadGlobal`, `Import`, `AttrLoad` on a
 //!    module, calls of classes, `AllocBuiltin`, `Copy`).
 //! 2. Typed: PEP 484 parameter / local / return annotations, `self` / `cls`.
 //! 3. Typed: `self.attr` types collected from `__init__` / `__post_init__` and annotations.
 //! 4. Heuristic: CHA over project subclasses, at most `CHA_CANDIDATE_LIMIT` candidates.
+//!
+//! Reading a property (`obj.attr` on a project-class instance whose `attr` is a getter) runs
+//! its getter, so `resolve_attr_load` resolves it like a method call.
 
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
@@ -27,6 +30,10 @@ const MAX_ALIAS_CHASE: usize = 8;
 /// Decorators that leave a generator function's call result a generator.
 const GENERATOR_KEEPING_DECORATORS: &[&str] =
     &["staticmethod", "classmethod", "abstractmethod", "override"];
+
+/// Decorators (by their last dotted component) that make a method a getter: reading the
+/// attribute on an instance runs it (`@property`, `@functools.cached_property`).
+const PROPERTY_DECORATORS: &[&str] = &["property", "cached_property"];
 
 const BUILTIN_TYPES: &[&str] = &[
     "list",
@@ -154,6 +161,13 @@ pub struct FunctionDecl {
     /// other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
     /// `@contextmanager` generator returns a context manager). `MUT106` single-pass sources.
     pub is_generator: bool,
+    /// A property getter that reading the attribute on an instance runs: a method decorated
+    /// with `property` / `cached_property` (any decorator whose last dotted component is one of
+    /// them) whose every definition is such a getter. A property with a setter or deleter is
+    /// not one: `@x.setter def x(...)` is a second function with the getter's qualname, whose
+    /// facts share the getter's summary, so reading the property would pick up the setter's
+    /// writes.
+    pub is_property: bool,
 }
 
 /// Per-module declarations other modules need (stored in `FileSummary`, IR-free).
@@ -313,6 +327,9 @@ pub struct ProjectDecls {
     modules: FxHashMap<String, ModuleDecls>,
     /// Class fqn -> direct project subclasses.
     subclasses: FxHashMap<String, Vec<String>>,
+    /// Names of the property getters (`FunctionDecl::is_property`) of every class: an
+    /// attribute read with another name runs no getter, without walking any class hierarchy.
+    property_names: FxHashSet<String>,
 }
 
 /// What a dotted fqn names inside the project.
@@ -331,27 +348,28 @@ impl ProjectDecls {
         for m in modules {
             out.modules.insert(m.module_name.clone(), m);
         }
-        out.rebuild_subclasses();
+        out.rebuild_indexes();
         out
     }
 
-    /// Replace (or add) one module's declarations; the subclass index is rebuilt because a
+    /// Replace (or add) one module's declarations; the derived indexes are rebuilt because a
     /// base may be canonicalized through any module.
     pub fn replace(&mut self, decls: ModuleDecls) {
         self.modules.insert(decls.module_name.clone(), decls);
-        self.rebuild_subclasses();
+        self.rebuild_indexes();
     }
 
     /// Forget a deleted module.
     pub fn remove(&mut self, module: &str) {
         if self.modules.remove(module).is_some() {
-            self.rebuild_subclasses();
+            self.rebuild_indexes();
         }
     }
 
-    fn rebuild_subclasses(&mut self) {
+    fn rebuild_indexes(&mut self) {
         let out = &*self;
         let mut subclasses: FxHashMap<String, Vec<String>> = FxHashMap::default();
+        let mut property_names = FxHashSet::default();
         for m in out.modules.values() {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
@@ -362,12 +380,19 @@ impl ProjectDecls {
                         .push(fqn.clone());
                 }
             }
+            for (qualname, f) in &m.functions {
+                if f.is_property {
+                    let name = qualname.rsplit('.').next().unwrap_or(qualname);
+                    property_names.insert(name.to_owned());
+                }
+            }
         }
         for subs in subclasses.values_mut() {
             subs.sort();
             subs.dedup();
         }
         self.subclasses = subclasses;
+        self.property_names = property_names;
     }
 
     pub fn module(&self, name: &str) -> Option<&ModuleDecls> {
@@ -510,33 +535,42 @@ impl ProjectDecls {
             .find_map(|c| self.class(c)?.attr_types.get(attr).cloned())
     }
 
-    /// Resolve `instance_of(class).method(...)`: MRO definition plus overriding project
-    /// subclasses (Priority 4 CHA). External bases supply a Layer 2 symbol fallback.
-    pub(crate) fn method_targets(&self, class: &str, method: &str, skip_self: bool) -> Callee {
-        let class = self.canonical(class);
-        if !self.is_project_class(&class) {
-            return Callee::External(format!("{class}.{method}"));
-        }
-        let mro = self.mro(&class);
+    /// The project functions `name` names on an instance of the canonical project class
+    /// `class`: the first definition along the MRO (past `class` itself with `skip_self`, for
+    /// `super()`) and, without `skip_self`, the definitions of every overriding project
+    /// subclass (Priority 4 CHA), each one kept when `keep` accepts it (sorted, deduplicated).
+    /// Also returns the first external base the MRO walk meets before a definition.
+    fn definitions(
+        &self,
+        class: &str,
+        name: &str,
+        skip_self: bool,
+        keep: impl Fn(&FuncKey) -> bool,
+    ) -> (Vec<FuncKey>, Option<String>) {
+        let mro = self.mro(class);
         let start = usize::from(skip_self);
         let mut found = Vec::new();
         let mut external = None;
         for c in mro.iter().skip(start) {
-            if let Some(k) = self.own_method(c, method) {
-                found.push(k);
+            if let Some(k) = self.own_method(c, name) {
+                if keep(&k) {
+                    found.push(k);
+                }
                 break;
             }
             if !self.is_project_class(c) && external.is_none() {
-                external = Some(format!("{c}.{method}"));
+                external = Some(format!("{c}.{name}"));
             }
         }
         if !skip_self {
-            let mut stack = vec![class.clone()];
+            let mut stack = vec![class.to_owned()];
             let mut seen = FxHashSet::default();
             while let Some(c) = stack.pop() {
                 for sub in self.subclasses.get(&c).into_iter().flatten() {
                     if seen.insert(sub.clone()) {
-                        if let Some(k) = self.own_method(sub, method) {
+                        if let Some(k) = self.own_method(sub, name)
+                            && keep(&k)
+                        {
                             found.push(k);
                         }
                         stack.push(sub.clone());
@@ -546,6 +580,17 @@ impl ProjectDecls {
         }
         found.sort();
         found.dedup();
+        (found, external)
+    }
+
+    /// Resolve `instance_of(class).method(...)`: MRO definition plus overriding project
+    /// subclasses (Priority 4 CHA). External bases supply a Layer 2 symbol fallback.
+    pub(crate) fn method_targets(&self, class: &str, method: &str, skip_self: bool) -> Callee {
+        let class = self.canonical(class);
+        if !self.is_project_class(&class) {
+            return Callee::External(format!("{class}.{method}"));
+        }
+        let (found, external) = self.definitions(&class, method, skip_self, |_| true);
         if found.len() > CHA_CANDIDATE_LIMIT {
             return Callee::TooMany;
         }
@@ -553,6 +598,35 @@ impl ProjectDecls {
             return external.map_or(Callee::Unresolved, Callee::External);
         }
         Callee::Project(found, true)
+    }
+
+    /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run
+    /// (`FunctionDecl::is_property`), found like [`Self::method_targets`]' candidates: the MRO
+    /// definition when it is a getter, plus the getters of overriding project subclasses
+    /// (Priority 4 CHA), at most `CHA_CANDIDATE_LIMIT` of them (`TooMany` beyond). `None` when
+    /// no modeled getter runs: a plain attribute, a method, an attribute of an external class
+    /// (never a Layer 2 symbol: the catalog describes calls), or a property with a setter or
+    /// deleter (`FunctionDecl::is_property`).
+    pub(crate) fn property_targets(
+        &self,
+        class: &str,
+        attr: &str,
+        skip_self: bool,
+    ) -> Option<Callee> {
+        if !self.property_names.contains(attr) {
+            return None;
+        }
+        let class = self.canonical(class);
+        if !self.is_project_class(&class) {
+            return None;
+        }
+        let is_getter = |k: &FuncKey| self.function_decl(k).is_some_and(|d| d.is_property);
+        let (found, _) = self.definitions(&class, attr, skip_self, is_getter);
+        match found.len() {
+            0 => None,
+            n if n > CHA_CANDIDATE_LIMIT => Some(Callee::TooMany),
+            _ => Some(Callee::Project(found, true)),
+        }
     }
 }
 
@@ -640,6 +714,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             .classes
             .insert(class.qualname.clone(), ClassDecl::default());
     }
+    // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
+    // function with the same qualname shares its summary).
+    let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
     for f in &input.ir.functions {
         if !is_summarized_function(f) {
             continue;
@@ -647,6 +724,8 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         decls
             .functions
             .insert(f.qualname.clone(), FunctionDecl::default());
+        let getter = f.owner_class_qualname.is_some() && f.has_decorator(PROPERTY_DECORATORS);
+        *getters_only.entry(&f.qualname).or_insert(true) &= getter;
     }
     // Resolve bases and annotations now that local names are known.
     for class in &semantic.classes {
@@ -685,6 +764,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 let last = base.rsplit('.').next().unwrap_or(base);
                 GENERATOR_KEEPING_DECORATORS.contains(&last)
             }),
+            is_property: getters_only[f.qualname.as_str()],
         };
         decls.functions.insert(f.qualname.clone(), decl);
     }
@@ -994,6 +1074,18 @@ impl<'a> TypeCtx<'a> {
             Some(Val::Inst(class)) => self.project.method_targets(class, method, false),
             Some(Val::Super(class)) => self.project.method_targets(class, method, true),
             None => Callee::Unresolved,
+        }
+    }
+
+    /// Resolve reading `recv.attr` (`AttrLoad`): the property getters it runs, which bind the
+    /// receiver (`super().attr` runs the next getter along the MRO); `None` when it runs no
+    /// project getter (see [`ProjectDecls::property_targets`]). Reading an attribute of a class
+    /// or module object (`Val::Ref`) runs none: it yields the property object itself.
+    pub fn resolve_attr_load(&self, recv: Option<&Val>, attr: &str) -> Option<Callee> {
+        match recv? {
+            Val::Inst(class) => self.project.property_targets(class, attr, false),
+            Val::Super(class) => self.project.property_targets(class, attr, true),
+            Val::Ref(_) => None,
         }
     }
 

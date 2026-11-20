@@ -1,10 +1,15 @@
 # heki
 
-heki (壁, "wall") is an effect and alias checker for Python, written in Rust. It is the third
-layer of static analysis next to a linter such as [Ruff](https://docs.astral.sh/ruff/) and a
-type checker such as [ty](https://github.com/astral-sh/ty): instead of style or types, it
-follows **what code does** across functions and modules — which objects it mutates, which
-references it shares, and which blocking, network, or database work it reaches.
+heki (Japanese for "wall") is an experimental effect and alias checker for Python, written in
+Rust. It is the third layer of static analysis next to a linter such as
+[Ruff](https://docs.astral.sh/ruff/) and a type checker such as
+[ty](https://github.com/astral-sh/ty): instead of style or types, it follows **what code does**
+across functions and modules — which objects it mutates, which references it shares, and which
+blocking, network, or database work it reaches.
+
+> **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
+> and output formats can change between releases without a deprecation period. Try it on your
+> code and report what it gets wrong, but do not depend on its output staying the same yet.
 
 ```console
 $ heki check
@@ -57,6 +62,7 @@ treats everything it cannot see as shared: a rewrite is offered only with a proo
 
 ## Next steps
 
+- See what heki [covers and does not cover](scope.md).
 - [Install heki](installation.md) and [run it on a project](getting-started.md).
 - [Configure](configuration.md) rule selection, ownership contracts, and the Python version.
 - Read how [fixes are proven safe](fixes.md).

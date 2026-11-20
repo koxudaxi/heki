@@ -1,5 +1,5 @@
 //! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
-//! `EFF107`, `EFF201` (docs/DETAILED_SPEC_M3_M7.md section 3.2).
+//! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
     ContractTarget, initializes_itself, parse_targets, patterns, project_classes, with_note,
@@ -12,7 +12,7 @@ use heki_effect::{
     FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, WriteKind, boundary_reports_in,
     group_by_root_cause,
 };
-use heki_ir::{InstKind, IrFunction, LoopBound};
+use heki_ir::{InstKind, IrFunction, LoopBound, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -164,8 +164,10 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 continue;
             }
             for inst in &bb.insts {
-                let args = match &inst.kind {
+                let args: &[VarId] = match &inst.kind {
                     InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => args,
+                    // Reading a property runs its getter (a call site at the read).
+                    InstKind::AttrLoad { .. } => &[],
                     _ => continue,
                 };
                 let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {

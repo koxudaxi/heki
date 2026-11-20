@@ -311,7 +311,7 @@ mod tests {
 
     // ---------------------------------------------------------------- Layer 1
 
-    /// DETAILED_SPEC_M3_M7.md section 1.3. `builtins.str` / `builtins.bytes` carry no
+    /// docs/ANALYSIS_AND_KB_SPEC.md section 4.1. `builtins.str` / `builtins.bytes` carry no
     /// `return_exact_type`: `__str__` / `__bytes__` may return a subclass that CPython passes
     /// through (witnessed by `tests/sentinel/verify_soundness_kb.py`).
     const LAYER1_REQUIRED: &[(&str, Option<&str>, &[SoundnessParamEffect])] = &[
@@ -445,7 +445,7 @@ mod tests {
         names.iter().map(|n| format!("{prefix}.{n}")).collect()
     }
 
-    /// DETAILED_SPEC_M3_M7.md section 1.4, as `(symbols, expected entry without symbol)`.
+    /// docs/ANALYSIS_AND_KB_SPEC.md section 4.2, as `(symbols, expected entry without symbol)`.
     fn layer2_required() -> Vec<(Vec<String>, EcosystemEntry)> {
         let verbs8 = &[
             "get", "post", "put", "delete", "patch", "head", "options", "request",

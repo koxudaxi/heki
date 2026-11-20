@@ -1,12 +1,13 @@
 [project]
 site_name = "heki"
-site_description = "Effect & Alias semantic checker for Python: shared-state, async-blocking, N+1 and quadratic-loop bugs that Ruff and type checkers do not see."
+site_description = "Experimental Effect & Alias semantic checker for Python: shared-state, async-blocking, N+1 and quadratic-loop bugs that Ruff and type checkers do not see."
 site_url = "https://heki.koxudaxi.dev"
 repo_name = "koxudaxi/heki"
 repo_url = "https://github.com/koxudaxi/heki"
 
 nav = [
   { "Overview" = "index.md" },
+  { "Scope and Limitations" = "scope.md" },
   { "Installation" = "installation.md" },
   { "Getting Started" = "getting-started.md" },
   { "Usage" = [
@@ -23,14 +24,10 @@ nav = [
   { "Development" = "development.md" },
 ]
 
-# The design documents in `docs/` are developer material (in Japanese); they stay in the
-# repository and are not part of the site.
+# Internal design docs: developer material kept in the repository, not part of the site.
 exclude_docs = """
 ANALYSIS_AND_KB_SPEC.md
 DESIGN_HISTORY_AND_ADR.md
-DETAILED_SPEC_M3_M7.md
-HANDOFF_PROMPTS.md
-IMPLEMENTATION_PLAN.md
 """
 
 [project.theme]

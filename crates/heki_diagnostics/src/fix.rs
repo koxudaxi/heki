@@ -1,5 +1,5 @@
 //! Applying fixes (`heki check --fix`) and previewing them as unified diffs (`--diff`)
-//! (docs/DETAILED_SPEC_M3_M7.md section 4.6).
+//! (docs/fixes.md).
 //!
 //! Every fix is a group of [`TextEdit`]s applied together or not at all. Groups are accepted in
 //! source order; a group that overlaps an accepted edit is skipped (safety first: a later run

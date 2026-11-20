@@ -1,5 +1,5 @@
 //! Boundary-Only Reporting and Root-Cause Grouping helpers for `EFF101` / `EFF105`
-//! (docs/DETAILED_SPEC_M3_M7.md section 2.7). Rule wiring (codes, severities) is M5's job.
+//! (docs/ANALYSIS_AND_KB_SPEC.md section 2.4). Rule wiring (codes, severities) is in `heki_rules`.
 
 use crate::summary::BLOCKING_EFFECTS;
 use crate::{CallHop, FuncKey, ProjectIndex};

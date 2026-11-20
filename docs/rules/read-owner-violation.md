@@ -21,7 +21,9 @@ A target names a class and an attribute; it covers the class's subclasses too.
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the read is reported at every call
 site of the first non-private callers above it, with the chain of calls as related
-information. Reads in a class's own initializer on its own `self` are allowed, and so are reads
+information. Reading a `@property` or `functools.cached_property` attribute calls its getter,
+so a private getter (`ref._kids` returning `self.children`) hands its read to the functions
+reading it. Reads in a class's own initializer on its own `self` are allowed, and so are reads
 in a function that only runs inside allowed contexts (every path of callers above it starts in
 an allowed reader or an exempt method), as for `MUT201`.
 

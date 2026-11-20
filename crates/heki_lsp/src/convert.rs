@@ -1,4 +1,4 @@
-//! heki diagnostics → LSP diagnostics and code actions (docs/DETAILED_SPEC_M3_M7.md 5.2).
+//! heki diagnostics → LSP diagnostics and code actions (docs/lsp.md).
 //!
 //! - `Diagnostic.related` → `DiagnosticRelatedInformation` (every call-chain hop).
 //! - `Diagnostic.fix` of `safe` + `unconditional` rules → `quickfix`; size-dependent `OPT`
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn positions_count_utf16_units() {
-        let text = "a = 1\nb = \"é😀\" + c\n";
+        let text = "a = 1\nb = \"£😀\" + c\n";
         let c = text.find("c\n").unwrap() as u32;
         assert_eq!(
             position(text, c),
@@ -179,7 +179,7 @@ mod tests {
             }
         );
         // An offset inside a multi-byte character snaps back to its start.
-        let e = text.find('é').unwrap() as u32 + 1;
+        let e = text.find('£').unwrap() as u32 + 1;
         assert_eq!(position(text, e).character, 5);
         assert_eq!(position(text, 10_000).line, 2);
     }

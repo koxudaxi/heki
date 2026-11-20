@@ -111,7 +111,7 @@ jobs:
           allow-prereleases: true
       # Every line is covered except 3 that cannot run: the `_ => {}` arms for assignment,
       # augmented-assignment and `del` targets in `heki_ir/src/builder.rs`, which ruff's parser
-      # rejects (see `docs/IMPLEMENTATION_PLAN.md`, M8). Lower the limit whenever one goes away.
+      # rejects (see `docs/development.md`). Lower the limit whenever one goes away.
       - run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-uncovered-lines 3
         env:
           HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -145,3 +145,5 @@ jobs:
         run: python tests/sentinel/verify_soundness_kb.py
       - name: Adversarial counterexamples
         run: python tests/difftest/counterexamples.py
+      - name: Counterexamples of the Soundness rewrites, end to end
+        run: python tests/difftest/soundness_e2e_counterexamples.py

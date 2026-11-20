@@ -70,7 +70,10 @@ The workspace is split by responsibility (`crates/`):
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |
 | `heki` | the command-line interface |
 
-The design documents (architecture, decisions, specifications; in Japanese) are in the
-repository: [`ARCHITECTURE.md`](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md) and
-[`docs/`](https://github.com/koxudaxi/heki/tree/main/docs). `AGENTS.md` lists the invariants every
-change must keep.
+The internal design docs are in the repository:
+[`ARCHITECTURE.md`](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md) (the design),
+[`docs/ANALYSIS_AND_KB_SPEC.md`](https://github.com/koxudaxi/heki/blob/main/docs/ANALYSIS_AND_KB_SPEC.md)
+(the analyses and knowledge bases), and
+[`docs/DESIGN_HISTORY_AND_ADR.md`](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md)
+(the decisions). [`AGENTS.md`](https://github.com/koxudaxi/heki/blob/main/AGENTS.md) lists the
+invariants every change must keep and the checks to run.

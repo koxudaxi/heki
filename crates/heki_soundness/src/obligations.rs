@@ -1,4 +1,4 @@
-//! Declarative three-valued Proof Obligations (docs/DETAILED_SPEC_M3_M7.md sections 4.3–4.5).
+//! Declarative three-valued Proof Obligations (docs/ANALYSIS_AND_KB_SPEC.md section 3.3).
 //!
 //! Each obligation is `Established`, `Blocked` (not provable here), or `Disproved` (a concrete
 //! counterexample shape exists). [`SafetyVerdict::evaluate`] aggregates them: any `Disproved`

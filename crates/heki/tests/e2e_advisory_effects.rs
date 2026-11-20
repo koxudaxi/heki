@@ -539,7 +539,8 @@ def drive(portal):
 #[test]
 fn eff103_reads_query_constants_with_non_ascii_text() {
     // The DDL prefix test once sliced the constant by bytes and panicked inside a multi-byte
-    // character, on any call in a loop whose first argument is such a string.
+    // character, on any call in a loop whose first argument is such a string (`✓` is three
+    // bytes, so bytes 4 and 5 fall inside the second one).
     let p = Project::new("effects_non_ascii_constants");
     p.write(
         "db.py",
@@ -552,17 +553,17 @@ def g(t):
 
 def label(xs):
     for x in xs:
-        g("这是对亚洲语言支持的测试")
+        g("✓✓✓ multi-byte symbols ✓✓✓")
 
 
 def query(cur: sqlite3.Cursor, ids):
     for i in ids:
-        cur.execute("SELECT * FROM 表 WHERE id = ?", (i,))
+        cur.execute("SELECT * FROM € WHERE id = ?", (i,))
 
 
 def ddl(cur: sqlite3.Cursor, names):
     for n in names:
-        cur.execute("  create table 表 (a int)")
+        cur.execute("  create table € (a int)")
 "#,
     );
     let diags = diagnostics(&p, &["--select", "EFF103"]);

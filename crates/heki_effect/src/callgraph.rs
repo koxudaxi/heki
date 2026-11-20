@@ -1,4 +1,4 @@
-//! Interprocedural propagation (docs/DETAILED_SPEC_M3_M7.md section 2.6).
+//! Interprocedural propagation (docs/ANALYSIS_AND_KB_SPEC.md section 2.2).
 //!
 //! `propagate` is the single fixpoint engine: it recomputes the final summaries of a
 //! `region` of functions from their local facts and the current finals of their callees,

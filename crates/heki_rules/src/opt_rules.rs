@@ -1,5 +1,5 @@
 //! Family 3 (`OPT101`–`OPT130`): `heki_soundness` candidates turned into diagnostics
-//! (docs/DETAILED_SPEC_M3_M7.md sections 4.5–4.6).
+//! (docs/ANALYSIS_AND_KB_SPEC.md section 3.3, docs/fixes.md).
 //!
 //! Reported: candidates that are not `Disproved`, are profitable, and have proven cost
 //! (`OptCandidate::is_reportable`). A diagnostic carries `fix` only when the rewrite is `Safe`;

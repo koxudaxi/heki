@@ -1,5 +1,5 @@
 //! `heki server` / `heki lsp`: the stdio LSP transport over [`Workspace`]
-//! (docs/DETAILED_SPEC_M3_M7.md section 5).
+//! (ARCHITECTURE.md section 8, docs/lsp.md).
 //!
 //! - `initialized`: index the workspace in the background, then publish diagnostics of every
 //!   open document.

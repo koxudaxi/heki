@@ -1,4 +1,4 @@
-//! Local (one function) effect extraction (docs/DETAILED_SPEC_M3_M7.md section 2.5).
+//! Local (one function) effect extraction (docs/ANALYSIS_AND_KB_SPEC.md section 2.2).
 //!
 //! Produces the function's local `EffectSummary` plus the `CallSite`s the interprocedural
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
@@ -381,6 +381,7 @@ impl<'a> Extractor<'a> {
                 }
                 let owner = self.owner_of(*obj);
                 self.typed_read(owner, attr, ReadKind::DirectAttr, span);
+                self.property_read(bb, *dst, *obj, attr, span);
             }
             InstKind::SubscriptLoad {
                 obj,
@@ -438,14 +439,7 @@ impl<'a> Extractor<'a> {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
                 let callee = self.cx.resolve_method(self.types.get(recv), method);
-                let is_super = matches!(self.types.get(recv), Some(Val::Super(_)));
-                let recv_is_self = is_super || self.self_vars.contains(recv);
-                let mut recv_origin = self.origin(*recv);
-                if is_super {
-                    // `super().m()` binds the calling method's own `self` (parameter 0).
-                    recv_origin.param = Some((0, None));
-                    recv_origin.may_params = 1;
-                }
+                let (recv_origin, recv_is_self) = self.receiver(*recv);
                 self.call(
                     bb,
                     *dst,
@@ -499,6 +493,44 @@ impl<'a> Extractor<'a> {
             }
             _ => {}
         }
+    }
+
+    /// The origin of a receiver bound to a method's first parameter, and whether it is the
+    /// calling method's own `self`: `super()` binds the calling method's `self` (parameter 0).
+    fn receiver(&self, recv: VarId) -> (ArgOrigin, bool) {
+        let mut origin = self.origin(recv);
+        let is_super = matches!(self.types.get(&recv), Some(Val::Super(_)));
+        if is_super {
+            origin.param = Some((0, None));
+            origin.may_params = 1;
+        }
+        (origin, is_super || self.self_vars.contains(&recv))
+    }
+
+    /// Reading `obj.attr` runs the property getters it resolves to: a project call binding the
+    /// receiver, at the read, awaited when the read value is awaited directly (an `async`
+    /// getter returns a coroutine). The read's own facts (`reads_self_attrs`, typed read
+    /// sites) stay as they are.
+    fn property_read(&mut self, bb: BlockId, dst: VarId, obj: VarId, attr: &str, span: Span) {
+        let Some(callee) = self.cx.resolve_attr_load(self.types.get(&obj), attr) else {
+            return;
+        };
+        let (recv, recv_is_self) = self.receiver(obj);
+        let is_awaited = self.uses.get(&dst).is_some_and(|uses| {
+            uses.iter()
+                .any(|u| matches!(u, InstKind::Await { value, .. } if *value == dst))
+        });
+        self.call(
+            bb,
+            dst,
+            callee,
+            Some(recv),
+            &[],
+            &[],
+            is_awaited,
+            recv_is_self,
+            span,
+        );
     }
 
     fn child_callee(&self, id: FunctionId) -> Callee {
