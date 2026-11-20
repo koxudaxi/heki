@@ -1897,3 +1897,35 @@ fn offloaded_callables_run_on_a_worker() {
         ]
     );
 }
+
+const OUT_BUFFERS: &str = r#"import numpy as np
+
+
+def tn_preallocated_buffer(pairs):
+    out = np.empty(2)
+    for a, b in pairs:
+        out = np.concatenate(([a], [b]), out=out)
+    return out
+
+
+def tp_accumulated_into_a_buffer(rows):
+    acc = np.empty(0)
+    for row in rows:
+        acc = np.concatenate((acc, row), out=None)
+    return acc
+"#;
+
+/// `out=` only names the buffer a concatenation writes into: the result rebuilt from the data it
+/// combines is what grows.
+#[test]
+fn concatenation_into_a_supplied_buffer_does_not_accumulate() {
+    assert_eq!(
+        check(
+            "catalog_out_buffers",
+            "app/buffers.py",
+            OUT_BUFFERS,
+            "DATA101"
+        ),
+        vec![d(14, "DATA101", "tp_accumulated_into_a_buffer", "acc")]
+    );
+}
