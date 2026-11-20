@@ -13,10 +13,10 @@ use crate::resolver::{
     is_generator_function, self_aliases,
 };
 use crate::{
-    ArgBinding, ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Construction,
-    Contracts, EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput, NewArg, NewCond,
-    NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SiteRole, Slot, TypedFieldReadSite,
-    TypedFieldWriteSite, Unresolved, UnresolvedWriteSite, WriteKind,
+    ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget,
+    Construction, Contracts, EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput,
+    NewArg, NewCond, NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SiteRole, Slot,
+    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
@@ -979,20 +979,44 @@ impl<'a> Extractor<'a> {
 
     fn origin(&self, var: VarId) -> ArgOrigin {
         let field = self.obj_attr_alias.get(&var);
+        let typed_field = field
+            .filter(|a| a.classes.len() == 1)
+            .map(|a| (a.classes[0].clone(), a.attr.clone()));
+        let typed_instance = self.project_class(var);
         ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
-            typed_field: field
-                .filter(|a| a.classes.len() == 1)
-                .map(|a| (a.classes[0].clone(), a.attr.clone())),
-            typed_instance: self.project_class(var),
+            targets: self.arg_targets(typed_field.as_ref(), typed_instance.as_deref()),
+            typed_field,
+            typed_instance,
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
             reach: self.reach_of(var),
             binding: None,
             new_object: NewArg::Old,
         }
+    }
+
+    /// [`ArgOrigin::targets`] of an argument that is the field `field` and an instance of
+    /// `instance` (`None` without an `invalidation` contract naming either).
+    fn arg_targets(
+        &self,
+        field: Option<&(String, String)>,
+        instance: Option<&str>,
+    ) -> Option<Box<ArgTargets>> {
+        let c = self.contracts.filter(|_| self.events.is_some())?;
+        let with_bases = |class: &str| {
+            let mut classes = vec![class.to_owned()];
+            classes.extend(self.cx.project.ancestors_of(class));
+            classes
+        };
+        let field = field.map_or(0, |(class, attr)| c.target_of(&with_bases(class), attr));
+        let classes = instance
+            .map(with_bases)
+            .filter(|classes| c.names_class(classes))
+            .unwrap_or_default();
+        (field != 0 || !classes.is_empty()).then(|| Box::new(ArgTargets { field, classes }))
     }
 
     /// String constant behind `var` (through `Copy`): a string literal, or, for contract
@@ -2075,7 +2099,8 @@ impl<'a> Extractor<'a> {
         if let (Some(c), Some(events)) = (self.contracts, self.events.as_mut())
             && reach.any()
         {
-            let own_init = invalidation::is_initializer(self.key) && reach.params & 1 != 0;
+            let initializer = invalidation::is_initializer(self.key);
+            let own_init = invalidation::builds_written_object(initializer, reach, obj.params);
             // The class and its project bases: a target class covers its subclasses.
             let mut classes = vec![class.clone()];
             classes.extend(self.cx.project.ancestors_of(&class));
@@ -2097,6 +2122,7 @@ impl<'a> Extractor<'a> {
                         kind,
                         span,
                         reach,
+                        obj_params: obj.params,
                         flow: SiteFlow::default(),
                     },
                 ));

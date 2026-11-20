@@ -13,7 +13,9 @@ use super::{MergedReports, is_private, with_note};
 use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
 use heki_diagnostics::Diagnostic;
-use heki_effect::{FuncKey, Reach, UnmetWrite, body_runs_at, is_initializer, reach_across};
+use heki_effect::{
+    FuncKey, Reach, UnmetWrite, body_runs_at, builds_written_object, is_initializer, reach_across,
+};
 use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
 
@@ -111,9 +113,10 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
 /// project caller is an exempt writer of the contract, builds the written object (its own
 /// initialization, or an instance it constructs), announces the change on every normal path
 /// after the call, or has callers that do so after calling it in turn (invalidation in bulk by a
-/// distant caller). The walk goes breadth first over `(function, written-object parameters)`
-/// states, like `MUT201`'s allowed-context walk: a function without project callers ends a path
-/// unannounced, and paths that only cycle announce nothing.
+/// distant caller). The walk goes breadth first over the written object as each function sees
+/// it (where it comes from, and the parameters it may be), like `MUT201`'s allowed-context walk:
+/// a function without project callers ends a path unannounced, and paths that only cycle
+/// announce nothing.
 fn announced_by_callers(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
@@ -123,11 +126,12 @@ fn announced_by_callers(
 ) -> bool {
     let bit = 1u64 << u.contract;
     let contract = &names.invalidations[usize::from(u.contract)];
-    let mut queue = VecDeque::from([(func.clone(), u.reach)]);
-    let mut visited: FxHashSet<(FuncKey, Reach)> = FxHashSet::default();
-    visited.insert((func.clone(), u.reach));
+    let start = (func.clone(), u.reach, u.obj_params);
+    let mut queue = VecDeque::from([start.clone()]);
+    let mut visited: FxHashSet<(FuncKey, Reach, u64)> = FxHashSet::default();
+    visited.insert(start);
     let mut announced = false;
-    while let Some((callee, reach)) = queue.pop_front() {
+    while let Some((callee, reach, obj_params)) = queue.pop_front() {
         let Some(callers) = cx
             .index
             .reverse_call_graph
@@ -158,15 +162,16 @@ fn announced_by_callers(
                     // The caller builds the written object (its own initialization, or one it
                     // constructs, copies, or gets from a call): nothing to announce on this path.
                     let caller_reach = reach_across(reach, bc);
-                    let builds = !caller_reach.any()
-                        || is_initializer(caller) && caller_reach.params & 1 != 0;
+                    let caller_obj = bc.caller_params_of(obj_params);
+                    let builds =
+                        builds_written_object(is_initializer(caller), caller_reach, caller_obj);
                     let covered = site
                         .flow
                         .is_some_and(|f| cx.index.covered_after(path, &f, bit) & bit != 0);
                     if builds || covered {
                         announced = true;
-                    } else if visited.insert((caller.clone(), caller_reach)) {
-                        queue.push_back((caller.clone(), caller_reach));
+                    } else if visited.insert((caller.clone(), caller_reach, caller_obj)) {
+                        queue.push_back((caller.clone(), caller_reach, caller_obj));
                     }
                 }
             }

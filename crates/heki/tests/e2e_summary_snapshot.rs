@@ -63,7 +63,9 @@ fn a_snapshot_is_not_rewritten_while_a_module_cannot_be_analyzed() {
     let (code, _, stderr) = p.heki(&["snapshot", "--write"]);
     assert_eq!(code, 2);
     assert!(
-        stderr.contains("Summary snapshot not written") && stderr.contains("syntax error"),
+        stderr.contains("summary snapshot")
+            && stderr.contains("not written")
+            && stderr.contains("syntax error"),
         "{stderr}"
     );
     assert_eq!(p.read(".heki-summary-snapshot.json"), before);

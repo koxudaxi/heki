@@ -1007,6 +1007,150 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
     assert!(diagnostics(&p, &["--select", "MUT109"]).is_empty());
 }
 
+const BINDING_CONFIG: &str = r#"[[tool.heki.invalidation]]
+name = "model"
+targets = ["Model.items", "Model.x"]
+invalidators = ["notify"]
+"#;
+const INITIALIZERS: &str = r#"class Model:
+    def __init__(self) -> None:
+        self.x = 0
+        _reset_x(self)
+
+
+def notify(m: Model) -> None:
+    pass
+
+
+def _reset_x(m: Model) -> None:
+    m.x = 0
+
+
+class Holder:
+    model: Model
+
+    def __init__(self, model: Model) -> None:
+        self.model = model
+        self.model.x = 1
+
+
+class Keeper:
+    model: Model
+
+    def __init__(self, model: Model) -> None:
+        self.model = model
+        _touch(self)
+
+
+def _touch(k: Keeper) -> None:
+    k.model.x = 2
+"#;
+
+#[test]
+fn mut109_initializers_build_only_their_own_self() {
+    let p = Project::new("mut109_initializers");
+    p.write("pyproject.toml", BINDING_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/models.py", INITIALIZERS);
+    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let m = "pkg/models.py";
+    // An initializer builds its own `self`, also through a helper it hands `self` to; an
+    // object reached through `self`'s attributes existed before (`Holder`, and `Keeper` through
+    // a helper).
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(m, 20, "MUT109", "Holder.__init__"),
+            d(m, 28, "MUT109", "Keeper.__init__"),
+        ],
+        "{diags:#?}"
+    );
+    assert!(
+        diags[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("(direct_attr) via `pkg.models._touch`"),
+        "{diags:#?}"
+    );
+}
+
+const BINDING: &str = r#"from __future__ import annotations
+
+
+class Model:
+    def __init__(self, other: Model | None = None) -> None:
+        self.items: list[int] = []
+        self.x = 0
+        _fill(self.items)
+        _set_x(self)
+        if other is not None:
+            _both(self, other.items)
+
+
+def notify(m: Model) -> None:
+    pass
+
+
+def _fill(xs) -> None:
+    xs.append(1)
+
+
+def _set_x(o) -> None:
+    o.x = 1
+
+
+def _both(m: Model, xs) -> None:
+    m.items = []
+    xs.append(1)
+
+
+def fill(m: Model) -> None:
+    _fill(m.items)
+
+
+def fill_ok(m: Model) -> None:
+    _fill(m.items)
+    notify(m)
+
+
+def set_x(m: Model) -> None:
+    _set_x(m)
+
+
+def set_x_ok(m: Model) -> None:
+    _set_x(m)
+    notify(m)
+"#;
+
+#[test]
+fn mut109_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
+    let p = Project::new("mut109_binding");
+    p.write("pyproject.toml", BINDING_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/models.py", BINDING);
+    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let m = "pkg/models.py";
+    // A helper changing an argument it does not type writes the field or the instance the
+    // caller binds to it (`fill`, `set_x`, and `other.items` in `Model.__init__`); the
+    // initializer's own fields are its construction.
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(m, 11, "MUT109", "Model.__init__"),
+            d(m, 32, "MUT109", "fill"),
+            d(m, 41, "MUT109", "set_x"),
+        ],
+        "{diags:#?}"
+    );
+    assert!(
+        diags[1]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("`fill` writes `Model.items` (indirect_helper) via `pkg.models._fill`"),
+        "{diags:#?}"
+    );
+}
+
 #[test]
 fn mut109_configuration_errors() {
     let p = inv_project("mut109_config");

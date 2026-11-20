@@ -454,6 +454,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   the callees' `must_invalidate`. A callee's writes and announcements are taken where its body
   runs (`ProjectIndex::delivery`): a plain function at its call, a generator where it is iterated
   or inside the function it is handed to; only bodies run at their call count as announcing.
+  A write a callee makes through an argument it does not type (an in-place change of `obj.attr`,
+  an attribute of `obj`) is the caller's write at the call: the caller's argument binding ties
+  it to a class (`ArgOrigin::targets`, the same `callgraph::indirect_writes` the ownership rules
+  use). The written object's identity (`obj_params`, the parameters it may be as itself) decides
+  an initializer's own construction: its `self`, not the objects reached through `self`.
 - Reporting: private helpers never report and pass the obligation to their callers; a public
   function is relieved when every caller path announces the change after the call (a
   breadth-first walk over the callers; exempt callers count).

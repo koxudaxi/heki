@@ -157,6 +157,14 @@ impl Contracts for ConfigContracts {
     fn target_of(&self, classes: &[String], attr: &str) -> u64 {
         mask(&self.invalidations, |c| c.target(classes, attr).is_some())
     }
+
+    fn names_class(&self, classes: &[String]) -> bool {
+        self.invalidations.iter().any(|c| {
+            c.targets
+                .iter()
+                .any(|(_, class, _)| classes.iter().any(|name| class.matches(name)))
+        })
+    }
 }
 
 /// Bit `i` set for every contract `i` that `has` holds for.
