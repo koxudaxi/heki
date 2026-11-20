@@ -1127,40 +1127,9 @@ impl<'a> Analyzer<'a> {
                     self.visit_expr(&kw.value);
                 }
             }
-            Expr::FString(fs) => {
-                for part in fs.value.iter() {
-                    if let ast::FStringPartRef::FString(fstr) = part {
-                        for elem in &fstr.elements {
-                            if let ast::InterpolatedStringElement::Interpolation(interp) = elem {
-                                self.visit_expr(&interp.expression);
-                                if let Some(spec) = &interp.format_spec {
-                                    for se in &spec.elements {
-                                        if let ast::InterpolatedStringElement::Interpolation(si) =
-                                            se
-                                        {
-                                            self.visit_expr(&si.expression);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Expr::TString(ts) => {
-                for part in ts.value.iter() {
-                    for elem in &part.elements {
-                        if let ast::InterpolatedStringElement::Interpolation(interp) = elem {
-                            self.visit_expr(&interp.expression);
-                            if let Some(spec) = &interp.format_spec {
-                                for se in &spec.elements {
-                                    if let ast::InterpolatedStringElement::Interpolation(si) = se {
-                                        self.visit_expr(&si.expression);
-                                    }
-                                }
-                            }
-                        }
-                    }
+            Expr::FString(_) | Expr::TString(_) => {
+                for field in heki_ast::interpolated_expressions(expr) {
+                    self.visit_expr(field);
                 }
             }
             Expr::Attribute(a) => self.visit_expr(&a.value),

@@ -1173,3 +1173,40 @@ fn a_fixpoint_not_reached_in_64_passes_blocks_every_candidate() {
         true,
     );
 }
+
+// ================================================ frames, bindings, and paths the IR models
+
+const STORED: &str = "Unique(xs): it may be shared: stored in a container, attribute, or global";
+
+const IR_COUNTEREXAMPLES: &[Expect] = &[
+    // A replacement field may rebind a builtin name or store the accumulator.
+    ("cx_walrus_in_fstring", &[]),
+    ("cx_nested_format_spec", &[("OPT101", V::Blocked(STORED))]),
+];
+
+#[test]
+fn ir_counterexamples_stay_unrewritten() {
+    check_fixture_unchanged(
+        "sound_ir_cx",
+        "tests/difftest/ir_counterexamples.py",
+        IR_COUNTEREXAMPLES,
+    );
+}
+
+/// The originals of a counterexample fixture: the verdicts of `expect`, no edit under any
+/// `--fix`, and CPython confirms that each old rewrite diverged.
+fn check_fixture_unchanged(name: &str, fixture: &str, expect: &[Expect]) {
+    let p = Project::new(name);
+    let original = repo_file(fixture);
+    p.write("cases.py", &original);
+    assert_verdicts(&opt_json(&p, &["--include-size-dependent"]), expect);
+    let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
+    assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
+    assert_eq!(p.read("cases.py"), original);
+    let transcript = run_python(&p.dir, "cases.py");
+    let total = transcript.lines().count() - 1;
+    assert!(
+        transcript.contains(&format!("old rewrites diverge: {total}/{total}")),
+        "{transcript}"
+    );
+}

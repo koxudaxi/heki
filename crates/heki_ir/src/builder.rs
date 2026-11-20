@@ -2304,24 +2304,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 dc.key.as_deref(),
                 span,
             ),
-            Expr::FString(fs) => {
-                for part in fs.value.iter() {
-                    if let ast::FStringPartRef::FString(fstr) = part {
-                        for elem in &fstr.elements {
-                            if let ast::InterpolatedStringElement::Interpolation(interp) = elem {
-                                let _ = self.lower_expr(&interp.expression);
-                                if let Some(spec) = &interp.format_spec {
-                                    for se in &spec.elements {
-                                        if let ast::InterpolatedStringElement::Interpolation(si) =
-                                            se
-                                        {
-                                            let _ = self.lower_expr(&si.expression);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            Expr::FString(_) => {
+                for field in heki_ast::interpolated_expressions(expr) {
+                    let _ = self.lower_expr(field);
                 }
                 let dst = self.fresh_var(None);
                 self.emit(
@@ -2334,20 +2319,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 );
                 dst
             }
-            Expr::TString(ts) => {
-                for part in ts.value.iter() {
-                    for elem in &part.elements {
-                        if let ast::InterpolatedStringElement::Interpolation(interp) = elem {
-                            let _ = self.lower_expr(&interp.expression);
-                            if let Some(spec) = &interp.format_spec {
-                                for se in &spec.elements {
-                                    if let ast::InterpolatedStringElement::Interpolation(si) = se {
-                                        let _ = self.lower_expr(&si.expression);
-                                    }
-                                }
-                            }
-                        }
-                    }
+            Expr::TString(_) => {
+                for field in heki_ast::interpolated_expressions(expr) {
+                    let _ = self.lower_expr(field);
                 }
                 self.emit_const(ConstLiteral::Other, span)
             }
@@ -3491,6 +3465,11 @@ fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
             collect_expr_bindings(&s.slice, out);
         }
         Expr::Starred(s) => collect_expr_bindings(&s.value, out),
+        Expr::FString(_) | Expr::TString(_) => {
+            for field in heki_ast::interpolated_expressions(expr) {
+                collect_expr_bindings(field, out);
+            }
+        }
         Expr::Slice(s) => {
             if let Some(l) = &s.lower {
                 collect_expr_bindings(l, out);
