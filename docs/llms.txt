@@ -23,7 +23,7 @@
 
 ## Integrations
 
-- [Editors (LSP)](https://heki.koxudaxi.dev/lsp/): heki server (alias heki lsp) is a Language Server Protocol server on stdin / stdout
+- [Editors (LSP)](https://heki.koxudaxi.dev/lsp/): heki server (alias heki lsp) is a Language Server Protocol server on stdin / stdout: it shows heki's diagnostics and fixes while you edit, with the results heki check reports
 - [Coding Agents](https://heki.koxudaxi.dev/coding-agents/): heki's output is designed to be acted on by people and by coding agents (Claude Code, Codex, Cursor, and similar): every diagnostic says what was proven, where the evidence is, and what blocks a fix
 
 ## Docs
