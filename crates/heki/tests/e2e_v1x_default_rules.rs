@@ -503,7 +503,7 @@ class Worker:
     names: list[str]
 
     def __init__(self):
-        self.items = []
+        self.items = list()
         self._running = True
 
     def drop(self, xs):
@@ -658,20 +658,22 @@ fn opt112_reports_linear_scans_of_long_lived_lists_in_data_sized_loops() {
     let l = "lookups.py";
     // Reported: annotated parameters (`list[str]`, `List[int]`, through an alias), `list(...)`,
     // a module global another function appends to or rebinds to another global (no known
-    // display), a 9-element module constant, displays that
-    // change (append, item assignment, `+=` through an alias), of non-constants, or of more
-    // than 8 elements, a conditional `break`, `self.attr` lists (from `__init__`, from a class
-    // annotation, an instance or class attribute another method appends to), a list behind a
-    // constant subscript, a comprehension, phis of long-lived lists (in the loop and before
-    // it), a loop-carried rebinding, an inner loop over a list of the outer iteration, a
-    // `while` condition and body, and module-level code.
-    // Not reported: small constant lists (local, module global, imported, `module.NAME`, an
-    // instance attribute its class only assigns one, also on another instance, a class
-    // attribute), displays built per iteration, one-shot calls (`break` / `return` on every
-    // path), small constant / retry / daemon loops (also over a local or module constant
-    // tuple), lists of the loop element or behind a loop-varying subscript, `str` / `set` /
-    // `list` subclass / project class / unknown receivers, the `for` iterable, a list that may
-    // be a fresh one, `index(x, start)` (a moving cursor), and the suppressed call.
+    // display), a 9-element module constant, displays that grow (append, `+=` through an
+    // alias, stored where other code may grow them) or of more than 8 elements, a conditional
+    // `break`, `self.attr` lists (from `__init__`, from a class annotation, an instance or
+    // class attribute another method appends to), a list behind a constant subscript, a
+    // comprehension, phis of long-lived lists (in the loop and before it), a loop-carried
+    // rebinding, an inner loop over a list of the outer iteration, a `while` condition and
+    // body, and module-level code.
+    // Not reported: small lists (displays of at most 8 items that nothing grows, also when
+    // their items are not constants or are replaced in place: local, module global, imported,
+    // `module.NAME`, an instance attribute its class only assigns one, also on another
+    // instance, a class attribute), displays built per iteration, one-shot calls (`break` /
+    // `return` on every path), small constant / retry / daemon loops (also over a local or
+    // module constant tuple), lists of the loop element or behind a loop-varying subscript,
+    // `str` / `set` / `list` subclass / project class / unknown receivers, the `for` iterable,
+    // a list that may be a fresh one, `index(x, start)` (a moving cursor), and the suppressed
+    // call.
     assert_eq!(
         found(&diags),
         vec![
@@ -681,9 +683,7 @@ fn opt112_reports_linear_scans_of_long_lived_lists_in_data_sized_loops() {
             d(l, 51, "OPT112", "globals_and_constants"),
             d(l, 54, "OPT112", "globals_and_constants"),
             d(l, 68, "OPT112", "displays"),
-            d(l, 70, "OPT112", "displays"),
             d(l, 72, "OPT112", "displays"),
-            d(l, 74, "OPT112", "displays"),
             d(l, 75, "OPT112", "displays"),
             d(l, 97, "OPT112", "conditional_break"),
             d(l, 121, "OPT112", "Worker.drop"),
@@ -712,9 +712,7 @@ fn opt112_reports_linear_scans_of_long_lived_lists_in_data_sized_loops() {
             "REGISTRY",
             "consts.SIZES",
             "grow",
-            "stored",
             "added",
-            "pair",
             "nine",
             "items",
             "self.items",
