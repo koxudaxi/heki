@@ -56,7 +56,6 @@ pub struct Binding {
     pub is_lazy_import: bool,
 }
 
-/// Extracted module import entry (used by `heki_effect` and `heki_ir`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleImport {
     pub scope: ScopeId,
@@ -284,6 +283,32 @@ impl ScopeBuilder {
             self.raw_reads.push(name);
         }
     }
+
+    /// The bindings plus the PEP 709 inlined comprehension targets that materialize as locals of
+    /// this scope, and those targets; the other targets stay isolated because the scope
+    /// references a global or enclosing name of the same identifier.
+    fn bindings_with_comp_locals(&self) -> (Vec<Binding>, FxHashSet<String>) {
+        let mut effective_bindings = self.bindings.clone();
+        let mut effective_comp_locals = FxHashSet::default();
+        for (cname, cspan) in &self.comp_target_bindings {
+            if self.bound_names.contains(cname) || self.declares(cname) {
+                continue;
+            }
+            // If the enclosing scope itself reads `cname` OUTSIDE the comprehension
+            // (or assigns it via module-level comprehension walrus), preserve outer global/enclosing resolution.
+            if self.non_comp_reads.contains(cname) || self.module_walrus_globals.contains(cname) {
+                continue;
+            }
+            effective_comp_locals.insert(cname.clone());
+            effective_bindings.push(Binding {
+                name: cname.clone(),
+                span: *cspan,
+                is_parameter: false,
+                is_lazy_import: false,
+            });
+        }
+        (effective_bindings, effective_comp_locals)
+    }
 }
 
 /// What a module-scope binding makes a name, for `TYPE_CHECKING` guards.
@@ -428,7 +453,6 @@ impl<'a> Analyzer<'a> {
             .unwrap_or(ScopeId(0))
     }
 
-    /// Bind the target `n` of a PEP 572 walrus (`n := value`) in its target scope.
     fn bind_walrus_target(&mut self, n: &ast::ExprName) {
         let cur_sid = self.cur_scope_id();
         let target_sid = self.walrus_target_scope();
@@ -855,8 +879,20 @@ impl<'a> Analyzer<'a> {
             self.visit_expr(&dec.expression);
         }
         self.visit_param_defaults(&func.parameters);
+        self.bind_function_name(func);
+        let qualname = self.child_qualname(func.name.as_str());
+        let has_type_params =
+            self.push_type_params_scope(func.type_params.as_deref(), func.name.as_str(), line);
+        self.visit_signature_annotations(func, line);
+        self.visit_function_body(func, qualname, line);
+        if has_type_params {
+            self.pop_scope();
+        }
+    }
 
-        // Bind function name in enclosing scope (and record method on enclosing class for CHA).
+    /// In the enclosing scope; a function a class body defines directly is also one of the
+    /// class's methods (CHA).
+    fn bind_function_name(&mut self, func: &ast::StmtFunctionDef) {
         self.cur_scope_mut().add_binding(
             func.name.as_str(),
             Span::from(func.name.range),
@@ -869,21 +905,27 @@ impl<'a> Analyzer<'a> {
                 .methods
                 .push(func.name.to_string());
         }
-        let qualname = self.child_qualname(func.name.as_str());
+    }
 
-        // Optional PEP 695 type parameters scope.
-        let has_type_params = func
-            .type_params
-            .as_ref()
-            .is_some_and(|tp| !tp.type_params.is_empty());
-        if let Some(tp) = &func.type_params
+    /// Opens the PEP 695 type-parameter scope of a definition that declares type parameters,
+    /// left open for the caller to pop: whether it opened one.
+    fn push_type_params_scope(
+        &mut self,
+        type_params: Option<&ast::TypeParams>,
+        name: &str,
+        line: u32,
+    ) -> bool {
+        let has_type_params = type_params.is_some_and(|tp| !tp.type_params.is_empty());
+        if let Some(tp) = type_params
             && !tp.type_params.is_empty()
         {
-            self.push_scope(ScopeKind::TypeParameters, func.name.to_string(), line);
+            self.push_scope(ScopeKind::TypeParameters, name.to_string(), line);
             self.bind_type_params(tp);
         }
+        has_type_params
+    }
 
-        // Parameter and return annotations.
+    fn visit_signature_annotations(&mut self, func: &ast::StmtFunctionDef, line: u32) {
         let func_anns = collect_func_annotations(func);
         if !self.has_future_annotations {
             if self.profile.pep649_deferred_annotations {
@@ -900,18 +942,15 @@ impl<'a> Analyzer<'a> {
                 }
             }
         }
+    }
 
-        // Function body scope.
+    fn visit_function_body(&mut self, func: &ast::StmtFunctionDef, qualname: String, line: u32) {
         self.push_scope(ScopeKind::Function, func.name.to_string(), line);
         self.bind_parameters(&func.parameters);
         self.qualnames.push((qualname, true));
         self.visit_suite(&func.body);
         self.qualnames.pop();
         self.pop_scope();
-
-        if has_type_params {
-            self.pop_scope();
-        }
     }
 
     fn visit_class_def(&mut self, cls: &ast::StmtClassDef) {
@@ -929,16 +968,8 @@ impl<'a> Analyzer<'a> {
         );
         self.note_guard_binding(cls.name.as_str(), GuardBinding::Other);
 
-        let has_type_params = cls
-            .type_params
-            .as_ref()
-            .is_some_and(|tp| !tp.type_params.is_empty());
-        if let Some(tp) = &cls.type_params
-            && !tp.type_params.is_empty()
-        {
-            self.push_scope(ScopeKind::TypeParameters, cls.name.to_string(), line);
-            self.bind_type_params(tp);
-        }
+        let has_type_params =
+            self.push_type_params_scope(cls.type_params.as_deref(), cls.name.as_str(), line);
 
         let mut bases = Vec::new();
         let mut keywords = Vec::new();
@@ -990,16 +1021,8 @@ impl<'a> Analyzer<'a> {
             .add_binding(name.id.as_str(), Span::from(name.range), false, false);
         let alias_name = name.id.to_string();
 
-        let has_type_params = ta
-            .type_params
-            .as_ref()
-            .is_some_and(|tp| !tp.type_params.is_empty());
-        if let Some(tp) = &ta.type_params
-            && !tp.type_params.is_empty()
-        {
-            self.push_scope(ScopeKind::TypeParameters, alias_name.clone(), line);
-            self.bind_type_params(tp);
-        }
+        let has_type_params =
+            self.push_type_params_scope(ta.type_params.as_deref(), &alias_name, line);
         self.push_scope(ScopeKind::TypeAlias, alias_name, line);
         self.visit_expr(&ta.value);
         self.pop_scope();
@@ -1361,67 +1384,16 @@ impl<'a> Analyzer<'a> {
             .scopes
             .iter()
             .map(|sc| {
-                // Determine which PEP 709 inlined comprehension targets materialize as scope locals
-                // vs stay isolated because the outer scope references a global/enclosing name of the same identifier.
-                let mut effective_bindings = sc.bindings.clone();
-                let mut effective_comp_locals = FxHashSet::default();
-                for (cname, cspan) in &sc.comp_target_bindings {
-                    if sc.bound_names.contains(cname) || sc.declares(cname) {
-                        continue;
-                    }
-                    // If the enclosing scope itself reads `cname` OUTSIDE the comprehension
-                    // (or assigns it via module-level comprehension walrus), preserve outer global/enclosing resolution.
-                    if sc.non_comp_reads.contains(cname) || sc.module_walrus_globals.contains(cname)
-                    {
-                        continue;
-                    }
-                    effective_comp_locals.insert(cname.clone());
-                    effective_bindings.push(Binding {
-                        name: cname.clone(),
-                        span: *cspan,
-                        is_parameter: false,
-                        is_lazy_import: false,
-                    });
-                }
-
-                let mut reads = Vec::new();
-                let mut inlined_comp_only_reads = Vec::new();
-                for name in &sc.raw_reads {
-                    let comp_only =
-                        sc.in_comp_reads.contains(name) && !sc.non_comp_reads.contains(name);
-                    // CPython 3.12+ PEP 709: class-body comprehension reads of class-bound names
-                    // (not bound by the comprehension itself) do not resolve to the class scope.
-                    let skip_self_class = sc.kind == ScopeKind::Class
-                        && sc.class_comp_reads.contains(name)
-                        && !sc.class_comp_bindings.contains(name);
-                    if skip_self_class && sc.bound_names.contains(name) {
-                        continue;
-                    }
-                    let res = if effective_comp_locals.contains(name) {
-                        if sc.kind == ScopeKind::Module {
-                            NameResolution::Global
-                        } else {
-                            NameResolution::Local
-                        }
-                    } else {
-                        resolver.resolve(sc.id, name)
-                    };
-                    if comp_only {
-                        inlined_comp_only_reads.push(name.clone());
-                    }
-                    reads.push((name.clone(), res));
-                }
-                reads.sort_by(|a, b| a.0.cmp(&b.0));
-                inlined_comp_only_reads.sort();
-                effective_bindings.sort_by(|a, b| a.name.cmp(&b.name));
-
+                let (mut bindings, comp_locals) = sc.bindings_with_comp_locals();
+                let (reads, inlined_comp_only_reads) = resolver.resolve_reads(sc, &comp_locals);
+                bindings.sort_by(|a, b| a.name.cmp(&b.name));
                 Scope {
                     id: sc.id,
                     parent: sc.parent,
                     kind: sc.kind,
                     name: sc.name.clone(),
                     line: sc.line,
-                    bindings: effective_bindings,
+                    bindings,
                     global_decls: sorted(&sc.global_decls),
                     nonlocal_decls: sorted(&sc.nonlocal_decls),
                     reads,
@@ -1484,6 +1456,45 @@ struct Resolver<'s> {
 impl Resolver<'_> {
     fn scope(&self, id: ScopeId) -> &ScopeBuilder {
         &self.scopes[id.0 as usize]
+    }
+
+    /// The resolution of each name `sc` reads, and the names it reads only inside its PEP 709
+    /// inlined comprehensions, both sorted; `comp_locals` are the comprehension targets that
+    /// materialized as locals of `sc`.
+    fn resolve_reads(
+        &self,
+        sc: &ScopeBuilder,
+        comp_locals: &FxHashSet<String>,
+    ) -> (Vec<(String, NameResolution)>, Vec<String>) {
+        let mut reads = Vec::new();
+        let mut inlined_comp_only_reads = Vec::new();
+        for name in &sc.raw_reads {
+            let comp_only = sc.in_comp_reads.contains(name) && !sc.non_comp_reads.contains(name);
+            // CPython 3.12+ PEP 709: class-body comprehension reads of class-bound names
+            // (not bound by the comprehension itself) do not resolve to the class scope.
+            let skip_self_class = sc.kind == ScopeKind::Class
+                && sc.class_comp_reads.contains(name)
+                && !sc.class_comp_bindings.contains(name);
+            if skip_self_class && sc.bound_names.contains(name) {
+                continue;
+            }
+            let res = if comp_locals.contains(name) {
+                if sc.kind == ScopeKind::Module {
+                    NameResolution::Global
+                } else {
+                    NameResolution::Local
+                }
+            } else {
+                self.resolve(sc.id, name)
+            };
+            if comp_only {
+                inlined_comp_only_reads.push(name.clone());
+            }
+            reads.push((name.clone(), res));
+        }
+        reads.sort_by(|a, b| a.0.cmp(&b.0));
+        inlined_comp_only_reads.sort();
+        (reads, inlined_comp_only_reads)
     }
 
     fn resolve(&self, scope_id: ScopeId, name: &str) -> NameResolution {
@@ -1695,19 +1706,16 @@ class Child(Base):
 ";
         let parsed = parse_module(src).unwrap();
         let m315 = analyze_module(&parsed, src, RuntimeProfile::from(PythonVersion::PY315));
-        // PEP 810 lazy import tracked
         assert!(
             m315.imports
                 .iter()
                 .any(|i| i.bound_name == "json" && i.is_lazy)
         );
-        // TYPE_CHECKING tracked
         assert!(
             m315.imports
                 .iter()
                 .any(|i| i.bound_name == "collections" && i.in_type_checking)
         );
-        // Nested class isolated from Child
         assert_eq!(m315.classes.len(), 3);
         let child = m315.classes.iter().find(|c| c.name == "Child").unwrap();
         let nested = m315.classes.iter().find(|c| c.name == "Nested").unwrap();
