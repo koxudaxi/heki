@@ -1468,9 +1468,14 @@ impl<'a> Extractor<'a> {
         let mut origin = self.origin(recv);
         let mut binding = self.binding(recv, self.loops_around(bb));
         let is_super = matches!(self.val(recv), Some(Val::Super(_)));
+        // `super()` is the method's own `self`, found along the MRO past its class.
         if is_super {
             origin.param = Some((0, None));
             origin.may_params = 1;
+            origin.reach = origin.reach.join(Reach {
+                params: 1,
+                globals: false,
+            });
             binding.input = Some(GuardSubject {
                 param: 0,
                 attr: None,

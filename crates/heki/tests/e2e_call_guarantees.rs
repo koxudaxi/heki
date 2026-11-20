@@ -2,7 +2,7 @@
 //! path (an announcement of `MUT109`, a consumption of `MUT106`) holds at a call only when
 //! every implementation the call may run guarantees it (an abstract method never runs). And
 //! which written objects existed before a call (`MUT109`): a value merged from a new object and
-//! an existing one may be the existing one.
+//! an existing one may be the existing one, and `super()` is the method's own `self`.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# MUT109`); every other line must not be.
@@ -218,6 +218,33 @@ fn a_merged_field_alias_may_be_an_existing_objects_field() {
     check_marks(
         "merged_field_aliases",
         &[("pkg/model.py", MODEL), ("pkg/merged.py", MERGED)],
+        &["MUT109"],
+    );
+}
+
+/// A helper of the base class called through `super()` writes the caller's own `self`.
+const CHILDREN: &str = r#"from pkg.model import Model
+
+
+class Base(Model):
+    def _set(self):
+        self.x = 1
+
+
+class Child(Base):
+    def __init__(self):
+        super().__init__()
+        super()._set()
+
+    def update(self):
+        super()._set()  # MUT109
+"#;
+
+#[test]
+fn super_is_the_methods_own_self() {
+    check_marks(
+        "super_receivers",
+        &[("pkg/model.py", MODEL), ("pkg/children.py", CHILDREN)],
         &["MUT109"],
     );
 }
