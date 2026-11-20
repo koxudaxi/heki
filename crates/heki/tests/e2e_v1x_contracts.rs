@@ -1144,6 +1144,7 @@ class Store:
     def save(self, model: Model):
         model.touch()
         tick(model, 2)
+        Builder(model)
         return model.peek()
 
 
@@ -1151,6 +1152,15 @@ class Parser:
     def parse(self, model: Model):
         model.touch()
         return model.peek()
+
+
+def stamp(model: Model):
+    model.bases = ["x"]
+
+
+class Builder:
+    def __init__(self, model: Model):
+        stamp(model)
 "#,
     );
     let diags = diagnostics(&p, &[]);
@@ -1169,6 +1179,9 @@ class Parser:
             d("pkg/model.py", 16, "ping", w),
             // `tick` <-> `tock` is entered only from `Store.save`: inside the store's
             // operation, so not reported.
+            // `stamp` runs from `Builder.__init__`: constructor calls also bind subclass
+            // initializers (CHA), so the walk does not trust them and keeps the report.
+            d("pkg/model.py", 50, "stamp", w),
         ],
         "{diags:#?}"
     );
@@ -1177,7 +1190,7 @@ class Parser:
             .iter()
             .map(|x| x["rule_code"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["MUT201", "MUT201", "MUT203", "MUT203", "MUT201"],
+        ["MUT201", "MUT201", "MUT203", "MUT203", "MUT201", "MUT201"],
         "{diags:#?}"
     );
 }
