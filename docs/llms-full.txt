@@ -2537,7 +2537,10 @@ latency to the database. A single batched query is usually orders of magnitude f
 
 ## Example
 ```python
-def names(cursor, ids: list[int]) -> list[str]:
+import sqlite3
+
+
+def names(cursor: sqlite3.Cursor, ids: list[int]) -> list[str]:
     out = []
     for i in ids:
         cursor.execute("SELECT name FROM users WHERE id = ?", (i,))  # EFF103
@@ -2547,11 +2550,21 @@ def names(cursor, ids: list[int]) -> list[str]:
 
 Use instead:
 ```python
-def names(cursor, ids: list[int]) -> list[str]:
+import sqlite3
+
+
+def names(cursor: sqlite3.Cursor, ids: list[int]) -> list[str]:
+    if not ids:
+        return []
     marks = ",".join("?" * len(ids))
-    cursor.execute(f"SELECT name FROM users WHERE id IN ({marks})", ids)
-    return [row[0] for row in cursor.fetchall()]
+    cursor.execute(f"SELECT id, name FROM users WHERE id IN ({marks})", ids)
+    name_of = dict(cursor.fetchall())
+    return [name_of[i] for i in ids]  # `KeyError` for an unknown ID (the loop: `TypeError`)
 ```
+
+The query returns each matching row once and in no particular order, so the result is rebuilt
+from the IDs: in their order, with repeated IDs repeated. A database caps the number of
+parameters in one statement; split a long list of IDs into chunks.
 
 ## Fix safety
 No automatic fix.
