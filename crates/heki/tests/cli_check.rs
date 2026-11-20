@@ -269,6 +269,79 @@ fn output_formats_and_config_selection() {
     assert!(stdout.contains("src/pkg/fs.py:2:12: EFF105"), "{stdout}");
 }
 
+const SLOW_AND_BLOCKING: &str = r#"import time
+
+
+def concat(items):
+    out = []
+    for x in items:
+        out = out + [x]
+    return out
+
+
+def join(orders, customers):
+    for o in orders:
+        for c in customers:
+            if o.cid == c.id:
+                print(o, c)
+
+
+async def handler():
+    time.sleep(1)
+"#;
+
+#[test]
+fn opt_rules_default_to_warning_and_still_fail_the_check() {
+    let p = Project::new("opt_warning");
+    p.write("app.py", SLOW_AND_BLOCKING);
+    let severities = |args: &[&str]| -> Vec<(String, String)> {
+        let (_, stdout, _) = p.heki(&[&["--output-format", "json"][..], args].concat());
+        let diags: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+        diags
+            .iter()
+            .map(|d| {
+                (
+                    d["rule_code"].as_str().unwrap().to_owned(),
+                    d["severity"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let pair = |rule: &str, severity: &str| (rule.to_owned(), severity.to_owned());
+    // The `OPT` rules report slower code, not wrong code: `warning`; the other families `error`.
+    assert_eq!(
+        severities(&[]),
+        vec![
+            pair("OPT101", "warning"),
+            pair("OPT113", "warning"),
+            pair("EFF101", "error"),
+        ]
+    );
+    // Warnings alone still fail the check; the label and the SARIF level change.
+    let (code, stdout, _) = p.heki(&["--select", "OPT"]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(
+        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning] "),
+        "{stdout}"
+    );
+    let (_, stdout, _) = p.heki(&["--output-format", "sarif", "--select", "OPT113"]);
+    let sarif: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(sarif["runs"][0]["results"][0]["level"], "warning");
+    // `lint.severity` still overrides the default, by code or by name.
+    p.write(
+        "heki.toml",
+        "[lint.severity]\nOPT101 = \"error\"\nnested-loop-equijoin = \"error\"\nEFF101 = \"warning\"\n",
+    );
+    assert_eq!(
+        severities(&[]),
+        vec![
+            pair("OPT101", "error"),
+            pair("OPT113", "error"),
+            pair("EFF101", "warning"),
+        ]
+    );
+}
+
 #[test]
 fn sarif_columns_and_carets_after_non_ascii_text() {
     let p = Project::new("non_ascii_columns");

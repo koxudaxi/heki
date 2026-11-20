@@ -1,0 +1,3 @@
+{"number": 31, "title": "MUT101: report setup_* methods — and <b>more</b> @someone", "labels": ["enhancement"]}
+{"number": 32, "title": "Test the [fix] path", "labels": ["maintenance"]}
+{"number": 33, "title": "Bump serde", "labels": ["dependencies"]}

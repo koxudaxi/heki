@@ -2,7 +2,7 @@
 
 # summary-effect-regression (MUT103)
 
-Family: Mutation & State (MUT) · Opt-in · No automatic fix
+Family: Mutation & State (MUT) · Opt-in · Severity `error` · No automatic fix
 
 Interprocedural mutation/escape/effect regression against saved summary snapshot.
 

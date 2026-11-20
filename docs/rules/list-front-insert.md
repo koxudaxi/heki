@@ -2,7 +2,7 @@
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.insert(0, v)` -> `collections.deque`.
 

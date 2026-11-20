@@ -71,6 +71,8 @@ python3.15 scripts/build_docs.py --heki target/release/heki --check
 python3.15 scripts/build_llms_txt.py --check
 # Peak memory of `heki check` and the `--watch` engine on a generated project
 python3.15 scripts/check_memory.py --heki target/release/heki
+# The scripts of the release workflows
+uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
 ```
 
 ## 4. Adding or changing rules
