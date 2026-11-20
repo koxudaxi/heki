@@ -491,7 +491,7 @@ pub fn check_project(
     if let Some(snap) = extras.snapshot {
         snapshot::mut103(&cx, snap, &mut out);
     }
-    let readonly = mut_rules::ReadOnlyProducers::new(config)?;
+    let readonly = mut_rules::ReadOnlyReturns::new(&cx)?;
     // Assumption A1(b) is project-wide: one module patching `builtins` taints them all.
     let opt_opts = heki_soundness::AnalysisOptions {
         project_patches_builtins: extras.project_patches_builtins.unwrap_or_else(|| {

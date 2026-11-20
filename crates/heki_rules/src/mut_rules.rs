@@ -1134,6 +1134,47 @@ impl ReadOnlyProducers {
     }
 }
 
+/// What `MUT202` reads besides the function it checks: the declared producers, and the names of
+/// the functions whose call yields a protected value as a property getter could (one returning
+/// a protected value, an `@lru_cache` function, or a declared property). Reading a property is a
+/// call of its getter; only these names are resolved. The names come from the summaries, so a
+/// check reads no other module's declarations for them.
+pub(crate) struct ReadOnlyReturns {
+    producers: ReadOnlyProducers,
+    getters: FxHashSet<String>,
+}
+
+impl ReadOnlyReturns {
+    pub fn new(cx: &CheckContext<'_>) -> Result<Self, RuleConfigError> {
+        let producers = ReadOnlyProducers::new(cx.config)?;
+        let property = |s: &EffectSummary| {
+            s.decorators.iter().any(|d| {
+                let last = d.rsplit('.').next().unwrap_or(d);
+                matches!(last, "property" | "cached_property")
+            })
+        };
+        let getters = cx
+            .index
+            .files
+            .values()
+            .flat_map(|f| &f.functions)
+            .filter(|(k, s)| {
+                s.returns_protected.is_some()
+                    || s.is_lru_cache
+                    || property(s) && producers.deep_for(&k.fqn()).is_some()
+            })
+            .map(|(k, _)| {
+                k.qualname
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(&k.qualname)
+                    .to_owned()
+            })
+            .collect();
+        Ok(Self { producers, getters })
+    }
+}
+
 /// Read-only origin of a value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Ro {
@@ -1193,7 +1234,7 @@ const MUTABLE_BUILTINS: &[&str] = &[
 pub(crate) fn mut202(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
-    producers: &ReadOnlyProducers,
+    returns: &ReadOnlyReturns,
     out: &mut Vec<Diagnostic>,
 ) {
     if !cx.enabled("MUT202", unit) {
@@ -1204,7 +1245,7 @@ pub(crate) fn mut202(
         if f.is_class_body {
             continue;
         }
-        Mut202Fn::new(cx, unit, &tcx, producers, f).run(out);
+        Mut202Fn::new(cx, unit, &tcx, returns, f).run(out);
     }
 }
 
@@ -1212,7 +1253,7 @@ struct Mut202Fn<'a> {
     cx: &'a CheckContext<'a>,
     unit: &'a ModuleUnit<'a>,
     tcx: &'a TypeCtx<'a>,
-    producers: &'a ReadOnlyProducers,
+    returns: &'a ReadOnlyReturns,
     f: &'a IrFunction,
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
@@ -1225,7 +1266,7 @@ impl<'a> Mut202Fn<'a> {
         cx: &'a CheckContext<'a>,
         unit: &'a ModuleUnit<'a>,
         tcx: &'a TypeCtx<'a>,
-        producers: &'a ReadOnlyProducers,
+        returns: &'a ReadOnlyReturns,
         f: &'a IrFunction,
     ) -> Self {
         let mut defs = FxHashMap::default();
@@ -1238,7 +1279,7 @@ impl<'a> Mut202Fn<'a> {
             cx,
             unit,
             tcx,
-            producers,
+            returns,
             f,
             key: CheckContext::key(unit, f),
             types: tcx.infer(f),
@@ -1292,7 +1333,7 @@ impl<'a> Mut202Fn<'a> {
                 if summary.is_some_and(|s| s.is_lru_cache) {
                     return direct(fqn, true);
                 }
-                if let Some(d) = self.producers.deep_for(&fqn) {
+                if let Some(d) = self.returns.producers.deep_for(&fqn) {
                     return direct(fqn, d);
                 }
                 let r = summary?.returns_protected.as_ref()?;
@@ -1306,6 +1347,7 @@ impl<'a> Mut202Fn<'a> {
                 Ro::new(r.producer.clone(), r.shared, via)
             }),
             Callee::External(sym) => self
+                .returns
                 .producers
                 .deep_for(sym)
                 .and_then(|d| direct(sym.clone(), d)),
@@ -1339,11 +1381,14 @@ impl<'a> Mut202Fn<'a> {
                 // `readonly-returns` may name a property: `obj.schema`.
                 if let Some(Val::Inst(class)) = self.types.get(obj) {
                     let fqn = format!("{class}.{attr}");
-                    if let Some(deep) = self.producers.deep_for(&fqn) {
+                    if let Some(deep) = self.returns.producers.deep_for(&fqn) {
                         return Ro::new(fqn, Shared::produced(deep), vec![]);
                     }
                 }
                 // A property getter that returns a read-only producer's value.
+                if !self.returns.getters.contains(attr.as_str()) {
+                    return None;
+                }
                 let getter = self.tcx.resolve_attr_load(self.types.get(obj), attr)?;
                 self.producer(&getter, inst.span)
             }
