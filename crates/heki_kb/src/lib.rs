@@ -1210,12 +1210,21 @@ mod tests {
                 [LOCK_CLASSES, TRANSACTION_STARTERS]
                     .concat()
                     .iter()
-                    .filter(|n| **n != "sqlalchemy.engine.Engine.begin")
+                    .filter(|n| {
+                        **n != "sqlalchemy.engine.Engine.begin" && !SAVEPOINTS.contains(*n)
+                    })
                     .map(|n| (*n).to_owned())
                     .collect(),
                 EcosystemEntry {
                     sync_lock_or_tx: true,
                     ..entry(&[])
+                },
+            ),
+            (
+                s(SAVEPOINTS),
+                EcosystemEntry {
+                    sync_lock_or_tx: true,
+                    ..entry(&[BlockingDb])
                 },
             ),
         ]
@@ -1228,6 +1237,12 @@ mod tests {
         "threading.Semaphore",
         "threading.BoundedSemaphore",
         "threading.Condition",
+    ];
+    /// Transaction starters that send `SAVEPOINT` (or flush the session) at the call.
+    const SAVEPOINTS: &[&str] = &[
+        "sqlalchemy.orm.Session.begin_nested",
+        "sqlalchemy.engine.Connection.begin_nested",
+        "sqlmodel.Session.begin_nested",
     ];
     /// `EFF106` DB transaction starters (call results held by `with`).
     const TRANSACTION_STARTERS: &[&str] = &[

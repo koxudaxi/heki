@@ -295,6 +295,18 @@ def tp_transactions_held_across_io(url):
         requests.post(url)
     with engine.begin() as conn:
         requests.post(url)
+
+
+async def tp_savepoints(conn: sqlalchemy.engine.Connection, session: Session, model):
+    with conn.begin_nested():
+        pass
+    with session.begin_nested():
+        session.add(model)
+
+
+async def tn_begin_sends_nothing(session: Session):
+    with session.begin():
+        pass
 "#;
 
 #[test]
@@ -355,6 +367,19 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
                 "EFF102",
                 "tp_async_queries_and_engines_in_loops",
                 "sqlalchemy.ext.asyncio.create_async_engine"
+            ),
+            // `SAVEPOINT` is sent at the call; the session flushes its pending changes first.
+            d(
+                89,
+                "EFF101",
+                "tp_savepoints",
+                "sqlalchemy.engine.Connection.begin_nested"
+            ),
+            d(
+                91,
+                "EFF101",
+                "tp_savepoints",
+                "sqlalchemy.orm.Session.begin_nested"
             ),
         ]
     );

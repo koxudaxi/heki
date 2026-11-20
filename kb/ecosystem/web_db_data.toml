@@ -2388,6 +2388,9 @@ opaque_to_layer3 = true
 
 # --- DB transaction starters (EFF106, opt-in) ---
 # A `with` block over the result of the call holds a transaction (and its pooled connection).
+# `Connection.begin_nested()` sends `SAVEPOINT` at the call and `Session.begin_nested()` flushes
+# the pending changes first, so both block; like a driver's `commit()`, transaction control is
+# no `db_query`. `begin()` sends nothing until the first statement.
 
 [[entries]]
 symbol = "sqlalchemy.orm.Session.begin"
@@ -2396,6 +2399,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.orm.Session.begin_nested"
+effects = ["blocking_db"]
 sync_lock_or_tx = true
 opaque_to_layer3 = true
 
@@ -2411,6 +2415,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.engine.Connection.begin_nested"
+effects = ["blocking_db"]
 sync_lock_or_tx = true
 opaque_to_layer3 = true
 
@@ -2428,6 +2433,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.Session.begin_nested"
+effects = ["blocking_db"]
 sync_lock_or_tx = true
 opaque_to_layer3 = true
 
