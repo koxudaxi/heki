@@ -588,7 +588,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      shallow copy, below the attributes `changed_param_attrs` names), is reported as **`MUT202`**
      with the call hop. Filling a memo of the shared object or initializing one of its attributes
      lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
-     holds) is no change: what the object computes stays the same. A change below a shallow copy
+     holds; through a call, a change of the object a memo-named attribute holds) is no change:
+     what the object computes stays the same. A change below a shallow copy
      of a parameter (`copy.copy(p).tags.append(x)`) is a change of the parameter.
   4. **Return flow**: a backward walk from the returns marks each call whose result may be
      returned (as itself, as an element, or as an item of target unpacking; a copy ends it). A

@@ -11,7 +11,8 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
     Facts, FuncKey, NewArg, NewCond, NewKind, ProjectIndex, ProtectedReturn, ReturnsNew, Shared,
-    SharedChain, SharedLine, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
+    SharedChain, SharedLine, SiteRole, Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
+    cache_flow,
 };
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -684,9 +685,12 @@ fn transfer(
                 }
             }
             // The callee's parameter is the caller's `p.attr`: any change of it changes the
-            // object that attribute holds.
+            // object that attribute holds, which fills a memo when the callee only fills one or
+            // when the attribute itself is named as a memo (`self._cache.set(k, v)`).
             Some((p, Some(attr))) => {
-                t.note_param_change(*p, attr.clone(), paths.iter().all(memo));
+                let into_memo = matches!(&o.param_slot, Some((q, Slot::Attr(a)))
+                    if q == p && a == attr && cache_flow::is_memo_name(a));
+                t.note_param_change(*p, attr.clone(), into_memo || paths.iter().all(memo));
                 t.changed_param_attrs
                     .entry(*p)
                     .or_default()

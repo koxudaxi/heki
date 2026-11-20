@@ -468,7 +468,8 @@ pub struct EffectSummary {
     /// `param index -> paths` of `mutated_param_paths` that every change, in the function and
     /// through its calls, only fills a memo or initializes lazily
     /// ([`cache_flow::SelfAttrWrite::fills_memo`], `lazy_init`): an in-place change of an
-    /// attribute named as a memo or cache (`p._cache[k] = v`), a memo-shaped store
+    /// attribute named as a memo or cache (`p._cache[k] = v`, also by a call changing the object
+    /// it holds: `p._cache.set(k, v)`), a memo-shaped store
     /// (`setdefault`, a store under `if k not in p.<attr>:`), or a store of `p.<attr>` where a
     /// `None` / falsy test of it found it unset. What the object computes stays the same
     /// (`MUT202`).

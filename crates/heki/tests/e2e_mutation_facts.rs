@@ -768,9 +768,24 @@ fn filling_a_memo_of_a_shared_object_leaves_what_it_computes_alone() {
     p.write("pkg/__init__.py", "")
         .write(
             "pkg/strip.py",
-            r#"class Strip:
+            r#"class FifoCache:
+    def __init__(self):
+        self._entries = {}
+        self.hits = 0
+
+    def get(self, key):
+        self.hits += 1
+        return self._entries.get(key)
+
+    def set(self, key, value):
+        self._entries[key] = value
+
+
+class Strip:
     def __init__(self, segments):
         self._segments = segments
+        self._glyph_cache = FifoCache()
+        self.counts = FifoCache()
         self._style_cache = {}
         self._runtime = None
         self._decoders = {}
@@ -800,6 +815,16 @@ fn filling_a_memo_of_a_shared_object_leaves_what_it_computes_alone() {
         if bounds is None:
             bounds = self._ranges = sorted(self._segments)
         return value in bounds
+
+    def glyph(self, ch):
+        found = self._glyph_cache.get(ch)
+        if found is None:
+            found = ch.upper()
+            self._glyph_cache.set(ch, found)
+        return found
+
+    def count(self, ch):
+        self.counts.set(ch, 1)
 
     def record(self, event):
         self.history.append(event)
@@ -833,26 +858,30 @@ def render(width, style):
     line.decoder(style)
     line.contains(" ")
     known_bases(line)
+    line.glyph("a")
     line._style_cache[style] = None
     return line
 
 
 def render_logged(width):
     line = blank(width)
+    line.count("a")
     line.record("render")
     line.reset_styles()
     line.history.append("direct")
 "#,
         );
-    // A memo dictionary (by name, or filled under `not in`) and a lazy initialization (also
-    // through a local copy of the attribute, also by a function taking the object) only cache
-    // what the object computes; appending to its history or replacing a memo changes it.
+    // A memo (by name, also a cache object whose methods change it, or filled under `not in`)
+    // and a lazy initialization (also through a local copy of the attribute, also by a function
+    // taking the object) only cache what the object computes; counting into an object of the
+    // same class not named as a memo, appending to its history, or replacing a memo changes it.
     assert_eq!(
         reports(&p, "MUT202"),
         vec![
-            at("pkg/render.py", 24, "render_logged"),
             at("pkg/render.py", 25, "render_logged"),
             at("pkg/render.py", 26, "render_logged"),
+            at("pkg/render.py", 27, "render_logged"),
+            at("pkg/render.py", 28, "render_logged"),
         ]
     );
 }
