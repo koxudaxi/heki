@@ -2803,7 +2803,9 @@ fn edge_steps() -> Vec<Step> {
 
 /// `MUT113`: a module steps by hand, then consumes, a private generator of another module that a
 /// function of a third one returns. The generator's report follows its object through the
-/// function returning it (`heki_rules::family_readers`), while no summary changes. Then a helper
+/// function returning it (`heki_rules::family_readers`), while no summary changes; then the
+/// module stops calling that function, which only the calls before the edit lead from to the
+/// generator. Then a helper
 /// a kept generator's method hands its deque to stores an item of it instead of rotating it
 /// (`IterationFacts::changes_param_containers`), and rotates it again.
 fn steps_forwarded_generator() -> Vec<Step> {
@@ -2811,12 +2813,18 @@ fn steps_forwarded_generator() -> Vec<Step> {
         "    return list(_forward(t))\n",
         "    g = _forward(t)\n    next(g)\n    return list(g)\n",
     );
+    let stopped = TALLY_LISTED.replace("    return list(_forward(t))\n", "    return []\n");
     vec![
         Step::new(
             "a module steps by hand the generator a function of another module returns",
             vec![Action::Save("app/tally_listed.py", stepping)],
         )
         .present(&[("app/tally.py", "MUT113")]),
+        Step::new(
+            "the module stops calling the forwarding function",
+            vec![Action::Save("app/tally_listed.py", stopped)],
+        )
+        .absent(&[("app/tally.py", "MUT113")]),
         Step::new(
             "the module lists the forwarded generator again",
             vec![save("app/tally_listed.py", TALLY_LISTED)],

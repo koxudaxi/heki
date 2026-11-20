@@ -213,14 +213,14 @@ fn hands_on(file: &FileSummary, caller: &FuncKey, span: Span) -> bool {
 }
 
 /// The generator methods suspending inside an iteration of their own containers whose objects
-/// the calls of `func` may receive: its project callees, and in turn the callees of the calls
-/// whose results those hand on ([`hands_on`], the relation [`Exposure::follow`] walks up).
-pub(super) fn generators_reached<'i>(index: &'i ProjectIndex, func: &FuncKey) -> Vec<&'i FuncKey> {
-    let mut stack: Vec<&FuncKey> = calls_of(index, func)
-        .into_iter()
-        .flat_map(|(_, s)| s.project_callees())
-        .map(|bc| &bc.callee)
-        .collect();
+/// a call of one of `callees` may hand its caller: the callees themselves, and in turn the
+/// callees of the calls whose results they hand on ([`hands_on`], the relation
+/// [`Exposure::follow`] walks up).
+pub(super) fn generators_reached<'a>(
+    index: &'a ProjectIndex,
+    callees: impl IntoIterator<Item = &'a FuncKey>,
+) -> Vec<&'a FuncKey> {
+    let mut stack: Vec<&FuncKey> = callees.into_iter().collect();
     let mut seen: FxHashSet<&FuncKey> = FxHashSet::default();
     let mut out = Vec::new();
     while let Some(f) = stack.pop() {
@@ -237,6 +237,15 @@ pub(super) fn generators_reached<'i>(index: &'i ProjectIndex, func: &FuncKey) ->
         }
     }
     out
+}
+
+/// The project callees of `func`'s calls.
+pub(super) fn callees_of<'i>(index: &'i ProjectIndex, func: &FuncKey) -> Vec<&'i FuncKey> {
+    calls_of(index, func)
+        .into_iter()
+        .flat_map(|(_, s)| s.project_callees())
+        .map(|bc| &bc.callee)
+        .collect()
 }
 
 /// The call sites of `func`, with the summary of its file.

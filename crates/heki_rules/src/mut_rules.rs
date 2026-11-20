@@ -658,18 +658,18 @@ fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
 /// and subclasses that have either, a method overriding an inherited one for its own family, and
 /// any method for its own family when a class of it has a generator suspending inside an
 /// iteration of its own containers (`MUT113` reports the generator with the methods changing
-/// them, and with what its callers run while it is suspended: a changed function, and one whose
-/// `calling` sites changed, is read for the families of the generators whose objects its calls
-/// may receive, also through the functions handing them on). With `in_place_changes` (`MUT112`
-/// selected), every changed method is read for its own family: a store in `self.<attr>` is
-/// reported when a method of the family changes the attribute in place. A family's classes
-/// include the ancestors whose methods it inherits. A changed writer is otherwise reported in its
-/// own file only.
+/// them, and with what its callers run while it is suspended: the callees of a changed function,
+/// and the `callees` a function whose call sites changed had before or has after the change, are
+/// read for the families of the generators whose objects their calls may hand on, also through
+/// the functions handing them on in turn). With `in_place_changes` (`MUT112` selected), every
+/// changed method is read for its own family: a store in `self.<attr>` is reported when a method
+/// of the family changes the attribute in place. A family's classes include the ancestors whose
+/// methods it inherits. A changed writer is otherwise reported in its own file only.
 pub fn family_readers(
     index: &ProjectIndex,
     decls: &ProjectDecls,
     changed: &[FuncKey],
-    calling: &[&FuncKey],
+    callees: &[&FuncKey],
     in_place_changes: bool,
 ) -> BTreeSet<String> {
     let has_reported_reads = |class: &String| {
@@ -690,11 +690,13 @@ pub fn family_readers(
         decls.is_project_class(&class).then_some((key, class, name))
     });
     let mut roots = BTreeSet::new();
-    for key in changed.iter().chain(calling.iter().copied()) {
-        for generator in iterated_mutation::generators_reached(index, key) {
-            if let Some((owner, _)) = generator.qualname.rsplit_once('.') {
-                roots.insert(format!("{}.{owner}", generator.module));
-            }
+    let called = changed
+        .iter()
+        .flat_map(|key| iterated_mutation::callees_of(index, key))
+        .chain(callees.iter().copied());
+    for generator in iterated_mutation::generators_reached(index, called) {
+        if let Some((owner, _)) = generator.qualname.rsplit_once('.') {
+            roots.insert(format!("{}.{owner}", generator.module));
         }
     }
     for (key, class, name) in methods {
