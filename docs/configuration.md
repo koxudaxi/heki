@@ -1,8 +1,13 @@
 # Configuration
 
 heki reads `[tool.heki]` from `pyproject.toml`, or a `heki.toml` / `.heki.toml` file (same keys
-without the `tool.heki` prefix). The nearest file at or above the checked path wins; `--config
-<path>` points at one explicitly. Keys are kebab-case, as in Ruff.
+without the `tool.heki` prefix). Keys are kebab-case, as in Ruff.
+
+One run checks one project. Its configuration is the nearest file at or above the first path
+given (the current directory when no path is given), or the file `--config <path>` names, and
+it applies to every file of the run, also to files given from another project
+(`heki check a/one.py b/two.py` uses `a/`'s configuration for both). Check projects with their
+own configurations in separate runs: `heki check a/`, then `heki check b/`.
 
 ```toml
 [tool.heki]
