@@ -84,7 +84,7 @@ allowed-writers = ["Store.*"]
 $ heki check --output-format concise
 app/api.py:5:12: EFF101 `async def handler` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
 app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
-Found 2 diagnostic(s) in 5 file(s).
+Found 2 diagnostic(s) in 4 file(s).
 ```
 
 Ruff's async rules see `requests.get` only when it is written in the `async def` itself; ty sees a
@@ -143,7 +143,9 @@ state that matters.
 
 - **Dynamic names.** `setattr(obj, "fields", v)`, `getattr(obj, "fields")`,
   `getattr(obj, "method")(...)`, and `obj.__dict__["fields"]` are followed only when the name is a
-  constant.
+  constant: a literal, or a module-level `Final` string constant (also imported). Names assigned
+  without `Final`, class-level constants, and computed names are not resolved; a `write-owners`
+  contract with `unresolved = "report"` counts the writes heki cannot tie to a class (`MUT205`).
 - **Objects without a known class.** Reads and writes through `Any` or unannotated parameters
   are not tied to a class, so contracts on that class do not see them. A write in an
   unannotated helper is still found where a caller passes it an object of a known class; a

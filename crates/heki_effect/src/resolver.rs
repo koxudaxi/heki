@@ -15,7 +15,7 @@ use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_ir::{
-    BlockId, FnIndex, FunctionKind, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId,
+    BlockId, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -289,6 +289,22 @@ pub struct ModuleDecls {
     /// [`ProjectDecls::small_global`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub small_globals: BTreeMap<String, SmallDisplay>,
+    /// Module-level string constants declared `Final` (`KEY: Final = "_key"`), by name: a
+    /// constant names an attribute in `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and
+    /// `setattr(obj, KEY, v)`, and a key in `obj.attr[KEY]`, as its literal would.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub str_constants: BTreeMap<String, StrConstant>,
+}
+
+/// The value of a module-level `Final` string constant ([`ModuleDecls::str_constants`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StrConstant {
+    /// `KEY: Final = "_key"`.
+    Value(String),
+    /// `KEY: Final = OTHER` / `KEY: Final = keys.OTHER`: the fully qualified name of the
+    /// constant it is bound to, resolved within the module (chased by
+    /// [`ProjectDecls::str_constant`]).
+    Alias(String),
 }
 
 impl ModuleDecls {
@@ -877,7 +893,9 @@ struct Recorder {
 /// Declarations of every project module plus derived indexes.
 #[derive(Debug, Default)]
 pub struct ProjectDecls {
-    modules: FxHashMap<String, ModuleDecls>,
+    /// Shared with the index's file summaries and the other passes: one copy of each module's
+    /// declarations.
+    modules: FxHashMap<String, Arc<ModuleDecls>>,
     /// Class fqn -> direct project subclasses.
     subclasses: FxHashMap<String, Vec<String>>,
     /// Names of the property getters (`FunctionDecl::is_property`) of every class: an
@@ -925,9 +943,10 @@ pub(crate) enum Symbol<'a> {
 }
 
 impl ProjectDecls {
-    pub fn new(modules: impl IntoIterator<Item = ModuleDecls>) -> Self {
+    pub fn new(modules: impl IntoIterator<Item = impl Into<Arc<ModuleDecls>>>) -> Self {
         let mut out = Self::default();
         for m in modules {
+            let m = m.into();
             out.modules.insert(m.module_name.clone(), m);
         }
         out.rebuild_indexes();
@@ -936,7 +955,8 @@ impl ProjectDecls {
 
     /// Replace (or add) one module's declarations; the derived indexes are rebuilt because a
     /// base may be canonicalized through any module.
-    pub fn replace(&mut self, decls: ModuleDecls) {
+    pub fn replace(&mut self, decls: impl Into<Arc<ModuleDecls>>) {
+        let decls = decls.into();
         self.modules.insert(decls.module_name.clone(), decls);
         self.rebuild_indexes();
     }
@@ -1182,7 +1202,7 @@ impl ProjectDecls {
 
     pub fn module(&self, name: &str) -> Option<&ModuleDecls> {
         self.read(|k| note(&mut k.modules, name));
-        self.modules.get(name)
+        self.modules.get(name).map(Arc::as_ref)
     }
 
     /// Longest project-module prefix of `fqn` and the remaining dotted part.
@@ -1233,6 +1253,20 @@ impl ProjectDecls {
             cur = next;
         }
         cur
+    }
+
+    /// The value of the module-level `Final` string constant `fqn` (`pkg.keys.KEY`), through
+    /// re-exports and constants bound to other constants (at most `MAX_ALIAS_CHASE` steps).
+    pub fn str_constant(&self, fqn: &str) -> Option<&str> {
+        let mut cur = self.canonical(fqn);
+        for _ in 0..MAX_ALIAS_CHASE {
+            let (m, rest) = self.split_module(&cur)?;
+            match m.str_constants.get(rest)? {
+                StrConstant::Value(v) => return Some(v),
+                StrConstant::Alias(next) => cur = self.canonical(next),
+            }
+        }
+        None
     }
 
     pub(crate) fn symbol(&self, fqn: &str) -> Symbol<'_> {
@@ -1490,6 +1524,23 @@ impl ProjectDecls {
         (out, multiple)
     }
 
+    /// Whether calling the class `class` may return an existing instance instead of a new one: a
+    /// project class along its MRO defines `__new__`, or it is an enumeration (`Color("red")`
+    /// returns a member).
+    pub fn may_reuse_instances(&self, class: &str) -> bool {
+        const ENUMS: &[&str] = &[
+            "enum.Enum",
+            "enum.IntEnum",
+            "enum.StrEnum",
+            "enum.Flag",
+            "enum.IntFlag",
+            "enum.ReprEnum",
+        ];
+        self.mro(class)
+            .iter()
+            .any(|c| ENUMS.contains(&c.as_str()) || self.own_method(c, "__new__").is_some())
+    }
+
     /// The method `name` defined directly in project class `class`.
     fn own_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let (m, rest) = self.split_module(class)?;
@@ -1694,10 +1745,10 @@ pub struct DeclPasses {
 impl DeclPasses {
     /// From the completed declarations of every module (`.py` implementations after `.pyi`
     /// stubs sharing a module name, so that they win).
-    pub fn new(completed: impl IntoIterator<Item = ModuleDecls>) -> Self {
-        let completed: Vec<ModuleDecls> = completed.into_iter().collect();
+    pub fn new(completed: impl IntoIterator<Item = Arc<ModuleDecls>>) -> Self {
+        let completed: Vec<Arc<ModuleDecls>> = completed.into_iter().collect();
         Self {
-            structural: ProjectDecls::new(completed.iter().map(ModuleDecls::structural)),
+            structural: ProjectDecls::new(completed.iter().map(|d| d.structural())),
             completed: ProjectDecls::new(completed),
         }
     }
@@ -1708,9 +1759,10 @@ impl DeclPasses {
     }
 
     /// Replace (or add) one module's completed declarations; returns what changed.
-    pub fn replace(&mut self, completed: ModuleDecls) -> DeclKeys {
+    pub fn replace(&mut self, completed: impl Into<Arc<ModuleDecls>>) -> DeclKeys {
+        let completed = completed.into();
         let name = completed.module_name.clone();
-        if self.completed.module(&name) == Some(&completed) {
+        if self.completed.module(&name) == Some(&*completed) {
             return DeclKeys::default();
         }
         let before = self.structural.indexes();
@@ -1743,7 +1795,7 @@ pub(crate) fn update_module_decls(
     input: &ModuleInput<'_>,
     kb: &EffectiveEcosystemKb,
     passes: &mut DeclPasses,
-) -> (DeclKeys, ModuleDecls, DeclKeys) {
+) -> (DeclKeys, Arc<ModuleDecls>, DeclKeys) {
     let name = &input.module_name;
     let structural = structural_decls(input);
     let restructured = passes.structural.module(name) != Some(&structural);
@@ -1753,9 +1805,10 @@ pub(crate) fn update_module_decls(
     }
     let (completed, reads) = complete_against(input, structural, &passes.structural, kb);
     if passes.completed.module(name) == Some(&completed) {
-        return (DeclKeys::default(), completed, reads);
+        return (DeclKeys::default(), Arc::new(completed), reads);
     }
-    passes.completed.replace(completed.clone());
+    let completed = Arc::new(completed);
+    passes.completed.replace(Arc::clone(&completed));
     (passes.changed(name, before.as_ref()), completed, reads)
 }
 
@@ -1765,8 +1818,10 @@ pub(crate) fn own_module_decls(
     input: &ModuleInput<'_>,
     kb: &EffectiveEcosystemKb,
     passes: &DeclPasses,
-) -> (ModuleDecls, DeclKeys) {
-    complete_against(input, structural_decls(input), &passes.structural, kb)
+) -> (Arc<ModuleDecls>, DeclKeys) {
+    let (completed, reads) =
+        complete_against(input, structural_decls(input), &passes.structural, kb);
+    (Arc::new(completed), reads)
 }
 
 /// [`complete_decls`] with what it read of `pass1`.
@@ -1786,46 +1841,47 @@ fn complete_against(
 pub(crate) fn project_decls_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
-    others: Option<Vec<(bool, ModuleDecls)>>,
+    others: Option<Vec<(bool, Arc<ModuleDecls>)>>,
     track: bool,
-) -> (ProjectDecls, Vec<(ModuleDecls, DeclKeys)>) {
+) -> (ProjectDecls, Vec<(Arc<ModuleDecls>, DeclKeys)>) {
     // Process stubs before implementation `.py` files so a `.py` module always wins when both
     // share one module name.
-    let order = |items: Vec<(bool, ModuleDecls)>| {
+    let order = |items: Vec<(bool, Arc<ModuleDecls>)>| {
         let mut items = items;
         items.sort_by_key(|(stub, _)| !*stub);
         items.into_iter().map(|(_, d)| d)
     };
-    let structural: Vec<(bool, ModuleDecls)> = modules
+    let structural: Vec<(bool, Arc<ModuleDecls>)> = modules
         .iter()
-        .map(|m| (crate::is_stub(&m.path), structural_decls(m)))
+        .map(|m| (crate::is_stub(&m.path), Arc::new(structural_decls(m))))
         .collect();
     let others = others.unwrap_or_default();
     let pass1 = ProjectDecls::new(order(
         others
             .iter()
-            .map(|(stub, d)| (*stub, d.structural()))
+            .map(|(stub, d)| (*stub, Arc::new(d.structural())))
             .chain(structural.iter().cloned())
             .collect(),
     ));
-    let own: Vec<(ModuleDecls, DeclKeys)> = modules
+    let own: Vec<(Arc<ModuleDecls>, DeclKeys)> = modules
         .iter()
         .zip(&structural)
         .map(|(m, (_, d))| {
-            if track {
-                complete_against(m, d.clone(), &pass1, kb)
+            let (completed, reads) = if track {
+                complete_against(m, ModuleDecls::clone(d), &pass1, kb)
             } else {
                 (
-                    complete_decls(m, d.clone(), &pass1, kb),
+                    complete_decls(m, ModuleDecls::clone(d), &pass1, kb),
                     DeclKeys::default(),
                 )
-            }
+            };
+            (Arc::new(completed), reads)
         })
         .collect();
     let completed = structural
         .iter()
         .zip(&own)
-        .map(|((stub, _), (d, _))| (*stub, d.clone()));
+        .map(|((stub, _), (d, _))| (*stub, Arc::clone(d)));
     let decls = ProjectDecls::new(order(others.into_iter().chain(completed).collect()));
     (decls, own)
 }
@@ -2071,6 +2127,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
     attr_displays(input, &mut decls);
+    decls.str_constants = final_str_constants(input, &decls);
     decls
 }
 
@@ -2160,6 +2217,103 @@ fn note_attr(
 /// The length of `items`, saturated to `u8` (positions past 255 never bind exactly).
 fn count_u8<T>(items: impl Iterator<Item = T>) -> u8 {
     u8::try_from(items.count()).unwrap_or(u8::MAX)
+}
+
+/// [`ModuleDecls::str_constants`]: module-level names annotated `Final` (`typing` /
+/// `typing_extensions`, also `Final[str]`) and bound exactly once in the module, to a string
+/// literal or to another name. A name the module stores twice (`global KEY` in a function, two
+/// branches) is no constant.
+fn final_str_constants(
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> BTreeMap<String, StrConstant> {
+    let mut out = BTreeMap::new();
+    let body = input.ir.functions.iter().filter(|f| f.is_module_body);
+    let resolve = |name: &str| decls.resolve_dotted(name, true);
+    let finals: FxHashSet<&str> = body
+        .clone()
+        .flat_map(|f| &f.local_annotations)
+        .filter(|a| !a.target.contains('.') && qualifiers(&a.annotation, &resolve).0.is_final)
+        .map(|a| a.target.as_str())
+        .collect();
+    if finals.is_empty() {
+        return out;
+    }
+    let mut stores: FxHashMap<&str, usize> = FxHashMap::default();
+    for inst in input
+        .ir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+    {
+        if let InstKind::StoreGlobal { name, .. } | InstKind::Delete { name, .. } = &inst.kind
+            && finals.contains(name.as_str())
+        {
+            *stores.entry(name.as_str()).or_default() += 1;
+        }
+    }
+    let insts = || {
+        body.clone()
+            .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+    };
+    let defs: FxHashMap<VarId, &Inst> = insts().filter_map(|i| Some((i.kind.dst()?, i))).collect();
+    // A module body reads an imported name as a copy of its `Import`.
+    let imports: FxHashMap<Span, String> = input
+        .semantic
+        .imports
+        .iter()
+        .filter_map(|imp| {
+            Some((
+                imp.span,
+                import_target(imp, &input.module_name, input.is_package)?,
+            ))
+        })
+        .collect();
+    for inst in insts() {
+        let InstKind::StoreGlobal { name, value } = &inst.kind else {
+            continue;
+        };
+        if stores.get(name.as_str()) != Some(&1) {
+            continue;
+        }
+        let value = match constant_source(&defs, &imports, *value) {
+            Some(Ok(s)) => StrConstant::Value(s.to_owned()),
+            Some(Err(fqn)) => StrConstant::Alias(fqn),
+            None => continue,
+        };
+        out.insert(name.clone(), value);
+    }
+    out
+}
+
+/// What a module-level constant is bound to, behind `var` (through copies): a string literal
+/// (`Ok`), or the fully qualified name of another constant (`Err`): an imported name
+/// (`from pkg.keys import OTHER`) or an attribute of an imported module (`keys.OTHER`). A
+/// name the module body loads by name instead of by its value is not bound on every path
+/// before (a star import, a branch), so it is no constant.
+fn constant_source<'a>(
+    defs: &FxHashMap<VarId, &'a Inst>,
+    imports: &FxHashMap<Span, String>,
+    var: VarId,
+) -> Option<Result<&'a str, String>> {
+    let mut cur = var;
+    for _ in 0..MAX_ALIAS_CHASE {
+        let inst = defs.get(&cur)?;
+        match &inst.kind {
+            InstKind::Const {
+                literal: heki_ir::ConstLiteral::Str(s),
+                ..
+            } => return Some(Ok(s)),
+            InstKind::Copy { src, .. } => cur = *src,
+            InstKind::Import { .. } => return imports.get(&inst.span).cloned().map(Err),
+            InstKind::AttrLoad { obj, attr, .. } => {
+                let base = constant_source(defs, imports, *obj)?.err()?;
+                return Some(Err(format!("{base}.{attr}")));
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// `FunctionDecl::readonly_params` and `FunctionDecl::mutable_params` of `f`.
@@ -2641,6 +2795,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     functions: BTreeMap::new(),
     global_types: BTreeMap::new(),
     small_globals: BTreeMap::new(),
+    str_constants: BTreeMap::new(),
 };
 
 impl<'a> TypeCtx<'a> {
@@ -2701,6 +2856,20 @@ impl<'a> TypeCtx<'a> {
             return t;
         }
         Ty::Ref(format!("builtins.{name}"))
+    }
+
+    /// The value of the module-level `Final` string constant `name` read inside this module:
+    /// one of its own constants, or one it imports (`from pkg.keys import KEY`).
+    pub fn global_str(&self, name: &str) -> Option<&'a str> {
+        match self.module.str_constants.get(name) {
+            Some(StrConstant::Value(v)) => Some(v),
+            Some(StrConstant::Alias(fqn)) => self.project.str_constant(fqn),
+            None => self
+                .module
+                .imports
+                .get(name)
+                .and_then(|fqn| self.project.str_constant(fqn)),
+        }
     }
 
     /// A named fqn: a project global holding an instance becomes that instance.
@@ -2884,6 +3053,11 @@ impl<'a> TypeCtx<'a> {
             inferred.narrowed_vals(),
             inferred.isinstance_args(f, self.project),
         )
+    }
+
+    /// The fully qualified name the import at `span` binds.
+    pub(crate) fn import_target(&self, span: Span) -> Option<&str> {
+        self.import_by_span.get(&span).map(String::as_str)
     }
 
     /// Value bound by an `Import` instruction (needs the span-keyed semantic import).

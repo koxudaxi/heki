@@ -61,7 +61,7 @@ app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes `valu
   |     ^
   = related: app/stats.py:9:5: `median` calls `app.stats.sort_values`
 
-Found 2 diagnostic(s) in 4 file(s).
+Found 2 diagnostic(s) in 3 file(s).
 ```
 
 > **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
@@ -124,7 +124,7 @@ CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive 
 the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
 the obligation instead of offering a fix. See [Fixes and safety](fixes.md).
 
-See the [rules reference](rules/index.md) for all 29 rules.
+See the [rules reference](rules/index.md) for all 30 rules.
 
 ## Next steps
 

@@ -13,7 +13,9 @@
 //! constant (`while True:`) takes its one feasible edge, and one on a boolean flag the path sets
 //! after the point (`changed = True ... if changed: notify()`) too (see [`Flags`]).
 
-use crate::{CallHop, CallSite, Delivery, EffectSummary, Facts, FuncKey, ProjectIndex, WriteKind};
+use crate::{
+    CallSite, Delivery, EffectSummary, Facts, FuncKey, ProjectIndex, SharedChain, WriteKind,
+};
 use heki_ast::Span;
 use heki_ir::{BlockId, ConstLiteral, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::FxHashMap;
@@ -105,7 +107,7 @@ pub struct UnmetWrite {
     /// (`Diagnostic::sites`).
     pub origin: Span,
     /// Calls from the owner down to the function that writes (empty: the owner itself).
-    pub via_chain: Vec<CallHop>,
+    pub via_chain: SharedChain,
     /// Where the written object comes from, as the owner sees it.
     pub reach: Reach,
 }

@@ -183,6 +183,11 @@ EffectSummary(f) = {
                                                            // normal path (MUT109)
     unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
                                                            // helpers, some normal path leaves unannounced
+    retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
+    returns_new:              bool,                        // returns an object it constructs, nothing else
+                                                           // holding it (fresh-objects)
+    unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
+                                                           // computed names on guarded classes (MUT205)
 
     // Guards: when an effect runs
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy
@@ -201,6 +206,12 @@ EffectSummary(f) = {
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
 ```
+
+Contract-only facts (`Final` string keys through `ModuleDecls::str_constants`, container
+entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
+`TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
+`Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
+invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
 
 `CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
 invalidation contracts announced after the call on every normal path, and the next call; set on
@@ -504,6 +515,7 @@ struct FrameState {
     derives_from: Map<VarId, SmallVec<[AllocId; 2]>>,
     points_to:    Map<VarId, SmallVec<[AllocId; 2]>>,// kept when the variable becomes Shared
     alloc_elems:  Map<AllocId, ElemKinds>,           // element kinds of list / tuple / set allocations
+    points_to_incomplete: Set<VarId>,                // may also hold an object no site names
 }
 ```
 
@@ -516,6 +528,23 @@ struct FrameState {
   `Shared { witness: DerivedRefEscapedAt(span) }`.
 - **CFG merges**: `Shared` on either side gives `Shared`; two `Unique` values give the union of
   their `alloc_ids` (kept when at most 4, otherwise `Shared { witness: JoinAllocOverflow }`).
+- **Element kinds** (`alloc_elems`, used by `HashConsistentProbe`, `ZeroTripExceptionSafe`,
+  and loop-element types) hold only where they describe every object a variable may hold:
+  - a parameter, an unknown result, or a container element has no allocation site, so a
+    variable that may hold one is in `points_to_incomplete` (unioned at merges) and has no
+    element kinds;
+  - an escape (`mark_escaped`) makes the escaped objects' kinds unknown: the code that
+    received them may replace any element whenever it runs;
+  - a site in a loop that runs again while a variable or iterator still refers to its earlier
+    object joins the new kinds into the old ones instead of replacing them;
+  - `next(it)` has the element kinds of the object `it` was made from by `iter()` (a `for`
+    loop, a comprehension) only, not of what an iterator retains (`map(f, xs)`, a generator
+    expression);
+  - `seq[i]` reads one element only when `i` is an exact `int` / `bool` (`seq[s]` with
+    `s = slice(...)` is a new sequence);
+  - a call with `*` arguments does not use its Layer 1 entry (the positions do not line up).
+- **Function objects**: creating one escapes every operand of `MakeClosure` (captured
+  variables, and default values when the IR passes them).
 - **`ValueLoopInvariant(v, loop)`**: besides `BindingLoopInvariant`, the value is an immutable
   builtin (a `tuple` whose elements are hash-consistent builtins too), or a mutable builtin that
   stays `Unique` for the whole loop and whose `alloc_id` (aliases and derived references included)
@@ -531,12 +560,12 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | Rule | Profitability | Safety obligations (behavior preservation) | Profitability condition | Main counterexamples |
 |---|---|---|---|---|
 | **OPT101** | `unconditional` | `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe(x)`, `EvalOrderPreserved` | `LoopCarried(x)` | S1–S5, S14, S23–S25 |
-| **OPT102** | `unconditional` | `Unique(target)`, `ExclusiveAccessAtWrite(target)`, `ExactType(target / rhs, set \| dict)`, **for dict unpacking the accumulated `d` comes first (`{**d, ...}`): `DictUnpackLeading`**, `ExceptionStateSafe`, `EvalOrderPreserved` | `LoopCarried(target)` | S26, S26b, **datamodel-code-generator `_target_binding.py:465` (`{**other, **found}` accumulates on the right and reverses the override order)** |
-| **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc / rhs)`, `NoIntermediateReads`, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall` (local `str +=` excluded) | A.8 (slower for small loops), `self.s +=`, `__radd__` on the right |
-| **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` | `NotConstSmall(lst)` | S9a, S9b, S22, S27 |
+| **OPT102** | `unconditional` | `Unique(target)`, `ExclusiveAccessAtWrite(target)`, `ExactType(target / rhs, set \| dict)`, **for dict unpacking the accumulated `d` comes first (`{**d, ...}`): `DictUnpackLeading`**, `ExceptionStateSafe` (also `(update)`: an update inserting several keys is not observed half done by a handler), `EvalOrderPreserved` (also `(update)`: entries gathered into one `update` have builtin keys and later entries that run no code) | `LoopCarried(target)` | S26, S26b, **datamodel-code-generator `_target_binding.py:465` (`{**other, **found}` accumulates on the right and reverses the override order)** |
+| **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc / rhs)`, `NoIntermediateReads`, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall` (local `str +=` excluded); for `obj.attr +=`, every assignment of the attribute (the class's methods for `self`) stores a `str` / `bytes` / `tuple` literal of the right operand's kind | A.8 (slower for small loops), `self.s +=`, `__radd__` on the right, `self.values = []` then `self.values += (i,)` |
+| **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe`; the edit needs a `for` statement (not a comprehension clause) and a name no other hoist of the function binds | `NotConstSmall(lst)`, not a `ConstSmall` / retry loop | S9a, S9b, S22, S27 |
 | **OPT111** | `size-dependent` | `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, only the appends the set mirrors (`OnlyPairedAppends`) | `NotConstSmall` | `seen.remove`, unhashable elements |
-| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes |
-| **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree`, `ZeroTripExceptionSafe`, the built container never changed | `NotConstSmall` (100 times slower when the loop runs zero times: A.8) | S22, S28, A.8 |
+| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
+| **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
 ---
 

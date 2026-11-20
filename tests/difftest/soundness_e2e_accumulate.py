@@ -114,6 +114,15 @@ def merge_unknown_mapping(items, other):
     return d
 
 
+def merge_constant_keys(items):
+    """Builtin keys, and the later entry reads a local name: `update` inserts them alike."""
+    d = {}
+    for i in items:
+        j = -i
+        d = {**d, "lo": i, "hi": j}
+    return d
+
+
 def key_not_simple_text(items):
     d = {}
     for k in items:
@@ -324,6 +333,80 @@ def element_attributes(names):
     return [i.name for i in items]
 
 
+def comment_after_element(items):
+    """The element keeps the line break that ends its comment."""
+    x = []
+    for i in items:
+        x = x + [i  # keep this comment
+                 ]
+    return x
+
+
+def comment_before_starred(rows):
+    """A comment first: the starred element is still found (`extend`)."""
+    x = []
+    for row in rows:
+        x = x + [  # spread
+            *row]
+    return x
+
+
+def merge_with_comment(items):
+    d = {}
+    extra = {"a": 1}
+    for i in items:
+        d = {**d, **extra  # keep this comment
+             }
+    return d
+
+
+class Collector:
+    """`list += tuple` extends the list in place: no copy."""
+
+    def __init__(self):
+        self.values = []
+
+    def collect(self, n):
+        for i in range(n):
+            self.values += (i,)
+        return len(self.values)
+
+
+class Holder:
+    pass
+
+
+def local_holder(n):
+    """The attribute starts as a `str` in this function: each `+=` copies it."""
+    holder = Holder()
+    holder.text = ""
+    for _ in range(n):
+        holder.text += "-"
+    return holder.text
+
+
+def set_or_built(items):
+    """The right operand is built by a call: `|=` inserts its elements in the same order."""
+    s = set()
+    for g in items:
+        s = s | set([g, -g])
+    return s
+
+
+class Encoder:
+    """Bytes and tuple attributes, each assigned a literal of its kind: `+=` copies them."""
+
+    def __init__(self):
+        self.data = b""
+        self.parts = ()
+
+    def encode(self, n):
+        for i in range(n):
+            self.data += b"x"
+            self.parts += (i,)
+        return self.data, self.parts
+
+
 def run(fn, *args):
     try:
         out = fn(*args)
@@ -355,6 +438,14 @@ def main() -> int:
             run(rhs_changes_other, items),
             run(merge_exact_dict, items),
             run(merge_unknown_mapping, items, {"b": n}),
+            run(merge_constant_keys, items),
+            run(comment_after_element, items),
+            run(comment_before_starred, [items, items]),
+            run(merge_with_comment, items),
+            run(Collector().collect, n),
+            run(local_holder, n),
+            run(set_or_built, items),
+            run(Encoder().encode, n),
             run(key_not_simple_text, items),
             run(constant_key, items),
             run(parameter_key, items, "k"),

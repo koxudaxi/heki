@@ -766,7 +766,7 @@ fn gate_5_handbuilt_file_summaries() {
     };
     file_a
         .local_functions
-        .insert(f_helper.clone(), EffectSummary::default());
+        .insert(f_helper.clone(), EffectSummary::default().into());
     let mut index = ProjectIndex::build(vec![file_a.clone()]);
 
     let mut file_b = FileSummary {
@@ -777,11 +777,8 @@ fn gate_5_handbuilt_file_summaries() {
     };
     file_b
         .local_functions
-        .insert(f_caller.clone(), EffectSummary::default());
+        .insert(f_caller.clone(), EffectSummary::default().into());
     let span = Span { start: 0, end: 1 };
-    file_b
-        .call_edges
-        .push((f_caller.clone(), f_helper.clone(), span));
     file_b.call_sites.push(CallSite {
         caller: f_caller.clone(),
         target: CallTarget::Project(vec![BoundCallee {
@@ -812,7 +809,7 @@ fn gate_5_handbuilt_file_summaries() {
     // Now add a BlockingNet effect to helper -> caller is affected!
     let mut sum = EffectSummary::default();
     sum.direct_exec_effects.insert(BlockingNet);
-    file_a.local_functions.insert(f_helper, sum);
+    file_a.local_functions.insert(f_helper, sum.into());
     let res2 = index.update_file(file_a);
     assert!(res2.summary_changed);
     assert_eq!(res2.affected_callers, vec![f_caller.clone()]);
@@ -1055,8 +1052,7 @@ fn cha_priority_4_limit() {
     assert!(call.transitive_exec_effects.contains(&Sleep));
     let file = &index.files[&PathBuf::from("cha.py")];
     let edges = file
-        .call_edges
-        .iter()
+        .call_edges()
         .filter(|(caller, _, _)| caller.qualname == "call")
         .count();
     assert_eq!(edges, 8);
@@ -1369,15 +1365,12 @@ fn callers_left_without_a_defining_file_are_skipped() {
         };
         for k in funcs {
             f.local_functions
-                .insert((*k).clone(), EffectSummary::default());
+                .insert((*k).clone(), EffectSummary::default().into());
         }
         f
     };
     let file_a = file("a.py", "a", &[&helper]);
     let mut file_b = file("b.py", "b", &[]);
-    file_b
-        .call_edges
-        .push((caller.clone(), helper.clone(), span));
     file_b.call_sites.push(CallSite {
         caller: caller.clone(),
         target: CallTarget::Project(vec![BoundCallee {
@@ -1399,7 +1392,6 @@ fn callers_left_without_a_defining_file_are_skipped() {
     });
     let live = key("c", "live");
     let mut file_c = file("c.py", "c", &[&live]);
-    file_c.call_edges.push((live.clone(), helper.clone(), span));
     file_c.call_sites.push(CallSite {
         caller: live.clone(),
         target: CallTarget::Project(vec![BoundCallee {
@@ -1452,7 +1444,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         ..EffectSummary::default()
     };
     s.direct_exec_effects.insert(BlockingNet);
-    blocking.local_functions.insert(helper.clone(), s);
+    blocking.local_functions.insert(helper.clone(), s.into());
     let res = index.update_file(blocking);
     assert!(res.summary_changed);
     assert_eq!(res.affected_callers, vec![caller.clone(), live]);

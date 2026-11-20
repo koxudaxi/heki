@@ -22,6 +22,9 @@ name = "store"
 targets = ["Model.fields", "Model.name", "Node.kwargs", "Node.children_types"]
 allowed-writers = ["pkg.store.*"]
 exempt-methods = ["__deepcopy__"]
+# The shapes type the objects a function creates too; whether such a write constructs its
+# object is `fresh-objects`' concern.
+fresh-objects = "report"
 
 [[tool.heki.read-owners]]
 name = "kids"

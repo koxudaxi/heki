@@ -171,22 +171,33 @@ fn mut201_exempt_methods_messages_and_class_family_initializers() {
     // inherited helper from `Other.__init__`, `_setup(self)` typed with the base class from
     // `Annotated.__init__`, and an object that may be `self` (`self if flag else peer`); a
     // merge of two different attributes (`self.fields if flag else self.extra`) is no alias;
-    // and constructing an instance (`build`).
+    // and constructing an instance (`build`), also filling a fresh instance before it is stored
+    // anywhere (`fresh-objects = "allow"`, the default).
+    let reported = vec![
+        d(m, 28, "DataModel.reset", t),
+        d(m, 42, "PydanticModel.size", "PydanticModel.size"),
+        // Other objects written from an initializer: another parameter, through a private
+        // helper, an attribute of `self`; and an initializer of a class outside the target
+        // family.
+        d(m, 60, "Other.__init__", t),
+        d(m, 61, "Other.__init__", t),
+        d(m, 69, "Other.__init__", t),
+        d(m, 77, "Unrelated.__init__", t),
+    ];
+    assert_eq!(found(&diags), reported, "{diags:#?}");
+    // `fresh-objects = "report"`: the fresh instance's write is reported too.
+    let strict = Project::new("mut201_report_fresh");
+    strict
+        .write(
+            "pyproject.toml",
+            &format!("{MUT201_CONFIG}fresh-objects = \"report\"\n"),
+        )
+        .write("model.py", MUT201_MODEL);
+    let mut with_fresh = reported.clone();
+    with_fresh.insert(4, d(m, 63, "Other.__init__", t));
     assert_eq!(
-        found(&diags),
-        vec![
-            d(m, 28, "DataModel.reset", t),
-            d(m, 42, "PydanticModel.size", "PydanticModel.size"),
-            // Other objects written from an initializer: another parameter, through a private
-            // helper, a fresh instance, an attribute of `self`; and an initializer of a class
-            // outside the target family.
-            d(m, 60, "Other.__init__", t),
-            d(m, 61, "Other.__init__", t),
-            d(m, 63, "Other.__init__", t),
-            d(m, 69, "Other.__init__", t),
-            d(m, 77, "Unrelated.__init__", t),
-        ],
-        "{diags:#?}"
+        found(&diagnostics(&strict, &["--select", "MUT201"])),
+        with_fresh
     );
     let note = ": use GenerationStore.set_fields() instead";
     assert!(

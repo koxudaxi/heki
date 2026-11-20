@@ -8,7 +8,7 @@
 //! producer itself. Its summary carries a [`ProtectedReturn`], propagated bottom-up over the call
 //! graph, so a wrapper needs no configuration of its own.
 
-use crate::CallHop;
+use crate::SharedChain;
 use crate::resolver::Val;
 use heki_ir::{Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use heki_kb::EffectiveEcosystemKb;
@@ -158,7 +158,7 @@ pub struct ProtectedReturn {
     /// What the returned value shares, joined over the paths that return such a value.
     pub shared: Shared,
     /// Calls from this function down to the one that returns the producer's value.
-    pub chain: Vec<CallHop>,
+    pub chain: SharedChain,
 }
 
 impl ProtectedReturn {
@@ -178,7 +178,7 @@ impl ProtectedReturn {
         producer: String,
         produced: Shared,
         step: ReturnStep,
-        chain: Vec<CallHop>,
+        chain: SharedChain,
     ) {
         let shared = step.apply(produced);
         if !shared.any() {
@@ -368,14 +368,16 @@ mod tests {
 
     #[test]
     fn a_join_keeps_the_shorter_chain_and_both_sharings() {
-        let hop = |callee: &str| CallHop {
-            caller: crate::FuncKey {
-                module: "m".into(),
-                qualname: "f".into(),
-            },
-            callee: callee.into(),
-            span: heki_ast::Span { start: 0, end: 1 },
-            path: "m.py".into(),
+        let hop = |callee: &str| {
+            std::sync::Arc::new(crate::CallHop {
+                caller: crate::FuncKey {
+                    module: "m".into(),
+                    qualname: "f".into(),
+                },
+                callee: callee.into(),
+                span: heki_ast::Span { start: 0, end: 1 },
+                path: "m.py".into(),
+            })
         };
         let mut long = ProtectedReturn {
             producer: "m.deep".into(),

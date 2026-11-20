@@ -8,7 +8,7 @@ use globset::GlobSet;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     CallSite, CallTarget, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole,
-    analyze_project_with_reads,
+    summarize_project_with_reads,
 };
 use heki_rules::project::{
     ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, exclude_set, parse_source,
@@ -103,13 +103,110 @@ pub struct Workspace {
     chain_reports: FxHashSet<PathBuf>,
     /// What the latest check of each file read of the declarations (what its summary read is
     /// in its `FileSummary`).
-    check_reads: FxHashMap<PathBuf, DeclKeys>,
+    check_reads: CheckReads,
     /// The indexed files that may patch `builtins` (they import it or touch `__builtins__`):
     /// while there is one, no module trusts builtin names (Assumption A1(b)).
     patching_builtins: FxHashSet<PathBuf>,
     /// What the configured contracts read across functions (`Workspace::affected_by`).
     reach: ContractReach,
     stats: EngineStats,
+}
+
+/// What the latest check of each file read of the declarations ([`DeclKeys`]). A check reads
+/// about every module and class of the project, so the keys as strings would grow with the
+/// number of files times the number of declarations: every key is interned once, and a file
+/// keeps the ids its check read.
+#[derive(Debug, Default)]
+struct CheckReads {
+    /// Key ids, per `DeclKeys` field.
+    ids: [FxHashMap<String, u32>; 5],
+    files: FxHashMap<PathBuf, KeySet>,
+}
+
+impl CheckReads {
+    /// Every field of `keys` (destructured without `..`: a new kind of key does not compile
+    /// until it is kept here too).
+    fn fields(keys: &DeclKeys) -> [&BTreeSet<String>; 5] {
+        let DeclKeys {
+            modules,
+            subclasses,
+            property_names,
+            class_facts,
+            protocols,
+        } = keys;
+        [modules, subclasses, property_names, class_facts, protocols]
+    }
+
+    fn insert(&mut self, path: PathBuf, keys: &DeclKeys) {
+        let mut next = self.ids.iter().map(FxHashMap::len).sum::<usize>() as u32;
+        let mut read = Vec::new();
+        for (ids, field) in self.ids.iter_mut().zip(Self::fields(keys)) {
+            for key in field {
+                let id = *ids.entry(key.clone()).or_insert_with(|| {
+                    next += 1;
+                    next - 1
+                });
+                read.push(id);
+            }
+        }
+        self.files.insert(path, KeySet::new(read));
+    }
+
+    fn remove(&mut self, path: &Path) {
+        self.files.remove(path);
+    }
+
+    /// Every file with a recorded check.
+    fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.files.keys()
+    }
+
+    /// The files whose latest check read a key of `change` (a key no check read has no id).
+    fn reading<'a>(&'a self, change: &DeclKeys) -> impl Iterator<Item = &'a PathBuf> + 'a {
+        let changed: Vec<u32> = self
+            .ids
+            .iter()
+            .zip(Self::fields(change))
+            .flat_map(|(ids, field)| field.iter().filter_map(|key| ids.get(key).copied()))
+            .collect();
+        self.files
+            .iter()
+            .filter(move |(_, read)| changed.iter().any(|&id| read.contains(id)))
+            .map(|(path, _)| path)
+    }
+}
+
+/// A set of key ids: a bitset when that is smaller (a check that read most keys), else the
+/// sorted ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeySet {
+    Sparse(Box<[u32]>),
+    Dense(Box<[u64]>),
+}
+
+impl KeySet {
+    fn new(mut ids: Vec<u32>) -> Self {
+        ids.sort_unstable();
+        let words = ids.last().map_or(0, |&max| max as usize / 64 + 1);
+        if words * 2 < ids.len() {
+            let mut bits = vec![0u64; words];
+            for id in ids {
+                bits[id as usize / 64] |= 1 << (id % 64);
+            }
+            Self::Dense(bits.into_boxed_slice())
+        } else {
+            Self::Sparse(ids.into_boxed_slice())
+        }
+    }
+
+    fn contains(&self, id: u32) -> bool {
+        match self {
+            Self::Sparse(ids) => ids.binary_search(&id).is_ok(),
+            Self::Dense(bits) => bits
+                .get(id as usize / 64)
+                .is_some_and(|w| w & (1 << (id % 64)) != 0),
+        }
+    }
 }
 
 /// What the configured contracts read across functions besides the summaries of callees.
@@ -139,7 +236,8 @@ type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
 type ExternalView = BTreeMap<FuncKey, Vec<CallTarget>>;
 
 impl Workspace {
-    /// Index every Python file under `paths` (IR is dropped once the index is built).
+    /// Index every Python file under `paths` (IR is dropped once the files are summarized, before
+    /// propagation).
     /// `overrides` replaces the disk text of open documents.
     pub fn load(
         opts: &ProjectOptions<'_>,
@@ -178,7 +276,9 @@ impl Workspace {
         // A configuration error is reported by every check (`check_project`); without valid
         // contracts the summaries carry no contract facts.
         let contracts = heki_rules::summary_contracts(env_cfg).ok().flatten();
-        let index = analyze_project_with_reads(&project.inputs(), &project.env.kb, contracts);
+        let typed_writes = heki_rules::typed_writes(env_cfg, &selection);
+        let summaries =
+            summarize_project_with_reads(&project.inputs(), &project.env.kb, contracts.as_deref());
         let files = project
             .files
             .iter()
@@ -203,7 +303,14 @@ impl Workspace {
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
             effects: forbids_execution_effects(&env_cfg.effect_boundaries),
         };
-        let Project { env, errors, .. } = project;
+        // Every file's IR, semantic model, and text go before propagation: only the index stays.
+        let Project {
+            env,
+            files: parsed,
+            errors,
+        } = project;
+        drop(parsed);
+        let index = ProjectIndex::build_for(summaries, contracts, typed_writes);
         let decls = index.decl_passes();
         let stats = EngineStats {
             indexed_files: index.files.len(),
@@ -220,7 +327,7 @@ impl Workspace {
                 decls,
                 shown: FxHashMap::default(),
                 chain_reports: FxHashSet::default(),
-                check_reads: FxHashMap::default(),
+                check_reads: CheckReads::default(),
                 patching_builtins,
                 reach,
                 stats,
@@ -296,7 +403,7 @@ impl Workspace {
         } else {
             self.chain_reports.remove(&parsed.path);
         }
-        self.check_reads.insert(parsed.path.clone(), reads);
+        self.check_reads.insert(parsed.path.clone(), &reads);
         checked
     }
 
@@ -336,12 +443,7 @@ impl Workspace {
             .filter(|f| f.decl_reads.intersects(change))
             .map(|f| f.path.clone())
             .collect();
-        out.extend(
-            self.check_reads
-                .iter()
-                .filter(|(_, reads)| reads.intersects(change))
-                .map(|(path, _)| path.clone()),
-        );
+        out.extend(self.check_reads.reading(change).cloned());
         out.into_iter().collect()
     }
 
@@ -439,7 +541,7 @@ impl Workspace {
         if before == self.patching_builtins.is_empty() {
             return Vec::new();
         }
-        self.check_reads.keys().cloned().collect()
+        self.check_reads.paths().cloned().collect()
     }
 
     /// Re-summarize one parsed file; returns the update and what changed in the declarations.
@@ -776,6 +878,24 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_sets_hold_exactly_their_ids_in_either_form() {
+        let cases: [(&[u32], bool); 5] = [
+            (&[], false),
+            (&[7], false),
+            (&[3, 900, 41], false),
+            (&[0, 1, 2, 63, 64, 5], true),
+            (&[130, 2, 129, 128, 70, 71, 4], true),
+        ];
+        for (ids, dense) in cases {
+            let set = KeySet::new(ids.to_vec());
+            assert_eq!(matches!(set, KeySet::Dense(_)), dense, "{ids:?}");
+            for id in 0..1000 {
+                assert_eq!(set.contains(id), ids.contains(&id), "{ids:?} {id}");
+            }
+        }
+    }
 
     #[test]
     fn diagnose_all_reports_indexed_files_that_can_no_longer_be_read() {
