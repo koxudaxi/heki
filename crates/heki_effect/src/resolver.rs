@@ -2682,6 +2682,7 @@ fn class_attrs_rebound<'i>(
         let defs: FxHashMap<VarId, &InstKind> = insts()
             .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
             .collect();
+        let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
         let receiver = match (&f.owner_class_qualname, f.params.first()) {
             (Some(owner), Some(p))
                 if is_summarized_function(f) && !f.has_decorator(&["staticmethod"]) =>
@@ -2696,11 +2697,7 @@ fn class_attrs_rebound<'i>(
             else {
                 continue;
             };
-            let mut cur = *obj;
-            while let Some(InstKind::Copy { src, .. }) = defs.get(&cur) {
-                cur = *src;
-            }
-            let class = match defs.get(&cur) {
+            let class = match defs.get(&copy_root(&defs, &mut roots, *obj)) {
                 Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
                     if decls.classes.contains_key(name.as_str()) =>
                 {
@@ -2722,6 +2719,33 @@ fn class_attrs_rebound<'i>(
         }
     }
     out
+}
+
+/// The value `var` copies, through any number of copies. Each value's root is kept in `roots`,
+/// so the stores through one long chain of aliases walk it once.
+fn copy_root(
+    defs: &FxHashMap<VarId, &InstKind>,
+    roots: &mut FxHashMap<VarId, VarId>,
+    var: VarId,
+) -> VarId {
+    let mut chain = Vec::new();
+    let mut cur = var;
+    let root = loop {
+        if let Some(root) = roots.get(&cur) {
+            break *root;
+        }
+        match defs.get(&cur) {
+            Some(InstKind::Copy { src, .. }) => {
+                chain.push(cur);
+                cur = *src;
+            }
+            _ => break cur,
+        }
+    };
+    for v in chain {
+        roots.insert(v, root);
+    }
+    root
 }
 
 /// What a module-level constant is bound to, behind `var` (through copies): a string literal

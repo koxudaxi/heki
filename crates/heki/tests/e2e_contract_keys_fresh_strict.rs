@@ -485,6 +485,20 @@ class SameKeys:
 def write_through_same(keys: SameProto, field: DataModelFieldBase) -> None:
     field.__dict__[keys.KEY] = True
 
+
+class Aliased:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+    LABEL: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+def realias() -> None:
+    keys = Aliased
+    same = keys
+    same.LABEL = "_other"
+    same.KEY = "_other"
 "#;
 
 #[test]
@@ -569,6 +583,8 @@ unresolved = "report"
             // when each of them holds the same one.
             d(u, 146, "MUT205", "write_through_protocol", class),
             d(u, 163, "MUT201", "write_through_same", forced),
+            // Stored through a chain of aliases of the class.
+            d(u, 171, "MUT205", "Aliased.write", class),
         ]
     );
 }

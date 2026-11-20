@@ -639,3 +639,28 @@ fn aliases_of_a_large_string_constant_share_its_text() {
     let diags = check_within(&p, Duration::from_secs(20));
     assert!(diags.is_empty(), "{diags:#?}");
 }
+
+/// A function with a long chain of aliases of a class and as many attribute stores through the
+/// last one (`a4000.x0 = 0`, ...): whether a store rebinds a class attribute follows each copy
+/// once.
+#[test]
+fn stores_through_a_long_alias_chain_resolve_each_copy_once() {
+    let links = 4_000;
+    let mut lines = vec![
+        "class K:".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def configure():".to_owned(),
+        "    a0 = K".to_owned(),
+    ];
+    for i in 1..=links {
+        lines.push(format!("    a{i} = a{}", i - 1));
+    }
+    for i in 0..links {
+        lines.push(format!("    a{links}.x{i} = 0"));
+    }
+    let p = Project::new("bounds_alias_chain_stores");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
