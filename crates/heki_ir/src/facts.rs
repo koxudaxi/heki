@@ -187,6 +187,17 @@ struct Origins {
     kinds: Vec<BuiltinKind>,
     /// The variables whose definition creates (or loads) one of the objects.
     roots: Vec<VarId>,
+    /// The variables whose objects are collected (phis may share inputs: each is resolved
+    /// once).
+    resolved: FxHashSet<VarId>,
+}
+
+/// The walk of [`FnIndex::lives_across`]: the phis it reached, and the answer of each
+/// instruction.
+#[derive(Default)]
+struct Lifetimes {
+    seen: FxHashSet<VarId>,
+    answered: FxHashMap<VarId, (bool, bool)>,
 }
 
 impl<'a> FnIndex<'a> {
@@ -302,7 +313,7 @@ impl<'a> FnIndex<'a> {
     /// display, a slice of one, or a small module constant. `stack`: the variables being
     /// resolved (a cycle through phis adds nothing).
     fn origins(&self, v: VarId, out: &mut Origins, stack: &mut Vec<VarId>) -> bool {
-        if stack.contains(&v) {
+        if stack.contains(&v) || out.resolved.contains(&v) {
             return true;
         }
         if stack.len() > 32 {
@@ -318,6 +329,10 @@ impl<'a> FnIndex<'a> {
             Def::Param | Def::None => false,
         };
         stack.pop();
+        // A variable that fails fails the whole walk: only resolved ones are kept.
+        if ok {
+            out.resolved.insert(v);
+        }
         ok
     }
 
@@ -865,38 +880,51 @@ impl<'a> FnIndex<'a> {
     /// such objects. A list built in the iteration (`parts = [...]` inside the loop), the loop
     /// element, or an object created from it (`row.cells`, `make(row)`) does not.
     pub fn lives_across(&self, lp: &NaturalLoop, v: VarId) -> bool {
-        self.lives_across_seen(lp, v, &mut FxHashSet::default())
+        self.lives_across_seen(lp, v, &mut Lifetimes::default()).0
     }
 
-    fn lives_across_seen(&self, lp: &NaturalLoop, v: VarId, seen: &mut FxHashSet<VarId>) -> bool {
+    /// [`Self::lives_across`], and whether the answer reached a phi of the loop body (a phi
+    /// reached again answers no). An instruction reached again answers as before without the
+    /// walk: what it did, and no if it reached such a phi, which is now seen (the answer is a
+    /// conjunction: once one part says no, the whole does).
+    fn lives_across_seen(&self, lp: &NaturalLoop, v: VarId, walk: &mut Lifetimes) -> (bool, bool) {
         match self.def(v) {
-            Def::Phi(b, i) => {
-                b == lp.header
-                    || !lp.body.contains(&b)
-                    || (seen.insert(v)
-                        && self
-                            .phi_incoming(b, i)
-                            .iter()
-                            .all(|&(_, x)| self.lives_across_seen(lp, x, seen)))
+            Def::Phi(b, i) if b != lp.header && lp.body.contains(&b) => {
+                let lives = walk.seen.insert(v)
+                    && self
+                        .phi_incoming(b, i)
+                        .iter()
+                        .all(|&(_, x)| self.lives_across_seen(lp, x, walk).0);
+                (lives, true)
             }
             Def::Inst(b, i) if lp.body.contains(&b) => {
-                match &self.f.block(b).insts[i as usize].kind {
+                if let Some(&(lives, phi)) = walk.answered.get(&v) {
+                    return (lives && !phi, phi);
+                }
+                let answer = match &self.f.block(b).insts[i as usize].kind {
                     InstKind::Copy { src: x, .. } | InstKind::AttrLoad { obj: x, .. } => {
-                        self.lives_across_seen(lp, *x, seen)
+                        self.lives_across_seen(lp, *x, walk)
                     }
                     InstKind::SubscriptLoad { obj, index, .. } => {
-                        self.lives_across_seen(lp, *obj, seen)
-                            && self.lives_across_seen(lp, *index, seen)
+                        let (obj_lives, obj_phi) = self.lives_across_seen(lp, *obj, walk);
+                        if obj_lives {
+                            let (index_lives, index_phi) = self.lives_across_seen(lp, *index, walk);
+                            (index_lives, obj_phi || index_phi)
+                        } else {
+                            (false, obj_phi)
+                        }
                     }
                     InstKind::LoadGlobal { .. }
                     | InstKind::LoadDeref { .. }
                     | InstKind::LoadName { .. }
-                    | InstKind::Const { .. } => true,
-                    _ => false,
-                }
+                    | InstKind::Const { .. } => (true, false),
+                    _ => (false, false),
+                };
+                walk.answered.insert(v, answer);
+                answer
             }
-            // A parameter, or defined before the loop.
-            _ => true,
+            // A parameter, a loop-carried phi of the header, or defined before the loop.
+            _ => (true, false),
         }
     }
 }
