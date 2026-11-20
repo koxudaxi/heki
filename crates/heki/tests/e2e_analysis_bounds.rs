@@ -800,3 +800,20 @@ fn calls_of_a_method_with_many_subclasses_expand_its_family_once() {
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0]["qualname"], "other");
 }
+
+/// Modules binding twelve thousand names, each to an attribute of the one before
+/// (`a1 = a0.x`, `a2 = a1.x`, ...), about as many as a module body's IR budget models: whether
+/// a binding is a string constant takes a bounded walk of copies and attribute loads, past
+/// which it is none, not a walk down the whole chain.
+#[test]
+fn module_names_bound_along_a_long_attribute_chain_take_a_bounded_walk() {
+    let links = 12_000;
+    let mut lines = vec!["a0 = \"s\"".to_owned()];
+    lines.extend((1..=links).map(|i| format!("a{i} = a{}.x", i - 1)));
+    let source = lines.join("\n") + "\n";
+    let p = Project::new("bounds_constant_attribute_chain");
+    for module in ["m0.py", "m1.py", "m2.py", "m3.py"] {
+        p.write(module, &source);
+    }
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}

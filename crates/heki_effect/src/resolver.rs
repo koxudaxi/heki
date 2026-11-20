@@ -60,6 +60,10 @@ pub const CHA_CANDIDATE_LIMIT: usize = 8;
 /// Upper bound on re-export alias chasing (`pkg.__init__` re-exporting `pkg.sub.Foo`).
 const MAX_ALIAS_CHASE: usize = 8;
 
+/// Upper bound on the attribute loads behind a module-level constant's value
+/// (`KEY = pkg.sub.keys.OTHER`: three): a dotted name a few modules deep takes a few.
+const MAX_CONSTANT_ATTRS: usize = 16;
+
 /// Decorators that leave calling a function what its definition makes it: a generator function
 /// returns a generator, an `async def` a coroutine, a plain `def` what its body returns.
 const CALL_KEEPING_DECORATORS: &[&str] =
@@ -2966,30 +2970,50 @@ fn copy_root(
 /// (`Ok`), or the fully qualified name of another constant (`Err`): an imported name
 /// (`from pkg.keys import OTHER`) or an attribute of an imported module (`keys.OTHER`). A
 /// name the module body loads by name instead of by its value is not bound on every path
-/// before (a star import, a branch), so it is no constant.
+/// before (a star import, a branch), so it is no constant. The walk takes at most
+/// `MAX_ALIAS_CHASE` instructions before and between attribute loads, and at most
+/// `MAX_CONSTANT_ATTRS` of those (`a1 = a0.x`, `a2 = a1.x`, ...): past either the value is no
+/// constant, so each binding costs a bounded walk and keeps a bounded name.
 fn constant_source<'a>(
     defs: &FxHashMap<VarId, &'a Inst>,
     imports: &FxHashMap<Span, String>,
     var: VarId,
 ) -> Option<Result<&'a str, String>> {
+    // The attributes loaded on the way, the last one first.
+    let mut attrs: Vec<&str> = Vec::new();
     let mut cur = var;
-    for _ in 0..MAX_ALIAS_CHASE {
+    let mut steps = 0;
+    loop {
+        if steps == MAX_ALIAS_CHASE {
+            return None;
+        }
+        steps += 1;
         let inst = defs.get(&cur)?;
         match &inst.kind {
             InstKind::Const {
                 literal: heki_ir::ConstLiteral::Str(s),
                 ..
-            } => return Some(Ok(s)),
+            } => return attrs.is_empty().then_some(Ok(s)),
             InstKind::Copy { src, .. } => cur = *src,
-            InstKind::Import { .. } => return imports.get(&inst.span).cloned().map(Err),
+            InstKind::Import { .. } => {
+                let mut fqn = imports.get(&inst.span)?.clone();
+                for attr in attrs.iter().rev() {
+                    fqn.push('.');
+                    fqn.push_str(attr);
+                }
+                return Some(Err(fqn));
+            }
             InstKind::AttrLoad { obj, attr, .. } => {
-                let base = constant_source(defs, imports, *obj)?.err()?;
-                return Some(Err(format!("{base}.{attr}")));
+                if attrs.len() == MAX_CONSTANT_ATTRS {
+                    return None;
+                }
+                attrs.push(attr);
+                cur = *obj;
+                steps = 0;
             }
             _ => return None,
         }
     }
-    None
 }
 
 /// `FunctionDecl::readonly_params` and `FunctionDecl::mutable_params` of `f`.

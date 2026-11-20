@@ -107,8 +107,8 @@ source), many waits on one future before many `await`s of it, task factories at 
 chain of copies, a long chain of aliases of a class with an attribute store through the last one per
 alias, a class with thousands of subclasses whose class constant as many functions read on an
 instance, a strict `read-owners` target on such a class that as many functions read on an object of
-unknown class, and as many calls of a method of such a class that a call target naming no class
-names.
+unknown class, as many calls of a method of such a class that a call target naming no class names,
+and a module binding thousands of names each to an attribute of the one before.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
