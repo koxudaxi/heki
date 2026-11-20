@@ -1130,6 +1130,11 @@ symbol = "sqlite3.connect"
 effects = ["blocking_db"]
 
 [[tool.heki.ecosystem]]
+symbol = "vendor.fetch"
+async-safe = true
+effects = ["blocking_net", "db_query"]
+
+[[tool.heki.ecosystem]]
 symbol = "vendor.db.open"
 return-type = "sqlite3.Connection"
 
@@ -1138,9 +1143,11 @@ symbol = "vendor.locks.Gate"
 sync-lock-or-tx = true
 "#;
 
-const OVERRIDDEN: &str = r#"import sqlite3
+const OVERRIDDEN: &str = r#"import asyncio
+import sqlite3
 
 import requests
+import vendor
 import vendor.db
 import vendor.locks
 
@@ -1156,6 +1163,14 @@ def tn_override_drops_the_allocation(paths):
         sqlite3.connect(p)
 
 
+async def tn_async_safe_api_never_blocks():
+    await asyncio.gather(vendor.fetch())
+
+
+async def tp_async_safe_api_keeps_its_queries(ids):
+    for i in ids:
+        await vendor.fetch(i)
+
 
 def tp_declared_factory(ids):
     conn = vendor.db.open()
@@ -1169,7 +1184,8 @@ def tp_declared_lock(url):
 "#;
 
 /// An override sets the keys it lists and keeps the built-in entry's others; `return-type` and
-/// `sync-lock-or-tx` declare factories and locks.
+/// `sync-lock-or-tx` declare factories and locks; an async-safe API never blocks the event loop
+/// but still counts its queries in loops.
 #[test]
 fn overrides_set_only_the_keys_they_list() {
     assert_eq!(
@@ -1182,19 +1198,25 @@ fn overrides_set_only_the_keys_they_list() {
         ),
         vec![
             d(
-                11,
+                13,
                 "EFF103",
                 "tp_factory_keeps_its_return_type",
                 "sqlite3.Connection.execute"
             ),
             d(
-                23,
+                27,
+                "EFF103",
+                "tp_async_safe_api_keeps_its_queries",
+                "vendor.fetch"
+            ),
+            d(
+                33,
                 "EFF103",
                 "tp_declared_factory",
                 "sqlite3.Connection.execute"
             ),
             d(
-                28,
+                38,
                 "EFF106",
                 "tp_declared_lock",
                 "vendor.locks.Gate->requests.get"

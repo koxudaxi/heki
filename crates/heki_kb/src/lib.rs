@@ -139,6 +139,22 @@ pub enum ExecEffectKind {
 }
 
 impl ExecEffectKind {
+    /// The effects that wait on the calling thread (`EFF101` / `EFF105` / `EFF106`), as opposed
+    /// to the loop-sensitive costs `EFF102` / `EFF103` / `DATA101` count.
+    pub const BLOCKING: &[Self] = &[
+        Self::BlockingNet,
+        Self::BlockingDb,
+        Self::BlockingSubprocess,
+        Self::BlockingSync,
+        Self::Sleep,
+        Self::BlockingFs,
+    ];
+
+    /// Whether the effect is one of [`Self::BLOCKING`].
+    pub fn blocks(self) -> bool {
+        Self::BLOCKING.contains(&self)
+    }
+
     /// Parse an effect name spelled as in `kb/ecosystem/*.toml` (snake_case, e.g. `"blocking_net"`).
     pub fn from_kb_name(name: &str) -> Result<Self, KbError> {
         let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
@@ -165,6 +181,17 @@ pub struct EcosystemEntry {
     /// `sqlalchemy.orm.Session.begin`) holds a lock or a transaction. Async locks are never
     /// flagged.
     pub sync_lock_or_tx: bool,
+}
+
+impl EcosystemEntry {
+    /// The entry as the analyses read it: an `async_safe` API never blocks the event loop, so
+    /// it keeps only its loop-sensitive effects (`db_query`, `unpooled_client_alloc`).
+    fn normalized(mut self) -> Self {
+        if self.async_safe {
+            self.effects.retain(|e| !e.blocks());
+        }
+        self
+    }
 }
 
 /// A validated `[[tool.heki.ecosystem]]` entry: the keys it sets on the entry for `symbol`
@@ -266,7 +293,7 @@ impl EffectiveEcosystemKb {
     pub fn materialize(raw: Vec<EcosystemEntry>, opaque_packages: Vec<String>) -> Self {
         let mut entries = BTreeMap::new();
         for entry in raw {
-            entries.insert(entry.symbol.clone(), entry);
+            entries.insert(entry.symbol.clone(), entry.normalized());
         }
         let digest = blake3::hash(
             format!(
@@ -511,15 +538,7 @@ mod tests {
         names.iter().map(|n| (*n).to_owned()).collect()
     }
 
-    /// The effects `EFF101` / `EFF105` report (`heki_effect::BLOCKING_EFFECTS`).
-    const BLOCKING: &[ExecEffectKind] = &[
-        BlockingNet,
-        BlockingDb,
-        BlockingSubprocess,
-        BlockingSync,
-        Sleep,
-        BlockingFs,
-    ];
+    const BLOCKING: &[ExecEffectKind] = ExecEffectKind::BLOCKING;
 
     const VERBS8: &[&str] = &[
         "get", "post", "put", "delete", "patch", "head", "options", "request",
@@ -1604,6 +1623,16 @@ mod tests {
                 sync_lock_or_tx: Some(true),
                 ..patch("mypkg.db.open")
             },
+            // An async-safe API keeps only its loop-sensitive effects.
+            EcosystemPatch {
+                async_safe: Some(true),
+                effects: Some(vec![BlockingNet, DbQuery]),
+                ..patch("vendor.fetch")
+            },
+            EcosystemPatch {
+                async_safe: Some(true),
+                ..patch("requests.get")
+            },
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&overrides).unwrap();
         let got = |symbol: &str| kb.lookup(symbol).cloned().unwrap();
@@ -1640,7 +1669,23 @@ mod tests {
                 ..EcosystemEntry::default()
             }
         );
-        assert_eq!(kb.entries.len(), builtin.entries.len() + 2);
+        assert_eq!(
+            got("vendor.fetch"),
+            EcosystemEntry {
+                symbol: "vendor.fetch".into(),
+                effects: vec![DbQuery],
+                async_safe: true,
+                ..EcosystemEntry::default()
+            }
+        );
+        assert_eq!(
+            got("requests.get"),
+            EcosystemEntry {
+                symbol: "requests.get".into(),
+                ..async_safe(entry(&[UnpooledClientAlloc]))
+            }
+        );
+        assert_eq!(kb.entries.len(), builtin.entries.len() + 3);
         assert_eq!(kb.opaque_packages, builtin.opaque_packages);
         assert_ne!(kb.digest, builtin.digest);
     }

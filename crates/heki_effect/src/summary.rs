@@ -50,14 +50,7 @@ pub const CONTAINER_MUTATORS: &[&str] = &[
 ];
 
 /// Execution effects `EFF101` treats as blocking the event loop.
-pub const BLOCKING_EFFECTS: &[ExecEffectKind] = &[
-    ExecEffectKind::BlockingNet,
-    ExecEffectKind::BlockingDb,
-    ExecEffectKind::BlockingSubprocess,
-    ExecEffectKind::BlockingSync,
-    ExecEffectKind::Sleep,
-    ExecEffectKind::BlockingFs,
-];
+pub const BLOCKING_EFFECTS: &[ExecEffectKind] = ExecEffectKind::BLOCKING;
 
 /// Summarize every function of one module (local facts only; see `ProjectIndex::build`).
 /// Summarize one module against the project declarations. `own` is the module's own completed
