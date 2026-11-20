@@ -2,9 +2,9 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargetPattern, ContractTarget, SiteId, called_targets, group_texts, helper_changes_field,
-    initializes_itself, parse_call_targets, parse_targets, patterns, project_classes, site_callee,
-    with_note,
+    CallTargetPattern, ContractTarget, SiteId, allows_fresh, called_targets, group_texts,
+    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
+    parse_targets, patterns, project_classes, site_callee, with_note, write_hits,
 };
 use crate::opt_rules::Sizes;
 use crate::{
@@ -14,9 +14,9 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::guards::loop_bit;
 use heki_effect::{
-    BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, EffectSummary,
-    Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
-    boundary_reports_in, group_by_root_cause,
+    BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, Construction,
+    EffectSummary, Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, Runner, SiteEffect, TypeCtx,
+    WriteKind, anchors_call_site, boundary_reports_in, group_by_root_cause,
 };
 use heki_ir::{InstKind, IrFunction};
 use heki_kb::ExecEffectKind;
@@ -320,6 +320,8 @@ struct Boundary<'r> {
     call_targets: Vec<CallTargetPattern>,
     allowed_callees: Vec<DottedPattern>,
     note: Option<&'r str>,
+    /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
+    allow_fresh: bool,
 }
 
 /// `name` and each of its dotted prefixes (`pkg.mod.f`, then `pkg` and `pkg.mod`).
@@ -366,7 +368,8 @@ impl Boundary<'_> {
     /// Which facts of a project callee count at `site`, run where the site's caller runs
     /// `into` ([`heki_effect::ProjectIndex::delivery`]): `allowed-callees` names neither the
     /// callee whose body runs nor the function iterating its result (`SiteRole::Through`). A
-    /// function returning a generator is not checked itself: its own body does not run there.
+    /// function returning a generator is not checked itself: its own body does not run there,
+    /// nor does a callee run on a worker thread (`Runner::Worker`).
     fn counts<'s>(
         &self,
         cx: &CheckContext<'_>,
@@ -374,6 +377,9 @@ impl Boundary<'_> {
         callee: &FuncKey,
         into: Facts,
     ) -> Option<heki_effect::Delivery<'s>> {
+        if site.runner == Runner::Worker {
+            return None;
+        }
         let s = cx.index.summary(callee)?;
         let d = cx.index.delivery(site, s).filter(|d| d.into == into)?;
         let runs_body = d.from == s.body_facts();
@@ -451,7 +457,13 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             write_universe: targets(&b.write_universe, "effect-boundaries.write-universe")?,
             allow_writes: targets(&b.allow_writes, "effect-boundaries.allow-writes")?,
             reads_targets: forbids("reads-targets"),
-            read_targets: targets(&b.read_targets, "effect-boundaries.read-targets")?,
+            read_targets: parse_read_targets(
+                cx,
+                &all_classes,
+                &b.read_targets,
+                "effect-boundaries.read-targets",
+                "effect-boundaries.read-targets",
+            )?,
             calls: forbids("calls"),
             call_targets: parse_call_targets(
                 cx,
@@ -461,6 +473,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             )?,
             allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
             note: b.message.as_deref(),
+            allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
         });
     }
     Ok(out)
@@ -701,6 +714,10 @@ impl<'a> Reach<'a> {
         func: &FuncKey,
         own: &[(&Path, &CallSite)],
     ) {
+        debug_assert!(
+            cx.index.propagates_typed_writes(),
+            "`typed_writes` decides for EFF201"
+        );
         let writes = cx
             .index
             .summary(func)
@@ -725,35 +742,37 @@ impl<'a> Reach<'a> {
                             })
                     }) =>
                 {
-                    Some(hop.clone())
+                    Some(CallHop::clone(hop))
                 }
                 _ => continue,
             };
-            if b.allow_writes
-                .iter()
-                .any(|a| a.matches(&w.class_qualname, &w.attr))
+            if b.allow_writes.iter().any(|a| a.matches_write(w))
+                || b.allow_fresh && w.construction == Construction::Yes
             {
                 continue;
             }
             // A class's own initialization (constructing a fresh object) is not a write.
-            let forbidden = |t: &ContractTarget| {
-                t.matches(&w.class_qualname, &w.attr)
-                    && !initializes_itself(cx, func, &t.classes, w.obj_params)
-            };
+            let own_init =
+                |t: &ContractTarget| initializes_itself(cx, func, &t.classes, w.obj_params);
             let mut buckets: Vec<WriteBucket> = Vec::new();
             if b.writes_targets {
                 buckets.extend(
-                    b.write_targets
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, t)| forbidden(t))
+                    write_hits(&b.write_targets, w)
+                        .into_iter()
+                        .filter(|(_, t)| !own_init(t))
                         .map(|(ti, _)| WriteBucket::Target(ti)),
                 );
             }
             if buckets.is_empty()
-                && let Some(t) = b.write_universe.iter().find(|t| forbidden(t))
+                && let Some((_, t)) = write_hits(&b.write_universe, w)
+                    .into_iter()
+                    .find(|(_, t)| !own_init(t))
             {
-                buckets.push(WriteBucket::Undeclared(undeclared_text(&t.text, &w.attr)));
+                let text = match &t.key {
+                    Some(_) => t.text.clone(),
+                    None => undeclared_text(&t.text, &w.attr),
+                };
+                buckets.push(WriteBucket::Undeclared(text));
             }
             for bucket in buckets {
                 let nodes = &self.nodes;

@@ -184,7 +184,7 @@ def mixed_probe(n):
 def empty_probe():
     allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
     hits = []
-    for p in []:
+    for p in list():
         if p in allowed:
             hits.append(p)
     return hits
@@ -514,6 +514,115 @@ def unhashable_elements(n):
     return hits
 
 
+def probes_from_a_list(n):
+    """Iterating a list of `int`s yields `int`s: hash-consistent probes."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    probes = list(range(n))
+    hits = []
+    for p in probes:
+        if p in allowed:
+            hits.append(p)
+    return hits
+
+
+def probes_from_either_list(n, c):
+    """Both lists a branch may pick hold only `int`s."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    probes = list(range(n)) if c else list(range(n, 2 * n))
+    hits = []
+    for p in probes:
+        if p in allowed:
+            hits.append(p)
+    return hits
+
+
+def probes_measured_first(n):
+    """`len` only reads the list: its elements stay known."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    probes = list(range(n))
+    hits = [len(probes)]
+    for p in probes:
+        if p in allowed:
+            hits.append(p)
+    return hits
+
+
+def probe_by_index(n):
+    """`keys[True]` reads one `int` element."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    keys = list(range(n + 2))
+    probe = keys[True]
+    hits = []
+    for _ in range(n):
+        if probe in allowed:
+            hits.append(probe)
+    return hits
+
+
+def lookup_in_a_bounded_loop(n):
+    """One iteration: building a set costs more than the scan it saves."""
+    allowed = list(range(n + 100))
+    hits = []
+    for i in range(1):
+        if i in allowed:
+            hits.append(i)
+    return hits
+
+
+def rebuild_in_a_bounded_loop(n):
+    keys = list(range(n + 100))
+    hits = 0
+    for i in range(1):
+        if i in set(keys):
+            hits += 1
+    return hits
+
+
+def rebuild_tuple_of_a_tuple(n):
+    """`tuple(t)` of a tuple returns `t`: no container is built."""
+    keys = tuple(range(9))
+    hits = 0
+    for i in range(n):
+        if i in tuple(keys):
+            hits += 1
+    return hits
+
+
+def chained_membership(n):
+    """`i in allowed in allowed`: the last name is the second comparison's operand."""
+    allowed = list(range(9))
+    out = []
+    for i in range(n):
+        out.append(i in allowed in allowed)
+    return out
+
+
+def comprehension_clause_on_its_own_line(n):
+    """The `for` clause starts a line, but it is inside the brackets: no statement to hoist
+    before."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    return [p
+            for p in range(n) if p in allowed]
+
+
+def generator_clause_on_its_own_line(n):
+    return sum(1
+               for p in "abcdefghijkl"[:n]
+               if p in set("abcdefghi"))
+
+
+def two_hoists_in_nested_loops(n):
+    """Both rebuilds are hoisted; the inner set must not take the outer one's name."""
+    outer = inner = 0
+    for i in range(n):
+        if "a" in set("abcdefghi"):
+            outer += 1
+        for j in range(n):
+            if "a" in set("jklmnopqr"):
+                inner += 1
+    return outer, inner
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -577,6 +686,17 @@ def main() -> int:
             run(rebuild_number, n),
             run(bytes_display, n),
             run(unhashable_elements, n),
+            run(probes_from_a_list, n),
+            run(probes_from_either_list, n, n % 2),
+            run(probes_measured_first, n),
+            run(probe_by_index, n),
+            run(lookup_in_a_bounded_loop, n),
+            run(rebuild_in_a_bounded_loop, n),
+            run(rebuild_tuple_of_a_tuple, n),
+            run(chained_membership, n),
+            run(comprehension_clause_on_its_own_line, n),
+            run(generator_clause_on_its_own_line, n),
+            run(two_hoists_in_nested_loops, n),
         ]
     print("\n".join(lines))
     return 0

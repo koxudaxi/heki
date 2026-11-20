@@ -31,6 +31,7 @@ extend-select = ["MUT108"]
 name = "registry"
 targets = ["Registry.entries"]
 allowed-writers = ["Store.*"]
+unresolved = "report"
 
 [[tool.heki.read-owners]]
 name = "vault"
@@ -70,16 +71,16 @@ targets = ["Node.kids"]
 invalidators = ["Index.refresh"]
 
 [[tool.heki.effect-boundaries]]
-name = "shelf-view"
-scopes = ["pkg.shelf_view"]
+name = "rack-view"
+scopes = ["pkg.rack_view"]
 forbid = ["writes-targets"]
-write-targets = ["Shelf.items"]
-allowed-callees = ["pkg.shelf_ops.empty"]
+write-targets = ["Rack.items"]
+allowed-callees = ["pkg.rack_ops.empty"]
 
 [[tool.heki.write-owners]]
-name = "shelf"
-targets = ["Shelf.items"]
-allowed-writers = ["pkg.shelf_ops.empty"]
+name = "rack"
+targets = ["Rack.items"]
+allowed-writers = ["pkg.rack_ops.empty"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -142,6 +143,16 @@ const CHAIN_LOW: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Re
 const CHAIN_MID: &str = "from pkg.chain_low import book, peek, stamp\n\n\ndef relay(r, v, l):\n    stamp(r)\n    peek(v)\n    return book(l)\n";
 const CHAIN_TOP: &str = "from pkg.chain_mid import relay\n\n\nclass Store:\n    def run(self, r, v, l):\n        return relay(r, v, l)\n\n\ndef outside(r, v, l):\n    return None\n";
 
+// Constant keys, objects under construction, and the strict mode: a `__dict__` key names the
+// guarded attribute through a `Final` constant of another module; a private helper fills a new
+// object its caller hands it; a helper writes a target on a parameter its caller types.
+const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
+const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
+const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
+const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
+const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
+const STRICT_USE: &str = "from pkg.model import Registry\nfrom pkg.strict_ops import _reset\n\n\ndef run(r: Registry):\n    _reset(r)\n";
+
 // Files: a module a caller already imports is created, then deleted; a stub is put next to a
 // module, then removed.
 const USES_EXTRA: &str = "from pkg.extra import slow\n\n\nasync def go():\n    return slow()\n";
@@ -198,6 +209,9 @@ const CONFIGURE: &str = "from pkg.frozen.helpers import add_default, clear_names
 const OFFLOAD: &str = "import requests\n\n\ndef fetch_profile():\n    return requests.post(\"https://example.com\")\n";
 const OFFLOAD_DECORATED: &str = "import requests\nfrom asgiref.sync import sync_to_async\n\n\n@sync_to_async\ndef fetch_profile():\n    return requests.post(\"https://example.com\")\n";
 const VIEW: &str = "from pkg.offload import fetch_profile\n\n\nasync def view():\n    return await fetch_profile()\n";
+// A function run on a worker thread, awaited per item in another module (`EFF103`).
+const WORKER_OPS: &str = "from asgiref.sync import sync_to_async\nfrom sqlalchemy.orm import Session\n\n\n@sync_to_async\ndef load(session: Session, i):\n    return i\n";
+const WORKER_VIEW: &str = "from pkg.worker_ops import load\n\n\nasync def load_all(session, ids):\n    for i in ids:\n        await load(session, i)\n";
 const FEED: &str =
     "import httpx\n\n\ndef rows():\n    return [httpx.get(\"https://example.com\")]\n";
 const FEED_GENERATOR: &str =
@@ -238,9 +252,9 @@ const KID_USER: &str = "from pkg.kid_gen import _grow_kids\nfrom pkg.nodes impor
 // Helpers handed a typed field (`EFF201` / `MUT201` `indirect_helper` writes): `refill` only
 // leaves the change to `empty`, which the boundary and the owner allow, then also changes the
 // list itself. Its summary already says that it changes its parameter, so it stays the same.
-const SHELF: &str = "class Shelf:\n    def __init__(self):\n        self.items = []\n";
-const SHELF_OPS: &str = "def empty(xs):\n    xs.clear()\n\n\ndef refill(xs):\n    empty(xs)\n";
-const SHELF_VIEW: &str = "from pkg.shelf import Shelf\nfrom pkg.shelf_ops import refill\n\n\ndef show(s: Shelf):\n    refill(s.items)\n";
+const RACK: &str = "class Rack:\n    def __init__(self):\n        self.items = []\n";
+const RACK_OPS: &str = "def empty(xs):\n    xs.clear()\n\n\ndef refill(xs):\n    empty(xs)\n";
+const RACK_VIEW: &str = "from pkg.rack import Rack\nfrom pkg.rack_ops import refill\n\n\ndef show(s: Rack):\n    refill(s.items)\n";
 // Inherited writers (`MUT101`): a subclass in another module gains a cached property that an
 // inherited method's write leaves stale, then overrides that method.
 const NAMED: &str = "class Named:\n    def __init__(self, name):\n        self.name = name\n\n    def rename(self, name):\n        self.name = name\n";
@@ -281,6 +295,33 @@ const RO_STATS: &str = "from collections.abc import Sequence\n\nfrom pkg.ro.mid 
 const RO_INIT: &str = "from pkg.ro.impl import scale\n";
 const RO_IMPL: &str = "def scale(values):\n    return [v * 2 for v in values]\n\n\ndef scale_in_place(values):\n    values[0] = 0\n";
 const RO_PLOT: &str = "from collections.abc import Sequence\n\nfrom pkg.ro import scale\n\n\ndef plot(values: Sequence[float]) -> None:\n    scale(values)\n";
+// Receiver typing: the class of a loop target comes from the element type of an attribute
+// annotation in another module.
+const SHELF: &str = r#"from typing import Self
+
+from pkg.model import Registry
+
+
+class Shelf:
+    registries: list[Registry]
+
+    @property
+    def main(self) -> Registry:
+        return self.registries[0]
+
+    def again(self) -> Self:
+        return self
+"#;
+const FILL: &str = "from pkg.shelf import Shelf\n\n\ndef fill(shelf: Shelf, x):\n    for r in shelf.registries:\n        r.entries.append(x)\n";
+const FILL_MAIN: &str = "from pkg.shelf import Shelf\n\n\ndef fill_main(shelf: Shelf, x):\n    shelf.again().main.entries.append(x)\n";
+// A protocol in one module, the class implementing it structurally in another.
+const VIEWS: &str = "from typing import Protocol\n\n\nclass EntriesView(Protocol):\n    entries: list\n    tag: str\n\n\ndef fill_view(view: EntriesView, x):\n    view.entries.append(x)\n";
+// The class body only declares names (no function changes): only the protocol's
+// implementations change.
+const TAGGED: &str =
+    "from pkg.model import Registry\n\n\nclass TaggedRegistry(Registry):\n    tag: str = \"t\"\n";
+const UNTAGGED: &str =
+    "from pkg.model import Registry\n\n\nclass TaggedRegistry(Registry):\n    label: str = \"t\"\n";
 
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
@@ -351,6 +392,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/chain_top.py", CHAIN_TOP),
         ("pkg/offload.py", OFFLOAD),
         ("pkg/view.py", VIEW),
+        ("pkg/worker_ops.py", WORKER_OPS),
+        ("pkg/worker_view.py", WORKER_VIEW),
         ("pkg/feed.py", FEED),
         ("pkg/feed_user.py", FEED_USER),
         ("pkg/fills.py", FILLS),
@@ -373,10 +416,21 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/kid_gen.py", KID_GEN),
         ("pkg/kid_user.py", KID_USER),
         ("pkg/shelf.py", SHELF),
-        ("pkg/shelf_ops.py", SHELF_OPS),
-        ("pkg/shelf_view.py", SHELF_VIEW),
+        ("pkg/rack.py", RACK),
+        ("pkg/rack_ops.py", RACK_OPS),
+        ("pkg/rack_view.py", RACK_VIEW),
         ("pkg/named.py", NAMED),
         ("pkg/labeled.py", LABELED),
+        ("pkg/fill.py", FILL),
+        ("pkg/fill_main.py", FILL_MAIN),
+        ("pkg/views.py", VIEWS),
+        ("pkg/tagged.py", TAGGED),
+        ("pkg/key_consts.py", KEY_CONSTS),
+        ("pkg/key_writer.py", KEY_WRITER),
+        ("pkg/fresh_ops.py", FRESH_OPS),
+        ("pkg/fresh_build.py", FRESH_BUILD),
+        ("pkg/strict_ops.py", STRICT_OPS),
+        ("pkg/strict_use.py", STRICT_USE),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -504,6 +558,59 @@ fn steps_mut108() -> Vec<Step> {
     ]
 }
 
+/// Receiver typing: the element types of declarations in another module type the receivers of
+/// a function, so editing those declarations re-checks it.
+fn steps_receiver_typing() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the attribute holds strings instead of registries",
+            vec![save(
+                "pkg/shelf.py",
+                &SHELF.replace("list[Registry]", "list[str]"),
+            )],
+        )
+        .absent(&[("pkg/fill.py", "MUT201")]),
+        Step::new(
+            "the attribute holds registries again",
+            vec![save("pkg/shelf.py", SHELF)],
+        )
+        .present(&[("pkg/fill.py", "MUT201")]),
+        Step::new(
+            "the property returns a string",
+            vec![save(
+                "pkg/shelf.py",
+                &SHELF.replace(") -> Registry:", ") -> str:"),
+            )],
+        )
+        .absent(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the property returns a registry again",
+            vec![save("pkg/shelf.py", SHELF)],
+        )
+        .present(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the method returns an int instead of Self",
+            vec![save("pkg/shelf.py", &SHELF.replace("-> Self:", "-> int:"))],
+        )
+        .absent(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the method returns Self again",
+            vec![save("pkg/shelf.py", SHELF)],
+        )
+        .present(&[("pkg/fill_main.py", "MUT201")]),
+        Step::new(
+            "the class stops implementing the protocol",
+            vec![save("pkg/tagged.py", UNTAGGED)],
+        )
+        .absent(&[("pkg/views.py", "MUT201")]),
+        Step::new(
+            "the class implements the protocol again",
+            vec![save("pkg/tagged.py", TAGGED)],
+        )
+        .present(&[("pkg/views.py", "MUT201")]),
+    ]
+}
+
 /// Step 5b: the contract extensions. A call of a function without effects (constructing a
 /// dataclass) changes no summary, so the reports of the private helper's callers and of the
 /// boundary above follow the call facts; the allowed-context walk reads the calls of callers two
@@ -623,6 +730,20 @@ fn steps_body_runs() -> Vec<Step> {
         )
         .present(&[("pkg/view.py", "EFF101")]),
         Step::new(
+            "a function run on a worker thread starts a query per call",
+            vec![Action::Save(
+                "pkg/worker_ops.py",
+                WORKER_OPS.replace("    return i\n", "    return session.execute(i)\n"),
+            )],
+        )
+        .present(&[("pkg/worker_view.py", "EFF103")])
+        .absent(&[("pkg/worker_view.py", "EFF101")]),
+        Step::new(
+            "the worker's query is removed",
+            vec![save("pkg/worker_ops.py", WORKER_OPS)],
+        )
+        .absent(&[("pkg/worker_view.py", "EFF103")]),
+        Step::new(
             "a helper becomes a generator: the report moves to the iteration",
             vec![save("pkg/feed.py", FEED_GENERATOR)],
         )
@@ -673,6 +794,57 @@ fn steps_small_displays() -> Vec<Step> {
             vec![save("pkg/sniff_more.py", SNIFF_MORE)],
         )
         .absent(&[("pkg/sniff_user.py", "OPT112")]),
+    ]
+}
+
+/// Constant keys, objects under construction, and the strict mode. A `Final` key
+/// constant is a declaration another module's summary resolves names through; whether a helper
+/// keeps the object its caller hands it is a summary fact of the helper; whether a parameter is
+/// typed is a fact of the callers the strict mode walks.
+fn steps_keys_fresh_strict() -> Vec<Step> {
+    let storing = FRESH_OPS.replace(
+        "    r.entries.append(1)\n",
+        "    KEPT.append(r)\n    r.entries.append(1)\n",
+    );
+    vec![
+        Step::new(
+            "the `Final` key constant of another module names another attribute",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                KEY_CONSTS.replace("\"entries\"", "\"other\""),
+            )],
+        )
+        .absent(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the constant names the guarded attribute again",
+            vec![save("pkg/key_consts.py", KEY_CONSTS)],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "a helper starts storing the fresh object before writing it",
+            vec![Action::Save("pkg/fresh_ops.py", storing)],
+        )
+        .present(&[("pkg/fresh_build.py", "MUT201")]),
+        Step::new(
+            "the helper only fills the fresh object again",
+            vec![save("pkg/fresh_ops.py", FRESH_OPS)],
+        )
+        .absent(&[("pkg/fresh_build.py", "MUT201")]),
+        Step::new(
+            "the caller stops typing the object it hands the helper",
+            vec![Action::Save(
+                "pkg/strict_use.py",
+                STRICT_USE.replace("def run(r: Registry):", "def run(r):"),
+            )],
+        )
+        .present(&[("pkg/strict_ops.py", "MUT205")])
+        .absent(&[("pkg/strict_use.py", "MUT201")]),
+        Step::new(
+            "the caller types it again",
+            vec![save("pkg/strict_use.py", STRICT_USE)],
+        )
+        .present(&[("pkg/strict_use.py", "MUT201")])
+        .absent(&[("pkg/strict_ops.py", "MUT205")]),
     ]
 }
 
@@ -898,23 +1070,23 @@ fn steps_mut202_mut109() -> Vec<Step> {
 /// callee, while its final summary stays the same: the writes the boundary and the owner
 /// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`).
 fn steps_indirect_helpers() -> Vec<Step> {
-    let changing = SHELF_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
+    let changing = RACK_OPS.replace("    empty(xs)\n", "    xs.append(1)\n    empty(xs)\n");
     vec![
         Step::new(
             "a helper handed a field also changes it outside the allowed callee",
-            vec![Action::Save("pkg/shelf_ops.py", changing)],
+            vec![Action::Save("pkg/rack_ops.py", changing)],
         )
         .present(&[
-            ("pkg/shelf_view.py", "EFF201"),
-            ("pkg/shelf_view.py", "MUT201"),
+            ("pkg/rack_view.py", "EFF201"),
+            ("pkg/rack_view.py", "MUT201"),
         ]),
         Step::new(
             "the helper leaves the change to the allowed callee again",
-            vec![save("pkg/shelf_ops.py", SHELF_OPS)],
+            vec![save("pkg/rack_ops.py", RACK_OPS)],
         )
         .absent(&[
-            ("pkg/shelf_view.py", "EFF201"),
-            ("pkg/shelf_view.py", "MUT201"),
+            ("pkg/rack_view.py", "EFF201"),
+            ("pkg/rack_view.py", "MUT201"),
         ]),
     ]
 }
@@ -955,6 +1127,9 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_use.py", "EFF102"),
             ("pkg/guard_default_use.py", "EFF102"),
             ("pkg/guard_conn_use.py", "EFF102"),
+            ("pkg/fill.py", "MUT201"),
+            ("pkg/fill_main.py", "MUT201"),
+            ("pkg/views.py", "MUT201"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(
@@ -1080,6 +1255,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut202_mut109());
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());
+    steps.extend(steps_receiver_typing());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(
@@ -1104,6 +1280,7 @@ fn steps() -> Vec<Step> {
         .present(&[("pkg/ops.py", "MUT201"), ("pkg/ops.py", "MUT203")]),
     ]);
     steps.extend(steps_contract_extensions());
+    steps.extend(steps_keys_fresh_strict());
     steps.extend([
         // 7. Files.
         Step::new(

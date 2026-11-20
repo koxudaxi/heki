@@ -71,15 +71,20 @@ GitHub Actions annotations:
 - run: uvx heki check --output-format github
 ```
 
-Code scanning (SARIF):
+Code scanning (SARIF; the job needs `permissions: security-events: write`):
 
 ```yaml
-- run: uvx heki check --output-format sarif > heki.sarif || true
-- uses: github/codeql-action/upload-sarif@v3
+- run: uvx heki check --output-format sarif > heki.sarif || test "$?" -eq 1
+- uses: github/codeql-action/upload-sarif@v4
   with:
     sarif_file: heki.sarif
 ```
 
+Findings (exit code `1`) become code-scanning alerts and keep the step green. A configuration,
+read, or syntax error (exit code `2`) still fails it: heki then writes SARIF for the files it
+could analyze, which would hide the others.
+
+SARIF results carry the message, the location, and the call chain (`relatedLocations`).
 `--output-format json` gives every field (evidence, blocker, related call chain, fix edits) for
 custom tooling.
 
@@ -90,6 +95,7 @@ custom tooling.
   state and the operations you care about and effect boundaries (`effect-boundaries`) for the
   code that must stay pure; `MUT201`, `MUT203`, `MUT204`, and `EFF201` report nothing until a
   contract exists.
-- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) for code where they
-  matter: async services, threaded code, and library APIs.
+- Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) for code
+  where they matter: async services, threaded code, library APIs, and code that relies on frozen
+  dataclasses and `ReadOnly` fields.
 - Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.

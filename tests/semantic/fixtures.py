@@ -119,11 +119,26 @@ async def handler_popen_spawn_tn() -> subprocess.Popen:
 
 
 # ==============================================================================
-# EFF102: for.iter header exclusion TN
+# EFF102: a client allocated in the loop header runs once; in the body, per item
 # ==============================================================================
-def fetch_once_then_iterate_tn(client_factory) -> list[str]:
+def _connect_and_list(names: list[str]) -> list[str]:
+    import sqlite3
+
+    sqlite3.connect(":memory:").close()
+    return names
+
+
+def connect_once_then_iterate_tn(names: list[str]) -> list[str]:
     out: list[str] = []
     # MUST NOT report EFF102: `for.iter` runs once before the loop body
-    for item in client_factory():
+    for item in _connect_and_list(names):
         out.append(str(item))
+    return out
+
+
+def connect_per_item_tp(names: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in names:
+        # EXPECT: EFF102 (the helper allocates a client on every iteration)
+        out.extend(_connect_and_list([item]))
     return out

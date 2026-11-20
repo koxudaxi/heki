@@ -5,12 +5,16 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # release.yml runs every job on the release commit before it publishes.
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Called from release.yml, `github.workflow` is the caller's: a push to main does not cancel
+  # a release's checks.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -151,3 +155,18 @@ jobs:
         run: python tests/difftest/counterexamples.py
       - name: Counterexamples of the Soundness rewrites, end to end
         run: python tests/difftest/soundness_e2e_counterexamples.py
+
+  memory:
+    name: peak memory
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build --release -p heki
+      # `heki check` (with and without an ownership contract) and the `--watch` engine on a
+      # generated project: fails when one's peak RSS exceeds its budget in the script.
+      - name: Peak RSS within budget
+        run: python3 scripts/check_memory.py --heki target/release/heki

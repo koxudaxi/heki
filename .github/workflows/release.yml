@@ -2,7 +2,8 @@ name: Release
 
 # Publishes a GitHub release: maturin wheels (`bindings = "bin"`: the wheel ships the `heki`
 # executable) for every platform, the source distribution, PyPI through trusted publishing, and
-# optionally the crates on crates.io.
+# optionally the crates on crates.io. Its jobs restore no cache (`enable-cache: false` for uv):
+# what they build or check is published.
 
 on:
   release:
@@ -10,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish to PyPI (otherwise only build and check the distributions)"
+        description: "Publish to PyPI from main (otherwise only build and check the distributions)"
         type: boolean
         default: false
 
@@ -56,8 +57,13 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
+          # The Linux builds run in a container, which installs its own toolchain (`stable`
+          # unless told otherwise) instead of the one set up above.
+          rust-toolchain: 1.99.0
           args: --release --locked --out dist
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
       - name: Check metadata
         shell: bash
         run: uvx twine check dist/*
@@ -78,10 +84,24 @@ jobs:
           command: sdist
           args: --out dist
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
       - run: uvx twine check dist/*
-      # Platforms without a wheel build from the source distribution: it must carry every file
-      # the build embeds (such as `kb/`).
+      # Platforms without a wheel build from the source distribution, and packagers run its
+      # tests: it must carry every file the build and the tests embed or read (`kb/`, `tests/`).
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+      - id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.15"
+          allow-prereleases: true
+      - name: The tests pass in the unpacked source distribution
+        env:
+          HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          mkdir sdist-tree
+          tar -xzf dist/*.tar.gz -C sdist-tree --strip-components 1
+          cargo test --workspace --locked --manifest-path sdist-tree/Cargo.toml
       - name: heki builds and runs from the source distribution
         run: |
           uv venv .sdist-smoke
@@ -94,8 +114,60 @@ jobs:
           path: dist/*
 
   smoke:
-    name: installed wheel smoke test
+    # Every wheel must carry the executable, and the executable must report a known diagnostic
+    # (exit 1) and pass a clean project (exit 0). Each wheel is installed on a runner of its
+    # platform; the static musl binary runs, extracted from its wheel, on a glibc runner.
+    name: wheel smoke test (${{ matrix.target }})
     needs: wheels
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            install: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            install: true
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            install: false
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            install: true
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            install: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            install: true
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+      - name: heki runs from the wheel
+        shell: bash
+        env:
+          INSTALL: ${{ matrix.install }}
+        run: |
+          if [ "$INSTALL" = true ]; then set -- --install; fi
+          python scripts/release_check.py smoke dist/*.whl "$@"
+
+  versions:
+    # A tag such as `v0.1.0rc1` must not publish distributions that declare `0.1.0`.
+    name: versions match the tag
+    needs: [wheels, sdist]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,21 +175,37 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: wheels-x86_64-unknown-linux-gnu
+          pattern: "{wheels-*,sdist}"
           path: dist
+          merge-multiple: true
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-      - name: heki runs from the wheel
+        with:
+          enable-cache: false
+      - name: The tag, the manifests, and every distribution declare one version
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
         run: |
-          uv venv .smoke
-          uv pip install --python .smoke dist/*.whl
-          .smoke/bin/heki --version
-          .smoke/bin/heki rule --all
-          .smoke/bin/heki check tests/semantic/fixtures.py --output-format concise || test $? -eq 1
+          if [ -n "$TAG" ]; then set -- --tag "$TAG"; fi
+          uv run --no-project --with "packaging==25.0" python scripts/release_check.py versions dist "$@"
+
+  ci:
+    # The correctness gates (tests, LSP oracle, rewrite differential tests, CPython checks) on
+    # the exact commit being published: CI on pull requests and on main does not cover a tag.
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
 
   pypi:
+    # A partial upload is resumed with "Re-run failed jobs": the rerun uploads this run's
+    # artifacts again, and PyPI accepts a file it already holds when the contents are the same.
+    # "Re-run all jobs" rebuilds the distributions, and PyPI refuses changed files under a name
+    # it already has.
     name: publish to PyPI
-    if: github.event_name == 'release' || inputs.publish
-    needs: [wheels, sdist, smoke]
+    # The `pypi` environment, which PyPI's trusted publisher names, admits only main and release
+    # tags as well.
+    if: github.event_name == 'release' || (inputs.publish && github.ref == 'refs/heads/main')
+    needs: [ci, wheels, sdist, smoke, versions]
     runs-on: ubuntu-24.04
     environment:
       name: pypi
@@ -132,10 +220,22 @@ jobs:
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
+  docs:
+    # The production site documents a release once its distributions are on PyPI.
+    name: production docs
+    needs: [pypi]
+    if: github.event_name == 'release'
+    uses: ./.github/workflows/docs.yml
+    permissions:
+      contents: read
+
   crates-io:
-    # The parser crates come from a pinned ruff git tag (ADR-009 / ADR-016), which crates.io
-    # does not accept as a dependency. The job stays off until they are published or vendored
-    # and the repository variable `PUBLISH_CRATES` is set to `true`.
+    # Off until the repository variable `PUBLISH_CRATES` is `true`, which needs two changes
+    # first: the parser crates come from a pinned ruff git tag (ADR-009 / ADR-016), which
+    # crates.io does not accept as a dependency, so they must be published or vendored; and
+    # `heki_kb` embeds `kb/` from the repository root, outside its crate archive, so the
+    # catalogs must move into the crate. `cargo publish --workspace` packages and verifies
+    # every crate before it uploads the first one.
     name: publish to crates.io
     if: github.event_name == 'release' && vars.PUBLISH_CRATES == 'true'
     needs: [pypi]
@@ -153,11 +253,7 @@ jobs:
       # Trusted publishing: a short-lived token from the repository's OIDC identity.
       - id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-      - name: Publish in dependency order
+      - name: Publish every crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: |
-          for crate in heki_ast heki_env heki_profile heki_semantic heki_ir heki_kb \
-                       heki_soundness heki_effect heki_diagnostics heki_rules heki_lsp heki; do
-            cargo publish --locked -p "$crate"
-          done
+        run: cargo publish --locked --workspace

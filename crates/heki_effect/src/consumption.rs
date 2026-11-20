@@ -122,10 +122,9 @@ const FULL_CONSUMERS: &[(&str, Consumes)] = &[
     ("math.fsum", Consumes::First),
 ];
 
-/// Calls stepping their first argument until a condition decides the result: `any` stops at
-/// the first true item and `all` at the first false one. The items after it are left for the
-/// next pass, but the steps run a generator's body.
-const SHORT_CIRCUIT_CONSUMERS: &[&str] = &["builtins.any", "builtins.all"];
+/// Calls stepping their first argument until an item decides the result (`any` at the first true
+/// item, `all` at the first false one): they exhaust it only when no item does.
+const STOPPING_CONSUMERS: &[&str] = &["builtins.any", "builtins.all"];
 
 /// Annotations naming a single-pass iterator (`Iterable`, `Sequence`, ... may be re-iterable).
 const ITERATOR_TYPES: &[&str] = &[
@@ -183,6 +182,19 @@ fn consumer_args(symbol: &str, args: &[VarId]) -> Vec<VarId> {
         Consumes::All => args.to_vec(),
         Consumes::Sole if args.len() == 1 => args.to_vec(),
         Consumes::Sole => Vec::new(),
+    }
+}
+
+/// The arguments a call of the external `symbol` iterates when it runs: an eager constructor's
+/// (`itertools.product(a, b)`), a full consumer's (`list(it)`, `xs.extend(it)`), or the first
+/// one of a consumer that may stop early (`any(it)`: it steps it, without exhausting it).
+pub(crate) fn iterated_args(symbol: &str, args: &[VarId]) -> Vec<VarId> {
+    if STOPPING_CONSUMERS.contains(&symbol) {
+        return args[..args.len().min(1)].to_vec();
+    }
+    match constructor_args(symbol, args) {
+        Some(w) if w.eager => w.stepped,
+        _ => consumer_args(symbol, args),
     }
 }
 
@@ -466,17 +478,14 @@ impl IterFlow {
                     InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => {
                         match &self.callees[&(bb.id, index)] {
                             Callee::External(symbol)
-                                if SHORT_CIRCUIT_CONSUMERS.contains(&symbol.as_str()) =>
+                                if STOPPING_CONSUMERS.contains(&symbol.as_str()) =>
                             {
-                                let first: Vec<VarId> = args.first().copied().into_iter().collect();
+                                let first = &args[..args.len().min(1)];
                                 let done = (bb.id, index + 1);
-                                self.push(bb.id, index, inst.span, &first, false, done);
+                                self.push(bb.id, index, inst.span, first, false, done);
                                 continue;
                             }
-                            Callee::External(symbol) => match constructor_args(symbol, args) {
-                                Some(w) if w.eager => w.stepped,
-                                _ => consumer_args(symbol, args),
-                            },
+                            Callee::External(symbol) => iterated_args(symbol, args),
                             _ => continue,
                         }
                     }
@@ -758,6 +767,9 @@ mod tests {
             ("functools.reduce", 3, &[1]),
             ("builtins.len", 1, &[]),
             ("builtins.next", 1, &[]),
+            // `any` / `all` stop at the item deciding the result.
+            ("builtins.any", 1, &[]),
+            ("builtins.all", 1, &[]),
             ("starlette.concurrency.iterate_in_threadpool", 1, &[]),
         ];
         for &(symbol, n, expected) in cases {

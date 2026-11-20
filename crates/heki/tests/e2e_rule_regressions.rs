@@ -711,6 +711,22 @@ def mixed(A):
         for r in rows:
             if a == r:
                 print(a)
+
+
+def lists_and_sets(A):
+    rows = [{1}, [2], [3], [4], [5], [6], [7], [8], [9]]
+    for a in A:
+        for r in rows:
+            if a == r:
+                print(a)
+
+
+def classes(A):
+    rows = [int, int, int, int, int, int, int, int, int]
+    for a in A:
+        for r in rows:
+            if a == r:
+                print(a)
 "#;
 
 #[test]
@@ -735,6 +751,15 @@ fn opt113_unhashable_display_elements() {
             ),
             (
                 22,
+                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop"
+            ),
+            // Elements of two unhashable classes; class objects are hashable.
+            (
+                30,
+                "`r` is an unhashable `list`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
+            ),
+            (
+                38,
                 "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop"
             ),
         ],

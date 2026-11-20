@@ -1,7 +1,7 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`)
+//!   `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -17,7 +17,7 @@ pub mod project;
 pub mod selection;
 pub mod snapshot;
 
-pub use contracts::{MAX_INVALIDATIONS, summary_contracts};
+pub use contracts::{MAX_INVALIDATIONS, summary_contracts, typed_writes};
 pub use mut_rules::{CHAIN_RULES, ChainFacts, chain_facts, family_readers};
 pub use selection::{RuleSelection, SelectionError};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
@@ -172,6 +172,16 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.",
         doc: include_str!("../rule-docs/MUT204.md"),
+    },
+    RuleMeta {
+        code: "MUT205",
+        slug: "unresolved-guarded-write",
+        family: RuleFamily::Mut,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Strict mode of a `write-owners` contract (`unresolved = \"report\"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class.",
+        doc: include_str!("../rule-docs/MUT205.md"),
     },
     RuleMeta {
         code: "EFF101",
@@ -381,6 +391,14 @@ pub enum RuleConfigError {
         section: &'static str,
         target: String,
     },
+    /// A container entry (`Class.attr["key"]`) among read targets.
+    #[error(
+        "invalid {section} target `{target}`: a container entry (`Class.attr[\"key\"]`) is a write target only; reads are of `Class.attr`"
+    )]
+    ItemTarget {
+        section: &'static str,
+        target: String,
+    },
     #[error(
         "unknown `forbid` token `{token}` in effect-boundaries `{boundary}` (expected {expected})"
     )]
@@ -398,6 +416,15 @@ pub enum RuleConfigError {
     },
     #[error("effect-boundaries `{0}` sets `allow-writes` but no `write-universe`")]
     AllowWritesWithoutUniverse(String),
+    /// A mode key of a contract (`fresh-objects`, `unresolved`) with an unknown value.
+    #[error("unknown `{key}` value `{value}` in {section} `{contract}` (expected {expected})")]
+    UnknownMode {
+        section: &'static str,
+        contract: String,
+        key: &'static str,
+        value: String,
+        expected: &'static str,
+    },
     #[error("invalid glob `{pattern}` in {context}: {cause}")]
     Glob {
         pattern: String,
@@ -569,6 +596,7 @@ impl<'a> CheckContext<'a> {
                 f.functions
                     .iter()
                     .filter(move |(k, _)| self.index.file_of(k) == Some(path.as_path()))
+                    .map(|(k, s)| (k, &**s))
             })
             .collect();
         funcs.sort_by(|a, b| a.0.cmp(b.0));

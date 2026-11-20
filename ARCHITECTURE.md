@@ -2,7 +2,7 @@
 
 | Item | Content |
 |---|---|
-| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (29 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
+| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (30 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
 | Date | 2026-11-20 |
 | Target language | Python (verified on CPython 3.11–3.15, including PEP 709, PEP 649 `__annotate__`, and PEP 810 `lazy import`) |
 | Implementation language | Rust: a single binary with a CLI and an incremental LSP server, distributed with `maturin`. Only the frontend uses `ruff_python_parser` / `ruff_python_ast` (`tag = "0.17.5"`), isolated in `heki_ast`. |
@@ -94,8 +94,9 @@ by crate boundaries, carrying three rule families.
   the certainty of a speedup (profitability) are managed as orthogonal axes; nothing without a
   reason, and nothing that can be slower for small inputs, is applied by default.
 - **G4. Gradual adoption and machine-readable output**: a line-number-independent, shrink-only
-  baseline (`heki check --baseline`) and JSON / SARIF output carrying the evidence (`evidence`),
-  the obstacle to a fix (`blocker`), and the call path (`related`), for large existing code bases
+  baseline (`heki check --baseline`) and JSON output carrying the evidence (`evidence`), the
+  obstacle to a fix (`blocker`), and the call path (`related`; SARIF carries the call path as
+  `relatedLocations`), for large existing code bases
   and for the fix loops of humans and agents in CI.
 - **G5. Coexistence with existing tools**: no overlap with Ruff, ty, mypy, Pyright, or tach;
   `# noqa` compatible.
@@ -220,6 +221,13 @@ direct imports, (2) PEP 484 annotations, (3) `self.attr` assignments in `__init_
 followed (the function is marked `unknown_calls`), and an external function that the Layer 2
 catalog does not list contributes no effect.
 
+Receiver types are inferred by a fixpoint over the SSA-CFG: annotations, including container
+item types (`list[Model]`, `dict[str, Model]`, `tuple[...]`, `Iterator[...]`); the items taken
+out by loops, subscripts, unpacking, dict views, and the builtins that wrap iterables; property
+getters' and methods' return annotations along the MRO, as a type checker reads them; `Self`;
+copies; `functools.partial`; `typing.cast`; unions of up to three classes; `isinstance`
+narrowing; and the structural implementations of project `Protocol`s (up to eight).
+
 Reading a property is a call: `obj.attr` on an instance of a project class whose `attr` is a
 getter-only `@property` / `cached_property` (found along the MRO and in overriding subclasses, at
 most 8) is a call site of the getter that binds the receiver, at the read. A property with a
@@ -251,7 +259,10 @@ EffectSummary(f) = {
     reads_self_attrs:         Set<AttrKeyPath>,     // reads of self.<attr> (constant dict keys included)
     mutates_self_attrs:       Set<AttrKeyPath>,     // reassignment or in-place change of self.<attr>
     invalidates_cached:       Set<AttrName>,        // del self.<prop>, self.__dict__.pop("<prop>", ...)
-    typed_field_write_sites:  Set<(Class, Attr, WriteKind, Chain)>, // direct and indirect writes (MUT201, EFF201)
+    typed_field_write_sites:  Set<(Class, Attr, WriteKind, Chain)>, // own and indirect writes, and those handed
+                                                    // over by private callees (MUT201, EFF201)
+    typed_field_writes:       Set<(Class, Attr)>,   // every typed write reached through any callee
+    typed_params:             Bitset,               // parameters the function types itself
     typed_field_read_sites:   Set<(Class, Attr, ReadKind)>,         // own reads only, never propagated (MUT203)
 
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy init
@@ -272,7 +283,9 @@ EffectSummary(f) = {
 1. **User-defined offload wrappers**: besides `asyncio.to_thread`, thin project wrappers such as
    `await in_thread(self.open)` propagate `offloads_blocking_params` bottom-up (finding from
    datamodel-code-generator `bodies.py:112`), and functions decorated with an offloading API
-   (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`) are calls of that API.
+   (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`) are calls of that API. Such a
+   function, and an offloading API's callable, run on a worker thread: everything they do
+   counts at the call except blocking effects.
 2. **Sync-over-async relaxation**: an internal `async def` driven only through a synchronous
    driver is relaxed for `EFF101` / `EFF105` (finding from datamodel-code-generator
    `client.py:1399`).
@@ -347,7 +360,9 @@ versions.
 │  redis, boto3, pandas, numpy, ...)                                           │
 │  - declarative model of public APIs for the Advisory lane (the origin of     │
 │    every effect): effects, async safety, offloaded arguments, copy           │
-│    sanitizers, factory return types, synchronous locks and transactions      │
+│    sanitizers, factory return types, synchronous locks and transactions,     │
+│    argument cases (a literal argument selects effects or the return type),   │
+│    sync facades (`run_sync`), and lazy iterators                             │
 │  - user additions and overrides with [[tool.heki.ecosystem]]                 │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ Layer 3: on-demand analysis of unregistered dependencies (planned)           │
@@ -371,7 +386,7 @@ versions.
 The adopted, rejected, and candidate rules are fixed by the Stage 0-A measurements (339
 repositories, 18.1 million lines, all 171 samples reviewed by hand), the Wave 2 measurements
 (19 million lines), and the study of datamodel-code-generator's 20,000 lines of in-house checkers.
-The 29 rules are listed in the [rules reference](docs/rules/index.md).
+The 30 rules are listed in the [rules reference](docs/rules/index.md).
 
 ### Family 1: Mutation & State Effect (`MUT`: hardening mature production code)
 
@@ -388,6 +403,7 @@ The 29 rules are listed in the [rules reference](docs/rules/index.md).
 | **MUT202** | When configured (contract) | **Declared read-only returns**: the shared objects returned by the functions and caches listed in `[[tool.heki.readonly-returns]]` (and the containers below them) must not be mutated by callers or downstream functions, including the values returned through wrappers: a function returning a producer's or `@lru_cache` function's result (unless copied) becomes a producer itself, across modules (`returns_protected`, propagated bottom-up) | Checked statically through cross-function `mutates_params` and alias tracking (replaces the run-time fingerprint monitoring of datamodel-code-generator's `tests/checks/schema_graph.py`) |
 | **MUT203** | When configured (contract) | **Declared read ownership**: reads of the classes and attributes listed in `[[tool.heki.read-owners]]` (local aliases, `getattr`, and `__dict__` included) are limited to the allowed readers (the read side of `MUT201`) | The same patterns, subclass expansion, initializer rule, `exempt-methods`, delegation from private helpers to their callers, allowed-context rule, and `message` as `MUT201`. Read sites are kept as local facts and the rule walks the reverse call graph, so summaries do not grow with propagated reads |
 | **MUT204** | On (contract) | **Declared call ownership**: calls of the functions, methods (overrides included), and constructions of the classes listed in `[[tool.heki.call-owners]]` outside the allowed callers (or inside `forbidden-callers`), through the receiver's class, bound-method aliases, and constant `getattr` calls | Reported only when every candidate is a target; `MUT203`'s delegation, initializer, and allowed-context rules; targets may call each other; call sites are local `FileSummary` facts (`CallSite::constructs`) |
+| **MUT205** | When configured (`unresolved = "report"`) | **Writes a `write-owners` contract cannot check**: outside the write owners, an attribute named like a target written on an object of unknown class, or a computed attribute name on a guarded class (`setattr(obj, name, v)`, `obj.__dict__[name]`, `__dict__.clear()`), so a clean `MUT201` run says how much it did not check | Objects of known classes (`MUT201`'s domain), the contract's scopes and baselines |
 
 *(`MUT102` (`MUT102a` deep mutation / `MUT102b` representation exposure), measured in Stage 0-A,
 is **rejected**: the hits were sparse and mostly deliberate idioms;
@@ -397,7 +413,7 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 
 | Rule ID | Default | Stage 0-A density | What it finds and how precision is controlled |
 |---|---|---|---|
-| **EFF101** | On | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators, sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
+| **EFF101** | On | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators (their queries and writes still count), sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
 | **EFF102** | On | Web/async **44.1%** / DB **48.5%** (90–93% indirect) | HTTP clients, sessions, or connection pools created in a loop (across functions too). `for.iter` excluded; `ConstSmall` / `RetryPattern` / `DaemonPolling` loops relaxed |
 | **EFF103** | On | DB **47.6%** (74% indirect) | Explicit database queries or external RPC calls in a loop (N+1, across functions too). `for.iter`, DDL, migrations, ORM internals, and bulk APIs excluded. **Implicit ORM lazy loading is out of scope (known limitation)** |
 | **EFF105** | Opt-in | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |
@@ -413,7 +429,7 @@ single-expression lints.)*
 
 | Rule ID | Pattern → rewrite | Profitability | Default `heki check --fix` | Main safety obligations / profitability conditions |
 |---|---|---|---|---|
-| **OPT101** | `x = x + [e]`, `x = [*x, e]`, `x = x + y` → `x.append(e)` / `x.extend(y)` | `unconditional` | **Applied (when `safe`)** | Safety: `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe`, `EvalOrderPreserved` / Profit: `LoopCarried(x)` |
+| **OPT101** | `x = x + [e]`, `x = x + [e1, *it]` (a list display on the right) → `x.append(e)` / `x.extend([...])` | `unconditional` | **Applied (when `safe`)** | Safety: `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe`, `EvalOrderPreserved` / Profit: `LoopCarried(x)` |
 | **OPT102** | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s.add(e)`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`) / Profit: `LoopCarried` |
 | **OPT103** | Quadratic accumulation of immutable values (`tuple +=`, `bytes +=`, `self.s +=`, ...) → a buffer and one final conversion | `size-dependent` | Suggestion only | Safety: `Unique`, `ExclusiveAccessAtWrite`, `ExactType(lhs / rhs)`, no intermediate reads (`NoIntermediateReads`), `ExceptionStateSafe` / Profit: `LoopCarried`, `NotConstSmall` (local `s += x` excluded: CPython already appends in place) |
 | **OPT110** | `e in lst` in a loop → a `set` built before the loop | `size-dependent` | With `--include-size-dependent` | Safety: `ValueLoopInvariant(lst)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` / Profit: `NotConstSmall(lst)` |
@@ -526,10 +542,11 @@ heki/
 - Direct dependencies on `ruff_python_*` stay inside `heki_ast`.
 
 ### Incremental LSP design (two stages for 10–50 ms responses)
-- **Start-up (in the background)**: every file is analyzed in parallel; IR is dropped and only
-  the light `FileSummary`s and the reverse call graph (`ProjectIndex`) stay in memory (about
-  0.3–1.5 s and tens of MB for 100,000 lines). A source-level guard test fails when the resident
-  state holds IR or the semantic model.
+- **Start-up (in the background)**: every file is analyzed in parallel; the parsed files (IR,
+  semantic model, text) are dropped once every file is summarized, before propagation, and only
+  the `FileSummary`s and the reverse call graph (`ProjectIndex`) stay in memory. What each
+  file's check read of the declarations is kept as interned key ids. A source-level guard test
+  fails when the resident state holds IR or the semantic model.
 - **While editing (`didChange`, 250 ms debounce)**: only the edited file is parsed and analyzed
   again; rules within one function and cross-function rules that use the cached summaries of
   other files report immediately.
@@ -656,7 +673,7 @@ message = "render entry points must not mutate model state"
 | M7 | The incremental LSP server and `--watch` |
 | M8 | End-to-end test suite through the real binary and LSP process; 100% of reachable lines |
 | M9 | CI / release / documentation workflows and the user guide |
-| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT109`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, and the `MUT202` return flow (29 rules) |
+| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT109`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, the `MUT202` return flow, `MUT205`, and contract keys, entries, and fresh objects (30 rules) |
 
 ### Gates for every release (from Stage 0-B)
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.
@@ -670,6 +687,11 @@ message = "render entry points must not mutate model state"
      rules `MUT201` / `MUT202` show at least the coverage of datamodel-code-generator's own
      checker on its code).
 4. **Performance**: a 100,000-line repository is analyzed in a few seconds.
+5. **Release integrity**: the release workflow runs CI on the release commit and checks the tag
+   against every distribution's version before it publishes.
+6. **Memory**: CI (`scripts/check_memory.py`) bounds the peak memory (resident set size on
+   Linux, physical footprint on macOS) of `heki check`, with and without an ownership contract,
+   and of the `--watch` engine on a generated project.
 
 ### Remaining for v1.0
 The conservative `SoundnessSummary` (A2), Layer 3 on-demand analysis with its disk cache,

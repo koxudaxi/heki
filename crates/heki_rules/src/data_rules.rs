@@ -11,9 +11,11 @@ use rustc_hash::FxHashMap;
 
 /// `DATA101`: a loop-carried variable rebuilt *from itself* through a `QuadraticRealloc` API
 /// (`df = pd.concat([df, part])`): one of its accumulating updates (`LoopCarriedInfo::updates`,
-/// the back-edge values computed from the previous value) is such a call. One-shot
-/// concatenations inside a loop, also on a branch that leaves the variable unchanged otherwise,
-/// are not updates and are never reported.
+/// the back-edge values computed from the previous value) is such a call, and the previous
+/// value reaches it through the data it combines, not only as the `out=` buffer it writes into
+/// (`out = np.concatenate(parts, out=out)` reuses the buffer). One-shot concatenations inside a
+/// loop, also on a branch that leaves the variable unchanged otherwise, are not updates and are
+/// never reported.
 pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.enabled("DATA101", unit) {
         return;
@@ -43,7 +45,8 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 if !matches!(
                     inst.kind,
                     InstKind::Call { .. } | InstKind::MethodCall { .. }
-                ) {
+                ) || !combines(f, &defs, inst, lc.phi_var)
+                {
                     return None;
                 }
                 let effects: Vec<SiteEffect> = sites
@@ -158,6 +161,53 @@ fn carries(f: &IrFunction, v: VarId, previous: VarId) -> bool {
         }
     }
     false
+}
+
+/// Whether the call `inst` reads `previous` through what it combines: its receiver, its
+/// positional arguments, or a keyword argument other than the `out=` destination, followed back
+/// through the instructions and phis that compute them.
+fn combines(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>, inst: &Inst, previous: VarId) -> bool {
+    let mut work: Vec<VarId> = match &inst.kind {
+        InstKind::Call { args, kwargs, .. } => args
+            .iter()
+            .copied()
+            .chain(destination_free(kwargs))
+            .collect(),
+        InstKind::MethodCall {
+            recv, args, kwargs, ..
+        } => std::iter::once(*recv)
+            .chain(args.iter().copied())
+            .chain(destination_free(kwargs))
+            .collect(),
+        _ => return false,
+    };
+    let phis: FxHashMap<VarId, &heki_ir::PhiNode> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.phis)
+        .map(|p| (p.dst, p))
+        .collect();
+    let mut seen: rustc_hash::FxHashSet<VarId> = work.iter().copied().collect();
+    while let Some(v) = work.pop() {
+        if v == previous {
+            return true;
+        }
+        let next: Vec<VarId> = match (defs.get(&v), phis.get(&v)) {
+            (Some(def), _) => def.kind.operands(),
+            (None, Some(phi)) => phi.incoming.iter().map(|(_, x)| *x).collect(),
+            (None, None) => Vec::new(),
+        };
+        work.extend(next.into_iter().filter(|x| seen.insert(*x)));
+    }
+    false
+}
+
+/// The keyword arguments of a call but `out=`, the destination buffer it writes into.
+fn destination_free(kwargs: &[(Option<String>, VarId)]) -> impl Iterator<Item = VarId> + '_ {
+    kwargs
+        .iter()
+        .filter(|(name, _)| name.as_deref() != Some("out"))
+        .map(|(_, v)| *v)
 }
 
 /// Self-accumulating loop-carried values of `f` with their natural loop. `loop_carried`

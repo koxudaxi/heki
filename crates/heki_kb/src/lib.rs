@@ -12,10 +12,10 @@
 //! deserialize into uses `#[serde(deny_unknown_fields)]`, so an advisory field written into
 //! a Layer 1 file (or a Layer 1 field written into a Layer 2 file) fails to load.
 
-use heki_env::{EcosystemOverride, PythonVersion};
+use heki_env::{CopySanitizerSetting, EcosystemOverride, PythonVersion};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 /// Embedded Layer 1 files (`kb/soundness/*.toml`): `(path relative to the repository, contents)`.
@@ -45,6 +45,8 @@ pub enum KbError {
     },
     #[error("invalid effect kind `{0}` in user ecosystem override")]
     InvalidEffect(String),
+    #[error("invalid copy-sanitizer `{0}` in user ecosystem override (`shallow` or `deep`)")]
+    InvalidCopyDepth(String),
 }
 
 /// Layer 1 parameter effect (Soundness lane ONLY — no advisory I/O effects).
@@ -139,12 +141,37 @@ pub enum ExecEffectKind {
 }
 
 impl ExecEffectKind {
+    /// The effects that wait on the calling thread (`EFF101` / `EFF105` / `EFF106`), as opposed
+    /// to the loop-sensitive costs `EFF102` / `EFF103` / `DATA101` count.
+    pub const BLOCKING: &[Self] = &[
+        Self::BlockingNet,
+        Self::BlockingDb,
+        Self::BlockingSubprocess,
+        Self::BlockingSync,
+        Self::Sleep,
+        Self::BlockingFs,
+    ];
+
+    /// Whether the effect is one of [`Self::BLOCKING`].
+    pub fn blocks(self) -> bool {
+        Self::BLOCKING.contains(&self)
+    }
+
     /// Parse an effect name spelled as in `kb/ecosystem/*.toml` (snake_case, e.g. `"blocking_net"`).
     pub fn from_kb_name(name: &str) -> Result<Self, KbError> {
         let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
             name.into_deserializer();
         Self::deserialize(de).map_err(|_| KbError::InvalidEffect(name.to_owned()))
     }
+}
+
+/// How much of its operand a copy sanitizer copies (`MUT202`): the object only, so the values
+/// below it stay shared (`copy.copy`), or everything below it too (`copy.deepcopy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyDepth {
+    Shallow,
+    Deep,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,7 +182,8 @@ pub struct EcosystemEntry {
     pub async_safe: bool,
     pub offloads_blocking_arg: Option<u8>,
     pub excluded: bool,
-    pub copy_sanitizer: bool,
+    /// The call returns a copy of its operand (`MUT202`), this deep.
+    pub copy_sanitizer: Option<CopyDepth>,
     pub opaque_to_layer3: bool,
     /// Optional instance class returned by a factory function or method
     /// (e.g. `sqlite3.connect` -> `sqlite3.Connection`, `sqlite3.Connection.cursor` -> `sqlite3.Cursor`).
@@ -165,29 +193,201 @@ pub struct EcosystemEntry {
     /// `sqlalchemy.orm.Session.begin`) holds a lock or a transaction. Async locks are never
     /// flagged.
     pub sync_lock_or_tx: bool,
+    /// What the call does instead when an argument is known (the first case that holds).
+    pub cases: Vec<ArgCase>,
+    /// Index of a callable argument the call runs on the calling thread, handing it a
+    /// synchronous facade over an async database connection as its first argument
+    /// (SQLAlchemy's `AsyncSession.run_sync(fn)`): the database I/O through the facade is
+    /// awaited for it, its other blocking calls block.
+    pub sync_facade_arg: Option<u8>,
 }
 
-/// Validate a `[[tool.heki.ecosystem]]` override into a Layer 2 entry.
-/// `opaque_to_layer3` is decided when merging (see [`EffectiveEcosystemKb::load_builtin`]).
-impl TryFrom<&EcosystemOverride> for EcosystemEntry {
+/// One case of an entry (`EcosystemEntry::cases`): when the argument at position `arg` (the
+/// receiver not counted), or passed by the keyword `param`, passes every test the case sets,
+/// the call has the case's `effects` and `return_type` (those it sets) instead of the entry's.
+/// An argument the call does not pass, or may pass through `*` / `**` unpacking, passes no
+/// test, so the entry's own facts are those of the unknown argument.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArgCase {
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    /// A literal equal to this one (`false`; `0`, which a float `0.0` equals too).
+    pub equals: Option<ArgLiteral>,
+    /// A string literal starting with one of these prefixes.
+    pub prefix: Vec<String>,
+    /// A string literal that is not empty.
+    pub nonempty: bool,
+    /// An instance of one of these classes.
+    pub instance_of: Vec<String>,
+    pub effects: Option<Vec<ExecEffectKind>>,
+    pub return_type: Option<String>,
+}
+
+/// A literal `ArgCase::equals` compares with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ArgLiteral {
+    Bool(bool),
+    Int(i64),
+}
+
+/// What the analysis knows of an argument a call passes ([`EcosystemEntry::case_for`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ArgFact {
+    pub literal: Option<LiteralValue>,
+    /// The class of the value, when it is an instance of a known one.
+    pub class: Option<String>,
+}
+
+/// A constant argument.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiteralValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
+impl ArgCase {
+    fn holds(&self, fact: &ArgFact) -> bool {
+        let literal = fact.literal.as_ref();
+        let text = match literal {
+            Some(LiteralValue::Str(s)) => Some(s.as_str()),
+            _ => None,
+        };
+        let equals = self.equals.is_none_or(|want| match (want, literal) {
+            (ArgLiteral::Bool(b), Some(LiteralValue::Bool(v))) => b == *v,
+            (ArgLiteral::Int(n), Some(LiteralValue::Int(v))) => n == *v,
+            (ArgLiteral::Int(n), Some(LiteralValue::Float(v))) => n as f64 == *v,
+            _ => false,
+        });
+        let prefix = self.prefix.is_empty()
+            || text.is_some_and(|t| self.prefix.iter().any(|p| t.starts_with(p.as_str())));
+        let nonempty = !self.nonempty || text.is_some_and(|t| !t.is_empty());
+        let instance = self.instance_of.is_empty()
+            || fact
+                .class
+                .as_ref()
+                .is_some_and(|c| self.instance_of.contains(c));
+        equals && prefix && nonempty && instance
+    }
+}
+
+impl EcosystemEntry {
+    /// The entry as the analyses read it: an `async_safe` API never blocks the event loop, so
+    /// it keeps only its loop-sensitive effects (`db_query`, `unpooled_client_alloc`).
+    fn normalized(mut self) -> Self {
+        if self.async_safe {
+            self.effects.retain(|e| !e.blocks());
+            for case in &mut self.cases {
+                if let Some(effects) = &mut case.effects {
+                    effects.retain(|e| !e.blocks());
+                }
+            }
+        }
+        self
+    }
+
+    /// The first case the call's arguments select: `arg(position, keyword)` tells what the
+    /// call passes there (`None`: nothing known, or not passed).
+    pub fn case_for(
+        &self,
+        mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<&ArgCase> {
+        self.cases
+            .iter()
+            .find(|case| arg(case.arg, case.param.as_deref()).is_some_and(|fact| case.holds(&fact)))
+    }
+
+    /// The effects of a call selecting `case`.
+    pub fn effects_in<'e>(&'e self, case: Option<&'e ArgCase>) -> &'e [ExecEffectKind] {
+        case.and_then(|c| c.effects.as_deref())
+            .unwrap_or(&self.effects)
+    }
+
+    /// The class of the result of a call selecting `case`.
+    pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
+        case.and_then(|c| c.return_type.as_deref())
+            .or(self.return_type.as_deref())
+    }
+}
+
+/// A validated `[[tool.heki.ecosystem]]` entry: the keys it sets on the entry for `symbol`
+/// (`None`: left out, the built-in value stays).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EcosystemPatch {
+    pub symbol: String,
+    pub effects: Option<Vec<ExecEffectKind>>,
+    pub async_safe: Option<bool>,
+    pub offloads_blocking_arg: Option<u8>,
+    pub excluded: Option<bool>,
+    /// `Some(None)`: no copy sanitizer.
+    pub copy_sanitizer: Option<Option<CopyDepth>>,
+    pub return_type: Option<String>,
+    pub sync_lock_or_tx: Option<bool>,
+}
+
+impl EcosystemPatch {
+    fn apply(&self, entry: &mut EcosystemEntry) {
+        if let Some(effects) = &self.effects {
+            entry.effects.clone_from(effects);
+        }
+        if let Some(v) = self.async_safe {
+            entry.async_safe = v;
+        }
+        if let Some(k) = self.offloads_blocking_arg {
+            entry.offloads_blocking_arg = Some(k);
+        }
+        if let Some(v) = self.excluded {
+            entry.excluded = v;
+        }
+        if let Some(depth) = self.copy_sanitizer {
+            entry.copy_sanitizer = depth;
+        }
+        if let Some(t) = &self.return_type {
+            entry.return_type = Some(t.clone());
+        }
+        if let Some(v) = self.sync_lock_or_tx {
+            entry.sync_lock_or_tx = v;
+        }
+    }
+}
+
+/// Validate a `[[tool.heki.ecosystem]]` override (its effect names).
+impl TryFrom<&EcosystemOverride> for EcosystemPatch {
     type Error = KbError;
 
     fn try_from(value: &EcosystemOverride) -> Result<Self, KbError> {
         let effects = value
             .effects
-            .iter()
-            .map(|name| ExecEffectKind::from_kb_name(name))
-            .collect::<Result<Vec<_>, _>>()?;
+            .as_ref()
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| ExecEffectKind::from_kb_name(name))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
+        let copy_sanitizer = match &value.copy_sanitizer {
+            None => None,
+            Some(CopySanitizerSetting::Flag(false)) => Some(None),
+            Some(CopySanitizerSetting::Flag(true)) => Some(Some(CopyDepth::Shallow)),
+            Some(CopySanitizerSetting::Depth(depth)) => Some(Some(match depth.as_str() {
+                "shallow" => CopyDepth::Shallow,
+                "deep" => CopyDepth::Deep,
+                _ => return Err(KbError::InvalidCopyDepth(depth.clone())),
+            })),
+        };
         Ok(Self {
             symbol: value.symbol.clone(),
             effects,
             async_safe: value.async_safe,
             offloads_blocking_arg: value.offloads_blocking_arg,
             excluded: value.excluded,
-            copy_sanitizer: value.copy_sanitizer,
-            opaque_to_layer3: false,
-            return_type: None,
-            sync_lock_or_tx: false,
+            copy_sanitizer,
+            return_type: value.return_type.clone(),
+            sync_lock_or_tx: value.sync_lock_or_tx,
         })
     }
 }
@@ -216,6 +416,8 @@ fn top_level_package(symbol: &str) -> &str {
 pub struct EffectiveEcosystemKb {
     pub entries: BTreeMap<String, EcosystemEntry>,
     pub opaque_packages: Vec<String>,
+    /// The symbols `[[tool.heki.ecosystem]]` names ([`Self::declared`]).
+    pub user_symbols: BTreeSet<String>,
     pub digest: String,
 }
 
@@ -223,7 +425,7 @@ impl EffectiveEcosystemKb {
     pub fn materialize(raw: Vec<EcosystemEntry>, opaque_packages: Vec<String>) -> Self {
         let mut entries = BTreeMap::new();
         for entry in raw {
-            entries.insert(entry.symbol.clone(), entry);
+            entries.insert(entry.symbol.clone(), entry.normalized());
         }
         let digest = blake3::hash(
             format!(
@@ -238,31 +440,53 @@ impl EffectiveEcosystemKb {
         Self {
             entries,
             opaque_packages,
+            user_symbols: BTreeSet::new(),
             digest,
         }
     }
 
-    /// Embed `kb/ecosystem/*.toml` via `include_str!` and merge user `overrides`.
-    /// User overrides take precedence over built-in entries for the same `symbol` (the whole
-    /// entry is replaced). An override inside an opaque package stays `opaque_to_layer3`.
-    pub fn load_builtin(overrides: &[EcosystemEntry]) -> Result<Self, KbError> {
-        let mut raw = Vec::new();
+    /// Embed `kb/ecosystem/*.toml` via `include_str!` and merge user `overrides`, in order:
+    /// each sets the keys it lists on the entry for its `symbol` (a built-in one, or a new
+    /// one). A new entry inside an opaque package is `opaque_to_layer3`.
+    pub fn load_builtin(overrides: &[EcosystemPatch]) -> Result<Self, KbError> {
+        let mut raw: BTreeMap<String, EcosystemEntry> = BTreeMap::new();
         let mut opaque_packages = Vec::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
             let parsed = parse_ecosystem_file(file, text)?;
-            raw.extend(parsed.entries);
+            raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
             opaque_packages.extend(parsed.opaque_packages);
         }
         opaque_packages.sort();
         opaque_packages.dedup();
-        for entry in overrides {
-            let mut entry = entry.clone();
-            let package = top_level_package(&entry.symbol);
-            entry.opaque_to_layer3 |= opaque_packages.iter().any(|p| p == package);
-            // `materialize` inserts in order, so overrides (pushed last) replace built-ins.
-            raw.push(entry);
+        for patch in overrides {
+            let package = top_level_package(&patch.symbol);
+            let entry = raw
+                .entry(patch.symbol.clone())
+                .or_insert_with(|| EcosystemEntry {
+                    symbol: patch.symbol.clone(),
+                    opaque_to_layer3: opaque_packages.iter().any(|p| p == package),
+                    ..EcosystemEntry::default()
+                });
+            patch.apply(entry);
         }
-        Ok(Self::materialize(raw, opaque_packages))
+        let mut kb = Self::materialize(raw.into_values().collect(), opaque_packages);
+        kb.user_symbols = overrides.iter().map(|p| p.symbol.clone()).collect();
+        if !kb.user_symbols.is_empty() {
+            let users: Vec<&str> = kb.user_symbols.iter().map(String::as_str).collect();
+            let keyed = format!("{}|{}", kb.digest, users.join(","));
+            kb.digest = blake3::hash(keyed.as_bytes()).to_hex().to_string();
+        }
+        Ok(kb)
+    }
+
+    /// The entry of `symbol` when the project's configuration names it: a declaration of one
+    /// of the project's own functions. A function the project defines is followed through its
+    /// body otherwise, also when the built-in catalog lists its name (a package's own source).
+    pub fn declared(&self, symbol: &str) -> Option<&EcosystemEntry> {
+        self.user_symbols
+            .contains(symbol)
+            .then(|| self.entries.get(symbol))
+            .flatten()
     }
 
     pub fn lookup(&self, symbol: &str) -> Option<&EcosystemEntry> {
@@ -318,8 +542,12 @@ mod tests {
         ("builtins.iter", None, &[RetainedInReturn]),
         ("builtins.enumerate", None, &[RetainedInReturn]),
         ("builtins.zip", None, &[RetainedInReturn]),
-        ("builtins.map", None, &[ReadOnly, RetainedInReturn]),
-        ("builtins.filter", None, &[ReadOnly, RetainedInReturn]),
+        ("builtins.map", None, &[RetainedInReturn, RetainedInReturn]),
+        (
+            "builtins.filter",
+            None,
+            &[RetainedInReturn, RetainedInReturn],
+        ),
         ("builtins.reversed", None, &[RetainedInReturn]),
         ("builtins.memoryview", None, &[RetainedInReturn]),
         ("builtins.dict.keys", None, &[RetainedInReturn]),
@@ -343,14 +571,18 @@ mod tests {
         ("builtins.list.clear", None, &[Mutated]),
         ("builtins.list.reverse", None, &[Mutated]),
         ("builtins.list.sort", None, &[Mutated]),
-        ("builtins.list.remove", None, &[Mutated, ReadOnly]),
+        ("builtins.list.remove", None, &[Mutated, Escaped]),
         ("builtins.set.add", None, &[Mutated, Escaped]),
         ("builtins.set.update", None, &[Mutated, ReadOnly]),
-        ("builtins.set.discard", None, &[Mutated, ReadOnly]),
-        ("builtins.set.remove", None, &[Mutated, ReadOnly]),
+        ("builtins.set.discard", None, &[Mutated, Escaped]),
+        ("builtins.set.remove", None, &[Mutated, Escaped]),
         ("builtins.set.clear", None, &[Mutated]),
         ("builtins.dict.update", None, &[Mutated, ReadOnly]),
-        ("builtins.dict.pop", None, &[Mutated, ReadOnly, ReadOnly]),
+        (
+            "builtins.dict.pop",
+            None,
+            &[Mutated, Escaped, RetainedInReturn],
+        ),
         (
             "builtins.dict.setdefault",
             None,
@@ -464,15 +696,7 @@ mod tests {
         names.iter().map(|n| (*n).to_owned()).collect()
     }
 
-    /// The effects `EFF101` / `EFF105` report (`heki_effect::BLOCKING_EFFECTS`).
-    const BLOCKING: &[ExecEffectKind] = &[
-        BlockingNet,
-        BlockingDb,
-        BlockingSubprocess,
-        BlockingSync,
-        Sleep,
-        BlockingFs,
-    ];
+    const BLOCKING: &[ExecEffectKind] = ExecEffectKind::BLOCKING;
 
     const VERBS8: &[&str] = &[
         "get", "post", "put", "delete", "patch", "head", "options", "request",
@@ -559,20 +783,19 @@ mod tests {
         "delete",
         "get_or_create",
         "update_or_create",
-        "bulk_create",
-        "in_bulk",
         "aggregate",
     ];
+    /// Django `QuerySet` and pymongo `Collection` bulk APIs: many rows in one statement.
+    const QUERYSET_BULK: &[&str] = &["bulk_create", "in_bulk"];
+    const MONGO_BULK: &[&str] = &["insert_many", "bulk_write"];
     const REDIS_COMMANDS: &[&str] = &[
         "get", "set", "setex", "mget", "mset", "delete", "exists", "expire", "ttl", "incr", "decr",
         "hget", "hset", "hmget", "hgetall", "hdel", "lpush", "rpush", "lpop", "rpop", "lrange",
         "sadd", "srem", "smembers", "zadd", "zrange", "publish", "keys", "eval",
     ];
     const MONGO_COLLECTION_OPS: &[&str] = &[
-        "find",
         "find_one",
         "insert_one",
-        "insert_many",
         "update_one",
         "update_many",
         "replace_one",
@@ -582,7 +805,6 @@ mod tests {
         "estimated_document_count",
         "distinct",
         "aggregate",
-        "bulk_write",
         "find_one_and_update",
         "find_one_and_replace",
         "find_one_and_delete",
@@ -635,22 +857,59 @@ mod tests {
     ];
     /// DynamoDB item reads and writes (client operations and `Table` actions).
     const DYNAMODB_ITEM_CALLS: &[&str] = &["get_item", "put_item", "update_item", "delete_item"];
-    const PANDAS_FILE_READERS: &[&str] = &[
-        "read_csv",
-        "read_table",
-        "read_fwf",
-        "read_excel",
-        "read_json",
-        "read_parquet",
-        "read_feather",
-        "read_orc",
-        "read_pickle",
-        "read_hdf",
-        "read_xml",
-        "read_stata",
-        "read_sas",
-        "read_spss",
+    /// pandas readers of a URL or a buffer, with the name of their source parameter.
+    const PANDAS_URL_READERS: &[(&str, &str)] = &[
+        ("read_csv", "filepath_or_buffer"),
+        ("read_table", "filepath_or_buffer"),
+        ("read_fwf", "filepath_or_buffer"),
+        ("read_excel", "io"),
+        ("read_json", "path_or_buf"),
+        ("read_parquet", "path"),
+        ("read_feather", "path"),
+        ("read_orc", "path"),
+        ("read_pickle", "filepath_or_buffer"),
+        ("read_xml", "path_or_buffer"),
+        ("read_stata", "filepath_or_buffer"),
     ];
+    const PANDAS_URL_SCHEMES: &[&str] = &[
+        "http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://",
+        "abfss://", "hdfs://", "sftp://",
+    ];
+
+    /// The source of a reader is a URL to download (`effects`) or a buffer to parse.
+    fn source_case(param: &str, url: bool) -> ArgCase {
+        ArgCase {
+            arg: Some(0),
+            param: Some(param.into()),
+            prefix: if url {
+                s(PANDAS_URL_SCHEMES)
+            } else {
+                Vec::new()
+            },
+            instance_of: if url {
+                Vec::new()
+            } else {
+                s(&["io.StringIO", "io.BytesIO"])
+            },
+            effects: Some(if url { vec![BlockingNet] } else { Vec::new() }),
+            ..ArgCase::default()
+        }
+    }
+
+    /// `cursor(name)` with a name returns a server-side cursor of `class`.
+    fn named_cursor(class: &str) -> ArgCase {
+        ArgCase {
+            arg: Some(0),
+            param: Some("name".into()),
+            nonempty: true,
+            return_type: Some(class.into()),
+            ..ArgCase::default()
+        }
+    }
+
+    fn with_cases(cases: Vec<ArgCase>, e: EcosystemEntry) -> EcosystemEntry {
+        EcosystemEntry { cases, ..e }
+    }
 
     /// Every Layer 2 entry (docs/ANALYSIS_AND_KB_SPEC.md section 4.2), as `(symbols, expected
     /// entry without symbol)`.
@@ -663,14 +922,23 @@ mod tests {
             excluded: true,
             ..entry(&[])
         };
-        let copy_sanitizer = EcosystemEntry {
-            copy_sanitizer: true,
+        let copy_sanitizer = |depth| EcosystemEntry {
+            copy_sanitizer: Some(depth),
             ..entry(&[])
         };
         let qs = "django.db.models.query.QuerySet";
         let async_queryset_runs: Vec<String> =
             QUERYSET_RUNS.iter().map(|m| format!("{qs}.a{m}")).collect();
-        vec![
+        let pandas_url_readers = PANDAS_URL_READERS.iter().map(|&(reader, param)| {
+            (
+                vec![format!("pandas.{reader}")],
+                with_cases(
+                    vec![source_case(param, true), source_case(param, false)],
+                    entry(&[BlockingFs]),
+                ),
+            )
+        });
+        let mut required = vec![
             // ------------------------------------------------ standard library
             (s(&["time.sleep"]), entry(&[Sleep])),
             (
@@ -698,7 +966,7 @@ mod tests {
                     "pathlib.Path.open",
                     "os.listdir",
                     "os.scandir",
-                    "os.walk",
+                    "os.walk().__iter__",
                     "shutil.copy",
                     "shutil.copy2",
                     "shutil.copytree",
@@ -768,16 +1036,19 @@ mod tests {
                 .concat(),
                 excluded,
             ),
+            (s(&["copy.deepcopy"]), copy_sanitizer(CopyDepth::Deep)),
             (
+                // `model_copy(deep=True)` copies deeply (`heki_effect::readonly`).
                 s(&[
-                    "copy.deepcopy",
                     "copy.copy",
+                    "copy.replace",
+                    "dataclasses.replace",
                     "pydantic.BaseModel.model_copy",
                     "builtins.dict.copy",
                     "builtins.list.copy",
                     "builtins.set.copy",
                 ]),
-                copy_sanitizer,
+                copy_sanitizer(CopyDepth::Shallow),
             ),
             (
                 with_prefix(
@@ -848,12 +1119,34 @@ mod tests {
                     "urllib3.HTTPSConnectionPool",
                     "boto3.client",
                     "boto3.resource",
-                    "boto3.Session",
                     "redis.Redis",
                     "redis.StrictRedis",
-                    "pymongo.MongoClient",
+                    "psycopg_pool.ConnectionPool",
                 ]),
                 entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                // `connect=True` (the default) resolves a `mongodb+srv://` URI at once.
+                s(&["pymongo.MongoClient"]),
+                with_cases(
+                    vec![
+                        ArgCase {
+                            arg: Some(4),
+                            param: Some("connect".into()),
+                            equals: Some(ArgLiteral::Bool(false)),
+                            effects: Some(vec![UnpooledClientAlloc]),
+                            ..ArgCase::default()
+                        },
+                        ArgCase {
+                            arg: Some(0),
+                            param: Some("host".into()),
+                            prefix: s(&["mongodb+srv://"]),
+                            effects: Some(vec![BlockingNet, UnpooledClientAlloc]),
+                            ..ArgCase::default()
+                        },
+                    ],
+                    entry(&[UnpooledClientAlloc]),
+                ),
             ),
             (
                 s(&["requests.session"]),
@@ -870,6 +1163,7 @@ mod tests {
                     "aiohttp.request",
                     "redis.asyncio.Redis",
                     "pymongo.AsyncMongoClient",
+                    "psycopg_pool.AsyncConnectionPool",
                 ]),
                 async_safe(entry(&[UnpooledClientAlloc])),
             ),
@@ -938,13 +1232,15 @@ mod tests {
                     with_prefix("sqlalchemy.orm.Session", SA_SESSION_QUERIES),
                     with_prefix("sqlalchemy.orm.Query", SA_QUERY_RUNS),
                     with_prefix("sqlmodel.Session", SQLMODEL_SESSION_QUERIES),
-                    s(&["psycopg.Connection.execute"]),
-                    with_prefix("psycopg.Cursor", &["execute", "executemany"]),
+                    s(&["psycopg.Cursor.executemany"]),
                     with_prefix("psycopg2.extensions.cursor", DBAPI_EXECUTES),
                     with_prefix("pymysql.cursors.Cursor", DBAPI_EXECUTES),
                     with_prefix("django.db.backends.utils.CursorWrapper", DBAPI_EXECUTES),
                     with_prefix(qs, QUERYSET_RUNS),
-                    s(&["redis.client.Pipeline.execute"]),
+                    s(&[
+                        "redis.client.Pipeline.execute",
+                        "redis.client.Pipeline.watch",
+                    ]),
                     with_prefix("redis.Redis", REDIS_COMMANDS),
                     s(&["pymongo.database.Database.command"]),
                     with_prefix("pymongo.collection.Collection", MONGO_COLLECTION_OPS),
@@ -959,8 +1255,12 @@ mod tests {
                     with_prefix("psycopg.Connection", COMMIT_ROLLBACK),
                     with_prefix("psycopg2.extensions.connection", COMMIT_ROLLBACK),
                     with_prefix("pymysql.connections.Connection", COMMIT_ROLLBACK),
-                    // A cursor loop by design: blocking, but no N+1 query.
+                    // Connects a `defer_connect=True` connection.
+                    s(&["pymysql.connections.Connection.connect"]),
+                    // A cursor loop or a bulk API by design: blocking, but no N+1 query.
                     s(&["redis.Redis.scan", "pandas.DataFrame.to_sql"]),
+                    with_prefix(qs, QUERYSET_BULK),
+                    with_prefix("pymongo.collection.Collection", MONGO_BULK),
                 ]
                 .concat(),
                 entry(&[BlockingDb]),
@@ -1003,7 +1303,31 @@ mod tests {
             ),
             (
                 s(&["psycopg.Connection.cursor"]),
-                returning("psycopg.Cursor", entry(&[])),
+                with_cases(
+                    vec![named_cursor("psycopg.ServerCursor")],
+                    returning("psycopg.Cursor", entry(&[])),
+                ),
+            ),
+            (
+                s(&["psycopg.ServerCursor.execute"]),
+                returning("psycopg.ServerCursor", entry(&[BlockingDb, DbQuery])),
+            ),
+            (
+                s(&["psycopg.ServerCursor.executemany"]),
+                entry(&[BlockingDb, DbQuery]),
+            ),
+            (
+                // Each fetch sends `FETCH` for rows of the declared statement.
+                with_prefix(
+                    "psycopg.ServerCursor",
+                    &["fetchone", "fetchmany", "fetchall", "scroll", "__iter__"],
+                ),
+                entry(&[BlockingDb]),
+            ),
+            (
+                // A new cursor, or the cursor itself, holding the result.
+                s(&["psycopg.Connection.execute", "psycopg.Cursor.execute"]),
+                returning("psycopg.Cursor", entry(&[BlockingDb, DbQuery])),
             ),
             (
                 s(&["psycopg_pool.ConnectionPool.connection"]),
@@ -1022,9 +1346,17 @@ mod tests {
             ),
             (
                 s(&["pymysql.connect"]),
-                returning(
-                    "pymysql.connections.Connection",
-                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                with_cases(
+                    vec![ArgCase {
+                        param: Some("defer_connect".into()),
+                        equals: Some(ArgLiteral::Bool(true)),
+                        effects: Some(vec![UnpooledClientAlloc]),
+                        ..ArgCase::default()
+                    }],
+                    returning(
+                        "pymysql.connections.Connection",
+                        entry(&[BlockingDb, UnpooledClientAlloc]),
+                    ),
                 ),
             ),
             (
@@ -1048,8 +1380,12 @@ mod tests {
                 returning("redis.Redis", entry(&[UnpooledClientAlloc])),
             ),
             (
-                // Only buffers commands until `execute()`.
-                s(&["redis.Redis.pipeline"]),
+                // Only buffers commands until `execute()`; a buffered command returns the pipeline.
+                [
+                    s(&["redis.Redis.pipeline"]),
+                    with_prefix("redis.client.Pipeline", REDIS_COMMANDS),
+                ]
+                .concat(),
                 returning("redis.client.Pipeline", entry(&[])),
             ),
             (
@@ -1079,10 +1415,12 @@ mod tests {
                         "sqlmodel.ext.asyncio.session.AsyncSession",
                         SQLMODEL_SESSION_QUERIES,
                     ),
-                    s(&["psycopg.AsyncConnection.execute"]),
-                    with_prefix("psycopg.AsyncCursor", &["execute", "executemany"]),
+                    s(&["psycopg.AsyncCursor.executemany"]),
                     async_queryset_runs,
-                    s(&["redis.asyncio.client.Pipeline.execute"]),
+                    s(&[
+                        "redis.asyncio.client.Pipeline.execute",
+                        "redis.asyncio.client.Pipeline.watch",
+                    ]),
                     with_prefix("redis.asyncio.Redis", REDIS_COMMANDS),
                     s(&["pymongo.asynchronous.database.AsyncDatabase.command"]),
                     with_prefix(
@@ -1092,6 +1430,29 @@ mod tests {
                 ]
                 .concat(),
                 async_safe(entry(&[DbQuery])),
+            ),
+            (
+                [
+                    QUERYSET_BULK.iter().map(|m| format!("{qs}.a{m}")).collect(),
+                    with_prefix(
+                        "pymongo.asynchronous.collection.AsyncCollection",
+                        MONGO_BULK,
+                    ),
+                ]
+                .concat(),
+                async_safe(entry(&[])),
+            ),
+            (
+                // `fn(sync_session, *args)` runs on the loop's thread through a greenlet.
+                s(&[
+                    "sqlalchemy.ext.asyncio.AsyncConnection.run_sync",
+                    "sqlalchemy.ext.asyncio.AsyncSession.run_sync",
+                    "sqlmodel.ext.asyncio.session.AsyncSession.run_sync",
+                ]),
+                EcosystemEntry {
+                    sync_facade_arg: Some(0),
+                    ..async_safe(entry(&[]))
+                },
             ),
             (
                 s(&["sqlalchemy.ext.asyncio.create_async_engine"]),
@@ -1130,7 +1491,25 @@ mod tests {
             ),
             (
                 s(&["psycopg.AsyncConnection.cursor"]),
-                async_safe(returning("psycopg.AsyncCursor", entry(&[]))),
+                with_cases(
+                    vec![named_cursor("psycopg.AsyncServerCursor")],
+                    async_safe(returning("psycopg.AsyncCursor", entry(&[]))),
+                ),
+            ),
+            (
+                s(&["psycopg.AsyncServerCursor.execute"]),
+                async_safe(returning("psycopg.AsyncServerCursor", entry(&[DbQuery]))),
+            ),
+            (
+                s(&["psycopg.AsyncServerCursor.executemany"]),
+                async_safe(entry(&[DbQuery])),
+            ),
+            (
+                s(&[
+                    "psycopg.AsyncConnection.execute",
+                    "psycopg.AsyncCursor.execute",
+                ]),
+                async_safe(returning("psycopg.AsyncCursor", entry(&[DbQuery]))),
             ),
             (
                 s(&["psycopg_pool.AsyncConnectionPool.connection"]),
@@ -1144,7 +1523,11 @@ mod tests {
                 )),
             ),
             (
-                s(&["redis.asyncio.Redis.pipeline"]),
+                [
+                    s(&["redis.asyncio.Redis.pipeline"]),
+                    with_prefix("redis.asyncio.client.Pipeline", REDIS_COMMANDS),
+                ]
+                .concat(),
                 async_safe(returning("redis.asyncio.client.Pipeline", entry(&[]))),
             ),
             (
@@ -1166,8 +1549,16 @@ mod tests {
             ),
             // ------------------------------------------------ data
             (
-                with_prefix("pandas", PANDAS_FILE_READERS),
+                // Local paths only.
+                with_prefix("pandas", &["read_hdf", "read_spss"]),
                 entry(&[BlockingFs]),
+            ),
+            (
+                s(&["pandas.read_sas"]),
+                with_cases(
+                    vec![source_case("filepath_or_buffer", false)],
+                    entry(&[BlockingFs]),
+                ),
             ),
             (
                 [
@@ -1194,13 +1585,154 @@ mod tests {
                 [LOCK_CLASSES, TRANSACTION_STARTERS]
                     .concat()
                     .iter()
-                    .filter(|n| **n != "sqlalchemy.engine.Engine.begin")
+                    .filter(|n| **n != "sqlalchemy.engine.Engine.begin" && !SAVEPOINTS.contains(*n))
                     .map(|n| (*n).to_owned())
                     .collect(),
                 EcosystemEntry {
                     sync_lock_or_tx: true,
                     ..entry(&[])
                 },
+            ),
+            (
+                s(SAVEPOINTS),
+                EcosystemEntry {
+                    sync_lock_or_tx: true,
+                    ..entry(&[BlockingDb])
+                },
+            ),
+        ];
+        required.extend(pandas_url_readers);
+        required.extend(synchronous_waits());
+        required.extend(lazy_iterators());
+        required
+    }
+
+    /// Calls returning an iterator that does the I/O while it is iterated.
+    fn lazy_iterators() -> Vec<(Vec<String>, EcosystemEntry)> {
+        const CURSOR_BUILDERS: &[&str] = &[
+            "sort",
+            "limit",
+            "skip",
+            "batch_size",
+            "hint",
+            "max_time_ms",
+            "max_await_time_ms",
+            "where",
+            "collation",
+            "comment",
+            "allow_disk_use",
+            "min",
+            "max",
+            "add_option",
+            "remove_option",
+            "rewind",
+            "clone",
+        ];
+        const CURSOR_RUNS: &[&str] = &["to_list", "distinct", "explain"];
+        let cursor = "pymongo.cursor.Cursor";
+        let async_cursor = "pymongo.asynchronous.cursor.AsyncCursor";
+        vec![
+            (s(&["os.walk"]), returning("os.walk()", entry(&[]))),
+            (
+                [
+                    s(&["pymongo.collection.Collection.find"]),
+                    with_prefix(cursor, CURSOR_BUILDERS),
+                ]
+                .concat(),
+                returning(cursor, entry(&[])),
+            ),
+            (
+                [
+                    s(&[&format!("{cursor}.__iter__")]),
+                    with_prefix(cursor, CURSOR_RUNS),
+                ]
+                .concat(),
+                entry(&[BlockingDb, DbQuery]),
+            ),
+            (
+                [
+                    s(&["pymongo.asynchronous.collection.AsyncCollection.find"]),
+                    with_prefix(async_cursor, CURSOR_BUILDERS),
+                ]
+                .concat(),
+                async_safe(returning(async_cursor, entry(&[]))),
+            ),
+            (
+                [
+                    s(&[&format!("{async_cursor}.__aiter__")]),
+                    with_prefix(async_cursor, CURSOR_RUNS),
+                ]
+                .concat(),
+                async_safe(entry(&[DbQuery])),
+            ),
+        ]
+    }
+
+    /// Waits on the calling thread, with the arguments that make them return at once.
+    fn synchronous_waits() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let zero = |arg, param: &str| ArgCase {
+            arg: Some(arg),
+            param: Some(param.into()),
+            equals: Some(ArgLiteral::Int(0)),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let off = |arg, param: &str| ArgCase {
+            equals: Some(ArgLiteral::Bool(false)),
+            ..zero(arg, param)
+        };
+        let waits = |cases: Vec<ArgCase>| with_cases(cases, entry(&[BlockingSync]));
+        let queues = ["queue.Queue", "queue.LifoQueue", "queue.PriorityQueue"];
+        let executors = [
+            "concurrent.futures.ThreadPoolExecutor",
+            "concurrent.futures.ProcessPoolExecutor",
+        ];
+        vec![
+            (
+                LOCK_CLASSES
+                    .iter()
+                    .map(|c| format!("{c}.acquire"))
+                    .collect(),
+                waits(vec![off(0, "blocking"), zero(1, "timeout")]),
+            ),
+            (
+                s(&[
+                    "threading.Condition.wait",
+                    "threading.Event.wait",
+                    "threading.Barrier.wait",
+                    "threading.Thread.join",
+                    "concurrent.futures.Future.result",
+                    "concurrent.futures.Future.exception",
+                ]),
+                waits(vec![zero(0, "timeout")]),
+            ),
+            (
+                s(&["threading.Condition.wait_for", "concurrent.futures.wait"]),
+                waits(vec![zero(1, "timeout")]),
+            ),
+            (
+                [
+                    queues.iter().map(|q| format!("{q}.get")).collect(),
+                    s(&["queue.SimpleQueue.get"]),
+                ]
+                .concat(),
+                waits(vec![off(0, "block"), zero(1, "timeout")]),
+            ),
+            (
+                queues.iter().map(|q| format!("{q}.put")).collect(),
+                waits(vec![off(1, "block"), zero(2, "timeout")]),
+            ),
+            (
+                queues.iter().map(|q| format!("{q}.join")).collect(),
+                entry(&[BlockingSync]),
+            ),
+            (
+                executors.iter().map(|e| format!("{e}.shutdown")).collect(),
+                waits(vec![off(0, "wait")]),
+            ),
+            (
+                executors.iter().map(|e| format!("{e}.submit")).collect(),
+                returning("concurrent.futures.Future", entry(&[])),
             ),
         ]
     }
@@ -1212,6 +1744,12 @@ mod tests {
         "threading.Semaphore",
         "threading.BoundedSemaphore",
         "threading.Condition",
+    ];
+    /// Transaction starters that send `SAVEPOINT` (or flush the session) at the call.
+    const SAVEPOINTS: &[&str] = &[
+        "sqlalchemy.orm.Session.begin_nested",
+        "sqlalchemy.engine.Connection.begin_nested",
+        "sqlmodel.Session.begin_nested",
     ];
     /// `EFF106` DB transaction starters (call results held by `with`).
     const TRANSACTION_STARTERS: &[&str] = &[
@@ -1278,6 +1816,8 @@ mod tests {
         "threading",
         "multiprocessing",
         "concurrent",
+        "dataclasses",
+        "queue",
         "requests",
         "httpx",
         "aiohttp",
@@ -1386,6 +1926,36 @@ mod tests {
         }
     }
 
+    /// Every case names its argument, tests it, and changes something; a case's return type
+    /// names a catalogued class, as an entry's does.
+    #[test]
+    fn layer2_cases_test_a_named_argument() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        for (symbol, e) in &kb.entries {
+            for case in &e.cases {
+                assert!(case.arg.is_some() || case.param.is_some(), "{symbol}");
+                assert!(
+                    case.equals.is_some()
+                        || !case.prefix.is_empty()
+                        || case.nonempty
+                        || !case.instance_of.is_empty(),
+                    "{symbol}"
+                );
+                assert!(
+                    case.effects.is_some() || case.return_type.is_some(),
+                    "{symbol}"
+                );
+                if let Some(class) = &case.return_type {
+                    let methods = format!("{class}.");
+                    assert!(
+                        kb.entries.keys().any(|k| k.starts_with(&methods)),
+                        "{symbol} -> {class}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn layer2_does_not_register_popen_spawn() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
@@ -1394,8 +1964,8 @@ mod tests {
     }
 
     /// Calls that do no I/O, or whose effect depends on what the catalog cannot see, are left
-    /// out: client-side cursors already hold their rows, boto3 signs URLs locally, pipelines
-    /// buffer commands, `to_csv()` without a path returns a string, `read_html` parses text as
+    /// out: client-side cursors already hold their rows, boto3 signs URLs locally,
+    /// `to_csv()` without a path returns a string, `read_html` parses text as
     /// often as it fetches, and `sessionmaker()` builds `AsyncSession`s with `class_=AsyncSession`.
     #[test]
     fn layer2_leaves_local_and_undecidable_calls_unregistered() {
@@ -1410,9 +1980,9 @@ mod tests {
             "boto3.client.get_paginator",
             "httpx.Client.build_request",
             "httpx.AsyncClient.build_request",
-            "redis.client.Pipeline.set",
-            "redis.asyncio.client.Pipeline.set",
             "pandas.DataFrame.to_csv",
+            // A session only holds configuration; its `client()` / `resource()` allocate.
+            "boto3.Session",
             "pandas.read_html",
             "sqlalchemy.orm.sessionmaker.__call__",
         ] {
@@ -1478,79 +2048,272 @@ mod tests {
         }
     }
 
+    /// A case holds when the argument passes every test it sets; the first case that holds
+    /// decides the effects and the return type, and an unknown argument selects none.
     #[test]
-    fn layer2_user_overrides_take_precedence() {
+    fn argument_cases_select_by_literal_prefix_and_class() {
+        let lit = |v: LiteralValue| ArgFact {
+            literal: Some(v),
+            class: None,
+        };
+        let inst = |c: &str| ArgFact {
+            literal: None,
+            class: Some(c.into()),
+        };
+        let off = ArgCase {
+            arg: Some(0),
+            param: Some("timeout".into()),
+            equals: Some(ArgLiteral::Int(0)),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let no_wait = ArgCase {
+            param: Some("block".into()),
+            equals: Some(ArgLiteral::Bool(false)),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let url = ArgCase {
+            arg: Some(0),
+            prefix: s(&["https://"]),
+            effects: Some(vec![BlockingNet]),
+            ..ArgCase::default()
+        };
+        let named = ArgCase {
+            arg: Some(0),
+            nonempty: true,
+            return_type: Some("m.Named".into()),
+            ..ArgCase::default()
+        };
+        let buffer = ArgCase {
+            arg: Some(0),
+            instance_of: s(&["io.StringIO"]),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        for (case, fact, holds) in [
+            (&off, lit(LiteralValue::Int(0)), true),
+            (&off, lit(LiteralValue::Float(0.0)), true),
+            (&off, lit(LiteralValue::Int(1)), false),
+            (&off, lit(LiteralValue::Bool(false)), false),
+            (&off, inst("builtins.int"), false),
+            (&no_wait, lit(LiteralValue::Bool(false)), true),
+            (&no_wait, lit(LiteralValue::Int(0)), false),
+            (&url, lit(LiteralValue::Str("https://x".into())), true),
+            (&url, lit(LiteralValue::Str("rows.csv".into())), false),
+            (&url, inst("builtins.str"), false),
+            (&named, lit(LiteralValue::Str("export".into())), true),
+            (&named, lit(LiteralValue::Str(String::new())), false),
+            (&buffer, inst("io.StringIO"), true),
+            (&buffer, inst("io.BytesIO"), false),
+        ] {
+            assert_eq!(case.holds(&fact), holds, "{case:?} {fact:?}");
+        }
+        let e = EcosystemEntry {
+            cases: vec![off.clone(), url.clone()],
+            ..returning("m.Default", entry(&[BlockingSync]))
+        };
+        let pick = |facts: &[(Option<u8>, Option<&str>, ArgFact)]| {
+            e.case_for(|i, k| {
+                facts
+                    .iter()
+                    .find(|(fi, fk, _)| (fi.is_some() && *fi == i) || (fk.is_some() && *fk == k))
+                    .map(|(_, _, f)| f.clone())
+            })
+            .cloned()
+        };
+        assert_eq!(pick(&[]), None);
+        assert_eq!(
+            pick(&[(None, Some("timeout"), lit(LiteralValue::Int(0)))]),
+            Some(off.clone())
+        );
+        let chosen = pick(&[(Some(0), None, lit(LiteralValue::Str("https://x".into())))]);
+        assert_eq!(chosen, Some(url.clone()));
+        assert_eq!(e.effects_in(chosen.as_ref()), &[BlockingNet]);
+        assert_eq!(e.effects_in(None), &[BlockingSync]);
+        assert_eq!(e.return_type_in(chosen.as_ref()), Some("m.Default"));
+        let named_entry = EcosystemEntry {
+            cases: vec![named.clone()],
+            ..e.clone()
+        };
+        assert_eq!(named_entry.return_type_in(Some(&named)), Some("m.Named"));
+        assert_eq!(named_entry.effects_in(Some(&named)), &[BlockingSync]);
+    }
+
+    #[test]
+    fn layer2_user_overrides_set_only_the_keys_they_list() {
         let builtin = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let patch = |symbol: &str| EcosystemPatch {
+            symbol: symbol.into(),
+            ..EcosystemPatch::default()
+        };
         let overrides = [
-            // Replaces the built-in `time.sleep` entry as a whole.
-            EcosystemEntry {
-                symbol: "time.sleep".into(),
-                excluded: true,
-                ..EcosystemEntry::default()
+            EcosystemPatch {
+                excluded: Some(true),
+                ..patch("time.sleep")
+            },
+            // The factory keeps the return type the override does not mention.
+            EcosystemPatch {
+                effects: Some(vec![BlockingDb]),
+                ..patch("sqlite3.connect")
             },
             // A project-local symbol is added and is not opaque.
-            EcosystemEntry {
-                symbol: "mypkg.http.fetch".into(),
-                effects: vec![BlockingNet],
-                ..EcosystemEntry::default()
+            EcosystemPatch {
+                effects: Some(vec![BlockingNet]),
+                ..patch("mypkg.http.fetch")
+            },
+            EcosystemPatch {
+                return_type: Some("sqlite3.Connection".into()),
+                ..patch("mypkg.db.open")
+            },
+            EcosystemPatch {
+                sync_lock_or_tx: Some(true),
+                ..patch("mypkg.db.open")
+            },
+            // An async-safe API keeps only its loop-sensitive effects.
+            EcosystemPatch {
+                async_safe: Some(true),
+                effects: Some(vec![BlockingNet, DbQuery]),
+                ..patch("vendor.fetch")
+            },
+            EcosystemPatch {
+                async_safe: Some(true),
+                ..patch("requests.get")
             },
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&overrides).unwrap();
+        let got = |symbol: &str| kb.lookup(symbol).cloned().unwrap();
         assert_eq!(
-            kb.lookup("time.sleep"),
-            Some(&EcosystemEntry {
+            got("time.sleep"),
+            EcosystemEntry {
                 symbol: "time.sleep".into(),
                 excluded: true,
-                opaque_to_layer3: true,
-                ..EcosystemEntry::default()
-            })
+                ..entry(&[Sleep])
+            }
         );
         assert_eq!(
-            kb.lookup("mypkg.http.fetch"),
-            Some(&EcosystemEntry {
+            got("sqlite3.connect"),
+            EcosystemEntry {
+                symbol: "sqlite3.connect".into(),
+                ..returning("sqlite3.Connection", entry(&[BlockingDb]))
+            }
+        );
+        assert_eq!(
+            got("mypkg.http.fetch"),
+            EcosystemEntry {
                 symbol: "mypkg.http.fetch".into(),
                 effects: vec![BlockingNet],
                 ..EcosystemEntry::default()
-            })
+            }
         );
-        assert_eq!(kb.entries.len(), builtin.entries.len() + 1);
+        // Later overrides of a symbol add to the earlier ones.
+        assert_eq!(
+            got("mypkg.db.open"),
+            EcosystemEntry {
+                symbol: "mypkg.db.open".into(),
+                return_type: Some("sqlite3.Connection".into()),
+                sync_lock_or_tx: true,
+                ..EcosystemEntry::default()
+            }
+        );
+        assert_eq!(
+            got("vendor.fetch"),
+            EcosystemEntry {
+                symbol: "vendor.fetch".into(),
+                effects: vec![DbQuery],
+                async_safe: true,
+                ..EcosystemEntry::default()
+            }
+        );
+        assert_eq!(
+            got("requests.get"),
+            EcosystemEntry {
+                symbol: "requests.get".into(),
+                ..async_safe(entry(&[UnpooledClientAlloc]))
+            }
+        );
+        assert_eq!(kb.entries.len(), builtin.entries.len() + 3);
+        // Only what the configuration names is a declaration of project code.
+        assert!(kb.declared("mypkg.db.open").is_some());
+        assert!(kb.declared("time.sleep").is_some());
+        assert_eq!(kb.declared("sqlite3.Connection.execute"), None);
+        assert_eq!(builtin.declared("time.sleep"), None);
         assert_eq!(kb.opaque_packages, builtin.opaque_packages);
         assert_ne!(kb.digest, builtin.digest);
     }
 
     #[test]
-    fn user_override_config_converts_to_entry() {
+    fn user_override_config_converts_to_patch() {
         let ok = EcosystemOverride {
             symbol: "mypkg.workers.in_thread".into(),
-            effects: vec!["blocking_sync".into()],
-            async_safe: true,
+            effects: Some(vec!["unpooled_client_alloc".into()]),
+            async_safe: Some(true),
             offloads_blocking_arg: Some(0),
-            excluded: false,
-            copy_sanitizer: true,
+            excluded: Some(false),
+            copy_sanitizer: Some(CopySanitizerSetting::Depth("deep".into())),
+            return_type: Some("mypkg.workers.Handle".into()),
+            sync_lock_or_tx: Some(false),
         };
         assert_eq!(
-            EcosystemEntry::try_from(&ok).unwrap(),
-            EcosystemEntry {
+            EcosystemPatch::try_from(&ok).unwrap(),
+            EcosystemPatch {
                 symbol: "mypkg.workers.in_thread".into(),
-                effects: vec![BlockingSync],
-                async_safe: true,
+                effects: Some(vec![UnpooledClientAlloc]),
+                async_safe: Some(true),
                 offloads_blocking_arg: Some(0),
-                excluded: false,
-                copy_sanitizer: true,
-                opaque_to_layer3: false,
-                return_type: None,
-                // Overrides cannot declare locks or transactions (`[[tool.heki.ecosystem]]`
-                // has no such key).
-                sync_lock_or_tx: false,
+                excluded: Some(false),
+                copy_sanitizer: Some(Some(CopyDepth::Deep)),
+                return_type: Some("mypkg.workers.Handle".into()),
+                sync_lock_or_tx: Some(false),
+            }
+        );
+        // `true` is a shallow copy (the values below stay protected), `false` none.
+        for (setting, depth) in [
+            (CopySanitizerSetting::Flag(true), Some(CopyDepth::Shallow)),
+            (CopySanitizerSetting::Flag(false), None),
+            (
+                CopySanitizerSetting::Depth("shallow".into()),
+                Some(CopyDepth::Shallow),
+            ),
+        ] {
+            let cfg = EcosystemOverride {
+                symbol: "mypkg.f".into(),
+                copy_sanitizer: Some(setting),
+                ..EcosystemOverride::default()
+            };
+            assert_eq!(
+                EcosystemPatch::try_from(&cfg).unwrap().copy_sanitizer,
+                Some(depth)
+            );
+        }
+        let cfg = EcosystemOverride {
+            symbol: "mypkg.f".into(),
+            copy_sanitizer: Some(CopySanitizerSetting::Depth("full".into())),
+            ..EcosystemOverride::default()
+        };
+        assert!(matches!(
+            EcosystemPatch::try_from(&cfg),
+            Err(KbError::InvalidCopyDepth(d)) if d == "full"
+        ));
+        // Keys left out stay unset.
+        let bare = EcosystemOverride {
+            symbol: "mypkg.f".into(),
+            ..EcosystemOverride::default()
+        };
+        assert_eq!(
+            EcosystemPatch::try_from(&bare).unwrap(),
+            EcosystemPatch {
+                symbol: "mypkg.f".into(),
+                ..EcosystemPatch::default()
             }
         );
         for bad in ["blocking-net", "BlockingNet", "network", ""] {
             let cfg = EcosystemOverride {
                 symbol: "mypkg.f".into(),
-                effects: vec!["sleep".into(), bad.into()],
+                effects: Some(vec!["sleep".into(), bad.into()]),
                 ..EcosystemOverride::default()
             };
-            let result = EcosystemEntry::try_from(&cfg);
+            let result = EcosystemPatch::try_from(&cfg);
             assert!(
                 matches!(&result, Err(KbError::InvalidEffect(name)) if name == bad),
                 "{bad}: {result:?}"

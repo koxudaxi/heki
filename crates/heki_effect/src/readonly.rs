@@ -8,9 +8,9 @@
 //! producer itself. Its summary carries a [`ProtectedReturn`], propagated bottom-up over the call
 //! graph, so a wrapper needs no configuration of its own.
 
-use crate::CallHop;
+use crate::SharedChain;
 use heki_ir::{Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
-use heki_kb::EffectiveEcosystemKb;
+use heki_kb::{CopyDepth, EffectiveEcosystemKb};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
@@ -151,20 +151,20 @@ pub enum Derivation {
 
 /// The derivation of a call's result from its receiver (`method` set: copy methods, element
 /// accessors) or from its first argument (`method` `None`), for the resolved external `symbol`
-/// (empty for any other callee): copy sanitizers of the catalog and copy methods copy, deeply for
-/// `deepcopy`, `__deepcopy__`, and `model_copy(deep=True)` (`deep_kwarg`).
+/// (empty for any other callee): copy sanitizers of the catalog copy as deeply as their entry
+/// says, and copy methods of any receiver copy, deeply for `__deepcopy__` and
+/// `model_copy(deep=True)` (`deep_kwarg`).
 pub fn call_derivation(
     method: Option<&str>,
     symbol: &str,
     kb: &EffectiveEcosystemKb,
     deep_kwarg: bool,
 ) -> Option<Derivation> {
-    let sanitizer = kb.lookup(symbol).is_some_and(|e| e.copy_sanitizer)
-        || method.is_some_and(|m| COPY_METHODS.contains(&m));
-    if sanitizer {
-        let deep_copy = symbol.ends_with("deepcopy")
+    let catalogued = kb.lookup(symbol).and_then(|e| e.copy_sanitizer);
+    if catalogued.is_some() || method.is_some_and(|m| COPY_METHODS.contains(&m)) {
+        let deep_copy = catalogued == Some(CopyDepth::Deep)
             || method == Some("__deepcopy__")
-            || (method == Some("model_copy") || symbol.ends_with(".model_copy")) && deep_kwarg;
+            || method == Some("model_copy") && deep_kwarg;
         return Some(if deep_copy {
             Derivation::DeepCopy
         } else {
@@ -174,6 +174,21 @@ pub fn call_derivation(
     method
         .filter(|m| ELEMENT_ACCESSORS.contains(m))
         .map(|_| Derivation::Step(ReturnStep::ELEMENT))
+}
+
+/// Whether a copy call asks for a deep copy (`model_copy(deep=True)`, `is_true` deciding a
+/// keyword's value). Pydantic assigns the values of `update` to the copy by reference after
+/// copying, so a copy with `update` (or with a `**` mapping that may hold it) is a shallow one.
+pub fn deep_copy_requested(
+    kwargs: &[(Option<String>, VarId)],
+    is_true: impl Fn(VarId) -> bool,
+) -> bool {
+    let deep = kwargs
+        .iter()
+        .any(|(k, v)| k.as_deref() == Some("deep") && is_true(*v));
+    deep && kwargs
+        .iter()
+        .all(|(k, _)| k.as_deref().is_some_and(|k| k != "update"))
 }
 
 /// A function that may return (on some path) a value shared with a read-only producer's other
@@ -186,7 +201,7 @@ pub struct ProtectedReturn {
     /// What the returned value shares, joined over the paths that return such a value.
     pub shared: Shared,
     /// Calls from this function down to the one that returns the producer's value.
-    pub chain: Vec<CallHop>,
+    pub chain: SharedChain,
 }
 
 impl ProtectedReturn {
@@ -206,7 +221,7 @@ impl ProtectedReturn {
         producer: String,
         produced: Shared,
         step: ReturnStep,
-        chain: Vec<CallHop>,
+        chain: SharedChain,
     ) {
         let shared = step.apply(produced);
         if !shared.any() {
@@ -360,14 +375,16 @@ mod tests {
 
     #[test]
     fn a_join_keeps_the_shorter_chain_and_both_sharings() {
-        let hop = |callee: &str| CallHop {
-            caller: crate::FuncKey {
-                module: "m".into(),
-                qualname: "f".into(),
-            },
-            callee: callee.into(),
-            span: heki_ast::Span { start: 0, end: 1 },
-            path: "m.py".into(),
+        let hop = |callee: &str| {
+            std::sync::Arc::new(crate::CallHop {
+                caller: crate::FuncKey {
+                    module: "m".into(),
+                    qualname: "f".into(),
+                },
+                callee: callee.into(),
+                span: heki_ast::Span { start: 0, end: 1 },
+                path: "m.py".into(),
+            })
         };
         let mut long = ProtectedReturn {
             producer: "m.deep".into(),

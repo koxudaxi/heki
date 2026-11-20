@@ -69,6 +69,10 @@ pub fn build_module_ir(
         &ctx.loop_hints,
         ctx.last_star_import,
     );
+    for f in &mut functions {
+        release_spare_capacity(f);
+    }
+    functions.shrink_to_fit();
     ModuleIr {
         functions,
         module_fn,
@@ -76,6 +80,37 @@ pub fn build_module_ir(
         has_star_import: ctx.has_star_import,
         constants,
     }
+}
+
+/// Building by pushes leaves spare capacity in a function's containers, and a module's IR stays
+/// resident until its file is checked.
+fn release_spare_capacity(f: &mut IrFunction) {
+    f.params.shrink_to_fit();
+    f.decorators.shrink_to_fit();
+    f.local_annotations.shrink_to_fit();
+    f.var_names.shrink_to_fit();
+    f.captured_vars.shrink_to_fit();
+    f.starred.shrink_to_fit();
+    for bb in &mut f.blocks {
+        bb.insts.shrink_to_fit();
+        bb.phis.shrink_to_fit();
+        for phi in &mut bb.phis {
+            phi.incoming.shrink_to_fit();
+        }
+    }
+    f.blocks.shrink_to_fit();
+    for lp in &mut f.loops {
+        lp.body.shrink_to_fit();
+        lp.exits.shrink_to_fit();
+        lp.back_edges.shrink_to_fit();
+        lp.len_caps.shrink_to_fit();
+    }
+    f.loops.shrink_to_fit();
+    for lc in &mut f.loop_carried {
+        lc.updates.shrink_to_fit();
+    }
+    f.loop_carried.shrink_to_fit();
+    f.a1_hazards.shrink_to_fit();
 }
 
 enum FunctionBody<'a> {

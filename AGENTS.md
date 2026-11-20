@@ -30,7 +30,8 @@ When a document and the implementation disagree, update the document in the same
      standard library or packages registered in Layer 2 (`opaque_packages`).
 4. **Safety × Profitability orthogonality (ADR-007 / ADR-011)**:
    - The default `heki check --fix` applies only fixes that are `safe` and `unconditional`
-     (`OPT101`, and `OPT102` with a leading `{**d, ...}` accumulator).
+     (`OPT101`, and `OPT102`: `{**d, ...}` with the accumulator leading, and `s = s | t` /
+     `d = d | other` on exact operands).
    - Custom decorators, custom contract APIs, Lean 4, native extensions, a general import-cycle
      checker (tach's domain), and framework-specific heuristic rules are non-goals: do not add
      them.
@@ -66,6 +67,8 @@ python3.15 tests/difftest/soundness_e2e_counterexamples.py
 cargo build --release -p heki
 python3.15 scripts/build_docs.py --heki target/release/heki --check
 python3.15 scripts/build_llms_txt.py --check
+# Peak memory of `heki check` and the `--watch` engine on a generated project
+python3.15 scripts/check_memory.py --heki target/release/heki
 ```
 
 ## 4. Adding or changing rules

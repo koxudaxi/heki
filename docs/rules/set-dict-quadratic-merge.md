@@ -43,4 +43,11 @@ Applied by `heki check --fix` only when proven safe, with the same obligations a
 - the accumulator must be the leading `**` entry. `found = {**site, **found}` keeps the keys
   already in `found`, while `found.update(site)` would overwrite them, so it is never rewritten;
 - for `|`, the right operand must be an exact `set` / `dict` (a subclass could make
-  `__ror__` and `__ior__` disagree).
+  `__ror__` and `__ior__` disagree);
+- the display inserts each entry before it evaluates the next one, and an insertion can run a
+  key's `__eq__` (on a hash collision) or a mapping's `keys()` / `__getitem__`. Gathering
+  several entries into one `d.update({...})` is applied only when the keys are `int` / `str` /
+  `bytes` / `bool` / `float` values and the later entries are constants or local names;
+  `d = {**d, **other}` with an unknown mapping `other` is not rewritten;
+- an update that inserts several keys stops halfway when an insertion raises, where the display
+  left `d` unchanged: it is not applied when an exception handler reads `d`.

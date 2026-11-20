@@ -6,6 +6,7 @@
 # `param_effects[i]` describes positional parameter i; for methods, index 0 is `self`.
 
 # --- Derived references (return value keeps a live view/iterator of the argument) ---
+# `map` / `filter` keep their function too (`m.__reduce__()` hands it back).
 
 [[entries]]
 symbol = "builtins.iter"
@@ -24,12 +25,12 @@ verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.map"
-param_effects = ["read_only", "retained_in_return"]
+param_effects = ["retained_in_return", "retained_in_return"]
 verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.filter"
-param_effects = ["read_only", "retained_in_return"]
+param_effects = ["retained_in_return", "retained_in_return"]
 verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
@@ -128,6 +129,8 @@ param_effects = ["read_only"]
 verified_max_python = { major = 3, minor = 15 }
 
 # --- Mutators (parameter 0 = self is mutated) ---
+# An argument the method compares with the elements (`remove`, `discard`, a `pop` key) is
+# `escaped`: an element's `__eq__` receives it and may keep it. `dict.pop` returns its default.
 
 [[entries]]
 symbol = "builtins.list.append"
@@ -166,7 +169,7 @@ verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.list.remove"
-param_effects = ["mutated", "read_only"]
+param_effects = ["mutated", "escaped"]
 verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
@@ -181,12 +184,12 @@ verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.set.discard"
-param_effects = ["mutated", "read_only"]
+param_effects = ["mutated", "escaped"]
 verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.set.remove"
-param_effects = ["mutated", "read_only"]
+param_effects = ["mutated", "escaped"]
 verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
@@ -201,7 +204,7 @@ verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]
 symbol = "builtins.dict.pop"
-param_effects = ["mutated", "read_only", "read_only"]
+param_effects = ["mutated", "escaped", "retained_in_return"]
 verified_max_python = { major = 3, minor = 15 }
 
 [[entries]]

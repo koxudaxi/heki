@@ -16,7 +16,9 @@ when that function returns a reallocation of the argument carrying the previous 
 or through further helpers (`acc = grow(acc)` where `grow` returns `np.append(acc, x)`); a helper
 that reallocates something else and returns its argument unchanged does not. One-off
 concatenations inside a loop are not reported, also on a branch that leaves the variable
-unchanged otherwise (`if step: x = np.append(edges, last)`).
+unchanged otherwise (`if step: x = np.append(edges, last)`), nor is writing into a buffer passed
+as `out=` (`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous
+value must be among the data that is combined.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -37,7 +39,7 @@ def load(chunks: list[pd.DataFrame]) -> pd.DataFrame:
 Use instead:
 ```python
 def load(chunks: list[pd.DataFrame]) -> pd.DataFrame:
-    return pd.concat(chunks)
+    return pd.concat(chunks) if chunks else pd.DataFrame()  # `pd.concat([])` raises
 ```
 
 ## Fix safety

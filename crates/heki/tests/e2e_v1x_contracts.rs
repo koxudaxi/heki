@@ -171,22 +171,33 @@ fn mut201_exempt_methods_messages_and_class_family_initializers() {
     // inherited helper from `Other.__init__`, `_setup(self)` typed with the base class from
     // `Annotated.__init__`, and an object that may be `self` (`self if flag else peer`); a
     // merge of two different attributes (`self.fields if flag else self.extra`) is no alias;
-    // and constructing an instance (`build`).
+    // and constructing an instance (`build`), also filling a fresh instance before it is stored
+    // anywhere (`fresh-objects = "allow"`, the default).
+    let reported = vec![
+        d(m, 28, "DataModel.reset", t),
+        d(m, 42, "PydanticModel.size", "PydanticModel.size"),
+        // Other objects written from an initializer: another parameter, through a private
+        // helper, an attribute of `self`; and an initializer of a class outside the target
+        // family.
+        d(m, 60, "Other.__init__", t),
+        d(m, 61, "Other.__init__", t),
+        d(m, 69, "Other.__init__", t),
+        d(m, 77, "Unrelated.__init__", t),
+    ];
+    assert_eq!(found(&diags), reported, "{diags:#?}");
+    // `fresh-objects = "report"`: the fresh instance's write is reported too.
+    let strict = Project::new("mut201_report_fresh");
+    strict
+        .write(
+            "pyproject.toml",
+            &format!("{MUT201_CONFIG}fresh-objects = \"report\"\n"),
+        )
+        .write("model.py", MUT201_MODEL);
+    let mut with_fresh = reported.clone();
+    with_fresh.insert(4, d(m, 63, "Other.__init__", t));
     assert_eq!(
-        found(&diags),
-        vec![
-            d(m, 28, "DataModel.reset", t),
-            d(m, 42, "PydanticModel.size", "PydanticModel.size"),
-            // Other objects written from an initializer: another parameter, through a private
-            // helper, a fresh instance, an attribute of `self`; and an initializer of a class
-            // outside the target family.
-            d(m, 60, "Other.__init__", t),
-            d(m, 61, "Other.__init__", t),
-            d(m, 63, "Other.__init__", t),
-            d(m, 69, "Other.__init__", t),
-            d(m, 77, "Unrelated.__init__", t),
-        ],
-        "{diags:#?}"
+        found(&diagnostics(&strict, &["--select", "MUT201"])),
+        with_fresh
     );
     let note = ": use GenerationStore.set_fields() instead";
     assert!(
@@ -1267,4 +1278,35 @@ fn contract_rule_docs() {
     }
     let (_, doc, _) = p.heki(&["rule", "MUT201"]);
     assert!(doc.contains("`message`"), "{doc}");
+}
+
+/// A scope function calling a private helper that writes a target gets the write from the
+/// helper's node (one report, with the helper on the chain).
+#[test]
+fn eff201_reports_a_write_a_private_helper_hands_over_once() {
+    let p = Project::new("v1x_eff201_private_helper");
+    p.write("heki.toml", EFF201_WRITES_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", EFF201_MODEL)
+        .write("pkg/store.py", EFF201_STORE)
+        .write(
+            "pkg/render_mod.py",
+            "from pkg.model import DataModel\n\n\ndef _reset(m: DataModel):\n    m.fields = []\n\n\nclass Renderer:\n    def via_private(self, m: DataModel):\n        _reset(m)\n",
+        );
+    let diags = diagnostics(&p, &["--config", "heki.toml", "--select", "EFF201"]);
+    let r = "pkg/render_mod.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(r, 9, "Renderer.via_private", "pure-render:mutates-params"),
+            d(
+                r,
+                10,
+                "Renderer.via_private",
+                "pure-render:DataModel.fields"
+            ),
+        ],
+        "{diags:#?}"
+    );
+    assert!(messages(&diags)[1].contains("(direct_attr via `pkg.render_mod._reset`)"));
 }

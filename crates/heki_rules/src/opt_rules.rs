@@ -804,68 +804,23 @@ impl<'a> Defs<'a> {
     }
 
     /// The unhashable builtin type (`list`, `dict`, `set`, `bytearray`) the key `var` is known
-    /// to have: its inferred type or, for a whole loop element, the type of every element of
-    /// the displays the loop iterates (through copies and phis), when they all are such.
+    /// to have: its inferred type, or every class of an inferred union (the first one names
+    /// it). A loop element over displays has the type of their elements.
     fn unhashable(&self, var: VarId, types: &FxHashMap<VarId, Val>) -> Option<&'static str> {
         const UNHASHABLE: &[&str] = &["list", "dict", "set", "bytearray"];
-        if let Some(Val::Inst(t)) = types.get(&var)
-            && let Some(name) = t.strip_prefix("builtins.")
-        {
-            return UNHASHABLE.iter().find(|u| **u == name).copied();
-        }
-        let mut elem = var;
-        while let Some(InstKind::Copy { src, .. }) = self.kind(elem) {
-            elem = *src;
-        }
-        let Some(InstKind::IterNext { iter, .. }) = self.kind(elem) else {
-            return None;
+        let unhashable = |class: &str| {
+            let name = class.strip_prefix("builtins.")?;
+            UNHASHABLE.iter().find(|u| **u == name).copied()
         };
-        let &(iterable, _) = self.iterables.get(iter)?;
-        let mut kinds = Vec::new();
-        self.element_kinds(iterable, &mut FxHashSet::default(), &mut kinds)
-            .then(|| kinds.first().copied())
-            .flatten()
-    }
-
-    /// Collect the unhashable display kind of every element of the displays `var` may hold
-    /// (through copies and phis): `false` when it may hold another value or an element is not
-    /// such a display (a starred element included).
-    fn element_kinds(
-        &self,
-        var: VarId,
-        seen: &mut FxHashSet<VarId>,
-        kinds: &mut Vec<&'static str>,
-    ) -> bool {
-        if let Some((_, phi)) = self.phis.get(&var) {
-            return !seen.insert(var)
-                || phi
-                    .incoming
-                    .iter()
-                    .all(|(_, v)| self.element_kinds(*v, seen, kinds));
-        }
-        match self.kind(var) {
-            Some(InstKind::Copy { src, .. }) => self.element_kinds(*src, seen, kinds),
-            Some(InstKind::AllocBuiltin {
-                kind: BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Set,
-                elems,
-                ..
-            }) => elems.iter().all(|e| {
-                let kind = match self.kind(*e) {
-                    Some(InstKind::AllocBuiltin {
-                        kind: BuiltinKind::List,
-                        ..
-                    }) => "list",
-                    Some(InstKind::AllocBuiltin {
-                        kind: BuiltinKind::Set,
-                        ..
-                    }) => "set",
-                    Some(InstKind::DictLiteral { .. }) => "dict",
-                    _ => return false,
-                };
-                kinds.push(kind);
-                true
-            }),
-            _ => false,
+        match types.get(&var)? {
+            Val::Inst(class) => unhashable(class),
+            Val::Union(classes) => classes
+                .iter()
+                .map(|c| unhashable(c))
+                .collect::<Option<Vec<_>>>()?
+                .first()
+                .copied(),
+            Val::Ref(_) | Val::Super(_) => None,
         }
     }
 
