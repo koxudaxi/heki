@@ -200,6 +200,15 @@ const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
 // A class constant names the guarded attribute for the class's own methods.
 const KEY_CLASS: &str = "from typing import ClassVar\n\nfrom pkg.model import Registry\n\n\nclass Keys:\n    KEY: ClassVar[str] = \"entries\"\n\n    def mark(self, r: Registry):\n        r.__dict__[self.KEY] = []\n";
+// Module aliases and getters: a module alias of `object.__setattr__`, imported by another
+// module, writes the guarded attribute; a function returning the guarded container hands it to
+// the caller changing it.
+const ALIAS_SRC: &str = "_set = object.__setattr__\n";
+const ALIAS_USE: &str = "from pkg.alias_src import _set\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    _set(r, \"entries\", [])\n";
+const ALIAS_REBIND: &str = "from pkg import alias_src\n\nalias_src._set = print\n";
+const GETTER_SRC: &str =
+    "from pkg.model import Registry\n\n\ndef entries_of(r: Registry):\n    return r.entries\n";
+const GETTER_USE: &str = "from pkg.getter_src import entries_of\nfrom pkg.model import Registry\n\n\ndef grow(r: Registry):\n    entries_of(r).append(1)\n";
 const KEY_REBIND: &str =
     "from pkg import key_consts\n\n\ndef reset():\n    key_consts.KEY = \"other\"\n";
 const KEY_SUBCLASS: &str =
@@ -661,6 +670,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/async_user.py", ASYNC_USER),
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
+        ("pkg/alias_src.py", ALIAS_SRC),
+        ("pkg/alias_use.py", ALIAS_USE),
+        ("pkg/getter_src.py", GETTER_SRC),
+        ("pkg/getter_use.py", GETTER_USE),
         ("pkg/key_class.py", KEY_CLASS),
         ("pkg/key_class_reader.py", KEY_CLASS_READER),
         ("pkg/field_deco.py", FIELD_DECO),
@@ -1463,6 +1476,47 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
 /// (`heki_rules::ChainFacts`): a helper that moves the change to or from a function it calls
 /// keeps its summary but changes the chain. The callers' annotations change in their own file
 /// only (Early Cutoff); a helper is also reached through a package re-export.
+fn steps_aliases_and_getters() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the module alias is bound to another function",
+            vec![save("pkg/alias_src.py", "_set = print\n")],
+        )
+        .absent(&[("pkg/alias_use.py", "MUT201")]),
+        Step::new(
+            "the module alias names `object.__setattr__` again",
+            vec![save("pkg/alias_src.py", ALIAS_SRC)],
+        )
+        .present(&[("pkg/alias_use.py", "MUT201")]),
+        Step::new(
+            "another module rebinds the alias",
+            vec![Action::Create(
+                "pkg/alias_rebind.py",
+                ALIAS_REBIND.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/alias_use.py", "MUT201")]),
+        Step::new(
+            "the module rebinding it is deleted",
+            vec![Action::Delete("pkg/alias_rebind.py")],
+        )
+        .present(&[("pkg/alias_use.py", "MUT201")]),
+        Step::new(
+            "the getter returns a copy of the container",
+            vec![Action::Save(
+                "pkg/getter_src.py",
+                GETTER_SRC.replace("return r.entries", "return list(r.entries)"),
+            )],
+        )
+        .absent(&[("pkg/getter_use.py", "MUT201")]),
+        Step::new(
+            "the getter returns the container again",
+            vec![save("pkg/getter_src.py", GETTER_SRC)],
+        )
+        .present(&[("pkg/getter_use.py", "MUT201")]),
+    ]
+}
+
 fn steps_mut110() -> Vec<Step> {
     let callers_mutable = RO_CALLERS
         .replace("items: Sequence[int]", "items: list[int]")
@@ -1960,6 +2014,8 @@ fn steps() -> Vec<Step> {
             ("pkg/fill.py", "MUT201"),
             ("pkg/fill_main.py", "MUT201"),
             ("pkg/views.py", "MUT201"),
+            ("pkg/alias_use.py", "MUT201"),
+            ("pkg/getter_use.py", "MUT201"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(
@@ -2109,6 +2165,7 @@ fn steps() -> Vec<Step> {
     // 4. `MUT108`, `MUT110`, then where bodies run.
     steps.extend(steps_mut108());
     steps.extend(steps_mut110());
+    steps.extend(steps_aliases_and_getters());
     steps.extend(steps_body_runs());
     steps.extend(steps_task_arguments());
     steps.extend(steps_small_displays());

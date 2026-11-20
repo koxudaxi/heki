@@ -253,6 +253,24 @@ next to it), then the greater path. A relative import resolves inside the packag
 that climbs past the top-level package binds nothing (`ImportError`), except that a project root
 holding `__init__.py` is itself the package of the top-level modules.
 
+A module-level name bound once to another object by name, not by an import statement
+(`_set = object.__setattr__`, `sleep = time.sleep`, `Alias = Node`), is that object, as a value
+or in an annotation, in its module and imported from it (`ModuleDecls::aliases`,
+`ProjectDecls::object_named`), unless another module rebinds or deletes it. Any other global a
+module binds is the module's own object of unknown value (`Symbol::Unknown`), never the builtin
+of the same name: calling it is unresolved.
+
+A method that no project class of the receiver's MRO defines comes from the first base outside
+the project that heki takes to define it: a special method (`__init__`, `__copy__`, ...), a
+public method of a builtin type other than `object` (`dict.update`), or a member Layer 2 lists
+(`pydantic.BaseModel.model_copy`). Otherwise the call is unresolved (`abc.ABC._copy_model_type`
+and `typing.Generic.result_type` are no known symbols); on a union, a class whose bases are all
+project classes and builtin types without the member adds no target, any other one leaves the
+call unresolved. `object.__new__(C)`, also through an alias, and `C.__new__(C)` or
+`super().__new__(cls)` where no class of the MRO defines `__new__` and no base outside the project
+but builtin types may, allocate an instance of `C` without running its `__init__`: a
+construction of `C`.
+
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
 cannot be resolved is not followed (`unknown_calls`); an external function that Layer 2 does not
@@ -791,7 +809,11 @@ message = "write model state through GenerationStore instead"
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
-       caught across calls**).
+       caught across calls**). `getattr(obj, "a"[, default])` with a constant name loads
+       `obj.a`, and so does a call or property read whose every project callee returns
+       attribute `a` of the parameter the object binds on every `return`
+       (`FunctionDecl::returns_param_attr`: `node.members().append(1)` and
+       `node.view.append(1)` with `return self.items`).
   2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
      only: a public callee reports its own writes. A write is allowed
      when a function on its chain matches `allowed-writers` or `exempt-methods`, when an

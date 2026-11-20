@@ -12,8 +12,12 @@ reserves for a set of allowed writer functions. A write is reported when it happ
 allowed writers:
 
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
-- through a local alias (`fields = model.fields; fields.append(...)`);
-- through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`,
+- through a local alias (`fields = model.fields; fields.append(...)`), also one `getattr` with a
+  constant name loads (`getattr(model, "fields").append(...)`), or what a method, property, or
+  function returns when it returns the attribute itself on every `return`
+  (`model.field_list().append(...)` with `return self.fields`);
+- through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
+  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
@@ -106,7 +110,8 @@ passes `self` to (`self._init_fields()`, `_setup(self)`). An object that may be 
 not `self` stay reported: another parameter, an attribute of `self`.
 
 A write that constructs the object it writes is allowed too (`fresh-objects = "allow"`, the
-default): the object was allocated in the same call chain, by calling its class, by copying
+default): the object was allocated in the same call chain, by calling its class, by
+`object.__new__(Model)` (also `Model.__new__(Model)` when no class defines `__new__`), by copying
 (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`, `.copy()`, `.model_copy()`), or by a
 project function that returns such an object, and nothing else can hold it yet: no store into
 another object, a container, a global, or a closure, no `yield`, and no call that may keep it
