@@ -15,7 +15,7 @@ else describes the code as it is.
 
 ## 1. Product definition and positioning
 
-**heki** (Japanese for "wall") is an experimental tool, the **third layer of Python static analysis: an Effect
+**heki** (壁, Japanese for "wall") is an experimental tool, the **third layer of Python static analysis: an Effect
 (execution and state change) and Alias (uniqueness and ownership boundaries) semantic
 checker**.
 

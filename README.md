@@ -1,6 +1,6 @@
 # heki
 
-heki (Japanese for "wall") checks **what Python code does** across functions and modules: which
+heki (壁, Japanese for "wall") checks **what Python code does** across functions and modules: which
 objects it mutates, which references it shares, and which blocking, network, or database work
 it reaches. It is the third layer of static analysis, next to a linter such as
 [Ruff](https://docs.astral.sh/ruff/) and a type checker such as
@@ -159,6 +159,11 @@ $ heki server                                   # LSP server for editors
 - [CLI reference](https://heki.koxudaxi.dev/cli-reference/)
 - [Development](https://heki.koxudaxi.dev/development/)
 - [Changelog](https://github.com/koxudaxi/heki/blob/main/CHANGELOG.md)
+
+## Name
+
+*heki* is 壁, "wall", in its Sino-Japanese (*on*) reading, the one used in compounds such as
+防火壁 (*bōkaheki*, "firewall"). On its own the character is usually read *kabe*.
 
 ## License
 
