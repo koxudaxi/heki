@@ -915,3 +915,50 @@ def cell(values):
     );
     assert_eq!(stores("cell.<locals>.<genexpr>", "StoreDeref"), ["found"]);
 }
+
+// ======================================================================== across modules
+
+#[test]
+fn a_module_display_another_module_grows_is_not_fixed() {
+    let cfg = "import httpx\n\nQUEUE = []\nHOSTS = [\"a\", \"b\"]\n\n\ndef run():\n    for item in QUEUE:\n        httpx.Client()\n\n\ndef each_host():\n    for host in HOSTS:\n        httpx.Client()\n";
+    let reports_with = |name: &str, user: &str| -> Vec<(String, String)> {
+        let p = Project::new(name);
+        p.write("pkg/__init__.py", "")
+            .write("pkg/cfg.py", cfg)
+            .write("pkg/user.py", user);
+        diagnostics(&p, &["--select", "EFF102"])
+            .iter()
+            .map(|d| {
+                (
+                    d["path"].as_str().unwrap().to_owned(),
+                    d["qualname"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let run = vec![("pkg/cfg.py".to_owned(), "run".to_owned())];
+    for (name, user) in [
+        (
+            "ir_foreign_extend",
+            "from pkg import cfg\n\n\ndef feed(items):\n    cfg.QUEUE.extend(items)\n",
+        ),
+        (
+            "ir_foreign_append",
+            "from pkg.cfg import QUEUE\n\nQUEUE.append(1)\n",
+        ),
+        (
+            "ir_foreign_rebind",
+            "from pkg import cfg\n\n\ndef reset(items):\n    cfg.QUEUE = list(items)\n",
+        ),
+    ] {
+        assert_eq!(reports_with(name, user), run, "{name}");
+    }
+    // Reading the list (and growing another module's other list) leaves both fixed.
+    assert!(
+        reports_with(
+            "ir_foreign_read",
+            "from pkg import cfg\n\n\ndef peek():\n    return len(cfg.QUEUE), sorted(cfg.HOSTS)\n",
+        )
+        .is_empty()
+    );
+}

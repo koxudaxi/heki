@@ -150,22 +150,30 @@ pub struct Workspace {
 #[derive(Debug, Default)]
 struct CheckReads {
     /// Key ids, per `DeclKeys` field.
-    ids: [FxHashMap<String, u32>; 5],
+    ids: [FxHashMap<String, u32>; 6],
     files: FxHashMap<PathBuf, KeySet>,
 }
 
 impl CheckReads {
     /// Every field of `keys` (destructured without `..`: a new kind of key does not compile
     /// until it is kept here too).
-    fn fields(keys: &DeclKeys) -> [&BTreeSet<String>; 5] {
+    fn fields(keys: &DeclKeys) -> [&BTreeSet<String>; 6] {
         let DeclKeys {
             modules,
             subclasses,
             property_names,
             class_facts,
             protocols,
+            grown_globals,
         } = keys;
-        [modules, subclasses, property_names, class_facts, protocols]
+        [
+            modules,
+            subclasses,
+            property_names,
+            class_facts,
+            protocols,
+            grown_globals,
+        ]
     }
 
     fn insert(&mut self, path: PathBuf, keys: &DeclKeys) {

@@ -34,6 +34,7 @@ struct Indexes {
     frozen: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
     protocols: FxHashMap<String, Option<Vec<String>>>,
+    grown_elsewhere: FxHashSet<String>,
 }
 
 /// Names every class has, which a protocol's body defines without requiring them.
@@ -324,6 +325,12 @@ pub struct ModuleDecls {
     /// [`ProjectDecls::small_global`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub small_globals: BTreeMap<String, SmallDisplay>,
+    /// Globals of other modules, by the fqn this module's imports give them, whose object a
+    /// function of this module may grow or that it rebinds (`cfg.QUEUE.extend(more)`,
+    /// `cfg.QUEUE = []`): no longer a display their own module fixes
+    /// ([`ProjectDecls::grown_elsewhere`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub grown_globals: BTreeSet<String>,
     /// Module-level string constants declared `Final` (`KEY: Final = "_key"`), by name: a
     /// constant names an attribute in `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and
     /// `setattr(obj, KEY, v)`, and a key in `obj.attr[KEY]`, as its literal would.
@@ -901,6 +908,10 @@ pub struct DeclKeys {
     /// or stop satisfying one).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub protocols: BTreeSet<String>,
+    /// Module globals asked whether another module may grow them (a module can start or stop
+    /// growing any module's global).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub grown_globals: BTreeSet<String>,
 }
 
 impl DeclKeys {
@@ -910,6 +921,7 @@ impl DeclKeys {
             && self.property_names.is_empty()
             && self.class_facts.is_empty()
             && self.protocols.is_empty()
+            && self.grown_globals.is_empty()
     }
 
     pub fn extend(&mut self, other: Self) {
@@ -918,6 +930,7 @@ impl DeclKeys {
         self.property_names.extend(other.property_names);
         self.class_facts.extend(other.class_facts);
         self.protocols.extend(other.protocols);
+        self.grown_globals.extend(other.grown_globals);
     }
 
     /// Whether the two share a key (an analysis that read `self` is affected by the change
@@ -928,6 +941,7 @@ impl DeclKeys {
             || !self.property_names.is_disjoint(&other.property_names)
             || !self.class_facts.is_disjoint(&other.class_facts)
             || !self.protocols.is_disjoint(&other.protocols)
+            || !self.grown_globals.is_disjoint(&other.grown_globals)
     }
 }
 
@@ -962,6 +976,9 @@ pub struct ProjectDecls {
     /// Every project protocol with the project classes implementing it structurally
     /// (`Self::protocol_implementations`), `None` past `CHA_CANDIDATE_LIMIT`.
     protocols: FxHashMap<String, Option<Vec<String>>>,
+    /// Canonical fqns of module globals another project module may grow or rebinds
+    /// (`ModuleDecls::grown_globals`).
+    grown_elsewhere: FxHashSet<String>,
     recorder: Recorder,
 }
 
@@ -1066,6 +1083,7 @@ impl ProjectDecls {
                 out.protocols.insert(p.clone());
             }
         }
+        out.grown_globals = differ(&before.grown_elsewhere, &self.grown_elsewhere);
         out
     }
 
@@ -1076,6 +1094,7 @@ impl ProjectDecls {
             frozen: self.frozen.clone(),
             typed_dicts: self.typed_dicts.clone(),
             protocols: self.protocols.clone(),
+            grown_elsewhere: self.grown_elsewhere.clone(),
         }
     }
 
@@ -1119,6 +1138,32 @@ impl ProjectDecls {
             .collect();
         self.frozen = self.frozen_classes();
         self.protocols = self.protocol_implementations();
+        self.grown_elsewhere = self.globals_grown_elsewhere();
+    }
+
+    /// The canonical fqns of the globals some module grows or rebinds that another module
+    /// owns (`ModuleDecls::grown_globals`).
+    fn globals_grown_elsewhere(&self) -> FxHashSet<String> {
+        let mut out = FxHashSet::default();
+        for m in self.modules.values() {
+            for fqn in &m.grown_globals {
+                let fqn = self.canonical(fqn);
+                if self.split_module(&fqn).is_some_and(|(owner, rest)| {
+                    owner.module_name != m.module_name && !rest.is_empty()
+                }) {
+                    out.insert(fqn);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether another project module may grow or rebinds the module global `fqn` (a display
+    /// its own module fixes is then fixed no longer).
+    pub fn grown_elsewhere(&self, fqn: &str) -> bool {
+        let fqn = self.canonical(fqn);
+        self.read(|k| note(&mut k.grown_globals, &fqn));
+        self.grown_elsewhere.contains(&fqn)
     }
 
     /// For every project protocol, the project classes implementing it structurally: those
@@ -1362,7 +1407,8 @@ impl ProjectDecls {
     pub fn small_global(&self, fqn: &str) -> Option<&SmallDisplay> {
         let fqn = self.canonical(fqn);
         let (m, rest) = self.split_module(&fqn)?;
-        m.small_globals.get(rest)
+        let display = m.small_globals.get(rest)?;
+        (!self.grown_elsewhere(&fqn)).then_some(display)
     }
 
     /// The small display attribute `attr` of an instance of the project class `class` holds:
@@ -2042,9 +2088,86 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     }
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
+    decls.grown_globals = foreign_grown_globals(input, &decls.imports);
     attr_displays(input, &mut decls);
     decls.str_constants = final_str_constants(input, &decls);
     decls
+}
+
+/// `ModuleDecls::grown_globals`: the loads of an imported module's global (`cfg.QUEUE`, or
+/// `QUEUE` after `from cfg import QUEUE`) whose object a function may grow, and the globals
+/// it stores into or deletes on an imported module (`cfg.QUEUE = []`), decided by the shared
+/// `heki_ir` facts ([`FnIndex::grown_vars`]).
+fn foreign_grown_globals(
+    input: &ModuleInput<'_>,
+    imports: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if imports.is_empty() {
+        return out;
+    }
+    for f in &input.ir.functions {
+        let ix = FnIndex::new(f, &input.ir.constants);
+        let mut loads: Vec<(VarId, String)> = Vec::new();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            match &inst.kind {
+                InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } => {
+                    if let Some(module) = imported_fqn(&ix, imports, *obj, 0) {
+                        out.insert(format!("{module}.{attr}"));
+                    }
+                }
+                kind => {
+                    if let Some(dst) = kind.dst()
+                        && matches!(
+                            kind,
+                            InstKind::LoadGlobal { .. }
+                                | InstKind::LoadName { .. }
+                                | InstKind::Import { .. }
+                                | InstKind::AttrLoad { .. }
+                        )
+                        && let Some(fqn) = imported_fqn(&ix, imports, dst, 0)
+                    {
+                        loads.push((dst, fqn));
+                    }
+                }
+            }
+        }
+        if loads.is_empty() {
+            continue;
+        }
+        let grown = ix.grown_vars();
+        out.extend(
+            loads
+                .into_iter()
+                .filter(|(v, _)| grown.contains(v))
+                .map(|(_, fqn)| fqn),
+        );
+    }
+    out
+}
+
+/// The fqn `v` names through this module's runtime imports (`cfg`, `cfg.QUEUE`), through
+/// copies and attribute loads.
+fn imported_fqn(
+    ix: &FnIndex<'_>,
+    imports: &BTreeMap<String, String>,
+    v: VarId,
+    depth: u32,
+) -> Option<String> {
+    if depth > 8 {
+        return None;
+    }
+    match &ix.def_inst(v)?.kind {
+        InstKind::Copy { src, .. } => imported_fqn(ix, imports, *src, depth + 1),
+        InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+            imports.get(name).cloned()
+        }
+        InstKind::Import { dst, .. } => ix.f.var_name(*dst).and_then(|n| imports.get(n)).cloned(),
+        InstKind::AttrLoad { obj, attr, .. } => {
+            imported_fqn(ix, imports, *obj, depth + 1).map(|m| format!("{m}.{attr}"))
+        }
+        _ => None,
+    }
 }
 
 /// `ClassDecl::attr_displays` of the module's classes: the stores of their bodies and methods
@@ -2760,6 +2883,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     functions: BTreeMap::new(),
     global_types: BTreeMap::new(),
     small_globals: BTreeMap::new(),
+    grown_globals: BTreeSet::new(),
     str_constants: BTreeMap::new(),
 };
 

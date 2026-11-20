@@ -16,7 +16,7 @@ use heki_diagnostics::{Diagnostic, TextEdit};
 use heki_effect::{CONTAINER_MUTATORS, Callee, TypeCtx, Val};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
-    LoopBound, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
+    LoopBound, ModuleConstants, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
 };
 use heki_soundness::{
     AnalysisOptions, OptCandidate, ProfitabilityTier, SafetyTier, analyze_module,
@@ -102,29 +102,42 @@ pub(crate) struct Sizes<'a, 'c> {
     /// Receiver types for attribute loads (empty: attributes are not resolved).
     types: &'c FxHashMap<VarId, Val>,
     pub ix: FnIndex<'c>,
+    /// Some display the module's own code fixes may grow in another module
+    /// (`CheckContext::fixed_constants`): the IR's fixed trip counts are decided again.
+    withheld: bool,
 }
 
 impl<'a, 'c> Sizes<'a, 'c> {
+    /// `constants`: the module's constants the project leaves fixed
+    /// (`CheckContext::fixed_constants`).
     pub(crate) fn new(
         cx: &'c CheckContext<'a>,
         tcx: &'c TypeCtx<'a>,
         types: &'c FxHashMap<VarId, Val>,
         f: &'c IrFunction,
         unit: &'c ModuleUnit<'_>,
+        constants: &'c ModuleConstants,
     ) -> Self {
         Self {
             cx,
             tcx,
             types,
-            ix: FnIndex::new(f, &unit.input.ir.constants),
+            ix: FnIndex::new(f, constants),
+            withheld: constants.displays.len() != unit.input.ir.constants.displays.len(),
         }
     }
 
     /// A data-sized loop: its trip count is not fixed by the code (`LoopBound::Unbounded`, the
-    /// IR's verdict), and it does not iterate a small display of another module or an
-    /// attribute (or a builtin wrapper of one: `enumerate(PREFIXES)`).
+    /// IR's verdict, or a fixed count from a module display another module may grow), and it
+    /// does not iterate a small display of another module or an attribute (or a builtin
+    /// wrapper of one: `enumerate(PREFIXES)`).
     pub(crate) fn data_sized(&self, lp: &NaturalLoop) -> bool {
-        lp.bound == LoopBound::Unbounded
+        let decided_again = match lp.bound {
+            LoopBound::Unbounded => true,
+            LoopBound::ConstSmall(_) => self.withheld,
+            LoopBound::RetryPattern | LoopBound::DaemonPolling => false,
+        };
+        decided_again
             && !self.ix.loop_iterable(lp).is_some_and(|it| {
                 self.ix
                     .iter_bound(it, &mut |inst| {
@@ -212,6 +225,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let constants = cx.fixed_constants(unit);
     for f in &unit.input.ir.functions {
         // `index(x, start)` scans from a position, usually one that advances (a linear walk).
         let calls: Vec<(BlockId, Span, VarId, &str)> = f
@@ -234,7 +248,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
         }
         let types = tcx.infer(f);
         let defs = Defs::new(f);
-        let sizes = Sizes::new(cx, &tcx, &types, f, unit);
+        let sizes = Sizes::new(cx, &tcx, &types, f, unit, &constants);
         for (bb, span, recv, method) in calls {
             // Only a receiver that is certainly a builtin `list` (`set.remove`, `str.index`, a
             // project class's `remove`, or an unknown type are not linear scans of a list).
@@ -881,12 +895,13 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
+    let constants = cx.fixed_constants(unit);
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loops.len() < 2 {
             continue;
         }
         let defs = Defs::new(f);
-        let sizes = Sizes::new(cx, &tcx, &no_types, f, unit);
+        let sizes = Sizes::new(cx, &tcx, &no_types, f, unit, &constants);
         // Inferred only for a function with a report.
         let mut types: Option<FxHashMap<VarId, Val>> = None;
         // Both loops are data-sized `for` loops (inlined comprehensions included).

@@ -157,6 +157,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
     read other modules' small displays through the declarations (`ModuleDecls.small_globals`,
     `ClassDecl.attr_displays`), so the language server re-checks their users when they change.
+    A module display another module may grow or rebinds (`cfg.QUEUE.extend(more)`, `from cfg
+    import QUEUE` and `QUEUE.append(x)`, `cfg.QUEUE = []`; `ModuleDecls.grown_globals`, by the
+    shared `FnIndex::grown_vars`) is not fixed for the Advisory rules, in its own module or
+    any other (`ProjectDecls::grown_elsewhere`, a declaration key the language server tracks).
 
 ---
 

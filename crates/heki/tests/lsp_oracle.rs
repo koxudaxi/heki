@@ -280,6 +280,14 @@ const SPELLED_STUB: &str = "import builtins\n\n\ndef name(x: builtins.str) -> No
 const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
 const LEVELS_GROWN: &str =
     "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";
+// A module-level list its own loop treats as fixed, and the module that may grow it.
+const QUEUE_CFG: &str =
+    "import httpx\n\nQUEUE = []\n\n\ndef run():\n    for item in QUEUE:\n        httpx.Client()\n";
+const QUEUE_FEEDER: &str =
+    "from pkg import queue_cfg\n\n\ndef peek():\n    return len(queue_cfg.QUEUE)\n";
+const QUEUE_FEEDER_GROWING: &str =
+    "from pkg import queue_cfg\n\n\ndef feed(items):\n    queue_cfg.QUEUE.extend(items)\n";
+const QUEUE_READER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    for item in QUEUE:\n        httpx.Client()\n";
 const LEVELS_USER: &str = "from pkg.levels import LEVELS\n\n\ndef ranks(xs):\n    out = []\n    for x in xs:\n        out.append(LEVELS.index(x))\n    return out\n";
 const SNIFF: &str =
     "class Sniffer:\n    def __init__(self):\n        self.preferred = [\",\", \";\"]\n";
@@ -409,6 +417,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/handoff.py", HANDOFF),
         ("pkg/levels.py", LEVELS),
         ("pkg/levels_user.py", LEVELS_USER),
+        ("pkg/queue_cfg.py", QUEUE_CFG),
+        ("pkg/queue_feeder.py", QUEUE_FEEDER),
+        ("pkg/queue_reader.py", QUEUE_READER),
         ("pkg/sniff.py", SNIFF),
         ("pkg/sniff_more.py", SNIFF_MORE),
         ("pkg/sniff_user.py", SNIFF_USER),
@@ -785,7 +796,8 @@ fn steps_body_runs() -> Vec<Step> {
 /// `OPT112`'s small displays in other files, read through the declarations
 /// (`ModuleDecls::small_globals`, `ClassDecl::attr_displays`): the user of a module-level list
 /// is re-checked when another function starts growing the list, and the user of an attribute
-/// when a subclass in a third module starts growing it.
+/// when a subclass in a third module starts growing it; `EFF102`'s fixed loops over a
+/// module-level list another module grows (`ModuleDecls::grown_globals`).
 fn steps_small_displays() -> Vec<Step> {
     vec![
         Step::new(
@@ -808,6 +820,24 @@ fn steps_small_displays() -> Vec<Step> {
             vec![save("pkg/sniff_more.py", SNIFF_MORE)],
         )
         .absent(&[("pkg/sniff_user.py", "OPT112")]),
+        // `ModuleDecls::grown_globals`: the module owning the list and a third module reading
+        // it are re-checked when another module starts or stops growing it.
+        Step::new(
+            "another module starts growing a module-level list",
+            vec![save("pkg/queue_feeder.py", QUEUE_FEEDER_GROWING)],
+        )
+        .present(&[
+            ("pkg/queue_cfg.py", "EFF102"),
+            ("pkg/queue_reader.py", "EFF102"),
+        ]),
+        Step::new(
+            "it only reads the list again",
+            vec![save("pkg/queue_feeder.py", QUEUE_FEEDER)],
+        )
+        .absent(&[
+            ("pkg/queue_cfg.py", "EFF102"),
+            ("pkg/queue_reader.py", "EFF102"),
+        ]),
     ]
 }
 

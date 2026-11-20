@@ -568,9 +568,15 @@ impl<'a> FnIndex<'a> {
             InstKind::MakeGenExpr { captured, .. } | InstKind::MakeClosure { captured, .. } => {
                 out.extend(captured);
             }
-            // Binding a module constant: every load of it was checked (`module_constants`).
+            // Binding a module constant: every load of it was checked (`module_constants`). An
+            // import binding its name is another name of the imported global, not a new place
+            // it escapes to.
             InstKind::StoreGlobal { name, value } => {
-                if !self.module.displays.contains_key(name) {
+                let import_binding = matches!(
+                    self.def_inst(*value).map(|i| &i.kind),
+                    Some(InstKind::Import { .. })
+                ) && self.f.var_name(*value) == Some(name.as_str());
+                if !self.module.displays.contains_key(name) && !import_binding {
                     out.push(*value);
                 }
             }

@@ -195,6 +195,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
     let sites = cx.sites_by_span(unit);
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
+    let constants = cx.fixed_constants(unit);
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loops.is_empty() {
             continue;
@@ -216,7 +217,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             // data-sized (the mask of those loops, as `SiteEffect::once_loops`), and the effect
             // does not run once per object across that loop (lazy initialization).
             let mut data_loops = || {
-                let sizes = sizes.get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit));
+                let sizes = sizes
+                    .get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit, &constants));
                 f.loops
                     .iter()
                     .enumerate()
