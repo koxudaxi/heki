@@ -1402,10 +1402,15 @@ async def tn_buffers(text, raw):
 
 async def tp_unpacked_source(args):
     pd.read_csv(*args)
+
+
+async def tp_path_or_buffer(source: str | io.StringIO):
+    pd.read_csv(source)
 "#;
 
 /// A pandas reader's source decides its I/O: a URL is downloaded (`EFF101`), a path is read
-/// from the disk (`EFF105`), and an in-memory buffer is parsed without I/O.
+/// from the disk (`EFF105`), and an in-memory buffer is parsed without I/O. A source that may be
+/// a path or a buffer may be read from the disk.
 #[test]
 fn pandas_readers_do_the_io_of_their_source() {
     assert_eq!(
@@ -1421,6 +1426,7 @@ fn pandas_readers_do_the_io_of_their_source() {
             d(13, "EFF105", "tp_local_files", "pandas.read_csv"),
             d(14, "EFF105", "tp_local_files", "pandas.read_excel"),
             d(24, "EFF105", "tp_unpacked_source", "pandas.read_csv"),
+            d(28, "EFF105", "tp_path_or_buffer", "pandas.read_csv"),
         ]
     );
 }
@@ -1500,6 +1506,7 @@ async def tp_waits(event: threading.Event, lock: threading.Lock, q: queue.Queue,
     lock.acquire()
     drain(q)
     worker.join(5)
+    worker.join(None)
 
 
 async def tp_futures(pool: ThreadPoolExecutor, job):
@@ -1519,8 +1526,8 @@ async def tn_waits_that_return_at_once(event: threading.Event, lock: threading.L
     pool.shutdown(wait=False)
 "#;
 
-/// Waiting on a thread, a lock, an event, a queue, or a future blocks the event loop, unless the
-/// call passes a zero timeout or does not block.
+/// Waiting on a thread, a lock, an event, a queue, or a future blocks the event loop (also with
+/// no timeout, `None`), unless the call passes a zero timeout or does not block.
 #[test]
 fn synchronous_waits_block_unless_they_return_at_once() {
     assert_eq!(
@@ -1530,13 +1537,14 @@ fn synchronous_waits_block_unless_they_return_at_once() {
             d(13, "EFF101", "tp_waits", "threading.Lock.acquire"),
             d(14, "EFF101", "tp_waits", "queue.Queue.get"),
             d(15, "EFF101", "tp_waits", "threading.Thread.join"),
+            d(16, "EFF101", "tp_waits", "threading.Thread.join"),
             d(
-                20,
+                21,
                 "EFF101",
                 "tp_futures",
                 "concurrent.futures.Future.result"
             ),
-            d(21, "EFF101", "tp_futures", "concurrent.futures.wait"),
+            d(22, "EFF101", "tp_futures", "concurrent.futures.wait"),
         ]
     );
 }
@@ -1724,6 +1732,14 @@ async-safe = true
 [[tool.heki.ecosystem]]
 symbol = "pkg.db.open_db"
 return-type = "sqlite3.Connection"
+
+[[tool.heki.ecosystem]]
+symbol = "pkg.log.Sink.write"
+excluded = true
+
+[[tool.heki.ecosystem]]
+symbol = "pkg.net.pages"
+async-safe = true
 "#;
 
 const DECLARED_DB: &str = r#"def run_query(cur, sql):
@@ -1739,6 +1755,16 @@ const DECLARED_LOG: &str = r#"import time
 
 def emit(message):
     time.sleep(0.1)
+
+
+class Sink:
+    def write(self):
+        self.flush()
+
+
+class FileSink(Sink):
+    def flush(self):
+        time.sleep(0.1)
 "#;
 
 const DECLARED_NET: &str = r#"import requests
@@ -1746,11 +1772,19 @@ const DECLARED_NET: &str = r#"import requests
 
 def fetch(url):
     return requests.get(url)
+
+
+def _pages(url):
+    yield requests.get(url)
+
+
+def pages(url):
+    return _pages(url)
 "#;
 
 const DECLARED_APP: &str = r#"from pkg.db import open_db, run_query
-from pkg.log import emit
-from pkg.net import fetch
+from pkg.log import FileSink, emit
+from pkg.net import fetch, pages
 
 
 async def tp_declared_effects(cur):
@@ -1771,11 +1805,18 @@ def tp_declared_result(factory, ids):
     conn = open_db(factory)
     for i in ids:
         conn.execute("SELECT ?", (i,))
+
+
+async def tn_declared_method_and_iterated_result(sink: FileSink, url):
+    sink.write()
+    for page in pages(url):
+        print(page)
 "#;
 
 /// An ecosystem entry naming a project function applies when its source is checked too: its
 /// effects add to the body's, `excluded` / `async-safe` keep the body's (blocking) effects from
-/// its callers, and `return-type` types its result.
+/// its callers (also those a subclass's implementation on `self` adds, and those iterating its
+/// result runs), and `return-type` types its result.
 #[test]
 fn declarations_of_project_functions_apply_to_their_callers() {
     let files = [
@@ -1855,11 +1896,24 @@ async def tp_queries_per_item_on_a_worker(session: Session, ids):
 async def tn_worker_does_not_block_the_loop(session: Session):
     await load_one_offloaded(session, 1)
     await asyncio.to_thread(load_one, session, 1)
+
+
+class Cleaner:
+    def wipe(self, xs):
+        xs.clear()
+
+
+async def tp_worker_method_mutates_a_shared_list(c: Cleaner):
+    await asyncio.to_thread(c.wipe, cached())
+
+
+async def tn_unpacked_job(job):
+    await asyncio.to_thread(*job)
 "#;
 
-/// A callable an offloading API runs on a worker thread does everything it does there: its
-/// writes to shared objects and its queries per item count, its blocking calls do not block the
-/// event loop.
+/// A callable an offloading API runs on a worker thread (a function or a bound method) does
+/// everything it does there: its writes to shared objects and its queries per item count, its
+/// blocking calls do not block the event loop. A callable unpacked with `*` is not known.
 #[test]
 fn offloaded_callables_run_on_a_worker() {
     assert_eq!(
@@ -1893,6 +1947,12 @@ fn offloaded_callables_run_on_a_worker() {
                 "EFF103",
                 "tp_queries_per_item_on_a_worker",
                 "sqlalchemy.orm.Session.execute"
+            ),
+            d(
+                49,
+                "MUT202",
+                "tp_worker_method_mutates_a_shared_list",
+                "app.workers.cached"
             ),
         ]
     );
@@ -1955,11 +2015,15 @@ async def tn_database_io_through_the_facade(session: AsyncSession, conn: AsyncCo
 async def tp_query_per_item_through_the_facade(session: AsyncSession, ids):
     for i in ids:
         await session.run_sync(load)
+
+
+async def tn_unpacked_facade_job(session: AsyncSession, job):
+    await session.run_sync(*job)
 "#;
 
 /// SQLAlchemy's `run_sync(fn)` runs `fn` on the event loop's thread with a synchronous facade:
 /// its database I/O through the facade is awaited for it (still a query per call), its other
-/// blocking calls block the loop.
+/// blocking calls block the loop. A callable unpacked with `*` is not known.
 #[test]
 fn run_sync_callables_run_on_the_event_loop() {
     assert_eq!(
@@ -1996,10 +2060,23 @@ class Client:
 
     async def aclose_and_wait(self):
         self.close()
+
+
+class Configured:
+    def __init__(self, wait):
+        self._executor = ThreadPoolExecutor()
+        self.wait = wait
+
+    def close(self):
+        self._executor.shutdown(wait=self.wait)
+
+    async def aclose(self):
+        self.close()
 "#;
 
 /// A flag a helper passes on from its own parameter (`shutdown(wait=wait)`) is decided at the
-/// helper's call: `close(wait=False)` does not wait.
+/// helper's call: `close(wait=False)` does not wait. One read from an attribute of a parameter
+/// (`wait=self.wait`) is no caller's to decide.
 #[test]
 fn forwarded_flags_are_decided_by_the_caller() {
     assert_eq!(
@@ -2009,11 +2086,19 @@ fn forwarded_flags_are_decided_by_the_caller() {
             FORWARDED_FLAGS,
             "EFF101"
         ),
-        vec![d(
-            15,
-            "EFF101",
-            "Client.aclose_and_wait",
-            "concurrent.futures.ThreadPoolExecutor.shutdown"
-        )]
+        vec![
+            d(
+                15,
+                "EFF101",
+                "Client.aclose_and_wait",
+                "concurrent.futures.ThreadPoolExecutor.shutdown"
+            ),
+            d(
+                27,
+                "EFF101",
+                "Configured.aclose",
+                "concurrent.futures.ThreadPoolExecutor.shutdown"
+            ),
+        ]
     );
 }

@@ -673,3 +673,30 @@ fn lsp_reports_invalid_rule_options_as_a_failed_load() {
     assert_eq!(lsp.latest[&a], Vec::<Value>::new());
     lsp.stop(true);
 }
+
+#[test]
+fn lsp_reloads_when_a_save_finds_the_module_layout_switched() {
+    // A client that watches no files: `src/__init__.py` appears without a notification, and the
+    // next save reloads the workspace, as `heki check` would see the project.
+    let p = Project::new("lsp_layout_on_save");
+    let caller = "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n";
+    p.write("src/pkg/__init__.py", "")
+        .write(
+            "src/pkg/util.py",
+            "import time\n\n\ndef helper():\n    time.sleep(1)\n",
+        )
+        .write("caller.py", caller);
+    let a = uri(&p.dir.join("caller.py"));
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.open(&a, caller);
+    assert_eq!(
+        codes(&lsp.diagnostics(&a, |d| !d.is_empty())),
+        vec!["EFF101"]
+    );
+    // `src` becomes a package: its modules are `src.pkg.*`, and `pkg.util` names nothing.
+    p.write("src/__init__.py", "");
+    lsp.notify("textDocument/didSave", json!({"textDocument": {"uri": a}}));
+    lsp.diagnostics(&a, <[Value]>::is_empty);
+    assert_eq!(p.check(&["--output-format", "concise"]).1, "");
+    lsp.stop(true);
+}

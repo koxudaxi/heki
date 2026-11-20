@@ -198,6 +198,106 @@ fn a_helper_handed_a_field_writes_it_only_where_no_allowed_writer_does() {
     );
 }
 
+/// Helpers handed `Model.items` (or the model) that leave every change to `clear_allowed`: after
+/// logging through a project function, recursively, besides changing another attribute, or
+/// besides handing on a bound method of the list that the callee only keeps. The others change it
+/// themselves, through a further helper handed the attribute, or where the generator a helper
+/// returns is iterated.
+const HANDED_FURTHER: &str = r#"class Model:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+        self.tags: list[str] = []
+
+
+def clear_allowed(xs):
+    xs.clear()
+
+
+def note(message):
+    return message
+
+
+def wipe(xs):
+    xs.clear()
+
+
+def logged(xs):
+    note("clearing")
+    clear_allowed(xs)
+
+
+def walk(xs, depth):
+    if depth:
+        walk(xs, depth - 1)
+    clear_allowed(xs)
+
+
+def holder_wipes(m):
+    wipe(m.items)
+
+
+def holder_other(m):
+    wipe(m.tags)
+    clear_allowed(m.items)
+
+
+def _drain(xs):
+    while xs:
+        yield xs.pop()
+
+
+def drained(xs):
+    return _drain(xs)
+
+
+def drain_all(xs):
+    for _ in drained(xs):
+        pass
+
+
+def settle(xs):
+    clear_allowed(xs)
+    note(xs.append)
+
+
+def render_logged(m: Model) -> None:
+    logged(m.items)
+
+
+def render_walk(m: Model) -> None:
+    walk(m.items, 3)
+
+
+def render_holder_wipes(m: Model) -> None:
+    holder_wipes(m)
+
+
+def render_holder_other(m: Model) -> None:
+    holder_other(m)
+
+
+def render_drain(m: Model) -> None:
+    drain_all(m.items)
+
+
+def render_settle(m: Model) -> None:
+    settle(m.items)
+"#;
+
+#[test]
+fn a_helper_handed_a_field_writes_it_where_it_or_a_callee_it_hands_the_field_changes_it() {
+    let p = project(
+        "owner_handed_further",
+        "[[tool.heki.write-owners]]\nname = \"owner\"\ntargets = [\"Model.items\"]\nallowed-writers = [\"app.clear_allowed\"]\n",
+    );
+    p.write("app.py", HANDED_FURTHER);
+    let target = || "Model.items".to_owned();
+    assert_eq!(
+        reports(&p, "MUT201"),
+        vec![(67, target(), 1), (75, target(), 1)]
+    );
+}
+
 const RESETS: &str = r#"class Base:
     pass
 

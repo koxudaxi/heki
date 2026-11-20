@@ -2175,3 +2175,24 @@ def flag_true():
         );
     }
 }
+
+#[test]
+fn semantic_imports_a_later_module_statement_rebinds_are_overridden() {
+    // A settings module extending what it imports: every target form of a statement that always
+    // runs rebinds the name; a rebinding under a condition keeps the import.
+    let source = "\
+from base import APPS, DEBUG, MIDDLEWARE, ROOT, first, handlers, rest
+
+APPS += [\"debug_toolbar\"]
+MIDDLEWARE, ROOT = list(MIDDLEWARE), ROOT.parent
+[handlers] = [dict(handlers)]
+first, *rest = (first, *rest)
+if DEBUG:
+    DEBUG = False
+";
+    let m = dump_source("dump-semantic", "fe_overridden_imports", source, "py312");
+    for name in ["APPS", "MIDDLEWARE", "ROOT", "handlers", "first", "rest"] {
+        assert_eq!(import(&m, name)["overridden"], true, "{name}");
+    }
+    assert_ne!(import(&m, "DEBUG")["overridden"], true);
+}

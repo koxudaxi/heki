@@ -590,3 +590,80 @@ fn mut202_tracks_read_only_values_through_unpacking_phis_and_calls() {
         "`via_method` calls `ro.Mutator.apply`"
     );
 }
+
+/// An invalidation before a `try` covers the write in its body; a key computed at run time
+/// (`f"_{name}_cache"`) names no cached property, so the path popping it leaves `total` stale.
+const CART_RELOADS: &str = r#"from functools import cached_property
+
+
+class Cart:
+    def __init__(self):
+        self.items = []
+
+    @cached_property
+    def total(self):
+        return len(self.items)
+
+    def retitle(self, rows, name, full):
+        self.items = list(rows)
+        if full:
+            del self.total
+        else:
+            self.__dict__.pop(f"_{name}_cache", None)
+
+    def reload(self, load):
+        del self.total
+        try:
+            self.items = load()
+        finally:
+            print("reloaded")
+"#;
+
+#[test]
+fn mut101_covers_writes_in_a_try_after_an_invalidation_but_not_a_computed_key() {
+    let p = Project::new("mut101_reloads");
+    p.write("cart.py", CART_RELOADS);
+    let diags = diagnostics(&p, &["--select", "MUT101"]);
+    assert_eq!(
+        found(&diags),
+        vec![d("cart.py", 13, "MUT101", "Cart.retitle")],
+        "{diags:#?}"
+    );
+}
+
+/// A method call under an `isinstance` check of its receiver mutates what the methods of the
+/// receiver's declared class and its subclasses mutate.
+const NARROWED_RECEIVERS: &str = r#"import functools
+
+
+@functools.cache
+def cached():
+    return [1, 2]
+
+
+class Base:
+    def clear(self, xs):
+        xs.clear()
+
+
+class Sub(Base):
+    def clear(self, xs):
+        xs.clear()
+
+
+def narrowed(b: Base):
+    if isinstance(b, Sub):
+        b.clear(cached())
+"#;
+
+#[test]
+fn mut202_follows_a_call_on_a_narrowed_receiver() {
+    let p = Project::new("mut202_narrowed");
+    p.write("app.py", NARROWED_RECEIVERS);
+    let diags = diagnostics(&p, &["--select", "MUT202"]);
+    assert_eq!(
+        found(&diags),
+        vec![d("app.py", 21, "MUT202", "narrowed")],
+        "{diags:#?}"
+    );
+}

@@ -371,6 +371,14 @@ def fetch(url):
 
 from requests import get as fetch
 
+
+class Session:
+    def __init__(self):
+        time.sleep(1)
+
+
+from requests import Session
+
 try:
     from requests import post
 except ImportError:
@@ -391,7 +399,7 @@ def helper():
     time.sleep(1)
 "#;
 
-const SHADOW_USERS: &str = r#"from pkg.shadows import fetch, helper, post, sleep
+const SHADOW_USERS: &str = r#"from pkg.shadows import Session, fetch, helper, post, sleep
 
 
 async def handler(url):
@@ -399,6 +407,7 @@ async def handler(url):
     helper()
     fetch(url)  # EFF101
     post(url)  # EFF101
+    Session()
 "#;
 
 #[test]
@@ -415,7 +424,8 @@ fn a_module_name_is_what_its_module_binds_last() {
 }
 
 /// An argument unpacked with `*` binds the items of a display of known length one by one; past
-/// one of unknown length, the parameter an argument binds is not known.
+/// one of unknown length (also one unpacked inside the display), the parameter an argument binds
+/// is not known.
 const UNPACKED: &str = r#"from pkg.model import Model
 
 
@@ -437,6 +447,10 @@ def whole_pack(m: Model):
 
 def first_slot(m: Model, rest):
     fill(m.items, *rest)
+
+
+def nested_pack(m: Model, rest):
+    fill(*(None, *rest), m.items)
 
 
 def plain(m: Model):
@@ -590,4 +604,178 @@ class Sentinel:
 #[test]
 fn a_mixin_method_runs_the_implementations_of_its_receivers_class() {
     check_marks("mixins", &[("pkg/mixins.py", MIXINS)], &["EFF101"]);
+}
+
+/// An effect a method reaches through a subclass's implementation on its own `self` and also
+/// through a plain call runs whatever `self` is; of two chains through one implementation, the
+/// shorter one is kept.
+const HOOKS: &str = r#"import time
+
+
+def pause():
+    time.sleep(1)
+
+
+class Base:
+    def run(self):
+        self.flush()
+        pause()
+
+    def run_short_first(self):
+        self.flush()
+        self.slow_path()
+
+    def run_long_first(self):
+        self.slow_path()
+        self.flush()
+
+    def slow_path(self):
+        self.flush()
+
+
+class FileSink(Base):
+    def flush(self):
+        time.sleep(1)
+
+
+class Quiet(Base):
+    def flush(self):
+        pass
+
+
+async def on_quiet(q: Quiet):
+    q.run()  # EFF101
+    q.run_short_first()
+    q.run_long_first()
+
+
+async def on_file(f: FileSink):
+    f.run_short_first()  # EFF101
+    f.run_long_first()  # EFF101
+"#;
+
+#[test]
+fn an_effect_through_self_and_a_plain_call_runs_for_every_receiver() {
+    check_marks("self_hooks", &[("pkg/hooks.py", HOOKS)], &["EFF101"]);
+    let p = Project::new("self_hooks_chains");
+    p.write("pkg/__init__.py", "").write("pkg/hooks.py", HOOKS);
+    let (_, stdout, _) = p.check(&["--select", "EFF101", "--output-format", "json"]);
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    // `(line of the report, line of the hop into `FileSink.flush`)`.
+    let hops: Vec<(u64, u64)> = diags
+        .iter()
+        .filter(|d| d["qualname"] == "on_file")
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["related"][1]["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(hops, [(42, 14), (43, 19)], "{diags:#?}");
+}
+
+/// A class whose bases C3 cannot linearize keeps the depth-first, left-to-right order: a base
+/// order its subclass contradicts (Python rejects the class statement, as the test expects),
+/// and bases that name the class itself (a class extending an imported class of its own name
+/// with a mixin).
+const UNORDERED: &str = r#"import time
+
+import pytest
+
+from pkg.parsers import Parser
+
+
+class Mixin:
+    def extra(self):
+        time.sleep(1)
+
+
+class Parser(Parser, Mixin):
+    pass
+
+
+async def on_parser(p: Parser):
+    p.extra()  # EFF101
+
+
+class X:
+    def read(self):
+        time.sleep(1)
+
+
+class Y:
+    def read(self):
+        pass
+
+
+class A(X, Y):
+    pass
+
+
+class B(Y, X):
+    pass
+
+
+def test_rejects_an_inconsistent_order():
+    with pytest.raises(TypeError):
+
+        class Both(A, B):
+            async def run(self):
+                self.read()  # EFF101
+"#;
+
+#[test]
+fn bases_c3_cannot_linearize_keep_the_depth_first_order() {
+    check_marks(
+        "unordered_bases",
+        &[
+            (
+                "pkg/parsers.py",
+                "class Parser:\n    def parse(self):\n        return None\n",
+            ),
+            ("pkg/unordered.py", UNORDERED),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// A class method's `cls` stays any subclass of the class also where one path rebinds it to the
+/// class itself: constructing it runs any subclass's `__init__`. The class's own name constructs
+/// exactly that class.
+const CLASS_FACTORIES: &str = r#"import time
+
+
+class Model:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def build(cls, base):
+        if base:
+            cls = Model
+        return cls()
+
+    @classmethod
+    def plain(cls):
+        return Model()
+
+
+class Slow(Model):
+    def __init__(self):
+        time.sleep(1)
+
+
+async def make():
+    Slow.build(False)  # EFF101
+    Slow.plain()
+"#;
+
+#[test]
+fn a_class_method_constructs_any_subclass_through_cls() {
+    check_marks(
+        "class_factories",
+        &[("pkg/factories.py", CLASS_FACTORIES)],
+        &["EFF101"],
+    );
 }

@@ -1310,3 +1310,30 @@ fn eff201_reports_a_write_a_private_helper_hands_over_once() {
     );
     assert!(messages(&diags)[1].contains("(direct_attr via `pkg.render_mod._reset`)"));
 }
+
+/// A scope function's work on a worker thread is not its own (the sleep there blocks no scope),
+/// and iterating the generator a helper returns runs it in the scope: the parameter the
+/// generator drains is the scope's.
+#[test]
+fn eff201_follows_where_offloaded_callables_and_returned_generators_run() {
+    let p = Project::new("v1x_eff201_runs");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"domain\"\nscopes = [\"pkg.views.*\"]\nforbid = [\"sleep\", \"mutates-params\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/helpers.py",
+        "import time\n\n\ndef nap():\n    time.sleep(1)\n\n\ndef _drain(items):\n    while items:\n        yield items.pop()\n\n\ndef drained(items):\n    return _drain(items)\n",
+    )
+    .write(
+        "pkg/views.py",
+        "import asyncio\n\nfrom pkg.helpers import drained, nap\n\n\nasync def offload():\n    await asyncio.to_thread(nap)\n\n\ndef show(items):\n    for x in drained(items):\n        print(x)\n",
+    );
+    let diags = diagnostics(&p, &["--select", "EFF201"]);
+    assert_eq!(
+        found(&diags),
+        vec![d("pkg/views.py", 10, "show", "domain:mutates-params")],
+        "{diags:#?}"
+    );
+}

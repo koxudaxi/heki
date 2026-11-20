@@ -296,6 +296,12 @@ const NAMED: &str = "class Named:\n    def __init__(self, name):\n        self.n
 const LABELED: &str = "from pkg.named import Named\n\n\nclass Labeled(Named):\n    pass\n";
 const LABELED_CACHED: &str = "from functools import cached_property\n\nfrom pkg.named import Named\n\n\nclass Labeled(Named):\n    @cached_property\n    def label(self):\n        return self.name.upper()\n";
 const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay import forward\n\n\ndef plant(index: Index, node: Node, kid):\n    forward(node, kid)\n";
+// Two-phase initialization (`MUT101`): an `__init__` of a subclass in another module starts and
+// stops calling a private writer of its base.
+const SHEET: &str = "from functools import cached_property\n\n\nclass Sheet:\n    def __init__(self):\n        self.cells = []\n\n    @cached_property\n    def size(self):\n        return len(self.cells)\n\n    def _reset(self):\n        self.cells = []\n";
+const GRID: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    pass\n";
+const GRID_RESETTING: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    def __init__(self):\n        super().__init__()\n        self._reset()\n";
+const GRID_INITIALIZING: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    def __init__(self):\n        super().__init__()\n";
 
 // Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
 // size-dependent rewrites that rely on them (`OPT110` builds a `set(...)`) are not proven.
@@ -471,6 +477,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/rack_view.py", RACK_VIEW),
         ("pkg/named.py", NAMED),
         ("pkg/labeled.py", LABELED),
+        ("pkg/sheet.py", SHEET),
+        ("pkg/grid.py", GRID),
         ("pkg/fill.py", FILL),
         ("pkg/fill_main.py", FILL_MAIN),
         ("pkg/views.py", VIEWS),
@@ -1271,7 +1279,8 @@ fn steps_indirect_helpers() -> Vec<Step> {
 
 /// A class's family includes the methods it inherits: the inherited writer's report appears in
 /// the base class's file when a subclass in another module starts caching what it writes, and
-/// goes away when the subclass overrides the writer.
+/// goes away when the subclass overrides the writer. A private writer of the base that a
+/// subclass's `__init__` calls initializes in two phases.
 fn steps_inherited_writers() -> Vec<Step> {
     let overriding = format!(
         "{LABELED_CACHED}\n    def rename(self, name):\n        self.name = name\n        del self.label\n"
@@ -1292,6 +1301,16 @@ fn steps_inherited_writers() -> Vec<Step> {
             vec![save("pkg/labeled.py", LABELED)],
         )
         .absent(&[("pkg/named.py", "MUT101")]),
+        Step::new(
+            "an `__init__` of a subclass in another module calls the base's private writer",
+            vec![save("pkg/grid.py", GRID_RESETTING)],
+        )
+        .absent(&[("pkg/sheet.py", "MUT101")]),
+        Step::new(
+            "the subclass's `__init__` stops calling it",
+            vec![save("pkg/grid.py", GRID_INITIALIZING)],
+        )
+        .present(&[("pkg/sheet.py", "MUT101")]),
     ]
 }
 

@@ -287,7 +287,85 @@ def through_helpers(items: list[int], frames: list[pd.DataFrame]):
     for part in frames:
         df = combine([df, part])
     return acc, df
+
+
+class Stepper:
+    def step(self, acc):
+        numpy.append([0], 1)
+        return acc
+
+
+def unchanged_when_narrowed(items: list[int], s):
+    acc = numpy.array([])
+    for _ in items:
+        if isinstance(s, Stepper):
+            acc = s.step(acc)
+    return acc
 "#,
     );
     assert_eq!(lines(&p, "DATA101"), vec![33, 35]);
+}
+
+#[test]
+fn an_accumulation_through_a_method_a_module_function_or_a_merged_part_is_quadratic() {
+    let p = Project::new("data101_call_forms");
+    p.write("app/__init__.py", "")
+        .write(
+            "app/grow.py",
+            r#"import numpy
+
+
+def grow(acc):
+    return numpy.append(acc, 1)
+
+
+def window(acc, edges):
+    return numpy.append(edges, 0)
+"#,
+        )
+        .write(
+            "app/acc.py",
+            r#"import numpy
+
+from app import grow as helpers
+
+
+class Series:
+    def _grow(self, acc):
+        return numpy.append(acc, 1)
+
+    def collect(self, items):
+        acc = numpy.array([])
+        for _ in items:
+            acc = self._grow(acc)
+        return acc
+
+
+def through_module(items):
+    acc = numpy.array([])
+    for _ in items:
+        acc = helpers.grow(acc)
+    return acc
+
+
+def merged_part(rows):
+    acc = numpy.array([])
+    for row in rows:
+        if row:
+            v = 1
+        else:
+            v = 2
+        acc = numpy.append(acc, v)
+    return acc
+
+
+def edges_only(items, edge):
+    acc = numpy.array([])
+    for _ in items:
+        acc = helpers.window(acc, [edge, edge])
+    return acc
+"#,
+        );
+    // `window` rebuilds the display it is handed, not the accumulator it ignores.
+    assert_eq!(lines(&p, "DATA101"), vec![13, 20, 31]);
 }

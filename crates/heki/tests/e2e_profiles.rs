@@ -43,6 +43,17 @@ fn gecko_references_to_missing_rows_are_a_malformed_dump() {
         stderr.contains("gecko `samples.stack` entry 0 refers to no row"),
         "{stderr}"
     );
+    // A column shorter than its table.
+    p.write(
+        "short.json",
+        r#"{"threads": [{"samples": {"stack": [0]}, "stackTable": {"frame": [0], "prefix": []}, "frameTable": {"func": [0]}, "funcTable": {"name": [0], "fileName": [0]}}], "shared": {"stringArray": ["app.py"]}}"#,
+    );
+    let (code, _, stderr) = p.check(&["--profile", "short.json"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("gecko `stackTable.prefix` entry 0 refers to no row"),
+        "{stderr}"
+    );
 }
 
 /// The `profile:` evidence of each diagnostic, by qualname.
