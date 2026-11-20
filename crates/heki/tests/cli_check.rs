@@ -81,6 +81,7 @@ fn semantic_fixtures_gate_json() {
         (78, "MUT201"),
         (92, "MUT202"),
         (108, "EFF101"),
+        (143, "EFF102"),
     ]
     .iter()
     .map(|(l, c)| (*l, (*c).to_owned()))
