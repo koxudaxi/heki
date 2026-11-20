@@ -484,6 +484,12 @@ mod tests {
         assert_eq!(hot.cum_pct(Path::new("app.py"), "main"), Some(75.0));
         assert!(parse_gecko("{}").is_err());
         assert!(parse_gecko("{\"shared\": {\"stringArray\": []}, \"threads\": [{}]}").is_err());
+        // A column shorter than its table: the function's file name is missing.
+        let short = gecko.replace("\"fileName\": [2, 2]", "\"fileName\": [2]");
+        assert!(matches!(
+            parse_gecko(&short),
+            Err(ProfileError::Parse(m)) if m == "gecko `funcTable.fileName` entry 1 refers to no row"
+        ));
         assert!(parse_gecko("not json").is_err());
     }
 

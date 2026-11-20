@@ -2180,6 +2180,11 @@ mod tests {
                 async_safe: Some(true),
                 ..patch("requests.get")
             },
+            // Also the effects of its argument cases (an SRV lookup of a `mongodb+srv://` host).
+            EcosystemPatch {
+                async_safe: Some(true),
+                ..patch("pymongo.MongoClient")
+            },
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&overrides).unwrap();
         let got = |symbol: &str| kb.lookup(symbol).cloned().unwrap();
@@ -2231,6 +2236,16 @@ mod tests {
                 symbol: "requests.get".into(),
                 ..async_safe(entry(&[UnpooledClientAlloc]))
             }
+        );
+        let mongo = got("pymongo.MongoClient");
+        assert!(mongo.async_safe);
+        assert_eq!(
+            mongo
+                .cases
+                .iter()
+                .map(|c| c.effects.clone().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            [vec![UnpooledClientAlloc], vec![UnpooledClientAlloc]]
         );
         assert_eq!(kb.entries.len(), builtin.entries.len() + 3);
         // Only what the configuration names is a declaration of project code.
