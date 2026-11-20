@@ -318,6 +318,9 @@ fn pair(a: Elem, b: Elem) -> Elem {
     Elem::Of(Ty::container("builtins.tuple", Args::Tuple(vec![a, b])))
 }
 
+/// The types `isinstance` checks give variables.
+type Narrowed = FxHashMap<VarId, Ty>;
+
 struct Engine<'e, 'a> {
     cx: &'e TypeCtx<'a>,
     f: &'e IrFunction,
@@ -350,6 +353,10 @@ struct Engine<'e, 'a> {
     narrowing: Option<Narrowing<'e>>,
     /// What `isinstance` checks guarding the current block give its variables.
     cur: FxHashMap<VarId, Ty>,
+    /// [`Self::implied`] of each condition, truth, block of the narrowed types it starts from,
+    /// and depth, while one block is entered: a condition reaches the same phi through many
+    /// paths (a loop header's phi is an input of itself on each `continue`).
+    implied_memo: RefCell<FxHashMap<(VarId, bool, BlockId, u8), Narrowed>>,
 }
 
 /// The CFG facts `isinstance` narrowing needs, and the narrowed types at each block's entry
@@ -384,6 +391,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             added_changed: false,
             narrowing: None,
             cur: FxHashMap::default(),
+            implied_memo: RefCell::default(),
         };
         engine.seed_params();
         if let Some(seed) = seed {
@@ -627,6 +635,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     fn enter(&mut self, bb: BlockId) {
         // The predecessors' narrowed types come from their entries, not the last block's.
         self.cur.clear();
+        self.implied_memo.get_mut().clear();
         let Some(n) = &self.narrowing else {
             return;
         };
@@ -637,7 +646,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             };
             let mut edge = at.clone();
             if let Terminator::Branch { cond, then_bb, .. } = &self.f.block(p).terminator {
-                edge.extend(self.implied(n, *cond, *then_bb == bb, at, 0));
+                edge.extend(self.implied(n, *cond, *then_bb == bb, p, 0));
             }
             entry = Some(match entry {
                 None => edge,
@@ -651,14 +660,32 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
-    /// The narrowed types that `cond` being `truth` implies, where the narrowed types `at`
-    /// hold: `isinstance(x, C)` (with `not`, and through the values `and` / `or` join).
+    /// The narrowed types that `cond` being `truth` implies, where the narrowed types at the
+    /// entry of `from` hold: `isinstance(x, C)` (with `not`, and through the values `and` /
+    /// `or` join).
     fn implied(
         &self,
         n: &Narrowing<'_>,
         cond: VarId,
         truth: bool,
-        at: &FxHashMap<VarId, Ty>,
+        from: BlockId,
+        depth: u8,
+    ) -> FxHashMap<VarId, Ty> {
+        let key = (cond, truth, from, depth);
+        if let Some(known) = self.implied_memo.borrow().get(&key) {
+            return known.clone();
+        }
+        let out = self.implied_once(n, cond, truth, from, depth);
+        self.implied_memo.borrow_mut().insert(key, out.clone());
+        out
+    }
+
+    fn implied_once(
+        &self,
+        n: &Narrowing<'_>,
+        cond: VarId,
+        truth: bool,
+        from: BlockId,
         depth: u8,
     ) -> FxHashMap<VarId, Ty> {
         let mut out = FxHashMap::default();
@@ -686,7 +713,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     }
                 }
                 let mut facts = path.clone();
-                facts.extend(self.implied(n, *v, truth, path, depth + 1));
+                facts.extend(self.implied(n, *v, truth, *p, depth + 1));
                 joined = Some(match joined {
                     None => facts,
                     Some(acc) => intersect(acc, &facts),
@@ -699,9 +726,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                 op: UnaryOpKind::Not,
                 operand,
                 ..
-            }) => return self.implied(n, *operand, !truth, at, depth + 1),
+            }) => return self.implied(n, *operand, !truth, from, depth + 1),
             Some(InstKind::Copy { src, .. }) => {
-                return self.implied(n, *src, truth, at, depth + 1);
+                return self.implied(n, *src, truth, from, depth + 1);
             }
             Some(InstKind::Call {
                 callee_var: Some(c),
@@ -711,7 +738,10 @@ impl<'e, 'a> Engine<'e, 'a> {
                 && matches!(self.need(*c), Ok(Some(Ty::Ref(f))) if f == "builtins.isinstance") =>
             {
                 let x = args[0];
-                let current = at.get(&x).or_else(|| self.need(x).ok().flatten());
+                let current = n.entry[from.0 as usize]
+                    .as_ref()
+                    .and_then(|at| at.get(&x))
+                    .or_else(|| self.need(x).ok().flatten());
                 if let Some(classes) = self
                     .need(args[1])
                     .ok()
