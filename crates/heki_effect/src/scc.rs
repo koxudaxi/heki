@@ -4,7 +4,8 @@
 ///
 /// Components are returned in **reverse topological order** of the condensation: every
 /// component appears after all components it has edges into (callees before callers), which
-/// is the bottom-up order the effect fixpoint needs. Members of each component are sorted.
+/// is the bottom-up order the effect fixpoint needs. Members of each component stay in Tarjan
+/// stack-pop order (callee-first along the DFS tree) so simple cycles converge in two rounds.
 pub(crate) fn tarjan_scc(n: usize, succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
     const UNVISITED: usize = usize::MAX;
     let mut index = vec![UNVISITED; n];
@@ -55,7 +56,6 @@ pub(crate) fn tarjan_scc(n: usize, succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
                         break;
                     }
                 }
-                component.sort_unstable();
                 out.push(component);
             }
         }
@@ -73,7 +73,7 @@ mod tests {
         let succ = vec![vec![1], vec![2], vec![1, 3], vec![], vec![]];
         let sccs = tarjan_scc(5, &succ);
         let pos = |n: usize| sccs.iter().position(|c| c.contains(&n)).unwrap();
-        assert!(sccs.contains(&vec![1, 2]));
+        assert!(sccs.contains(&vec![2, 1]));
         assert!(pos(3) < pos(1));
         assert!(pos(1) < pos(0));
         assert_eq!(sccs.iter().map(Vec::len).sum::<usize>(), 5);

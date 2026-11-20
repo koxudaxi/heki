@@ -278,7 +278,10 @@ impl Workspace {
             return Vec::new();
         };
         let update = self.index.remove_file(path);
-        self.decls.remove(&meta.module_name);
+        match self.index.module_decls(&meta.module_name) {
+            Some(remaining) => self.decls.replace(remaining),
+            None => self.decls.remove(&meta.module_name),
+        }
         self.stats.indexed_files = self.index.files.len();
         let mut affected: FxHashSet<PathBuf> = update
             .affected_callers

@@ -1034,16 +1034,18 @@ fn method_cycle(n: usize) -> String {
 
 #[test]
 fn non_converged_sccs_are_marked_unknown() {
-    // A small cycle converges: every method sees every attribute.
-    let index = project(&[("small.py", &method_cycle(4))]);
-    for i in 0..4 {
-        let s = summary(&index, "small", &format!("C.m{i}"));
-        assert!(!s.unknown_calls);
-        assert_eq!(s.mutates_self_attrs.len(), 4);
+    // Even a long simple cycle converges in two rounds because Tarjan pops components callee-first.
+    let mut index = project(&[("big.py", &method_cycle(24))]);
+    for i in 0..24 {
+        let s = summary(&index, "big", &format!("C.m{i}"));
+        assert!(!s.unknown_calls, "C.m{i}");
+        assert_eq!(s.mutates_self_attrs.len(), 24, "C.m{i}");
     }
-    // A long one exceeds `MAX_ITERATIONS_PER_SCC_MEMBER` recomputations per member: the
-    // propagation stops and every member is marked as not fully known.
-    let index = project(&[("big.py", &method_cycle(24))]);
+    // When an SCC still exceeds its iteration budget (abnormal guard), propagation stops and
+    // marks every member as not fully known.
+    let all: FxHashSet<FuncKey> = index.all_functions().collect();
+    crate::callgraph::reset_to_local(&mut index, &all);
+    crate::callgraph::propagate_with_budget(&mut index, &all, 1);
     for i in 0..24 {
         assert!(
             summary(&index, "big", &format!("C.m{i}")).unknown_calls,
@@ -1054,10 +1056,10 @@ fn non_converged_sccs_are_marked_unknown() {
 
 #[test]
 fn callers_left_without_a_defining_file_are_skipped() {
-    // Two files of one module (`b.py` and its stub `b.pyi`) both define `b.caller`; the
-    // stub wins `func_files`. When the stub drops `caller`, the call edges of `b.py` still
+    // Two `.py` files sharing one module name (`b.py` and `b_alt.py`) both define `b.caller`;
+    // the second wins `func_files`. When it drops `caller`, the call edges of `b.py` still
     // name it as a caller of `a.helper` although no file defines it any more.
-    let helper = key("a", "helper");
+    let helper = key("a", "_helper");
     let caller = key("b", "caller");
     let span = Span { start: 0, end: 1 };
     let file = |path: &str, module: &str, funcs: &[&FuncKey]| {
@@ -1089,21 +1091,51 @@ fn callers_left_without_a_defining_file_are_skipped() {
         recv_is_self: false,
         drives_coroutine_manually: false,
     });
-    let stub = file("b.pyi", "b", &[&caller]);
-    let mut index = ProjectIndex::build(vec![file_a.clone(), file_b, stub]);
-    assert_eq!(index.file_of(&caller), Some(Path::new("b.pyi")));
-    index.update_file(file("b.pyi", "b", &[]));
+    let live = key("c", "live");
+    let mut file_c = file("c.py", "c", &[&live]);
+    file_c.call_edges.push((live.clone(), helper.clone(), span));
+    file_c.call_sites.push(CallSite {
+        caller: live.clone(),
+        target: CallTarget::Project(vec![BoundCallee {
+            callee: helper.clone(),
+            params: Vec::new(),
+        }]),
+        is_awaited: false,
+        span,
+        loop_depth: 0,
+        recv_is_self: false,
+        drives_coroutine_manually: true,
+    });
+    file_c.call_sites.push(CallSite {
+        caller: live.clone(),
+        target: CallTarget::Project(vec![BoundCallee {
+            callee: live.clone(),
+            params: Vec::new(),
+        }]),
+        is_awaited: false,
+        span,
+        loop_depth: 0,
+        recv_is_self: false,
+        drives_coroutine_manually: false,
+    });
+    let dup = file("b_alt.py", "b", &[&caller]);
+    let mut index = ProjectIndex::build(vec![file_a.clone(), file_b, file_c, dup]);
+    assert_eq!(index.file_of(&caller), Some(Path::new("b_alt.py")));
+    index.update_file(file("b_alt.py", "b", &[]));
     assert_eq!(index.file_of(&caller), None);
 
-    // `helper` starts blocking: the stale caller is reported as affected, but propagation
-    // and the `sync_driven_only` pass skip it (it has no summary to update).
+    // `helper` starts blocking (and async): the stale caller is reported as affected, but
+    // propagation and the `sync_driven_only` pass skip it (it has no summary to update).
     let mut blocking = file_a;
-    let mut s = EffectSummary::default();
+    let mut s = EffectSummary {
+        is_async: true,
+        ..EffectSummary::default()
+    };
     s.direct_exec_effects.insert(BlockingNet);
     blocking.local_functions.insert(helper.clone(), s);
     let res = index.update_file(blocking);
     assert!(res.summary_changed);
-    assert_eq!(res.affected_callers, vec![caller.clone()]);
+    assert_eq!(res.affected_callers, vec![caller.clone(), live]);
     assert!(index.summary(&caller).is_none());
     assert!(
         index
@@ -1112,6 +1144,70 @@ fn callers_left_without_a_defining_file_are_skipped() {
             .direct_exec_effects
             .contains(&BlockingNet)
     );
+}
+
+#[test]
+fn py_implementation_takes_precedence_over_sibling_pyi_stub() {
+    let mut index = project(&[
+        (
+            "pkg/util.py",
+            "import time\n\ndef helper():\n    time.sleep(1)\n",
+        ),
+        ("pkg/util.pyi", "def helper() -> None: ...\n"),
+        (
+            "pkg/api.py",
+            "from pkg.util import helper\n\nasync def handler():\n    helper()\n",
+        ),
+        ("pkg/api.pyi", "async def handler() -> None: ...\n"),
+    ]);
+    assert_eq!(
+        index.file_of(&key("pkg.util", "helper")),
+        Some(Path::new("pkg/util.py"))
+    );
+    assert!(
+        index
+            .module_decls("pkg.util")
+            .unwrap()
+            .imports
+            .contains_key("time")
+    );
+    assert!(
+        summary(&index, "pkg.api", "handler")
+            .transitive_exec_effects
+            .contains(&Sleep)
+    );
+    // Editing the sibling `.pyi` stub leaves the `.py` implementation's decls and effects intact.
+    let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+    let mut decls = index.project_decls();
+    let stub_src = "def helper() -> None: ...\ndef extra() -> None: ...\n";
+    let stub_parsed = heki_ast::parse_module(stub_src).unwrap();
+    let profile = RuntimeProfile::from(PythonVersion::PY315);
+    let stub_sem = heki_semantic::analyze_module(&stub_parsed, stub_src, profile);
+    let stub_ir = heki_ir::build_module_ir(&stub_parsed, stub_src, &stub_sem, profile);
+    let stub_input = ModuleInput {
+        path: PathBuf::from("pkg/util.pyi"),
+        module_name: "pkg.util".into(),
+        is_package: false,
+        content_hash: String::new(),
+        semantic: &stub_sem,
+        ir: &stub_ir,
+    };
+    let (_upd, decls_changed) = index.reanalyze_module_cached(&stub_input, &kb, &mut decls);
+    assert!(!decls_changed);
+    assert_eq!(
+        index.file_of(&key("pkg.util", "helper")),
+        Some(Path::new("pkg/util.py"))
+    );
+    assert!(
+        summary(&index, "pkg.util", "helper")
+            .direct_exec_effects
+            .contains(&Sleep)
+    );
+    // Removing the `.py` file falls back to the remaining stub's declarations.
+    index.remove_file(Path::new("pkg/util.py"));
+    assert!(index.module_decls("pkg.util").is_some());
+    index.remove_file(Path::new("pkg/util.pyi"));
+    assert!(index.module_decls("pkg.util").is_none());
 }
 
 #[test]

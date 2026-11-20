@@ -157,6 +157,9 @@ pub struct EcosystemEntry {
     pub excluded: bool,
     pub copy_sanitizer: bool,
     pub opaque_to_layer3: bool,
+    /// Optional instance class returned by a factory function or method
+    /// (e.g. `sqlite3.connect` -> `sqlite3.Connection`, `sqlite3.Connection.cursor` -> `sqlite3.Cursor`).
+    pub return_type: Option<String>,
 }
 
 /// Validate a `[[tool.heki.ecosystem]]` override into a Layer 2 entry.
@@ -178,6 +181,7 @@ impl TryFrom<&EcosystemOverride> for EcosystemEntry {
             excluded: value.excluded,
             copy_sanitizer: value.copy_sanitizer,
             opaque_to_layer3: false,
+            return_type: None,
         })
     }
 }
@@ -602,16 +606,74 @@ mod tests {
                 entry(&[BlockingNet, UnpooledClientAlloc]),
             ),
             (
-                s(&[
-                    "sqlite3.connect",
-                    "psycopg.connect",
-                    "psycopg2.connect",
-                    "pymysql.connect",
-                    "sqlalchemy.create_engine",
-                    "redis.Redis",
-                    "redis.StrictRedis",
-                    "pymongo.MongoClient",
-                ]),
+                s(&["sqlite3.connect"]),
+                EcosystemEntry {
+                    return_type: Some("sqlite3.Connection".into()),
+                    ..entry(&[BlockingDb, UnpooledClientAlloc])
+                },
+            ),
+            (
+                s(&["sqlite3.Connection.cursor"]),
+                EcosystemEntry {
+                    return_type: Some("sqlite3.Cursor".into()),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["psycopg.connect"]),
+                EcosystemEntry {
+                    return_type: Some("psycopg.Connection".into()),
+                    ..entry(&[BlockingDb, UnpooledClientAlloc])
+                },
+            ),
+            (
+                s(&["psycopg.Connection.cursor"]),
+                EcosystemEntry {
+                    return_type: Some("psycopg.Cursor".into()),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["psycopg.Connection.execute"]),
+                entry(&[BlockingDb, DbQuery]),
+            ),
+            (
+                s(&["psycopg2.connect"]),
+                EcosystemEntry {
+                    return_type: Some("psycopg2.extensions.connection".into()),
+                    ..entry(&[BlockingDb, UnpooledClientAlloc])
+                },
+            ),
+            (
+                s(&["psycopg2.extensions.connection.cursor"]),
+                EcosystemEntry {
+                    return_type: Some("psycopg2.extensions.cursor".into()),
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["pymysql.connect"]),
+                EcosystemEntry {
+                    return_type: Some("pymysql.connections.Connection".into()),
+                    ..entry(&[BlockingDb, UnpooledClientAlloc])
+                },
+            ),
+            (
+                s(&["sqlalchemy.create_engine"]),
+                EcosystemEntry {
+                    return_type: Some("sqlalchemy.engine.Engine".into()),
+                    ..entry(&[BlockingDb, UnpooledClientAlloc])
+                },
+            ),
+            (
+                s(&["sqlalchemy.engine.Engine.connect"]),
+                EcosystemEntry {
+                    return_type: Some("sqlalchemy.engine.Connection".into()),
+                    ..entry(&[BlockingDb])
+                },
+            ),
+            (
+                s(&["redis.Redis", "redis.StrictRedis", "pymongo.MongoClient"]),
                 entry(&[BlockingDb, UnpooledClientAlloc]),
             ),
             (
@@ -860,6 +922,7 @@ mod tests {
                 excluded: false,
                 copy_sanitizer: true,
                 opaque_to_layer3: false,
+                return_type: None,
             }
         );
         for bad in ["blocking-net", "BlockingNet", "network", ""] {

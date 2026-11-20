@@ -256,21 +256,23 @@ fn watch_follows_stubs_deleted_callees_and_files_that_stop_being_utf8() {
             "pkg/jobs.pyi",
             "from pkg.util import helper\n\n\ndef job() -> None: ...\n",
         );
-    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "4");
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "5");
     wait_for(&rx, "[heki watch] 1 diagnostic(s) in 5 file(s)");
-    // The stub drops `job`: no file defines it for the index any more, although `jobs.py`
-    // still calls `helper`.
+    // Editing the sibling stub does not mask `pkg/jobs.py`.
     p.write("pkg/jobs.pyi", "from pkg.util import helper\n\nx: int\n");
     wait_for(&rx, "[heki watch] 1 diagnostic(s) in 5 file(s)");
-    // An edit of `helper` passes over that caller and keeps `handler` reported.
+    // An edit of `helper` keeps `handler` reported.
     p.write(
         "pkg/util.py",
         "import time\n\n\ndef helper():\n    time.sleep(2)\n",
     );
     wait_for(&rx, "[heki watch] 1 diagnostic(s) in 5 file(s)");
+    // Removing a sibling `.pyi` stub keeps the `.py` module's declarations alive.
+    std::fs::remove_file(p.dir.join("pkg/jobs.pyi")).unwrap();
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 4 file(s)");
     // Deleting the callee re-checks its callers: `handler` no longer blocks.
     std::fs::remove_file(p.dir.join("pkg/util.py")).unwrap();
-    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 4 file(s)");
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 3 file(s)");
     // A changed file that is no longer UTF-8 is a read error.
     std::fs::write(p.dir.join("pkg/api.py"), b"\xff\xfe").unwrap();
     let lines = wait_for(&rx, "[heki watch]");
@@ -287,8 +289,8 @@ fn watch_follows_stubs_deleted_callees_and_files_that_stop_being_utf8() {
             .unwrap()
             .matches(" EFF101 ")
             .count(),
-        3,
-        "reported by the first check and the two re-checks before the deletion"
+        4,
+        "reported by the first check and the three re-checks before the deletion"
     );
 }
 

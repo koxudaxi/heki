@@ -630,3 +630,73 @@ def combine(a, b):
     );
     assert_eq!(diags[0]["target"], "df");
 }
+
+#[test]
+fn py_module_beats_sibling_pyi_stub_end_to_end() {
+    let p = Project::new("effects_py_over_pyi");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/util.py",
+            "import time\n\n\ndef helper():\n    time.sleep(1)\n",
+        )
+        .write("pkg/util.pyi", "def helper() -> None: ...\n")
+        .write(
+            "pkg/api.py",
+            "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n",
+        )
+        .write("pkg/api.pyi", "async def handler() -> None: ...\n");
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![d("pkg/api.py", 5, "EFF101", "pkg.util.helper")],
+        "{diags:#?}"
+    );
+}
+
+#[test]
+fn eff103_tracks_db_connection_and_cursor_factories_without_annotations() {
+    let p = Project::new("effects_db_factories");
+    p.write(
+        "queries.py",
+        r#"import psycopg
+import sqlite3
+import sqlalchemy
+
+
+def via_sqlite(ids):
+    conn = sqlite3.connect(":memory:")
+    cur = conn.cursor()
+    for i in ids:
+        conn.execute("SELECT 1 WHERE id = ?", (i,))
+        cur.execute("SELECT 2 WHERE id = ?", (i,))
+
+
+def via_psycopg_and_sa(ids):
+    pg = psycopg.connect("dbname=test")
+    pg_cur = pg.cursor()
+    engine = sqlalchemy.create_engine("sqlite://")
+    sa_conn = engine.connect()
+    for i in ids:
+        pg.execute("SELECT 1")
+        pg_cur.execute("SELECT 2")
+        sa_conn.execute("SELECT 3")
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "EFF103"]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d("queries.py", 10, "EFF103", "sqlite3.Connection.execute"),
+            d("queries.py", 11, "EFF103", "sqlite3.Cursor.execute"),
+            d("queries.py", 20, "EFF103", "psycopg.Connection.execute"),
+            d("queries.py", 21, "EFF103", "psycopg.Cursor.execute"),
+            d(
+                "queries.py",
+                22,
+                "EFF103",
+                "sqlalchemy.engine.Connection.execute"
+            ),
+        ],
+        "{diags:#?}"
+    );
+}

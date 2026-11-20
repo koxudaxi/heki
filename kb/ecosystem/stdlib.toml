@@ -275,6 +275,12 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlite3.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "sqlite3.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.cursor"
+return_type = "sqlite3.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]

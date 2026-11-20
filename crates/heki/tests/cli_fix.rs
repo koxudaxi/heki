@@ -268,6 +268,18 @@ fn snapshot_write_and_mut103_regressions() {
     assert_eq!(p.heki(&["snapshot", "summary", "--write"]).0, 0);
     assert_eq!(p.check(&["--extend-select", "MUT103"]).0, 0);
 
+    // Direct execution effects newly added to a public function are caught too.
+    p.write(
+        "pkg/api.py",
+        "import time\n\n\ndef add(items, x):\n    items.append(x)\n    time.sleep(1)\n    return items\n\n\ndef _private(items):\n    items.append(1)\n",
+    );
+    let (code, stdout, _) = p.check(&["--extend-select", "MUT103", "--output-format", "concise"]);
+    assert_eq!(code, 1);
+    assert!(
+        stdout.contains("MUT103") && stdout.contains("reaches effect `sleep`"),
+        "{stdout}"
+    );
+
     // Missing and broken snapshots.
     std::fs::remove_file(p.dir.join(".heki-summary-snapshot.json")).unwrap();
     let (code, _, stderr) = p.check(&["--extend-select", "MUT103"]);

@@ -120,6 +120,14 @@ pub(crate) fn scc_closure(index: &ProjectIndex, own: &FxHashSet<FuncKey>) -> FxH
 
 /// Recompute final summaries of `region` to a fixpoint (callees outside it stay fixed).
 pub(crate) fn propagate(index: &mut ProjectIndex, region: &FxHashSet<FuncKey>) {
+    propagate_with_budget(index, region, MAX_ITERATIONS_PER_SCC_MEMBER);
+}
+
+pub(crate) fn propagate_with_budget(
+    index: &mut ProjectIndex,
+    region: &FxHashSet<FuncKey>,
+    max_iterations_per_member: usize,
+) {
     let mut nodes: Vec<FuncKey> = region
         .iter()
         .filter(|k| index.func_files.contains_key(*k))
@@ -154,7 +162,7 @@ pub(crate) fn propagate(index: &mut ProjectIndex, region: &FxHashSet<FuncKey>) {
         let members: FxHashSet<usize> = scc.iter().copied().collect();
         let mut queue: VecDeque<usize> = scc.iter().copied().collect();
         let mut queued: FxHashSet<usize> = members.clone();
-        let budget = MAX_ITERATIONS_PER_SCC_MEMBER * scc.len();
+        let budget = max_iterations_per_member * scc.len();
         let mut steps = 0;
         let mut converged = true;
         while let Some(i) = queue.pop_front() {
