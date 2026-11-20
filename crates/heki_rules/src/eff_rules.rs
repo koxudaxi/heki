@@ -227,15 +227,18 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
     }
 }
 
-/// `EFF106`: `await` / blocking network I/O while a sync lock or DB transaction is held
-/// (scaffold).
+mod held_across_io;
+mod unretained_task;
+
+/// `EFF106` (opt-in): `await` / blocking network I/O while a sync lock or DB transaction is
+/// held.
 pub(crate) fn eff106(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
-    let _ = (cx, unit, out);
+    held_across_io::run(cx, unit, out);
 }
 
-/// `EFF107`: a locally bound `asyncio.create_task` result that is never retained (scaffold).
+/// `EFF107` (opt-in): a locally bound `asyncio.create_task` result that is never retained.
 pub(crate) fn eff107(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
-    let _ = (cx, unit, out);
+    unretained_task::run(cx, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one

@@ -160,6 +160,11 @@ pub struct EcosystemEntry {
     /// Optional instance class returned by a factory function or method
     /// (e.g. `sqlite3.connect` -> `sqlite3.Connection`, `sqlite3.Connection.cursor` -> `sqlite3.Cursor`).
     pub return_type: Option<String>,
+    /// `EFF106`: a `with` block over an instance of this class (a synchronous `threading` lock)
+    /// or over the result of this call (a DB transaction starter such as
+    /// `sqlalchemy.orm.Session.begin`) holds a lock or a transaction. Async locks are never
+    /// flagged.
+    pub sync_lock_or_tx: bool,
 }
 
 /// Validate a `[[tool.heki.ecosystem]]` override into a Layer 2 entry.
@@ -182,6 +187,7 @@ impl TryFrom<&EcosystemOverride> for EcosystemEntry {
             copy_sanitizer: value.copy_sanitizer,
             opaque_to_layer3: false,
             return_type: None,
+            sync_lock_or_tx: false,
         })
     }
 }
@@ -394,6 +400,7 @@ mod tests {
             "excluded = true",
             "copy_sanitizer = true",
             "opaque_to_layer3 = true",
+            "sync_lock_or_tx = true",
         ] {
             let text = format!(
                 "[[entries]]\nsymbol = \"builtins.len\"\nparam_effects = [\"read_only\"]\n\
@@ -734,7 +741,77 @@ mod tests {
                 ]),
                 entry(&[QuadraticRealloc]),
             ),
+            (
+                with_prefix(
+                    "asyncio",
+                    &["get_running_loop", "get_event_loop", "new_event_loop"],
+                ),
+                EcosystemEntry {
+                    return_type: Some("asyncio.AbstractEventLoop".into()),
+                    ..entry(&[])
+                },
+            ),
+            (
+                [LOCK_CLASSES, TRANSACTION_STARTERS]
+                    .concat()
+                    .iter()
+                    .map(|n| (*n).to_owned())
+                    .collect(),
+                EcosystemEntry {
+                    sync_lock_or_tx: true,
+                    ..entry(&[])
+                },
+            ),
         ]
+    }
+
+    /// `EFF106` synchronous locks (instances held by `with`).
+    const LOCK_CLASSES: &[&str] = &[
+        "threading.Lock",
+        "threading.RLock",
+        "threading.Semaphore",
+        "threading.BoundedSemaphore",
+        "threading.Condition",
+    ];
+    /// `EFF106` DB transaction starters (call results held by `with`).
+    const TRANSACTION_STARTERS: &[&str] = &[
+        "sqlalchemy.orm.Session.begin",
+        "sqlalchemy.orm.Session.begin_nested",
+        "sqlalchemy.engine.Connection.begin",
+        "sqlalchemy.engine.Connection.begin_nested",
+        "sqlalchemy.engine.Engine.begin",
+        "sqlmodel.Session.begin",
+        "sqlmodel.Session.begin_nested",
+        "django.db.transaction.atomic",
+        "psycopg.Connection.transaction",
+    ];
+
+    #[test]
+    fn layer2_flags_exactly_the_synchronous_locks_and_transaction_starters() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let flagged: BTreeSet<&str> = kb
+            .entries
+            .values()
+            .filter(|e| e.sync_lock_or_tx)
+            .map(|e| e.symbol.as_str())
+            .collect();
+        let expected: BTreeSet<&str> = [LOCK_CLASSES, TRANSACTION_STARTERS]
+            .concat()
+            .into_iter()
+            .collect();
+        assert_eq!(flagged, expected);
+        // Async locks never hold the event loop's thread: they are not registered at all.
+        for symbol in [
+            "asyncio.Lock",
+            "asyncio.Semaphore",
+            "asyncio.BoundedSemaphore",
+            "asyncio.Condition",
+            "anyio.Lock",
+            "anyio.Semaphore",
+            "sqlalchemy.ext.asyncio.AsyncSession.begin",
+        ] {
+            assert_eq!(kb.lookup(symbol), None, "{symbol}");
+        }
     }
 
     const REQUIRED_OPAQUE: &[&str] = &[
@@ -923,6 +1000,9 @@ mod tests {
                 copy_sanitizer: true,
                 opaque_to_layer3: false,
                 return_type: None,
+                // Overrides cannot declare locks or transactions (`[[tool.heki.ecosystem]]`
+                // has no such key).
+                sync_lock_or_tx: false,
             }
         );
         for bad in ["blocking-net", "BlockingNet", "network", ""] {

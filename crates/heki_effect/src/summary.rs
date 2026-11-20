@@ -102,6 +102,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     }
     into.mutates_params |= other.mutates_params;
     into.escapes_params |= other.escapes_params;
+    into.consumes_params |= other.consumes_params;
+    // A must-fact: propagate only through parameters both definitions forward unconditionally.
+    into.unconditional_forwards &= other.unconditional_forwards;
     for (i, paths) in other.mutated_param_paths {
         into.mutated_param_paths.entry(i).or_default().extend(paths);
     }
@@ -357,6 +360,10 @@ impl<'a> Extractor<'a> {
 
     fn run(mut self) -> (EffectSummary, Vec<CallSite>) {
         let f = self.f;
+        (
+            self.summary.consumes_params,
+            self.summary.unconditional_forwards,
+        ) = crate::consumption::param_consumption(f, self.cx, &self.types);
         for bb in &f.blocks {
             for inst in &bb.insts {
                 self.visit(bb.id, &inst.kind, inst.span);
