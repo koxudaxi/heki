@@ -1,16 +1,24 @@
 # heki
 
-[![PyPI](https://img.shields.io/pypi/v/heki.svg)](https://pypi.org/project/heki/)
-[![Python versions](https://img.shields.io/pypi/pyversions/heki.svg)](https://pypi.org/project/heki/)
-[![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
-
 🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
 With no configuration, it catches blocking I/O in `async` code, database queries and HTTP clients
 in loops, quadratic loops, and stale caches. You can also add rules in `pyproject.toml` to restrict
 which functions may mutate state or reach I/O.
+
+<p>
+  <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
+  <a class="md-button" href="rules/">Rules</a>
+  <a class="md-button" href="configuration/">Configuration</a>
+</p>
+
+[![PyPI](https://img.shields.io/pypi/v/heki.svg)](https://pypi.org/project/heki/)
+[![Python versions](https://img.shields.io/pypi/pyversions/heki.svg)](https://pypi.org/project/heki/)
+[![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
+
+---
 
 ### A blocking call two helpers below an `async def`
 
@@ -95,9 +103,11 @@ heki follows aliases, helpers, and subclasses, with no decorators and nothing ru
 time. The other contracts are `read-owners`, `call-owners`, `readonly-returns`, `invalidation`,
 and `effect-boundaries`.
 
-> 🧪 **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
-> and output formats can change between releases without a deprecation period. Try it on your
-> code and report what it gets wrong, but do not depend on its output staying the same yet.
+!!! warning "Experimental"
+
+    heki is under active development: rules, configuration keys, diagnostics, and output formats
+    can change between releases without a deprecation period. Try it on your code and report what
+    it gets wrong, but do not depend on its output staying the same yet.
 
 ## ✨ Why heki?
 
@@ -182,13 +192,13 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 
 ## 👉 Next steps
 
-- See what heki [covers and does not cover](scope.md).
-- [Install heki](installation.md) and [run it on a project](getting-started.md).
-- [Configure](configuration.md) rule selection, contracts, and the Python version.
-- Browse the [31 rules](rules/index.md).
-- Read how [fixes are proven safe](fixes.md).
-- [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
-- Use it from [your editor](lsp.md) or [a coding agent](coding-agents.md).
+- 🎯 See what heki [covers and does not cover](scope.md).
+- 📦 [Install heki](installation.md) and 🚀 [run it on a project](getting-started.md).
+- ⚙️ [Configure](configuration.md) rule selection, contracts, and the Python version.
+- 📏 Browse the [31 rules](rules/index.md).
+- 🔧 Read how [fixes are proven safe](fixes.md).
+- 🪜 [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
+- 🖥️ Use it from [your editor](lsp.md) or 🤖 [a coding agent](coding-agents.md).
 
 ## 📛 Name
 

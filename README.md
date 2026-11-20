@@ -1,10 +1,5 @@
 # heki
 
-[![PyPI](https://img.shields.io/pypi/v/heki.svg)](https://pypi.org/project/heki/)
-[![Python versions](https://img.shields.io/pypi/pyversions/heki.svg)](https://pypi.org/project/heki/)
-[![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
-
 🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
@@ -12,7 +7,16 @@ With no configuration, it catches blocking I/O in `async` code, database queries
 in loops, quadratic loops, and stale caches. You can also add rules in `pyproject.toml` to restrict
 which functions may mutate state or reach I/O.
 
-📚 [Documentation](https://heki.koxudaxi.dev/)
+📚 [Documentation](https://heki.koxudaxi.dev/) ·
+🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) ·
+📏 [Rules](https://heki.koxudaxi.dev/rules/)
+
+[![PyPI](https://img.shields.io/pypi/v/heki.svg)](https://pypi.org/project/heki/)
+[![Python versions](https://img.shields.io/pypi/pyversions/heki.svg)](https://pypi.org/project/heki/)
+[![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
+
+---
 
 ### A blocking call two helpers below an `async def`
 
@@ -96,6 +100,7 @@ heki follows aliases, helpers, and subclasses, with no decorators and nothing ru
 time. The other contracts are `read-owners`, `call-owners`, `readonly-returns`, `invalidation`,
 and `effect-boundaries`.
 
+> [!WARNING]
 > 🧪 **Experimental.** heki is under active development: rules, configuration keys, diagnostics,
 > and output formats can change between releases without a deprecation period. Try it on your
 > code and report what it gets wrong, but do not depend on its output staying the same yet.
@@ -213,17 +218,19 @@ $ heki server                                   # LSP server for editors
 
 ## 📚 Documentation
 
-- [Getting started](https://heki.koxudaxi.dev/getting-started/)
-- [Scope and limitations](https://heki.koxudaxi.dev/scope/)
-- [Configuration](https://heki.koxudaxi.dev/configuration/)
-- [Rules](https://heki.koxudaxi.dev/rules/) (31 rules)
-- [Fixes and safety](https://heki.koxudaxi.dev/fixes/)
-- [Adopting heki in a code base](https://heki.koxudaxi.dev/adoption/)
-- [Editors (LSP)](https://heki.koxudaxi.dev/lsp/) and
-  [coding agents](https://heki.koxudaxi.dev/coding-agents/)
-- [CLI reference](https://heki.koxudaxi.dev/cli-reference/)
-- [Development](https://heki.koxudaxi.dev/development/)
-- [Changelog](https://github.com/koxudaxi/heki/blob/main/CHANGELOG.md)
+**👉 [heki.koxudaxi.dev](https://heki.koxudaxi.dev/)**
+
+- 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
+- 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
+- ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 31 rules
+- 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
+- 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI
+- 🖥️ [Editors (LSP)](https://heki.koxudaxi.dev/lsp/) - VS Code, Neovim, and any LSP client
+- 🤖 [Coding agents](https://heki.koxudaxi.dev/coding-agents/) - JSON output and agent setup
+- ⌨️ [CLI reference](https://heki.koxudaxi.dev/cli-reference/) - every command and option
+- 🛠️ [Development](https://heki.koxudaxi.dev/development/) - building, testing, and the gates
+- 📝 [Changelog](https://github.com/koxudaxi/heki/blob/main/CHANGELOG.md)
 
 ## 📛 Name
 
