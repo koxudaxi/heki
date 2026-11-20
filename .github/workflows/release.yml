@@ -2,7 +2,8 @@ name: Release
 
 # Publishes a GitHub release: maturin wheels (`bindings = "bin"`: the wheel ships the `heki`
 # executable) for every platform, the source distribution, PyPI through trusted publishing, and
-# optionally the crates on crates.io.
+# optionally the crates on crates.io. Its jobs restore no cache (`enable-cache: false` for uv):
+# what they build or check is published.
 
 on:
   release:
@@ -61,6 +62,8 @@ jobs:
           rust-toolchain: 1.99.0
           args: --release --locked --out dist
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
       - name: Check metadata
         shell: bash
         run: uvx twine check dist/*
@@ -81,6 +84,8 @@ jobs:
           command: sdist
           args: --out dist
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
       - run: uvx twine check dist/*
       # Platforms without a wheel build from the source distribution, and packagers run its
       # tests: it must carry every file the build and the tests embed or read (`kb/`, `tests/`).
@@ -149,6 +154,8 @@ jobs:
         with:
           python-version: "3.14"
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
       - name: heki runs from the wheel
         shell: bash
         env:
@@ -172,6 +179,8 @@ jobs:
           path: dist
           merge-multiple: true
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
       - name: The tag, the manifests, and every distribution declare one version
         env:
           TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
