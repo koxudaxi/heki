@@ -636,7 +636,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - **`DATA101`**: only `df = pd.concat([df, ...])` / `arr = np.vstack([arr, ...])` whose SSA
      `PhiNode` accumulates across the back edge (`LoopCarried`), or a project call there whose
      callee's `reallocates_params` covers the argument carrying the previous value; one-off
-     concatenation and padding in a loop are excluded.
+     concatenation and padding in a loop are excluded, and so is a value rebuilt only from
+     arithmetic on the previous one (`x = np.concatenate((x - d, [a]))`): an operator holds an
+     operand only as list or tuple concatenation and repetition or dict union, and an operand
+     sliced or computed from the previous array or frame makes it work entry by entry.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of the reports

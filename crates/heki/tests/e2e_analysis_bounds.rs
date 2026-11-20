@@ -318,3 +318,38 @@ fn a_branch_on_a_value_many_cases_pass_through_is_decided_once_per_depth() {
         "{found:#?}"
     );
 }
+
+/// Operators whose two operands are one value (`t1 = t0 + t0`), thirty deep, in a loop that
+/// reallocates the result: whether each operand is computed entry by entry from the previous
+/// value, and so whether `DATA101` reads the previous value through it, is decided once per
+/// value.
+#[test]
+fn operators_sharing_operands_decide_each_derivation_once() {
+    let mut lines = vec!["import numpy as np".to_owned()];
+    for (name, first, last) in [
+        ("rebuilt", "acc[1:]", "(t30, row)"),
+        ("grown", "[acc]", "t30"),
+    ] {
+        lines.extend(["", ""].map(str::to_owned));
+        lines.push(format!("def {name}(rows):"));
+        lines.push("    acc = np.empty(0)".to_owned());
+        lines.push("    for row in rows:".to_owned());
+        lines.push(format!("        t0 = {first}"));
+        for i in 1..=30 {
+            lines.push(format!("        t{i} = t{} + t{}", i - 1, i - 1));
+        }
+        lines.push(format!("        acc = np.concatenate({last})"));
+        lines.push("    return acc".to_owned());
+    }
+    let p = Project::new("bounds_shared_operators");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    // Arithmetic on a slice of the previous array builds a new one; a list doubled thirty times
+    // holds the previous array.
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "DATA101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["grown"], "{found:#?}");
+}

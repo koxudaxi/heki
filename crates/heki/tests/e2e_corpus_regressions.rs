@@ -538,6 +538,102 @@ fn r08_a_one_off_reallocation_on_one_branch_is_not_an_accumulation() {
     );
 }
 
+const ARITHMETIC_ON_THE_PREVIOUS_VALUE: &str = r#"import numpy as np
+import pandas as pd
+
+
+def compose(turns):
+    q = np.array([1.0, 0.0, 0.0, 0.0])
+    for turn in turns:
+        w1, v1, w2, v2 = turn[0], turn[1:], q[0], q[1:]
+        q = np.concatenate([[w1 * w2 - v1 @ v2], w1 * v2 + w2 * v1 + np.cross(v1, v2)])
+    return q
+
+
+def solve(r, b):
+    d = r[0:1]
+    x = b[0:1, :]
+    for j in range(1, len(b)):
+        rf = r[0:j][::-1]
+        a = (b[j, :] - np.dot(rf, x)) / (1 - np.dot(rf, d[::-1]))
+        x = np.concatenate((x - np.outer(d[::-1], a), a[None, :]), axis=0)
+        a = (r[j] - np.dot(rf, d)) / (1 - np.dot(rf, d[::-1]))
+        d = np.concatenate((d - a * d[::-1], np.r_[a]))
+    return x
+
+
+def decay(rows, rate):
+    acc = np.empty(0)
+    for row in rows:
+        acc = np.append(-acc * rate, row)
+    return acc
+
+
+def scale(rows, w):
+    q = np.zeros(4)
+    for row in rows:
+        q = np.concatenate([[w * q[0]], w * q[1:]])
+    return q
+
+
+def scaled_parts(rows):
+    acc = np.empty(0)
+    for row in rows:
+        acc = np.concatenate((acc, row * 2))
+    return acc
+
+
+def sliced(segments):
+    pts = np.empty((0, 2))
+    for seg in segments:
+        pts = np.concatenate((pts[:-1], seg))
+    return pts
+
+
+def listed(parts):
+    df = pd.DataFrame()
+    for part in parts:
+        df = pd.concat([df] + [part])
+    return df
+
+
+def converted(rows, batch):
+    acc = np.empty((0, 3))
+    for row in rows:
+        acc = np.vstack(list(acc) + batch)
+    return acc
+
+
+def scaled_sometimes(rows, scale):
+    acc = np.empty(0)
+    for row in rows:
+        base = acc * 2 if scale else acc
+        acc = np.append(base, row)
+    return acc
+"#;
+
+#[test]
+fn a_value_rebuilt_from_arithmetic_on_the_previous_one_is_not_an_accumulation() {
+    // Not reported: the reallocation combines only arithmetic on the previous value or on its
+    // items (a new array whose every entry changed, also after unpacking
+    // `w2, v2 = q[0], q[1:]`), so the loop already works in proportion to its size and has no
+    // unchanged parts to collect. Reported: arithmetic on the new part only, a slice of the
+    // previous value, a list concatenation holding it (`[df] + [part]`, `list(acc) + batch`),
+    // and a branch that passes it on as it is.
+    assert_reports(
+        "reg_data101_arithmetic",
+        ARITHMETIC_ON_THE_PREVIOUS_VALUE,
+        "DATA101",
+        &[
+            ("scaled_parts", "DATA101"),
+            ("sliced", "DATA101"),
+            ("listed", "DATA101"),
+            ("converted", "DATA101"),
+            ("scaled_sometimes", "DATA101"),
+        ],
+    );
+}
+
 // ======================================================================== EFF102 / EFF103
 
 const R14_BOUNDED_LOOPS: &str = r#"import urllib.request

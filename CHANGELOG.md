@@ -32,6 +32,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
   objects. A helper changing an attribute's object below its own shallow copy of a parameter
   (`draft = copy.copy(post); draft.tags.append(t)`) now changes that parameter (`MUT202`,
   `MUT108`, `EFF201` `mutates-params`).
+- `DATA101` no longer reports a value rebuilt from arithmetic on the previous one, such as a
+  recursion that computes `x = np.concatenate((x - np.outer(d, a), [a]))` or a fixed-size
+  quaternion product: every entry of the new array changed, so there are no unchanged parts to
+  collect and combine once. A list that holds the previous value (`pd.concat([df] + parts)`)
+  is still reported.
 
 ## [0.1.2] - 2026-11-21
 
