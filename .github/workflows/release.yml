@@ -79,9 +79,21 @@ jobs:
           args: --out dist
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       - run: uvx twine check dist/*
-      # Platforms without a wheel build from the source distribution: it must carry every file
-      # the build embeds (such as `kb/`).
+      # Platforms without a wheel build from the source distribution, and packagers run its
+      # tests: it must carry every file the build and the tests embed or read (`kb/`, `tests/`).
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+      - id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.15"
+          allow-prereleases: true
+      - name: The tests pass in the unpacked source distribution
+        env:
+          HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          mkdir sdist-tree
+          tar -xzf dist/*.tar.gz -C sdist-tree --strip-components 1
+          cargo test --workspace --locked --manifest-path sdist-tree/Cargo.toml
       - name: heki builds and runs from the source distribution
         run: |
           uv venv .sdist-smoke
