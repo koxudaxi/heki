@@ -1666,3 +1666,32 @@ fn a_loop_with_many_branches_finds_the_blocks_reaching_its_header_once() {
     p.write("m.py", &(lines.join("\n") + "\n"));
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
 }
+
+/// A function consuming a private generator's result `consumptions` times in a row
+/// (`list(node._walk())`): what it does with each call's result (handed on, iterated) is read
+/// from one index of its call sites and iterations, not by a scan of the file's call sites per
+/// call. Each result is consumed at once, so nothing runs while the generator is suspended.
+#[test]
+fn repeated_consumptions_of_a_generator_read_each_call_once() {
+    let consumptions = 16_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _walk(self):".to_owned(),
+        "        for k in self.items:".to_owned(),
+        "            yield k".to_owned(),
+        String::new(),
+        "    def drop(self, k: str) -> None:".to_owned(),
+        "        self.items.pop(k, None)".to_owned(),
+        String::new(),
+        String::new(),
+        "def consume(node: Node):".to_owned(),
+    ];
+    lines.extend((0..consumptions).map(|_| "    list(node._walk())".to_owned()));
+    assert_eq!(
+        iterated_mutations("bounds_consumptions", &(lines.join("\n") + "\n")),
+        0
+    );
+}
