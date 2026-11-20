@@ -1588,6 +1588,7 @@ fn edge_steps() -> Vec<Step> {
             .absent(&[("app/render.py", "EFF201"), ("caller.py", "EFF101")]),
     ];
     steps.extend(steps_shared_module_name());
+    steps.extend(steps_boundary_calls());
     steps
 }
 
@@ -1620,6 +1621,33 @@ fn steps_shared_module_name() -> Vec<Step> {
             vec![save("app/dup/__init__.py", DUP_PACKAGE)],
         )
         .present(&[("app/dup_user.py", "EFF101")]),
+    ]
+}
+
+/// Effect boundaries read the ecosystem calls below them, not only the summaries.
+fn steps_boundary_calls() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a call the boundary allows becomes one of the same effect it forbids",
+            vec![save(
+                "app/fetcher.py",
+                &FETCHER.replacen("requests.get", "requests.put", 1),
+            )],
+        )
+        .present(&[("app/render.py", "EFF201")]),
+        Step::new(
+            "a second forbidden call of the same effect",
+            vec![save(
+                "app/fetcher.py",
+                &FETCHER.replace("requests.get", "requests.put"),
+            )],
+        )
+        .present(&[("app/render.py", "EFF201")]),
+        Step::new(
+            "the calls are allowed again",
+            vec![save("app/fetcher.py", FETCHER)],
+        )
+        .absent(&[("app/render.py", "EFF201")]),
     ]
 }
 

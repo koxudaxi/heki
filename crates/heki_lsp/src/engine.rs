@@ -123,11 +123,18 @@ struct ContractReach {
     /// any number of calls above it, and a call of a function without effects changes no
     /// summary.
     calls: bool,
+    /// An effect boundary: a scope function's report names the ecosystem calls it reaches any
+    /// number of calls below (which `allowed-callees` may allow one by one) and counts them,
+    /// while the summaries keep the effects with one chain each.
+    ecosystem_calls: bool,
 }
 
 /// Per function of one file: its project call sites without positions, and the cached
 /// properties it invalidates (see `Workspace::callee_files`).
 type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
+
+/// Per function of one file: its ecosystem (Layer 2) call sites without positions.
+type EcosystemView = BTreeMap<FuncKey, Vec<CallSite>>;
 
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the index is built).
@@ -192,6 +199,7 @@ impl Workspace {
                     .effect_boundaries
                     .iter()
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
+            ecosystem_calls: !env_cfg.effect_boundaries.is_empty(),
         };
         let Project { env, errors, .. } = project;
         let decls = index.decl_passes();
@@ -362,6 +370,24 @@ impl Workspace {
         out
     }
 
+    /// What the functions of `path` call of the ecosystem (`EcosystemView`).
+    fn ecosystem_view(&self, path: &Path) -> EcosystemView {
+        let mut out = EcosystemView::new();
+        for site in self
+            .index
+            .files
+            .get(path)
+            .into_iter()
+            .flat_map(|f| &f.call_sites)
+            .filter(|s| matches!(s.target, heki_effect::CallTarget::Layer2 { .. }))
+        {
+            let mut site = site.clone();
+            site.span = heki_ast::Span { start: 0, end: 0 };
+            out.entry(site.caller.clone()).or_default().push(site);
+        }
+        out
+    }
+
     /// Files of the functions whose callers changed what they see of them: calls gained, lost,
     /// or bound differently (a function's `MUT201` / `MUT203` reports depend on the contexts
     /// it runs in), or the cached properties a caller invalidates (`MUT101`).
@@ -466,15 +492,17 @@ impl Workspace {
 
     /// The files an update of the index affects besides the updated file: callers of changed
     /// summaries, readers of changed declarations, callees whose callers changed, generators
-    /// handed to changed functions, class families whose members changed, and the files with
+    /// handed to changed functions, class families whose members changed, the files with
     /// `MUT108` / `MUT110` reports above functions whose chain facts (`chains`, before and
-    /// after) changed.
+    /// after) changed, and with an effect boundary the files above functions whose ecosystem
+    /// calls (`ecosystem`, before and after) changed.
     fn affected_by(
         &self,
         update: &heki_effect::IncrementalUpdate,
         change: &DeclKeys,
         callers: (&CallerView, &CallerView),
         chains: (&ChainFacts, &ChainFacts),
+        ecosystem: (&EcosystemView, &EcosystemView),
     ) -> FxHashSet<PathBuf> {
         let mut affected: FxHashSet<PathBuf> = update
             .affected_callers
@@ -496,6 +524,15 @@ impl Workspace {
         }
         if self.reach.calls {
             affected.extend(self.above_files(&changed));
+        }
+        if self.reach.ecosystem_calls {
+            let calling_differently: Vec<&FuncKey> = ecosystem
+                .0
+                .keys()
+                .chain(ecosystem.1.keys())
+                .filter(|k| ecosystem.0.get(*k) != ecosystem.1.get(*k))
+                .collect();
+            affected.extend(self.above_files(&calling_differently));
         }
         // A `MUT108` / `MUT110` call chain ends at the first function whose own body makes the
         // change and walks the calls of the functions before it: when a function moves the
@@ -616,15 +653,18 @@ impl Workspace {
         };
         let callers_before = self.caller_view(&parsed.path);
         let chains_before = chain_facts(&self.index, &parsed.path);
+        let ecosystem_before = self.ecosystem_view(&parsed.path);
         let sites_before = self.call_site_spans(&parsed.path);
         let (update, change) = self.summarize(&parsed);
         let callers_after = self.caller_view(&parsed.path);
         let chains_after = chain_facts(&self.index, &parsed.path);
+        let ecosystem_after = self.ecosystem_view(&parsed.path);
         let mut affected = self.affected_by(
             &update,
             &change,
             (&callers_before, &callers_after),
             (&chains_before, &chains_after),
+            (&ecosystem_before, &ecosystem_after),
         );
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         // Call chains of other files show this file's call sites: when they move, those
@@ -688,6 +728,7 @@ impl Workspace {
         };
         let callers_before = self.caller_view(path);
         let chains_before = chain_facts(&self.index, path);
+        let ecosystem_before = self.ecosystem_view(path);
         let update = self.index.remove_file(path);
         let change = match self.index.module_decls(&meta.module_name) {
             Some(remaining) => self.decls.replace(remaining),
@@ -699,6 +740,7 @@ impl Workspace {
             &change,
             (&callers_before, &CallerView::new()),
             (&chains_before, &ChainFacts::new()),
+            (&ecosystem_before, &EcosystemView::new()),
         );
         affected.extend(self.note_builtins(path, false));
         let mut v: Vec<PathBuf> = affected.into_iter().collect();
