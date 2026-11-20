@@ -12,7 +12,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - The errors of files that cannot be read or parsed (and of files that changed on disk during
   `--fix`) print the paths diagnostics print: relative to the working directory, without a
   leading `./` (`error: pkg/broken.py:1:7: syntax error: ...`, was `./pkg/broken.py`), also
-  in `--watch` and `heki assumptions`.
+  in `--watch`, `heki snapshot`, and `heki assumptions`. The hazards `heki assumptions` lists
+  print those paths too, also for a directory given as an absolute path.
 - On Windows, `json` output, errors, and `heki assumptions` write paths with `/` separators,
   as the other output formats do (`pkg/a.py`, was `pkg\a.py`), and the paths heki resolves
   (the project root and the files under it that messages name, such as a configured baseline,
