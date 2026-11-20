@@ -8,7 +8,7 @@
 
 use crate::edits::{
     ends_statement, indentation, is_identifier, is_plain_assign, line_start, slice, squash,
-    starts_statement, strip_token,
+    starts_statement, strip_token, trim_element,
 };
 use crate::interpreter::{Analysis, BuiltinScope, FnCtx, UseSite};
 use crate::liveness::Liveness;
@@ -955,17 +955,14 @@ impl<'a, 'c> Rules<'a, 'c> {
             && list_inst.span.end == binop.span.end
             && let Some(display) = self.m.text(list_inst.span)
         {
-            let single =
-                matches!(&list_inst.kind, InstKind::AllocBuiltin { elems, .. } if elems.len() == 1);
+            let one_plain_element = matches!(&list_inst.kind,
+                InstKind::AllocBuiltin { elems, .. } if matches!(elems.as_slice(), [e] if !f.is_unpacked(*e)));
             let inner = display
                 .strip_prefix('[')
                 .and_then(|d| d.strip_suffix(']'))
-                .map(str::trim);
+                .map(trim_element);
             let replacement = match inner {
-                Some(e) if single && !e.starts_with('*') => {
-                    let e = e.strip_suffix(',').map_or(e, str::trim_end);
-                    format!("{name}.append({e})")
-                }
+                Some(e) if one_plain_element => format!("{name}.append({e})"),
                 _ => format!("{name}.extend({display})"),
             };
             edits.push(TextEdit {
@@ -1082,10 +1079,9 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
         if let [_, DictEntry::Unpack { dict }] = entries
             && st.exact_type(*dict) == Some(Dict)
-            && let Some(e) = rest_trim.strip_prefix("**")
+            && let Some(e) = rest.trim_start().strip_prefix("**")
         {
-            let e = e.trim().strip_suffix(',').map_or(e.trim(), str::trim_end);
-            return Some(format!("{name}.update({e})"));
+            return Some(format!("{name}.update({})", trim_element(e)));
         }
         Some(format!("{name}.update({{{rest}}})"))
     }
@@ -2349,7 +2345,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                 let value = strip_token(strip_token(after_paren, "0")?, ",")?;
                 TextEdit {
                     span: inst.span,
-                    replacement: format!("{name}.appendleft({})", value.trim()),
+                    replacement: format!("{name}.appendleft({})", trim_element(value)),
                 }
             }
         };

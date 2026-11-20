@@ -54,6 +54,26 @@ pub(crate) fn strip_token<'t>(text: &'t str, prefix: &str) -> Option<&'t str> {
     text.trim_start().strip_prefix(prefix)
 }
 
+/// `text` without the blanks around it, but still ending with its own line break when a
+/// comment or a `\` continuation ends its last line: a bracket an edit puts after it must not
+/// land inside the comment or the continued line.
+pub(crate) fn trim_fragment(text: &str) -> &str {
+    let text = text.trim_start();
+    let body = text.trim_end();
+    let last_line = body.rsplit('\n').next().unwrap_or(body);
+    if body.ends_with('\\') || last_line.contains('#') {
+        text
+    } else {
+        body
+    }
+}
+
+/// [`trim_fragment`] without one trailing `,` (an element of a display, an argument).
+pub(crate) fn trim_element(text: &str) -> &str {
+    let e = trim_fragment(text);
+    e.strip_suffix(',').map_or(e, str::trim_end)
+}
+
 /// `name = ` exactly: the text between an assignment target and its value.
 pub(crate) fn is_plain_assign(between: &str) -> bool {
     between.trim() == "="
@@ -87,5 +107,9 @@ mod tests {
         assert_eq!(indentation(src, line_start(src, x)), "    ");
         assert!(is_identifier("acc_1") && !is_identifier("1x") && !is_identifier("a.b"));
         assert_eq!(squash("{ k : v ,\n }"), "{k:v,}");
+        assert_eq!(trim_element(" v, "), "v");
+        assert_eq!(trim_element("\n  v  # c\n    "), "v  # c\n    ");
+        assert_eq!(trim_element("v \\\n"), "v \\\n");
+        assert_eq!(trim_element("v,  # c\n"), "v,  # c\n");
     }
 }

@@ -333,6 +333,33 @@ def element_attributes(names):
     return [i.name for i in items]
 
 
+def comment_after_element(items):
+    """The element keeps the line break that ends its comment."""
+    x = []
+    for i in items:
+        x = x + [i  # keep this comment
+                 ]
+    return x
+
+
+def comment_before_starred(rows):
+    """A comment first: the starred element is still found (`extend`)."""
+    x = []
+    for row in rows:
+        x = x + [  # spread
+            *row]
+    return x
+
+
+def merge_with_comment(items):
+    d = {}
+    extra = {"a": 1}
+    for i in items:
+        d = {**d, **extra  # keep this comment
+             }
+    return d
+
+
 def run(fn, *args):
     try:
         out = fn(*args)
@@ -365,6 +392,9 @@ def main() -> int:
             run(merge_exact_dict, items),
             run(merge_unknown_mapping, items, {"b": n}),
             run(merge_constant_keys, items),
+            run(comment_after_element, items),
+            run(comment_before_starred, [items, items]),
+            run(merge_with_comment, items),
             run(key_not_simple_text, items),
             run(constant_key, items),
             run(parameter_key, items, "k"),

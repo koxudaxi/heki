@@ -463,6 +463,27 @@ const ACCUMULATE: &[Expect] = &[
     // The loop's test caps the accumulator; each item's attribute gets one piece.
     ("capped_by_test", &[]),
     ("element_attributes", &[]),
+    (
+        "comment_after_element",
+        &[(
+            "OPT101",
+            V::Fix(&["x.append(i  # keep this comment\n                 )"]),
+        )],
+    ),
+    (
+        "comment_before_starred",
+        &[(
+            "OPT101",
+            V::Fix(&["x.extend([  # spread\n            *row])"]),
+        )],
+    ),
+    (
+        "merge_with_comment",
+        &[(
+            "OPT102",
+            V::Fix(&["d.update(extra  # keep this comment\n             )"]),
+        )],
+    ),
 ];
 
 #[test]
@@ -853,6 +874,16 @@ const DEQUE: &[Expect] = &[
         &[(
             "OPT120",
             V::Fix(&["deque(items)", "q.popleft()", "deque[int]"]),
+        )],
+    ),
+    (
+        "fill_front_with_comment",
+        &[(
+            "OPT121",
+            V::Fix(&[
+                "deque()",
+                "q.appendleft(i  # keep this comment\n                 )",
+            ]),
         )],
     ),
 ];
