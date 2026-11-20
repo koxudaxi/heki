@@ -402,17 +402,29 @@ impl<'a> Analyzer<'a> {
         aa: &'b ast::StmtAnnAssign,
         deferred: &mut Vec<&'b Expr>,
     ) {
-        if aa.simple {
-            if let Expr::Name(n) = aa.target.as_ref() {
-                self.cur_scope_mut()
-                    .add_binding(n.id.as_str(), Span::from(n.range), false, false);
-            }
-        } else {
-            self.visit_expr(&aa.target);
-        }
+        self.visit_ann_assign_target(aa);
         deferred.push(&aa.annotation);
         if let Some(val) = &aa.value {
             self.visit_expr(val);
+        }
+    }
+
+    /// `x: T` binds `x` even without a value (an unassigned local in a function); a
+    /// parenthesized `(x): T` binds it only when it assigns a value. An attribute or subscript
+    /// target evaluates its object.
+    fn visit_ann_assign_target(&mut self, aa: &ast::StmtAnnAssign) {
+        match aa.target.as_ref() {
+            Expr::Name(n) => {
+                if aa.simple || aa.value.is_some() {
+                    self.cur_scope_mut().add_binding(
+                        n.id.as_str(),
+                        Span::from(n.range),
+                        false,
+                        false,
+                    );
+                }
+            }
+            target => self.visit_expr(target),
         }
     }
 
@@ -457,18 +469,7 @@ impl<'a> Analyzer<'a> {
                 self.visit_expr(&aug.value);
             }
             Stmt::AnnAssign(aa) => {
-                if aa.simple {
-                    if let Expr::Name(n) = aa.target.as_ref() {
-                        self.cur_scope_mut().add_binding(
-                            n.id.as_str(),
-                            Span::from(n.range),
-                            false,
-                            false,
-                        );
-                    }
-                } else {
-                    self.visit_expr(&aa.target);
-                }
+                self.visit_ann_assign_target(aa);
                 // In function scopes, local variable annotations are never evaluated at runtime in Python 3.
                 let cur_kind = self.scopes[self.cur_scope_id().0 as usize].kind;
                 if !self.has_future_annotations && cur_kind != ScopeKind::Function {

@@ -469,6 +469,24 @@ def declares_only():
 }
 
 #[test]
+fn semantic_parenthesized_annotation_binds_only_with_a_value() {
+    let source = "\
+x = 3
+def bare():
+    (x): int
+    return x
+def assigned():
+    (y): int = 1
+    return y
+";
+    let m = dump_source("dump-semantic", "fe_paren_ann", source, "py312");
+    let bare = scope(&m, &["function bare"]);
+    assert!(bindings(bare).is_empty());
+    assert_eq!(reads(bare)["x"], "global");
+    assert_eq!(reads(scope(&m, &["function assigned"]))["y"], "local");
+}
+
+#[test]
 fn semantic_generator_walrus_writes_the_declared_global() {
     let source = "\
 def f():
