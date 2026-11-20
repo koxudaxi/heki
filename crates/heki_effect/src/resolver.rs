@@ -1469,9 +1469,11 @@ impl ProjectDecls {
     /// The value of the class-level string constant `attr` read on an instance of the project
     /// class `class` or on the class object (`self.KEY`, `cls.KEY`, `Model.KEY`): the
     /// definition of `attr` the MRO finds first must be a constant. With `subclasses`, the
-    /// object may be of a subclass, and none may define `attr` again. A class that code stores
-    /// `attr` on (`Child.KEY = "x"`, in its module or another) defines it too: its own value
-    /// then hides the inherited constant. An instance of a protocol is one of its structural
+    /// object may be of a subclass, and the MRO of each must find the same definition: a
+    /// subclass defining `attr` again, or listing a base that defines it before `class`
+    /// (`class Child(Other, Model)`), reads its own value. A class that code stores `attr` on
+    /// (`Child.KEY = "x"`, in its module or another) defines it too: its own value then hides
+    /// the inherited constant. An instance of a protocol is one of its structural
     /// implementations, which define the name themselves: each must hold the same constant.
     pub fn class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<&str> {
         let defines = |c: &str| {
@@ -1479,11 +1481,17 @@ impl ProjectDecls {
                 .is_some_and(|d| d.members.contains(attr) || d.rebound_attrs.contains(attr))
                 || self.rebound_elsewhere(&format!("{c}.{attr}"))
         };
+        let definer = |c: &str| self.mro(c).into_iter().find(|m| defines(m));
         let class = self.canonical(class);
-        if subclasses && self.subclasses_of(&class).iter().any(|s| defines(s)) {
+        let owner = definer(&class)?;
+        if subclasses
+            && self
+                .subclasses_of(&class)
+                .iter()
+                .any(|s| definer(s).as_ref() != Some(&owner))
+        {
             return None;
         }
-        let owner = self.mro(&class).into_iter().find(|c| defines(c))?;
         let value = self.str_constant(&format!("{owner}.{attr}"))?;
         if subclasses && let Some(implementers) = self.protocol(&class) {
             let same = |i: &String| self.class_str_constant(i, attr, true) == Some(value);

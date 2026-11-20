@@ -344,7 +344,8 @@ module-level names declared `Final`, or bound once and rebound by no other modul
 (`StrConstant::rebindable`, checked against `ProjectDecls::rebound_elsewhere` where a constant is
 read), and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
 an instance by no other code of their module (and, without `Final`, by no other module), read
-through the MRO when no subclass defines the name again; a class that code stores the name on
+through the MRO when the MRO of every subclass finds the same definition (none defines the name
+again or lists another base defining it first); a class that code stores the name on
 (`ClassDecl::rebound_attrs` in its module, `ProjectDecls::rebound_elsewhere` from another)
 defines it too, and on an instance of a protocol every structural implementation must hold the
 same constant (`ProjectDecls::class_str_constant`). Contract-only facts

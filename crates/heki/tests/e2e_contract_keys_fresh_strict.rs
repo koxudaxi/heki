@@ -589,6 +589,86 @@ unresolved = "report"
     );
 }
 
+/// A project guarding `DataModelFieldBase._forced_field_assignment` in strict mode, with
+/// `pkg/use.py` reading class constants.
+fn class_keys_project(name: &str, use_src: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataModelFieldBase._forced_field_assignment"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/use.py", use_src);
+    p
+}
+
+const MRO_KEYS: &str = r#"from typing import ClassVar
+
+from pkg.model import DataModelFieldBase
+
+
+class Forced:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+
+class Other:
+    KEY: ClassVar[str] = "_other"
+
+
+class OtherFirst(Other, Forced):
+    pass
+
+
+def write_forced(keys: Forced, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+
+
+def write_other_first(field: DataModelFieldBase) -> None:
+    field.__dict__[OtherFirst.KEY] = True
+
+
+class Listed:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+
+class ListedFirst(Listed, Other):
+    pass
+
+
+def write_listed(keys: Listed, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+"#;
+
+/// A subclass finds a class attribute along its own MRO: a base it lists before the class
+/// (`class OtherFirst(Other, Forced)`) defines `KEY` first, so an instance of `Forced` may read
+/// `Other`'s value, and the subclass itself reads it. A subclass listing the class first reads
+/// the class's constant.
+#[test]
+fn a_subclass_listing_another_base_first_reads_that_base_constant() {
+    let p = class_keys_project("keys_subclass_mro", MRO_KEYS);
+    let u = "pkg/use.py";
+    let class = "DataModelFieldBase";
+    let forced = "DataModelFieldBase._forced_field_assignment";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 19, "MUT205", "write_forced", class),
+            d(u, 35, "MUT201", "write_listed", forced),
+        ]
+    );
+}
+
 #[test]
 fn a_final_key_of_another_module_follows_its_value() {
     let p = keys_project("keys_other_value");
