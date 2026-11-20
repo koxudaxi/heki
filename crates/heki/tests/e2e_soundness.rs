@@ -336,6 +336,11 @@ const INTERP: &[Expect] = &[
             ),
         )],
     ),
+    ("consumed_before_the_loop", &[("OPT101", V::Fix(&[ONE]))]),
+    (
+        "slice_object_subscripts",
+        &[("OPT101", V::Fix(&["x.extend([data[s], nums[s]])"]))],
+    ),
 ];
 
 #[test]
@@ -379,7 +384,14 @@ const ACCUMULATE: &[Expect] = &[
     ),
     (
         "merge_unknown_mapping",
-        &[("OPT102", V::Fix(&["d.update({**other})"]))],
+        &[(
+            "OPT102",
+            V::Blocked("EvalOrderPreserved(update): `d.update({...})` evaluates every entry"),
+        )],
+    ),
+    (
+        "merge_constant_keys",
+        &[("OPT102", V::Fix(&["d.update({\"lo\": i, \"hi\": j})"]))],
     ),
     (
         "key_not_simple_text",
@@ -455,6 +467,53 @@ const ACCUMULATE: &[Expect] = &[
     // The loop's test caps the accumulator; each item's attribute gets one piece.
     ("capped_by_test", &[]),
     ("element_attributes", &[]),
+    (
+        "comment_after_element",
+        &[(
+            "OPT101",
+            V::Fix(&["x.append(i  # keep this comment\n                 )"]),
+        )],
+    ),
+    (
+        "comment_before_starred",
+        &[(
+            "OPT101",
+            V::Fix(&["x.extend([  # spread\n            *row])"]),
+        )],
+    ),
+    (
+        "merge_with_comment",
+        &[(
+            "OPT102",
+            V::Fix(&["d.update(extra  # keep this comment\n             )"]),
+        )],
+    ),
+    // `list += tuple` extends in place; an attribute that holds a `str` is copied.
+    ("Collector.collect", &[]),
+    (
+        "local_holder",
+        &[(
+            "OPT103",
+            V::Blocked("Unique(holder.text): `holder.text` is reachable through `holder`"),
+        )],
+    ),
+    (
+        "set_or_built",
+        &[("OPT102", V::Fix(&["s |= set([g, -g])"]))],
+    ),
+    (
+        "Encoder.encode",
+        &[
+            (
+                "OPT103",
+                V::Blocked("Unique(self.data): `self.data` is reachable through `self`"),
+            ),
+            (
+                "OPT103",
+                V::Blocked("Unique(self.parts): `self.parts` is reachable through `self`"),
+            ),
+        ],
+    ),
 ];
 
 #[test]
@@ -681,6 +740,62 @@ const HOIST: &[Expect] = &[
     // A small display of `bytes`; elements no `set` can hold.
     ("bytes_display", &[]),
     ("unhashable_elements", &[]),
+    (
+        "probes_from_a_list",
+        &[(
+            "OPT110",
+            V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
+        )],
+    ),
+    (
+        "probes_from_either_list",
+        &[(
+            "OPT110",
+            V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
+        )],
+    ),
+    (
+        "probes_measured_first",
+        &[(
+            "OPT110",
+            V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
+        )],
+    ),
+    (
+        "probe_by_index",
+        &[(
+            "OPT110",
+            V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
+        )],
+    ),
+    // A bounded loop, or a constructor that returns its argument: nothing to gain.
+    ("lookup_in_a_bounded_loop", &[]),
+    ("rebuild_in_a_bounded_loop", &[]),
+    ("rebuild_tuple_of_a_tuple", &[]),
+    // A comparison chain shares one span: no edit can name the right operand.
+    ("chained_membership", &[("OPT110", V::Hand)]),
+    // A comprehension's or generator expression's `for` clause is no statement to hoist before.
+    (
+        "comprehension_clause_on_its_own_line",
+        &[("OPT110", V::Hand)],
+    ),
+    (
+        "generator_clause_on_its_own_line.<locals>.<genexpr>",
+        &[("OPT130", V::Hand)],
+    ),
+    (
+        "two_hoists_in_nested_loops",
+        &[
+            (
+                "OPT130",
+                V::Fix(&["    hoisted = set(\"abcdefghi\")\n", "hoisted"]),
+            ),
+            (
+                "OPT130",
+                V::Fix(&["        hoisted_1 = set(\"jklmnopqr\")\n", "hoisted_1"]),
+            ),
+        ],
+    ),
 ];
 
 #[test]
@@ -699,11 +814,11 @@ const NOT_EMPTY: &str = "DequeEquivalentOps(q): `q[1:]` of an empty list is `[]`
 const DEQUE: &[Expect] = &[
     (
         "drain_del",
-        &[("OPT120", V::Fix(&["deque(items)", "q.popleft()"]))],
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     (
         "drain_slice",
-        &[("OPT120", V::Fix(&["deque(items)", "q.popleft()"]))],
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     (
         "drain_slice_after_change",
@@ -727,7 +842,7 @@ const DEQUE: &[Expect] = &[
     ("parameter_queue", &[]),
     (
         "drain_then_alias",
-        &[("OPT120", V::Fix(&["deque(items)", "q.popleft()"]))],
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     // The statement text is not `del q[0]` / `q = q[1:]`: rewritten by hand.
     ("drain_del_parenthesized", &[("OPT120", V::Hand)]),
@@ -810,13 +925,34 @@ const DEQUE: &[Expect] = &[
     ("rebuilt_per_iteration", &[]),
     (
         "drain_and_test",
-        &[("OPT120", V::Fix(&["deque(items)", "q.popleft()"]))],
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     (
         "annotated_queue",
         &[(
             "OPT120",
-            V::Fix(&["deque(items)", "q.popleft()", "deque[int]"]),
+            V::Fix(&["deque(list(items))", "q.popleft()", "deque[int]"]),
+        )],
+    ),
+    (
+        "fill_front_with_comment",
+        &[(
+            "OPT121",
+            V::Fix(&[
+                "deque()",
+                "q.appendleft(i  # keep this comment\n                 )",
+            ]),
+        )],
+    ),
+    (
+        "drain_then_iterate",
+        &[("OPT120", V::Fix(&["deque(range(n))", "q.popleft()"]))],
+    ),
+    (
+        "drain_then_sum_reversed",
+        &[(
+            "OPT120",
+            V::Blocked("DequeEquivalentOps(q): the result of `reversed(...)` (line"),
         )],
     ),
 ];
@@ -831,6 +967,9 @@ fn deque_rules() {
 }
 
 // ============================================================ counterexamples found in M8
+
+const PARTLY_UPDATED: &str = "ExceptionStateSafe(update): an insertion that raises would leave";
+const REGROUPED: &str = "EvalOrderPreserved(update): ";
 
 const COUNTEREXAMPLES: &[Expect] = &[
     // Default `--fix` (`OPT102`): the display stores the accumulator in the new dict.
@@ -956,6 +1095,155 @@ const COUNTEREXAMPLES: &[Expect] = &[
         )],
     ),
     ("cx_slice_of_empty", &[("OPT120", V::Blocked(NOT_EMPTY))]),
+    // `pop`'s default and `map`'s function stay live in the result: `Disproved`.
+    ("cx_kept_by_pop_default", &[]),
+    (
+        "cx_compared_by_remove",
+        &[(
+            "OPT101",
+            V::Blocked(
+                "Unique(acc): it may be shared: stored in a container, attribute, or global",
+            ),
+        )],
+    ),
+    ("cx_function_kept_by_map", &[]),
+    (
+        "cx_map_over_ints",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_generator_over_ints",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_ints_or_parameter",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_range_or_parameter",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_tuple_or_element",
+        &[(
+            "OPT130",
+            V::Blocked("ZeroTripExceptionSafe(set(...)): its elements may be unhashable"),
+        )],
+    ),
+    (
+        "cx_elements_after_escape",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_list_from_earlier_iteration",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_subscript_with_slice_object",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_partly_updated_in_handler",
+        &[("OPT102", V::Blocked(PARTLY_UPDATED))],
+    ),
+    (
+        "cx_set_partly_updated_in_handler",
+        &[("OPT102", V::Blocked(PARTLY_UPDATED))],
+    ),
+    (
+        "cx_later_entry_before_collision",
+        &[("OPT102", V::Blocked(REGROUPED))],
+    ),
+    (
+        "cx_entry_reads_what_eq_changes",
+        &[("OPT102", V::Blocked(REGROUPED))],
+    ),
+    (
+        "cx_rebuilt_container_changed",
+        &[(
+            "OPT130",
+            V::Blocked("ValueLoopInvariant(list(...)): the built container is also bound or used"),
+        )],
+    ),
+    // `list(*args)`: the call's Layer 1 positions do not apply, so nothing is known of it.
+    (
+        "cx_rebuild_with_unpacked_argument",
+        &[(
+            "OPT130",
+            V::Blocked("ExactType(list(...)): its exact type is unknown (result of `list`)"),
+        )],
+    ),
+    (
+        "cx_rebuild_copy_with_argument",
+        &[(
+            "OPT130",
+            V::Blocked(
+                "SideEffectFree(set(...)): the expression evaluates more than builtin calls",
+            ),
+        )],
+    ),
+    (
+        "cx_set_declared_without_value",
+        &[(
+            "OPT110",
+            V::Blocked(
+                "SideEffectFree(set): `set` is a local name of this function or an enclosing one",
+            ),
+        )],
+    ),
+    (
+        "cx_deque_keyword_arguments",
+        &[(
+            "OPT121",
+            V::Blocked("DequeEquivalentOps(q): `list(...)` with `*` / `**` arguments"),
+        )],
+    ),
+    (
+        "cx_extended_by_its_own_iterator",
+        &[(
+            "OPT120",
+            V::Blocked(
+                "DequeEquivalentOps(q): the result of `reversed(...)` still iterates it when it changes",
+            ),
+        )],
+    ),
+    (
+        "cx_iterator_type_observed",
+        &[(
+            "OPT120",
+            V::Blocked("DequeEquivalentOps(q): the result of `iter(...)` (line"),
+        )],
+    ),
+    // `q[1::2]` is no front pop: not a candidate.
+    ("cx_stepped_slice", &[]),
+    (
+        "cx_iterator_returned",
+        &[(
+            "OPT120",
+            V::Blocked("DequeEquivalentOps(q): the result of `iter(...)` (line"),
+        )],
+    ),
 ];
 
 #[test]
@@ -971,7 +1259,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 17/17"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 41/41"));
 }
 
 // ======================================================================== module-level facts
@@ -1118,6 +1406,67 @@ fn deque_spellings_and_import_insertion() {
         &[("drain", &[("OPT120", V::Fix(TOP))])],
         true,
     );
+}
+
+#[test]
+fn deque_import_reuse_and_placement() {
+    const INSERTED: &[&str] = &[
+        "import collections\n",
+        "collections.deque([1, 2, 3, *range(n)])",
+        "q.popleft()",
+    ];
+    // (module head, the fix's replacements, whether CPython can run the module)
+    let cases: &[(&str, &[&str], bool)] = &[
+        // An unconditional absolute import is reused.
+        (
+            "from collections import deque\n",
+            &["deque([1, 2, 3, *range(n)])", "q.popleft()"],
+            true,
+        ),
+        // A name bound only for type checkers is not there at run time.
+        (
+            "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from collections import deque\n",
+            INSERTED,
+            true,
+        ),
+        // `from .collections import deque` is another module's `deque`.
+        (
+            "from .collections import deque\n",
+            &[
+                "import collections\n\n",
+                "collections.deque([1, 2, 3, *range(n)])",
+                "q.popleft()",
+            ],
+            false,
+        ),
+        // `__future__` imports stay first, the shebang and the encoding line too.
+        (
+            "from __future__ import annotations\nfrom math import pi\n",
+            INSERTED,
+            true,
+        ),
+        ("#!/usr/bin/env python3\nimport sys\n", INSERTED, true),
+        ("# -*- coding: utf-8 -*-\nimport os\n", INSERTED, true),
+        // A non-ASCII name next to an import heki plans around.
+        ("import os as caf\u{e9}\n", INSERTED, true),
+    ];
+    for (i, (head, reps, runs)) in cases.iter().enumerate() {
+        let src = format!("{head}\n\n{DRAIN}\n\nprint(drain(3))\n");
+        let p = Project::new(&format!("sound_import_{i}"));
+        p.write("cases.py", &src);
+        let diags = opt_json(&p, &[]);
+        assert_eq!(diags.len(), 1, "{head}: {diags:#?}");
+        assert_eq!(replacements(&diags[0]), *reps, "{head}: {diags:#?}");
+        if *runs {
+            let before = run_python(&p.dir, "cases.py");
+            p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
+            let fixed = p.read("cases.py");
+            assert_eq!(before, run_python(&p.dir, "cases.py"), "{fixed}");
+            let first = head.lines().next().unwrap();
+            let must_stay_first = first.starts_with('#') || first.starts_with("from __future__");
+            assert!(!must_stay_first || fixed.starts_with(first), "{fixed}");
+        }
+    }
 }
 
 #[test]

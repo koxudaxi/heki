@@ -17,24 +17,28 @@ The first public preview.
   `concise`, `json`, `github`, `sarif`; paths relative to the working directory, as in Ruff),
   and exit codes `0` / `1` / `2`. The target Python version (`py311` to `py315`) comes from
   `requires-python` or `--target-version`, and `--watch` re-checks on every change.
-- 29 rules in four families:
+- 30 rules in four families:
   - Mutation and state: `MUT101`, `MUT107`, `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`,
-    `MUT204`, and the opt-in `MUT103`, `MUT106`, and `MUT108`.
+    `MUT204`, `MUT205`, and the opt-in `MUT103`, `MUT106`, and `MUT108`.
   - Execution effects: `EFF101`, `EFF102`, `EFF103`, `EFF201`, and the opt-in `EFF105`,
     `EFF106`, and `EFF107`.
   - Data pipelines: `DATA101`.
   - Complexity rewrites: `OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`, `OPT112`, `OPT113`,
     `OPT120`, `OPT121`, and `OPT130`.
 - Proven-safe rewrites: `heki check --fix` applies the unconditional `OPT101` / `OPT102` fixes,
-  `--include-size-dependent` adds the size-dependent ones, `--profile` limits those to the hot
-  functions of a sampling profile (CPython 3.15's profiler or py-spy), and `--diff` previews
-  them. A fix that turns a list into a `collections.deque` also rewrites its `list` annotation
+  `--include-size-dependent` adds the size-dependent ones in every function, `--profile` alone
+  applies them in the hot functions of a sampling profile (CPython 3.15's profiler or py-spy),
+  and `--diff` previews them. A fix that turns a list into a `collections.deque` also rewrites its `list` annotation
   and adds the import in sorted order to the standard-library imports.
 - Contracts in `[tool.heki]`: `write-owners` (`MUT201`), `read-owners` (`MUT203`),
   `call-owners` (`MUT204`), `readonly-returns` (`MUT202`, followed through the functions that
   return a producer's result), `invalidation` (`MUT109`), and `effect-boundaries` (`EFF201`, with
   `reads-targets`, `calls`, and `allow-writes` / `write-universe`); `forbidden-writers` /
-  `forbidden-readers` / `forbidden-callers` restrict an owner contract to a layer.
+  `forbidden-readers` / `forbidden-callers` restrict an owner contract to a layer. Targets can
+  name container entries (`Class.attr["key"]`) and use module-level `Final` string constants as
+  keys; `fresh-objects = "allow" | "report"` decides whether a write that constructs its object
+  counts (allowed by default), and `unresolved = "report"` makes a `write-owners` contract count
+  the writes heki cannot tie to a class (`MUT205`).
 - A catalog of library behavior (blocking network, database, and file calls, their async
   counterparts, offloading helpers, locks and transactions) for the standard library, requests,
   httpx, urllib3, aiohttp, SQLAlchemy, SQLModel, psycopg, psycopg2, PyMySQL, Django, redis,
@@ -46,6 +50,12 @@ The first public preview.
   unpacking, `yield from`, consuming calls, lazy wrappers, project functions iterating them),
   generators returned by helpers included; a generator handed to a framework
   (`StreamingResponse(rows())`) is not reported.
+- Receiver typing for the call graph: container item types (`list[Model]`), return annotations
+  along the MRO, `Self`, copies, `functools.partial`, `typing.cast`, unions of up to three
+  classes, `isinstance` narrowing, and the structural implementations of project `Protocol`s.
+- Effect guards: a branch the caller's arguments switch off is not followed
+  (`load(name, cache=False)`), and a client created by a lazy initialization counts once per
+  object, not once per loop iteration.
 - Ratchet baselines (`--baseline`, `--update-baseline`), keyed by file, function, rule, and
   target instead of line numbers, that count violation sites (`version = 2`); older files keep
   counting reports until `--update-baseline`.

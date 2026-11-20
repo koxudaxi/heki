@@ -5,6 +5,9 @@ Checks (docs/ANALYSIS_AND_KB_SPEC.md section 4.1):
   1. No advisory (Layer 2) field and no unknown field appears in a Layer 1 file.
   2. Every `retained_in_return` API returns a derived reference that observes a later mutation of
      the retained argument, and the KB marks exactly the argument positions the scenario retains.
+     Every `read_only` argument is dead once the call returns although the receiver, the other
+     arguments, and the result stay alive, also when their elements' dunders keep whatever they
+     receive: the API neither retains it nor hands it to code that could.
   3. Every `return_exact_type` API satisfies `type(result) is expected_type`, also for adversarial
      inputs (subclass instances, dunders returning subclasses).
 Supporting checks:
@@ -17,10 +20,12 @@ Usage: python3.15 tests/sentinel/verify_soundness_kb.py   (exit status 0 = no fa
 from __future__ import annotations
 
 import builtins
+import gc
 import importlib
 import sys
 import tomllib
 import warnings
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -138,18 +143,43 @@ def _zip(fn: Callable[..., Any]) -> None:
     assert list(z) == [(1, 3), (2, 4), (5, 6)], "zip retains every iterable argument"
 
 
+class Offset:
+    def __init__(self) -> None:
+        self.by = 0
+
+    def __call__(self, x: int) -> int:
+        return x + self.by
+
+
+class Above:
+    def __init__(self) -> None:
+        self.limit = 0
+
+    def __call__(self, x: int) -> bool:
+        return x > self.limit
+
+
 def _map(fn: Callable[..., Any]) -> None:
-    x = [1, 2]
-    m = fn(str, x)
+    x, f = [1, 2], Offset()
+    m = fn(f, x)
     x.append(3)
-    assert list(m) == ["1", "2", "3"]
+    f.by = 10
+    assert list(m) == [11, 12, 13], "map keeps its function and its iterable"
 
 
 def _filter(fn: Callable[..., Any]) -> None:
-    x = [1, 2]
-    f = fn(None, x)
+    x, pred = [1, 2], Above()
+    f = fn(pred, x)
     x.append(3)
-    assert list(f) == [1, 2, 3]
+    pred.limit = 1
+    assert list(f) == [2, 3], "filter keeps its predicate and its iterable"
+
+
+def _dict_pop(fn: Callable[..., Any]) -> None:
+    default = [1]
+    got = fn({}, "missing", default)
+    default.append(2)
+    assert got == [1, 2], "pop returns its default itself"
 
 
 def _reversed(fn: Callable[..., Any]) -> None:
@@ -195,13 +225,95 @@ RETAINED_SCENARIOS: dict[str, tuple[set[int], Callable[[Callable[..., Any]], Non
     "builtins.enumerate": ({0}, _enumerate),
     # Variadic: the last declared effect covers the remaining iterables (scenario checks two).
     "builtins.zip": ({0}, _zip),
-    "builtins.map": ({1}, _map),
-    "builtins.filter": ({1}, _filter),
+    "builtins.map": ({0, 1}, _map),
+    "builtins.filter": ({0, 1}, _filter),
     "builtins.reversed": ({0}, _reversed),
     "builtins.memoryview": ({0}, _memoryview),
     "builtins.dict.keys": ({0}, _dict_keys),
     "builtins.dict.values": ({0}, _dict_values),
     "builtins.dict.items": ({0}, _dict_items),
+    "builtins.dict.pop": ({2}, _dict_pop),
+}
+
+# --------------------------------------------------------------------------- read-only arguments
+# A `read_only` argument may be passed to its own dunders only. `Keeper` objects around it (as
+# receivers, elements, other arguments) keep every object their dunders receive, so an API that
+# hands the argument to other code (`[k].remove(x)` calls `k.__eq__(x)`) keeps it alive.
+
+KEPT: list[Any] = []
+
+
+class Keeper:
+    def __hash__(self) -> int:
+        return 0
+
+    def __eq__(self, other: object) -> bool:
+        KEPT.append(other)
+        return False
+
+    def __call__(self, *args: Any) -> int:
+        KEPT.extend(args)
+        return 0
+
+
+class Subject:
+    """A weakly referenceable argument whose own protocols keep nothing."""
+
+    def __init__(self) -> None:
+        self.items = [Keeper()]
+
+    def __hash__(self) -> int:
+        return 0
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def __iter__(self) -> Any:
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __index__(self) -> int:
+        return 0
+
+    def keys(self) -> list[Any]:
+        return self.items
+
+    def __getitem__(self, key: Any) -> int:
+        return 0
+
+
+class ListSub2(list):
+    pass
+
+
+class SetSub2(set):
+    pass
+
+
+class DictSub2(dict):
+    pass
+
+
+# symbol -> {position: case}; a case gets the subject and returns the call's arguments
+# (the receiver first for methods).
+READ_ONLY_CASES: dict[str, dict[int, Callable[[Any], tuple[Any, ...]]]] = {
+    **{
+        f"builtins.{name}": {0: lambda s: (s,)}
+        for name in ("len", "bool", "int", "float", "str", "bytes", "range", "list", "set", "tuple", "dict")
+    },
+    "builtins.list.extend": {1: lambda s: ([Keeper()], s)},
+    "builtins.list.insert": {1: lambda s: ([Keeper()], s, Keeper())},
+    "builtins.list.pop": {1: lambda s: ([Keeper(), Keeper()], s)},
+    "builtins.set.update": {1: lambda s: ({Keeper()}, s)},
+    "builtins.dict.update": {1: lambda s: ({Keeper(): 0}, s)},
+}
+# The receiver is the subject: a copy keeps its elements, never the receiver.
+COPY_RECEIVERS: dict[str, Callable[[], Any]] = {
+    "builtins.list.copy": lambda: ListSub2([Keeper()]),
+    "builtins.set.copy": lambda: SetSub2({Keeper()}),
+    "builtins.dict.copy": lambda: DictSub2({Keeper(): 0}),
 }
 
 # --------------------------------------------------------------------------- check 3 cases
@@ -330,7 +442,14 @@ def check_fields(entries: list[tuple[str, dict[str, Any]]]) -> list[str]:
 
 def check_tables_match_kb(kb: dict[str, dict[str, Any]]) -> list[str]:
     problems = []
-    tables = [RETAINED_SCENARIOS, EXACT_TYPE_CASES, FRESH_CONTAINER_CASES, NON_EXACT_WITNESSES]
+    tables = [
+        RETAINED_SCENARIOS,
+        READ_ONLY_CASES,
+        COPY_RECEIVERS,
+        EXACT_TYPE_CASES,
+        FRESH_CONTAINER_CASES,
+        NON_EXACT_WITNESSES,
+    ]
     for symbol in sorted(set().union(*tables) - set(kb)):
         problems.append(f"{symbol}: sentinel table entry but the KB has no such entry")
     return problems
@@ -368,6 +487,49 @@ def check_retained(kb: dict[str, dict[str, Any]]) -> list[str]:
             scenario(resolve(symbol))
         except Exception as exc:  # noqa: BLE001 - report every failure kind
             problems.append(f"{symbol}: {type(exc).__name__}: {exc}")
+    return problems
+
+
+def _dies_after(call: Callable[[], tuple[Any, list[Any]]]) -> bool:
+    """`call` returns a weak reference to its subject and the objects to keep alive."""
+    ref, alive = call()
+    gc.collect()
+    died = ref() is None
+    del alive
+    KEPT.clear()
+    return died
+
+
+def check_read_only(kb: dict[str, dict[str, Any]]) -> list[str]:
+    problems = []
+    for symbol, raw in kb.items():
+        positions = {i for i, e in enumerate(raw["param_effects"]) if e == "read_only"}
+        fn = resolve(symbol)
+        for pos in sorted(positions):
+            if symbol in COPY_RECEIVERS and pos == 0:
+
+                def call(make=COPY_RECEIVERS[symbol], fn=fn) -> tuple[Any, list[Any]]:
+                    receiver = make()
+                    result = fn(receiver)
+                    return weakref.ref(receiver), [result]
+
+            elif pos in READ_ONLY_CASES.get(symbol, {}):
+
+                def call(case=READ_ONLY_CASES[symbol][pos], fn=fn) -> tuple[Any, list[Any]]:
+                    subject = Subject()
+                    args = case(subject)
+                    result = fn(*args)
+                    others = [a for a in args if a is not subject]
+                    return weakref.ref(subject), [result, *others]
+
+            else:
+                problems.append(f"{symbol}: read_only position {pos} has no sentinel case")
+                continue
+            try:
+                if not _dies_after(call):
+                    problems.append(f"{symbol}: the read_only argument {pos} outlives the call")
+            except Exception as exc:  # noqa: BLE001 - report every failure kind
+                problems.append(f"{symbol}: argument {pos}: {type(exc).__name__}: {exc}")
     return problems
 
 
@@ -461,6 +623,7 @@ def main() -> int:
     # Unresolvable symbols are reported above; the dynamic checks run on the rest.
     live = {s: raw for s, raw in kb.items() if _resolves(s)}
     report.check("retained-in-return", check_retained(live))
+    report.check("read-only-arguments-are-not-kept", check_read_only(live))
     report.check("return-exact-type", check_exact_types(live))
     report.check("fresh-containers-do-not-alias", check_fresh_containers(live))
     report.check("non-exact-witnesses", check_non_exact_witnesses(live))

@@ -225,7 +225,10 @@ def min_python(path: Path) -> tuple[int, int]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Verify heki_semantic against CPython symtable.")
     ap.add_argument("targets", nargs="*", type=Path, default=[Path(__file__).parent / "fixtures"])
-    ap.add_argument("--heki", type=Path, help="Path to compiled `heki` binary")
+    # Resolved: `subprocess` looks a bare `heki` (what `Path("./heki")` prints) up on `PATH`.
+    ap.add_argument(
+        "--heki", type=lambda p: Path(p).resolve(), help="Path to compiled `heki` binary"
+    )
     ap.add_argument("--self-check", action="store_true", help="Only verify fixtures parse with CPython symtable")
     ap.add_argument("--max-errors", type=int, default=30)
     args = ap.parse_args()

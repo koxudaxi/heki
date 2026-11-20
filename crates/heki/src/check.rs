@@ -6,10 +6,10 @@ use crate::{CheckArgs, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
-    BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
-    baseline_key, render, unified_diff,
+    BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, baseline_counts, baseline_key,
+    fix_python_source, render, unified_diff,
 };
-use heki_effect::{analyze_project, analyze_project_with, func_qualname};
+use heki_effect::{ProjectIndex, analyze_project, analyze_project_for, func_qualname};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
@@ -85,10 +85,11 @@ pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&HotFunctions>)
     }
 }
 
-/// One analysis pass: the project, its diagnostics after inline suppressions, and the shares
-/// of its functions in the profile.
+/// One analysis pass: the project, its index, its diagnostics after inline suppressions, and
+/// the shares of its functions in the profile.
 struct Analyzed {
     project: Project,
+    index: ProjectIndex,
     diags: Vec<Diagnostic>,
     hot: Option<HotFunctions>,
 }
@@ -109,7 +110,8 @@ fn analyze(
     let env = &project.env;
     let inputs = project.inputs();
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
-    let index = analyze_project_with(&inputs, &env.kb, contracts);
+    let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
+    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes);
     let units = project.units();
     let extras = CheckExtras {
         soundness_kb: &env.soundness_kb,
@@ -126,6 +128,7 @@ fn analyze(
     annotate_hot(&mut diags, hot.as_ref());
     Ok(Analyzed {
         project,
+        index,
         diags,
         hot,
     })
@@ -178,17 +181,24 @@ fn shown_text(p: &Path) -> String {
     shown_path(p).to_string_lossy().replace('\\', "/")
 }
 
-/// Apply fixes in memory until nothing more applies. Returns the number of applied fixes,
-/// the changed files, and the read / syntax errors of the last pass.
-fn fix_in_memory(
-    args: &CheckArgs,
-    hot: Option<&ProfileData>,
-) -> Result<(usize, Vec<FixedFile>, Vec<String>)> {
+/// What `--fix` / `--diff` would do.
+struct FixRun {
+    fixes: usize,
+    files: Vec<FixedFile>,
+    /// Read / syntax errors of the last pass.
+    errors: Vec<String>,
+    /// Files whose fixes would not parse, left unchanged.
+    refused: Vec<String>,
+}
+
+/// Apply fixes in memory until nothing more applies.
+fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> {
     let mut overrides: FxHashMap<PathBuf, String> = FxHashMap::default();
     let mut originals: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut total = 0;
     let mut errors;
     let mut passes = 0;
+    let mut refused: Vec<String> = Vec::new();
     loop {
         let a = analyze(args, hot, Some(&overrides))?;
         errors = a.project.errors;
@@ -205,12 +215,13 @@ fn fix_in_memory(
             let Some(groups) = by_path.get(file.path.as_path()) else {
                 continue;
             };
-            let (new, applied) = apply_fixes(&file.source, groups);
-            pass += applied.len();
+            let fixed = fix_python_source(&shown_text(&file.path), &file.source, groups);
+            pass += fixed.applied.len();
+            refused.extend(fixed.refused);
             originals
                 .entry(file.path.clone())
                 .or_insert_with(|| file.source.clone());
-            overrides.insert(file.path.clone(), new);
+            overrides.insert(file.path.clone(), fixed.text);
         }
         total += pass;
         passes += 1;
@@ -229,7 +240,15 @@ fn fix_in_memory(
             })
         })
         .collect();
-    Ok((total, files, errors))
+    // A file whose fixes break it is refused again in every later pass.
+    refused.sort_unstable();
+    refused.dedup();
+    Ok(FixRun {
+        fixes: total,
+        files,
+        errors,
+        refused,
+    })
 }
 
 pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
@@ -242,31 +261,51 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         return crate::watch::run(args, hot.as_ref());
     }
     if args.diff {
-        let (fixes, files, errors) = fix_in_memory(args, hot.as_ref())?;
-        for f in &files {
+        let run = fix_in_memory(args, hot.as_ref())?;
+        for f in &run.files {
             print!(
                 "{}",
                 unified_diff(&shown_text(&f.path), &f.original, &f.fixed)
             );
         }
-        eprintln!("Would fix {fixes} issue(s) in {} file(s).", files.len());
-        let code = if fixes == 0 {
+        eprintln!(
+            "Would fix {} issue(s) in {} file(s).",
+            run.fixes,
+            run.files.len()
+        );
+        let code = if run.fixes == 0 {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(1)
         };
-        return finish(&errors, code);
+        return finish(&[run.errors, run.refused].concat(), code);
     }
+    let mut refused = Vec::new();
     if args.fix {
-        let (fixes, files, _) = fix_in_memory(args, hot.as_ref())?;
-        for f in &files {
+        let run = fix_in_memory(args, hot.as_ref())?;
+        for f in &run.files {
             heki_ast::write_source(&f.path, &f.fixed)
                 .with_context(|| format!("failed to write `{}`", f.path.display()))?;
         }
-        eprintln!("Fixed {fixes} issue(s) in {} file(s).", files.len());
+        eprintln!(
+            "Fixed {} issue(s) in {} file(s).",
+            run.fixes,
+            run.files.len()
+        );
+        refused = run.refused;
     }
-    let Analyzed { project, diags, .. } = analyze(args, hot.as_ref(), None)?;
-    report(args, &project, diags)
+    let Analyzed {
+        project,
+        index,
+        diags,
+        ..
+    } = analyze(args, hot.as_ref(), None)?;
+    let code = report(args, &project, diags)?;
+    // The process ends here: freeing the index and the parsed files one allocation at a time
+    // would only cost time.
+    std::mem::forget(index);
+    std::mem::forget(project);
+    finish(&refused, code)
 }
 
 /// Baseline handling, rendering, summary, and exit code of one analyzed run.

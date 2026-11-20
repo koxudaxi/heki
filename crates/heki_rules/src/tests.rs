@@ -153,7 +153,7 @@ fn semantic_fixtures_all_tp_detected_and_no_tn() {
     config.lint.relax_async_in_tests = Some(false);
     let diags = check_with(&[("tests/semantic/fixtures.py", FIXTURES)], &config, &[]);
     let (tp, tn) = expectations(FIXTURES);
-    assert_eq!(tp.len(), 6, "{tp:?}");
+    assert_eq!(tp.len(), 7, "{tp:?}");
     assert_eq!(tn.len(), 7, "{tn:?}");
     let in_range = |e: &Expect, d: &Diagnostic| e.code == d.rule_code && e.lines.contains(&d.line);
     for e in &tp {
