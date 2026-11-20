@@ -81,3 +81,18 @@ fn an_empty_select_starts_from_no_rules() {
     );
     assert_eq!(concise(&p, &["--select", "EFF101"]).len(), 1);
 }
+
+#[test]
+fn per_file_ignores_globs_match_across_directories_as_in_ruff() {
+    let p = Project::new("per_file_globs");
+    p.write("scripts/top.py", BLOCKING)
+        .write("scripts/tools/worker.py", BLOCKING)
+        .write("src/app.py", BLOCKING)
+        .write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"scripts/*.py\" = [\"EFF101\"] }\n",
+        );
+    let out = concise(&p, &[]);
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0].starts_with("src/app.py:5:5: EFF101"), "{out:?}");
+}

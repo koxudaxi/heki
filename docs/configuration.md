@@ -40,7 +40,7 @@ command line are always checked.
 | `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) need their exact code or name. |
 | `ignore` | Rules to disable (prefixes match every rule they cover). |
-| `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
+| `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
 | `severity` | Rule → `"error"` or `"warning"` (affects output and SARIF level; both make `heki check` fail). |
 | `relax-async-in-tests` | `true` (default) skips `EFF101` / `EFF105` in `test_*` functions and files under `tests/`. |
 
