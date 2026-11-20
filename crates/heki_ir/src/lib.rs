@@ -450,6 +450,19 @@ impl InstKind {
         }
     }
 
+    /// Whether the instruction suspends a coroutine until what it awaits completes: an `await`,
+    /// and the implicit awaits of `async for` (`__anext__`) and `async with` (`__aenter__`,
+    /// `__aexit__`). Other tasks run meanwhile.
+    pub fn suspends(&self) -> bool {
+        matches!(
+            self,
+            Self::Await { .. }
+                | Self::IterNext { is_async: true, .. }
+                | Self::EnterWith { is_async: true, .. }
+                | Self::ExitWith { is_async: true, .. }
+        )
+    }
+
     /// Collect all SSA operand `VarId`s read by this instruction.
     pub fn operands(&self) -> Vec<VarId> {
         match self {

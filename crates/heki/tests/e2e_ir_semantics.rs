@@ -558,3 +558,51 @@ def merged(maps):
         .collect();
     assert_eq!(methods, ["update"]);
 }
+
+// ============================================================================ suspensions
+
+#[test]
+fn async_iteration_and_async_with_suspend_while_a_lock_is_held() {
+    let src = "\
+import asyncio
+import threading
+
+
+async def iterates(stream):
+    with threading.Lock():
+        async for item in stream:
+            pass
+
+
+async def comprehension(stream):
+    with threading.Lock():
+        return [x async for x in stream]
+
+
+async def enters(session):
+    with threading.Lock():
+        async with session:
+            pass
+
+
+async def after_release(stream):
+    with threading.Lock():
+        pass
+    async for item in stream:
+        pass
+
+
+async def async_lock(stream):
+    async with asyncio.Lock():
+        async for item in stream:
+            pass
+";
+    assert_eq!(
+        reports("ir_async_suspensions", src, "EFF106"),
+        pairs(&[
+            ("iterates", "EFF106"),
+            ("comprehension", "EFF106"),
+            ("enters", "EFF106"),
+        ])
+    );
+}
