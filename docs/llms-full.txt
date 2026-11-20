@@ -36,30 +36,26 @@ async def get_user(user_id: int) -> dict[str, str]:
     return load_user(user_id)  # blocks the event loop two calls down
 
 
-# app/settings.py
-from dataclasses import dataclass
+# app/stats.py
+from collections.abc import Sequence
 
 
-@dataclass(frozen=True)
-class Settings:
-    allowed_hosts: list[str]
+def sort_values(values):
+    values.sort()
 
 
-def add_host(hosts: list[str], host: str) -> None:
-    hosts.append(host)
-
-
-def for_tenant(settings: Settings, host: str) -> Settings:
-    add_host(settings.allowed_hosts, host)  # changes it for every holder
-    return settings
+def median(values: Sequence[float]) -> float:
+    sort_values(values)  # reorders the caller's list
+    return values[len(values) // 2]
 ```
 
-Ruff (every rule except the docstring rules), ty, Pyrefly, and pyright and mypy in strict mode
-report nothing for this code. heki reports both bugs, with the calls that lead to them (`MUT108`
-is opt-in):
+Ruff (every rule except the docstring and annotation rules), ty, Pyrefly, and pyright and mypy
+in their default modes report nothing for this code. The annotation rules and the strict modes
+ask for annotations on `sort_values`, but none of them sees that it reorders the caller's list.
+heki reports both bugs, with the calls that lead to them:
 
 ```console
-$ heki check --extend-select MUT108
+$ heki check
 app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
   |
 5 |     return load_user(user_id)  # blocks the event loop two calls down
@@ -68,11 +64,11 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls
   = related: app/users.py:9:41: `load_user` calls `app.users.fetch_name`
   = related: app/users.py:5:12: `fetch_name` calls `requests.get`
 
-app/settings.py:14:5: MUT108 (readonly-type-mutation) [error] `for_tenant` changes the field `Settings.allowed_hosts` of a frozen instance in place via `app.settings.add_host` (indirect_helper): the class promises immutable instances, so they get shared (module-level defaults, caches, the same value handed to several owners), and every holder sees the change and different `==` results; copy it first or store an immutable type such as `tuple` / `frozenset`
-   |
-14 |     add_host(settings.allowed_hosts, host)  # changes it for every holder
-   |     ^
-  = related: app/settings.py:14:5: `for_tenant` calls `app.settings.add_host`
+app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes `values` to `app.stats.sort_values`, which changes it in place: `values` is annotated read-only (`Sequence` / `Mapping`), so the caller was promised that its argument is only read, but the helper changes the caller's object; pass a copy (`list(values)` / `dict(values)`), or annotate the helper's parameter with a mutable type so that the type checker shows the mismatch
+  |
+9 |     sort_values(values)  # reorders the caller's list
+  |     ^
+  = related: app/stats.py:9:5: `median` calls `app.stats.sort_values`
 
 Found 2 diagnostic(s) in 4 file(s).
 ```
@@ -87,14 +83,15 @@ Found 2 diagnostic(s) in 4 file(s).
   `async def` ([`EFF101`](rules/async-blocking-call.md)), a database query or an HTTP client
   created on every iteration of a loop ([`EFF103`](rules/loop-db-query.md),
   [`EFF102`](rules/loop-unpooled-client.md)), a `@cached_property` left stale when another
-  method changes what it read ([`MUT101`](rules/cached-property-stale-mutation.md)), and an
+  method changes what it read ([`MUT101`](rules/cached-property-stale-mutation.md)), an
   attribute `__hash__` reads changing after the object went into a `set`
-  ([`MUT107`](rules/hash-attr-mutation.md)). Opt-in rules add frozen dataclasses, `ReadOnly`
-  fields, and `Sequence` / `Mapping` arguments changed in place through a helper
-  ([`MUT108`](rules/readonly-type-mutation.md)), I/O while a `threading` lock or a database
-  transaction is held ([`EFF106`](rules/lock-or-tx-held-across-io.md)), and generators consumed
-  twice ([`MUT106`](rules/iterator-double-consumption.md)). A report that crosses functions
-  shows its call chain.
+  ([`MUT107`](rules/hash-attr-mutation.md)), and a `Sequence` / `Mapping` argument changed in
+  place by a helper ([`MUT110`](rules/readonly-param-mutation.md)). Opt-in rules add frozen
+  dataclass and `ReadOnly` fields changed in place ([`MUT108`](rules/readonly-type-mutation.md)),
+  I/O while a `threading` lock or a database transaction is held
+  ([`EFF106`](rules/lock-or-tx-held-across-io.md)), and generators consumed twice
+  ([`MUT106`](rules/iterator-double-consumption.md)). A report that crosses functions shows its
+  call chain.
 - **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of
@@ -136,7 +133,7 @@ CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive 
 the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
 the obligation instead of offering a fix. See [Fixes and safety](fixes.md).
 
-See the [rules reference](rules/index.md) for all 26 rules.
+See the [rules reference](rules/index.md) for all 27 rules.
 
 ## Next steps
 
@@ -306,11 +303,14 @@ state that matters.
   also defines a setter or deleter (`@x.setter`) is not followed, nor is `x = property(get_x)`,
   and the getter's return annotation does not type the value read (`self.session.execute(...)`
   through a `session` property is not resolved).
-- **Read-only types (`MUT108`, opt-in).** Frozen dataclasses, `NamedTuple`s, classes that a
+- **Read-only types.** `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the
+  helpers they are handed to, any number of calls deep; a helper parameter annotated with a
+  mutable type is left to the type checker, and a container inside the argument does not count.
+  `MUT108` (opt-in) follows frozen dataclasses, `NamedTuple`s, classes that a
   `dataclass_transform(frozen_default=True)` in the checked files builds, `Final` / `ReadOnly`
-  attributes, `ReadOnly` `TypedDict` keys, and `Sequence` / `Mapping` parameters are followed.
-  Transforms of installed packages (attrs, Pydantic) are not, and an instance the function
-  constructs itself counts as under construction.
+  attributes, and `ReadOnly` `TypedDict` keys; transforms of installed packages (attrs,
+  Pydantic) are not seen, and an instance the function constructs itself counts as under
+  construction.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
@@ -346,10 +346,10 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT201`, `MUT203` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT108`, `EFF107`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT201`, `MUT203` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT201`–`MUT203` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT201`–`MUT203` |
 
 ## What heki does not do
 
@@ -1049,7 +1049,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 26 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 27 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
@@ -1067,7 +1067,8 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT103 | [summary-effect-regression](summary-effect-regression.md) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
 | MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
 | MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
-| MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place what a standard type declares read-only (frozen dataclass / `NamedTuple` fields, `Final` / `ReadOnly` attributes, `Sequence` / `Mapping` parameters), directly, through an alias, or in a helper. | 🔌 |
+| MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
+| MUT110 | [readonly-param-mutation](readonly-param-mutation.md) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`. |  |
 | MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
@@ -2554,6 +2555,82 @@ Known limitation: a read through a parameter without a project-class annotation
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/readonly-param-mutation/
+
+# readonly-param-mutation (MUT110)
+
+Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+
+Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).
+
+## What it does
+Checks functions that hand a parameter annotated as a read-only container to code that changes
+it in place: a parameter annotated `Sequence[...]`, `Mapping[...]`, or `ReadOnly[...]` (also
+inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself or through a local alias
+(`alias = items`) to a function that changes its argument in place (`items.sort()`,
+`items.append(...)`, `table[key] = ...`), itself or through further helpers, any number of calls
+deep.
+
+The rule reports the call that hands the parameter over, with the calls down to the change as
+related locations.
+
+It does not report:
+
+- a change in the function itself (`items.append(1)`, `alias = items; alias.append(1)`): type
+  checkers report it on the read-only type;
+- a container inside the argument (`values["a"].append(1)` with
+  `values: Mapping[str, list[int]]`): only the argument itself counts;
+- a call that hands over a copy (`helper(list(items))`, `helper(dict(table))`);
+- a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
+  `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument;
+- a helper parameter annotated read-only: that helper is checked in turn (its own handing over is
+  reported, a change in its own body is a type error);
+- variadic parameters (`*items: Sequence[int]`).
+
+## Why is this bad?
+A `Sequence` or `Mapping` annotation promises the caller that the function only reads its
+argument, so callers pass their own lists and dictionaries, shared values, or tuples. A helper
+that changes the argument in place breaks the promise: the caller's object changes behind its
+back, or the call fails on a tuple. Type checkers trust the helper's signature, so an
+unannotated or `Any` helper accepts the `Sequence` and hides the change.
+
+## Example
+```python
+from collections.abc import Sequence
+
+
+def sort_values(values):
+    values.sort()
+
+
+def median(values: Sequence[float]) -> float:
+    sort_values(values)  # MUT110: reorders the caller's list
+    return values[len(values) // 2]
+```
+
+Use instead:
+```python
+from collections.abc import Sequence
+
+
+def median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+```
+
+If the helper is meant to change its argument, annotate its parameter with a mutable type
+(`def sort_values(values: list[float]) -> None`): the type checker then shows the mismatch at
+the call.
+
+## Fix safety
+No automatic fix.
+
+## Options
+No configuration: the rule reads standard `typing` declarations only.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/readonly-return-mutation/
 
 # readonly-return-mutation (MUT202)
@@ -2620,11 +2697,11 @@ Source: https://heki.koxudaxi.dev/rules/readonly-type-mutation/
 
 Family: Mutation & State (MUT) · Opt-in · No automatic fix
 
-Opt-in: changing in place what a standard type declares read-only (frozen dataclass / `NamedTuple` fields, `Final` / `ReadOnly` attributes, `Sequence` / `Mapping` parameters), directly, through an alias, or in a helper.
+Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper.
 
 ## What it does
-Checks in-place changes of containers that a standard type declares read-only, which type
-checkers let through because they only stop rebinding:
+Checks in-place changes of containers held in fields that a standard type declares read-only,
+which type checkers let through because they only stop rebinding:
 
 - a field that holds a container in a `@dataclass(frozen=True)`, a `NamedTuple`, or a class that a
   PEP 681 `dataclass_transform(frozen_default=True)` builds (a decorator function, base class, or
@@ -2632,22 +2709,22 @@ checkers let through because they only stop rebinding:
   subclass: `config.tags.append(...)`;
 - an attribute declared `Final[...]` (`self.items: Final[list[int]] = []` in `__init__`, or a
   `Final` field of a dataclass or `NamedTuple`) or `ReadOnly[...]`, and a `ReadOnly` key of a
-  `TypedDict` (`movie["names"].append(...)`);
-- a parameter annotated `Sequence[...]`, `Mapping[...]`, or `ReadOnly[...]` (also inside
-  `Optional`, `| None`, and `Annotated`) that the function hands to another function which
-  changes it in place.
+  `TypedDict` (`movie["names"].append(...)`).
+
+A `Sequence` / `Mapping` parameter handed to a helper that changes it is `MUT110`
+(`readonly-param-mutation`), which shares this analysis.
 
 Changes are followed through local aliases (`tags = config.tags; tags.append(...)`) and through
 helpers, annotated or not and any number of calls deep, that change what they are handed: the
 attribute itself (`add_default(config.tags)`) or the object holding it (`reset(config)`). Such a
-change is reported at the call that hands the attribute, the object, or the read-only parameter
-over, with the calls down to the change as related locations. A helper that sees the object's
-type reports its own change instead.
+change is reported at the call that hands the attribute or the object over, with the calls down
+to the change as related locations. A helper that sees the object's type reports its own change
+instead.
 
 The rule does not report:
 
-- rebinding or deleting the attribute (`config.tags = []`, `del config.tags`), and changing a
-  read-only parameter in the function itself (`items.append(1)`): type checkers report those;
+- rebinding or deleting the attribute (`config.tags = []`, `del config.tags`): type checkers
+  report it;
 - `object.__setattr__(...)`, `setattr(...)`, and `__dict__` writes: the deliberate way to set up a
   frozen instance, caches included;
 - the class's own initialization: `__init__`, `__post_init__`, `__new__`, `model_post_init`,
@@ -2659,11 +2736,7 @@ The rule does not report:
   changes through its own methods); class variables (`ClassVar`); class-level constants of other
   classes; and module-level constants;
 - a container inside the read-only one (`config.tables["a"].append(1)` with a frozen
-  `tables: dict[str, list[int]]`, `values["a"].append(1)` with
-  `values: Mapping[str, list[int]]`): only the container in the read-only slot counts;
-- a read-only parameter handed to a parameter annotated with a mutable type (`list[int]`,
-  `MutableSequence[int]`, ...: a type checker reports the argument) or with a read-only type (that
-  function reports its own changes).
+  `tables: dict[str, list[int]]`): only the container in the read-only field counts.
 
 Out of scope: `dataclass_transform`s defined outside the checked files, such as the frozen models
 of `attrs` and Pydantic (heki does not analyze installed packages, so it cannot see the
@@ -2675,10 +2748,9 @@ receiver).
 A frozen dataclass or a `NamedTuple` promises immutable instances, so code shares them freely: as
 module-level defaults, in caches, or by handing the same value to several owners. An in-place
 change of a container inside one is seen by every holder and changes the results of `==`. A
-`Final` or `ReadOnly` declaration makes the same promise to the readers of the value, and a
-`Sequence` or `Mapping` parameter promises the caller that its argument is only read. Type
-checkers stop the rebinding and a mutating method called on the read-only type itself, but not a
-change made through an alias or in a helper that receives a plain `list` or an unannotated value.
+`Final` or `ReadOnly` declaration makes the same promise to the readers of the value. Type
+checkers stop the rebinding, but not a change of the container inside, directly, through an
+alias, or in a helper that receives a plain `list` or an unannotated value.
 
 ## Example
 ```python

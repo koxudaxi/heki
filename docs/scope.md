@@ -152,11 +152,14 @@ state that matters.
   also defines a setter or deleter (`@x.setter`) is not followed, nor is `x = property(get_x)`,
   and the getter's return annotation does not type the value read (`self.session.execute(...)`
   through a `session` property is not resolved).
-- **Read-only types (`MUT108`, opt-in).** Frozen dataclasses, `NamedTuple`s, classes that a
+- **Read-only types.** `MUT110` follows `Sequence` / `Mapping` / `ReadOnly` parameters into the
+  helpers they are handed to, any number of calls deep; a helper parameter annotated with a
+  mutable type is left to the type checker, and a container inside the argument does not count.
+  `MUT108` (opt-in) follows frozen dataclasses, `NamedTuple`s, classes that a
   `dataclass_transform(frozen_default=True)` in the checked files builds, `Final` / `ReadOnly`
-  attributes, `ReadOnly` `TypedDict` keys, and `Sequence` / `Mapping` parameters are followed.
-  Transforms of installed packages (attrs, Pydantic) are not, and an instance the function
-  constructs itself counts as under construction.
+  attributes, and `ReadOnly` `TypedDict` keys; transforms of installed packages (attrs,
+  Pydantic) are not seen, and an instance the function constructs itself counts as under
+  construction.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
@@ -192,10 +195,10 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT201`, `MUT203` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT108`, `EFF107`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT201`, `MUT203` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT201`–`MUT203` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT201`–`MUT203` |
 
 ## What heki does not do
 

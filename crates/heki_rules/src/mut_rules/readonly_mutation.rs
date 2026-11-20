@@ -1,8 +1,10 @@
-//! `MUT108` (`readonly-type-mutation`): in-place changes of what standard types declare
-//! read-only. Type checkers stop the rebinding of a frozen dataclass or `NamedTuple` field, a
-//! `Final` / `ReadOnly` attribute, or a `ReadOnly` `TypedDict` key, but not an in-place change of
-//! the container it holds, directly, through an alias, or in a helper; nor a `Sequence` /
-//! `Mapping` parameter handed to a helper that changes it.
+//! `MUT108` (`readonly-type-mutation`) and `MUT110` (`readonly-param-mutation`): in-place
+//! changes of what standard types declare read-only, through one analysis. Type checkers stop
+//! the rebinding of a frozen dataclass or `NamedTuple` field, a `Final` / `ReadOnly` attribute,
+//! or a `ReadOnly` `TypedDict` key, but not an in-place change of the container it holds,
+//! directly, through an alias, or in a helper (`MUT108`); and they trust a helper's signature, so
+//! a `Sequence` / `Mapping` parameter handed to an unannotated or `Any` helper that changes it
+//! goes unnoticed (`MUT110`).
 //!
 //! A change is reported where heki sees that the object is read-only: an own change at the
 //! change, a helper's change at the call that hands the attribute (the object holding it, or the
@@ -33,11 +35,17 @@ const IN_PLACE: &[WriteKind] = &[
 const FIX: &str = "copy it first or store an immutable type such as `tuple` / `frozenset`";
 
 pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
-    if !cx.selection.is_enabled("MUT108") {
+    let (fields, params) = (
+        cx.selection.is_enabled("MUT108"),
+        cx.selection.is_enabled("MUT110"),
+    );
+    if !fields && !params {
         return;
     }
     let mut rule = Rule {
         cx,
+        fields,
+        params,
         sites: None,
         seen: FxHashSet::default(),
         none: Allowance {
@@ -55,17 +63,25 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         let mut funcs: Vec<(&FuncKey, &EffectSummary)> = file
             .functions
             .iter()
-            .filter(|(k, _)| cx.index.file_of(k) == Some(path))
+            .filter(|(k, _)| fields && cx.index.file_of(k) == Some(path))
             .collect();
         funcs.sort_by(|a, b| a.0.cmp(b.0));
         for (key, s) in funcs {
             rule.own_changes(unit, key, s, out);
         }
-        for site in file
-            .call_sites
-            .iter()
-            .filter(|s| cx.index.file_of(&s.caller) == Some(path))
-        {
+        // Without `MUT108`, only the calls of the functions with a read-only parameter matter.
+        let readonly: FxHashSet<&str> = cx
+            .decls
+            .module(&file.module_name)
+            .into_iter()
+            .flat_map(|m| &m.functions)
+            .filter(|(_, d)| params && d.readonly_params != 0)
+            .map(|(q, _)| q.as_str())
+            .collect();
+        for site in file.call_sites.iter().filter(|s| {
+            (fields || readonly.contains(s.caller.qualname.as_str()))
+                && cx.index.file_of(&s.caller) == Some(path)
+        }) {
             rule.handed_over(unit, path, site, out);
         }
     }
@@ -82,10 +98,14 @@ struct Call<'s> {
 
 struct Rule<'c, 'a> {
     cx: &'c CheckContext<'a>,
+    /// `MUT108` (read-only attributes) runs.
+    fields: bool,
+    /// `MUT110` (read-only parameters) runs.
+    params: bool,
     /// Built on the first need (`runs_inside_allowed`).
     sites: Option<SitesByCaller<'a>>,
-    /// `(function, span, target)` already reported.
-    seen: FxHashSet<(FuncKey, Span, String)>,
+    /// `(rule, function, span, target)` already reported.
+    seen: FxHashSet<(&'static str, FuncKey, Span, String)>,
     /// No allowed writers: only a class's own initialization is allowed.
     none: Allowance,
 }
@@ -118,7 +138,7 @@ impl Rule<'_, '_> {
                 w.kind.as_str(),
                 why(ro.kind)
             );
-            self.emit(out, unit, key, w.span, target, message, &[]);
+            self.emit(out, "MUT108", unit, key, w.span, target, message, &[]);
         }
     }
 
@@ -169,7 +189,12 @@ impl Rule<'_, '_> {
         out: &mut Vec<Diagnostic>,
     ) {
         let cx = self.cx;
-        let caller_decl = cx.decls.function_decl(&site.caller);
+        // `MUT110` needs a read-only parameter of the caller (`run` hands over only such calls
+        // when `MUT108` is off).
+        let readonly = cx
+            .decls
+            .function_decl(&site.caller)
+            .filter(|d| self.params && d.readonly_params != 0);
         let callees = site
             .project_callees()
             .iter()
@@ -191,7 +216,7 @@ impl Rule<'_, '_> {
                 let itself = changes(callee, k, &None);
                 // An instance the caller constructs (or an attribute of one) is filled before
                 // anyone else holds it.
-                let shared = !o.fresh;
+                let shared = self.fields && !o.fresh;
                 if itself
                     && shared
                     && let Some((class, attr)) = &o.typed_field
@@ -221,20 +246,22 @@ impl Rule<'_, '_> {
                 if itself
                     && annotated & (1u64 << k) == 0
                     && let Some((p, None)) = &o.param
-                    && let Some(decl) = caller_decl.filter(|d| d.readonly_params & (1u64 << p) != 0)
+                    && let Some(decl) = readonly.filter(|d| d.readonly_params & (1u64 << p) != 0)
                 {
                     let name = &decl.param_names[usize::from(*p)];
                     let message = format!(
-                        "`{}` passes `{name}` to `{}`, which changes it in place: `{name}` is annotated read-only (`Sequence` / `Mapping`), so the caller expects its argument to stay as it is; pass a copy (`list({name})` / `dict({name})`) or annotate `{name}` with a mutable type",
+                        "`{}` passes `{name}` to `{}`, which changes it in place: `{name}` is annotated read-only (`Sequence` / `Mapping`), so the caller was promised that its argument is only read, but the helper changes the caller's object; pass a copy (`list({name})` / `dict({name})`), or annotate the helper's parameter with a mutable type so that the type checker shows the mismatch",
                         site.caller.qualname,
                         bc.callee.fqn()
                     );
                     let chain = self.chain(&call, k, None);
+                    let (caller, span) = (&site.caller, site.span);
                     self.emit(
                         out,
+                        "MUT110",
                         unit,
-                        &site.caller,
-                        site.span,
+                        caller,
+                        span,
                         name.clone(),
                         message,
                         &chain,
@@ -280,7 +307,7 @@ impl Rule<'_, '_> {
         );
         let chain = self.chain(call, k, what);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
-        self.emit(out, unit, caller, span, target, message, &chain);
+        self.emit(out, "MUT108", unit, caller, span, target, message, &chain);
     }
 
     /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
@@ -359,11 +386,12 @@ impl Rule<'_, '_> {
         chain
     }
 
-    /// One report per `(function, span, target)`.
+    /// One report per `(rule, function, span, target)`.
     #[allow(clippy::too_many_arguments)]
     fn emit(
         &mut self,
         out: &mut Vec<Diagnostic>,
+        code: &'static str,
         unit: &ModuleUnit<'_>,
         func: &FuncKey,
         span: Span,
@@ -371,17 +399,10 @@ impl Rule<'_, '_> {
         message: String,
         chain: &[CallHop],
     ) {
-        if self.seen.insert((func.clone(), span, target.clone())) {
-            self.cx.emit(
-                out,
-                "MUT108",
-                unit,
-                span,
-                &func.qualname,
-                target,
-                message,
-                chain,
-            );
+        if self.seen.insert((code, func.clone(), span, target.clone())) {
+            let qualname = &func.qualname;
+            self.cx
+                .emit(out, code, unit, span, qualname, target, message, chain);
         }
     }
 }
