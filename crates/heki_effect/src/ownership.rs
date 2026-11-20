@@ -169,12 +169,12 @@ pub fn source<'i>(
             if CASTS.contains(&symbol) {
                 return args.get(1).map_or(Source::Unknown, |v| Source::Same(*v));
             }
-            if symbol == "builtins.getattr" {
-                let Some(name) = args.get(1) else {
-                    return Source::Unknown;
-                };
+            // `getattr(*spec)` names neither its object nor its default: unknown.
+            if symbol == "builtins.getattr"
+                && let [obj, name, ..] = args.as_slice()
+            {
                 let held = Holder::NamedAttr {
-                    obj: args[0],
+                    obj: *obj,
                     name: *name,
                 };
                 return match args.get(2) {
