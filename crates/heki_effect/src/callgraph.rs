@@ -400,26 +400,46 @@ fn site_origin(site: &TypedFieldWriteSite) -> Option<&str> {
 /// Insert a typed write site, keeping one (shortest) chain per original write and written
 /// object (`obj_params`).
 fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite) {
-    let origin = site_origin(&site).map(str::to_owned);
-    if origin.as_deref() == Some(owner.fqn().as_str()) {
+    let origin = site_origin(&site);
+    if origin.is_some_and(|o| is_fqn_of(o, owner)) {
         // The owner's own write coming back around a cycle.
         return;
     }
-    let same = |t: &TypedFieldWriteSite| {
-        t.class_qualname == site.class_qualname
-            && t.attr == site.attr
-            && t.kind == site.kind
-            && t.span == site.span
-            && t.obj_params == site.obj_params
-            && site_origin(t).map(str::to_owned) == origin
+    // Sites order by `(class, attr, kind, span, via_chain, obj_params)`: the ones sharing the
+    // first four fields form one range, starting at the empty chain.
+    let first = TypedFieldWriteSite {
+        class_qualname: site.class_qualname.clone(),
+        attr: site.attr.clone(),
+        kind: site.kind,
+        span: site.span,
+        via_chain: Vec::new(),
+        obj_params: 0,
     };
-    if let Some(existing) = s.typed_field_write_sites.iter().find(|t| same(t)).cloned() {
+    let existing = s
+        .typed_field_write_sites
+        .range(first..)
+        .take_while(|t| {
+            t.class_qualname == site.class_qualname
+                && t.attr == site.attr
+                && t.kind == site.kind
+                && t.span == site.span
+        })
+        .find(|t| t.obj_params == site.obj_params && site_origin(t) == origin)
+        .cloned();
+    if let Some(existing) = existing {
         if existing.via_chain.len() <= site.via_chain.len() {
             return;
         }
         s.typed_field_write_sites.remove(&existing);
     }
     s.typed_field_write_sites.insert(site);
+}
+
+/// `name == owner.fqn()`, without building the fqn.
+fn is_fqn_of(name: &str, owner: &FuncKey) -> bool {
+    name.strip_prefix(owner.module.as_str())
+        .and_then(|rest| rest.strip_prefix('.'))
+        == Some(owner.qualname.as_str())
 }
 
 /// A private function name (`_name`, not a dunder) by its qualname's last component.
