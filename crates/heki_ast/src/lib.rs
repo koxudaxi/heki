@@ -110,7 +110,6 @@ impl From<TextRange> for Span {
     }
 }
 
-/// Source-level parse error reported by the Python parser.
 #[derive(Debug, Clone, Error)]
 #[error("python syntax error at {span:?}: {message}")]
 pub struct ParseError {
@@ -130,13 +129,11 @@ pub struct ImportRecord {
     pub span: Span,
 }
 
-/// Parsed Python module wrapper.
 pub struct ParsedModule {
     parsed: ruff_python_parser::Parsed<ruff_python_ast::ModModule>,
 }
 
 impl ParsedModule {
-    /// Access the underlying module body (for `heki_semantic` / `heki_ir` lowering).
     pub fn suite(&self) -> &[ruff_python_ast::Stmt] {
         &self.parsed.syntax().body
     }
