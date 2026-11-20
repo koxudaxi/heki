@@ -434,8 +434,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      in a loop are excluded.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
-     synchronous world (`async B`) is reported; when more than a threshold (10) of callers reach
-     the same root cause, they are grouped into one representative with the count.
+     synchronous world (`async B`) is reported; when more than a threshold (10) of the reports
+     shown reach the same root cause, output folds them into one representative with the count
+     (`heki_rules::fold_root_causes`). Folding comes after inline suppressions and the Ratchet
+     baseline, which see every report.
 5. **Context relaxation**: `click` / `typer` commands (`@command`), ASGI lifespan hooks,
    `LoopBound::ConstSmall` / `RetryPattern` loops, and test code (`lint.relax-async-in-tests`,
    default true) are relaxed by default.

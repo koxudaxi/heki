@@ -157,8 +157,10 @@ impl State {
         }
     }
 
-    fn publish_for(&mut self, path: &Path, diags: Vec<Diagnostic>) -> Option<Publish> {
+    fn publish_for(&mut self, path: &Path, mut diags: Vec<Diagnostic>) -> Option<Publish> {
         let uri = self.uri_of(path)?;
+        // Per file: the document always shows its own boundaries (docs/lsp.md).
+        heki_rules::fold_root_causes(&mut diags);
         // Positions are converted with the text; a file without diagnostics needs none (it may
         // be gone).
         let text = if diags.is_empty() {

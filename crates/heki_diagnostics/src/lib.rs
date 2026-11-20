@@ -62,6 +62,11 @@ pub struct Diagnostic {
     /// only when above 1.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub sites: u32,
+    /// What the report shares with others that output may fold into one: the blocking root cause
+    /// and effect of an `async def` boundary (`EFF101` / `EFF105`). Folding happens after
+    /// suppressions and baselines, which see every report (`heki_rules::fold_root_causes`).
+    #[serde(skip)]
+    pub fold_key: Option<String>,
 }
 
 fn one() -> u32 {
@@ -733,6 +738,7 @@ mod tests {
             }],
             fix: None,
             sites: 1,
+            fold_key: None,
         }
     }
 

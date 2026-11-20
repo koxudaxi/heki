@@ -658,14 +658,31 @@ fn eff101_root_cause_grouping() {
     for i in 0..11 {
         src.push_str(&format!("\nasync def h{i:02}():\n    c()\n"));
     }
-    let diags = check(&src, &HekiConfig::default());
+    // Every boundary is a report of its own (suppressions and baselines count each one);
+    // output folds them beyond the threshold.
+    let mut diags = check(&src, &HekiConfig::default());
+    assert_eq!(diags.len(), 11);
+    fold_root_causes(&mut diags);
     assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].qualname, "h00");
     assert!(
         diags[0]
             .message
             .ends_with("(+10 more async call sites reaching the same blocking root cause)"),
         "{}",
         diags[0].message
+    );
+    // Exactly at the threshold nothing is folded.
+    let mut ten = check(
+        &src.replace("async def h10", "def h10"),
+        &HekiConfig::default(),
+    );
+    assert_eq!(ten.len(), ROOT_CAUSE_GROUP_THRESHOLD);
+    fold_root_causes(&mut ten);
+    assert_eq!(ten.len(), ROOT_CAUSE_GROUP_THRESHOLD);
+    assert!(
+        ten.iter()
+            .all(|d| !d.message.contains("more async call sites"))
     );
 }
 

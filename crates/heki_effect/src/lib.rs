@@ -15,7 +15,7 @@
 //!    with the guards of each effect and call site (`guards`).
 //! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint; `guards` maps a
 //!    callee's guards across each call site (pruning the effects an argument switches off).
-//! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
+//! 4. `report`: Boundary-Only Reporting.
 
 mod callgraph;
 pub mod consumption;
@@ -34,10 +34,7 @@ pub use invalidation::{
     delegates_to_callers, is_initializer, reach_across,
 };
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
-pub use report::{
-    BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
-    boundary_reports_in, group_by_root_cause,
-};
+pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
     ReadOnlyKind, TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path,

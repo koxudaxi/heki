@@ -14,6 +14,7 @@ use heki_profile::ProfileData;
 use heki_rules::project::{ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
+    fold_root_causes,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeMap;
@@ -348,6 +349,8 @@ pub(crate) fn report(
         }
     }
 
+    // Suppressions and the baseline saw every report; only output folds them.
+    fold_root_causes(&mut diags);
     // Every format prints the paths `--diff` prints.
     for d in &mut diags {
         d.path = shown_path(&d.path);

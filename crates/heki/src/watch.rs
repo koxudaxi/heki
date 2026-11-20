@@ -84,6 +84,8 @@ impl Watcher<'_> {
             }
         }
         sort_diagnostics(&mut all);
+        // As `heki check` prints them: across every file.
+        heki_rules::fold_root_causes(&mut all);
         let source_line = |p: &Path, line: u32| {
             let text = std::fs::read_to_string(p).ok()?;
             LineIndex::from_source(&text)

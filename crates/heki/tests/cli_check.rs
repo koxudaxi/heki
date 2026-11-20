@@ -430,3 +430,50 @@ fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
         (baseline, snap)
     );
 }
+
+/// An `async def` with `n` blocking calls on lines of their own (from line 4).
+fn sleeps(n: usize) -> String {
+    let mut src = String::from("import time\n\nasync def h():\n");
+    for i in 0..n {
+        src.push_str(&format!("    time.sleep({i})\n"));
+    }
+    src
+}
+
+#[test]
+fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
+    let p = Project::new("fold_after_baseline");
+    p.write("a.py", &sleeps(11));
+    let concise = ["--output-format", "concise"];
+    let (code, stdout, _) = p.heki(&concise);
+    assert_eq!(code, 1);
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
+    // Suppressing the first call leaves the other ten, below the folding threshold.
+    p.write(
+        "a.py",
+        &sleeps(11).replacen("time.sleep(0)", "time.sleep(0)  # heki: ignore[EFF101]", 1),
+    );
+    let (code, stdout, _) = p.heki(&concise);
+    assert_eq!(code, 1);
+    assert_eq!(stdout.lines().count(), 10, "{stdout}");
+    assert!(stdout.starts_with("a.py:5:5: EFF101 "), "{stdout}");
+    // The baseline records every site: a twelfth call is a regression.
+    p.write("a.py", &sleeps(11));
+    let baseline = ["--baseline", "b.toml"];
+    assert_eq!(
+        p.heki(&[&baseline[..], &["--update-baseline"]].concat()).0,
+        0
+    );
+    assert!(
+        std::fs::read_to_string(p.dir.join("b.toml"))
+            .unwrap()
+            .contains("count = 11")
+    );
+    p.write("a.py", &sleeps(12));
+    let (code, stdout, stderr) = p.heki(&[&baseline[..], &concise[..]].concat());
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("allows 11 site(s), found 12"), "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert!(stdout.contains("(+11 more async call sites"), "{stdout}");
+}
