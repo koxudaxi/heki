@@ -2,7 +2,8 @@
 //! Python's MRO (C3 linearization), constructing a named class (its own `__init__`, not a
 //! subclass's) and calling a method through it, class methods called through their class,
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
-//! statements, module-level names bound twice, and the parameters `*` arguments bind.
+//! statements, module-level names bound twice, the parameters `*` arguments bind, and project
+//! methods named like container mutators.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -20,7 +21,7 @@ extend-select = ["MUT108"]
 
 [[tool.heki.write-owners]]
 name = "model"
-targets = ["Model.items"]
+targets = ["Model.items", "Holder.stats", "Holder.tally"]
 "#;
 
 /// `(path, line, rule)` of every diagnostic of `rules`.
@@ -447,6 +448,47 @@ fn unpacked_arguments_bind_the_items_of_known_displays() {
     check_marks(
         "unpacked_arguments",
         &[("pkg/model.py", MODEL), ("pkg/unpacked.py", UNPACKED)],
+        &["MUT201"],
+    );
+}
+
+/// A method named like a container mutator changes its receiver in place only when the
+/// receiver's class does not define it: a project method's own summary decides.
+const HOLDERS: &str = r#"class Stats:
+    def clear(self):
+        return None
+
+
+class Tally(list):
+    pass
+
+
+class Counter:
+    def __init__(self):
+        self.seen = []
+
+    def clear(self):
+        self.seen.clear()
+
+
+class Holder:
+    def __init__(self):
+        self.stats = Stats()
+        self.tally = Tally()
+        self.counter = Counter()
+
+
+def reset(h: Holder):
+    h.stats.clear()
+    h.tally.clear()  # MUT201
+    h.counter.clear()
+"#;
+
+#[test]
+fn a_project_method_named_like_a_container_mutator_decides_itself() {
+    check_marks(
+        "named_mutators",
+        &[("pkg/holders.py", HOLDERS)],
         &["MUT201"],
     );
 }

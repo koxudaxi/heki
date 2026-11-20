@@ -1259,7 +1259,13 @@ impl<'a> Extractor<'a> {
                 if crate::callgraph::is_private_name(method) {
                     self.summary.private_calls.insert(method.clone());
                 }
-                if CONTAINER_MUTATORS.contains(&method.as_str()) {
+                let callee = self.cx.resolve_method(self.val(*recv), method);
+                // A container method changes its receiver in place, unless the receiver's
+                // class defines the method itself: then what that method does is in its
+                // summary (`Stats.clear()` may change nothing).
+                if CONTAINER_MUTATORS.contains(&method.as_str())
+                    && !matches!(callee, Callee::Project(..))
+                {
                     self.container_method(*recv, method, args, span);
                     for a in args {
                         if matches!(method.as_str(), "append" | "insert" | "add" | "setdefault") {
@@ -1274,7 +1280,6 @@ impl<'a> Extractor<'a> {
                 {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
-                let callee = self.cx.resolve_method(self.val(*recv), method);
                 let (recv_origin, recv_is_self) = self.receiver(*recv, bb);
                 let constructs = self.construction(kind);
                 let call = Call {
