@@ -505,7 +505,8 @@ opaque_to_layer3 = true
 # (likewise `boto3.resource.<Resource>.<action>`). Every listed operation is a network call;
 # DynamoDB item reads and writes are database queries too (`query` / `scan` page through
 # results in loops by design, so they are not). Local helpers (`generate_presigned_url`,
-# `get_paginator`) are not listed.
+# `get_paginator`) are not listed. A `boto3.Session(...)` only holds configuration (profile,
+# region, credentials): its `client()` / `resource()` allocate the clients, so it is not listed.
 
 [[entries]]
 symbol = "boto3.client"
@@ -514,11 +515,6 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "boto3.resource"
-effects = ["unpooled_client_alloc"]
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "boto3.Session"
 effects = ["unpooled_client_alloc"]
 opaque_to_layer3 = true
 

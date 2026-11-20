@@ -847,7 +847,6 @@ mod tests {
                     "urllib3.HTTPSConnectionPool",
                     "boto3.client",
                     "boto3.resource",
-                    "boto3.Session",
                     "redis.Redis",
                     "redis.StrictRedis",
                     "pymongo.MongoClient",
@@ -1428,6 +1427,8 @@ mod tests {
             "redis.client.Pipeline.set",
             "redis.asyncio.client.Pipeline.set",
             "pandas.DataFrame.to_csv",
+            // A session only holds configuration; its `client()` / `resource()` allocate.
+            "boto3.Session",
             "pandas.read_html",
             "sqlalchemy.orm.sessionmaker.__call__",
         ] {

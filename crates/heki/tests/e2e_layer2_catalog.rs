@@ -785,6 +785,13 @@ def tn_dynamodb_pagination(name):
         start = page.get("LastEvaluatedKey")
         if not start:
             break
+
+
+def tp_sessions_in_loops(profiles):
+    for name in profiles:
+        # A session only reads configuration; its clients are what is allocated.
+        print(boto3.Session(profile_name=name).region_name)
+        boto3.Session(profile_name=name).client("s3")
 "#;
 
 #[test]
@@ -840,6 +847,7 @@ fn boto3_and_django_block_on_their_calls_and_lazy_querysets_do_not() {
                 "tp_django_async_queries_in_loops",
                 "django.db.models.query.QuerySet.aget"
             ),
+            d(82, "EFF102", "tp_sessions_in_loops", "boto3.Session.client"),
         ]
     );
 }
