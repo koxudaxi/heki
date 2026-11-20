@@ -1,0 +1,17 @@
+[package]
+name = "heki_ir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+heki_ast.workspace = true
+heki_env.workspace = true
+heki_semantic.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+smallvec.workspace = true

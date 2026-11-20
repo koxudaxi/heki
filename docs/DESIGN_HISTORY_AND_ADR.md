@@ -1,0 +1,339 @@
+# Design History, Revision Log, and Architecture Decision Records (ADRs)
+
+> **What this document is**
+> The supplement to [ARCHITECTURE.md](../ARCHITECTURE.md): how the design arrived at its current
+> form, the evidence behind it (large-scale measurements: 19.7 million lines plus the Stage 0-A
+> Wave 1/2 corpora of 19 million lines, counterexample experiments, a study of
+> datamodel-code-generator's 196,000 lines and its 20,000 lines of in-house checkers, and checks
+> of CPython 3.15 PEP 810 and `ruff_python_parser` 0.17.5), the reasons for every revision from
+> v1.0 to v4.1, and every major decision (ADR-001 to ADR-017). The project's working name was
+> `pyopt`; crate names below use the current `heki_*` names.
+
+---
+
+## 1. Starting point and the owner's stance
+
+### 1.1 The original idea
+The first plan was a performance optimizer that brought Rust's ownership and borrowing to Python
+static analysis by combining (1) inference without annotations (Stage 1), (2) an explicit
+contract API (Stage 2: `Owned` / `Borrowed` / `move()` / `@pure`), and (3) formal verification in
+Lean 4.
+
+### 1.2 The goal and framing that discussion and measurement settled on
+- Rust ownership and Lean 4 are **means, not ends**.
+- **No ad-hoc fixes and no deferring**: one complete architecture based on one theory, a tool of
+  industry-standard quality that runs in CI without overlapping Ruff, ty, or tach.
+- After large corpus measurements (more than 37 million lines in total) and a deep study of
+  datamodel-code-generator (196,000 lines plus 20,000 lines of in-house defensive
+  infrastructure), the framing converged on: **an Effect (execution and state change) and Alias
+  (uniqueness and ownership boundaries) semantic checker for Python, the third static analysis
+  layer after Ruff and ty, with speedups as a natural by-product**
+  ([ADR-012](#adr-012) to [ADR-016](#adr-016)).
+
+---
+
+## 2. Facts established by measurements, primary sources, and real projects
+
+### 2.1 Large corpus (19.7 million lines), counterexample experiments (S1–S28), and CPython 3.15
+1. **Pure-Python container rewrites alone are rare, and default automatic fixes even rarer**:
+   - About 130 container optimizations per million lines look provable without annotations
+     (one per about 7,600 lines).
+   - Small-size measurements (A.8) show that only **`OPT101` and `OPT102`** are faster from
+     $n = 1$ on (`unconditional`): about 20 provable cases in 13.2 million lines of mature code,
+     1 in 6.5 million lines of new code. `OPT103` is 0.23–0.84 times as fast for small loops, and
+     `OPT130` 0.01 times as fast (about 100 times slower) for loops that run zero times.
+2. **Uniqueness (frame locality) holds, but derived references and the invariance of object
+   contents must be tracked (S1–S28)**:
+   - Experiments confirmed that `for v in x: x = x + [v]` becomes an infinite loop when rewritten
+     (S23), that rewrites break while `iter` / `enumerate` / `zip` / `map` / generator expressions
+     / `d.keys()` are alive (S24–S26b), and that changes from outside or through aliases during a
+     loop break them too (S27–S28).
+3. **Constant-factor micro-optimizations often backfire, and propagating effects up from the
+   lowest primitives misfires on `asyncio`**:
+   - Caching builtins and bound methods in locals is 2–12% slower on CPython 3.15, and
+     `re.compile` only gains a constant factor because of its internal cache.
+   - A `sys.setprofile` measurement (A.7) showed that correct async code,
+     `asyncio.StreamWriter.write(data)`, reaches the non-blocking `socket.send` in two hops.
+
+### 2.2 Stage 0-A measurement (339 repositories / 56,629 files / 18,108,143 lines, all 171 samples reviewed by hand)
+- **Corpus**: 118 mature open-source repositories (12.42 million lines) and 221 new GitHub
+  repositories of 2026 (5.68 million lines), scanned with 8 workers (62.8 s); 171 samples of 8
+  rules reviewed by hand.
+- **Adopted as the core**:
+  - `EFF101`: **37.6%** of web/async repositories (82.3% indirect), **68% real harm** (including
+    a real `time.sleep` in redis-py `redis/asyncio/cluster.py:1613` reached in 4–5 hops). The
+    need to exclude awaited calls and `subprocess.Popen` was identified.
+  - `EFF102`: **44.1%** of web/async and **48.5%** of database repositories (90–93% indirect);
+    about 75–80% real harm after excluding `for.iter` (NVIDIA NeMo, OmniAgent, luigi, ...).
+  - `EFF103`: **47.6%** of database repositories (74.2% indirect). The need to exclude
+    `for.iter`, DDL, migrations, and ORM internals was identified.
+  - `DATA101`: **19.5%** of data/ML repositories. The 60% false positives of a naive AST check
+    were all non-`LoopCarried` padding; with the SSA `LoopCarried` check precision is about 90%.
+- **Made strict or rejected**:
+  - `MUT101`: **16.1%** of mature repositories (real hits in datamodel-code-generator, mkdocs,
+    wagtail, textual, ...). The three noise sources of the naive version (two-phase
+    initialization, memo dicts, disjoint dict keys) and the separation of nested-class
+    `__init__` were identified; the strict version was adopted.
+  - `MUT102a` / `MUT102b`: 4.2% of mature and 0.5–1.4% of new repositories, sparse and mostly
+    deliberate idioms: **rejected by measurement**.
+  - `DATA102` (`df.iterrows()`): duplicates single-expression lints: **rejected**.
+
+### 2.3 A real production project: datamodel-code-generator (196,000 lines plus 20,000 lines of in-house checkers)
+1. **Performance, CLI start-up, and native code**:
+   - The pure core (6 JSON schemas, `Formatter.BUILTIN`: 1,771 ms) scaled exactly linearly,
+     $O(N)$, in every scaling test. 45% of a medium CLI run (269 ms) was start-up and the import
+     of 395 modules, so turning parts into native extensions (`.so`) would be counterproductive
+     for a CLI (checked by the owner and by measurement).
+   - The default `OPT101` / `OPT102` fixes apply 0 times (and `_target_binding.py:465` gave a new
+     counterexample: `{**other, **found}` accumulates on the right). `_runtime/client/` gave two
+     findings: the `await in_thread(self.open)` wrapper propagation and the sync-over-async
+     (`run_sync`) relaxation.
+   - A scan for `@cached_property` **hit a real bug of datamodel-code-generator 0.86.0
+     (`jsonschema.py:1460`) on the first try**.
+2. **What the in-house defensive infrastructure (about 20,272 lines) taught**:
+   - The project maintains **9,762 lines** of static checkers in `scripts/`, **4,685 lines** of
+     run-time monitoring in `tests/checks/`, and **5,825 lines** of unit tests for the checkers.
+   - Its foundation, `scripts/_source_model.py` (2,433 lines), states itself that *value flow,
+     container aliases, attribute types, and call graphs cannot be answered from the AST*. As a
+     result `check_generation_store_usage.py` (1,665 lines) tracks local aliases by hand and
+     still **misses 13 cases that depend on run-time `__setattr__` monitoring (`witnesses`)**,
+     and `tests/checks/schema_graph.py` (236 lines) has to compare deep fingerprints to verify
+     that the shared `JsonSchemaObject` is not changed.
+   - All of this generalizes to **state effects, aliases, and the call graph** in `heki_effect`
+     (**`MUT201` write ownership** and **`MUT202` read-only returns**). The line-number-independent,
+     shrink-only baseline (`check_ratchets.py` with `generation_store_allowlist.toml`) and the
+     bidirectional comparison with CPython `symtable` (`_source_model.py:verify()`) are worth
+     adopting as core techniques of the tool's design and quality assurance.
+3. **Checks on CPython 3.15 (Tachyon and PEP 810 `lazy import`)**:
+   - Tachyon (`profiling.sampling`) cannot combine `--opcodes` with `--jsonl`, and needs `sudo`
+     on macOS. Profile integration is limited to reading recorded dumps (optional).
+   - **PEP 810 (`lazy import json` / `lazy from pathlib import Path` → `is_lazy=1`) is in CPython
+     3.15.0, checked on the real interpreter**. Lazy imports and import cycles are left to tach
+     and Python 3.15+ PEP 810, and heki stays with effects and aliases.
+
+---
+
+## 3. Evolution of the design (v1.0 → v2.0 → v2.1 → v3.0 → v4.0)
+
+### 3.1 Summary of v1.0 → v3.0
+- **v1.0 → v2.0**: the two lanes physically separated (Soundness vs Effect), the three-layer
+  knowledge model, Datalog rejected, the Safety × Profitability model, the `LoopBound` gate,
+  Stage 0-A first.
+- **v2.0 → v2.1**: derived references (`derived_refs`), `ValueLoopInvariant`, an independent
+  `SoundnessSummary` inside the Soundness lane, `OPT103` / `OPT130` made size-dependent, a pure
+  Layer 1 and no Layer 3 dives into the standard library, staged `EFF101` with boundary
+  aggregation, `EFF104` rejected.
+- **v2.1 → v3.0**: after measuring datamodel-code-generator's 196,000 lines, the product was
+  redefined as an "Effect & Alias semantic checker (speedups are a natural by-product)"; native
+  extensions and ad-hoc rules became non-goals; Tachyon became optional dumps; offload wrapper
+  propagation and the sync-over-async relaxation were added; `OPT102` was limited to a leading
+  accumulator.
+
+### 3.2 Baseline v3.0 → Baseline v4.0 (Stage 0-A done, in-house checker study, PEP 810 checked)
+
+| Topic | Baseline v3.0 | What measurement and study showed | Baseline v4.0 decision | Related ADR |
+|---|---|---|---|---|
+| **Stage 0-A rule decisions** | `MUT101` / `102`, `EFF101`–`103`, `DATA101` / `102` to be measured | In 339 repositories and 171 samples, `EFF101`–`103` / `DATA101` are dense and harmful, `MUT102` is sparse and noisy, `DATA102` duplicates Ruff | Adopt `EFF101`–`103`, `DATA101` (SSA `LoopCarried` required), and `MUT101` (strict); **formally reject `MUT102` / `DATA102`**; list the next candidates (`MUT104`–`107`, `EFF106`–`108`, `OPT112`–`113`, `OPT131`) | [ADR-014](#adr-014) |
+| **Protecting state in mature code (declared boundaries)** | Inference only (`MUT101` / `102` / `103`) | datamodel-code-generator protects "write boundaries" and "immutability of shared objects" with 20,000 lines of in-house checkers and run-time monitoring, and hits the limits of the AST (13 misses) | Adopt **`MUT201` (write ownership)**, **`MUT202` (read-only returns)**, the **line-number-independent Ratchet baseline**, and the **`symtable` comparison** | [ADR-015](#adr-015) |
+| **Import boundaries and Python 3.15 PEP 810** | Not specified | tach / import-linter exist, and CPython 3.15.0 ships **PEP 810 (`lazy import`, `is_lazy=1`)**, checked on the real interpreter | General import-layer and import-cycle checks are **non-goals left to other tools**; heki stays with effects and aliases; `heki_ast` / `heki_semantic` support the PEP 810 syntax and lazy-evaluation semantics | [ADR-016](#adr-016) |
+
+Baseline v4.1 (ADR-017) fixed the name `heki`, the interface shared with Ruff and `t-linter`, the
+incremental LSP design, and the Stage 0-A Wave 2 decisions.
+
+---
+
+## 4. Architecture Decision Records (ADRs)
+
+<a id="adr-001"></a>
+### ADR-001: The product's axis — an independent middle end, not a judge for Ruff's unsafe fixes
+- **Decision**: no judge for Ruff's unsafe fixes (`pyopt judge`); an independent middle-end
+  analyzer instead (merged into the "Effect & Alias semantic checker" by [ADR-012](#adr-012)).
+- **Reason**: most of Ruff's unsafe fixes can be decided with type information and risk being
+  absorbed by ty, and tracking upstream would cost too much. Effects across functions (74–93% of
+  the findings are indirect) and alias / mutation analysis are structurally outside Ruff.
+
+<a id="adr-002"></a>
+### ADR-002: The custom contract API (Stage 2: `Owned` / `Borrowed` / `move()` / `@pure`) is rejected
+- **Decision**: no custom contract API in user code (a non-goal). Instead: **standard `typing`,
+  zero-config inference, boundaries declared in `pyproject.toml` (`MUT201` / `MUT202`), and
+  `heki snapshot summary`**.
+- **Reason**: to avoid function coloring, package dependencies, run-time overhead, and barriers to
+  adoption.
+
+<a id="adr-003"></a>
+### ADR-003: Lean 4 is rejected; rigor comes from axiomatic analysis and adversarial differential tests
+- **Decision**: no Lean 4 (a non-goal). Instead: conservative abstract interpretation (a
+  lattice), declarative three-valued proof obligations, adversarial differential tests (with
+  obligation-stripping tests), and Layer 1 sentinel verification.
+
+<a id="adr-004"></a>
+### ADR-004: Two lanes physically separated on one IR (`heki_soundness` vs `heki_effect`), each with its own summaries
+- **Decision**: the analyses below the SSA-CFG IR are split into the crates `heki_soundness` and
+  `heki_effect`, and `heki_soundness` depending on `heki_effect` is a compile-time error.
+  - `heki_soundness`: never trusts type annotations; uses only `ExactType`, `Unique`,
+    `derived_refs`, and `ValueLoopInvariant`. For A2 it is to get its own conservative
+    `SoundnessSummary` (planned).
+  - `heki_effect`: light receiver type resolution (name resolution, PEP 484, `self` attributes,
+    CHA / RTA) computing one `EffectSummary` (execution effects, mutation and state effects, and
+    write ownership). It continues on functions that violate A1.
+  - A fix's text may rewrite an annotation (`list[int]` to `deque[int]` for a `deque` fix):
+    the Soundness lane rewrites the annotation's text and never trusts it as a type.
+
+<a id="adr-005"></a>
+### ADR-005: The three-layer knowledge model (a pure Layer 1, one Layer 2, no Layer 3 dives, a full dependency cache)
+- **Decision**: Layer 1 (Soundness only, no effects, sentinel verification, demotion past
+  `verified_max_python`), Layer 2 (public standard-library APIs and major packages: the origin of
+  every effect, `async_safe`, offloading, `logging` excluded, copy sanitizers), and Layer 3
+  (on-demand analysis of unregistered pure-Python dependencies only, never the standard library
+  or Layer 2 packages, with a cache keyed by `effective_kb_digest` and `env_packages_digest`),
+  projected once at start-up.
+- **Status**: Layers 1 and 2 are implemented; Layer 3 and its cache are planned. Until then,
+  functions outside the checked files that Layer 2 does not list have no known effects.
+
+<a id="adr-006"></a>
+### ADR-006: Embedded Datalog (`ascent`) is rejected in favor of a dedicated engine
+- **Decision**: no embedded Datalog. Instead: an RPO worklist abstract interpretation over a
+  provenance-carrying lattice, declarative three-valued proof obligations, and a Tarjan SCC
+  worklist fixpoint.
+
+<a id="adr-007"></a>
+### ADR-007: Safety × Profitability, the `LoopBound` gate, and honest expectations about automatic fixes
+- **Decision**: safety (behavior preservation) and profitability (`LoopCarried`, `NotConstSmall`,
+  dependence on input size) are separate. `unconditional` (applied by the default `--fix`) is
+  only `OPT101` and `OPT102`; `OPT103` and `OPT110`–`OPT130` are `size-dependent`; `OPT120` /
+  `OPT121` forbid any index `q[i]` other than the ends.
+
+<a id="adr-008"></a>
+### ADR-008: Advisory precision (staging, boundary aggregation, offload wrapper propagation, sync-over-async relaxation, `EFF104` rejected)
+- **Decision**: `EFF101` is limited to high-impact blocking; `BlockingFs` is split into the
+  opt-in `EFF105`; `logging` / `print` are excluded. Boundary-only reporting with root-cause
+  grouping, offload wrapper propagation, the sync-over-async relaxation, `EFF104` rejected, and
+  ORM lazy loading stated as out of scope for `EFF103`.
+
+<a id="adr-009"></a>
+### ADR-009: Minimal, isolated use of Ruff crates; scopes, CFG, and SSA IR built in-house
+- **Decision**: only `ruff_python_parser` / `ruff_python_ast` are used, pinned exactly (a version
+  with PEP 810), and isolated in `heki_ast`; scope resolution, the CFG, and the SSA IR are built
+  in-house.
+
+<a id="adr-010"></a>
+### ADR-010: Stage 0-A measurement first, with strict quantitative gates
+- **Decision**: every core rule and every candidate rule is judged by a corpus measurement and a
+  manual review before it is adopted. The Stage 0-B gates are zero `symtable` disagreements,
+  zero unsafe rewrites, a strict Advisory false-positive rate below 5%, practical noise below
+  20%, a convincing finding in at least 30% of the target projects (shown on
+  datamodel-code-generator for the contract rules), and 100,000 lines analyzed in a few seconds.
+
+<a id="adr-011"></a>
+### ADR-011: Derived references, invariance of object contents, and the unpacking order of `OPT102`
+- **Decision**: `FrameState` gets `derived_refs` with transitive escape, `ExclusiveAccessAtWrite`,
+  merges of up to 4 `alloc_id`s, and `ValueLoopInvariant` (against S23–S28). `OPT102` rewrites a
+  dict unpacking only when the accumulated dict comes first (`{**d, ...}`) (against
+  datamodel-code-generator `_target_binding.py:465`).
+
+<a id="adr-012"></a>
+### ADR-012: Product redefinition — an "Effect & Alias semantic checker (speedups are a by-product)"
+- **Decision**: the product is **"an Effect & Alias semantic checker for Python (the third static
+  analysis layer after Ruff and ty)"**, and **"speedups follow as a natural by-product"**. Family
+  1 (`MUT`), family 2 (`EFF` / `DATA`), and family 3 (`OPT`) all derive from one SSA-CFG and
+  call-graph foundation.
+
+<a id="adr-013"></a>
+### ADR-013: Native extensions (AOT / mypyc) and ad-hoc framework optimizations excluded; external dumps optional
+- **Decision**: ahead-of-time native extensions, build-time rewriting, and framework-specific
+  heuristics are non-goals; profile integration is limited to reading offline dumps, without
+  touching the program (an optional add-on).
+
+<a id="adr-014"></a>
+### ADR-014: Rule decisions from the Stage 0-A measurement (`MUT102` / `DATA102` rejected, SSA required for `DATA101`, strict `MUT101`)
+- **Background**: 339 repositories (18.1 million lines) and all 171 samples reviewed by hand.
+- **Decision**:
+  1. Adopt `EFF101` / `EFF102` / `EFF103` / `DATA101` as the core; in the IR, keep `for.iter`
+     outside the loop, distinguish `is_awaited`, exclude `subprocess.Popen` and DDL, relax
+     `DaemonPolling`, and require SSA `LoopCarried` for `DATA101`.
+  2. Adopt `MUT101` with its four required filters: two-phase initialization hooks, memo dicts,
+     disjoint constant dict keys, and the separation of nested classes.
+  3. **Formally reject `MUT102` (deep mutation, representation exposure) and `DATA102`
+     (`df.iterrows()`) based on the measurements.**
+  4. Keep the further candidates (`MUT104`–`107`, `EFF106`–`108`, `OPT112`–`113`, `OPT131`) for
+     v1.x and put them through the same measurement gate before implementation (done for Wave 2
+     in [ADR-017](#adr-017)).
+
+<a id="adr-015"></a>
+### ADR-015: Declared write ownership (`MUT201`), read-only returns (`MUT202`), the Ratchet baseline, and the `symtable` comparison
+- **Background**: the study of datamodel-code-generator's in-house defensive infrastructure (20,272
+  lines) showed that the biggest pain of mature production code, which neither Ruff nor ty can
+  protect and which forces in-house AST checkers and run-time monitoring, is "model state written
+  outside the designated store (through aliases, container operations, and indirect calls)" and
+  "corruption of shared cached objects". It also showed that large-scale adoption needs a
+  line-number-independent, shrink-only baseline, and that the semantic analyzer's reliability
+  needs a comparison with CPython's `symtable`.
+- **Decision**:
+  1. **`MUT201` (write ownership)** and **`MUT202` (read-only returns)**, declared in
+     `pyproject.toml`, become core members of family 1 (they ride on the existing state effect
+     and alias engine unchanged). v1.x added **`MUT203` (read ownership)**, `exempt-methods`, and
+     `message`.
+  2. The Ratchet baseline (line-number-independent keys `(path, qualname, rule, target) = count`,
+     shrink only) becomes a standard feature: `heki check --baseline` / `--update-baseline`.
+  3. The quality assurance of `heki_semantic` requires the **bidirectional comparison with the
+     CPython `symtable`** (CPython 3.11–3.15 in CI).
+
+<a id="adr-016"></a>
+### ADR-016: No import-boundary or import-cycle checks (left to tach); semantic support for Python 3.15 PEP 810 (`lazy import`)
+- **Background**: datamodel-code-generator has `_import_cycles.py` (117 lines),
+  `check_architecture_boundaries.py` (1,977 lines), and `redundant-local-import`, while tach /
+  import-linter already exist, and CPython 3.15.0 was confirmed to ship **PEP 810 (`lazy import`
+  / `lazy from ... import ...`, `is_lazy=1`)**.
+- **Decision**:
+  1. General import-layer boundaries and import-cycle checks stay out of heki's core and are left
+     to tach / import-linter and PEP 810: **heki stays with effects and aliases**.
+  2. `heki_ast` and `heki_semantic` **fully support the syntax of Python 3.15 PEP 810
+     (`is_lazy=1`) and its semantics of materializing on first use** (a requirement for the pinned
+     `ruff_python_parser` version).
+
+<a id="adr-017"></a>
+### ADR-017: The name `heki`, one interface with Ruff and `t-linter`, the incremental LSP design, and the Stage 0-A Wave 2 decisions
+- **Background**: before implementation, the project needed (1) a name short enough for
+  `# <name>: ignore[EFF101]` at the end of a line, easy to pronounce in Japanese and English (no
+  `v` / `th`), searchable, and free on PyPI and crates.io; (2) a CLI and configuration that sit
+  naturally next to Ruff and `t-linter`; (3) realistic LSP latency; and (4) the advance
+  measurement of the nine v1.x candidate rules.
+- **Decision**:
+  1. **The working name `heki` (Japanese for "wall")**: four letters (as long as `ruff`), no `v` /
+     `th`, no clash with religious terms, slang, or IT companies in search, and free on PyPI
+     (HTTP 404) and crates.io (HTTP 404), checked. (The first candidate `kabe` was dropped because
+     it collides with the Turkish word for the Kaaba. The final public name was still being
+     considered at the time.) The name stands for every rule's theme: a barrier around write
+     ownership, shared immutability, crossings into `async`, and alias boundaries.
+  2. **One interface with Ruff and `t-linter`**: one Rust binary distributed with `maturin`; the
+     CLI `heki check` / `heki check --fix` / `heki server` (alias `lsp`) / `heki rule` (alias
+     `explain`) / `heki snapshot` / `heki assumptions`; exit codes `0 / 1 / 2`; configuration in
+     `pyproject.toml` `[tool.heki]` (kebab-case), `heki.toml`, and `.hekiignore`; inline
+     suppressions `# heki: ignore[...]` first (no conflict with Ruff's `RUF100`), `# noqa:`
+     accepted too.
+  3. **Incremental LSP design (Early Cutoff)**: from day one, `heki_effect::ProjectIndex` keeps no
+     IR, only the light `FileSummary`s and the reverse call graph; `didChange` (250 ms debounce)
+     re-evaluates one file, and `didSave` or a changed summary re-evaluates only the affected
+     callers through Early Cutoff.
+  4. **Stage 0-A Wave 2 (339 repositories, 19 million lines, 30.5 s, with a manual audit)**:
+     - **First v1.x rules**: `MUT107` (attributes `__hash__` depends on: 21.2% of mature
+       projects, about 83% precise), `OPT112` (`list.index` / `remove` in loops: 81.4% of mature
+       projects, restricted by type), `OPT113` (nested-loop equi-joins: 10.2% of mature projects,
+       about 90% precise).
+     - **Adopted when narrow and strict (v1.x opt-in)**: `EFF106` (`await` / HTTP while a
+       type-certain synchronous lock or a database `.begin()` is held), `MUT106` (single-pass
+       iterators that SSA does not rebind, consumed twice), `EFF107` (tasks bound to a local
+       variable that does not escape; the discarded case duplicates Ruff's `RUF006` and is
+       excluded).
+     - **Rejected by Wave 2**: `MUT104` for module `ALL_CAPS` constants (100% were deliberate
+       registries or caches; mutation of `@lru_cache` results was folded into `MUT202`),
+       `EFF108` (duplicates Ruff's `SIM115` and is noisy), `MUT105` (very sparse under SSA).
+- **Status**: all of the above is implemented (the v1.x rules on 2026-11-20).
+
+---
+
+## 5. Open items
+
+- The design, name, license (MIT), interface, and Stage 0-A measurements (Waves 1 and 2) are
+  settled. What remains for v1.0 is listed in [ARCHITECTURE.md §10](../ARCHITECTURE.md), and the
+  rules for working on the code base in [AGENTS.md](../AGENTS.md).

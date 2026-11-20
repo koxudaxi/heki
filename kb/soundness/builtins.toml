@@ -1,0 +1,238 @@
+# Layer 1: Native Soundness KB (Soundness lane ONLY — ZERO advisory effect fields!)
+# Allowed keys per entry: symbol, return_exact_type, param_effects, verified_max_python
+# (enforced by `#[serde(deny_unknown_fields)]` in `heki_kb`).
+# Verified by `tests/sentinel/verify_soundness_kb.py` against CPython 3.12-3.15.
+# Any entry with verified_max_python < target_python is auto-downgraded to Unknown.
+# `param_effects[i]` describes positional parameter i; for methods, index 0 is `self`.
+
+# --- Derived references (return value keeps a live view/iterator of the argument) ---
+# `map` / `filter` keep their function too (`m.__reduce__()` hands it back).
+
+[[entries]]
+symbol = "builtins.iter"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.enumerate"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.zip"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.map"
+param_effects = ["retained_in_return", "retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.filter"
+param_effects = ["retained_in_return", "retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.reversed"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.memoryview"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict.keys"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict.values"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict.items"
+param_effects = ["retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+# --- Pure reads ---
+# `builtins.str` / `builtins.bytes` carry NO return_exact_type: when `__str__` / `__bytes__` returns a
+# str / bytes subclass, `str(x)` / `bytes(x)` return that subclass instance unchanged (CPython 3.11-3.15;
+# witnessed by tests/sentinel/verify_soundness_kb.py).
+
+[[entries]]
+symbol = "builtins.len"
+return_exact_type = "int"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.bool"
+return_exact_type = "bool"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.int"
+return_exact_type = "int"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.float"
+return_exact_type = "float"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.str"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.bytes"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.range"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+# --- Fresh containers ---
+
+[[entries]]
+symbol = "builtins.list"
+return_exact_type = "list"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.set"
+return_exact_type = "set"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict"
+return_exact_type = "dict"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.tuple"
+return_exact_type = "tuple"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+# --- Mutators (parameter 0 = self is mutated) ---
+# An argument the method compares with the elements (`remove`, `discard`, a `pop` key) is
+# `escaped`: an element's `__eq__` receives it and may keep it. `dict.pop` returns its default.
+
+[[entries]]
+symbol = "builtins.list.append"
+param_effects = ["mutated", "escaped"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.list.extend"
+param_effects = ["mutated", "read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.list.insert"
+param_effects = ["mutated", "read_only", "escaped"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.list.pop"
+param_effects = ["mutated", "read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.list.clear"
+param_effects = ["mutated"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.list.reverse"
+param_effects = ["mutated"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.list.sort"
+param_effects = ["mutated"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.list.remove"
+param_effects = ["mutated", "escaped"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.set.add"
+param_effects = ["mutated", "escaped"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.set.update"
+param_effects = ["mutated", "read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.set.discard"
+param_effects = ["mutated", "escaped"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.set.remove"
+param_effects = ["mutated", "escaped"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.set.clear"
+param_effects = ["mutated"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict.update"
+param_effects = ["mutated", "read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict.pop"
+param_effects = ["mutated", "escaped", "retained_in_return"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict.setdefault"
+param_effects = ["mutated", "escaped", "escaped"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict.clear"
+param_effects = ["mutated"]
+verified_max_python = { major = 3, minor = 15 }
+
+# --- Shallow copies (fresh container of the exact builtin type) ---
+
+[[entries]]
+symbol = "builtins.list.copy"
+return_exact_type = "list"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.set.copy"
+return_exact_type = "set"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }
+
+[[entries]]
+symbol = "builtins.dict.copy"
+return_exact_type = "dict"
+param_effects = ["read_only"]
+verified_max_python = { major = 3, minor = 15 }

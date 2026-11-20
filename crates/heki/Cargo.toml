@@ -1,0 +1,35 @@
+[package]
+name = "heki"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "heki"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+globset.workspace = true
+heki_ast.workspace = true
+heki_diagnostics.workspace = true
+heki_effect.workspace = true
+heki_env.workspace = true
+heki_ir.workspace = true
+heki_kb.workspace = true
+heki_lsp.workspace = true
+heki_profile.workspace = true
+heki_rules.workspace = true
+heki_semantic.workspace = true
+heki_soundness.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true

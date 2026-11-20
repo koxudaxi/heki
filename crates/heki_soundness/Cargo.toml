@@ -1,0 +1,24 @@
+[package]
+name = "heki_soundness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# ARCHITECTURE INVARIANT (ADR-004):
+# `heki_soundness` MUST NEVER depend on `heki_effect`.
+# It may only read `EffectiveSoundnessKb` (Layer 1) and `RuntimeProfile`.
+heki_ast.workspace = true
+heki_env.workspace = true
+heki_ir.workspace = true
+heki_kb.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+
+[dev-dependencies]
+heki_semantic.workspace = true

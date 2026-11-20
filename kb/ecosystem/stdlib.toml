@@ -1,0 +1,702 @@
+# Layer 2: Ecosystem Effect / AsyncSafe / OffloadsBlocking / CopySanitizer Catalog
+# Every package listed here (and every package an entry belongs to) is opaque_to_layer3: Layer 3 never
+# descends into it (prevents A.7 false positive: asyncio.StreamWriter.write -> non-blocking socket.send).
+# This file: the standard library (including `builtins`).
+
+opaque_packages = [
+    "builtins", "asyncio", "socket", "ssl", "subprocess", "time", "io", "os",
+    "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
+    "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
+    "queue",
+]
+
+# --- Sleep ---
+
+[[entries]]
+symbol = "time.sleep"
+effects = ["sleep"]
+opaque_to_layer3 = true
+
+# --- Subprocess ---
+# `subprocess.Popen` itself spawns without blocking and is deliberately NOT registered;
+# only `.wait()` / `.communicate()` block (Stage 0-A finding).
+
+[[entries]]
+symbol = "subprocess.run"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "subprocess.call"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "subprocess.check_call"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "subprocess.check_output"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "subprocess.Popen.wait"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "subprocess.Popen.communicate"
+effects = ["blocking_subprocess"]
+opaque_to_layer3 = true
+
+# --- Blocking filesystem (EFF105, opt-in) ---
+# `os.walk` is a generator function: it lists directories while its result is iterated. The
+# class of such a result is named after the call (`os.walk()`), its iteration is `__iter__`.
+
+[[entries]]
+symbol = "builtins.open"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "io.open"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.read_text"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.read_bytes"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.write_text"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.write_bytes"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.open"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.listdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.scandir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.walk"
+return_type = "os.walk()"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.walk().__iter__"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.copy"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.copy2"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.copytree"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.rmtree"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+# File metadata: `stat` and the existence and type tests ask the file system; `realpath` and
+# `Path.resolve` also read every symbolic link on the way.
+
+[[entries]]
+symbol = "os.stat"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.exists"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.isfile"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.isdir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.path.realpath"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.exists"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.stat"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_file"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.is_dir"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pathlib.Path.resolve"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+# --- Name resolution ---
+# A host name lookup waits for the resolver (DNS); the event loop has `loop.getaddrinfo()`.
+
+[[entries]]
+symbol = "socket.getaddrinfo"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "socket.gethostbyname"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "socket.getfqdn"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+# --- Async-safe ---
+
+[[entries]]
+symbol = "asyncio.StreamWriter.write"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.sleep"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.gather"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.wait_for"
+async_safe = true
+opaque_to_layer3 = true
+
+# --- Event loop factories (EFF107 resolves `loop.create_task`) ---
+
+[[entries]]
+symbol = "asyncio.get_running_loop"
+return_type = "asyncio.AbstractEventLoop"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.get_event_loop"
+return_type = "asyncio.AbstractEventLoop"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.new_event_loop"
+return_type = "asyncio.AbstractEventLoop"
+opaque_to_layer3 = true
+
+# --- Synchronous locks (EFF106, opt-in) ---
+# A `with` block over an instance holds the lock. The `asyncio` / `anyio` locks are async-safe
+# and deliberately NOT registered.
+
+[[entries]]
+symbol = "threading.Lock"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.RLock"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Semaphore"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.BoundedSemaphore"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Condition"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+# --- Blocking synchronization (waits on the calling thread) ---
+# Acquiring a lock, waiting for an event, a condition, a barrier, a thread, a queue, or a
+# future blocks until another thread acts (`blocking_sync`); a zero timeout or `blocking=False`
+# / `block=False` / `wait=False` returns at once. `SimpleQueue.put` never blocks.
+# `Executor.submit` returns the `concurrent.futures.Future` to wait on.
+
+[[entries]]
+symbol = "threading.Lock.acquire"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "blocking", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.RLock.acquire"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "blocking", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Semaphore.acquire"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "blocking", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.BoundedSemaphore.acquire"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "blocking", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Condition.acquire"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "blocking", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Condition.wait"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Condition.wait_for"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Event.wait"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Barrier.wait"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "threading.Thread.join"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.Queue.get"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "block", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.Queue.put"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 1, param = "block", equals = false, effects = [] },
+    { arg = 2, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.Queue.join"
+effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.LifoQueue.get"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "block", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.LifoQueue.put"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 1, param = "block", equals = false, effects = [] },
+    { arg = 2, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.LifoQueue.join"
+effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.PriorityQueue.get"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "block", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.PriorityQueue.put"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 1, param = "block", equals = false, effects = [] },
+    { arg = 2, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.PriorityQueue.join"
+effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.SimpleQueue.get"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "block", equals = false, effects = [] },
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.Future.result"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.Future.exception"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.wait"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 1, param = "timeout", equals = 0, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.ThreadPoolExecutor.submit"
+return_type = "concurrent.futures.Future"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.ThreadPoolExecutor.shutdown"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "wait", equals = false, effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.ProcessPoolExecutor.submit"
+return_type = "concurrent.futures.Future"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "concurrent.futures.ProcessPoolExecutor.shutdown"
+effects = ["blocking_sync"]
+cases = [
+    { arg = 0, param = "wait", equals = false, effects = [] },
+]
+opaque_to_layer3 = true
+
+# --- Offloads blocking work (argument index of the offloaded callable) ---
+
+[[entries]]
+symbol = "asyncio.to_thread"
+async_safe = true
+offloads_blocking_arg = 0
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.AbstractEventLoop.run_in_executor"
+async_safe = true
+offloads_blocking_arg = 1
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.BaseEventLoop.run_in_executor"
+async_safe = true
+offloads_blocking_arg = 1
+opaque_to_layer3 = true
+
+# --- Excluded (logging) ---
+
+[[entries]]
+symbol = "logging.Logger.debug"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.Logger.info"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.Logger.warning"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.Logger.error"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.Logger.critical"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.Logger.exception"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.Logger.log"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.debug"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.info"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.warning"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.error"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.critical"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.exception"
+excluded = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "logging.log"
+excluded = true
+opaque_to_layer3 = true
+
+# --- Copy sanitizers (MUT202) ---
+
+[[entries]]
+symbol = "copy.deepcopy"
+copy_sanitizer = "deep"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "copy.copy"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+# `replace` copies its argument with some fields changed (Python 3.13 added `copy.replace`).
+[[entries]]
+symbol = "copy.replace"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "dataclasses.replace"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.dict.copy"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.list.copy"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.set.copy"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+# --- HTTP ---
+
+[[entries]]
+symbol = "urllib.request.urlopen"
+effects = ["blocking_net", "unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+# --- DB (sqlite3) ---
+# The `execute*` methods return the cursor. `fetch*` step the statement already executed: they
+# read the database file (blocking) but send no new query, so a fetch loop is not `EFF103`.
+
+[[entries]]
+symbol = "sqlite3.connect"
+effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "sqlite3.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.cursor"
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.execute"
+effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.executemany"
+effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.executescript"
+effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.commit"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.rollback"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Cursor.execute"
+effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Cursor.executemany"
+effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Cursor.executescript"
+effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Cursor.fetchone"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Cursor.fetchmany"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Cursor.fetchall"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
