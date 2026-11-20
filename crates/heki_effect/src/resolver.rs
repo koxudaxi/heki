@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock};
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -889,6 +889,9 @@ pub struct ProjectDecls {
     /// (`Self::protocol_implementations`), `None` past `CHA_CANDIDATE_LIMIT`.
     protocols: FxHashMap<String, Option<Vec<String>>>,
     recorder: Recorder,
+    /// The C3 linearizations computed so far of classes with multiple inheritance along their
+    /// bases (`Self::mro`); cleared with the indexes.
+    linearized: RwLock<FxHashMap<String, Vec<String>>>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -1004,6 +1007,10 @@ impl ProjectDecls {
     }
 
     fn rebuild_indexes(&mut self) {
+        self.linearized
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         // Maintenance, not a lookup of an analysis.
         let recording = std::mem::replace(self.recorder.on.get_mut(), false);
         self.build_indexes();
@@ -1379,23 +1386,107 @@ impl ProjectDecls {
         self.mro(sub).iter().skip(1).any(|c| c == base)
     }
 
-    /// Depth-first, left-to-right base linearization (project and external classes).
+    /// The method resolution order of `class`: Python's C3 linearization of its project bases;
+    /// an external base stands for itself (its bases are not known). A hierarchy C3 cannot
+    /// linearize (Python rejects the class statement, or a cycle) keeps the depth-first,
+    /// left-to-right order.
     fn mro(&self, class: &str) -> Vec<String> {
+        let class = self.canonical(class);
+        // The depth-first walk reads the declarations the linearization depends on.
+        let (order, multiple) = self.depth_first_bases(&class);
+        // Without multiple inheritance, the depth-first order is the linearization.
+        if !multiple {
+            return order;
+        }
+        let known = self
+            .linearized
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&class)
+            .cloned();
+        if let Some(mro) = known {
+            return mro;
+        }
+        let mut done = FxHashMap::default();
+        let mro = self.c3(&class, &mut done, &mut Vec::new()).unwrap_or(order);
+        self.linearized
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(class, mro.clone());
+        mro
+    }
+
+    /// [`Self::mro`] by C3: `class` followed by the merge of its bases' linearizations and the
+    /// list of its bases. `done` holds the linearizations computed so far, `open` the classes
+    /// being linearized (a cycle has none).
+    fn c3(
+        &self,
+        class: &str,
+        done: &mut FxHashMap<String, Vec<String>>,
+        open: &mut Vec<String>,
+    ) -> Option<Vec<String>> {
+        if let Some(mro) = done.get(class) {
+            return Some(mro.clone());
+        }
+        if open.iter().any(|c| c == class) {
+            return None;
+        }
+        let bases: Vec<String> = self
+            .class(class)
+            .map(|d| d.bases.iter().map(|b| self.canonical(b)).collect())
+            .unwrap_or_default();
+        open.push(class.to_owned());
+        let mut seqs: Vec<std::collections::VecDeque<String>> = Vec::new();
+        for base in &bases {
+            seqs.push(self.c3(base, done, open)?.into());
+        }
+        open.pop();
+        seqs.push(bases.into());
+        let mut out = vec![class.to_owned()];
+        loop {
+            seqs.retain(|s| !s.is_empty());
+            let Some(head) = seqs
+                .iter()
+                .map(|s| &s[0])
+                .find(|h| !seqs.iter().any(|s| s.iter().skip(1).any(|c| c == *h)))
+                .cloned()
+            else {
+                break;
+            };
+            for s in &mut seqs {
+                if s.front() == Some(&head) {
+                    s.pop_front();
+                }
+            }
+            out.push(head);
+        }
+        if !seqs.is_empty() {
+            return None;
+        }
+        done.insert(class.to_owned(), out.clone());
+        Some(out)
+    }
+
+    /// Depth-first, left-to-right base order (project and external classes), and whether a
+    /// class along it has more than one base.
+    fn depth_first_bases(&self, class: &str) -> (Vec<String>, bool) {
         let mut out = Vec::new();
+        let mut multiple = false;
         let mut seen = FxHashSet::default();
-        let mut stack = vec![self.canonical(class)];
+        let mut stack = vec![class.to_owned()];
         while let Some(c) = stack.pop() {
             if !seen.insert(c.clone()) {
                 continue;
             }
             if let Some(decl) = self.class(&c) {
+                multiple |= decl.bases.len() > 1;
                 for base in decl.bases.iter().rev() {
                     stack.push(self.canonical(base));
                 }
             }
             out.push(c);
         }
-        out
+        (out, multiple)
     }
 
     /// The method `name` defined directly in project class `class`.

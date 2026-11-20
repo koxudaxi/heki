@@ -131,6 +131,9 @@ the targets of write and read boundaries.
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
+A method called on an instance is the definition the class's MRO (Python's C3 linearization of
+its project bases) finds first, plus the overrides of its project subclasses (Priority 4).
+
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
 cannot be resolved is not followed (`unknown_calls`); an external function that Layer 2 does not
