@@ -18,7 +18,7 @@ use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 /// CHA fan-out limit: more candidates than this leave the call unresolved (`unknown_calls`).
@@ -146,6 +146,34 @@ pub struct ClassDecl {
     pub bases: Vec<String>,
     /// Priority 3 `attr -> class fqn` (instance attribute types).
     pub attr_types: BTreeMap<String, String>,
+    /// `@dataclass(frozen=True)` / `@dataclasses.dataclass(frozen=True)`, or a `NamedTuple`:
+    /// the class promises immutable instances (`MUT108`). Classes a PEP 681
+    /// `dataclass_transform(frozen_default=True)` builds are frozen too, and the subclasses of a
+    /// frozen class keep the promise for its fields: both are resolved across modules
+    /// (`ProjectDecls::readonly_attr`).
+    pub is_frozen: bool,
+    /// The class-body names that hold a container, the fields of a frozen class: annotated with
+    /// a container type (`list`, `dict`, `set`, `Sequence`, `Mapping`, ... after `Optional` /
+    /// `Annotated` / `Final`), other than `ClassVar` / `InitVar` and `field(compare=False)`
+    /// fields (state outside the value, such as a cache). Attributes a frozen class sets
+    /// otherwise (`object.__setattr__(self, "_cache", {})`) are no fields.
+    pub container_fields: BTreeSet<String>,
+    /// Attributes holding a container whose binding is read-only: class-body `ReadOnly[...]`
+    /// names (PEP 705, `TypedDict` keys included), `Final[...]` fields of a dataclass or
+    /// `NamedTuple`, and instance attributes annotated `self.x: Final[...]` in `__init__`, each
+    /// with a container type inside (`MUT108`). Class variables and class-level constants of
+    /// other classes are not.
+    pub readonly_attrs: BTreeSet<String>,
+    /// The class's decorators (resolved heads) with the `frozen=` each passes: a decorator
+    /// function carrying a `dataclass_transform` builds the class.
+    pub decorators: Vec<(String, Option<bool>)>,
+    /// The resolved `metaclass=` of the class statement.
+    pub metaclass: Option<String>,
+    /// The `frozen=` keyword of the class statement (`class C(Base, frozen=False)`).
+    pub frozen_keyword: Option<bool>,
+    /// `@dataclass_transform(...)` on this class (as a base class or metaclass of the classes it
+    /// builds): `Some(frozen_default)`.
+    pub transform: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +196,17 @@ pub struct FunctionDecl {
     /// facts share the getter's summary, so reading the property would pick up the setter's
     /// writes.
     pub is_property: bool,
+    /// Parameters (bit `i`: parameter `i < 64`) annotated with a read-only container type:
+    /// `Sequence[...]`, `Mapping[...]`, or `ReadOnly[...]` after `Optional` / `| None` /
+    /// `Annotated` (`MUT108`). Variadic parameters never are.
+    pub readonly_params: u64,
+    /// Parameters annotated with a mutable container type (`list`, `dict`, `set`,
+    /// `bytearray`, `MutableSequence`, `MutableMapping`, `MutableSet`, `deque`, ...): a type
+    /// checker reports a read-only argument passed there (`MUT108`).
+    pub mutable_params: u64,
+    /// `@dataclass_transform(...)` on some definition of this decorator function (PEP 681: an
+    /// overload or the implementation): `Some(frozen_default)` (`MUT108`).
+    pub transform: Option<bool>,
 }
 
 /// Per-module declarations other modules need (stored in `FileSummary`, IR-free).
@@ -321,6 +360,275 @@ fn subscript(text: &str) -> Option<(&str, &str)> {
     Some((text[..open].trim(), inner))
 }
 
+// ------------------------------------------------------------------------- MUT108 annotations
+
+/// `"T"` / `'T'` -> `T` (any depth).
+fn unquote(mut text: &str) -> &str {
+    loop {
+        let t = text.trim();
+        let inner = t
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')));
+        match inner {
+            Some(i) => text = i,
+            None => return t,
+        }
+    }
+}
+
+/// `Head[inner]` -> `(Head, Some(inner))`; anything else is a bare head.
+fn head_and_args(text: &str) -> (&str, Option<&str>) {
+    subscript(text).map_or((text, None), |(h, i)| (h, Some(i)))
+}
+
+/// The first top-level argument of a subscript (`int` of `Final[int]`).
+fn first_arg(inner: &str) -> &str {
+    split_top_level(inner, ',')[0]
+}
+
+/// Type qualifiers around an attribute annotation, outermost first through `Annotated`,
+/// `Required`, and `NotRequired` (`ClassVar[Final[int]]`, `ReadOnly[NotRequired[list[str]]]`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Qualifiers {
+    pub class_var: bool,
+    pub is_final: bool,
+    pub read_only: bool,
+    /// `InitVar[...]` / `KW_ONLY`: a dataclass pseudo-field that is no attribute.
+    pub pseudo_field: bool,
+}
+
+/// The qualifier a (possibly subscripted) head names: a `typing` / `typing_extensions` one
+/// (`ClassVar`, `Final`, `ReadOnly`, `Annotated`, `Required`, `NotRequired`) or a `dataclasses`
+/// one (`InitVar`, `KW_ONLY`), by the fqn `resolve` gives it. An unresolved name only counts
+/// when it takes protection away (`ClassVar`, `InitVar`, `KW_ONLY`): a report needs evidence.
+fn qualifier_name(head: &str, resolve: &impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    const TYPING: &[&str] = &[
+        "Annotated",
+        "ClassVar",
+        "Final",
+        "NotRequired",
+        "ReadOnly",
+        "Required",
+    ];
+    const DATACLASSES: &[&str] = &["InitVar", "KW_ONLY"];
+    const REMOVING: &[&str] = &["ClassVar", "InitVar", "KW_ONLY"];
+    let Some(fqn) = resolve(head) else {
+        let last = head.rsplit('.').next().unwrap_or(head);
+        return REMOVING.iter().copied().find(|n| *n == last);
+    };
+    let (module, name) = fqn.rsplit_once('.')?;
+    let names = match module {
+        "typing" | "typing_extensions" => TYPING,
+        "dataclasses" => DATACLASSES,
+        _ => return None,
+    };
+    names.iter().copied().find(|n| *n == name)
+}
+
+/// The qualifiers of the attribute annotation `text` and the type they wrap (`None` for a bare
+/// qualifier such as `Final`, or a pseudo-field); `resolve` maps a dotted name written in the
+/// module to its fqn.
+pub(crate) fn qualifiers<'t>(
+    text: &'t str,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> (Qualifiers, Option<&'t str>) {
+    let mut q = Qualifiers::default();
+    let mut t = text;
+    loop {
+        let u = unquote(t);
+        let (head, args) = head_and_args(u);
+        match qualifier_name(head, resolve) {
+            Some("ClassVar") => q.class_var = true,
+            Some("Final") => q.is_final = true,
+            Some("ReadOnly") => q.read_only = true,
+            Some("InitVar" | "KW_ONLY") => q.pseudo_field = true,
+            Some(_) => {}
+            None => return (q, Some(u)),
+        }
+        match args {
+            Some(inner) if !q.pseudo_field => t = first_arg(inner),
+            _ => return (q, None),
+        }
+    }
+}
+
+/// The attribute annotation `text` declares a container (a read-only or mutable container type,
+/// `param_access`), unless a qualifier makes it no instance attribute (`ClassVar`, `InitVar`,
+/// `KW_ONLY`); returns the qualifiers with it.
+fn container_annotation(
+    text: &str,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> (Qualifiers, bool) {
+    let (q, inner) = qualifiers(text, resolve);
+    let container =
+        !q.class_var && !q.pseudo_field && inner.and_then(|t| param_access(t, resolve)).is_some();
+    (q, container)
+}
+
+/// What a parameter annotation promises about changing the argument (`MUT108`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParamAccess {
+    /// `Sequence[...]` / `Mapping[...]` / `ReadOnly[...]`: the argument is only read.
+    ReadOnly,
+    /// A mutable container type: the argument may be changed in place.
+    Mutable,
+}
+
+/// Read-only container types (`ParamAccess::ReadOnly`).
+const READONLY_TYPES: &[&str] = &[
+    "typing.Sequence",
+    "typing.Mapping",
+    "collections.abc.Sequence",
+    "collections.abc.Mapping",
+];
+
+/// Mutable container types (`ParamAccess::Mutable`).
+const MUTABLE_TYPES: &[&str] = &[
+    "builtins.list",
+    "builtins.dict",
+    "builtins.set",
+    "builtins.bytearray",
+    "typing.List",
+    "typing.Dict",
+    "typing.Set",
+    "typing.DefaultDict",
+    "typing.OrderedDict",
+    "typing.Counter",
+    "typing.Deque",
+    "typing.MutableSequence",
+    "typing.MutableMapping",
+    "typing.MutableSet",
+    "collections.abc.MutableSequence",
+    "collections.abc.MutableMapping",
+    "collections.abc.MutableSet",
+    "collections.deque",
+    "collections.defaultdict",
+    "collections.OrderedDict",
+    "collections.Counter",
+];
+
+/// The access the parameter annotation `text` promises, after `Optional[T]`, `T | None`,
+/// `Union[T, None]`, `Annotated[T, ...]`, and quotes; `None` for any other type (`Iterable`,
+/// `Any`, a project class) and for unions of several types. An unresolved name only counts as
+/// mutable (a report needs evidence).
+pub(crate) fn param_access(
+    text: &str,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Option<ParamAccess> {
+    const MUTABLE_NAMES: &[&str] = &[
+        "List",
+        "Dict",
+        "Set",
+        "DefaultDict",
+        "OrderedDict",
+        "Counter",
+        "Deque",
+        "MutableSequence",
+        "MutableMapping",
+        "MutableSet",
+        "deque",
+        "defaultdict",
+    ];
+    let mut t = text;
+    loop {
+        let u = unquote(t);
+        let mut parts = split_top_level(u, '|');
+        if parts.len() > 1 {
+            parts.retain(|p| *p != "None");
+            t = single(&parts)?;
+            continue;
+        }
+        let (head, args) = head_and_args(u);
+        let Some(fqn) = resolve(head) else {
+            let last = head.rsplit('.').next().unwrap_or(head);
+            return MUTABLE_NAMES
+                .contains(&last)
+                .then_some(ParamAccess::Mutable);
+        };
+        let wrapper = fqn
+            .strip_prefix("typing.")
+            .or_else(|| fqn.strip_prefix("typing_extensions."));
+        match (wrapper, args) {
+            (Some("Optional" | "Annotated"), Some(inner)) => t = first_arg(inner),
+            (Some("Union"), Some(inner)) => {
+                let mut members = split_top_level(inner, ',');
+                members.retain(|p| *p != "None");
+                t = single(&members)?;
+            }
+            (Some("ReadOnly"), _) => return Some(ParamAccess::ReadOnly),
+            _ if READONLY_TYPES.contains(&fqn.as_str()) => return Some(ParamAccess::ReadOnly),
+            _ => {
+                return MUTABLE_TYPES
+                    .contains(&fqn.as_str())
+                    .then_some(ParamAccess::Mutable);
+            }
+        }
+    }
+}
+
+/// The only element of `parts`.
+fn single<'s>(parts: &[&'s str]) -> Option<&'s str> {
+    match parts {
+        [one] => Some(one),
+        _ => None,
+    }
+}
+
+/// A decorator's head and the arguments of its call (`record` and `frozen=False` of
+/// `record(frozen=False)`; no arguments without a call).
+fn decorator_parts(text: &str) -> (&str, &str) {
+    match text.split_once('(') {
+        Some((h, rest)) => (h.trim(), rest.trim_end().strip_suffix(')').unwrap_or(rest)),
+        None => (text.trim(), ""),
+    }
+}
+
+/// `True` / `False`; `None` for any other expression.
+fn bool_literal(text: &str) -> Option<bool> {
+    match text.trim() {
+        "True" => Some(true),
+        "False" => Some(false),
+        _ => None,
+    }
+}
+
+/// The value of the boolean keyword argument `name` in call arguments (`frozen=True`); `None`
+/// when it is not passed or is no `True` / `False` literal.
+fn keyword_bool(args: &str, name: &str) -> Option<bool> {
+    split_top_level(args, ',').iter().find_map(|arg| {
+        let (k, v) = arg.split_once('=')?;
+        (k.trim() == name).then(|| bool_literal(v)).flatten()
+    })
+}
+
+/// Whether the class decorator `text` (its source) is `dataclass` / `dataclasses.dataclass`
+/// (resolved through the module's imports), and then whether it passes `frozen=True`.
+pub(crate) fn dataclass_decorator(
+    text: &str,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Option<bool> {
+    let (head, args) = decorator_parts(text);
+    (resolve(head)? == "dataclasses.dataclass").then(|| keyword_bool(args, "frozen") == Some(true))
+}
+
+/// Whether the decorator `text` is PEP 681 `typing.dataclass_transform` /
+/// `typing_extensions.dataclass_transform`, and then its `frozen_default`.
+pub(crate) fn transform_decorator(
+    text: &str,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Option<bool> {
+    let (head, args) = decorator_parts(text);
+    let fqn = resolve(head)?;
+    let module = fqn.strip_suffix(".dataclass_transform")?;
+    matches!(module, "typing" | "typing_extensions")
+        .then(|| keyword_bool(args, "frozen_default") == Some(true))
+}
+
+/// Bases that make a class a `NamedTuple` (frozen) or a `TypedDict`.
+const NAMED_TUPLE_BASES: &[&str] = &["typing.NamedTuple", "typing_extensions.NamedTuple"];
+const TYPED_DICT_BASES: &[&str] = &["typing.TypedDict", "typing_extensions.TypedDict"];
+
 /// Declarations of every project module plus derived indexes.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectDecls {
@@ -330,6 +638,28 @@ pub struct ProjectDecls {
     /// Names of the property getters (`FunctionDecl::is_property`) of every class: an
     /// attribute read with another name runs no getter, without walking any class hierarchy.
     property_names: FxHashSet<String>,
+    /// Every project class deriving (transitively) from `TypedDict`.
+    typed_dicts: FxHashSet<String>,
+    /// Every frozen project class (`Self::frozen_classes`).
+    frozen: FxHashSet<String>,
+}
+
+/// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOnlyKind {
+    /// A field of a frozen class: a frozen dataclass, a `NamedTuple`, or a class that a
+    /// `dataclass_transform(frozen_default=True)` builds.
+    Frozen,
+    /// Declared `Final[...]` or `ReadOnly[...]` (`ClassDecl::readonly_attrs`).
+    Declared,
+}
+
+/// The declaration that makes an attribute read-only: the first class along the MRO that
+/// declares it, by fqn, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOnlyAttr {
+    pub class: String,
+    pub kind: ReadOnlyKind,
 }
 
 /// What a dotted fqn names inside the project.
@@ -393,6 +723,67 @@ impl ProjectDecls {
         }
         self.subclasses = subclasses;
         self.property_names = property_names;
+        self.typed_dicts = TYPED_DICT_BASES
+            .iter()
+            .flat_map(|b| self.subclasses_of(b))
+            .collect();
+        self.frozen = self.frozen_classes();
+    }
+
+    /// The frozen project classes: `ClassDecl::is_frozen` (`@dataclass(frozen=True)`,
+    /// `NamedTuple`), and the classes a PEP 681 `dataclass_transform(frozen_default=True)`
+    /// builds unless they pass `frozen=False`: through a decorator function carrying it, or
+    /// through a base class or metaclass carrying it (the classes deriving from it, or using it
+    /// or a subclass of it as their metaclass, and their subclasses).
+    fn frozen_classes(&self) -> FxHashSet<String> {
+        let mut frozen = FxHashSet::default();
+        let mut transforms = Vec::new();
+        let mut metaclass_users = Vec::new();
+        for m in self.modules.values() {
+            for (q, c) in &m.classes {
+                let by_decorator = c.decorators.iter().any(|(dec, frozen_arg)| {
+                    match self.symbol(&self.canonical(dec)) {
+                        Symbol::Function(_, d) => {
+                            d.transform.is_some_and(|t| frozen_arg.unwrap_or(t))
+                        }
+                        _ => false,
+                    }
+                });
+                let fqn = || format!("{}.{q}", m.module_name);
+                if c.is_frozen || by_decorator {
+                    frozen.insert(fqn());
+                }
+                if let Some(t) = c.transform {
+                    transforms.push((fqn(), t));
+                }
+                if let Some(meta) = &c.metaclass {
+                    metaclass_users.push((fqn(), self.canonical(meta)));
+                }
+            }
+        }
+        for (t, default) in transforms {
+            let mut built = self.subclasses_of(&t);
+            let users: Vec<String> = metaclass_users
+                .iter()
+                .filter(|(_, meta)| *meta == t || built.binary_search(meta).is_ok())
+                .map(|(fqn, _)| fqn.clone())
+                .collect();
+            for u in users {
+                built.extend(self.subclasses_of(&u));
+                built.push(u);
+            }
+            for b in built {
+                // The first `frozen=` class keyword along the MRO decides.
+                let keyword = self
+                    .mro(&b)
+                    .iter()
+                    .find_map(|c| self.class(c)?.frozen_keyword);
+                if keyword.unwrap_or(default) {
+                    frozen.insert(b);
+                }
+            }
+        }
+        frozen
     }
 
     pub fn module(&self, name: &str) -> Option<&ModuleDecls> {
@@ -476,6 +867,34 @@ impl ProjectDecls {
 
     pub fn is_project_class(&self, fqn: &str) -> bool {
         self.class(fqn).is_some()
+    }
+
+    /// Whether the canonical project class `class` is a `TypedDict`.
+    pub fn is_typed_dict(&self, class: &str) -> bool {
+        self.typed_dicts.contains(class)
+    }
+
+    /// The module-relative qualname of the project class `fqn` (`Outer.Inner`).
+    pub fn class_qualname<'f>(&self, fqn: &'f str) -> Option<&'f str> {
+        let (m, rest) = self.split_module(fqn)?;
+        m.classes.contains_key(rest).then_some(rest)
+    }
+
+    /// Why attribute `attr` of an instance of `class` is read-only (`MUT108`): the first class
+    /// along the MRO that has it as a field of a frozen class, or declares it `Final` /
+    /// `ReadOnly`.
+    pub fn readonly_attr(&self, class: &str, attr: &str) -> Option<ReadOnlyAttr> {
+        self.mro(class).into_iter().find_map(|c| {
+            let decl = self.class(&c)?;
+            let kind = if self.frozen.contains(&c) && decl.container_fields.contains(attr) {
+                ReadOnlyKind::Frozen
+            } else if decl.readonly_attrs.contains(attr) {
+                ReadOnlyKind::Declared
+            } else {
+                return None;
+            };
+            Some(ReadOnlyAttr { class: c, kind })
+        })
     }
 
     /// Every project class that (transitively) inherits from `class`, sorted.
@@ -727,7 +1146,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         let getter = f.owner_class_qualname.is_some() && f.has_decorator(PROPERTY_DECORATORS);
         *getters_only.entry(&f.qualname).or_insert(true) &= getter;
     }
-    // Resolve bases and annotations now that local names are known.
+    // Resolve bases, class keywords, and annotations now that local names are known.
     for class in &semantic.classes {
         let bases = class
             .bases
@@ -737,15 +1156,44 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 decls.resolve_dotted(head, false)
             })
             .collect();
+        let keyword = |name: &str| {
+            class
+                .keywords
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        let metaclass = keyword("metaclass").and_then(|m| decls.resolve_dotted(m, false));
+        let frozen_keyword = keyword("frozen").and_then(bool_literal);
         if let Some(c) = decls.classes.get_mut(&class.qualname) {
             c.bases = bases;
+            c.metaclass = metaclass;
+            c.frozen_keyword = frozen_keyword;
         }
+    }
+    // PEP 681 `dataclass_transform` on a decorator function: any definition (an overload or the
+    // implementation) carries it; `Some(true)` (`frozen_default`) wins.
+    let mut transforms: FxHashMap<&str, Option<bool>> = FxHashMap::default();
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| is_summarized_function(f))
+    {
+        let resolve = |name: &str| decls.resolve_dotted(name, true);
+        let t = f
+            .decorators
+            .iter()
+            .find_map(|d| transform_decorator(d, &resolve));
+        let slot = transforms.entry(&f.qualname).or_insert(None);
+        *slot = (*slot).max(t);
     }
     for f in &input.ir.functions {
         if !is_summarized_function(f) {
             continue;
         }
         let is_staticmethod = f.has_decorator(&["staticmethod"]);
+        let (readonly_params, mutable_params) = param_accesses(f, &decls);
         let decl = FunctionDecl {
             is_async: matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator),
             is_staticmethod,
@@ -765,10 +1213,163 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 GENERATOR_KEEPING_DECORATORS.contains(&last)
             }),
             is_property: getters_only[f.qualname.as_str()],
+            readonly_params,
+            mutable_params,
+            transform: transforms[f.qualname.as_str()],
         };
         decls.functions.insert(f.qualname.clone(), decl);
     }
+    readonly_metadata(input, &mut decls);
     decls
+}
+
+/// `FunctionDecl::readonly_params` and `FunctionDecl::mutable_params` of `f`.
+fn param_accesses(f: &IrFunction, decls: &ModuleDecls) -> (u64, u64) {
+    let resolve = |name: &str| decls.resolve_dotted(name, true);
+    let (mut readonly, mut mutable) = (0, 0);
+    for (i, p) in f.params.iter().enumerate().take(64) {
+        let access = p
+            .annotation
+            .as_deref()
+            .filter(|_| !p.is_vararg && !p.is_kwarg)
+            .and_then(|a| param_access(a, &resolve));
+        match access {
+            Some(ParamAccess::ReadOnly) => readonly |= 1u64 << i,
+            Some(ParamAccess::Mutable) => mutable |= 1u64 << i,
+            None => {}
+        }
+    }
+    (readonly, mutable)
+}
+
+/// `MUT108` metadata of the module's classes (`ClassDecl::is_frozen`, `container_fields`,
+/// `readonly_attrs`, `decorators`, and `transform`), resolved through the module's imports.
+fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
+    struct Found {
+        qualname: String,
+        is_frozen: bool,
+        fields: BTreeSet<String>,
+        readonly: BTreeSet<String>,
+        decorators: Vec<(String, Option<bool>)>,
+        transform: Option<bool>,
+    }
+    let resolve = |name: &str| decls.resolve_dotted(name, true);
+    let mut found: Vec<Found> = Vec::new();
+    for body in input.ir.functions.iter().filter(|f| f.is_class_body) {
+        let dataclass = body
+            .decorators
+            .iter()
+            .find_map(|d| dataclass_decorator(d, &resolve));
+        let named_tuple = decls.classes.get(&body.qualname).is_some_and(|c| {
+            c.bases
+                .iter()
+                .any(|b| NAMED_TUPLE_BASES.contains(&b.as_str()))
+        });
+        let (mut fields, mut readonly) = (BTreeSet::new(), BTreeSet::new());
+        for ann in &body.local_annotations {
+            let (q, container) = container_annotation(&ann.annotation, &resolve);
+            if ann.target.contains('.') || !container {
+                continue;
+            }
+            if !compares_false(body, ann.span, &resolve) {
+                fields.insert(ann.target.clone());
+            }
+            // `Final` in the body of other classes declares a class-level constant.
+            if q.read_only || q.is_final && (named_tuple || dataclass.is_some()) {
+                readonly.insert(ann.target.clone());
+            }
+        }
+        let decorators = body
+            .decorators
+            .iter()
+            .filter_map(|d| {
+                let (head, args) = decorator_parts(d);
+                Some((resolve(head)?, keyword_bool(args, "frozen")))
+            })
+            .collect();
+        found.push(Found {
+            qualname: body.qualname.clone(),
+            is_frozen: named_tuple || dataclass == Some(true),
+            fields,
+            readonly,
+            decorators,
+            transform: body
+                .decorators
+                .iter()
+                .find_map(|d| transform_decorator(d, &resolve)),
+        });
+    }
+    // Instance attributes declared `self.x: Final[...]` in `__init__`.
+    for f in &input.ir.functions {
+        if let (Some(owner), Some(self_param)) = (&f.owner_class_qualname, f.params.first())
+            && f.name == "__init__"
+            && is_summarized_function(f)
+            && !f.has_decorator(&["staticmethod", "classmethod"])
+        {
+            let prefix = format!("{}.", self_param.name);
+            let readonly = f
+                .local_annotations
+                .iter()
+                .filter_map(|a| {
+                    let (q, container) = container_annotation(&a.annotation, &resolve);
+                    let attr = a.target.strip_prefix(&prefix)?;
+                    (!attr.contains('.') && q.is_final && container).then(|| attr.to_owned())
+                })
+                .collect();
+            found.push(Found {
+                qualname: owner.clone(),
+                is_frozen: false,
+                fields: BTreeSet::new(),
+                readonly,
+                decorators: Vec::new(),
+                transform: None,
+            });
+        }
+    }
+    for f in found {
+        if let Some(c) = decls.classes.get_mut(&f.qualname) {
+            c.is_frozen |= f.is_frozen;
+            c.container_fields.extend(f.fields);
+            c.readonly_attrs.extend(f.readonly);
+            c.decorators.extend(f.decorators);
+            c.transform = c.transform.max(f.transform);
+        }
+    }
+}
+
+/// Whether the class-body statement at `span` assigns `field(..., compare=False)`
+/// (`dataclasses.field`): the field is state outside the instance's value.
+fn compares_false(
+    body: &IrFunction,
+    span: Span,
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> bool {
+    let insts = || body.blocks.iter().flat_map(|b| &b.insts);
+    insts()
+        .filter(|i| span.start <= i.span.start && i.span.end <= span.end)
+        .any(|i| {
+            let (name, kwargs) = match &i.kind {
+                InstKind::Call { callee, kwargs, .. } => (Some(callee.clone()), kwargs),
+                // `dataclasses.field(...)`: the receiver is a module-level name.
+                InstKind::MethodCall {
+                    recv,
+                    method,
+                    kwargs,
+                    ..
+                } => {
+                    let module = insts().find_map(|j| match &j.kind {
+                        InstKind::LoadGlobal { dst, name, .. } if dst == recv => Some(name),
+                        _ => None,
+                    });
+                    (module.map(|m| format!("{m}.{method}")), kwargs)
+                }
+                _ => return false,
+            };
+            name.and_then(|n| resolve(&n)).as_deref() == Some("dataclasses.field")
+                && kwargs.iter().any(|(k, v)| {
+                    k.as_deref() == Some("compare") && body.const_bool(*v) == Some(false)
+                })
+        })
 }
 
 /// Pass 2: Priority 3 class attribute types and module global instance types.

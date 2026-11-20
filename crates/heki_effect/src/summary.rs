@@ -6,7 +6,7 @@
 use crate::resolver::{Callee, TypeCtx, Val, func_qualname, self_aliases};
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, EffectSummary, FileSummary,
-    FuncKey, ModuleInput, ProjectDecls, ReadKind, TypedFieldReadSite, TypedFieldWriteSite,
+    FuncKey, ModuleInput, ProjectDecls, ReadKind, Slot, TypedFieldReadSite, TypedFieldWriteSite,
     WriteKind,
 };
 use heki_ast::Span;
@@ -108,6 +108,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     for (i, paths) in other.mutated_param_paths {
         into.mutated_param_paths.entry(i).or_default().extend(paths);
     }
+    for (i, slots) in other.inplace_param_slots {
+        into.inplace_param_slots.entry(i).or_default().extend(slots);
+    }
     into.reads_self_attrs.extend(other.reads_self_attrs);
     into.mutates_self_attrs.extend(other.mutates_self_attrs);
     into.invalidates_cached.extend(other.invalidates_cached);
@@ -128,11 +131,23 @@ struct Owner {
     typed_class: Option<String>,
     /// Parameters the object may be, as itself.
     may_params: u64,
+    /// An instance the function constructs (`TypedFieldWriteSite::fresh`).
+    fresh: bool,
 }
 
-/// `obj.<attr>` with project-class `obj`: the class, the attribute, whether the variable is the
-/// load itself (not a copy / phi of it), and the parameters `obj` may be (as itself).
-type ObjAttr = (String, String, bool, u64);
+/// `obj.<attr>` with project-class `obj` (or `obj["key"]` with a `TypedDict` `obj`).
+#[derive(Debug, Clone)]
+struct ObjAttr {
+    class: String,
+    /// The attribute (the key of a `TypedDict`).
+    attr: String,
+    /// The variable is the load itself (not a copy / phi of it).
+    direct: bool,
+    /// The parameters `obj` may be (as itself).
+    obj_params: u64,
+    /// `obj` is an instance the function constructs (`TypedFieldWriteSite::fresh`).
+    fresh: bool,
+}
 
 struct Extractor<'a> {
     f: &'a IrFunction,
@@ -146,15 +161,22 @@ struct Extractor<'a> {
     uses: FxHashMap<VarId, Vec<&'a InstKind>>,
     self_vars: FxHashSet<VarId>,
     param_alias: FxHashMap<VarId, (u8, Option<String>)>,
+    /// One-level slots of parameters: `p.a` / `p["k"]` of parameter `p` itself, through copies
+    /// and agreeing phis (`EffectSummary::inplace_param_slots`).
+    param_slot_alias: FxHashMap<VarId, (u8, Slot)>,
     /// `self.<attr>` aliases: `var -> attr`.
     self_attr_alias: FxHashMap<VarId, String>,
-    /// `obj.<attr>` with project-class `obj`: `var -> (class, attr, direct, obj params)`.
+    /// `obj.<attr>` with project-class `obj`.
     obj_attr_alias: FxHashMap<VarId, ObjAttr>,
     /// `x.__dict__` -> owner of `x`.
     dict_of: FxHashMap<VarId, Owner>,
     /// Parameters (bit `i`: parameter `i < 64`) each variable may be, through copies and phis
     /// (any input): the may-alias counterpart of `param_alias`'s `(i, None)` entries.
     may_params: FxHashMap<VarId, u64>,
+    /// Instances the function constructs by calling a project class (`Model(...)`,
+    /// `cls(...)`), through copies and phis whose every input is one (`a = A(x) if c else
+    /// A(y)`): `TypedFieldWriteSite::fresh`.
+    fresh: FxHashSet<VarId>,
     summary: EffectSummary,
     sites: Vec<CallSite>,
 }
@@ -196,14 +218,17 @@ impl<'a> Extractor<'a> {
             uses,
             self_vars,
             param_alias: FxHashMap::default(),
+            param_slot_alias: FxHashMap::default(),
             self_attr_alias: FxHashMap::default(),
             obj_attr_alias: FxHashMap::default(),
             dict_of: FxHashMap::default(),
             may_params: FxHashMap::default(),
+            fresh: FxHashSet::default(),
             summary,
             sites: Vec::new(),
         };
         ex.build_may_params();
+        ex.build_fresh();
         ex.build_aliases();
         ex
     }
@@ -254,6 +279,7 @@ impl<'a> Extractor<'a> {
         loop {
             let before = (
                 self.param_alias.len(),
+                self.param_slot_alias.len(),
                 self.self_attr_alias.len(),
                 self.obj_attr_alias.len(),
                 self.dict_of.len(),
@@ -267,6 +293,7 @@ impl<'a> Extractor<'a> {
                         .filter(|v| *v != phi.dst)
                         .collect();
                     merge_phi(&mut self.param_alias, phi.dst, &inputs, |a| a.clone());
+                    merge_phi(&mut self.param_slot_alias, phi.dst, &inputs, |a| a.clone());
                     merge_phi(&mut self.self_attr_alias, phi.dst, &inputs, |a| a.clone());
                     merge_obj_attr_phi(&mut self.obj_attr_alias, phi.dst, &inputs);
                 }
@@ -276,11 +303,15 @@ impl<'a> Extractor<'a> {
                             if let Some(a) = self.param_alias.get(src).cloned() {
                                 self.param_alias.insert(*dst, a);
                             }
+                            if let Some(a) = self.param_slot_alias.get(src).cloned() {
+                                self.param_slot_alias.insert(*dst, a);
+                            }
                             if let Some(a) = self.self_attr_alias.get(src).cloned() {
                                 self.self_attr_alias.insert(*dst, a);
                             }
-                            if let Some((c, a, _, p)) = self.obj_attr_alias.get(src).cloned() {
-                                self.obj_attr_alias.insert(*dst, (c, a, false, p));
+                            if let Some(a) = self.obj_attr_alias.get(src).cloned() {
+                                let copy = ObjAttr { direct: false, ..a };
+                                self.obj_attr_alias.insert(*dst, copy);
                             }
                             if let Some(o) = self.dict_of.get(src).cloned() {
                                 self.dict_of.insert(*dst, o);
@@ -292,6 +323,10 @@ impl<'a> Extractor<'a> {
                         }
                         InstKind::AttrLoad { dst, obj, attr } => {
                             if let Some((i, path)) = self.param_alias.get(obj).cloned() {
+                                if path.is_none() {
+                                    self.param_slot_alias
+                                        .insert(*dst, (i, Slot::Attr(attr.clone())));
+                                }
                                 self.param_alias
                                     .insert(*dst, (i, Some(path.unwrap_or_else(|| attr.clone()))));
                             }
@@ -299,9 +334,27 @@ impl<'a> Extractor<'a> {
                                 self.self_attr_alias.insert(*dst, attr.clone());
                             }
                             if let Some(class) = self.project_class(*obj) {
-                                let params = self.may_params.get(obj).copied().unwrap_or(0);
-                                self.obj_attr_alias
-                                    .insert(*dst, (class, attr.clone(), true, params));
+                                let load = self.obj_attr(class, *obj, attr);
+                                self.obj_attr_alias.insert(*dst, load);
+                            }
+                        }
+                        // `p["key"]` of a parameter, `td["key"]` of a `TypedDict`: a key of a
+                        // typed dict is its field.
+                        InstKind::SubscriptLoad {
+                            dst,
+                            obj,
+                            key_const: Some(key),
+                            ..
+                        } => {
+                            if let Some((i, None)) = self.param_alias.get(obj) {
+                                self.param_slot_alias
+                                    .insert(*dst, (*i, Slot::Key(key.clone())));
+                            }
+                            if let Some(class) = self.project_class(*obj)
+                                && self.cx.project.is_typed_dict(&class)
+                            {
+                                let load = self.obj_attr(class, *obj, key);
+                                self.obj_attr_alias.insert(*dst, load);
                             }
                         }
                         _ => {}
@@ -310,6 +363,7 @@ impl<'a> Extractor<'a> {
             }
             let after = (
                 self.param_alias.len(),
+                self.param_slot_alias.len(),
                 self.self_attr_alias.len(),
                 self.obj_attr_alias.len(),
                 self.dict_of.len(),
@@ -320,25 +374,86 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// The load `obj.<attr>` (`obj["<attr>"]`) of the project-class object `obj`.
+    fn obj_attr(&self, class: String, obj: VarId, attr: &str) -> ObjAttr {
+        ObjAttr {
+            class,
+            attr: attr.to_owned(),
+            direct: true,
+            obj_params: self.may_params.get(&obj).copied().unwrap_or(0),
+            fresh: self.is_fresh(obj),
+        }
+    }
+
+    /// [`Self::fresh`]: the results of calling a project class, then a monotone fixpoint over
+    /// copies and phis.
+    fn build_fresh(&mut self) {
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::Call {
+                dst,
+                callee_var: Some(c),
+                ..
+            } = &inst.kind
+                && matches!(self.types.get(c), Some(Val::Ref(fqn)) if self.cx.project.is_project_class(fqn))
+            {
+                self.fresh.insert(*dst);
+            }
+        }
+        loop {
+            let before = self.fresh.len();
+            for bb in &self.f.blocks {
+                for phi in &bb.phis {
+                    let mut inputs = phi
+                        .incoming
+                        .iter()
+                        .map(|(_, v)| *v)
+                        .filter(|v| *v != phi.dst);
+                    let first = inputs.next();
+                    if first.is_some_and(|v| self.fresh.contains(&v))
+                        && inputs.all(|v| self.fresh.contains(&v))
+                    {
+                        self.fresh.insert(phi.dst);
+                    }
+                }
+                for inst in &bb.insts {
+                    if let InstKind::Copy { dst, src } = &inst.kind
+                        && self.fresh.contains(src)
+                    {
+                        self.fresh.insert(*dst);
+                    }
+                }
+            }
+            if self.fresh.len() == before {
+                return;
+            }
+        }
+    }
+
+    /// Whether `var` is an instance the function constructs (`Self::fresh`).
+    fn is_fresh(&self, var: VarId) -> bool {
+        self.fresh.contains(&var)
+    }
+
     fn owner_of(&self, var: VarId) -> Owner {
         Owner {
             is_self: self.self_vars.contains(&var),
             param: self.param_alias.get(&var).cloned(),
             typed_class: self.project_class(var),
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
+            fresh: self.is_fresh(var),
         }
     }
 
     fn origin(&self, var: VarId) -> ArgOrigin {
+        let field = self.obj_attr_alias.get(&var);
         ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
+            param_slot: self.param_slot_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
-            typed_field: self
-                .obj_attr_alias
-                .get(&var)
-                .map(|(c, a, _, _)| (c.clone(), a.clone())),
+            typed_field: field.map(|a| (a.class.clone(), a.attr.clone())),
             typed_instance: self.project_class(var),
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
+            fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
         }
     }
 
@@ -587,6 +702,7 @@ impl<'a> Extractor<'a> {
             .insert(path);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn typed_site(
         &mut self,
         class: String,
@@ -594,6 +710,7 @@ impl<'a> Extractor<'a> {
         kind: WriteKind,
         span: Span,
         obj_params: u64,
+        fresh: bool,
     ) {
         self.summary
             .typed_field_write_sites
@@ -604,6 +721,7 @@ impl<'a> Extractor<'a> {
                 span,
                 via_chain: Vec::new(),
                 obj_params,
+                fresh,
             });
     }
 
@@ -636,7 +754,7 @@ impl<'a> Extractor<'a> {
             None => {}
         }
         if let Some(class) = owner.typed_class {
-            self.typed_site(class, attr, kind, span, owner.may_params);
+            self.typed_site(class, attr, kind, span, owner.may_params, owner.fresh);
         }
     }
 
@@ -658,13 +776,20 @@ impl<'a> Extractor<'a> {
             Some((i, Some(path))) => self.mutate_param(i, path),
             None => {}
         }
-        if let Some((class, attr, direct, obj_params)) = self.obj_attr_alias.get(&var).cloned() {
-            let kind = if direct {
+        if let Some((i, slot)) = self.param_slot_alias.get(&var).cloned() {
+            self.summary
+                .inplace_param_slots
+                .entry(i)
+                .or_default()
+                .insert(slot);
+        }
+        if let Some(a) = self.obj_attr_alias.get(&var).cloned() {
+            let kind = if a.direct {
                 WriteKind::ContainerMut
             } else {
                 WriteKind::AliasContainerMut
             };
-            self.typed_site(class, &attr, kind, span, obj_params);
+            self.typed_site(a.class, &a.attr, kind, span, a.obj_params, a.fresh);
         }
     }
 
@@ -923,16 +1048,22 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
     }
     let mut found: Option<ObjAttr> = None;
     for v in inputs {
-        let Some((c, a, _, p)) = map.get(v) else {
+        let Some(a) = map.get(v) else {
             return;
         };
         match &mut found {
-            None => found = Some((c.clone(), a.clone(), false, *p)),
-            Some((fc, fa, _, fp)) => {
-                if fc != c || fa != a {
+            None => {
+                found = Some(ObjAttr {
+                    direct: false,
+                    ..a.clone()
+                });
+            }
+            Some(f) => {
+                if f.class != a.class || f.attr != a.attr {
                     return;
                 }
-                *fp |= p;
+                f.obj_params |= a.obj_params;
+                f.fresh &= a.fresh;
             }
         }
     }

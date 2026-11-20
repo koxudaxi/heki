@@ -1,7 +1,7 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
-//! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT201`,
-//!   `MUT202`, `MUT203`)
+//! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
+//!   `MUT201`, `MUT202`, `MUT203`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -97,6 +97,16 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).",
         doc: include_str!("../rule-docs/MUT107.md"),
+    },
+    RuleMeta {
+        code: "MUT108",
+        slug: "readonly-type-mutation",
+        family: RuleFamily::Mut,
+        default_enabled: false,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: changing in place what a standard type declares read-only (frozen dataclass / `NamedTuple` fields, `Final` / `ReadOnly` attributes, `Sequence` / `Mapping` parameters), directly, through an alias, or in a helper.",
+        doc: include_str!("../rule-docs/MUT108.md"),
     },
     RuleMeta {
         code: "MUT201",
@@ -415,6 +425,7 @@ pub fn check_project(
     let mut out = Vec::new();
     mut_rules::mut101(&cx, &mut out);
     mut_rules::mut107(&cx, &mut out);
+    mut_rules::mut108(&cx, &mut out);
     mut_rules::mut201(&cx, &mut out)?;
     mut_rules::mut203(&cx, &mut out)?;
     eff_rules::eff101_105(&cx, &mut out);

@@ -276,10 +276,32 @@ fn apply_edge(
         s.invalidates_cached
             .extend(callee.invalidates_cached.iter().cloned());
     }
+    // A slot of a callee parameter bound to a caller parameter is that parameter's slot.
+    for (&i, slots) in &callee.inplace_param_slots {
+        if let Some(ArgOrigin {
+            param: Some((p, None)),
+            ..
+        }) = origin(usize::from(i))
+        {
+            s.inplace_param_slots
+                .entry(*p)
+                .or_default()
+                .extend(slots.iter().cloned());
+        }
+    }
     for (&i, paths) in &callee.mutated_param_paths {
         let Some(o) = origin(usize::from(i)) else {
             continue;
         };
+        // A callee changing its argument in place changes the slot `p.a` / `p["k"]` it is.
+        if paths.contains("")
+            && let Some((p, slot)) = &o.param_slot
+        {
+            s.inplace_param_slots
+                .entry(*p)
+                .or_default()
+                .insert(slot.clone());
+        }
         match &o.param {
             Some((p, None)) => {
                 s.mutates_params |= 1u64 << p;
@@ -339,6 +361,7 @@ fn apply_edge(
                         span: site.span,
                         via_chain: vec![hop.clone()],
                         obj_params,
+                        fresh: o.fresh,
                     },
                 );
             }
@@ -405,8 +428,8 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         // The owner's own write coming back around a cycle.
         return;
     }
-    // Sites order by `(class, attr, kind, span, via_chain, obj_params)`: the ones sharing the
-    // first four fields form one range, starting at the empty chain.
+    // Sites order by `(class, attr, kind, span, via_chain, obj_params, fresh)`: the ones sharing
+    // the first four fields form one range, starting at the empty chain.
     let first = TypedFieldWriteSite {
         class_qualname: site.class_qualname.clone(),
         attr: site.attr.clone(),
@@ -414,6 +437,7 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         span: site.span,
         via_chain: Vec::new(),
         obj_params: 0,
+        fresh: false,
     };
     let existing = s
         .typed_field_write_sites

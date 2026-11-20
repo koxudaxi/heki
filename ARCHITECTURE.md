@@ -2,7 +2,7 @@
 
 | Item | Content |
 |---|---|
-| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (25 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
+| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (26 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
 | Date | 2026-11-20 |
 | Target language | Python (verified on CPython 3.11–3.15, including PEP 709, PEP 649 `__annotate__`, and PEP 810 `lazy import`) |
 | Implementation language | Rust: a single binary with a CLI and an incremental LSP server, distributed with `maturin`. Only the frontend uses `ruff_python_parser` / `ruff_python_ast` (`tag = "0.17.5"`), isolated in `heki_ast`. |
@@ -361,7 +361,7 @@ versions.
 The adopted, rejected, and candidate rules are fixed by the Stage 0-A measurements (339
 repositories, 18.1 million lines, all 171 samples reviewed by hand), the Wave 2 measurements
 (19 million lines), and the study of datamodel-code-generator's 20,000 lines of in-house checkers.
-The 25 rules are listed in the [rules reference](docs/rules/index.md).
+The 26 rules are listed in the [rules reference](docs/rules/index.md).
 
 ### Family 1: Mutation & State Effect (`MUT`: hardening mature production code)
 
@@ -371,6 +371,7 @@ The 25 rules are listed in the [rules reference](docs/rules/index.md).
 | **MUT103** | With a snapshot | **Cross-function effect and mutability regressions in CI (`heki snapshot summary`)**: a pull request adds new parameter mutations, escapes, or execution effects (direct or transitive) to a function fixed in the snapshot | Zero-config snapshot comparison |
 | **MUT106** | Opt-in | **A single-pass `Iterator` / `Generator` consumed twice**: an iterator that SSA does not rebind (generator expressions, `iter` / `zip` / `map` / ..., project generator functions, `Iterator` / `Generator` annotations) is consumed a second time and silently yields nothing | Reported only when the second consumption is reachable in the CFG from the first (exclusive branches never are); a partial first pass (`break`) and `next()` stepping do not count; an iterator created outside a loop and consumed inside it is found too; consumption by a called function is followed through the summary |
 | **MUT107** | On | **Attributes `__hash__` depends on changing**: a method other than the initialization hooks (subclasses included) changes a `self.<attr>` that `__hash__` reads (instances already stored in a `set` or as `dict` keys can no longer be found) | The `MUT101` filters (two-phase initialization, memo dicts, disjoint constant keys), plus lazy initialization under a `None` guard and the cache attributes of `__hash__` itself (`self._hash`, ...) (Wave 2: 21.2% of mature projects) |
+| **MUT108** | Opt-in | **In-place changes to read-only types**: a field of a `@dataclass(frozen=True)`, `NamedTuple`, or `dataclass_transform(frozen_default=True)` class, a `Final` / `ReadOnly` attribute, a `ReadOnly` `TypedDict` key, or a `Sequence` / `Mapping` parameter changed in place, directly, through an alias, or through a helper (type checkers stop only rebinding and direct calls) | Rebinding and `del` (type checkers' domain), `setattr` / `object.__setattr__` / `__dict__` bypasses, initializers and helpers that only run inside them, instances the function constructs itself, `field(compare=False)` fields, value-side changes, callee parameters annotated mutable (dcg: 4 reports, all correct and deliberate; Stage 0-A: 104 reports, the parameter ones genuine, the frozen ones deliberate, hence opt-in) |
 | **MUT201** | When configured (contract) | **Declared write ownership**: writes to the classes and attributes listed in `[[tool.heki.write-owners]]` (through local aliases, container operations `.append()` / `[k] =`, `__dict__` / `setattr`, and helpers in other functions) are limited to the allowed modules and classes (stores, services) | Declared in `pyproject.toml` only (no decorators, no run-time cost). `exempt-methods` for construction and copy methods; a class family's initializer may initialize its own `self`; a function that only runs inside allowed contexts is not reported; `message` is appended to the report. With the Ratchet baseline an existing code base migrates step by step (generalizes datamodel-code-generator's `check_generation_store_usage.py`: 1,665 lines, 1,323 lines of tests, and 13 run-time witnesses) |
 | **MUT202** | When configured (contract) | **Declared read-only returns**: the shared objects returned by the functions and caches listed in `[[tool.heki.readonly-returns]]` (and the containers below them) must not be mutated by callers or downstream functions | Checked statically through cross-function `mutates_params` and alias tracking (replaces the run-time fingerprint monitoring of datamodel-code-generator's `tests/checks/schema_graph.py`) |
 | **MUT203** | When configured (contract) | **Declared read ownership**: reads of the classes and attributes listed in `[[tool.heki.read-owners]]` (local aliases, `getattr`, and `__dict__` included) are limited to the allowed readers (the read side of `MUT201`) | The same patterns, subclass expansion, initializer rule, `exempt-methods`, delegation from private helpers to their callers, allowed-context rule, and `message` as `MUT201`. Read sites are kept as local facts and the rule walks the reverse call graph, so summaries do not grow with propagated reads |
@@ -633,7 +634,7 @@ message = "render entry points must not mutate model state"
 | M7 | The incremental LSP server and `--watch` |
 | M8 | End-to-end test suite through the real binary and LSP process; 100% of reachable lines |
 | M9 | CI / release / documentation workflows and the user guide |
-| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, and the `MUT201` extensions (25 rules) |
+| v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, and the `MUT201` extensions (26 rules) |
 
 ### Gates for every release (from Stage 0-B)
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.

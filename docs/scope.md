@@ -141,12 +141,22 @@ state that matters.
   are not tied to a class, so contracts on that class do not see them. A write in an
   unannotated helper is still found where a caller passes it an object of a known class; a
   read is not.
+- **Names the catalog does not list.** Catalog lookups are exact: a class reached through another
+  public name (`from sqlalchemy import Engine` for `sqlalchemy.engine.Engine`, `redis.StrictRedis`
+  for `redis.Redis`) or a method the catalog does not list contributes no effect, and objects
+  reached through subscripts or framework attributes (`client["app"]["users"]`, Django's
+  `Model.objects`) have no known class. Add what is missing with `[[tool.heki.ecosystem]]`.
 - **Properties with a setter or deleter.** Reading a `@property` or `functools.cached_property`
   of a project class runs its getter: its effects, writes, and the attributes it reads count for
   the reader, also through base classes, overriding subclasses, and `super()`. A property that
   also defines a setter or deleter (`@x.setter`) is not followed, nor is `x = property(get_x)`,
   and the getter's return annotation does not type the value read (`self.session.execute(...)`
   through a `session` property is not resolved).
+- **Read-only types (`MUT108`, opt-in).** Frozen dataclasses, `NamedTuple`s, classes that a
+  `dataclass_transform(frozen_default=True)` in the checked files builds, `Final` / `ReadOnly`
+  attributes, `ReadOnly` `TypedDict` keys, and `Sequence` / `Mapping` parameters are followed.
+  Transforms of installed packages (attrs, Pydantic) are not, and an instance the function
+  constructs itself counts as under construction.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
@@ -182,10 +192,10 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT201`, `MUT203` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `EFF107`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT201`, `MUT203` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT108`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT201`–`MUT203` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT201`–`MUT203` |
 
 ## What heki does not do
 
