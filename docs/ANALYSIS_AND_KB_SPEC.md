@@ -281,8 +281,9 @@ which module imports which.
    - **initialization and two-phase initialization hooks**: `__init__`, `__post_init__`,
      `model_post_init`, `__setstate__`, `__enter__`, `__new__`, `setup`, `setUp`, `postinit`,
      `_open`, `_setup`, `_init_*`, `_configure_*`, and private helpers that an initializer calls;
-   - **memo and cache dictionaries**: attributes named like `_cache` / `_memo`, `setdefault`, and
-     lazy filling under `if k not in self._xxx:`;
+   - **memo and cache dictionaries**: in-place changes of attributes with a `cache` / `memo` word
+     in their name (`_cache`, `_memo`; rebinding them and `memory_*` names count), `setdefault`,
+     and lazy filling under `if k not in self._xxx:`;
    - **disjoint constant dict keys**: when the keys `p` reads (`self.params["outtmpl"]`) and the
      keys `m` writes (`self.params["proxy"]`) are all constant and disjoint.
 3. Report **`MUT101`** when an attribute in `reads_self_attrs(p) ∩ writes(m)` remains and **`p ∉

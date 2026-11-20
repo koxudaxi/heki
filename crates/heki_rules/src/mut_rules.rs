@@ -141,10 +141,31 @@ fn local_summary<'a>(cx: &CheckContext<'a>, m: &Method<'_>) -> Option<&'a Effect
         .and_then(|f| f.local_functions.get(&m.key))
 }
 
-/// Memo / cache dictionaries by name (`self._cache`, `self.memo`).
-fn is_memo_attr(attr: &str) -> bool {
-    let lower = attr.to_ascii_lowercase();
-    lower.contains("cache") || lower.contains("memo")
+/// Memo / cache dictionaries by name: a word of the attribute's name is `cache...` or `memo...`
+/// (`self._cache`, `self.memo`, `self._resultCache`, `self.memoized`), not `memory`.
+fn is_memo_name(attr: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    for part in attr.split('_') {
+        let mut word = String::new();
+        for c in part.chars() {
+            if c.is_ascii_uppercase() && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(c.to_ascii_lowercase());
+        }
+        words.push(word);
+    }
+    words
+        .iter()
+        .any(|w| w.starts_with("cache") || w.starts_with("memo") && !w.starts_with("memor"))
+}
+
+/// A write that fills a memo dictionary rather than changing what it was computed from: a
+/// memo-shaped write (`setdefault`, a store under `if k not in self.<attr>:`), or an in-place
+/// change of an attribute named as a memo or cache. Rebinding such an attribute is no memo
+/// operation (`self.cache_size = n`).
+fn is_memo_write(attr: &str, w: &SelfWrite) -> bool {
+    w.memo_shaped || !w.rebinds && is_memo_name(attr)
 }
 
 /// Disjoint constant dict keys: every read and every write names a constant key, and no key
@@ -224,16 +245,14 @@ pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         continue;
                     }
                     // Filter 2: memo / cache dictionaries.
-                    if is_memo_attr(attr) {
-                        continue;
-                    }
                     let mut own = self_attr_writes(f, attr);
+                    own.retain(|w| !is_memo_write(attr, w));
                     // The cached value holds the attribute's object itself: it sees the changes
                     // made in place, and only rebinding the attribute leaves it behind.
                     if ps.returns_self_attrs.contains(*attr) {
                         own.retain(|w| w.rebinds);
                     }
-                    if own.is_empty() || own.iter().all(|w| w.memo_shaped) {
+                    if own.is_empty() {
                         continue;
                     }
                     // Filter 3: disjoint constant dict keys.
@@ -1834,10 +1853,9 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         .iter()
                         .filter(|w| w.attr == *attr)
                         .collect();
-                    // Filters 3 and 4: memo dictionaries and stored hashes (`self._hash`,
-                    // which a deserialization hook recomputes), disjoint constant keys.
+                    // Filter 4: stored hashes (`self._hash`, which a deserialization hook
+                    // recomputes), disjoint constant keys.
                     if writes.is_empty()
-                        || is_memo_attr(attr)
                         || is_stored_hash(attr)
                         || disjoint_keys(
                             read_keys.iter().copied(),
@@ -1846,10 +1864,10 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     {
                         continue;
                     }
-                    // Filters 2 and 3: lazy initialization, memo-shaped writes.
+                    // Filters 2 and 3: lazy initialization, memo dictionaries.
                     let lazy = lazy_init_branches(f, attr);
                     let first = self_attr_writes(f, attr).into_iter().find(|w| {
-                        !w.memo_shaped && !lazy.iter().any(|b| dominates(f, *b, w.block))
+                        !is_memo_write(attr, w) && !lazy.iter().any(|b| dominates(f, *b, w.block))
                     });
                     let Some(write) = first else {
                         continue;
