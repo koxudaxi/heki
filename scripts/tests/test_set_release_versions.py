@@ -14,11 +14,13 @@ from helpers import ROOT
 DATA = Path(__file__).parent / "data" / "set_release_versions"
 MANIFESTS = ("Cargo.toml", "pyproject.toml", "Cargo.lock")
 REPOSITORY = "https://github.com/koxudaxi/heki"
+CHECKOUT_VERSION = "0.1.1"
+"""The version of the copies, older than the releases the tests sync, whatever `main` declares."""
 
 
 @pytest.fixture
 def checkout(tmp_path: Path) -> Path:
-    """Copies of the repository's manifests and lock file, and a CHANGELOG to date."""
+    """Copies of the repository's manifests and lock file at `CHECKOUT_VERSION`, and a CHANGELOG."""
     for name in MANIFESTS:
         shutil.copy(ROOT / name, tmp_path / name)
     for member in tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"][
@@ -26,6 +28,8 @@ def checkout(tmp_path: Path) -> Path:
     ]:
         (tmp_path / member).mkdir(parents=True)
         shutil.copy(ROOT / member / "Cargo.toml", tmp_path / member / "Cargo.toml")
+    for path, text in release.release_files(tmp_path, CHECKOUT_VERSION, None).items():
+        path.write_text(text, encoding="utf-8")
     shutil.copy(DATA / "CHANGELOG.md", tmp_path / "CHANGELOG.md")
     return tmp_path
 
@@ -36,10 +40,6 @@ def texts(root: Path) -> dict[str, str]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
-
-
-def committed_version() -> str:
-    return release.manifest_versions(ROOT)[release.WORKSPACE_VERSION]
 
 
 def lock_versions(root: Path) -> dict[tuple[str, str | None], str]:
@@ -243,7 +243,7 @@ def edit(root: Path, name: str, old: str, new: str) -> None:
 def test_a_pattern_that_does_not_match_once_fails_before_anything_is_written(
     checkout: Path, name: str, old: str, new: str, message: str
 ) -> None:
-    version = committed_version()
+    version = CHECKOUT_VERSION
     edit(checkout, name, old.replace("{v}", version), new.replace("{v}", version))
     before = texts(checkout)
     with pytest.raises(SystemExit, match=re.escape(message)):
