@@ -322,6 +322,11 @@ pub struct ProjectIndex {
     pub(crate) func_files: FxHashMap<FuncKey, PathBuf>,
 }
 
+/// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
+pub(crate) fn is_stub(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "pyi")
+}
+
 /// Summarize every module of a project and propagate effects to a fixpoint.
 pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
     let decls = resolver::project_decls_for(modules, kb, None);
@@ -334,7 +339,9 @@ pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -
 
 impl ProjectIndex {
     /// Build an index from local file summaries and propagate the whole project.
-    pub fn build(files: Vec<FileSummary>) -> Self {
+    pub fn build(mut files: Vec<FileSummary>) -> Self {
+        // Index stubs first so a sibling `.py` implementation always owns the module's symbols.
+        files.sort_by_key(|f| !is_stub(&f.path));
         let mut index = Self::default();
         for mut file in files {
             file.functions = file.local_functions.clone();
@@ -409,9 +416,28 @@ impl ProjectIndex {
             .get(func)
     }
 
-    /// Declarations of every indexed module (for re-summarizing an edited module).
+    /// Declarations of every indexed module (for re-summarizing an edited module), preferring
+    /// `.py` implementations over `.pyi` stubs sharing a module name.
     pub fn project_decls(&self) -> ProjectDecls {
-        ProjectDecls::new(self.files.values().map(|f| f.decls.clone()))
+        let mut entries: Vec<(bool, ModuleDecls)> = self
+            .files
+            .values()
+            .map(|f| (is_stub(&f.path), f.decls.clone()))
+            .collect();
+        entries.sort_by_key(|(stub, _)| !*stub);
+        ProjectDecls::new(entries.into_iter().map(|(_, d)| d))
+    }
+
+    /// Preferred declarations currently indexed for `module_name` (`.py` over `.pyi`).
+    pub fn module_decls(&self, module_name: &str) -> Option<ModuleDecls> {
+        let mut stub = None;
+        for f in self.files.values().filter(|f| f.module_name == module_name) {
+            if !is_stub(&f.path) {
+                return Some(f.decls.clone());
+            }
+            stub = Some(f.decls.clone());
+        }
+        stub
     }
 
     /// Re-summarize one edited module against the index's declarations and update it.
@@ -420,11 +446,11 @@ impl ProjectIndex {
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
     ) -> IncrementalUpdate {
-        let others: Vec<ModuleDecls> = self
+        let others: Vec<(bool, ModuleDecls)> = self
             .files
             .values()
             .filter(|f| f.path != input.path)
-            .map(|f| f.decls.clone())
+            .map(|f| (is_stub(&f.path), f.decls.clone()))
             .collect();
         let decls = resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others));
         let file = summary::summarize_module(input, &decls, kb);
@@ -440,7 +466,15 @@ impl ProjectIndex {
         kb: &EffectiveEcosystemKb,
         decls: &mut ProjectDecls,
     ) -> (IncrementalUpdate, bool) {
-        let changed = resolver::update_module_decls(input, kb, decls);
+        let masked_by_impl = is_stub(&input.path)
+            && self.files.values().any(|f| {
+                f.module_name == input.module_name && f.path != input.path && !is_stub(&f.path)
+            });
+        let changed = if masked_by_impl {
+            false
+        } else {
+            resolver::update_module_decls(input, kb, decls)
+        };
         let file = summary::summarize_module(input, decls, kb);
         (self.update_file(file), changed)
     }
@@ -454,13 +488,24 @@ impl ProjectIndex {
         let path = new_file.path.clone();
         let old_file = self.files.remove(&path);
         let mut previous: FxHashMap<FuncKey, EffectSummary> = FxHashMap::default();
+        let mut owned_before: FxHashSet<FuncKey> = FxHashSet::default();
         if let Some(old) = &old_file {
+            for (k, v) in &old.functions {
+                if self.func_files.get(k) == Some(&path) {
+                    owned_before.insert(k.clone());
+                    previous.insert(k.clone(), v.clone());
+                }
+            }
             self.remove_file_links(old);
-            previous.extend(old.functions.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
         new_file.functions = new_file.local_functions.clone();
         self.add_file_links(&new_file);
-        let own: FxHashSet<FuncKey> = new_file.local_functions.keys().cloned().collect();
+        let own: FxHashSet<FuncKey> = new_file
+            .local_functions
+            .keys()
+            .filter(|k| self.func_files.get(*k) == Some(&path))
+            .cloned()
+            .collect();
         // `sync_driven_only` can only change for the file's functions and the callees of its
         // old and new call sites.
         let mut sync_candidates: FxHashSet<FuncKey> = own.clone();
@@ -496,11 +541,9 @@ impl ProjectIndex {
                 }
             }
         }
-        if let Some(old) = &old_file {
-            for func in old.functions.keys() {
-                if !own.contains(func) {
-                    changed.insert(func.clone());
-                }
+        for func in owned_before {
+            if !own.contains(&func) {
+                changed.insert(func);
             }
         }
         changed.extend(sync_changed);
@@ -565,8 +608,12 @@ impl ProjectIndex {
     }
 
     fn add_file_links(&mut self, file: &FileSummary) {
+        let file_is_stub = is_stub(&file.path);
         for func in file.local_functions.keys() {
-            self.func_files.insert(func.clone(), file.path.clone());
+            let keep_impl = file_is_stub && self.func_files.get(func).is_some_and(|p| !is_stub(p));
+            if !keep_impl {
+                self.func_files.insert(func.clone(), file.path.clone());
+            }
         }
         for (caller, callee, _) in &file.call_edges {
             self.reverse_call_graph

@@ -111,7 +111,7 @@ jobs:
           allow-prereleases: true
       # Every line is covered except 3 that cannot run: the `_ => {}` arms for assignment,
       # augmented-assignment and `del` targets in `heki_ir/src/builder.rs`, which ruff's parser
-      # rejects (OVERNIGHT_REVIEW_NOTES.md, M8). Lower the limit whenever one goes away.
+      # rejects (see `docs/IMPLEMENTATION_PLAN.md`, M8). Lower the limit whenever one goes away.
       - run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-uncovered-lines 3
         env:
           HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}

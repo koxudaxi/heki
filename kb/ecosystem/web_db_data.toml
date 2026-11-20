@@ -293,21 +293,46 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "psycopg.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Connection.cursor"
+return_type = "psycopg.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Connection.execute"
+effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg2.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "psycopg2.extensions.connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg2.extensions.connection.cursor"
+return_type = "psycopg2.extensions.cursor"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymysql.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "pymysql.connections.Connection"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.create_engine"
 effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "sqlalchemy.engine.Engine"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.engine.Engine.connect"
+effects = ["blocking_db"]
+return_type = "sqlalchemy.engine.Connection"
 opaque_to_layer3 = true
 
 [[entries]]

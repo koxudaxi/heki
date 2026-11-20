@@ -88,8 +88,9 @@ fn entry(summary: &EffectSummary, f: &IrFunction) -> SnapshotEntry {
         escapes_params: param_names(summary.escapes_params, f),
         mutates_self_attrs: summary.mutates_self_attrs.iter().map(attr_path).collect(),
         transitive_exec_effects: summary
-            .transitive_exec_effects
+            .direct_exec_effects
             .iter()
+            .chain(&summary.transitive_exec_effects)
             .map(|k| effect_name(*k).to_owned())
             .collect(),
     };

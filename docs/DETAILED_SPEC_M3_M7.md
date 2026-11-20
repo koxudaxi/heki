@@ -492,7 +492,7 @@ pub enum WriteKind {
 - `--fix` 時は、既定で `safe && unconditional`（`OPT101`/`OPT102`）のみ適用。`--include-size-dependent` または `--profile` のホット関数一致時のみ `size-dependent` の `safe` fix も許可。
 
 ### 4.7 `MUT103` & `heki snapshot` 仕様
-- `heki snapshot [PATHS...] --write`：各公開関数（`_` 始まり以外）の `(module, qualname)` ごとに正規化サマリ（`mutates_params`, `escapes_params`, `mutates_self_attrs`, `transitive_exec_effects`）を `.heki-summary-snapshot.json` へ保存。
+- `heki snapshot [PATHS...] --write`：各公開関数（`_` 始まり以外）の `(module, qualname)` ごとに正規化サマリ（`mutates_params`, `escapes_params`, `mutates_self_attrs`, `direct_exec_effects ∪ transitive_exec_effects`）を `.heki-summary-snapshot.json` へ保存。
 - `heki check --extend-select MUT103`：保存済みスナップショットと比較し、既存関数の副作用集合が真に増加した箇所に **`MUT103`** を報告。
 
 ### 4.8 M6 完了ゲート（定量チェック必須）

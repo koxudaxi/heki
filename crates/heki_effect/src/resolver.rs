@@ -574,17 +574,33 @@ pub(crate) fn update_module_decls(
 pub(crate) fn project_decls_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
-    others: Option<Vec<ModuleDecls>>,
+    others: Option<Vec<(bool, ModuleDecls)>>,
 ) -> ProjectDecls {
-    let structural: Vec<ModuleDecls> = modules.iter().map(structural_decls).collect();
+    // Process stubs before implementation `.py` files so a `.py` module always wins when both
+    // share one module name.
+    let order = |items: Vec<(bool, ModuleDecls)>| {
+        let mut items = items;
+        items.sort_by_key(|(stub, _)| !*stub);
+        items.into_iter().map(|(_, d)| d)
+    };
+    let structural: Vec<(bool, ModuleDecls)> = modules
+        .iter()
+        .map(|m| (crate::is_stub(&m.path), structural_decls(m)))
+        .collect();
     let others = others.unwrap_or_default();
-    let pass1 = ProjectDecls::new(others.iter().cloned().chain(structural.iter().cloned()));
-    let completed: Vec<ModuleDecls> = modules
+    let pass1 = ProjectDecls::new(order(
+        others
+            .iter()
+            .cloned()
+            .chain(structural.iter().cloned())
+            .collect(),
+    ));
+    let completed: Vec<(bool, ModuleDecls)> = modules
         .iter()
         .zip(structural)
-        .map(|(m, d)| complete_decls(m, d, &pass1, kb))
+        .map(|(m, (stub, d))| (stub, complete_decls(m, d, &pass1, kb)))
         .collect();
-    ProjectDecls::new(others.into_iter().chain(completed))
+    ProjectDecls::new(order(others.into_iter().chain(completed).collect()))
 }
 
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.
@@ -918,8 +934,11 @@ impl<'a> TypeCtx<'a> {
         if last.chars().next().is_some_and(char::is_uppercase) {
             return Some(Val::Inst(fqn.to_owned()));
         }
-        // Layer 2 constructor registered with a lowercase name (`boto3.client`).
+        // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
         let entry = self.kb.lookup(fqn)?;
+        if let Some(rt) = &entry.return_type {
+            return Some(Val::Inst(rt.clone()));
+        }
         (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
             && !entry.effects.contains(&ExecEffectKind::BlockingNet))
         .then(|| Val::Inst(fqn.to_owned()))
