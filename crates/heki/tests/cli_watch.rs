@@ -211,7 +211,7 @@ fn watch_notices_replacements_that_keep_the_modification_time() {
         .write("pkg/api.py", caller)
         .write("pkg/api2.py", caller)
         .write("pkg/broken.py", "def f(:\n");
-    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "3");
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "4");
     wait_for(&rx, "syntax error");
     wait_for(&rx, "[heki watch] 0 diagnostic(s) in 4 file(s)");
     // The file with the syntax error was never indexed; deleting it changes nothing else.
@@ -224,16 +224,18 @@ fn watch_notices_replacements_that_keep_the_modification_time() {
     );
     wait_for(&rx, "[heki watch] 2 diagnostic(s) in 4 file(s)");
     // So are the callers: one is no longer UTF-8, the other no longer parses. Both are
-    // reported, as `heki check` reports them.
+    // reported, as `heki check` reports them. One replacement per re-check: two quick
+    // replacements may land in one re-check or in two.
     replace_keeping_mtime(&p.dir.join("pkg/api.py"), b"\xff\xfe");
-    replace_keeping_mtime(&p.dir.join("pkg/api2.py"), b"def handler(:\n");
-    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    let lines = wait_for(&rx, "[heki watch] 1 diagnostic(s) in 3 file(s)");
     assert!(
         lines
             .iter()
             .any(|l| l == "error: pkg/api.py: stream did not contain valid UTF-8"),
         "{lines:#?}"
     );
+    replace_keeping_mtime(&p.dir.join("pkg/api2.py"), b"def handler(:\n");
+    let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
     assert!(
         lines
             .iter()
