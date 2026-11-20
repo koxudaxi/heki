@@ -295,6 +295,8 @@ which module imports which.
   and `direct_exec_effects ∪ transitive_exec_effects`) are saved in a normalized form
   (`.heki-summary-snapshot.json`); a pull request whose functions gained effects or mutability is
   reported.
+- Entries are built and compared from each function's defining file (`ProjectIndex::file_of`:
+  the `.py` file before its `.pyi` stub).
 
 #### `MUT106`: single-pass iterators consumed twice (opt-in)
 - Sources: generator expressions; `iter` / `zip` / `map` / `filter` / `enumerate` / `reversed`
