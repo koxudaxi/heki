@@ -487,6 +487,13 @@ pub struct EffectSummary {
     /// property it calls reads the attribute, and it hands `self` to no other code. An in-place
     /// change of such an attribute is seen through the cached value (`MUT101`).
     pub returns_self_attrs: BTreeSet<String>,
+    /// The `self` attributes the function reads only where they are initialized lazily: by
+    /// itself (it writes `self.<attr>` where a `None` / falsy test of it found it unset:
+    /// `if self._conn is None: self._conn = connect()`), or by the `self` methods and
+    /// properties it calls, none of which reads the attribute otherwise. Running the function
+    /// leaves such an attribute set (`MUT101`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub lazily_read_self_attrs: BTreeSet<String>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
     pub invalidates_cached: BTreeSet<String>,
     /// The facts of every typed write the function reaches, through any callee.
@@ -755,6 +762,28 @@ impl EffectSummary {
         if let Some(i) = &mut self.iterated {
             i.refresh_typed_field_writes();
         }
+    }
+
+    /// Add the `self` attributes `other` reads to the ones this summary reads (its own or a
+    /// `self` call's facts): an attribute stays read only lazily when neither reads it
+    /// otherwise ([`Self::lazily_read_self_attrs`]).
+    pub(crate) fn add_self_reads(&mut self, other: &EffectSummary) {
+        if !self.lazily_read_self_attrs.is_empty() || !other.lazily_read_self_attrs.is_empty() {
+            let eager = |s: &EffectSummary| -> BTreeSet<String> {
+                s.reads_self_attrs
+                    .iter()
+                    .filter(|r| !s.lazily_read_self_attrs.contains(&r.attr))
+                    .map(|r| r.attr.clone())
+                    .collect()
+            };
+            let eager = [eager(self), eager(other)];
+            self.lazily_read_self_attrs
+                .extend(other.lazily_read_self_attrs.iter().cloned());
+            self.lazily_read_self_attrs
+                .retain(|a| !eager.iter().any(|e| e.contains(a)));
+        }
+        self.reads_self_attrs
+            .extend(other.reads_self_attrs.iter().cloned());
     }
 
     /// An `@abstractmethod`: a call never runs it (an override does), so it guarantees

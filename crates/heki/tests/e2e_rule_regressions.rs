@@ -397,6 +397,114 @@ fn mut101_held_attributes_cross_modules() {
     assert_eq!(lines(&p, "MUT101"), vec![at(6, "Derived.push")]);
 }
 
+// ============================================================= MUT101: lazy initialization
+
+/// Lazy initializations (`if self._conn is None: self._conn = ...`, `if not self.finalized:`, in
+/// a method or a property getter) that the cached property runs itself, when it reads the
+/// attribute nowhere else: computing the cached value set the attribute, so the test cannot find
+/// it unset again. A cached property reading it directly may have cached its unset value.
+const LAZY: &str = r#"import threading
+from functools import cached_property
+
+
+def open_connection(url):
+    return object()
+
+
+class Client:
+    _conn = None
+    _pool = None
+
+    def __init__(self, url):
+        self.url = url
+        self._lock = threading.Lock()
+        self.finalized = False
+        self._tasks = {}
+
+    def _connect(self):
+        if self._conn is None:
+            self._conn = open_connection(self.url)
+        return self._conn
+
+    @property
+    def pool(self):
+        if self._pool is None:
+            self._pool = [self.url]
+        return self._pool
+
+    def finalize(self):
+        with self._lock:
+            if not self.finalized:
+                self.finalized = True
+                for task in self._tasks.values():
+                    print(task)
+
+    @cached_property
+    def database(self):
+        return self._connect().db
+
+    @cached_property
+    def client(self):
+        return tuple(self.pool)
+
+    @cached_property
+    def tasks(self):
+        self.finalize()
+        return dict(self._tasks)
+
+    @cached_property
+    def connected(self):
+        return self._conn is not None
+
+    @cached_property
+    def label(self):
+        return repr(self._conn) + repr(self._connect())
+
+    def reconnect(self):
+        if not self._conn:
+            self._conn = open_connection(self.url)
+
+    def close(self):
+        self._conn = None
+
+"#;
+
+#[test]
+fn mut101_skips_lazy_initializations_the_cached_property_runs() {
+    let p = Project::new("regr_mut101_lazy");
+    p.write("lazy.py", LAZY);
+    let found = reports(&p, "MUT101");
+    let got: Vec<(u64, &str, &str)> = found
+        .iter()
+        .map(|(line, qualname, message)| {
+            let property = message.rsplit_once("`@cached_property` `").unwrap().1;
+            (
+                *line,
+                qualname.as_str(),
+                property.split('`').next().unwrap(),
+            )
+        })
+        .collect();
+    // Not reported: `_connect`, `reconnect`, and the getter `pool` for the properties that
+    // read the attribute only through those initializations (`database`, `client`), and
+    // `finalize` for `tasks`. Reported: the same initializations for the properties that read
+    // the attribute directly (`connected`, `label`), and the rebinding that is no lazy
+    // initialization (`close`).
+    assert_eq!(
+        got,
+        vec![
+            (21, "Client._connect", "connected"),
+            (21, "Client._connect", "label"),
+            (60, "Client.reconnect", "connected"),
+            (60, "Client.reconnect", "label"),
+            (63, "Client.close", "connected"),
+            (63, "Client.close", "database"),
+            (63, "Client.close", "label"),
+        ],
+        "{found:#?}"
+    );
+}
+
 // ======================================================= EFF103: `Session.query` builds a query
 
 /// R19: `sqlalchemy.orm.Session.query(...)` and the `Query` builder methods only build a lazy

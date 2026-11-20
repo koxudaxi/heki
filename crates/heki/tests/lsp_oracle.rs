@@ -305,6 +305,15 @@ const GRID: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    pas
 const GRID_RESETTING: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    def __init__(self):\n        super().__init__()\n        self._reset()\n";
 const GRID_INITIALIZING: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    def __init__(self):\n        super().__init__()\n";
 
+// Lazy initialization (`MUT101`): a cached property reads a connection only through a mixin
+// helper in another module that initializes it lazily, so the lazy initialization of a
+// subclass in a third module cannot find it unset after; the helper stops initializing it.
+const CONN_MIXIN: &str = "class ConnMixin:\n    _conn = None\n\n    def _get_conn(self):\n        if self._conn is None:\n            self._conn = object()\n        return self._conn\n";
+const CONN_MIXIN_READING: &str =
+    "class ConnMixin:\n    _conn = None\n\n    def _get_conn(self):\n        return self._conn\n";
+const CONN_CLIENT: &str = "from functools import cached_property\n\nfrom pkg.conn_mixin import ConnMixin\n\n\nclass Client(ConnMixin):\n    @cached_property\n    def db(self):\n        return self._get_conn()\n";
+const CONN_POOLED: &str = "from pkg.conn_client import Client\n\n\nclass Pooled(Client):\n    def connect(self):\n        if self._conn is None:\n            self._conn = object()\n";
+
 // Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
 // size-dependent rewrites that rely on them (`OPT110` builds a `set(...)`) are not proven.
 const LOOPS: &str = "def member(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n";
@@ -491,6 +500,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/labeled.py", LABELED),
         ("pkg/sheet.py", SHEET),
         ("pkg/grid.py", GRID),
+        ("pkg/conn_mixin.py", CONN_MIXIN),
+        ("pkg/conn_client.py", CONN_CLIENT),
+        ("pkg/conn_pooled.py", CONN_POOLED),
         ("pkg/fill.py", FILL),
         ("pkg/fill_main.py", FILL_MAIN),
         ("pkg/views.py", VIEWS),
@@ -1295,7 +1307,8 @@ fn steps_indirect_helpers() -> Vec<Step> {
 /// A class's family includes the methods it inherits: the inherited writer's report appears in
 /// the base class's file when a subclass in another module starts caching what it writes, and
 /// goes away when the subclass overrides the writer. A private writer of the base that a
-/// subclass's `__init__` calls initializes in two phases.
+/// subclass's `__init__` calls initializes in two phases. A lazy initialization in a subclass
+/// follows whether the helper of a base class's mixin, the only reader, initializes lazily.
 fn steps_inherited_writers() -> Vec<Step> {
     let overriding = format!(
         "{LABELED_CACHED}\n    def rename(self, name):\n        self.name = name\n        del self.label\n"
@@ -1326,6 +1339,19 @@ fn steps_inherited_writers() -> Vec<Step> {
             vec![save("pkg/grid.py", GRID_INITIALIZING)],
         )
         .present(&[("pkg/sheet.py", "MUT101")]),
+        Step::new(
+            "the mixin helper a cached property reads through stops initializing lazily",
+            vec![save("pkg/conn_mixin.py", CONN_MIXIN_READING)],
+        )
+        .present(&[("pkg/conn_pooled.py", "MUT101")]),
+        Step::new(
+            "the helper initializes lazily again",
+            vec![save("pkg/conn_mixin.py", CONN_MIXIN)],
+        )
+        .absent(&[
+            ("pkg/conn_pooled.py", "MUT101"),
+            ("pkg/conn_mixin.py", "MUT101"),
+        ]),
     ]
 }
 

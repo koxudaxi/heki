@@ -576,8 +576,7 @@ fn transfer(
             t.returns_self_attrs
                 .retain(|a| !facts.reads_self_attrs.iter().any(|r| r.attr == *a));
         }
-        t.reads_self_attrs
-            .extend(facts.reads_self_attrs.iter().cloned());
+        t.add_self_reads(facts);
         t.mutates_self_attrs
             .extend(facts.mutates_self_attrs.iter().cloned());
         t.invalidates_cached

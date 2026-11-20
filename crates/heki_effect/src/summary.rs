@@ -195,6 +195,7 @@ fn extract_module(
             slot.writes.extend(flow.writes);
         }
         if let Some(flow) = cache_flow::cache_flow(f, &key, &sites, &cx) {
+            summary.lazily_read_self_attrs = flow.lazily_initialized().map(str::to_owned).collect();
             file.cache_flows.entry(key.clone()).or_default().push(flow);
         }
         file.call_sites.extend(sites);
@@ -284,6 +285,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
             .collect()
     };
     let read = [read_otherwise(into), read_otherwise(&other)];
+    into.add_self_reads(&other);
     into.returns_self_attrs.extend(other.returns_self_attrs);
     into.returns_self_attrs
         .retain(|a| !read.iter().any(|r| r.contains(a)));
@@ -319,7 +321,6 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     for (i, slots) in other.inplace_param_slots {
         into.inplace_param_slots.entry(i).or_default().extend(slots);
     }
-    into.reads_self_attrs.extend(other.reads_self_attrs);
     into.mutates_self_attrs.extend(other.mutates_self_attrs);
     into.invalidates_cached.extend(other.invalidates_cached);
     into.typed_field_write_sites

@@ -7,7 +7,7 @@
 //! decided from these facts and the summaries alone, also for a method of a file that is not
 //! checked (the language server checks one file).
 
-use crate::{CONTAINER_MUTATORS, CallSite, FuncKey, TypeCtx, aliases_of, self_aliases};
+use crate::{CONTAINER_MUTATORS, CallSite, FuncKey, TypeCtx, aliases_of, guards, self_aliases};
 use heki_ast::Span;
 use heki_ir::{BlockId, CompareOpKind, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -38,6 +38,10 @@ pub struct SelfAttrWrite {
     pub memo_shaped: bool,
     /// `self.<attr> = ...` / `del self.<attr>`: the attribute is rebound, not changed in place.
     pub rebinds: bool,
+    /// The write runs only where a `None` / falsy test of `self.<attr>` found it unset
+    /// (`if self.<attr> is None:`, `if not self.<attr>:`): a lazy initialization.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lazy_init: bool,
 }
 
 /// One block of a method: its normal control flow and the points that invalidate or read a
@@ -78,6 +82,15 @@ impl CacheFlow {
         self.writes
             .iter()
             .filter(move |w| self.name(w.attr) == attr)
+    }
+
+    /// The attributes the method initializes lazily (a write of
+    /// [`SelfAttrWrite::lazy_init`]).
+    pub fn lazily_initialized(&self) -> impl Iterator<Item = &str> {
+        self.writes
+            .iter()
+            .filter(|w| w.lazy_init)
+            .map(|w| self.name(w.attr))
     }
 }
 
@@ -182,6 +195,7 @@ pub fn self_attr_writes(f: &IrFunction) -> Vec<(&str, SelfAttrWrite)> {
             _ => false,
         })
     };
+    let lazy = lazy_init_blocks(f, &self_vars);
     let mut out = Vec::new();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {
@@ -217,6 +231,9 @@ pub fn self_attr_writes(f: &IrFunction) -> Vec<(&str, SelfAttrWrite)> {
                         index: u32::try_from(index).unwrap_or(u32::MAX),
                         memo_shaped,
                         rebinds,
+                        lazy_init: lazy
+                            .iter()
+                            .any(|(a, blocks)| *a == attr && blocks[bb.id.0 as usize]),
                     },
                 ));
             }
@@ -224,6 +241,37 @@ pub fn self_attr_writes(f: &IrFunction) -> Vec<(&str, SelfAttrWrite)> {
     }
     out.sort_by_key(|(_, w)| w.span);
     out
+}
+
+/// The attributes of `self` that `f` initializes lazily, each with the blocks (by id) that only
+/// the "unset" outcome of one of its `None` / falsy tests leads to
+/// ([`guards::lazy_init_branches`]): every path from the entry to such a block runs through the
+/// branch (normal and exception edges).
+fn lazy_init_blocks(f: &IrFunction, self_vars: &FxHashSet<VarId>) -> Vec<(String, Vec<bool>)> {
+    guards::lazy_init_branches(f)
+        .into_iter()
+        .filter(|b| self_vars.contains(&b.obj))
+        .map(|b| {
+            let blocks = avoidable_from_entry(f, b.init).into_iter().map(|a| !a);
+            (b.attr, blocks.collect())
+        })
+        .collect()
+}
+
+/// Membership (by block id) of the blocks a path from the entry of `f` reaches without running
+/// through `d` (normal and exception edges).
+fn avoidable_from_entry(f: &IrFunction, d: BlockId) -> Vec<bool> {
+    let mut seen = vec![false; f.blocks.len()];
+    let mut stack = vec![BlockId(0)];
+    while let Some(cur) = stack.pop() {
+        if cur == d || std::mem::replace(&mut seen[cur.0 as usize], true) {
+            continue;
+        }
+        let block = f.block(cur);
+        stack.extend(block.terminator.successors());
+        stack.extend(block.exc_target);
+    }
+    seen
 }
 
 /// The blocks of `f` with the points that invalidate or read a cached property of its own

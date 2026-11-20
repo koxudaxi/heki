@@ -11,7 +11,7 @@ use heki_effect::{
     AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CacheEvent, CacheFlow, CallHop, CallSite, Callee,
     Construction, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS, ProjectDecls,
     ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
-    WriteKind, self_aliases, self_attr_writes,
+    WriteKind, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
@@ -299,6 +299,12 @@ fn stale_writes<'m, 'a>(
                         .writes_of(attr)
                         .filter(|w| !is_memo_write(attr, w))
                         .collect();
+                    // Computing the cached value initialized the attribute (the property reads
+                    // it only where it is initialized lazily), so a lazy initialization cannot
+                    // find it unset after.
+                    if ps.lazily_read_self_attrs.contains(attr) {
+                        own.retain(|w| !w.lazy_init);
+                    }
                     // The cached value holds the attribute's object itself: it sees the
                     // changes made in place, and only rebinding the attribute leaves it behind.
                     if ps.returns_self_attrs.contains(attr) {
@@ -2449,12 +2455,9 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         continue;
                     }
                     // Filters 2 and 3: lazy initialization, memo dictionaries.
-                    let lazy = lazy_init_branches(f, attr);
-                    let first = self_attr_writes(f).into_iter().find(|(a, w)| {
-                        *a == *attr
-                            && !is_memo_write(attr, w)
-                            && !lazy.iter().any(|b| dominates(f, *b, w.block))
-                    });
+                    let first = self_attr_writes(f)
+                        .into_iter()
+                        .find(|(a, w)| *a == *attr && !is_memo_write(attr, w) && !w.lazy_init);
                     let Some((_, write)) = first else {
                         continue;
                     };
@@ -2517,41 +2520,6 @@ fn private_methods_named_in_initializers<'m>(
         .filter(|m| called.contains(m.name()))
         .map(|m| &m.key)
         .collect()
-}
-
-/// Filter 2 (`MUT107`): the initializing branches of the `None` / falsy guards of
-/// `self.<attr>` in `f` (`heki_effect::guards::lazy_init_branches`, which the effect lane's
-/// lazy initialization shares).
-fn lazy_init_branches(f: &IrFunction, attr: &str) -> Vec<heki_ir::BlockId> {
-    let self_vars = f
-        .params
-        .first()
-        .map(|p| self_aliases(f, p.var))
-        .unwrap_or_default();
-    heki_effect::guards::lazy_init_branches(f)
-        .into_iter()
-        .filter(|b| b.attr == attr && self_vars.contains(&b.obj))
-        .map(|b| b.init)
-        .collect()
-}
-
-/// Whether every path from the entry of `f` to block `b` runs through block `d` (normal and
-/// exception edges).
-fn dominates(f: &IrFunction, d: heki_ir::BlockId, b: heki_ir::BlockId) -> bool {
-    let mut seen = FxHashSet::default();
-    let mut stack = vec![heki_ir::BlockId(0)];
-    while let Some(cur) = stack.pop() {
-        if cur == d || !seen.insert(cur) {
-            continue;
-        }
-        if cur == b {
-            return false;
-        }
-        let block = f.block(cur);
-        stack.extend(block.terminator.successors());
-        stack.extend(block.exc_target);
-    }
-    true
 }
 
 // ============================================================================ MUT108 / MUT110

@@ -41,6 +41,12 @@ It does not report:
   already did and nothing read it since; an invalidation under a condition, such as
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
+- lazy initialization: a write where a `None` / falsy test of the attribute found it unset
+  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter), when the
+  cached property reads the attribute only through such initializations
+  (`return self._connect().db`): computing the cached value set the attribute, so the test
+  cannot find it unset again. A cached property that reads it directly
+  (`return self._conn is not None`) may have cached its unset value and is reported;
 - changes made in place (`clear()`, `append()`, item assignment) to an attribute whose object
   the cached value holds itself, when the getter reads it for nothing else: it returns
   `self.items`, or puts it as itself into a display or a container it returns

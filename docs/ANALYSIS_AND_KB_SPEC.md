@@ -246,6 +246,8 @@ EffectSummary(f) = {
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
     returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
                                                            // holds by reference, read for nothing else (MUT101)
+    lazily_read_self_attrs:   Set<AttrName>,               // self.<attr> read only where it or a self call
+                                                           // initializes it lazily (MUT101)
     mutates_self_attrs:       Set<AttrKeyPath>,            // reassignment or in-place change of self.<attr> (indirect too)
     invalidates_cached:       Set<AttrName>,               // del self.<prop>, self.__dict__.pop("<prop>", ...), clear
     typed_field_write_sites:  Set<TypedFieldWriteSite>,    // own and IndirectHelper writes to (class, attr) with
@@ -305,7 +307,7 @@ CFG and its post-dominator tree, only when a contract is configured; `ProjectInd
 
 `FileSummary.cache_flows` (`heki_effect::CacheFlow`, one per definition) holds the `MUT101` facts
 of every method that writes a `self` attribute in its own body: the writes (attribute, position,
-whether they rebind the attribute or fill a memo), and the blocks of the method (normal
+whether they rebind the attribute, fill a memo, or initialize it lazily), and the blocks of the method (normal
 successors, returns, exception targets) with the points that invalidate or read a cached
 property of its own instance (`del self.<name>`, a constant-key removal from `self.__dict__`,
 `self.__dict__.clear()`, `self.<name>`, and calls on `self`, whose callees' summaries say what
@@ -424,7 +426,15 @@ which module imports which.
    itself, into a display or a container that is returned; `self` reaches no other code), minus
    the attributes the `self` methods and properties it calls read (final summary). A starred
    display element (`(*self.a,)`) is a copy: the IR lowers it to a copy named `.unpacked`.
-5. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
+5. For an attribute in **`lazily_read_self_attrs(p)`**, a lazy initialization does not count: a
+   write in a block that only the "unset" outcome of a `None` / falsy test of `self.a` leads to
+   (`if self.a is None:`, `if not self.a:`; the blocks that branch dominates, normal and
+   exception edges). The fact holds when `p` reads `self.a` only in functions that initialize it
+   lazily: the methods writing it so (the test and every other read of theirs count as lazy),
+   joined through `self` calls and property getters, where any other read of it removes it.
+   Computing `p` ran the initialization, so the test cannot find the attribute unset again
+   (a write setting it back to `None` is a write of its own).
+6. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
    stale writes of a method are known without its IR: `MUT101` reports those of the checked
    methods, and `MUT111` reads those of every method.
 
@@ -472,7 +482,7 @@ which module imports which.
 - `reads_self_attrs` of `__hash__` (with its `self` helpers) against the own writes of every other
   method of the class and its subclasses, with `MUT101`'s initialization, memo, and constant-key
   filters, writes directly under a `None` / falsy guard of the same attribute (lazy
-  initialization), the attributes `__hash__` caches itself (`self._hash`), and stored-hash names.
+  initialization, `CacheFlow` writes), the attributes `__hash__` caches itself (`self._hash`), and stored-hash names.
 
 #### `MUT201`: declared write ownership
 Declared in `pyproject.toml` (no decorators, no run-time overhead):
