@@ -542,6 +542,10 @@ struct Extractor<'a> {
     pending_sites: Vec<PendingSite>,
     /// `(call site, callee, parameter, query)`: arguments waiting for `ArgOrigin::new_object`.
     pending_args: Vec<(usize, usize, usize, usize)>,
+    /// The origins of a callee's parameters while a call binds them, kept from call to call:
+    /// each bound callee takes a copy of its exact length, so no call allocates room it then
+    /// gives back (`release_spare_capacity`).
+    param_origins: Vec<ArgOrigin>,
     /// Unresolved writes waiting for the answer of their construction query.
     pending_unresolved: Vec<(UnresolvedWriteSite, usize)>,
     /// Whether the construction queries can be answered with anything but "no": the function
@@ -657,6 +661,7 @@ impl<'a> Extractor<'a> {
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
+            param_origins: Vec::new(),
             pending_unresolved: Vec::new(),
             track: false,
             maybe_new: FxHashSet::default(),
@@ -2803,6 +2808,7 @@ impl<'a> Extractor<'a> {
                 let mut on_worker = Vec::new();
                 let mut any_async = false;
                 let unknown = FunctionDecl::default();
+                let mut buffer = std::mem::take(&mut self.param_origins);
                 let loops = self.loops_around(bb);
                 // `(callee, its index, receiver, bound arguments, offset)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
@@ -2835,7 +2841,7 @@ impl<'a> Extractor<'a> {
                         invalidates = Some(invalidates.map_or(here, |i| i & here));
                     }
                     let offset = usize::from(*binds_recv && !decl.is_staticmethod);
-                    let mut params: Vec<ArgOrigin> = Vec::new();
+                    let mut params = std::mem::take(&mut buffer);
                     // The receiver the call hands over (a constructor's is its new object).
                     let mut handed_recv = None;
                     if offset == 1 {
@@ -2935,10 +2941,14 @@ impl<'a> Extractor<'a> {
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_recv, bound.clone(), offset));
                     }
+                    // A copy of the exact length; the buffer keeps its room for the next call.
+                    let mut exact = Vec::with_capacity(params.len());
+                    exact.append(&mut params);
                     let bc = BoundCallee {
                         callee: key.clone(),
-                        params,
+                        params: exact,
                     };
+                    buffer = params;
                     if offloaded {
                         on_worker.push(bc);
                     } else {
@@ -2946,6 +2956,7 @@ impl<'a> Extractor<'a> {
                         bindings.push((key.clone(), bound));
                     }
                 }
+                self.param_origins = buffer;
                 for (decl, i, recv, bound, offset) in handovers {
                     let bound = &bound;
                     self.hand_over(
