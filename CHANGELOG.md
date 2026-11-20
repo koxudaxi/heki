@@ -27,6 +27,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (`items = given or []`, `d.get(k, {})`, a callee returning a memo or its argument), made
   directly, through a helper, or in a closure, and a store of such a value in `self.<attr>` that a
   method of the class family changes in place.
+- `MUT113` (`iterated-container-mutation`, opt-in) reports a dict, set, or deque of `self`
+  changed in place while a method iterates it: by another method of the class while a generator
+  is suspended inside the iteration, or by a function the loop's body calls; the next step
+  raises `RuntimeError`.
 
 ### Changed
 
