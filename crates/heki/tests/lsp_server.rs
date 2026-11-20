@@ -286,6 +286,7 @@ fn lsp_unsaved_module_next_to_its_indexed_stub() {
     lsp.stop(true);
 }
 
+// Unix only: Windows does not remove a directory that is a process's working directory.
 #[cfg(unix)]
 #[test]
 fn lsp_without_a_root_in_a_removed_working_directory() {

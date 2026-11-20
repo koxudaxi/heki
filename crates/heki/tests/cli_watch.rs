@@ -696,6 +696,8 @@ fn watch_drops_a_package_moved_away_with_its_modules() {
     assert_eq!(out.status.code(), Some(0));
 }
 
+// Unix only: the directory is made unreadable with permission bits; on Windows that takes an
+// access control list, which std cannot set.
 #[cfg(unix)]
 #[test]
 fn watch_reports_a_directory_it_cannot_list_until_it_can() {

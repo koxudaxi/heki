@@ -1259,6 +1259,8 @@ fn absolute_paths_print_from_the_working_directory_through_links_and_stay_absolu
 
 /// A path given through a symbolic link into the working directory prints relative to it, on
 /// every platform (not only where the temporary directory itself is a link).
+// Unix only: creating a symbolic link on Windows needs a privilege (or Developer Mode) that a
+// test run cannot assume.
 #[cfg(unix)]
 #[test]
 fn absolute_paths_through_a_link_into_the_working_directory_print_relative() {

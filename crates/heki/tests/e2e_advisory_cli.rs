@@ -329,6 +329,8 @@ fn discovery_of_explicit_files_outside_paths_and_excluded_directories() {
     );
 }
 
+// Unix only: the directory is made unreadable with permission bits; on Windows that takes an
+// access control list, which std cannot set.
 #[cfg(unix)]
 #[test]
 fn an_unreadable_directory_is_an_io_error() {
@@ -362,23 +364,25 @@ fn a_source_that_is_not_utf8_is_a_read_error() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn fixes_that_cannot_be_written_are_an_io_error() {
-    use std::os::unix::fs::PermissionsExt;
     let p = Project::new("fix_readonly");
     let src =
         "def build(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
     p.write("a.py", src);
     let path = p.dir.join("a.py");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-    let writable = std::fs::OpenOptions::new().write(true).open(&path).is_ok(); // running as root
+    let writable = std::fs::metadata(&path).unwrap().permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&path, read_only).unwrap();
+    // The system's text for the error; none when running as root, who writes anyway.
+    let denied = std::fs::OpenOptions::new().write(true).open(&path).err();
     let (code, _, stderr) = p.check(&["--fix"]);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    if !writable {
+    std::fs::set_permissions(&path, writable).unwrap();
+    if let Some(denied) = denied {
         assert_eq!(code, 2, "{stderr}");
         assert!(
-            stderr.contains("heki error: failed to write `a.py`: Permission denied"),
+            stderr.contains(&format!("heki error: failed to write `a.py`: {denied}")),
             "{stderr}"
         );
         assert_eq!(p.read("a.py"), src);
