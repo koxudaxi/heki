@@ -408,7 +408,7 @@ fn profile_dumps_empty_blank_lines_cyclic_and_unprofiled_functions() {
 fn profile_dumps_with_weights_several_matching_sites_and_malformed_shapes() {
     let p = Project::new("profiles_shapes");
     p.write("app.py", PROFILED)
-        // `hot` is recorded under its file and under no file: the larger share counts.
+        // `hot` is recorded under its file and under no file: both frames are that function.
         .write("shared.txt", "app.py:hot:5 30\nhot 50\nidle 20\n")
         // Sample weights: `main;hot` three times, `main` once.
         .write(
@@ -431,7 +431,7 @@ fn profile_dumps_with_weights_several_matching_sites_and_malformed_shapes() {
     };
     assert_eq!(
         hot_note("shared.txt"),
-        "profile: `hot` is on the stack in 50.0% of samples"
+        "profile: `hot` is on the stack in 80.0% of samples"
     );
     assert_eq!(
         hot_note("weighted.json"),

@@ -4,12 +4,13 @@
 
 use crate::{CheckArgs, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
+use heki_ast::LineIndex;
 use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
     baseline_key, render, unified_diff,
 };
-use heki_effect::{analyze_project, analyze_project_with};
-use heki_profile::ProfileData;
+use heki_effect::{analyze_project, analyze_project_with, func_qualname};
+use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
@@ -52,8 +53,23 @@ pub(crate) fn snapshot_for(
     Ok(None)
 }
 
+/// Every function of the project with the lines of its definition, for attributing profile
+/// frames.
+fn profiled_functions(project: &Project) -> Vec<ProfiledFunction<'_>> {
+    let mut out = Vec::new();
+    for file in &project.files {
+        let lines = LineIndex::from_source(&file.source);
+        out.extend(file.ir.functions.iter().map(|f| ProfiledFunction {
+            path: &file.path,
+            qualname: func_qualname(f),
+            lines: Some(lines.line(f.span.start)..=lines.line(f.span.end)),
+        }));
+    }
+    out
+}
+
 /// Append `profile: ...` evidence to `OPT` diagnostics of profiled functions.
-pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&ProfileData>) {
+pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&HotFunctions>) {
     let Some(hot) = hot else {
         return;
     };
@@ -69,15 +85,17 @@ pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&ProfileData>) 
     }
 }
 
-/// One analysis pass: the project and its diagnostics after inline suppressions.
+/// One analysis pass: the project, its diagnostics after inline suppressions, and the shares
+/// of its functions in the profile.
 struct Analyzed {
     project: Project,
     diags: Vec<Diagnostic>,
+    hot: Option<HotFunctions>,
 }
 
 fn analyze(
     args: &CheckArgs,
-    hot: Option<&ProfileData>,
+    profile: Option<&ProfileData>,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<Analyzed> {
     let project = Project::load(&ProjectOptions {
@@ -104,14 +122,19 @@ fn analyze(
     drop(units);
     drop(inputs);
     retain_unsuppressed(&mut diags, &project.files);
-    annotate_hot(&mut diags, hot);
-    Ok(Analyzed { project, diags })
+    let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
+    annotate_hot(&mut diags, hot.as_ref());
+    Ok(Analyzed {
+        project,
+        diags,
+        hot,
+    })
 }
 
 /// Whether `--fix` / `--diff` applies this diagnostic's fix: `safe` + `unconditional` rules
 /// (`OPT101` / `OPT102`) always; `size-dependent` ones with `--include-size-dependent` or in a
 /// function the profile shows hot.
-fn applicable(d: &Diagnostic, args: &CheckArgs, hot: Option<&ProfileData>) -> bool {
+fn applicable(d: &Diagnostic, args: &CheckArgs, hot: Option<&HotFunctions>) -> bool {
     d.fix.is_some()
         && find_rule(&d.rule_code).is_some_and(|meta| {
             meta.auto_fix_default
@@ -171,7 +194,7 @@ fn fix_in_memory(
         errors = a.project.errors;
         let mut by_path: BTreeMap<&Path, Vec<&[heki_diagnostics::TextEdit]>> = BTreeMap::new();
         for d in &a.diags {
-            if applicable(d, args, hot)
+            if applicable(d, args, a.hot.as_ref())
                 && let Some(edits) = &d.fix
             {
                 by_path.entry(d.path.as_path()).or_default().push(edits);
@@ -242,7 +265,7 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         }
         eprintln!("Fixed {fixes} issue(s) in {} file(s).", files.len());
     }
-    let Analyzed { project, diags } = analyze(args, hot.as_ref(), None)?;
+    let Analyzed { project, diags, .. } = analyze(args, hot.as_ref(), None)?;
     report(args, &project, diags)
 }
 

@@ -9,7 +9,7 @@ use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
 use heki_lsp::{CONFIG_FILES, EditOutcome, Selectors, Workspace};
-use heki_profile::ProfileData;
+use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -72,9 +72,22 @@ impl Watcher<'_> {
         Ok((files, stamps))
     }
 
-    fn print(&self, diags: &BTreeMap<PathBuf, Vec<Diagnostic>>, errors: &[String]) -> bool {
+    fn print(
+        &self,
+        ws: &Workspace,
+        diags: &BTreeMap<PathBuf, Vec<Diagnostic>>,
+        errors: &[String],
+    ) -> bool {
         let mut all: Vec<Diagnostic> = diags.values().flatten().cloned().collect();
-        crate::check::annotate_hot(&mut all, self.hot);
+        // The index keeps no definition lines: a frame is told apart by its names only.
+        let hot = self.hot.map(|p| {
+            p.attribute(ws.functions().map(|(path, qualname)| ProfiledFunction {
+                path,
+                qualname,
+                lines: None,
+            }))
+        });
+        crate::check::annotate_hot(&mut all, hot.as_ref());
         // The paths `heki check` prints.
         for d in &mut all {
             d.path = crate::check::shown_path(&d.path);
@@ -154,7 +167,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
     let (mut ws, mut errors, (mut files, mut config)) = w.load()?;
     let (mut diags, more) = ws.diagnose_all();
     errors.extend(more);
-    let mut dirty = w.print(&diags, &errors);
+    let mut dirty = w.print(&ws, &diags, &errors);
     let mut runs = 0;
     while max_runs.is_none_or(|m| runs < m) {
         std::thread::sleep(POLL);
@@ -168,7 +181,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
             errors.extend(more);
             (files, config) = stamps;
             runs += 1;
-            dirty = w.print(&diags, &errors);
+            dirty = w.print(&ws, &diags, &errors);
             continue;
         } else if now_files != files {
             errors.clear();
@@ -206,7 +219,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         files = now_files;
         config = now_config;
         runs += 1;
-        dirty = w.print(&diags, &errors);
+        dirty = w.print(&ws, &diags, &errors);
     }
     Ok(if !errors.is_empty() {
         ExitCode::from(2)

@@ -585,8 +585,14 @@ an annotation, or a constructor call produces), and the `heki_kb` unit tests pin
 ### 4.4 Optional profile dumps (`heki_profile`)
 - **Offline reading only (the program is never run or touched)**: collapsed stacks (CPython 3.15
   Tachyon `--collapsed`: `tid:N;file.py:func:line;... count`; py-spy: `func (file.py:line);...
-  count`) and Tachyon `--gecko` JSON are read into one table of hot functions; `heki check
-  --profile` uses it to apply proven size-dependent rewrites in hot functions.
+  count`) and Tachyon `--gecko` JSON are read into their distinct stacks and sample weights
+  (gecko samples summed per stack first; every table reference checked; a total that overflows
+  is a malformed dump); `heki check --profile` uses it to apply proven size-dependent rewrites in
+  hot functions.
+- **Attribution to project functions**: each frame counts for the one project function its name
+  (on a dotted boundary), file (on a path boundary), and line (inside the definition) can denote;
+  a frame several functions fit counts for none, so an ambiguous profile never promotes a fix.
+  A function's share is the weight of the stacks it is on, divided by the total weight.
 - **Constraints checked on real tools**: Tachyon on CPython 3.15 cannot combine `--opcodes` with
   `--jsonl` (`--gecko` / `--binary` are needed), and macOS needs `sudo` to read another process's
   memory. Profile integration is therefore never required, only an optional add-on for tuning.
