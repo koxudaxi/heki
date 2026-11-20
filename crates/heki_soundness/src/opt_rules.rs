@@ -16,8 +16,8 @@ use crate::obligations::{Checker, ObligationKind, ProofObligation, SafetyVerdict
 use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTier};
 use heki_ast::{LineIndex, Span};
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind,
-    IrFunction, LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FnIndex, Inst, InstKind, IrFunction,
+    LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
 };
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::FxHashSet;
@@ -164,8 +164,9 @@ struct ModuleCtx<'a> {
 #[derive(Debug, Clone)]
 struct DequeRef {
     spelling: String,
-    /// `import collections\n` must be inserted at this offset first.
-    import_at: Option<u32>,
+    /// The edit adding `import collections` first, when the module does not bind it
+    /// (`crate::imports::collections_import`).
+    import: Option<(Span, String)>,
 }
 
 impl<'a> ModuleCtx<'a> {
@@ -196,7 +197,6 @@ impl<'a> ModuleCtx<'a> {
         }
         let module_fn = ir.function(ir.module_fn);
         let mut deque = None;
-        let mut first_import: Option<u32> = None;
         for inst in module_fn.blocks.iter().flat_map(|b| &b.insts) {
             let InstKind::Import {
                 dst, module, name, ..
@@ -209,49 +209,26 @@ impl<'a> ModuleCtx<'a> {
             if module.as_deref() == Some("collections") && name == "deque" && single {
                 deque = Some(DequeRef {
                     spelling: bound.to_owned(),
-                    import_at: None,
+                    import: None,
                 });
             } else if module.is_none()
-                && name == "collections"
+                // `import collections.abc` binds `collections` too.
+                && (name == "collections" || name.starts_with("collections."))
                 && bound == "collections"
                 && single
                 && deque.is_none()
             {
                 deque = Some(DequeRef {
                     spelling: "collections.deque".into(),
-                    import_at: None,
+                    import: None,
                 });
-            }
-            // First `import` / `from` statement at column 0 that is not a `__future__` import.
-            let ls = line_start(source, inst.span.start);
-            let line = slice(source, ls, inst.span.start).unwrap_or_default();
-            if module.as_deref() != Some("__future__")
-                && (line.starts_with("import ") || line.starts_with("from "))
-                && first_import.is_none_or(|f| ls < f)
-            {
-                first_import = Some(ls);
             }
         }
-        // Module code before the new import runs first and could call the rewritten function:
-        // only a docstring and `__future__` imports may precede it.
-        let nothing_runs_before = |at: u32| {
-            module_fn.blocks.iter().flat_map(|b| &b.insts).all(|i| {
-                i.span.start >= at
-                    || match &i.kind {
-                        InstKind::Import { module, .. } => module.as_deref() == Some("__future__"),
-                        InstKind::StoreGlobal { .. } => true,
-                        InstKind::Const { literal, .. } => matches!(literal, ConstLiteral::Str(_)),
-                        _ => false,
-                    }
-            })
-        };
         if deque.is_none() && !used_names.contains("collections") {
-            deque = first_import
-                .filter(|&at| nothing_runs_before(at))
-                .map(|at| DequeRef {
-                    spelling: "collections.deque".into(),
-                    import_at: Some(at),
-                });
+            deque = crate::imports::collections_import(source, module_fn).map(|import| DequeRef {
+                spelling: "collections.deque".into(),
+                import: Some(import),
+            });
         }
         let local_names = ir
             .functions
@@ -334,6 +311,7 @@ pub fn analyze_module(
         if sites.is_empty() {
             continue;
         }
+        let ix = FnIndex::new(f, &ir.constants);
         let an = cx.run();
         let live = Liveness::compute(f);
         let mutations = cx.mutations(&an);
@@ -345,7 +323,11 @@ pub fn analyze_module(
             &opts.disabled_obligations,
             &m.lines,
         );
-        let rules = Rules { m: &m, ck: &ck };
+        let rules = Rules {
+            m: &m,
+            ck: &ck,
+            ix: &ix,
+        };
         for site in &sites {
             if let Some(c) = rules.evaluate(site) {
                 out.push(c);
@@ -693,6 +675,8 @@ fn dedup_append(
 struct Rules<'a, 'c> {
     m: &'c ModuleCtx<'a>,
     ck: &'c Checker<'a, 'c>,
+    /// The shared size and lifetime facts (`heki_ir::FnIndex`): profitability only.
+    ix: &'c FnIndex<'a>,
 }
 
 fn established(evidence: &str) -> ObligationStatus {
@@ -1201,7 +1185,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             if let Some(v) = crate::interpreter::term_use(&f.block(b).terminator)
                 && f.var_name(v) == Some(name)
             {
-                return Some(f.span.start);
+                return Some(crate::interpreter::term_span(f, b).start);
             }
         }
         None
@@ -1275,13 +1259,20 @@ impl<'a, 'c> Rules<'a, 'c> {
             .and_then(|c| self.assignment_span(c, binop.span))
             .unwrap_or(binop.span);
         let what = kind.map_or("immutable value", BuiltinKind::name);
+        // `while len(acc) < N` with a small constant `N`: no copy is longer than `N`.
+        let capped = lp.len_caps.iter().find(|c| c.var == acc).map(|c| {
+            format!(
+                "the loop's test keeps `len({name})` below {} whatever the input",
+                c.limit
+            )
+        });
         Some(self.candidate(
             OptRule::Opt103,
             span,
             name.clone(),
             format!("`{name}` grows by `{what}` concatenation on every iteration (quadratic); collect the pieces in a list and join them once after the loop"),
             obs,
-            loop_bound_note(lp),
+            capped.or_else(|| loop_bound_note(lp)),
             self.init_evidence(&st, acc, &[Bytes, Tuple]),
             Vec::new(),
         ))
@@ -1310,13 +1301,21 @@ impl<'a, 'c> Rules<'a, 'c> {
                 self.var(obj)
             )),
         ));
+        // Only one object's attribute accumulates: the loop element, or an object created in
+        // the iteration, gets one piece each.
+        let fresh_receiver = (!self.ix.lives_across(lp, obj)).then(|| {
+            format!(
+                "`{}` is a different object in every iteration: no attribute grows across them",
+                self.var(obj)
+            )
+        });
         Some(self.candidate(
             OptRule::Opt103,
             binop.span,
             target.clone(),
             format!("`{target} += ...` re-copies the attribute on every iteration (quadratic); accumulate in a local list and assign the joined result once"),
             obs,
-            loop_bound_note(lp),
+            fresh_receiver.or_else(|| loop_bound_note(lp)),
             st.exact_type(rhs).filter(|k| matches!(k, Str | Bytes | Tuple)).map(|k| format!("the right operand is an exact `{}`", k.name())),
             Vec::new(),
         ))
@@ -1402,27 +1401,11 @@ impl<'a, 'c> Rules<'a, 'c> {
         )
     }
 
-    /// All `ExactType` evidence of a small constant literal: every allocation of `v` is a display
-    /// of at most 8 elements that is never changed.
-    fn const_small(&self, st: &FrameState, v: VarId) -> bool {
-        let allocs = st.allocs_of(v);
-        if allocs.is_empty() {
-            return false;
-        }
-        allocs.iter().all(|a| {
-            let small = match &inst_at(self.f(), self.cx().site_location(*a)).kind {
-                InstKind::AllocBuiltin { elems, .. } => {
-                    elems.len() <= 8
-                        && elems.iter().all(|e| {
-                            !matches!(
-                                self.cx().possible_kinds(st, *e).and_then(KindMask::single),
-                                Some(List | Tuple | Set | Dict | Str | Bytes)
-                            ) || self.cx().possible_kinds(st, *e) == Some(KindMask::of(Str))
-                        })
-                }
-                _ => false,
-            };
-            small && !self.ck.mutations.values().any(|m| m.contains(a))
+    /// `v` is a small display for its whole life (`heki_ir::FnIndex::container_bound`): why
+    /// a size-dependent rewrite does not pay off.
+    fn small_note(&self, name: &str, v: VarId) -> Option<String> {
+        self.ix.container_bound(v).map(|n| {
+            format!("`{name}` holds at most {n} item(s): a small display that nothing grows")
         })
     }
 
@@ -1450,9 +1433,21 @@ impl<'a, 'c> Rules<'a, 'c> {
         obs.push(self.ck.zero_trip_safe(&name, &st, lst));
         obs.push(self.ck.hash_consistent_probe(&self.var(probe), &st, probe));
         obs.extend(self.set_not_builtin());
-        let not_profitable = self
-            .const_small(&st, lst)
-            .then(|| format!("`{name}` is a small constant display"));
+        // A set cannot hold dicts, lists, or sets: the advice has nothing to build.
+        let unhashable = KindMask::of(List)
+            .union(KindMask::of(Dict))
+            .union(KindMask::of(Set));
+        let not_profitable = self.small_note(&name, lst).or_else(|| {
+            self.cx()
+                .elems_of_bases(&st, &st.allocs_of(lst))
+                .filter(|m| *m != KindMask::EMPTY && m.is_subset_of(unhashable))
+                .map(|m| {
+                    format!(
+                        "its elements are unhashable ({}): no `set` can hold them",
+                        crate::obligations::describe_mask(m)
+                    )
+                })
+        });
         let mut edits = Vec::new();
         if f.var_name(lst).is_some_and(is_identifier)
             && let Some(rspan) = self.container_name_span(cmp.span, &name)
@@ -1572,12 +1567,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                 None => established("the constructor cannot raise for these arguments"),
             },
         ));
-        let not_profitable = match args {
-            [a] if self.const_small(&st, *a) => {
-                Some("the argument is a small constant display".into())
-            }
-            [] => Some("the container is empty".into()),
-            _ => None,
+        // These constructors take at most one argument (more always raise, blocked above).
+        let not_profitable = match args.first() {
+            Some(a) => self.small_note(&self.var(*a), *a),
+            None => Some("the container is empty".into()),
         };
         let edits = self.m.text(call.span).map_or_else(Vec::new, |text| {
             let base = match args {
@@ -2020,6 +2013,15 @@ impl<'a, 'c> Rules<'a, 'c> {
         if bad_use.is_none() {
             bad_use = self.iterated_while_changed(&allocs);
         }
+        // A type checker must accept the rewritten variable: its `list` annotations become
+        // `deque` ones, and one that cannot be rewritten blocks the fix.
+        let mut type_edits = Vec::new();
+        if bad_use.is_none() {
+            match self.declared_type_edits(&init_sites, &aliases) {
+                Ok(edits) => type_edits = edits,
+                Err(why) => bad_use = Some(why),
+            }
+        }
         if bad_use.is_none()
             && matches!(form, Some(FrontForm::SliceRebind { .. }))
             && !self.non_empty_at(at, q, &allocs)
@@ -2048,7 +2050,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             );
         }
         let edits = self
-            .front_edits(at, &name, form, &init_sites)
+            .front_edits(at, &name, form, &init_sites, type_edits)
             .unwrap_or_default();
         let (msg, span) = match form {
             Some(FrontForm::SliceRebind { copy }) => (
@@ -2077,16 +2079,113 @@ impl<'a, 'c> Rules<'a, 'c> {
             ),
         };
         let evidence = self.exact_evidence(&st, q, &[List]);
+        // A list rebuilt in every iteration pays for its front operations once per build; a
+        // small display that the loop only drains never holds more than its items.
+        let not_profitable = self
+            .small_note(&name, q)
+            .or_else(|| {
+                (!self.ix.lives_across(lp, q))
+                    .then(|| format!("`{name}` is rebuilt in every iteration of the loop"))
+            })
+            .or_else(|| loop_bound_note(lp));
         Some(self.candidate(
             rule,
             span,
             name.clone(),
             msg,
             obs,
-            loop_bound_note(lp),
+            not_profitable,
             evidence,
             edits,
         ))
+    }
+
+    /// The edits turning the annotations of the deque's variables into `deque` ones: the
+    /// annotation of an initializing assignment (`q: list[int] = []`) is rewritten; one that is
+    /// not `list` / `list[...]` / `List[...]`, or another annotated declaration of a variable
+    /// that may hold the deque (a parameter, a bare `q: list[int]`), blocks the fix.
+    fn declared_type_edits(
+        &self,
+        init_sites: &[(BlockId, usize)],
+        aliases: &FxHashSet<VarId>,
+    ) -> Result<Vec<TextEdit>, String> {
+        let f = self.f();
+        let spelling = self
+            .m
+            .deque
+            .as_ref()
+            .map_or("collections.deque", |d| d.spelling.as_str());
+        let mut edits = Vec::new();
+        let mut handled: Vec<u32> = Vec::new();
+        // Every init site is a display or a `list(...)` call (`front`): it defines a value.
+        let inits = init_sites
+            .iter()
+            .filter_map(|&s| Some((inst_at(f, s), inst_at(f, s).kind.dst()?)));
+        for (init, value) in inits {
+            // The assignment binding it (`q: list[int] = []`), not a phi of a conditional.
+            let binding = self
+                .cx()
+                .uses(value)
+                .iter()
+                .find_map(|u| match *u {
+                    UseSite::Inst(b, i) => Some(&f.block(b).insts[i]),
+                    _ => None,
+                })
+                .filter(|inst| {
+                    matches!(&inst.kind, InstKind::Copy { dst, src }
+                        if *src == value && f.var_name(*dst).is_some_and(is_identifier))
+                });
+            let Some(target) = binding.map(|inst| inst.span) else {
+                continue;
+            };
+            let between = self
+                .m
+                .text(Span {
+                    start: target.end,
+                    end: init.span.start,
+                })
+                .unwrap_or_default();
+            let trimmed = between.trim();
+            let Some(inner) = trimmed.strip_prefix(':').and_then(|t| t.strip_suffix('=')) else {
+                continue;
+            };
+            let ann = inner.trim();
+            let ann_start = target.end + between.find(ann).unwrap_or(0) as u32;
+            let Some(rewritten) = deque_annotation(ann, spelling) else {
+                return Err(format!(
+                    "its annotation `{ann}` (line {}) would not accept a `collections.deque`; rewrite it by hand",
+                    self.line(ann_start)
+                ));
+            };
+            handled.push(target.start);
+            edits.push(TextEdit {
+                span: Span {
+                    start: ann_start,
+                    end: ann_start + ann.len() as u32,
+                },
+                replacement: rewritten,
+            });
+        }
+        let mut names: Vec<&str> = aliases
+            .iter()
+            .filter_map(|v| f.var_name(*v))
+            .filter(|n| is_identifier(n))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        let text = self.m.text(f.span).unwrap_or_default();
+        for name in names {
+            if let Some(off) = annotated_declarations(text, name)
+                .map(|o| f.span.start + o)
+                .find(|o| !handled.contains(o))
+            {
+                return Err(format!(
+                    "`{name}` is declared with an annotation at line {}; rewrite it by hand",
+                    self.line(off)
+                ));
+            }
+        }
+        Ok(edits)
     }
 
     fn front_edits(
@@ -2095,6 +2194,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         name: &str,
         form: Option<FrontForm>,
         init_sites: &[(BlockId, usize)],
+        type_edits: Vec<TextEdit>,
     ) -> Option<Vec<TextEdit>> {
         let f = self.f();
         let deque = self.m.deque.as_ref()?;
@@ -2108,13 +2208,10 @@ impl<'a, 'c> Rules<'a, 'c> {
         // A `list(...)` call is an init site only when `list` is the real builtin (`front`).
         let inst = inst_at(f, at);
         let mut edits = Vec::new();
-        if let Some(pos) = deque.import_at {
+        if let Some((span, text)) = &deque.import {
             edits.push(TextEdit {
-                span: Span {
-                    start: pos,
-                    end: pos,
-                },
-                replacement: "import collections\n".into(),
+                span: *span,
+                replacement: text.clone(),
             });
         }
         for &s in init_sites {
@@ -2181,6 +2278,57 @@ impl<'a, 'c> Rules<'a, 'c> {
             }
         };
         edits.push(site_edit);
+        edits.extend(type_edits);
         Some(edits)
     }
+}
+
+/// `list[T]` / `list` / `List[T]` / `typing.List[T]` (also quoted) spelled with `spelling`
+/// (`collections.deque[T]`); `None` for any other annotation (a union, `Sequence[T]`, ...).
+fn deque_annotation(ann: &str, spelling: &str) -> Option<String> {
+    let t = ann.trim();
+    for q in ['"', '\''] {
+        if let Some(inner) = t.strip_prefix(q).and_then(|i| i.strip_suffix(q)) {
+            return deque_annotation(inner, spelling).map(|d| format!("{q}{d}{q}"));
+        }
+    }
+    let (head, args) = match t.find('[') {
+        Some(i) => (t[..i].trim_end(), Some(&t[i..])),
+        None => (t, None),
+    };
+    let is_list = head == "list" || head == "List" || head.ends_with(".List");
+    if !is_list {
+        return None;
+    }
+    match args {
+        None => Some(spelling.to_owned()),
+        Some(a) if a.ends_with(']') && closes_at_end(a) => Some(format!("{spelling}{a}")),
+        Some(_) => None,
+    }
+}
+
+/// `[...]` whose first bracket closes at its last character.
+fn closes_at_end(text: &str) -> bool {
+    let mut depth = 0i32;
+    let close = text.char_indices().find_map(|(i, c)| {
+        depth += i32::from(c == '[') - i32::from(c == ']');
+        (depth == 0).then_some(i + c.len_utf8())
+    });
+    close == Some(text.len())
+}
+
+/// Offsets (in `text`) of annotated declarations of `name`: `name:` (not `name :=`) where a
+/// statement or a parameter can start: after indentation, `;`, `(`, `,`, or `*`.
+fn annotated_declarations<'t>(text: &'t str, name: &'t str) -> impl Iterator<Item = u32> + 't {
+    text.match_indices(name).filter_map(move |(i, _)| {
+        let before = text[..i].trim_end_matches([' ', '\t']);
+        let starts = before.is_empty() || before.ends_with(['\n', ';', '(', ',', '*']);
+        let word_start = text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        let after = text[i + name.len()..].trim_start_matches([' ', '\t']);
+        (starts && word_start && after.starts_with(':') && !after.starts_with(":="))
+            .then_some(i as u32)
+    })
 }
