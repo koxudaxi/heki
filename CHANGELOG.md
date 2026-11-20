@@ -75,7 +75,8 @@ The first public preview.
   rewrite proofs cannot see through (`eval`, `exec`, `locals()`, frame introspection, and
   functions too large to model).
 - A size budget per function bounds heki's memory on any input: a function whose model would
-  pass it is left unmodeled (no rewrite in it, its body one call heki cannot resolve).
+  pass it is left unmodeled (no rewrite in it, its body one call heki cannot resolve), and a
+  function whose rewrite proof would be too large gets no `OPT` finding.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
