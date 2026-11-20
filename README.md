@@ -1,10 +1,11 @@
 # heki
 
-heki (壁, Japanese for "wall") is a semantic linter for what Python leaves open. It checks **what
-code does, not what types it has**: which objects it changes in place, which references it
-shares, and which blocking, network, or database work it reaches. It runs next to a linter such
-as [Ruff](https://docs.astral.sh/ruff/) and a type checker such as
-[ty](https://github.com/astral-sh/ty): one Rust binary with a CLI and a language server.
+heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
+mutations across function calls.
+
+With no configuration, it catches blocking I/O in `async` code, database queries and HTTP clients
+in loops, quadratic loops, and stale caches. You can also add rules in `pyproject.toml` to restrict
+which functions may mutate state or reach I/O.
 
 ### A blocking call two helpers below an `async def`
 

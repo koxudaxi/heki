@@ -15,8 +15,8 @@ else describes the code as it is.
 
 ## 1. Product definition and positioning
 
-**heki** (壁, Japanese for "wall") is an experimental semantic linter for what Python leaves
-open: a wall where dynamic typing leaves the code unchecked. It checks **what code does, not
+**heki** (壁, Japanese for "wall") is an experimental static checker for Python that tracks side
+effects and mutations across function calls: a wall where dynamic typing leaves the code unchecked. It checks **what code does, not
 what types it has**: which objects it changes in place, which references it shares, and which
 blocking, network, or database work it reaches. What it adds lasts as the type checkers grow:
 aliases and in-place changes followed through any helper or subclass, contracts on who may

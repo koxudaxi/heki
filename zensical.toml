@@ -1,6 +1,6 @@
 [project]
 site_name = "heki"
-site_description = "Experimental Effect & Alias semantic checker for Python: shared-state, async-blocking, N+1 and quadratic-loop bugs that Ruff and type checkers do not see."
+site_description = "Experimental static checker for Python that tracks side effects and mutations across function calls."
 site_url = "https://heki.koxudaxi.dev"
 repo_name = "koxudaxi/heki"
 repo_url = "https://github.com/koxudaxi/heki"
