@@ -209,6 +209,13 @@ const KEY_CLASS_REBIND: &str =
 const KEY_SUBCLASS_REBIND: &str = "from pkg.key_class import Keys\n\n\nclass QuietKeys(Keys):\n    pass\n\n\nQuietKeys.KEY = \"other\"\n";
 // Another module reads the class constant on an instance, as the class's own method does.
 const KEY_CLASS_READER: &str = "from pkg.key_class import Keys\nfrom pkg.model import Registry\n\n\ndef mark_with(keys: Keys, r: Registry):\n    r.__dict__[keys.KEY] = []\n";
+// A `Final` class constant of a class a decorator of another module builds; a third module
+// reads it on the class object. With `dataclass_transform` on the decorator, the class's
+// annotations declare fields, whose class attribute the transform's runtime decides.
+const FIELD_DECO: &str = "def model(cls):\n    return cls\n";
+const FIELD_DECO_TRANSFORM: &str = "from typing import dataclass_transform\n\n\n@dataclass_transform()\ndef model(cls):\n    return cls\n";
+const FIELD_KEYS: &str = "from typing import Final\n\nfrom pkg.field_deco import model\n\n\n@model\nclass FieldKeys:\n    KEY: Final[str] = \"entries\"\n";
+const FIELD_READER: &str = "from pkg.field_keys import FieldKeys\nfrom pkg.model import Registry\n\n\ndef mark_fields(r: Registry):\n    r.__dict__[FieldKeys.KEY] = []\n";
 // A subclass lists a base defining the name before the class: its MRO finds the base's value.
 const KEY_OTHER_FIRST: &str = "from typing import ClassVar\n\nfrom pkg.key_class import Keys\n\n\nclass OtherKey:\n    KEY: ClassVar[str] = \"other\"\n\n\nclass OtherFirstKeys(OtherKey, Keys):\n    pass\n";
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
@@ -620,6 +627,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/key_writer.py", KEY_WRITER),
         ("pkg/key_class.py", KEY_CLASS),
         ("pkg/key_class_reader.py", KEY_CLASS_READER),
+        ("pkg/field_deco.py", FIELD_DECO),
+        ("pkg/field_keys.py", FIELD_KEYS),
+        ("pkg/field_reader.py", FIELD_READER),
         ("pkg/seal.py", SEAL),
         ("pkg/seal_peek.py", SEAL_PEEK),
         ("pkg/sealer.py", SEALER),
@@ -1178,7 +1188,8 @@ fn steps_small_displays() -> Vec<Step> {
 /// declaration another module's summary resolves names through: one without `Final` stops
 /// being one when a third module rebinds it, and a class constant when a subclass in another
 /// module defines the name again or lists a base defining it first, or code rebinds it on the
-/// class or a subclass; whether a helper keeps the object its caller hands it is a summary fact
+/// class or a subclass, and a `Final` one when a decorator in another module building its class
+/// becomes a `dataclass_transform` (a project-wide fact); whether a helper keeps the object its caller hands it is a summary fact
 /// of the helper; whether a parameter is typed, and with which class, is a fact of
 /// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls), and
 /// whether that class defines a method a call target naming no class names is a declaration of
@@ -1310,6 +1321,18 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             ("pkg/key_class.py", "MUT201"),
             ("pkg/key_class_reader.py", "MUT201"),
         ]),
+        Step::new(
+            "the decorator building the class becomes a `dataclass_transform`",
+            vec![save("pkg/field_deco.py", FIELD_DECO_TRANSFORM)],
+        )
+        .present(&[("pkg/field_reader.py", "MUT205")])
+        .absent(&[("pkg/field_reader.py", "MUT201")]),
+        Step::new(
+            "the decorator is a plain function again",
+            vec![save("pkg/field_deco.py", FIELD_DECO)],
+        )
+        .present(&[("pkg/field_reader.py", "MUT201")])
+        .absent(&[("pkg/field_reader.py", "MUT205")]),
         Step::new(
             "a helper starts storing the fresh object before writing it",
             vec![Action::Save("pkg/fresh_ops.py", storing)],

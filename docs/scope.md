@@ -209,7 +209,10 @@ Missed findings close as heki learns more:
   (`Model.KEY = "x"`; from another module, only one without `Final`), a class constant a
   subclass defines again, is given its own value (`Child.KEY = "x"`), or inherits first from
   another base it lists before the class (`class Child(Other, Model)`; read on that subclass,
-  or on an instance or `cls` that may be one), or a computed name.
+  or on an instance or `cls` that may be one), a `Final` field of a dataclass or of a class a
+  `dataclass_transform` builds read on an instance (`Keys("x").KEY` is `"x"`), or on a class
+  object whose default a class with `slots=True` or built by a transform replaces, or a
+  computed name.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](rules/unresolved-guarded-write.md)).
 

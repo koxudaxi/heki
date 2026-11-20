@@ -32,6 +32,7 @@ struct Indexes {
     subclasses: FxHashMap<String, Vec<String>>,
     property_names: FxHashSet<String>,
     frozen: FxHashSet<String>,
+    built: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
     protocols: FxHashMap<String, Option<Vec<String>>>,
     grown_elsewhere: FxHashSet<String>,
@@ -247,6 +248,10 @@ pub struct ClassDecl {
     /// `@dataclass_transform(...)` on this class (as a base class or metaclass of the classes it
     /// builds): `Some(frozen_default)`.
     pub transform: Option<bool>,
+    /// `@dataclass` / `@dataclasses.dataclass` on the class: its class-body annotations declare
+    /// instance fields ([`ProjectDecls::field_defaults`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataclass: Option<Dataclass>,
     /// What the class's own body and methods store in its attributes (`attr = [...]` in the
     /// body, `self.attr = ...` in a method): `Some` when every store is a small display that
     /// none of them grows (`heki_ir::FnIndex::stored_display`), `None` when an attribute is
@@ -265,6 +270,16 @@ pub struct ClassDecl {
     /// the name from then on, which no string constant of the class or its bases fixes.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_attrs: BTreeSet<String>,
+}
+
+/// What `@dataclass` makes of the class attributes of a class's fields ([`ClassDecl::dataclass`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Dataclass {
+    /// Each field's default stays the class attribute.
+    Defaults,
+    /// `slots=True`: a slot descriptor replaces the class attribute of every field, the class's
+    /// own and those of its dataclass bases.
+    Slots,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +404,11 @@ pub struct StrConstant {
     /// `Keys.KEY = "x"`, [`ProjectDecls::rebound_elsewhere`]) makes it no constant.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rebindable: bool,
+    /// A class-body name declared `Final` without `ClassVar`: in a class whose annotations
+    /// declare instance fields (a dataclass, a class a `dataclass_transform` builds) it is a
+    /// field, which each instance holds itself ([`ProjectDecls::field_defaults`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declares_field: bool,
 }
 
 /// What a string constant is bound to ([`StrConstant`]).
@@ -1033,6 +1053,30 @@ impl Recorded {
     }
 }
 
+/// What a class-level constant is read on ([`ProjectDecls::class_str_constant`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstantRead {
+    /// The class object the code names (`Model.KEY`).
+    Class,
+    /// A class object that may be a subclass (`cls.KEY`).
+    ClassOrSubclass,
+    /// An instance of the class or of a subclass (`self.KEY`).
+    Instance,
+}
+
+/// What the class object of a class holds for its fields, the class-body names its annotations
+/// declare as instance fields ([`ProjectDecls::field_defaults`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldDefaults {
+    /// The class has no fields: its class-body annotations declare class attributes.
+    NoFields,
+    /// A dataclass: each field's default stays the class attribute.
+    Kept,
+    /// A dataclass with `slots=True`, whose slot descriptors replace the defaults, or a class
+    /// a `dataclass_transform` builds, whose runtime decides.
+    Replaced,
+}
+
 /// A kept answer of [`ProjectDecls::class_str_constant`], with what computing it read of the
 /// declarations (`None`: it was computed without recording).
 #[derive(Debug, Clone)]
@@ -1054,8 +1098,10 @@ pub struct ProjectDecls {
     property_names: FxHashSet<String>,
     /// Every project class deriving (transitively) from `TypedDict`.
     typed_dicts: FxHashSet<String>,
-    /// Every frozen project class (`Self::frozen_classes`).
+    /// Every frozen project class (`Self::transform_builds`).
     frozen: FxHashSet<String>,
+    /// Every project class a PEP 681 `dataclass_transform` builds (`Self::transform_builds`).
+    built: FxHashSet<String>,
     /// Every project protocol with the project classes implementing it structurally
     /// (`Self::protocol_implementations`), `None` past `CHA_CANDIDATE_LIMIT`.
     protocols: FxHashMap<String, Option<Vec<String>>>,
@@ -1072,7 +1118,7 @@ pub struct ProjectDecls {
     lines: RwLock<FxHashMap<String, crate::SharedLine>>,
     /// The answers of [`Self::class_str_constant`] so far, by class, name, and whether the
     /// object may be of a subclass; cleared with the indexes.
-    class_constants: RwLock<FxHashMap<(String, String, bool), KnownConstant>>,
+    class_constants: RwLock<FxHashMap<(String, String, ConstantRead), KnownConstant>>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -1169,6 +1215,7 @@ impl ProjectDecls {
         };
         out.property_names = differ(&before.property_names, &self.property_names);
         out.class_facts = differ(&before.frozen, &self.frozen);
+        out.class_facts.extend(differ(&before.built, &self.built));
         out.class_facts
             .extend(differ(&before.typed_dicts, &self.typed_dicts));
         for p in before.protocols.keys().chain(self.protocols.keys()) {
@@ -1187,6 +1234,7 @@ impl ProjectDecls {
             subclasses: self.subclasses.clone(),
             property_names: self.property_names.clone(),
             frozen: self.frozen.clone(),
+            built: self.built.clone(),
             typed_dicts: self.typed_dicts.clone(),
             protocols: self.protocols.clone(),
             grown_elsewhere: self.grown_elsewhere.clone(),
@@ -1244,7 +1292,7 @@ impl ProjectDecls {
             .iter()
             .flat_map(|b| self.subclasses_of(b))
             .collect();
-        self.frozen = self.frozen_classes();
+        (self.frozen, self.built) = self.transform_builds();
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
@@ -1374,27 +1422,35 @@ impl ProjectDecls {
         self.protocols.get(class).map(Option::as_deref)
     }
 
-    /// The frozen project classes: `ClassDecl::is_frozen` (`@dataclass(frozen=True)`,
-    /// `NamedTuple`), and the classes a PEP 681 `dataclass_transform(frozen_default=True)`
-    /// builds unless they pass `frozen=False`: through a decorator function carrying it, or
-    /// through a base class or metaclass carrying it (the classes deriving from it, or using it
-    /// or a subclass of it as their metaclass, and their subclasses).
-    fn frozen_classes(&self) -> FxHashSet<String> {
+    /// The frozen project classes, and the project classes a PEP 681 `dataclass_transform`
+    /// builds: through a decorator function carrying it, or through a base class or metaclass
+    /// carrying it (the classes deriving from it, or using it or a subclass of it as their
+    /// metaclass, and their subclasses). Frozen are `ClassDecl::is_frozen`
+    /// (`@dataclass(frozen=True)`, `NamedTuple`), and the classes a
+    /// `dataclass_transform(frozen_default=True)` builds unless they pass `frozen=False`.
+    fn transform_builds(&self) -> (FxHashSet<String>, FxHashSet<String>) {
         let mut frozen = FxHashSet::default();
+        let mut built = FxHashSet::default();
         let mut transforms = Vec::new();
         let mut metaclass_users = Vec::new();
         for m in self.modules.values() {
             for (q, c) in &m.classes {
-                let by_decorator = c.decorators.iter().any(|(dec, frozen_arg)| {
-                    match self.symbol(&self.canonical(dec)) {
-                        Symbol::Function(_, d) => {
-                            d.transform.is_some_and(|t| frozen_arg.unwrap_or(t))
-                        }
-                        _ => false,
-                    }
-                });
+                // Whether a decorator function carrying a transform builds the class frozen.
+                let decorated = c
+                    .decorators
+                    .iter()
+                    .filter_map(
+                        |(dec, frozen_arg)| match self.symbol(&self.canonical(dec)) {
+                            Symbol::Function(_, d) => d.transform.map(|t| frozen_arg.unwrap_or(t)),
+                            _ => None,
+                        },
+                    )
+                    .reduce(|a, b| a || b);
                 let fqn = || format!("{}.{q}", m.module_name);
-                if c.is_frozen || by_decorator {
+                if decorated.is_some() {
+                    built.insert(fqn());
+                }
+                if c.is_frozen || decorated == Some(true) {
                     frozen.insert(fqn());
                 }
                 if let Some(t) = c.transform {
@@ -1406,28 +1462,43 @@ impl ProjectDecls {
             }
         }
         for (t, default) in transforms {
-            let mut built = self.subclasses_of(&t);
+            let mut built_by = self.subclasses_of(&t);
             let users: Vec<String> = metaclass_users
                 .iter()
-                .filter(|(_, meta)| *meta == t || built.binary_search(meta).is_ok())
+                .filter(|(_, meta)| *meta == t || built_by.binary_search(meta).is_ok())
                 .map(|(fqn, _)| fqn.clone())
                 .collect();
             for u in users {
-                built.extend(self.subclasses_of(&u));
-                built.push(u);
+                built_by.extend(self.subclasses_of(&u));
+                built_by.push(u);
             }
-            for b in built {
+            for b in built_by {
                 // The first `frozen=` class keyword along the MRO decides.
                 let keyword = self
                     .mro(&b)
                     .iter()
                     .find_map(|c| self.class(c)?.frozen_keyword);
                 if keyword.unwrap_or(default) {
-                    frozen.insert(b);
+                    frozen.insert(b.clone());
                 }
+                built.insert(b);
             }
         }
-        frozen
+        (frozen, built)
+    }
+
+    /// What the class object of the project class `class` holds for the class-body names its
+    /// annotations declare as instance fields.
+    fn field_defaults(&self, class: &str) -> FieldDefaults {
+        self.read(|k| note(&mut k.class_facts, class));
+        if self.built.contains(class) {
+            return FieldDefaults::Replaced;
+        }
+        match self.class(class).and_then(|d| d.dataclass) {
+            Some(Dataclass::Defaults) => FieldDefaults::Kept,
+            Some(Dataclass::Slots) => FieldDefaults::Replaced,
+            None => FieldDefaults::NoFields,
+        }
     }
 
     pub fn module(&self, name: &str) -> Option<&ModuleDecls> {
@@ -1506,18 +1577,27 @@ impl ProjectDecls {
 
     /// The value of the class-level string constant `attr` read on an instance of the project
     /// class `class` or on the class object (`self.KEY`, `cls.KEY`, `Model.KEY`): the
-    /// definition of `attr` the MRO finds first must be a constant. With `subclasses`, the
-    /// object may be of a subclass, and the MRO of each must find the same definition: a
-    /// subclass defining `attr` again, or listing a base that defines it before `class`
-    /// (`class Child(Other, Model)`), reads its own value. A class that code stores `attr` on
-    /// (`Child.KEY = "x"`, in its module or another) defines it too: its own value then hides
-    /// the inherited constant. An instance of a protocol is one of its structural
-    /// implementations, which define the name themselves: each must hold the same constant.
+    /// definition of `attr` the MRO finds first must be a constant. Read on anything but the
+    /// class object the code names, the object may be of a subclass, and the MRO of each must
+    /// find the same definition: a subclass defining `attr` again, or listing a base that
+    /// defines it before `class` (`class Child(Other, Model)`), reads its own value. A class
+    /// that code stores `attr` on (`Child.KEY = "x"`, in its module or another) defines it too:
+    /// its own value then hides the inherited constant. A field (`KEY: Final[str] = "x"` in a
+    /// dataclass) is no constant on an instance, which holds the value it was given, and on a
+    /// class object only while the default stays its class attribute along the way: no class
+    /// with `slots=True` or built by a `dataclass_transform`. An instance of a protocol is one
+    /// of its structural implementations, which define the name themselves: each must hold the
+    /// same constant.
     ///
     /// The answer is kept for the life of the indexes: a read of it while recording reads
     /// what computing it read.
-    pub fn class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<String> {
-        let key = (class.to_owned(), attr.to_owned(), subclasses);
+    pub fn class_str_constant(
+        &self,
+        class: &str,
+        attr: &str,
+        read: ConstantRead,
+    ) -> Option<String> {
+        let key = (class.to_owned(), attr.to_owned(), read);
         let recording = self.recorder.on.load(Ordering::Relaxed);
         let known = self
             .class_constants
@@ -1537,13 +1617,13 @@ impl ProjectDecls {
         let (value, reads) = if recording {
             // What this computation reads, apart from what the recording read before.
             let before = std::mem::take(&mut *self.recorded());
-            let value = self.find_class_str_constant(class, attr, subclasses);
+            let value = self.find_class_str_constant(class, attr, read);
             let mut recorded = self.recorded();
             let reads = Arc::new(std::mem::replace(&mut *recorded, before).into_keys());
             recorded.replayed.push(Arc::clone(&reads));
             (value, Some(reads))
         } else {
-            (self.find_class_str_constant(class, attr, subclasses), None)
+            (self.find_class_str_constant(class, attr, read), None)
         };
         let known = KnownConstant {
             value: value.clone(),
@@ -1557,31 +1637,62 @@ impl ProjectDecls {
     }
 
     /// [`Self::class_str_constant`], computed.
-    fn find_class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<String> {
+    fn find_class_str_constant(
+        &self,
+        class: &str,
+        attr: &str,
+        read: ConstantRead,
+    ) -> Option<String> {
         let defines = |c: &str| {
             self.class(c)
                 .is_some_and(|d| d.members.contains(attr) || d.rebound_attrs.contains(attr))
                 || self.rebound_elsewhere(&format!("{c}.{attr}"))
         };
-        let definer = |c: &str| self.mro(c).into_iter().find(|m| defines(m));
         let class = self.canonical(class);
-        let owner = definer(&class)?;
-        if subclasses
-            && self
-                .subclasses_of(&class)
-                .iter()
-                .any(|s| definer(s).as_ref() != Some(&owner))
-        {
+        let owner = self.mro(&class).into_iter().find(|m| defines(m))?;
+        let fqn = format!("{owner}.{attr}");
+        let value = self.str_constant(&fqn)?;
+        let defaults = self.field_defaults(&owner);
+        let field = self.declares_field(&fqn) && defaults != FieldDefaults::NoFields;
+        if field && (read == ConstantRead::Instance || defaults == FieldDefaults::Replaced) {
             return None;
         }
-        let value = self.str_constant(&format!("{owner}.{attr}"))?;
-        if subclasses && let Some(implementers) = self.protocol(&class) {
-            let same = |i: &String| self.class_str_constant(i, attr, true).as_deref() == Some(value);
+        let mut family = vec![class.clone()];
+        if read != ConstantRead::Class {
+            family.extend(self.subclasses_of(&class));
+        }
+        for c in &family {
+            let mro = self.mro(c);
+            let at = mro.iter().position(|m| defines(m))?;
+            // A class with `slots=True` (or built by a transform) ahead of the owner replaces
+            // the field's default with its own class attribute.
+            let replaced = || {
+                mro[..at]
+                    .iter()
+                    .any(|m| self.field_defaults(m) == FieldDefaults::Replaced)
+            };
+            if mro[at] != owner || field && replaced() {
+                return None;
+            }
+        }
+        if read != ConstantRead::Class
+            && let Some(implementers) = self.protocol(&class)
+        {
+            let same =
+                |i: &String| self.class_str_constant(i, attr, read).as_deref() == Some(value);
             if !implementers?.iter().all(same) {
                 return None;
             }
         }
         Some(value.to_owned())
+    }
+
+    /// Whether the class-level string constant `fqn` declares a field where its class's
+    /// annotations declare instance fields (`StrConstant::declares_field`).
+    fn declares_field(&self, fqn: &str) -> bool {
+        self.split_module(fqn)
+            .and_then(|(m, rest)| m.str_constants.get(rest))
+            .is_some_and(|c| c.declares_field)
     }
 
     pub(crate) fn symbol(&self, fqn: &str) -> Symbol<'_> {
@@ -2063,7 +2174,9 @@ impl ProjectDecls {
     /// on an instance of exactly `class` runs; overrides of subclasses do not count).
     pub fn mro_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let class = self.canonical(class);
-        self.definitions(&class, name, false, false, |_| true).0.pop()
+        self.definitions(&class, name, false, false, |_| true)
+            .0
+            .pop()
     }
 
     /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run
@@ -2758,7 +2871,12 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
                 Some(Err(fqn)) => StrValue::Alias(fqn),
                 None => continue,
             };
-            out.insert(key, StrConstant { value, rebindable });
+            let constant = StrConstant {
+                value,
+                rebindable,
+                declares_field: f.is_class_body && q.is_final && !q.class_var,
+            };
+            out.insert(key, constant);
         }
     }
     out
@@ -2900,6 +3018,7 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     struct Found {
         qualname: String,
         is_frozen: bool,
+        dataclass: Option<Dataclass>,
         fields: BTreeSet<String>,
         readonly: BTreeSet<String>,
         decorators: Vec<(String, Option<bool>)>,
@@ -2908,10 +3027,11 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
     let mut found: Vec<Found> = Vec::new();
     for body in input.ir.functions.iter().filter(|f| f.is_class_body) {
-        let dataclass = body
+        let decorator = body
             .decorators
             .iter()
-            .find_map(|d| dataclass_decorator(d, &resolve));
+            .find_map(|d| Some((d, dataclass_decorator(d, &resolve)?)));
+        let dataclass = decorator.map(|(_, frozen)| frozen);
         let named_tuple = decls.classes.get(&body.qualname).is_some_and(|c| {
             c.bases
                 .iter()
@@ -2942,6 +3062,13 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
         found.push(Found {
             qualname: body.qualname.clone(),
             is_frozen: named_tuple || dataclass == Some(true),
+            dataclass: decorator.map(|(text, _)| {
+                if keyword_bool(decorator_parts(text).1, "slots") == Some(true) {
+                    Dataclass::Slots
+                } else {
+                    Dataclass::Defaults
+                }
+            }),
             fields,
             readonly,
             decorators,
@@ -2971,6 +3098,7 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             found.push(Found {
                 qualname: owner.clone(),
                 is_frozen: false,
+                dataclass: None,
                 fields: BTreeSet::new(),
                 readonly,
                 decorators: Vec::new(),
@@ -2981,6 +3109,7 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     for f in found {
         if let Some(c) = decls.classes.get_mut(&f.qualname) {
             c.is_frozen |= f.is_frozen;
+            c.dataclass = c.dataclass.or(f.dataclass);
             c.container_fields.extend(f.fields);
             c.readonly_attrs.extend(f.readonly);
             c.decorators.extend(f.decorators);
@@ -3805,19 +3934,23 @@ impl<'a> TypeCtx<'a> {
                 }
                 InstKind::AttrLoad { obj, attr, .. } => {
                     let project = self.project;
-                    return match types.get(obj)? {
+                    let (class, read) = match types.get(obj)? {
                         Val::Ref(class) if project.is_project_class(class) => {
-                            project.class_str_constant(class, attr, false)
+                            (class, ConstantRead::Class)
                         }
-                        Val::Ref(module) => project
-                            .str_constant(&format!("{module}.{attr}"))
-                            .map(str::to_owned),
-                        // An instance, or a class object that may be a subclass (`cls`).
-                        Val::Inst(class) | Val::Class(class) if project.is_project_class(class) => {
-                            project.class_str_constant(class, attr, true)
+                        Val::Ref(module) => {
+                            let fqn = format!("{module}.{attr}");
+                            return project.str_constant(&fqn).map(str::to_owned);
                         }
-                        _ => None,
+                        Val::Inst(class) if project.is_project_class(class) => {
+                            (class, ConstantRead::Instance)
+                        }
+                        Val::Class(class) if project.is_project_class(class) => {
+                            (class, ConstantRead::ClassOrSubclass)
+                        }
+                        _ => return None,
                     };
+                    return project.class_str_constant(class, attr, read);
                 }
                 _ => return None,
             }

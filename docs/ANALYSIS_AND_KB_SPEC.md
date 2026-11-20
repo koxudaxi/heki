@@ -348,7 +348,12 @@ through the MRO when the MRO of every subclass finds the same definition (none d
 again or lists another base defining it first); a class that code stores the name on
 (`ClassDecl::rebound_attrs` in its module, `ProjectDecls::rebound_elsewhere` from another)
 defines it too, and on an instance of a protocol every structural implementation must hold the
-same constant (`ProjectDecls::class_str_constant`). Contract-only facts
+same constant (`ProjectDecls::class_str_constant`). A `Final` name without `ClassVar`
+(`StrConstant::declares_field`) in a class whose annotations declare instance fields (a
+`ClassDecl::dataclass`, or a class a `dataclass_transform` builds) is a field: no constant on an
+instance, and on a class object only where each class from it to the field's class keeps the
+default as its attribute (`Dataclass::Slots` and transform builds replace it). Each answer is
+kept until the indexes change; a recording that reads one again adds what computing it read. Contract-only facts
 (container entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or

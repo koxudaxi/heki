@@ -669,6 +669,108 @@ fn a_subclass_listing_another_base_first_reads_that_base_constant() {
     );
 }
 
+const FIELD_TRANSFORMS: &str = r#"from typing import dataclass_transform
+
+
+@dataclass_transform()
+class ModelBase:
+    pass
+
+
+@dataclass_transform()
+def model(cls):
+    return cls
+"#;
+
+const FIELD_KEYS: &str = r#"from dataclasses import dataclass
+from typing import ClassVar, Final
+
+from pkg.model import DataModelFieldBase
+from pkg.transforms import ModelBase, model
+
+
+@dataclass
+class Keys:
+    KEY: Final[str] = "_forced_field_assignment"
+    CONST: ClassVar[str] = "_forced_field_assignment"
+
+    @classmethod
+    def write_cls(cls, field: DataModelFieldBase) -> None:
+        field.__dict__[cls.KEY] = True
+
+
+def write_keys(keys: Keys, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+    field.__dict__[keys.CONST] = True
+    field.__dict__[Keys.KEY] = True
+
+
+@dataclass
+class Base:
+    KEY: Final[str] = "_forced_field_assignment"
+
+    @classmethod
+    def write_cls(cls, field: DataModelFieldBase) -> None:
+        field.__dict__[cls.KEY] = True
+
+
+@dataclass(slots=True)
+class Slotted(Base):
+    pass
+
+
+@dataclass(slots=True)
+class SlotKeys:
+    KEY: Final[str] = "_forced_field_assignment"
+
+
+class Built(ModelBase):
+    KEY: Final[str] = "_forced_field_assignment"
+
+
+@model
+class Decorated:
+    KEY: Final[str] = "_forced_field_assignment"
+
+
+def write_classes(field: DataModelFieldBase) -> None:
+    field.__dict__[Base.KEY] = True
+    field.__dict__[Slotted.KEY] = True
+    field.__dict__[SlotKeys.KEY] = True
+    field.__dict__[Built.KEY] = True
+    field.__dict__[Decorated.KEY] = True
+"#;
+
+/// A `Final` name with a default in a dataclass is a field: an instance holds the value it was
+/// constructed with (`Keys("x").KEY`), so it is no constant there, unlike a `ClassVar`. The
+/// class object keeps the default as its attribute, unless a class along the way replaces it:
+/// `slots=True` (also on a subclass that `cls` may be) puts a slot descriptor there, and a
+/// class a `dataclass_transform` builds, through a base class or a decorator, holds what the
+/// transform's runtime makes of it.
+#[test]
+fn a_final_dataclass_field_is_a_constant_only_where_the_class_keeps_its_default() {
+    let p = class_keys_project("keys_dataclass_fields", FIELD_KEYS);
+    p.write("pkg/transforms.py", FIELD_TRANSFORMS);
+    let u = "pkg/use.py";
+    let class = "DataModelFieldBase";
+    let forced = "DataModelFieldBase._forced_field_assignment";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 15, "MUT201", "Keys.write_cls", forced),
+            d(u, 19, "MUT205", "write_keys", class),
+            d(u, 20, "MUT201", "write_keys", forced),
+            d(u, 21, "MUT201", "write_keys", forced),
+            d(u, 30, "MUT205", "Base.write_cls", class),
+            d(u, 53, "MUT201", "write_classes", forced),
+            d(u, 54, "MUT205", "write_classes", class),
+            d(u, 55, "MUT205", "write_classes", class),
+            d(u, 56, "MUT205", "write_classes", class),
+            d(u, 57, "MUT205", "write_classes", class),
+        ]
+    );
+}
+
 #[test]
 fn a_final_key_of_another_module_follows_its_value() {
     let p = keys_project("keys_other_value");
