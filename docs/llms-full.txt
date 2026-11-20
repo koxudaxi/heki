@@ -1655,7 +1655,14 @@ It does not report:
   `if key not in self._memo:` pattern);
 - constant dictionary keys the property never reads (`self.params["proxy"]` while the property
   reads `self.params["outtmpl"]`);
-- private helpers whose every caller invalidates the property.
+- private helpers whose every caller invalidates the property;
+- changes made in place (`clear()`, `append()`, item assignment) to an attribute whose object
+  the cached value holds itself, when the getter reads it for nothing else: it returns
+  `self.items`, or puts it as itself into a display or a container it returns
+  (`{"items": self.items}`, `ctx["k"] = (x, self.items)`). The cached value sees those changes;
+  rebinding the attribute (`self.items = []`) is still reported. A getter that also computes
+  from it (`len(self.items)`), copies it (`list(self.items)`, `(*self.items,)`), reads it through
+  a `self` method or property, or hands `self` to other code is reported as before.
 
 ## Example
 ```python
@@ -2429,17 +2436,20 @@ Explicit DB query / external RPC executed inside a loop (N+1).
 ## What it does
 Checks loops that run a database query on every iteration (the "N+1 queries" problem):
 `cursor.execute(...)`, `session.execute(...)` (awaited ones on async sessions and connections
-too), the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their
-`a*` variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project
-functions that reach them, including the getter of a property read in the loop and a generator
-iterated in the loop (its body runs where it is iterated, as for `EFF101`).
+too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, `count`, ...)
+and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension),
+the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
+variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
+that reach them, including the getter of a property read in the loop and a generator iterated in
+the loop (its body runs where it is iterated, as for `EFF101`).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
-calls that only build a query (`QuerySet.filter(...)`, `Redis.pipeline()`), DDL statements
-(`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code (`upgrade` / `downgrade` functions, files
-under `migrations/` or `alembic/`), the ORM packages' own implementation, or loops whose size the
-code fixes when no data-sized loop is around them (`for ident in enumerate((1, 2), 1)`,
-`zip(order, ["m1", "m2"])`, a name bound to a small display; see `EFF102`).
+calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
+`Redis.pipeline()`), DDL statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
+(`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
+own implementation, or loops whose size the code fixes when no data-sized loop is around them
+(`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
+display; see `EFF102`).
 
 ## Why is this bad?
 One round trip per item makes the run time grow with the number of rows and with the network
@@ -2633,6 +2643,14 @@ def drop(items: list[int], unwanted: list[int]) -> None:
 The rewrites are not drop-in replacements: `remove()` drops only the first occurrence of each
 value and raises `ValueError` for a missing one, and the values must be hashable.
 
+The advice follows what the loop does with the list. Removals can wait for one rebuild after
+the loop only when the loop reads the list nowhere else (a membership test guarding the removal,
+`if x in items: items.remove(x)`, aside); when it iterates, tests, indexes, or passes on the list
+after a removal (a greedy match over the remaining values), the message advises a `set` or a
+`dict` with constant-time deletion instead. An index or a count built once before the loop stays
+right only while the loop does not change the list; otherwise the message advises keeping it up
+to date with each change.
+
 ## Fix safety
 No automatic fix.
 
@@ -2768,8 +2786,10 @@ its first matching comparison. It does not report:
   (`a.k == b.k or match(a, b)`), a result that is stored instead of tested, a value picked for
   every pair (`1 if a.k == b.k else 0`), a match that only skips to the next iteration
   (`if a == b: continue` in an all-pairs loop), or a comparison whose false side does work:
-  an `else` / `elif` body, the failure of an `assert a == b`, or a `break` / `return` on a
-  mismatch runs for the pairs an index would skip, so every pair is needed;
+  an `else` / `elif` body, the failure of an `assert a == b`, a `break` / `return` on a
+  mismatch, or statements that only the mismatches run because a match `break`s. They run for
+  the pairs an index would skip, so every pair is needed; statements after the `if` that every
+  pair runs do not count;
 - loops whose size the code fixes: a display of at most 8 items (`for b in ("x", "y")`, also
   through a name or a module constant bound to one that nothing grows, and through
   `enumerate` / `zip` / `sorted` / `.items()` ...), and `range` of integer constants.
@@ -2802,7 +2822,10 @@ def attach(orders, customers):
             order.customer = customer
 ```
 
-The keys must be hashable, and `==` must agree with their hash.
+The keys must be hashable, and `==` must agree with their hash. When a key is known to be a
+`list`, `dict`, `set`, or `bytearray` (from its annotation, or as an element of a display of
+such displays), the message advises indexing a hashable form of it instead (a `tuple` or
+`frozenset` of its items).
 
 ## Fix safety
 No automatic fix.
