@@ -62,6 +62,11 @@ pub const CONTAINER_MUTATORS: &[&str] = &[
 const KEPT_PAIRS_PER_SOURCE_BYTE: usize = 1;
 const MIN_KEPT_PAIRS: usize = 4096;
 
+/// The values the origin walks of `returns_origins` may take per byte of a function's source,
+/// above a floor: a function past it returns objects of unknown origin.
+const ORIGIN_STEPS_PER_SOURCE_BYTE: usize = 1;
+const MIN_ORIGIN_STEPS: usize = 4096;
+
 /// Augmented assignments changing a container in place, by the container's class: `xs += ys`
 /// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
 const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[
@@ -206,6 +211,11 @@ fn extract_module(
             summary.lazily_read_self_attrs = flow.lazily_initialized().map(str::to_owned).collect();
             file.cache_flows.entry(key.clone()).or_default().push(flow);
         }
+        // Same qualname defined twice (conditional definitions): its origin nodes follow the
+        // first definition's.
+        if let Some(first) = file.local_functions.get(&key) {
+            rebase_origin_nodes(&mut summary, &mut sites, first.origin_nodes.len());
+        }
         file.call_sites.extend(sites);
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
@@ -280,6 +290,30 @@ fn release_spare_capacity(file: &mut FileSummary) {
         }
     }
     file.call_sites.shrink_to_fit();
+}
+
+/// Shift the origin nodes a definition refers to (in its own nodes, its returns, and its call
+/// arguments) by `offset`: the definition's nodes follow another's of the same qualname.
+fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offset: usize) {
+    let offset = u32::try_from(offset).unwrap_or(u32::MAX);
+    let shift = |nodes: &mut Vec<u32>| {
+        for n in nodes {
+            *n = n.saturating_add(offset);
+        }
+    };
+    shift(&mut summary.returns_nodes);
+    for o in &mut summary.origin_nodes {
+        shift(&mut o.nodes);
+    }
+    let args = sites
+        .iter_mut()
+        .filter_map(CallSite::project_callees_mut)
+        .flatten()
+        .flat_map(|bc| &mut bc.params)
+        .filter_map(|p| p.origins.as_deref_mut());
+    for o in args {
+        shift(&mut o.nodes);
+    }
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
@@ -365,6 +399,8 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     };
     into.returns_origins.join(other.returns_origins);
     into.returns_results.extend(other.returns_results);
+    into.returns_nodes.extend(other.returns_nodes);
+    into.origin_nodes.extend(other.origin_nodes);
     into.unresolved_write_sites
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
@@ -1715,21 +1751,27 @@ impl<'a> Extractor<'a> {
                 _ => {}
             }
         }
-        let origins = |roots: &[VarId]| {
+        let mut nodes = ownership::OriginNodes::default();
+        let origins = |roots: &[(VarId, ownership::Part)], nodes: &mut ownership::OriginNodes| {
             ownership::origins_of(
                 &self.defs,
                 &phis,
                 live,
-                roots.iter().copied(),
+                roots,
                 source_of,
                 |v| params.get(&v).copied(),
                 slice_copies,
                 &kept,
+                nodes,
             )
         };
-        let returns = origins(&returned);
+        let roots: Vec<(VarId, ownership::Part)> = returned
+            .iter()
+            .map(|v| (*v, ownership::Part::Object))
+            .collect();
+        let returns = origins(&roots, &mut nodes);
         // The arguments of the project calls whose results the function may return, and in
-        // turn of the calls whose results those arguments may be.
+        // turn of the calls whose results those arguments or the phis the walks meet may be.
         let mut calls_at: FxHashMap<Span, Vec<&ProjectCall>> = FxHashMap::default();
         for call in &self.project_calls {
             calls_at
@@ -1737,27 +1779,44 @@ impl<'a> Extractor<'a> {
                 .or_default()
                 .push(call);
         }
+        let budget = ORIGIN_STEPS_PER_SOURCE_BYTE
+            * f.span.end.saturating_sub(f.span.start) as usize
+            + MIN_ORIGIN_STEPS;
         let mut queue: Vec<Span> = returns.results.iter().map(|r| r.span).collect();
         let mut done: FxHashSet<Span> = FxHashSet::default();
         let mut args: Vec<(usize, usize, usize, LocalOrigins)> = Vec::new();
-        while let Some(span) = queue.pop() {
-            if !done.insert(span) {
-                continue;
+        loop {
+            if nodes.steps > budget {
+                return;
             }
-            for call in calls_at.get(&span).into_iter().flatten() {
-                for (ci, (_, bound)) in call.params.iter().enumerate() {
-                    for (slot, var) in bound {
-                        let o = origins(&[*var]);
-                        queue.extend(o.results.iter().map(|r| r.span));
-                        if !o.is_empty() {
-                            args.push((call.site, ci, usize::from(*slot), o));
+            if let Some(span) = queue.pop() {
+                if !done.insert(span) {
+                    continue;
+                }
+                for call in calls_at.get(&span).into_iter().flatten() {
+                    for (ci, (_, bound)) in call.params.iter().enumerate() {
+                        for (slot, var) in bound {
+                            let o = origins(&[(*var, ownership::Part::Object)], &mut nodes);
+                            queue.extend(o.results.iter().map(|r| r.span));
+                            if !o.is_empty() {
+                                args.push((call.site, ci, usize::from(*slot), o));
+                            }
                         }
                     }
                 }
+                continue;
             }
+            let Some((id, root)) = nodes.next_pending() else {
+                break;
+            };
+            let o = origins(&[root], &mut nodes);
+            queue.extend(o.results.iter().map(|r| r.span));
+            nodes.set(id, o);
         }
         self.summary.returns_origins = returns.known;
         self.summary.returns_results = returns.results;
+        self.summary.returns_nodes = returns.nodes;
+        self.summary.origin_nodes = nodes.into_origins();
         for (site, ci, slot, o) in args {
             let callees = self.sites[site]
                 .project_callees_mut()

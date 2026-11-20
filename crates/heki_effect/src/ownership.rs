@@ -67,17 +67,61 @@ pub struct ResultOf {
 }
 
 /// What an object may be as the function holding it sees it (`MUT112`): the origins it knows,
-/// and the project calls whose results it may be, which propagation resolves with what their
-/// callees return.
+/// the project calls whose results it may be, which propagation resolves with what their
+/// callees return, and the phis it may be, by their positions in the function's
+/// `EffectSummary::origin_nodes` (each phi is walked once, for every value that may be it).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LocalOrigins {
     pub known: Origins,
     pub results: Vec<ResultOf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<u32>,
 }
 
 impl LocalOrigins {
     pub fn is_empty(&self) -> bool {
-        self.known.is_empty() && self.results.is_empty()
+        self.known.is_empty() && self.results.is_empty() && self.nodes.is_empty()
+    }
+}
+
+/// The phis the origin walks of one function meet ([`origins_of`]), each as itself or as an
+/// element: a node walked once, which the walks refer to by its position.
+#[derive(Default)]
+pub(crate) struct OriginNodes {
+    ids: FxHashMap<(VarId, Part), u32>,
+    keys: Vec<(VarId, Part)>,
+    walked: Vec<LocalOrigins>,
+    pending: Vec<u32>,
+    /// The values the walks took, each walk counting its own.
+    pub(crate) steps: usize,
+}
+
+impl OriginNodes {
+    fn id(&mut self, key: (VarId, Part)) -> u32 {
+        if let Some(&id) = self.ids.get(&key) {
+            return id;
+        }
+        let id = u32::try_from(self.keys.len()).unwrap_or(u32::MAX);
+        self.ids.insert(key, id);
+        self.keys.push(key);
+        self.walked.push(LocalOrigins::default());
+        self.pending.push(id);
+        id
+    }
+
+    /// A node met and not walked yet, with the value and part to walk from.
+    pub(crate) fn next_pending(&mut self) -> Option<(u32, (VarId, Part))> {
+        let id = self.pending.pop()?;
+        Some((id, self.keys[id as usize]))
+    }
+
+    pub(crate) fn set(&mut self, id: u32, origins: LocalOrigins) {
+        self.walked[id as usize] = origins;
+    }
+
+    /// The nodes' origins, by position.
+    pub(crate) fn into_origins(self) -> Vec<LocalOrigins> {
+        self.walked
     }
 }
 
@@ -358,7 +402,7 @@ pub enum ParamRole {
 
 /// A value of the backward walk: the object itself, or one of its elements.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Part {
+pub(crate) enum Part {
     Object,
     Element,
 }
@@ -370,25 +414,28 @@ enum Part {
 /// is of unknown origin, one of a parameter is the caller's, and one of held state is held; an
 /// object the function stores in another (`kept`, through copies and phis) is an element of that
 /// one, and one stored in a global or a closure cell is held. A project call's result is one of
-/// the `results`, which propagation resolves with what its callees return.
+/// the `results`, which propagation resolves with what its callees return. A phi other than a
+/// root is one of the `nodes` ([`OriginNodes`]), walked once from it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn origins_of<'i>(
     defs: &FxHashMap<VarId, &'i Inst>,
     phis: &FxHashMap<VarId, (heki_ir::BlockId, &PhiNode)>,
     live: &Live,
-    roots: impl IntoIterator<Item = VarId>,
+    roots: &[(VarId, Part)],
     source_of: impl Fn(&'i Inst) -> Source<'i>,
     param_of: impl Fn(VarId) -> Option<ParamRole>,
     slice_copies: impl Fn(VarId) -> bool,
     kept: &FxHashMap<VarId, Vec<Place<'_>>>,
+    nodes: &mut OriginNodes,
 ) -> LocalOrigins {
     let mut out = LocalOrigins::default();
     let mut seen: FxHashSet<(VarId, Part)> = FxHashSet::default();
-    let mut work: Vec<(VarId, Part)> = roots.into_iter().map(|v| (v, Part::Object)).collect();
+    let mut work: Vec<(VarId, Part)> = roots.to_vec();
     while let Some((var, part)) = work.pop() {
         if !seen.insert((var, part)) {
             continue;
         }
+        nodes.steps += 1;
         if let Some(role) = param_of(var) {
             match (role, part) {
                 (ParamRole::Plain(i), Part::Object) if i < 64 => out.known.params |= 1u64 << i,
@@ -410,12 +457,16 @@ pub(crate) fn origins_of<'i>(
             continue;
         }
         if let Some((block, phi)) = phis.get(&var) {
-            work.extend(
-                phi.incoming
-                    .iter()
-                    .filter(|(from, _)| live.edge(*from, *block))
-                    .map(|(_, v)| (*v, part)),
-            );
+            if roots.contains(&(var, part)) {
+                work.extend(
+                    phi.incoming
+                        .iter()
+                        .filter(|(from, _)| live.edge(*from, *block))
+                        .map(|(_, v)| (*v, part)),
+                );
+            } else {
+                out.nodes.push(nodes.id((var, part)));
+            }
             continue;
         }
         let source = defs.get(&var).map_or(Source::Unknown, |i| source_of(i));
