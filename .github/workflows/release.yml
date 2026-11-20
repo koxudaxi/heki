@@ -52,8 +52,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
         with:
           targets: ${{ matrix.target }}
+      # The ruff crates come from a git tag (ADR-009 / ADR-016), and the ruff repository holds
+      # test snapshots whose paths pass Windows' 260-character limit once cargo checks them out.
+      - name: Allow long paths in git checkouts
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
       - name: Build wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: ${{ runner.os == 'Windows' && 'true' || 'false' }}
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}

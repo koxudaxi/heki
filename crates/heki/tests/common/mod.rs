@@ -24,10 +24,17 @@ impl Project {
         Self { dir }
     }
 
+    /// Writes `rel` in one step: the text goes to a temporary file that is then renamed over
+    /// `rel`, so a `--watch` poll never sees the truncated file of a plain write.
     pub fn write(&self, rel: &str, text: &str) -> &Self {
         let p = self.dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, text).unwrap();
+        let tmp = p.with_file_name(format!(
+            ".{}.heki-test-write",
+            p.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&tmp, text).unwrap();
+        std::fs::rename(&tmp, &p).unwrap();
         self
     }
 
