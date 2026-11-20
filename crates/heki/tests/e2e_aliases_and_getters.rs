@@ -104,6 +104,14 @@ class Node:
     def items_of(node: "Node") -> list[int]:
         return node.items
 
+    def chosen(self) -> list[int]:
+        return self.items
+
+
+class Branch(Node):
+    def chosen(self) -> list[int]:
+        return self.others
+
 
 NodeAlias = Node
 
@@ -146,6 +154,7 @@ def returned(node: Node, flag: bool, pair: tuple[Node, Node]) -> None:
     node.settable.append(1)
     node.cached().append(1)
     items_of(*pair).append(1)
+    node.chosen().append(1)
 
 
 def mark_imported(node: NodeAlias) -> None:
@@ -202,12 +211,12 @@ fn project(name: &str) -> Project {
     p
 }
 
-/// The diagnostics of `pkg/use.py` before (`before = true`) or from line 39 on, where the
+/// The diagnostics of `pkg/use.py` before (`before = true`) or from line 40 on, where the
 /// allocations start.
 fn in_part(diags: &[Value], before: bool) -> Vec<(String, u64, String, String)> {
     found(diags)
         .into_iter()
-        .filter(|x| x.0 != "pkg/use.py" || (x.1 < 39) == before)
+        .filter(|x| x.0 != "pkg/use.py" || (x.1 < 40) == before)
         .filter(|x| before || x.0 == "pkg/use.py")
         .collect()
 }
@@ -220,7 +229,7 @@ fn aliases_getattr_and_getters_reach_the_guarded_attribute() {
         in_part(&diagnostics(&p, &[]), true),
         vec![
             // An annotation naming a module alias of the class.
-            d(m, 63, "MUT201", "Node.kind"),
+            d(m, 71, "MUT201", "Node.kind"),
             // `_set` is `object.__setattr__`, imported from the module binding it once; the
             // name bound twice, and the one another module rebinds, are not.
             d(u, 9, "MUT201", "Node.kind"),
@@ -230,14 +239,14 @@ fn aliases_getattr_and_getters_reach_the_guarded_attribute() {
             d(u, 17, "MUT201", "Node.items"),
             // A method, a property, a function, and a static method called on an instance
             // returning `node.items` hand out the list. A copy, an attribute returned on one
-            // path only or one of two, a property with a setter, a decorated method, and a
-            // call unpacking its arguments do not.
+            // path only or one of two, a property with a setter, a decorated method, a call
+            // unpacking its arguments, and overrides returning different attributes do not.
             d(u, 22, "MUT201", "Node.items"),
             d(u, 23, "MUT201", "Node.items"),
             d(u, 24, "MUT201", "Node.items"),
             d(u, 25, "MUT201", "Node.items"),
             // The alias imported, in an annotation.
-            d(u, 35, "MUT201", "Node.kind"),
+            d(u, 36, "MUT201", "Node.kind"),
         ]
     );
 }
@@ -250,7 +259,7 @@ fn object_new_allocates_an_instance_nothing_holds() {
     // `object.__new__(Node)`, its alias, `Node.__new__(Node)`, and `cls.__new__(cls)` in a class
     // method construct the node the helper fills: no report with `fresh-objects = "allow"`.
     // `object.__new__` of a class heki does not know constructs nothing it can tell.
-    assert_eq!(lines(&diagnostics(&p, &[])), vec![75]);
+    assert_eq!(lines(&diagnostics(&p, &[])), vec![76]);
     p.write(
         "pyproject.toml",
         &CONFIG.replace(
@@ -259,7 +268,7 @@ fn object_new_allocates_an_instance_nothing_holds() {
         ),
     );
     // With `fresh-objects = "report"`, each write is one of the node's class.
-    assert_eq!(lines(&diagnostics(&p, &[])), vec![44, 50, 56, 64, 75]);
+    assert_eq!(lines(&diagnostics(&p, &[])), vec![45, 51, 57, 65, 76]);
 }
 
 const IO: &str = r#"import functools
