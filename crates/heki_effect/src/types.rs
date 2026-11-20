@@ -192,9 +192,8 @@ impl Ty {
             }
         }
         match out.len() {
-            0 => None,
             1 => out.pop().map(Ty::Inst),
-            n if n <= MAX_UNION => Some(Ty::Union(out)),
+            n if (2..=MAX_UNION).contains(&n) => Some(Ty::Union(out)),
             _ => None,
         }
     }
@@ -413,6 +412,23 @@ mod tests {
             )),
             Some(Ty::inst("builtins.dict"))
         );
+    }
+
+    #[test]
+    fn named_objects_keep_through_member_maps() {
+        let f = Ty::Ref("m.f".into());
+        assert_eq!(f.bind_self(None), Some(f.clone()));
+        assert_eq!(f.map_members(|_| None), Some(f.clone()));
+        assert!(f.members().is_empty());
+        assert_eq!(Ty::SelfType.bind_self(None), None);
+        assert_eq!(Ty::of_members(Vec::new()), None);
+        // A union whose member maps to nothing is nothing.
+        let both = Ty::inst("m.A").join(&Ty::inst("m.B")).unwrap();
+        assert_eq!(both.map_members(|_| None), None);
+        assert_eq!(both.depth(), 1);
+        assert_eq!(f.depth(), 1);
+        assert_eq!(Ty::Partial(Box::new(f.clone())).depth(), 2);
+        assert_eq!(list(Elem::Of(f)).depth(), 2);
     }
 
     #[test]

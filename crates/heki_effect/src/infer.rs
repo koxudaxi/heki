@@ -575,7 +575,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             };
             let mut edge = at.clone();
             if let Terminator::Branch { cond, then_bb, .. } = &self.f.block(p).terminator {
-                edge.extend(self.implied(*cond, *then_bb == bb, at, 0));
+                edge.extend(self.implied(n, *cond, *then_bb == bb, at, 0));
             }
             entry = Some(match entry {
                 None => edge,
@@ -593,15 +593,13 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// hold: `isinstance(x, C)` (with `not`, and through the values `and` / `or` join).
     fn implied(
         &self,
+        n: &Narrowing<'_>,
         cond: VarId,
         truth: bool,
         at: &FxHashMap<VarId, Ty>,
         depth: u8,
     ) -> FxHashMap<VarId, Ty> {
         let mut out = FxHashMap::default();
-        let Some(n) = &self.narrowing else {
-            return out;
-        };
         if depth > 8 {
             return out;
         }
@@ -626,7 +624,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     }
                 }
                 let mut facts = path.clone();
-                facts.extend(self.implied(*v, truth, path, depth + 1));
+                facts.extend(self.implied(n, *v, truth, path, depth + 1));
                 joined = Some(match joined {
                     None => facts,
                     Some(acc) => intersect(acc, &facts),
@@ -639,8 +637,10 @@ impl<'e, 'a> Engine<'e, 'a> {
                 op: UnaryOpKind::Not,
                 operand,
                 ..
-            }) => return self.implied(*operand, !truth, at, depth + 1),
-            Some(InstKind::Copy { src, .. }) => return self.implied(*src, truth, at, depth + 1),
+            }) => return self.implied(n, *operand, !truth, at, depth + 1),
+            Some(InstKind::Copy { src, .. }) => {
+                return self.implied(n, *src, truth, at, depth + 1);
+            }
             Some(InstKind::Call {
                 callee_var: Some(c),
                 args,
@@ -1148,7 +1148,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .and_then(|t| cx.project.declared_ty(t))
                 .and_then(|t| t.bind_self(Some(&self_ty)));
         }
-        match cx.method_call_targets(recv.recv(), method) {
+        match cx.project.method_targets(class, method, skip_self) {
             Callee::External(symbol) if cx.kb.lookup(&symbol).is_some_and(|e| e.copy_sanitizer) => {
                 Some(self_ty)
             }

@@ -582,6 +582,42 @@ fn private_callees_hand_write_sites_to_callers_public_ones_keep_them() {
     );
 }
 
+const CYCLE_PY: &str = r#"
+class Model:
+    def __init__(self):
+        self.fields: list[str] = []
+
+
+def _ping(m: Model, n):
+    m.fields = []
+    if n:
+        _pong(m, n - 1)
+
+
+def _pong(m: Model, n):
+    _ping(m, n)
+
+
+def entry(m: Model):
+    _ping(m, 1)
+"#;
+
+#[test]
+fn a_write_handed_around_a_cycle_of_private_helpers_stays_with_its_writer() {
+    let index = project(&[("cycle.py", CYCLE_PY)]);
+    let chains = |q: &str| -> Vec<Vec<String>> {
+        summary(&index, "cycle", q)
+            .typed_field_write_sites
+            .iter()
+            .map(|t| t.via_chain.iter().map(|h| h.callee.clone()).collect())
+            .collect()
+    };
+    // `_ping` keeps its own write once; `_pong` and `entry` get it through the cycle.
+    assert_eq!(chains("_ping"), vec![Vec::<String>::new()]);
+    assert_eq!(chains("_pong"), vec![vec!["cycle._ping".to_owned()]]);
+    assert_eq!(chains("entry"), vec![vec!["cycle._ping".to_owned()]]);
+}
+
 // =================================================================== gate 5: Early Cutoff
 
 const B_PY: &str = r#"

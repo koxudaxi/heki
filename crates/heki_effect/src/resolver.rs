@@ -1788,19 +1788,17 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             .iter()
             .any(|b| matches!(b.as_str(), "typing.Protocol" | "typing_extensions.Protocol"));
         let mut members: BTreeSet<String> = class.methods.iter().cloned().collect();
-        if let Some(scope) = semantic
+        let bindings = semantic
             .scopes
             .get(class.scope.0 as usize)
             .filter(|sc| sc.id == class.scope)
-        {
-            members.extend(
-                scope
-                    .bindings
-                    .iter()
-                    .filter(|b| !b.is_global_decl && !b.is_nonlocal_decl)
-                    .map(|b| b.name.clone()),
-            );
-        }
+            .into_iter()
+            .flat_map(|sc| &sc.bindings);
+        members.extend(
+            bindings
+                .filter(|b| !b.is_global_decl && !b.is_nonlocal_decl)
+                .map(|b| b.name.clone()),
+        );
         if let Some(c) = decls.classes.get_mut(&class.qualname) {
             c.bases = bases;
             c.metaclass = metaclass;
@@ -2371,7 +2369,7 @@ pub enum Val {
     Union(Vec<String>),
 }
 
-/// A receiver or callee as call resolution sees it, borrowed from a [`Val`] or a [`Ty`].
+/// A receiver or callee as call resolution sees it, borrowed from a [`Val`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Recv<'v> {
     Ref(&'v str),
@@ -2402,10 +2400,9 @@ fn union_targets(classes: &[String], each: impl Fn(&str) -> Callee) -> Callee {
     for class in classes {
         match each(class) {
             Callee::Project(found, b) => {
-                if binds.is_some_and(|x| x != b) {
-                    return Callee::Unresolved;
-                }
-                binds = Some(b);
+                // A method call on an instance binds the receiver (a static method's binding
+                // is decided where the call binds its arguments).
+                binds.get_or_insert(b);
                 for k in found {
                     if !keys.contains(&k) {
                         keys.push(k);
@@ -2431,16 +2428,6 @@ fn union_targets(classes: &[String], each: impl Fn(&str) -> Callee) -> Callee {
 }
 
 impl Ty {
-    /// The view call resolution takes (`None` for a partial object and a union).
-    pub(crate) fn recv(&self) -> Option<Recv<'_>> {
-        match self {
-            Ty::Ref(f) => Some(Recv::Ref(f)),
-            Ty::Inst(o) => Some(Recv::Inst(&o.class)),
-            Ty::Super(c) => Some(Recv::Super(c)),
-            Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
-        }
-    }
-
     /// The value consumers see: the class of an instance (the classes of a union), the fqn of a
     /// named object (none for a partial object).
     pub(crate) fn val(&self) -> Option<Val> {
@@ -2679,11 +2666,7 @@ impl<'a> TypeCtx<'a> {
     pub(crate) fn callee_result(&self, callee: &Callee) -> Option<Ty> {
         match callee {
             Callee::Project(keys, _) if keys.len() == 1 => {
-                let key = &keys[0];
-                let decl = self.project.function_decl(key)?;
-                if key.qualname.ends_with(".__init__") {
-                    return None;
-                }
+                let decl = self.project.function_decl(&keys[0])?;
                 decl.return_type
                     .as_ref()
                     .and_then(|t| self.project.declared_ty(t))

@@ -1,7 +1,7 @@
 //! Receiver typing by variable: what `TypeCtx::infer` gives the named variables of a function.
 
 use crate::ModuleInput;
-use crate::resolver::{TypeCtx, Val, project_decls_for};
+use crate::resolver::{Callee, TypeCtx, Val, project_decls_for};
 use heki_ast::parse_module;
 use heki_env::{PythonVersion, RuntimeProfile};
 use heki_ir::{ModuleIr, build_module_ir};
@@ -73,6 +73,31 @@ fn types_at(
         }
     }
     out
+}
+
+/// Run `check` with the type context of the first of the modules `(module name, source)`.
+fn with_cx(files: &[(&str, &str)], check: impl FnOnce(&TypeCtx<'_>)) {
+    let built: Vec<Built> = files
+        .iter()
+        .map(|(m, s)| build(m, s, PythonVersion::PY311))
+        .collect();
+    let inputs: Vec<ModuleInput<'_>> = built.iter().map(input).collect();
+    let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+    let (decls, _) = project_decls_for(&inputs, &kb, None, false);
+    check(&TypeCtx::new(&inputs[0], &decls, &kb));
+}
+
+/// A callee as `kind: targets`.
+fn callee(c: &Callee) -> String {
+    match c {
+        Callee::Project(keys, binds) => {
+            let names: Vec<String> = keys.iter().map(|k| k.qualname.clone()).collect();
+            format!("project {binds} {}", names.join(","))
+        }
+        Callee::External(s) => format!("external {s}"),
+        Callee::TooMany => "too many".into(),
+        Callee::Unresolved => "unresolved".into(),
+    }
 }
 
 fn types(src: &str, qualname: &str) -> BTreeMap<String, BTreeSet<String>> {
@@ -692,7 +717,8 @@ def f(h: Holder, c: Child, o: Other):
     inherited = c.cached
     bound = o.model
     called = o.model()
-    return a, b, s, u, p, cm, inherited, bound, called
+    value_called = h.model()
+    return a, b, s, u, p, cm, inherited, bound, called, value_called
 "#,
     );
     let t = types(&src, "f");
@@ -703,7 +729,7 @@ def f(h: Holder, c: Child, o: Other):
     assert_eq!(of(&t, "cm"), one("m.Sub"));
     // A getter without a return annotation, a method read as an attribute, and a method of a
     // name some property has give no type.
-    for name in ["u", "p", "bound"] {
+    for name in ["u", "p", "bound", "value_called"] {
         assert!(of(&t, name).is_empty(), "{name}");
     }
     assert_eq!(of(&types(&src, "Child.use"), "up"), one("m.Model"));
@@ -829,7 +855,8 @@ def h(m: Model, r: Rec, pm: PM, x):
     k4 = cast("T", x)
     k5 = cast(x, x)
     none = copy.copy(x)
-    return c1, c2, c3, c4, c5, pr, pc, k1, k2, k4, k5, none
+    kw = part.keywords
+    return c1, c2, c3, c4, c5, pr, pc, k1, k2, k4, k5, none, kw
 "#,
     );
     let t = types(&src, "h");
@@ -843,7 +870,7 @@ def h(m: Model, r: Rec, pm: PM, x):
     assert_eq!(of(&t, "kf"), one("m.Field"));
     // A partial object is no value call resolution takes; a cast to a `TypeVar` or to an
     // unknown type, and a copy of an untyped value, give no type.
-    for name in ["part", "k4", "k5", "none"] {
+    for name in ["part", "k4", "k5", "none", "kw"] {
         assert!(of(&t, name).is_empty(), "{name}");
     }
 }
@@ -884,7 +911,17 @@ def g(h: Holder):
     return held, either
 
 
-def f(u: A | B, o: Optional[Union[A, B]], many: A | B | Model | Field, items: list[A | B], flag):
+def f(
+    u: A | B,
+    o: Optional[Union[A, B]],
+    many: A | B | Model | Field,
+    items: list[A | B],
+    flag,
+    lone: Union[A, None],
+    selfish: "A | Self",
+):
+    x5 = lone
+    x6 = selfish
     x1 = u
     x2 = o
     x3 = many
@@ -923,6 +960,20 @@ def f(u: A | B, o: Optional[Union[A, B]], many: A | B | Model | Field, items: li
         n11 = z
     if isinstance(u, A) or flag:
         n12 = u
+    if not not not not not not not not not not isinstance(u, A):
+        deep = u
+    if ok := isinstance(u, A):
+        walrus = u
+    if isinstance(u, (A, flag)):
+        partly = u
+    instance = A()
+    if isinstance(u, instance):
+        by_instance = u
+    going = flag
+    while going:
+        if isinstance(u, B):
+            looped = u
+        going = flag.next()
     after = u
     return x1, x2, x3, x4, pick, named, made, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11
 "#;
@@ -935,8 +986,10 @@ fn unions_of_a_few_classes_and_isinstance_narrowing() {
         for name in ["x1", "x2", "x4", "pick", "n9", "after"] {
             assert_eq!(of(&t, name), one("m.A | m.B"), "{name}");
         }
-        // More classes than a union keeps give no type.
+        // More classes than a union keeps give no type, nor does `Self` outside a method.
         assert!(of(&t, "x3").is_empty());
+        assert!(of(&t, "x6").is_empty());
+        assert_eq!(of(&t, "x5"), one("m.A"));
         // A member of a union has the join of its classes' declarations.
         assert_eq!(of(&t, "named"), one("m.Model"));
         assert_eq!(of(&t, "made"), one("m.Field"));
@@ -949,11 +1002,247 @@ fn unions_of_a_few_classes_and_isinstance_narrowing() {
         // A check of an untyped value names the class; one that may be false narrows nothing.
         assert_eq!(of(&t, "n10"), one("m.C"));
         assert_eq!(of(&t, "n12"), one("m.A | m.B"));
+        // Nested too deep, a check of an unknown class or of an instance: no narrowing.
+        for name in ["deep", "partly", "by_instance"] {
+            assert_eq!(of(&t, name), one("m.A | m.B"), "{name}");
+        }
+        assert_eq!(of(&t, "walrus"), one("m.A"));
+        assert_eq!(of(&t, "looped"), one("m.B"));
         // Attributes and globals keep a union of what they are assigned.
         let g = types_at(&[("m", src.as_str())], version, "g");
         assert_eq!(of(&g, "held"), one("m.A | m.B"));
         assert_eq!(of(&g, "either"), one("m.A | m.B"));
     }
+}
+
+const DISPATCH: &str = r#"
+from typing import Protocol
+
+from pydantic import BaseModel
+
+
+class A:
+    def run(self):
+        pass
+
+    @property
+    def size(self) -> int:
+        return 1
+
+
+class B:
+    def run(self):
+        pass
+
+    @staticmethod
+    def only(x):
+        pass
+
+    @property
+    def size(self) -> int:
+        return 2
+
+
+class C:
+    def only(self):
+        pass
+
+
+class D:
+    pass
+
+
+class M1(BaseModel):
+    pass
+
+
+class M2(BaseModel):
+    pass
+
+
+class Wide:
+    def go(self):
+        pass
+
+
+class Wide1(Wide):
+    def go(self):
+        pass
+
+
+class Wide2(Wide):
+    def go(self):
+        pass
+
+
+class Wide3(Wide):
+    def go(self):
+        pass
+
+
+class Wide4(Wide):
+    def go(self):
+        pass
+
+
+class Wide5(Wide):
+    def go(self):
+        pass
+
+
+class Wide6(Wide):
+    def go(self):
+        pass
+
+
+class Wide7(Wide):
+    def go(self):
+        pass
+
+
+class Wide8(Wide):
+    def go(self):
+        pass
+
+
+class Narrow:
+    def go(self):
+        pass
+
+
+class Narrow1(Narrow):
+    def go(self):
+        pass
+
+
+class Narrow2(Narrow):
+    def go(self):
+        pass
+
+
+class Narrow3(Narrow):
+    def go(self):
+        pass
+
+
+class Narrow4(Narrow):
+    def go(self):
+        pass
+
+
+class Runner(Protocol):
+    def run(self) -> None: ...
+
+
+class Marker(Protocol):
+    pass
+"#;
+
+#[test]
+fn calls_on_unions_and_protocols_resolve_class_by_class() {
+    with_cx(&[("m", DISPATCH)], |cx| {
+        let union = |cs: &[&str]| Val::Union(cs.iter().map(|c| format!("m.{c}")).collect());
+        let method = |v: &Val, m: &str| callee(&cx.resolve_method(Some(v), m));
+        // Every class's targets together; a class without the method adds none.
+        assert_eq!(
+            method(&union(&["A", "B"]), "run"),
+            "project true A.run,B.run"
+        );
+        assert_eq!(method(&union(&["A", "D"]), "run"), "project true A.run");
+        assert_eq!(method(&union(&["C", "D"]), "nothing"), "unresolved");
+        // A static method and a method (the call decides how arguments bind).
+        assert_eq!(
+            method(&union(&["B", "C"]), "only"),
+            "project true B.only,C.only"
+        );
+        // The one external method two classes inherit; external and project targets, or two
+        // external methods, leave it unresolved.
+        assert_eq!(
+            method(&union(&["M1", "M2"]), "model_dump"),
+            "external pydantic.BaseModel.model_dump"
+        );
+        assert_eq!(
+            method(
+                &Val::Union(vec!["builtins.str".into(), "builtins.list".into()]),
+                "copy"
+            ),
+            "unresolved"
+        );
+        assert_eq!(method(&union(&["A", "M1"]), "run"), "unresolved");
+        assert_eq!(
+            method(
+                &Val::Union(vec!["m.M1".into(), "builtins.str".into()]),
+                "copy"
+            ),
+            "unresolved"
+        );
+        // More targets than the CHA limit: together, or for one class already.
+        assert_eq!(
+            method(&union(&["Narrow", "Narrow1"]), "go"),
+            "project true Narrow.go,Narrow1.go,Narrow2.go,Narrow3.go,Narrow4.go"
+        );
+        assert_eq!(method(&union(&["A", "Wide"]), "go"), "too many");
+        assert_eq!(
+            method(
+                &union(&["Narrow", "Wide1", "Wide2", "Wide3", "Wide4"]),
+                "go"
+            ),
+            "too many"
+        );
+        // A protocol dispatches to the classes implementing it; one without members to none.
+        assert_eq!(
+            method(&Val::Inst("m.Runner".into()), "run"),
+            "project true A.run,B.run"
+        );
+        assert_eq!(
+            method(&Val::Inst("m.Marker".into()), "run"),
+            "external typing.Protocol.run"
+        );
+        // Calling a union value, reading a property on one.
+        assert_eq!(
+            callee(&cx.resolve_call(Some(&union(&["A", "B"])))),
+            "unresolved"
+        );
+        assert_eq!(
+            cx.resolve_attr_load(Some(&union(&["A", "B"])), "size")
+                .map(|c| callee(&c)),
+            Some("project true A.size,B.size".into())
+        );
+        assert_eq!(
+            cx.resolve_attr_load(Some(&union(&["C", "D"])), "size"),
+            None
+        );
+        assert_eq!(
+            cx.resolve_attr_load(Some(&Val::Ref("m.A".into())), "size"),
+            None
+        );
+        assert!(union(&["A", "B"]).recv().is_none());
+    });
+}
+
+#[test]
+fn names_of_other_modules_that_are_no_classes_type_nothing() {
+    let m2 = r#"
+from typing import TypeVar
+
+Alias = list[int]
+T = TypeVar("T")
+"#;
+    let m = r#"
+from m2 import Alias, T
+
+
+def f(a: Alias, t: "T", items: "list[Alias]"):
+    x = a
+    y = t
+    for z in items:
+        pass
+"#;
+    let t = types_at(&[("m", m), ("m2", m2)], PythonVersion::PY311, "f");
+    for name in ["x", "y", "z"] {
+        assert!(of(&t, name).is_empty(), "{name}: {:?}", of(&t, name));
+    }
+    assert_eq!(of(&t, "items"), one("builtins.list"));
 }
 
 #[test]
@@ -985,6 +1274,7 @@ def f(
     called = made()
     nothing = None
     merged = {**nothing}
+    from_none = dict(nothing)
     alias = list[Model]
     sliced = plain[1:]
     any_item = pair[i]
@@ -1005,6 +1295,7 @@ def f(
     assert!(of(&t, "gen").is_empty());
     assert!(of(&t, "called").is_empty());
     assert_eq!(of(&t, "merged"), one("builtins.dict"));
+    assert_eq!(of(&t, "from_none"), one("builtins.dict"));
     assert!(of(&t, "alias").is_empty());
     assert!(of(&t, "sliced").is_empty());
     assert_eq!(of(&t, "any_item"), one("m.Field | m.Model"));
