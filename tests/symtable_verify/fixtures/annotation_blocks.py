@@ -19,7 +19,7 @@ class Annotated:
     if sys:
         a: int
     else:
-        b: (lambda: bytes)
+        b: [i for i in range(2)]
 
 
 def local_annotations(items):
@@ -29,3 +29,7 @@ def local_annotations(items):
     third: [item for item in range(2)]
     return first, second
 
+
+class SignatureComprehensions:
+    def method(self, items: [i for i in range(2)]) -> {k: k for k in ()}:
+        return items

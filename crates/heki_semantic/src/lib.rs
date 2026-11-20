@@ -316,6 +316,28 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// PEP 709 inlines list / set / dict comprehensions (3.12+), except in the annotation
+    /// scopes that can see a class body's names: annotation, type-parameter, type-variable, and
+    /// type-alias scopes of a class body or of such a scope.
+    fn inlines_comprehensions(&self) -> bool {
+        self.profile.pep709_inlined_comprehensions && !self.sees_class_scope(self.cur_scope_id())
+    }
+
+    fn sees_class_scope(&self, id: ScopeId) -> bool {
+        let sc = &self.scopes[id.0 as usize];
+        let annotation_scope = matches!(
+            sc.kind,
+            ScopeKind::Annotation
+                | ScopeKind::TypeParameters
+                | ScopeKind::TypeVariable
+                | ScopeKind::TypeAlias
+        );
+        annotation_scope
+            && sc.parent.is_some_and(|p| {
+                self.scopes[p.0 as usize].kind == ScopeKind::Class || self.sees_class_scope(p)
+            })
+    }
+
     fn cur_scope_id(&self) -> ScopeId {
         *self.scope_stack.last().expect("scope stack non-empty")
     }
@@ -1040,19 +1062,19 @@ impl<'a> Analyzer<'a> {
                 self.pop_scope();
             }
             Expr::ListComp(lc) => {
-                let inlined = self.profile.pep709_inlined_comprehensions;
+                let inlined = self.inlines_comprehensions();
                 self.visit_comprehension("<listcomp>", lc.range, &lc.generators, inlined, |a| {
                     a.visit_expr(&lc.elt);
                 });
             }
             Expr::SetComp(sc) => {
-                let inlined = self.profile.pep709_inlined_comprehensions;
+                let inlined = self.inlines_comprehensions();
                 self.visit_comprehension("<setcomp>", sc.range, &sc.generators, inlined, |a| {
                     a.visit_expr(&sc.elt);
                 });
             }
             Expr::DictComp(dc) => {
-                let inlined = self.profile.pep709_inlined_comprehensions;
+                let inlined = self.inlines_comprehensions();
                 self.visit_comprehension("<dictcomp>", dc.range, &dc.generators, inlined, |a| {
                     if let Some(k) = &dc.key {
                         a.visit_expr(k);

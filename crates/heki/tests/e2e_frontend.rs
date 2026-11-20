@@ -587,6 +587,46 @@ def f():
 }
 
 #[test]
+fn semantic_comprehensions_in_class_annotation_scopes_are_not_inlined() {
+    let source = "\
+class C:
+    a: [i for i in range(2)]
+    def m(self, x: {k: k for k in ()}): pass
+    type Alias = list[[j for j in range(2)]]
+def f(y: [n for n in ()]): pass
+";
+    let m = dump_source(
+        "dump-semantic",
+        "fe_class_annotation_comps",
+        source,
+        "py314",
+    );
+    let comprehension_parents: Vec<(&str, &str)> = m["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["kind"] == "comprehension")
+        .map(|s| {
+            let parent = &m["scopes"][s["parent"].as_u64().unwrap() as usize];
+            (
+                s["name"].as_str().unwrap(),
+                parent["kind"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    // Annotation scopes of the class body see its names, so CPython keeps their comprehensions
+    // as scopes; `f`'s module-level annotation scope inlines its comprehension.
+    assert_eq!(
+        comprehension_parents,
+        [
+            ("<listcomp>", "annotation"),
+            ("<dictcomp>", "annotation"),
+            ("<listcomp>", "type_alias"),
+        ]
+    );
+}
+
+#[test]
 fn semantic_generator_walrus_writes_the_declared_global() {
     let source = "\
 def f():
