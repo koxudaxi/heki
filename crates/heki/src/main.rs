@@ -13,10 +13,9 @@ mod watch;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use heki_ast::LineIndex;
-use heki_env::HekiConfig;
+use heki_rules::project::{Project, ProjectOptions};
 use heki_rules::{CORE_RULES, find_rule};
-use rayon::prelude::*;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
@@ -229,32 +228,6 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
-fn collect_python_files(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for p in paths {
-        if p.is_file() {
-            if p.extension().is_some_and(|e| e == "py") {
-                files.push(p.clone());
-            }
-            continue;
-        }
-        if !p.exists() {
-            continue;
-        }
-        let mut builder = ignore::WalkBuilder::new(p);
-        builder.add_custom_ignore_filename(".hekiignore");
-        for entry in builder.build().flatten() {
-            let ep = entry.path();
-            if ep.is_file() && ep.extension().is_some_and(|e| e == "py") {
-                files.push(ep.to_path_buf());
-            }
-        }
-    }
-    files.sort();
-    files.dedup();
-    files
-}
-
 #[derive(serde::Serialize)]
 struct AssumptionRecord {
     path: String,
@@ -264,70 +237,30 @@ struct AssumptionRecord {
     kind: String,
 }
 
+/// `heki assumptions`: the A1 hazards of the files `heki check` would check (the same
+/// discovery, configuration, and target version), with the same exit code 2 for paths that do not
+/// exist and files that cannot be read or parsed.
 fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
-    // `paths` defaults to `.`.
-    let root = args.paths.first().map_or(Path::new("."), PathBuf::as_path);
-    let cfg = HekiConfig::load_from_dir(if root.is_dir() {
-        root
-    } else {
-        root.parent().unwrap_or(Path::new("."))
+    let project = Project::load(&ProjectOptions {
+        paths: &args.paths,
+        config: None,
+        target_version: args.target_version.as_deref(),
+        overrides: None,
     })?;
-    let profile = args
-        .target_version
-        .as_deref()
-        .and_then(heki_env::PythonVersion::parse_tag)
-        .map(heki_env::RuntimeProfile::from)
-        .unwrap_or_else(|| cfg.runtime_profile());
-
-    let files = collect_python_files(&args.paths);
-    let per_file: Vec<(usize, Vec<AssumptionRecord>, Option<String>)> = files
-        .par_iter()
-        .map(|path| {
-            let src = match std::fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(e) => return (0, Vec::new(), Some(format!("{}: {e}", path.display()))),
-            };
-            let parsed = match heki_ast::parse_module(&src) {
-                Ok(p) => p,
-                Err(errs) => {
-                    return (
-                        0,
-                        Vec::new(),
-                        Some(format!(
-                            "{}: {} syntax error(s)",
-                            path.display(),
-                            errs.len()
-                        )),
-                    );
-                }
-            };
-            let semantic = heki_semantic::analyze_module(&parsed, &src, profile);
-            let ir = heki_ir::build_module_ir(&parsed, &src, &semantic, profile);
-            let lines = LineIndex::from_source(&src);
-            let fn_count = ir.functions.len();
-            let mut records = Vec::new();
-            for (func, hazard) in ir.all_a1_hazards() {
-                let (line, column) = lines.line_col(hazard.span.start);
-                records.push(AssumptionRecord {
-                    path: path.display().to_string(),
-                    line,
-                    column,
-                    qualname: func.qualname.clone(),
-                    kind: hazard.kind.clone(),
-                });
-            }
-            (fn_count, records, None)
-        })
-        .collect();
-
     let mut total_fns = 0usize;
     let mut all_records = Vec::new();
-    let mut errors = Vec::new();
-    for (fns, recs, err) in per_file {
-        total_fns += fns;
-        all_records.extend(recs);
-        if let Some(e) = err {
-            errors.push(e);
+    for file in &project.files {
+        let lines = LineIndex::from_source(&file.source);
+        total_fns += file.ir.functions.len();
+        for (func, hazard) in file.ir.all_a1_hazards() {
+            let (line, column) = lines.line_col(hazard.span.start);
+            all_records.push(AssumptionRecord {
+                path: file.path.display().to_string(),
+                line,
+                column,
+                qualname: func.qualname.clone(),
+                kind: hazard.kind.clone(),
+            });
         }
     }
     all_records.sort_by(|a, b| {
@@ -345,16 +278,13 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
         }
         eprintln!(
             "Checked {} file(s) ({} IR function(s)): {} A1 hazard(s), {} parse/read error(s).",
-            files.len(),
+            project.files.len() + project.errors.len(),
             total_fns,
             all_records.len(),
-            errors.len()
+            project.errors.len()
         );
     }
-    for e in &errors {
-        eprintln!("warning: {e}");
-    }
-    Ok(ExitCode::SUCCESS)
+    check::finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS)
 }
 
 fn main() -> ExitCode {
