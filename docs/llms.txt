@@ -19,7 +19,7 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 34 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 35 rules in four families
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 
 ## Integrations
