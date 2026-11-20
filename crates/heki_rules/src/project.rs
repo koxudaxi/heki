@@ -6,7 +6,7 @@ use crate::ModuleUnit;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, InlineIgnores};
-use heki_effect::{ModuleInput, detect_src_layout, module_name_for_path};
+use heki_effect::{ModuleInput, ModuleLayout, module_name_for_path};
 use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
@@ -71,17 +71,25 @@ pub struct ParsedFile {
     pub rel: String,
     pub module_name: String,
     pub is_package: bool,
+    /// [`ModuleLayout::root_is_package`] of the project.
+    pub root_is_package: bool,
     pub source: String,
     pub semantic: SemanticModel,
     pub ir: ModuleIr,
     pub comments: Vec<Span>,
 }
 
+/// The module imports `builtins` or touches `__builtins__` when it runs: it may patch builtin
+/// names, and then no module of the project can trust them (Assumption A1(b)). A typing stub
+/// never runs (`import builtins` there only spells annotations).
+pub fn runtime_patches_builtins(input: &ModuleInput<'_>) -> bool {
+    !heki_effect::is_stub(&input.path) && heki_soundness::module_patches_builtins(input.ir)
+}
+
 impl ParsedFile {
-    /// The module imports `builtins` or touches `__builtins__`: it may patch builtin names, and
-    /// then no module of the project can trust them (Assumption A1(b)).
+    /// [`runtime_patches_builtins`] of this module.
     pub fn patches_builtins(&self) -> bool {
-        heki_soundness::module_patches_builtins(&self.ir)
+        runtime_patches_builtins(&self.input())
     }
 
     pub fn input(&self) -> ModuleInput<'_> {
@@ -89,6 +97,7 @@ impl ParsedFile {
             path: self.path.clone(),
             module_name: self.module_name.clone(),
             is_package: self.is_package,
+            root_is_package: self.root_is_package,
             content_hash: String::new(),
             semantic: &self.semantic,
             ir: &self.ir,
@@ -212,7 +221,14 @@ pub fn collect_files(
             files.push(p.clone());
             continue;
         }
-        for entry in walk(p).build() {
+        let mut builder = walk(p);
+        // An excluded directory is never entered (it may not even be readable).
+        let (dir_root, dir_exclude) = (root.to_path_buf(), exclude.clone());
+        builder.filter_entry(move |e| {
+            !e.file_type().is_some_and(|t| t.is_dir())
+                || !is_excluded(&rel_posix(e.path(), &dir_root), &dir_exclude)
+        });
+        for entry in builder.build() {
             let entry = entry.map_err(|cause| ProjectError::Walk {
                 path: p.clone(),
                 cause,
@@ -270,7 +286,7 @@ pub fn parse_source(
     path: &Path,
     root: &Path,
     source: String,
-    src_layout: bool,
+    layout: ModuleLayout,
     runtime: RuntimeProfile,
 ) -> Result<ParsedFile, String> {
     let parsed = heki_ast::parse_module(&source).map_err(|errs| {
@@ -285,7 +301,7 @@ pub fn parse_source(
         )
     })?;
     let rel = rel_posix(path, root);
-    let (module_name, is_package) = module_name_for_path(Path::new(&rel), src_layout)
+    let (module_name, is_package) = module_name_for_path(Path::new(&rel), layout.src)
         .unwrap_or_else(|| {
             let stem = path
                 .file_stem()
@@ -300,6 +316,7 @@ pub fn parse_source(
         rel,
         module_name,
         is_package,
+        root_is_package: layout.root_is_package,
         comments: parsed.comment_spans(),
         source,
         semantic,
@@ -325,7 +342,7 @@ pub struct ProjectEnv {
     pub runtime: RuntimeProfile,
     pub kb: EffectiveEcosystemKb,
     pub soundness_kb: EffectiveSoundnessKb,
-    pub src_layout: bool,
+    pub layout: ModuleLayout,
 }
 
 impl ProjectEnv {
@@ -353,14 +370,14 @@ impl ProjectEnv {
             .collect::<Result<Vec<_>, _>>()?;
         let kb = EffectiveEcosystemKb::load_builtin(&overrides)?;
         let soundness_kb = EffectiveSoundnessKb::load_builtin(runtime.python_version)?;
-        let src_layout = detect_src_layout(&root);
+        let layout = ModuleLayout::detect(&root);
         Ok(Self {
             root,
             cfg,
             runtime,
             kb,
             soundness_kb,
-            src_layout,
+            layout,
         })
     }
 }
@@ -410,12 +427,10 @@ impl Project {
             .map(|p| {
                 let source = match opts.overrides.and_then(|o| o.get(&display_path(p))) {
                     Some(text) => Ok(text.clone()),
-                    None => std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display())),
+                    None => heki_ast::read_source(p).map_err(|e| format!("{}: {e}", p.display())),
                 };
                 source
-                    .and_then(|source| {
-                        parse_source(p, &env.root, source, env.src_layout, env.runtime)
-                    })
+                    .and_then(|source| parse_source(p, &env.root, source, env.layout, env.runtime))
                     .map_err(|message| FileError {
                         path: display_path(p),
                         message,

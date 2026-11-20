@@ -193,7 +193,11 @@ state that matters.
 - **The target Python version.** Results follow `target-version`. From Python 3.12, list, set,
   and dict comprehensions run in the enclosing function (PEP 709), so a comprehension inside a
   loop can be reported for `py312` and not for `py311`. heki infers the version from
-  `requires-python`, which keeps it at the oldest version you support.
+  `requires-python`, which keeps it at the oldest version you support. Syntax newer than the
+  target version is analyzed, not reported: that is Ruff's check.
+- **Source encodings.** Sources are read in the encoding a PEP 263 declaration names: heki reads
+  UTF-8 (with or without a BOM), Latin-1, and ASCII, and reports any other declared encoding as
+  an error instead of checking the file.
 - **Sizes known only at run time.** Whether a collection is small is decided from the code: a
   list built from a short constant display is not reported, a list built at run time is, even
   when it always holds three items. A container counts as small only when it is a display of at

@@ -393,6 +393,15 @@ impl Workspace {
         ))
     }
 
+    /// Every indexed function as `(file, qualname)` (summaries keep no definition lines).
+    pub fn functions(&self) -> impl Iterator<Item = (&Path, &str)> {
+        self.index.files.values().flat_map(|f| {
+            f.local_functions
+                .keys()
+                .map(move |k| (f.path.as_path(), k.qualname.as_str()))
+        })
+    }
+
     pub fn stats(&self) -> &EngineStats {
         &self.stats
     }
@@ -423,7 +432,7 @@ impl Workspace {
             path,
             &self.env.root,
             text.to_owned(),
-            self.env.src_layout,
+            self.env.layout,
             self.env.runtime,
         )
     }
@@ -438,7 +447,7 @@ impl Workspace {
             snapshot: self.snapshot.as_ref(),
             decls: Some(self.decls.completed()),
             project_patches_builtins: Some(!self.patching_builtins.is_empty()),
-            text_of: Some(&|p: &Path| std::fs::read_to_string(p).ok()),
+            text_of: Some(&|p: &Path| heki_ast::read_source(p).ok()),
         };
         let (checked, reads) = self.decls.completed().record(|| {
             check_project(
@@ -937,7 +946,7 @@ impl Workspace {
         let mut errors = Vec::new();
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in &paths {
-            let diagnosed = std::fs::read_to_string(path)
+            let diagnosed = heki_ast::read_source(path)
                 .map_err(|e| format!("{}: {e}", path.display()))
                 .and_then(|text| self.diagnose(path, &text));
             match diagnosed {

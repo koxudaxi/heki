@@ -84,14 +84,35 @@ const BUILTIN_TYPES: &[&str] = &[
 
 // ------------------------------------------------------------------------------ module names
 
-/// `src/` layout: some `root/src/<pkg>/__init__.py` exists.
+/// How module names derive from project-relative paths.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModuleLayout {
+    /// [`detect_src_layout`].
+    pub src: bool,
+    /// The project root is a package itself (`__init__.py`, without a `src/` layout): heki names
+    /// its modules top-level, and relative imports may climb to it.
+    pub root_is_package: bool,
+}
+
+impl ModuleLayout {
+    pub fn detect(root: &Path) -> Self {
+        let src = detect_src_layout(root);
+        Self {
+            src,
+            root_is_package: !src && root.join("__init__.py").is_file(),
+        }
+    }
+}
+
+/// `src/` layout: `root/src` is a source root, not a package. It holds the project's top-level
+/// packages, namespace packages, and modules (the layout packaging tools install from), unless
+/// it is a regular package itself (`src/__init__.py`, or a stub for one), imported as `src`.
 pub fn detect_src_layout(root: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(root.join("src")) else {
-        return false;
-    };
-    entries
-        .flatten()
-        .any(|e| e.path().join("__init__.py").is_file())
+    let src = root.join("src");
+    src.is_dir()
+        && !["__init__.py", "__init__.pyi"]
+            .iter()
+            .any(|f| src.join(f).is_file())
 }
 
 /// Module name of `rel` (the normalized project-relative path `rel_posix` produces):
@@ -123,49 +144,64 @@ pub fn module_name_for_path(rel: &Path, src_layout: bool) -> Option<(String, boo
 }
 
 /// Resolve the module part of `from <level dots><module> import ...` inside `current`.
-/// A package `__init__` is its own base; a plain module's base is its parent package.
+/// A package `__init__` is its own base; a plain module's base is its parent package. `None`
+/// when the level climbs past the top-level package, where Python raises `ImportError`; when
+/// `root_is_package`, the import root is that package (heki names its modules top-level), and
+/// `""` is the root package itself.
 pub fn resolve_relative_module(
     current: &str,
     current_is_package: bool,
     level: u32,
     module: Option<&str>,
+    root_is_package: bool,
 ) -> Option<String> {
     if level == 0 {
         return module.map(str::to_owned);
     }
-    let mut parts: Vec<&str> = current.split('.').collect();
+    let mut package: Vec<&str> = current.split('.').collect();
     if !current_is_package {
-        parts.pop();
+        package.pop();
     }
-    for _ in 1..level {
-        parts.pop()?;
+    // Each dot after the first climbs one package; at least the top-level one must remain.
+    let keep = (package.len() + 1).checked_sub(usize::try_from(level).ok()?)?;
+    if keep == 0 && !root_is_package {
+        return None;
     }
-    let base = parts.join(".");
-    match (base.is_empty(), module) {
-        (true, None) => None,
-        (true, Some(m)) => Some(m.to_owned()),
-        (false, None) => Some(base),
-        (false, Some(m)) => Some(format!("{base}.{m}")),
-    }
+    package.truncate(keep);
+    let base = package.join(".");
+    Some(match module {
+        None => base,
+        Some(m) if base.is_empty() => m.to_owned(),
+        Some(m) => format!("{base}.{m}"),
+    })
 }
 
 /// Fully qualified symbol bound by one import.
-fn import_target(imp: &ModuleImport, module_name: &str, is_package: bool) -> Option<String> {
+fn import_target(imp: &ModuleImport, input: &ModuleInput<'_>) -> Option<String> {
     if !imp.is_from {
-        let top = imp
-            .imported_name
-            .split('.')
-            .next()
-            .unwrap_or(&imp.imported_name);
         // `import a.b.c` binds `a`; `import a.b.c as x` binds `a.b.c`.
-        return Some(if imp.bound_name == top {
-            top.to_owned()
-        } else {
+        return Some(if imp.has_alias {
             imp.imported_name.clone()
+        } else {
+            imp.imported_name
+                .split('.')
+                .next()
+                .unwrap_or(&imp.imported_name)
+                .to_owned()
         });
     }
-    let base = resolve_relative_module(module_name, is_package, imp.level, imp.module.as_deref())?;
-    Some(format!("{base}.{}", imp.imported_name))
+    let base = resolve_relative_module(
+        &input.module_name,
+        input.is_package,
+        imp.level,
+        imp.module.as_deref(),
+        input.root_is_package,
+    )?;
+    Some(if base.is_empty() {
+        imp.imported_name.clone()
+    } else {
+        format!("{base}.{}", imp.imported_name)
+    })
 }
 
 // ------------------------------------------------------------------------------ declarations
@@ -1814,14 +1850,14 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         if Some(imp.scope) != module_scope {
             continue;
         }
-        let Some(target) = import_target(imp, &input.module_name, input.is_package) else {
+        let Some(target) = import_target(imp, input) else {
             continue;
         };
         if imp.in_type_checking {
             decls
                 .type_checking_imports
                 .insert(imp.bound_name.clone(), target);
-        } else {
+        } else if !imp.overridden {
             decls.imports.insert(imp.bound_name.clone(), target);
         }
     }
@@ -1875,17 +1911,19 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             .iter()
             .any(|b| matches!(b.as_str(), "typing.Protocol" | "typing_extensions.Protocol"));
         let mut members: BTreeSet<String> = class.methods.iter().cloned().collect();
-        let bindings = semantic
+        // A name the body declares `global` / `nonlocal` is no member, even when assigned.
+        let body = semantic
             .scopes
             .get(class.scope.0 as usize)
-            .filter(|sc| sc.id == class.scope)
-            .into_iter()
-            .flat_map(|sc| &sc.bindings);
-        members.extend(
-            bindings
-                .filter(|b| !b.is_global_decl && !b.is_nonlocal_decl)
-                .map(|b| b.name.clone()),
-        );
+            .filter(|sc| sc.id == class.scope);
+        members.extend(body.into_iter().flat_map(|sc| {
+            sc.bindings
+                .iter()
+                .filter(|b| {
+                    !sc.global_decls.contains(&b.name) && !sc.nonlocal_decls.contains(&b.name)
+                })
+                .map(|b| b.name.clone())
+        }));
         if let Some(c) = decls.classes.get_mut(&class.qualname) {
             c.bases = bases;
             c.metaclass = metaclass;
@@ -2140,12 +2178,7 @@ fn final_str_constants(
         .semantic
         .imports
         .iter()
-        .filter_map(|imp| {
-            Some((
-                imp.span,
-                import_target(imp, &input.module_name, input.is_package)?,
-            ))
-        })
+        .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
         .collect();
     for inst in insts() {
         let InstKind::StoreGlobal { name, value } = &inst.kind else {
@@ -2741,7 +2774,7 @@ impl<'a> TypeCtx<'a> {
             if imp.in_type_checking {
                 continue;
             }
-            if let Some(t) = import_target(imp, &input.module_name, input.is_package) {
+            if let Some(t) = import_target(imp, input) {
                 import_by_span.insert(imp.span, t);
             }
         }

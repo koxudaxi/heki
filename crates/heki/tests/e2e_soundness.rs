@@ -1064,7 +1064,10 @@ const COUNTEREXAMPLES: &[Expect] = &[
     // Proven safe, but `collections.deque` would name the parameter: no automatic edit.
     ("cx_local_collections", &[("OPT120", V::Hand)]),
     // The same through a class: the enclosing function is found by its span, not its qualname.
-    ("LocalCx.drain", &[("OPT120", V::Hand)]),
+    (
+        "cx_class_in_function_collections.<locals>.LocalCx.drain",
+        &[("OPT120", V::Hand)],
+    ),
     (
         "cx_two_pops",
         &[

@@ -25,7 +25,7 @@
 use crate::convert;
 use crate::engine::{CONFIG_FILES, Selectors, Workspace};
 use heki_diagnostics::Diagnostic;
-use heki_effect::detect_src_layout;
+use heki_effect::ModuleLayout;
 use heki_rules::project::{IGNORE_FILES, ProjectOptions, find_root};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
@@ -364,12 +364,14 @@ impl State {
         (pubs, errors)
     }
 
-    /// Whether a package marker that appeared or disappeared under `src/` switched the `src`
-    /// layout the workspace was indexed with: every module name under `src/` changes with it.
+    /// Whether a package marker that appeared or disappeared (`src/__init__.py`, a root
+    /// `__init__.py`) switched the module layout the workspace was indexed with
+    /// (`ModuleLayout`): module names under `src/`, or relative imports climbing to the root,
+    /// change with it.
     fn layout_changed(&self) -> bool {
         self.workspace
             .as_ref()
-            .is_some_and(|ws| detect_src_layout(&ws.env.root) != ws.env.src_layout)
+            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root) != ws.env.layout)
     }
 
     /// A document was closed (`text`: what it held): the file on the disk is its text again.
@@ -383,7 +385,7 @@ impl State {
         text: Option<String>,
     ) -> (Vec<Publish>, Vec<String>) {
         let (mut pubs, mut errors) = (Vec::new(), Vec::new());
-        let disk = std::fs::read_to_string(path).ok();
+        let disk = heki_ast::read_source(path).ok();
         let indexed = self.workspace.as_ref().is_some_and(|ws| ws.accepts(path));
         if text.is_some() && text != disk && indexed {
             let ws = self.workspace.as_mut().expect("checked above");
@@ -419,7 +421,7 @@ impl State {
 fn text_of(docs: &FxHashMap<PathBuf, Doc>, path: &Path) -> Option<String> {
     match docs.get(path) {
         Some(d) => Some(d.text.clone()),
-        None => std::fs::read_to_string(path).ok(),
+        None => heki_ast::read_source(path).ok(),
     }
 }
 

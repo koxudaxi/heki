@@ -3,7 +3,7 @@
 //! callers and importers are re-analyzed only when a summary or declaration changed).
 //!
 //! Files are polled (no platform watcher dependency). A change to the configuration, the
-//! summary snapshot, or the Ratchet baseline, or a switch of the `src` layout, reloads the whole
+//! summary snapshot, or the Ratchet baseline, or a switch of the module layout, reloads the whole
 //! workspace. A reload that fails, and a path that disappears, are reported while the watch goes
 //! on.
 
@@ -11,9 +11,9 @@ use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
-use heki_effect::detect_src_layout;
+use heki_effect::ModuleLayout;
 use heki_lsp::{CONFIG_FILES, EditOutcome, Selectors, Workspace};
-use heki_profile::ProfileData;
+use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{
     FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
 };
@@ -217,9 +217,17 @@ impl Watcher<'_> {
         Ok(stamps_of(&files, earlier))
     }
 
-    fn print(&self, report: &Report) -> bool {
+    fn print(&self, report: &Report, ws: Option<&Workspace>) -> bool {
         let mut all: Vec<Diagnostic> = report.diags.values().flatten().cloned().collect();
-        crate::check::annotate_hot(&mut all, self.hot);
+        // The index keeps no definition lines: a frame is told apart by its names only.
+        let hot = self.hot.zip(ws).map(|(profile, ws)| {
+            profile.attribute(ws.functions().map(|(path, qualname)| ProfiledFunction {
+                path,
+                qualname,
+                lines: None,
+            }))
+        });
+        crate::check::annotate_hot(&mut all, hot.as_ref());
         // The paths `heki check` prints.
         for d in &mut all {
             d.path = crate::check::shown_path(&d.path);
@@ -231,7 +239,7 @@ impl Watcher<'_> {
         // As `heki check` prints them: across every file.
         heki_rules::fold_root_causes(&mut all);
         let source_line = |p: &Path, line: u32| {
-            let text = std::fs::read_to_string(p).ok()?;
+            let text = heki_ast::read_source(p).ok()?;
             LineIndex::from_source(&text)
                 .line_text(&text, line)
                 .map(str::to_owned)
@@ -334,7 +342,7 @@ impl Report {
             .iter()
             .filter(|(p, s)| before.get(*p).is_none_or(|b| !s.same_as(b)));
         for (p, _) in changed {
-            match std::fs::read_to_string(p) {
+            match heki_ast::read_source(p) {
                 Ok(text) => {
                     let out = ws.edit(p, &text);
                     affected.remove(p);
@@ -353,7 +361,7 @@ impl Report {
                 }
             }
         }
-        let read = |p: &Path| std::fs::read_to_string(p).ok();
+        let read = |p: &Path| heki_ast::read_source(p).ok();
         for (p, out) in ws.refresh_all(affected, &read) {
             self.record(&p, out);
         }
@@ -387,7 +395,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         (loaded.files, loaded.config_files, loaded.config);
     let mut ws = Some(loaded.ws);
     let mut report = Report::of(ws.as_mut().expect("just loaded"), loaded.errors);
-    let mut dirty = w.print(&report);
+    let mut dirty = w.print(&report, ws.as_ref());
     let mut runs = 0;
     while max_runs.is_none_or(|m| runs < m) {
         std::thread::sleep(POLL);
@@ -395,11 +403,12 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         let reconfigured = !unchanged(&config, &now_config);
         // The racy files' content hashes of this poll are what the next one compares.
         config = now_config;
-        // A package marker appearing or disappearing under `src/` can switch the `src` layout:
-        // every module name under `src/` changes with it.
+        // `src/__init__.py` or a root `__init__.py` appearing or disappearing switches the module
+        // layout (`ModuleLayout`): every module name under `src/`, or every relative import that
+        // climbs to the root, changes with it.
         let relayout = ws
             .as_ref()
-            .is_some_and(|ws| detect_src_layout(&ws.env.root) != ws.env.src_layout);
+            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root) != ws.env.layout);
         if reconfigured || relayout {
             match w.load((&files, &config)) {
                 Ok(loaded) => {
@@ -421,7 +430,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                     if report.failure != failure {
                         report.failure = failure;
                         runs += 1;
-                        dirty = w.print(&report);
+                        dirty = w.print(&report, Some(&*ws));
                     }
                     continue;
                 }
@@ -438,7 +447,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
             continue;
         }
         runs += 1;
-        dirty = w.print(&report);
+        dirty = w.print(&report, ws.as_ref());
     }
     Ok(report.exit_code(dirty))
 }

@@ -9,8 +9,8 @@ use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, baseline_counts, fix_python_source,
     github_escape, path_text, render, unified_diff,
 };
-use heki_effect::{ProjectIndex, analyze_project, analyze_project_for};
-use heki_profile::ProfileData;
+use heki_effect::{ProjectIndex, analyze_project, analyze_project_for, func_qualname};
+use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{FileError, ParsedFile, Project, ProjectOptions, retain_unsuppressed};
 use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
@@ -56,8 +56,23 @@ pub(crate) fn snapshot_for(
     Ok(None)
 }
 
+/// Every function of the project with the lines of its definition, for attributing profile
+/// frames.
+fn profiled_functions(project: &Project) -> Vec<ProfiledFunction<'_>> {
+    let mut out = Vec::new();
+    for file in &project.files {
+        let lines = LineIndex::from_source(&file.source);
+        out.extend(file.ir.functions.iter().map(|f| ProfiledFunction {
+            path: &file.path,
+            qualname: func_qualname(f),
+            lines: Some(lines.line(f.span.start)..=lines.line(f.span.end)),
+        }));
+    }
+    out
+}
+
 /// Append `profile: ...` evidence to `OPT` diagnostics of profiled functions.
-pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&ProfileData>) {
+pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&HotFunctions>) {
     let Some(hot) = hot else {
         return;
     };
@@ -73,16 +88,18 @@ pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&ProfileData>) 
     }
 }
 
-/// One analysis pass: the project, its index, and its diagnostics after inline suppressions.
+/// One analysis pass: the project, its index, its diagnostics after inline suppressions, and
+/// the shares of its functions in the profile.
 struct Analyzed {
     project: Project,
     index: ProjectIndex,
     diags: Vec<Diagnostic>,
+    hot: Option<HotFunctions>,
 }
 
 fn analyze(
     args: &CheckArgs,
-    hot: Option<&ProfileData>,
+    profile: Option<&ProfileData>,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<Analyzed> {
     let project = Project::load(&ProjectOptions {
@@ -110,18 +127,20 @@ fn analyze(
     drop(units);
     drop(inputs);
     retain_unsuppressed(&mut diags, &project.files);
-    annotate_hot(&mut diags, hot);
+    let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
+    annotate_hot(&mut diags, hot.as_ref());
     Ok(Analyzed {
         project,
         index,
         diags,
+        hot,
     })
 }
 
 /// Whether `--fix` / `--diff` applies this diagnostic's fix: `safe` + `unconditional` rules
 /// (`OPT101` / `OPT102`) always; `size-dependent` ones with `--include-size-dependent` or in a
 /// function the profile shows hot.
-fn applicable(d: &Diagnostic, args: &CheckArgs, hot: Option<&ProfileData>) -> bool {
+fn applicable(d: &Diagnostic, args: &CheckArgs, hot: Option<&HotFunctions>) -> bool {
     d.fix.is_some()
         && find_rule(&d.rule_code).is_some_and(|meta| {
             meta.auto_fix_default
@@ -191,7 +210,7 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
         errors = a.project.errors;
         let mut by_path: BTreeMap<&Path, Vec<&[heki_diagnostics::TextEdit]>> = BTreeMap::new();
         for d in &a.diags {
-            if applicable(d, args, hot)
+            if applicable(d, args, a.hot.as_ref())
                 && let Some(edits) = &d.fix
             {
                 by_path.entry(d.path.as_path()).or_default().push(edits);
@@ -289,6 +308,7 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         mut project,
         index,
         diags,
+        ..
     } = analyze(args, hot.as_ref(), None)?;
     project.errors.extend(conflicts);
     let code = report(args, &project, diags)?;
@@ -306,7 +326,7 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
 fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
     let (mut fixes, mut written, mut conflicts) = (0, 0, Vec::new());
     for f in files {
-        if std::fs::read_to_string(&f.path).ok().as_ref() != Some(&f.original) {
+        if heki_ast::read_source(&f.path).ok().as_ref() != Some(&f.original) {
             conflicts.push(FileError {
                 path: f.path.clone(),
                 message: format!(
@@ -316,7 +336,7 @@ fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
             });
             continue;
         }
-        std::fs::write(&f.path, &f.fixed)
+        heki_ast::write_source(&f.path, &f.fixed)
             .with_context(|| format!("failed to write `{}`", f.path.display()))?;
         fixes += f.fixes;
         written += 1;

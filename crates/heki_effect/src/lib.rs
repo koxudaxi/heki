@@ -39,9 +39,9 @@ pub use invalidation::{
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, StrConstant, TypeCtx, Val, aliases_of, detect_src_layout, func_qualname,
-    module_name_for_path, resolve_relative_module, self_aliases,
+    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ModuleLayout, ProjectDecls,
+    ReadOnlyAttr, ReadOnlyKind, StrConstant, TypeCtx, Val, aliases_of, detect_src_layout,
+    func_qualname, module_name_for_path, resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
 
@@ -995,6 +995,8 @@ pub struct ModuleInput<'a> {
     pub path: PathBuf,
     pub module_name: String,
     pub is_package: bool,
+    /// [`ModuleLayout::root_is_package`] of the project.
+    pub root_is_package: bool,
     pub content_hash: String,
     pub semantic: &'a SemanticModel,
     pub ir: &'a ModuleIr,
@@ -1032,7 +1034,7 @@ pub struct ProjectIndex {
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
-pub(crate) fn is_stub(path: &Path) -> bool {
+pub fn is_stub(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "pyi")
 }
 
@@ -1244,7 +1246,7 @@ impl ProjectIndex {
     }
 
     /// Declarations of every indexed module (for re-summarizing an edited module), preferring
-    /// `.py` implementations over `.pyi` stubs sharing a module name.
+    /// the owner ([`module_precedence`]) among the files sharing a module name.
     pub fn project_decls(&self) -> ProjectDecls {
         ProjectDecls::new(self.preferred_decls())
     }
@@ -1365,8 +1367,8 @@ impl ProjectIndex {
             }
         }
         self.files.insert(path, new_file);
-        // A function the file stopped defining falls back to another file defining it (a
-        // `.pyi` stub next to its `.py` implementation), as a full build links it.
+        // A function the file stopped defining falls back to the highest-ranked other file
+        // defining it (a `.pyi` stub next to its `.py` implementation), as a full build links it.
         for func in owned_before.iter().filter(|f| !own.contains(*f)) {
             let fallback = self
                 .files

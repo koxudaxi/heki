@@ -297,6 +297,47 @@ fn snapshot_write_and_mut103_regressions() {
     assert_eq!(p.check(&["--extend-select", "MUT103"]).0, 2);
 }
 
+/// PEP 263: a declared Latin-1 source is checked like any other, and `--fix` writes it back in
+/// Latin-1 (the bytes outside the rewrite stay as they were); an encoding heki does not read is
+/// an error, not a UTF-8 failure.
+#[test]
+fn declared_source_encodings_are_read_and_fixes_keep_them() {
+    let p = Project::new("fix_latin1");
+    let latin1: &[u8] = b"# coding: latin-1\nimport time\n\n\nasync def caf\xe9():\n    time.sleep(1)  # pause \xe9\n\n\ndef build(items):\n    xs = []\n    for item in items:\n        xs = xs + [item]\n    return xs\n";
+    std::fs::write(p.dir.join("legacy.py"), latin1).unwrap();
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.contains("legacy.py:6:5: EFF101 "), "{stdout}");
+    assert!(stdout.contains("legacy.py:12:9: OPT101 "), "{stdout}");
+    let (code, diff, _) = p.check(&["--diff"]);
+    assert_eq!(code, 1);
+    assert!(diff.contains("+        xs.append(item)"), "{diff}");
+    let (_, _, stderr) = p.check(&["--fix"]);
+    assert!(
+        stderr.contains("Fixed 1 issue(s) in 1 file(s)."),
+        "{stderr}"
+    );
+    let as_latin1 = |bytes: &[u8]| bytes.iter().copied().map(char::from).collect::<String>();
+    let expected = as_latin1(latin1).replace("xs = xs + [item]", "xs.append(item)");
+    let fixed = std::fs::read(p.dir.join("legacy.py")).unwrap();
+    assert_eq!(as_latin1(&fixed), expected, "still Latin-1");
+
+    std::fs::write(p.dir.join("legacy.py"), b"# coding: cp1252\nx = '\x80'\n").unwrap();
+    let (code, _, stderr) = p.check(&[]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("legacy.py: source declares encoding `cp1252`"),
+        "{stderr}"
+    );
+    std::fs::write(p.dir.join("legacy.py"), b"x = '\xe9'\n").unwrap();
+    let (code, _, stderr) = p.check(&[]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("stream did not contain valid UTF-8"),
+        "{stderr}"
+    );
+}
+
 /// A module with a hoisting rewrite (`OPT130`) and a deque rewrite that adds
 /// `import collections` below a `__future__` import (`OPT120`), and a call printing both.
 const LINE_BREAKS: &str = r#""""Doc."""

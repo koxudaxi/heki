@@ -153,13 +153,14 @@ const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model impor
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
 const STRICT_USE: &str = "from pkg.model import Registry\nfrom pkg.strict_ops import _reset\n\n\ndef run(r: Registry):\n    _reset(r)\n";
 
-// Files: a module a caller already imports is created, then deleted; a stub is put next to a
-// module, then removed.
+// Files: a module a caller already imports is created, then deleted; a stub, then a package of
+// the same name, is put next to a module, then removed.
 const USES_EXTRA: &str = "from pkg.extra import slow\n\n\nasync def go():\n    return slow()\n";
 const EXTRA: &str = "import time\n\n\ndef slow():\n    time.sleep(1)\n";
 const SVC: &str =
     "import requests\n\n\ndef ping():\n    return requests.get(\"https://example.com\")\n";
 const SVC_STUB: &str = "def ping() -> None: ...\n";
+const SVC_PACKAGE: &str = "def ping():\n    return None\n";
 const SVC_USER: &str = "from pkg.svc import ping\n\n\nasync def poll():\n    return ping()\n";
 
 // Declarations: a module global instance stored on `self`, a return type another module's
@@ -271,6 +272,8 @@ const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay 
 // size-dependent rewrites that rely on them (`OPT110` builds a `set(...)`) are not proven.
 const LOOPS: &str = "def member(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n";
 const COMPAT: &str = "import builtins\n\nbuiltins.len = len\n";
+// A stub never runs: its `import builtins` patches nothing.
+const SPELLED_STUB: &str = "import builtins\n\n\ndef name(x: builtins.str) -> None: ...\n";
 
 // Small displays other files read (`OPT112`): a module-level list another module scans in a
 // loop, and an instance attribute whose class family (a subclass in a third module) may grow it.
@@ -1338,6 +1341,22 @@ fn steps() -> Vec<Step> {
             vec![Action::Delete("pkg/svc.pyi")],
         )
         .present(&[("pkg/svc_user.py", "EFF101")]),
+        // Python imports a package over the module of the same name.
+        Step::new(
+            "a package next to the module of the same name",
+            vec![Action::Create("pkg/svc/__init__.py", SVC_PACKAGE.to_owned())],
+        )
+        .absent(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the package's module is edited",
+            vec![save("pkg/svc.py", &format!("{SVC}# edited\n"))],
+        )
+        .absent(&[("pkg/svc_user.py", "EFF101")]),
+        Step::new(
+            "the package is removed",
+            vec![Action::Delete("pkg/svc/__init__.py")],
+        )
+        .present(&[("pkg/svc_user.py", "EFF101")]),
         // The configuration changes while the server runs.
         Step::new(
             "the configuration gains a write owner",
@@ -1368,6 +1387,11 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the module patching builtins is deleted",
             vec![Action::Delete("pkg/compat.py")],
+        )
+        .present(&[("pkg/loops.py", "OPT110")]),
+        Step::new(
+            "a typing stub imports builtins for its annotations",
+            vec![Action::Create("pkg/spelled.pyi", SPELLED_STUB.to_owned())],
         )
         .present(&[("pkg/loops.py", "OPT110")]),
         Step::new(
@@ -1876,8 +1900,12 @@ fn edge_files() -> Vec<(&'static str, String)> {
 fn edge_steps() -> Vec<Step> {
     let mut steps = vec![
         Step::new("initial index", Vec::new())
-            .present(&[("app/handler.py", "EFF101"), ("app/dup_user.py", "EFF101")])
-            .absent(&[("app/render.py", "EFF201"), ("caller.py", "EFF101")]),
+            .present(&[
+                ("app/handler.py", "EFF101"),
+                ("app/dup_user.py", "EFF101"),
+                ("caller.py", "EFF101"),
+            ])
+            .absent(&[("app/render.py", "EFF201")]),
     ];
     steps.extend(steps_shared_module_name());
     steps.extend(steps_boundary_calls());
@@ -1999,12 +2027,23 @@ fn steps_discarded_buffer() -> Vec<Step> {
     ]
 }
 
-/// The first package marker under `src/` switches the project to the `src` layout.
+/// `src/` is a source root until it becomes a package itself: then every module name under it
+/// changes, and the caller's `pkg.util` no longer names the helper.
 fn steps_src_layout() -> Vec<Step> {
     vec![
         Step::new(
-            "the first package marker under src",
+            "a package marker under src",
             vec![Action::Write("src/pkg/__init__.py", String::new())],
+        )
+        .present(&[("caller.py", "EFF101")]),
+        Step::new(
+            "src becomes a package itself",
+            vec![Action::Write("src/__init__.py", String::new())],
+        )
+        .absent(&[("caller.py", "EFF101")]),
+        Step::new(
+            "src is a source root again",
+            vec![Action::Delete("src/__init__.py")],
         )
         .present(&[("caller.py", "EFF101")]),
     ]

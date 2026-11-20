@@ -42,7 +42,8 @@ deliberately conservative:
 - The evaluation order and exception behavior must be preserved: `{**d, f(): g()}` becomes
   `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first.
 - Builtin names are trusted only while they are not rebound in the module (an assignment, a
-  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`).
+  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`; a `.pyi`
+  stub never runs, so its `import builtins` does not count).
 - Functions using `eval`, `exec`, `locals()`, `sys._getframe`, or frame attributes can change
   locals behind any analysis: their candidates are always blocked. `heki assumptions` lists such
   places in a project.
@@ -97,6 +98,11 @@ A fix keeps the file acceptable to a type checker and to isort:
   stacks.txt app.py`, or `--gecko -o profile.json`);
 - py-spy (`py-spy record --format raw -o stacks.txt -- python app.py`).
 
-A function on the stack in at least 1 % of the samples is hot. The profile is used to promote
+A function on the stack in at least 1 % of the samples is hot. A frame counts for a function when
+its name names the function on a dotted boundary (`run` or `A.run` for `A.run`, never for
+`BA.run`), its file is the function's file (a basename, a relative, or an absolute path), and its
+line, when the profiler recorded one, lies inside the function. A frame that fits several
+functions (a plain `run` without a line in a file with two `run` methods, a `models.py` two
+packages have) counts for none. `--watch` matches frames by their names only. The profile is used to promote
 size-dependent fixes in hot functions and adds the sample share to the diagnostics' evidence; it
 never makes an unsafe rewrite safe.

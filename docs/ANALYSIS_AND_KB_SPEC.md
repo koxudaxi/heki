@@ -27,8 +27,9 @@ resolution are heki's own (`heki_semantic`).
     materialized when the name is first evaluated, not when the module loads.
 - **Bidirectional comparison with CPython `symtable` (quality assurance)**:
   - Following datamodel-code-generator's `scripts/_source_model.py:verify()`, the scope tree
-    (kind and line), bound names, `global` / `nonlocal`, and the kind of every reference (local /
-    enclosing / global / builtin) are compared automatically with the real `symtable` of CPython
+    (kind, name, line, and parent), bound names and parameters, `global` / `nonlocal`
+    declarations, and the kind of every reference (local / enclosing / global / builtin) are
+    compared automatically with the real `symtable` of CPython
     3.11–3.15, which keeps the divergence from the language at zero
     (`tests/symtable_verify/verify_symtable.py`).
 
@@ -36,7 +37,9 @@ resolution are heki's own (`heki_semantic`).
 One `IrFunction` is built per function (`def`, `async def`, lambda, generator expression, a
 comprehension before 3.12), per class body, and for the module's top level. The methods of a
 nested class (its `__init__` in particular) are kept apart from the methods of the outer class
-(against the `MUT101` false positives found in Stage 0-A).
+(against the `MUT101` false positives found in Stage 0-A). Qualnames are Python's
+`__qualname__`: a class defined in a function is `factory.<locals>.Worker`, so its methods never
+share a summary with a module-level `Worker`.
 
 ```text
 IrFunction {
@@ -131,10 +134,15 @@ the targets of write and read boundaries.
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
-A module name that several files share is defined by one of them, in full and incremental
-analysis alike: an implementation before its `.pyi` stub, a package (`pkg/__init__.py`) before a
-module file of the same name (`pkg.py`, which Python does not import next to it), then the greater
-path.
+Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
+`pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
+`src/acme/io.py` is `acme.io`, for regular and namespace packages and for modules directly under
+`src/`. A module name that several files share is defined by one of them, in full and
+incremental analysis alike: an implementation before its `.pyi` stub, a package
+(`pkg/__init__.py`) before a module file of the same name (`pkg.py`, which Python does not import
+next to it), then the greater path. A relative import resolves inside the packages it climbs; one
+that climbs past the top-level package binds nothing (`ImportError`), except that a project root
+holding `__init__.py` is itself the package of the top-level modules.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
@@ -685,8 +693,14 @@ an annotation, or a constructor call produces), and the `heki_kb` unit tests pin
 ### 4.4 Optional profile dumps (`heki_profile`)
 - **Offline reading only (the program is never run or touched)**: collapsed stacks (CPython 3.15
   Tachyon `--collapsed`: `tid:N;file.py:func:line;... count`; py-spy: `func (file.py:line);...
-  count`) and Tachyon `--gecko` JSON are read into one table of hot functions; `heki check
-  --profile` uses it to apply proven size-dependent rewrites in hot functions.
+  count`) and Tachyon `--gecko` JSON are read into their distinct stacks and sample weights
+  (gecko samples summed per stack first; every table reference checked; a total that overflows
+  is a malformed dump); `heki check --profile` uses it to apply proven size-dependent rewrites in
+  hot functions.
+- **Attribution to project functions**: each frame counts for the one project function its name
+  (on a dotted boundary), file (on a path boundary), and line (inside the definition) can denote;
+  a frame several functions fit counts for none, so an ambiguous profile never promotes a fix.
+  A function's share is the weight of the stacks it is on, divided by the total weight.
 - **Constraints checked on real tools**: Tachyon on CPython 3.15 cannot combine `--opcodes` with
   `--jsonl` (`--gecko` / `--binary` are needed), and macOS needs `sudo` to read another process's
   memory. Profile integration is therefore never required, only an optional add-on for tuning.

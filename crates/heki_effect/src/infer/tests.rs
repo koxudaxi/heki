@@ -33,6 +33,7 @@ fn input(b: &Built) -> ModuleInput<'_> {
         path: PathBuf::from(format!("{}.py", b.module_name.replace('.', "/"))),
         module_name: b.module_name.clone(),
         is_package: false,
+        root_is_package: false,
         content_hash: String::new(),
         semantic: &b.semantic,
         ir: &b.ir,
