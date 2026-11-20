@@ -20,13 +20,33 @@ pub struct LineIndex {
     line_starts: Vec<u32>,
 }
 
+/// Whether the byte at `i` of `source` ends a line: a `\n`, or a `\r` no `\n` follows (the
+/// `\r` of `\r\n` stays on its line). The next line starts at `i + 1`.
+pub fn ends_line(source: &[u8], i: usize) -> bool {
+    match source.get(i) {
+        Some(b'\n') => true,
+        Some(b'\r') => source.get(i + 1) != Some(&b'\n'),
+        _ => false,
+    }
+}
+
+/// The line break `source` uses (that of its first line; `\n` without one), for lines an
+/// edit inserts.
+pub fn line_break(source: &str) -> &'static str {
+    let bytes = source.as_bytes();
+    match (0..bytes.len()).find(|&i| ends_line(bytes, i)) {
+        Some(i) if bytes[i] == b'\r' => "\r",
+        Some(i) if i > 0 && bytes[i - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    }
+}
+
 impl LineIndex {
     pub fn from_source(source: &str) -> Self {
         let bytes = source.as_bytes();
         let mut line_starts = vec![0u32];
-        for (idx, &b) in bytes.iter().enumerate() {
-            let ends_line = b == b'\n' || (b == b'\r' && bytes.get(idx + 1) != Some(&b'\n'));
-            if ends_line {
+        for idx in 0..bytes.len() {
+            if ends_line(bytes, idx) {
                 line_starts.push((idx + 1) as u32);
             }
         }
@@ -265,6 +285,10 @@ def nested():
         );
         // A final line break starts an empty last line.
         assert_eq!(LineIndex::from_source("a\r").line_text("a\r", 2), Some(""));
+        assert_eq!(
+            ["a\nb\r", "a\r\nb", "a\rb\n", "a"].map(line_break),
+            ["\n", "\r\n", "\r", "\n"]
+        );
     }
 
     #[test]

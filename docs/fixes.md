@@ -70,6 +70,9 @@ bug to report). `--diff`
 prints the paths every other output format prints (relative to the working directory), so
 `patch -p1` applies it where heki ran.
 
+Fixes work the same in files with `\n`, `\r\n`, or lone `\r` line breaks, and the lines they insert
+use the file's own line break.
+
 A fix keeps the file acceptable to a type checker and to isort:
 
 - A `collections.deque` rewrite (`OPT120`, `OPT121`) also rewrites the variable's annotation

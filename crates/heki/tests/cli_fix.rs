@@ -296,3 +296,59 @@ fn snapshot_write_and_mut103_regressions() {
     p.write(".heki-summary-snapshot.json", "not json");
     assert_eq!(p.check(&["--extend-select", "MUT103"]).0, 2);
 }
+
+/// A module with a hoisting rewrite (`OPT130`) and a deque rewrite that adds
+/// `import collections` below a `__future__` import (`OPT120`), and a call printing both.
+const LINE_BREAKS: &str = r#""""Doc."""
+from __future__ import annotations
+
+
+def f(n):
+    hits = 0
+    for i in range(n):
+        hits += "a" in set("abcdefghi")
+    return hits
+
+
+def g(items):
+    q = []
+    for x in items:
+        q.append(x)
+    out = []
+    while q:
+        out.append(q.pop(0))
+    return out
+
+
+print(f(3), g([1, 2, 3]))
+"#;
+
+#[test]
+fn files_with_cr_or_crlf_line_breaks_get_the_fixes_of_lf_files_in_their_own_line_breaks() {
+    let p = Project::new("fix_line_breaks");
+    for (file, br) in [("lf.py", "\n"), ("cr.py", "\r"), ("crlf.py", "\r\n")] {
+        p.write(file, &LINE_BREAKS.replace('\n', br));
+    }
+    let before = run_python(&p.dir, "cr.py");
+    let (code, _, stderr) = p.check(&["--fix", "--include-size-dependent"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Fixed 6 issue(s) in 3 file(s)."),
+        "{stderr}"
+    );
+    let lf = p.read("lf.py");
+    assert!(
+        lf.contains("    hoisted = set(\"abcdefghi\")\n    for i in range(n):\n")
+            && lf.contains("from __future__ import annotations\n\nimport collections\n"),
+        "{lf}"
+    );
+    for (file, br) in [("cr.py", "\r"), ("crlf.py", "\r\n")] {
+        let fixed = std::fs::read(p.dir.join(file)).unwrap();
+        assert_eq!(
+            String::from_utf8(fixed).unwrap(),
+            lf.replace('\n', br),
+            "{file}"
+        );
+        assert_eq!(run_python(&p.dir, file), before, "{file}");
+    }
+}
