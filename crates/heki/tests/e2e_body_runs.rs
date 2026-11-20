@@ -6,8 +6,10 @@
 //! (stored, returned out of an `async def`, handed to an external call such as
 //! `StreamingResponse(...)`, or only stepped with `next()`) runs nothing there. A function an
 //! offloading decorator wraps (`@sync_to_async`, `@database_sync_to_async`, `@asyncify`) runs on
-//! another thread. Every fact of a body moves with it: execution effects (`EFF101`, `EFF103`,
-//! `EFF201`), writes (`MUT201`), and reads (`MUT203`).
+//! another thread, and a function handed to a builtin that calls it once per item (`map`,
+//! `filter`, `sorted(key=...)`, ...) runs there once per item. Every fact of a body moves with
+//! it: execution effects (`EFF101`, `EFF102`, `EFF103`, `EFF201`), writes (`MUT201`), and reads
+//! (`MUT203`).
 
 mod common;
 
@@ -1220,4 +1222,269 @@ fn bodies_run_where_python_runs_them() {
         &["EFF101", "EFF201"],
     );
     assert_eq!(reported, marked);
+}
+
+/// The queries a project function makes, called once per item by builtins.
+const PER_ITEM_QUERIES: &str = r#"import sqlite3
+
+CONN = sqlite3.connect("app.db")
+
+
+def name(uid):
+    return CONN.execute("SELECT name FROM users WHERE id = ?", (uid,)).fetchone()
+
+
+def name_of_pair(uid, other):
+    return name(uid)
+
+
+def add_name(total, uid):
+    return total + name(uid)
+
+
+def score(conn: sqlite3.Connection, uid):
+    return conn.execute("SELECT score FROM users WHERE id = ?", (uid,)).fetchone()
+
+
+class Users:
+    def name(self, uid):
+        return name(uid)
+
+    def name_of_pair(self, uid, other):
+        return name(uid)
+
+    def add_name(self, total, uid):
+        return total + name(uid)
+"#;
+
+/// Each builtin calling a callable once per item, with a lambda, a project function from
+/// another module, a bound method, and a `functools.partial`: a loop as long as the items.
+const PER_ITEM: &str = r#"import functools
+import itertools
+import sqlite3
+from functools import partial
+
+from pkg.queries import Users, add_name, name, name_of_pair, score
+
+
+def lambdas(ids, pairs, rows: list[int]):
+    list(map(lambda u: name(u), ids))  # EFF103
+    list(filter(lambda u: name(u), ids))  # EFF103
+    list(itertools.filterfalse(lambda u: name(u), ids))  # EFF103
+    list(itertools.starmap(lambda u, v: name(u), pairs))  # EFF103
+    functools.reduce(lambda t, u: t + name(u), ids, 0)  # EFF103
+    sorted(ids, key=lambda u: name(u))  # EFF103
+    min(ids, key=lambda u: name(u))  # EFF103
+    max(ids, key=lambda u: name(u))  # EFF103
+    rows.sort(key=lambda u: name(u))  # EFF103
+    itertools.groupby(ids, lambda u: name(u))  # EFF103
+
+
+def functions(ids, pairs, rows: list[int]):
+    list(map(name, ids))  # EFF103
+    list(filter(name, ids))  # EFF103
+    list(itertools.filterfalse(name, ids))  # EFF103
+    list(itertools.starmap(name_of_pair, pairs))  # EFF103
+    functools.reduce(add_name, ids, 0)  # EFF103
+    sorted(ids, key=name)  # EFF103
+    min(ids, key=name)  # EFF103
+    max(ids, key=name)  # EFF103
+    rows.sort(key=name)  # EFF103
+    itertools.groupby(ids, key=name)  # EFF103
+
+
+def bound_methods(users: Users, ids, pairs, rows: list[int]):
+    list(map(users.name, ids))  # EFF103
+    list(filter(users.name, ids))  # EFF103
+    list(itertools.filterfalse(users.name, ids))  # EFF103
+    list(itertools.starmap(users.name_of_pair, pairs))  # EFF103
+    functools.reduce(users.add_name, ids, 0)  # EFF103
+    sorted(ids, key=users.name)  # EFF103
+    min(ids, key=users.name)  # EFF103
+    max(ids, key=users.name)  # EFF103
+    rows.sort(key=users.name)  # EFF103
+    itertools.groupby(ids, users.name)  # EFF103
+
+
+def partials(conn: sqlite3.Connection, ids, extra):
+    list(map(functools.partial(score, conn), ids))  # EFF103
+    list(map(partial(score, conn), ids))  # EFF103
+    sorted(ids, key=functools.partial(functools.partial(score), conn))  # EFF103
+    sorted(ids, key=functools.partial(score, *extra))  # EFF103
+    key = functools.partial(score, conn)
+    sorted(ids, key=key)  # EFF103
+
+
+def unpacked_iterables(columns):
+    list(map(name_of_pair, *columns))  # EFF103
+
+
+def fixed_items(ids):
+    sorted((1, 2, 3), key=name)
+    list(map(name, range(3)))
+    max(1, 2, key=name)
+    min("ab", key=name)
+    list(map(name_of_pair, ids, [1, 2]))
+
+
+def query_outside_the_callable(ids):
+    first = name(0)
+    return sorted(ids, key=lambda u: u == first)
+
+
+def callables_that_run_nothing_here(ids, fn):
+    sorted(ids, key=len)
+    list(filter(None, ids))
+    list(map(aname, ids))
+    list(map(fn, ids))
+    list(map(Users, ids))
+
+
+async def aname(uid):
+    return name(uid)  # EFF101
+
+
+def every_outer_iteration(batches):
+    for batch in batches:
+        max(1, 2, key=lambda u: name(batch))  # EFF103
+"#;
+
+/// Clients made once per item, and clients a pool or the receiver holds.
+const PER_ITEM_CLIENTS: &str = r#"import time
+
+import requests
+
+
+def fetch(url):
+    return requests.get(url)
+
+
+def pause(delay):
+    time.sleep(delay)
+
+
+class Api:
+    def __init__(self):
+        self.session = requests.Session()
+        self._lazy = None
+
+    def get(self, url):
+        return self.session.get(url)
+
+    def lazy(self):
+        if self._lazy is None:
+            self._lazy = requests.Session()
+        return self._lazy
+
+    def lazy_get(self, url):
+        return self.lazy().get(url)
+
+    def all_lazy(self, urls):
+        return list(map(self.lazy_get, urls))
+
+    def all_lazy_through_a_lambda(self, urls):
+        return list(map(lambda u: self.lazy_get(u), urls))
+
+
+def per_url(urls):
+    return list(map(fetch, urls))  # EFF102
+
+
+def per_url_lambda(urls):
+    return list(map(lambda u: requests.get(u), urls))  # EFF102
+
+
+def new_api_per_url(urls):
+    return list(map(lambda u: Api().lazy_get(u), urls))  # EFF102
+
+
+def lazy_get_one(api: Api, url):
+    return api.lazy_get(url)
+
+
+def each_api_once(apis: list[Api]):
+    return list(map(lazy_get_one, apis, ["https://example.com"] * len(apis)))
+
+
+def pooled(api: Api, urls):
+    return list(map(api.get, urls))
+
+
+def two_hosts():
+    return list(map(fetch, ["https://a.example.com", "https://b.example.com"]))
+
+
+async def on_the_event_loop(delays):
+    list(map(pause, delays))  # EFF101
+"#;
+
+#[test]
+fn builtins_call_a_callable_once_per_item() {
+    let files = [
+        ("pkg/queries.py", PER_ITEM_QUERIES),
+        ("pkg/per_item.py", PER_ITEM),
+        ("pkg/clients.py", PER_ITEM_CLIENTS),
+    ];
+    let (reported, marked) =
+        reported_and_marked("per_item", &files, &["EFF101", "EFF102", "EFF103"]);
+    assert_eq!(reported, marked);
+
+    let p = Project::new("per_item_messages");
+    p.write("pkg/__init__.py", "");
+    for (path, text) in files {
+        p.write(path, text);
+    }
+    let diags = diagnostics(&p, &["--select", "EFF102,EFF103"]);
+    // The line of `PER_ITEM` holding `code`.
+    let at = |code: &str| {
+        PER_ITEM
+            .lines()
+            .position(|l| l.contains(code))
+            .map(|i| i as u64 + 1)
+            .unwrap()
+    };
+    let help = |line: u64| {
+        diags
+            .iter()
+            .find(|d| d["path"] == "pkg/per_item.py" && d["line"] == line)
+            .unwrap()["help"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let sorted = at("sorted(ids, key=lambda u: name(u))");
+    assert_eq!(
+        message(&diags, "pkg/per_item.py", sorted),
+        "`pkg.per_item.lambdas.<locals>.<lambda>` runs a database query \
+         (`sqlite3.Connection.execute`) for every item `sorted` calls it with (N+1)"
+    );
+    assert_eq!(
+        help(sorted),
+        "batch the queries, or load the data once before the call"
+    );
+    assert_eq!(
+        first_hop(&diags, "pkg/per_item.py", sorted),
+        "`lambdas` calls `pkg.per_item.lambdas.<locals>.<lambda>`"
+    );
+    assert_eq!(
+        message(&diags, "pkg/per_item.py", at("rows.sort(key=lambda")),
+        "`pkg.per_item.lambdas.<locals>.<lambda>` runs a database query \
+         (`sqlite3.Connection.execute`) for every item `list.sort` calls it with (N+1)"
+    );
+    // A fixed number of items inside a data-sized loop: the loop repeats the query.
+    let outer = at("max(1, 2, key=lambda u: name(batch))");
+    assert_eq!(
+        message(&diags, "pkg/per_item.py", outer),
+        "`pkg.per_item.every_outer_iteration.<locals>.<lambda>` runs a database query \
+         (`sqlite3.Connection.execute`) on every loop iteration (N+1)"
+    );
+    assert_eq!(
+        help(outer),
+        "batch the queries, or load the data once before the loop"
+    );
+    assert_eq!(
+        message(&diags, "pkg/clients.py", 38),
+        "`pkg.clients.fetch` allocates an unpooled client (`requests.get`) for every item `map` \
+         calls it with"
+    );
 }

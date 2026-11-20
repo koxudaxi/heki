@@ -5,8 +5,8 @@
 
 use crate::cache_flow;
 use crate::construction::{Escape, Pos, Recorder};
-use crate::consumption::{IterFlow, Roots, param_iteration};
-use crate::guards::{self, GuardInputs, LocalGuards};
+use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
+use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -15,10 +15,10 @@ use crate::resolver::{
 };
 use crate::{
     ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget,
-    Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject,
-    ModuleInput, NewArg, NewCond, NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine,
-    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedWriteSite,
-    WriteKind,
+    Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, Items,
+    ModuleInput, NewArg, NewCond, NewKind, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner,
+    SharedLine, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
+    UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
@@ -1043,12 +1043,7 @@ impl<'a> Extractor<'a> {
             InstKind::Call {
                 callee_var: Some(c),
                 ..
-            } => match self.val(*c)? {
-                Val::Ref(fqn) | Val::Class(fqn) if project.is_project_class(fqn) => {
-                    Some(fqn.clone())
-                }
-                _ => None,
-            },
+            } => self.class_called(*c),
             InstKind::MethodCall { recv, method, .. } => match self.val(*recv)? {
                 Val::Ref(owner) => {
                     let fqn = project.canonical(&format!("{owner}.{method}"));
@@ -1056,6 +1051,16 @@ impl<'a> Extractor<'a> {
                 }
                 _ => None,
             },
+            _ => None,
+        }
+    }
+
+    /// The project class calling `callee` constructs (`Model`, `cls` in a class method).
+    fn class_called(&self, callee: VarId) -> Option<String> {
+        match self.val(callee)? {
+            Val::Ref(fqn) | Val::Class(fqn) if self.cx.project.is_project_class(fqn) => {
+                Some(fqn.clone())
+            }
             _ => None,
         }
     }
@@ -1904,6 +1909,7 @@ impl<'a> Extractor<'a> {
                     is_awaited: *is_awaited,
                     recv_is_self,
                     constructs,
+                    per_item: false,
                     span,
                 };
                 self.call_inst(bb, index, callee, &call);
@@ -1945,6 +1951,7 @@ impl<'a> Extractor<'a> {
                         is_awaited: *is_awaited,
                         recv_is_self,
                         constructs: None,
+                        per_item: false,
                         span,
                     };
                     self.call_inst(bb, index, target, &call);
@@ -1971,6 +1978,7 @@ impl<'a> Extractor<'a> {
                     is_awaited: *is_awaited,
                     recv_is_self: false,
                     constructs,
+                    per_item: false,
                     span,
                 };
                 self.call_inst(bb, index, target, &call);
@@ -1997,6 +2005,7 @@ impl<'a> Extractor<'a> {
                     is_awaited: false,
                     recv_is_self: false,
                     constructs: None,
+                    per_item: false,
                     span,
                 };
                 self.call(bb, &target, &call);
@@ -2111,6 +2120,7 @@ impl<'a> Extractor<'a> {
             is_awaited,
             recv_is_self,
             constructs: None,
+            per_item: false,
             span,
         };
         self.call_inst(bb, index, callee, &call);
@@ -2710,6 +2720,7 @@ impl<'a> Extractor<'a> {
                         runner: Runner::Caller,
                         binds_recv: false,
                         handed_callable: None,
+                        per_item: None,
                         dispatch: None,
                         result_discarded: false,
                     });
@@ -2909,12 +2920,15 @@ impl<'a> Extractor<'a> {
                 let site = self.site(bb, CallTarget::Project(callees), call.is_awaited, call.span);
                 self.sites.push(CallSite {
                     recv_is_self: call.recv_is_self,
-                    result_discarded: call.recv_is_self && self.discards(call.dst),
+                    // A builtin calling the callees per item uses what they return.
+                    result_discarded: call.recv_is_self
+                        && !call.per_item
+                        && self.discards(call.dst),
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
                     dispatch: self.dispatch(call, site.project_callees()),
                     constructs: call.constructs.clone(),
-                    returned: if constructor {
+                    returned: if constructor || call.per_item {
                         None
                     } else {
                         self.returned.get(&call.dst).copied()
@@ -3025,12 +3039,15 @@ impl<'a> Extractor<'a> {
         });
     }
 
-    /// A callable a library API runs at the call, when it is a project function: an offloading
+    /// A callable a library API runs at the call, when it is a project function or a
+    /// `functools.partial` of one (which passes the arguments it holds first): an offloading
     /// API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f, *args)`) on a worker
     /// thread, with the positional arguments after it (keyword arguments are left unbound: some
-    /// APIs forward them, others take their own), and a sync-facade API's
+    /// APIs forward them, others take their own); a sync-facade API's
     /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and
-    /// the arguments left unbound.
+    /// the arguments left unbound; and the one a builtin calls once per item (`map(f, xs)`,
+    /// `sorted(xs, key=f)`) on the caller's thread, with the items as its arguments
+    /// (`Self::bind_items`).
     fn handed_callable(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
         let facade = || {
             let k = usize::from(self.cx.kb.lookup(symbol)?.sync_facade_arg?);
@@ -3039,12 +3056,18 @@ impl<'a> Extractor<'a> {
             }
             Some(*call.args.get(k)?)
         };
-        let (callable, args, runner) =
+        let per_item_call = || {
+            crate::consumption::per_item_callable(symbol, call.args, call.kwargs, call.star_from)
+        };
+        let (callable, passed, runner, per_item) =
             match offloaded_callable(self.cx.kb, symbol, call.args, call.star_from) {
-                Some((callable, first)) => (callable, &call.args[first..], Runner::Worker),
+                Some((callable, first)) => (callable, &call.args[first..], Runner::Worker, None),
                 None => match facade() {
-                    Some(callable) => (callable, &[][..], Runner::SyncFacade),
-                    None => return,
+                    Some(callable) => (callable, &[][..], Runner::SyncFacade, None),
+                    None => match per_item_call() {
+                        Some(p) => (p.callable, &[][..], Runner::PerItem, Some(p)),
+                        None => return,
+                    },
                 },
             };
         let position = call
@@ -3052,38 +3075,209 @@ impl<'a> Extractor<'a> {
             .iter()
             .position(|a| *a == callable)
             .and_then(|i| u8::try_from(i).ok());
-        let (callee, recv, recv_var, recv_is_self) = match self.bound_method(callable) {
+        let partial = self.partial(callable);
+        let target = partial.as_ref().map_or(callable, |p| p.callable);
+        // A class a builtin is handed is constructed once per item: what the builtin returns
+        // is not the new object, and that construction is not modeled.
+        if runner == Runner::PerItem && self.class_called(target).is_some() {
+            return;
+        }
+        let (callee, recv, recv_var, recv_is_self) = match self.bound_method(target) {
             Some((recv, method)) => {
                 let callee = self.cx.resolve_method(self.val(recv), &method);
                 let (origin, is_self) = self.receiver(recv, bb);
                 (callee, Some(origin), Some(recv), is_self)
             }
-            None => (self.cx.resolve_call(self.val(callable)), None, None, false),
+            None => (self.cx.resolve_call(self.val(target)), None, None, false),
         };
         let Callee::Project(..) = &callee else {
             return;
         };
-        let after = call.args.len() - args.len();
+        let (held, kwargs, open) = partial.map_or((Vec::new(), Vec::new(), false), |p| {
+            (p.args, p.kwargs, p.open)
+        });
+        let after = call.args.len() - passed.len();
+        let held_count = held.len();
+        // Where the positions the call binds end: at the first argument `*` unpacks (in the
+        // partial object or among the worker's arguments), or after the held arguments where
+        // the API passes the facade or the items.
+        let star_from = match runner {
+            _ if open => Some(held.len()),
+            Runner::Worker => call
+                .star_from
+                .filter(|_| !passed.is_empty())
+                .map(|s| usize::from(s) - after + held.len()),
+            Runner::SyncFacade if held.is_empty() => None,
+            _ => Some(held.len()),
+        }
+        .map(|s| u8::try_from(s).unwrap_or(u8::MAX));
+        let args: Vec<VarId> = if open {
+            held
+        } else {
+            held.into_iter().chain(passed.iter().copied()).collect()
+        };
         let handed = Call {
             dst: call.dst,
-            value: Some(callable),
+            value: Some(target),
             recv,
             recv_var,
-            args,
-            kwargs: &[],
-            star_from: call
-                .star_from
-                .filter(|_| !args.is_empty())
-                .map(|s| s - u8::try_from(after).unwrap_or(u8::MAX)),
+            args: &args,
+            kwargs: &kwargs,
+            star_from,
             is_awaited: false,
             recv_is_self,
             constructs: None,
+            per_item: per_item.is_some(),
             span: call.span,
         };
         if let Some((site, _)) = self.call(bb, &callee, &handed) {
             self.sites[site].runner = runner;
             self.sites[site].handed_callable = position;
+            if let Some(p) = per_item {
+                self.bind_items(bb, site, call, &p, held_count);
+                self.sites[site].per_item = Some(Box::new(PerItem {
+                    api: symbol.to_owned(),
+                    items: p.items,
+                }));
+            }
         }
+    }
+
+    /// What the callees of the per-item `site` (`Runner::PerItem`) are passed after the `held`
+    /// arguments of a partial object: items of the iterables, which the builtin does not
+    /// construct. The items, the receiver, and the held arguments are the same objects through
+    /// the builtin's loop over the items (`ArgBinding::stays_in_loops`), as the objects a `for`
+    /// loop takes from its iterable are.
+    fn bind_items(
+        &mut self,
+        bb: BlockId,
+        site: usize,
+        call: &Call<'_>,
+        per_item: &PerItemCall,
+        held: usize,
+    ) {
+        let bit = per_item_bit(self.f.block_loop_depth(bb));
+        let loops = self.loops_around(bb);
+        let iterables: Vec<VarId> = match &per_item.items {
+            Items::Args(positions) => positions
+                .iter()
+                .filter_map(|i| call.args.get(usize::from(*i)).copied())
+                .collect(),
+            Items::Receiver => call.recv_var.into_iter().collect(),
+            Items::Unpacked => Vec::new(),
+        };
+        // An item is not its iterable: neither a constant nor an input of the caller.
+        let items: Vec<ArgBinding> = iterables
+            .iter()
+            .map(|it| ArgBinding {
+                constant: None,
+                input: None,
+                ..self.binding(*it, loops)
+            })
+            .collect();
+        let site = &mut self.sites[site];
+        let binds_recv = site.binds_recv;
+        // A site of project callees, as `Self::call` makes it.
+        if let CallTarget::Project(callees) = &mut site.target {
+            for bc in callees {
+                for b in bc.params.iter_mut().filter_map(|o| o.binding.as_mut()) {
+                    b.stays_in_loops |= bit;
+                }
+                let decl = self.cx.project.function_decl(&bc.callee);
+                let positional = decl.map_or(0, |d| usize::from(d.positional_params));
+                let first =
+                    usize::from(binds_recv && !decl.is_some_and(|d| d.is_staticmethod)) + held;
+                let slots: Vec<(usize, &ArgBinding)> = match per_item.passed {
+                    ItemArgs::OnePerIterable => items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| (first + i, b))
+                        .collect(),
+                    ItemArgs::Elements => items
+                        .first()
+                        .map(|b| (first..positional).map(|slot| (slot, b)).collect())
+                        .unwrap_or_default(),
+                    ItemArgs::AfterAccumulator => {
+                        items.first().map(|b| (first + 1, b)).into_iter().collect()
+                    }
+                };
+                for (slot, b) in slots.into_iter().filter(|(slot, _)| *slot < positional) {
+                    if bc.params.len() <= slot {
+                        bc.params.resize(slot + 1, ArgOrigin::default());
+                    }
+                    bc.params[slot].binding = Some(ArgBinding {
+                        stays_in_loops: b.stays_in_loops | bit,
+                        ..b.clone()
+                    });
+                }
+            }
+        }
+    }
+
+    /// What calling `var` calls when it holds a `functools.partial` object (`partial(f, a,
+    /// k=b)` calls `f(a, ..., k=b)`), through copies and nested partials (the inner one's
+    /// arguments go first).
+    fn partial(&self, var: VarId) -> Option<Partial> {
+        let mut found: Option<Partial> = None;
+        let mut cur = var;
+        for _ in 0..16 {
+            let kind = self.defs.get(&cur).map(|i| &i.kind);
+            if let Some(InstKind::Copy { src, .. }) = kind {
+                cur = *src;
+                continue;
+            }
+            let Some((inner, held, kwargs, open)) = kind.and_then(|k| self.partial_call(k)) else {
+                break;
+            };
+            let p = found.get_or_insert_with(|| Partial {
+                callable: inner,
+                args: Vec::new(),
+                kwargs: Vec::new(),
+                open: false,
+            });
+            p.callable = inner;
+            p.args.splice(0..0, held.iter().copied());
+            p.kwargs.splice(0..0, kwargs.iter().cloned());
+            p.open |= open;
+            cur = inner;
+        }
+        found
+    }
+
+    /// The parts of a `functools.partial(f, ...)` call: `f`, the positional arguments after it
+    /// up to the first one `*` unpacks, the keywords, and whether one is unpacked.
+    #[allow(clippy::type_complexity)]
+    fn partial_call(
+        &self,
+        kind: &'a InstKind,
+    ) -> Option<(VarId, &'a [VarId], &'a [(Option<String>, VarId)], bool)> {
+        let (callee, args, kwargs, star_from) = match kind {
+            InstKind::Call {
+                callee_var: Some(c),
+                args,
+                kwargs,
+                star_from,
+                ..
+            } => (self.cx.resolve_call(self.val(*c)), args, kwargs, star_from),
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                star_from,
+                ..
+            } => (
+                self.cx.resolve_method(self.val(*recv), method),
+                args,
+                kwargs,
+                star_from,
+            ),
+            _ => return None,
+        };
+        matches!(callee, Callee::External(s) if s == "functools.partial").then_some(())?;
+        let known = star_from.map_or(args.len(), |s| usize::from(s).min(args.len()));
+        let (&inner, held) = args[..known].split_first()?;
+        Some((inner, held, kwargs, known < args.len()))
     }
 
     /// A call site in block `bb` with the caller's guards there.
@@ -3131,6 +3325,7 @@ impl<'a> Extractor<'a> {
             runner: Runner::Caller,
             binds_recv: false,
             handed_callable: None,
+            per_item: None,
             dispatch: None,
             result_discarded: false,
         }
@@ -3159,7 +3354,7 @@ impl<'a> Extractor<'a> {
                 );
             }
             Callee::Project(keys, _) => {
-                if !self.track {
+                if !self.track || call.per_item {
                 } else if let Some(class) = &call.constructs {
                     if !self.cx.project.may_reuse_instances(class) {
                         self.rec
@@ -3541,6 +3736,9 @@ struct Call<'c> {
     recv_is_self: bool,
     /// The project class the call constructs (`CallSite::constructs`).
     constructs: Option<String>,
+    /// A builtin calls the callees once per item (`Runner::PerItem`): `dst` holds what the
+    /// builtin returns, never what they return.
+    per_item: bool,
     span: Span,
 }
 
@@ -3553,6 +3751,17 @@ impl<'c> Call<'c> {
             recv: self.recv_var,
         }
     }
+}
+
+/// What calling a `functools.partial` object calls ([`Extractor::partial`]).
+struct Partial {
+    callable: VarId,
+    /// The positional arguments it passes first, up to the first one `*` unpacks.
+    args: Vec<VarId>,
+    /// Its keywords (`**` unpacking is a `None` keyword).
+    kwargs: Vec<(Option<String>, VarId)>,
+    /// It unpacks positional arguments with `*`: the positions after `args` are not known.
+    open: bool,
 }
 
 /// What a call binds to one project callee's parameters ([`Extractor::hand_over`]).
@@ -3598,6 +3807,7 @@ fn role_site(
         runner: site.runner,
         binds_recv: site.binds_recv,
         handed_callable: site.handed_callable,
+        per_item: site.per_item.clone(),
         dispatch: site.dispatch.clone(),
         result_discarded: false,
     }
