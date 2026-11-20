@@ -415,9 +415,11 @@ and the items stay the same objects through that loop (`ArgBinding::stays_in_loo
 initialization on them runs once per object. A class handed to such a builtin is constructed per
 item, which is not modeled, and a lambda the function makes next to another lambda is not
 followed: every lambda of a function is `<function>.<locals>.<lambda>`, one key whose summary
-holds the facts of all of them. Every API handing a
-callable resolves a `functools.partial` object to the function it calls, the arguments it holds
-binding the leading parameters (`partial(f, a)` handed to `map` calls `f(a, item)`).
+holds the facts of all of them. A builtin calling a
+callable per item and a sync-facade API resolve a `functools.partial` object to the function it
+calls, the arguments it holds binding the leading parameters (`partial(f, a)` handed to `map`
+calls `f(a, item)`); an offloading API's partial is not followed, since `MUT202` matches a
+worker's site to the arguments after the callable again (`site_call`).
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still

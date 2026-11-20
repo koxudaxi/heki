@@ -17,8 +17,7 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
   `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
   fixed number. Its body runs at the call for every rule, so `EFF101` sees its blocking calls
-  too. A `functools.partial` handed to such a builtin or to an offloading API
-  (`loop.run_in_executor(None, partial(fetch, url))`) is followed to the function it calls.
+  too. A `functools.partial` handed to such a builtin is followed to the function it calls.
 
 ### Fixed
 

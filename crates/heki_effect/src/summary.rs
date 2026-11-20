@@ -3052,8 +3052,9 @@ impl<'a> Extractor<'a> {
         });
     }
 
-    /// A callable a library API runs at the call, when it is a project function or a
-    /// `functools.partial` of one (which passes the arguments it holds first): an offloading
+    /// A callable a library API runs at the call, when it is a project function (or, but for an
+    /// offloading API, a `functools.partial` of one, which passes the arguments it holds
+    /// first): an offloading
     /// API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f, *args)`) on a worker
     /// thread, with the positional arguments after it (keyword arguments are left unbound: some
     /// APIs forward them, others take their own); a sync-facade API's
@@ -3088,7 +3089,12 @@ impl<'a> Extractor<'a> {
             .iter()
             .position(|a| *a == callable)
             .and_then(|i| u8::try_from(i).ok());
-        let partial = self.partial(callable);
+        // A worker's site is matched again to the call's own arguments after the callable
+        // (`MUT202`, `heki_rules::mut_rules::site_call`), which the arguments a partial object
+        // holds would shift: a partial is followed for the other APIs only.
+        let partial = (runner != Runner::Worker)
+            .then(|| self.partial(callable))
+            .flatten();
         let target = partial.as_ref().map_or(callable, |p| p.callable);
         // A class a builtin is handed is constructed once per item: what the builtin returns
         // is not the new object, and that construction is not modeled. The facts of a lambda
