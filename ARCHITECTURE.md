@@ -15,9 +15,14 @@ else describes the code as it is.
 
 ## 1. Product definition and positioning
 
-**heki** (壁, Japanese for "wall") is an experimental tool, the **third layer of Python static analysis: an Effect
-(execution and state change) and Alias (uniqueness and ownership boundaries) semantic
-checker**.
+**heki** (壁, Japanese for "wall") is an experimental semantic linter for what Python leaves
+open: a wall where dynamic typing leaves the code unchecked. It checks **what code does, not
+what types it has**: which objects it changes in place, which references it shares, and which
+blocking, network, or database work it reaches. What it adds lasts as the type checkers grow:
+aliases and in-place changes followed through any helper or subclass, contracts on who may
+write, read, or call what, and rewrites that come with a proof. It is the **third layer of
+Python static analysis: an Effect (execution and state change) and Alias (uniqueness and
+ownership boundaries) semantic checker**.
 
 | Layer | Typical tools | Underlying model | Coverage and limits |
 |---|---|---|---|
