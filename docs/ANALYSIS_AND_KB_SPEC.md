@@ -680,7 +680,10 @@ functions with none).
    missing key inserts nothing). Rebinding the attribute is no change, and neither is a change of
    a read of `self.<attr>` that a store of a new object to `self.<attr>` dominates, when every
    store of the function to it is of a new object: that is the new container's change (a
-   callee's change at a call after the store still counts). The function's own change sites are
+   callee's change at a call after the store still counts). The key tests, the key reads, and
+   the stores (of new objects by the callees of all the function's calls) are gathered in one
+   walk per function, and whether one dominates a change is read from the function's dominator
+   tree over normal and exception edges. The function's own change sites are
    in `self_container_change_sites`. A function's changes of its parameters' own containers, of
    any class, are counted the same way (`changes_param_containers`, propagated through the
    helpers it hands them to): a helper storing an item of a deque it is handed breaks no

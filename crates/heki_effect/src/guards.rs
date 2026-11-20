@@ -1196,7 +1196,7 @@ fn same_values(f: &IrFunction, root: VarId) -> FxHashSet<VarId> {
 /// Membership (by block id) of the blocks every path from the entry to which runs through `d`
 /// (normal and exception edges); it takes two cells per block of the function, for its walks
 /// and the membership kept.
-pub(crate) fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
+fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
     cells.take(2 * f.blocks.len());
     let reach = |start: BlockId, avoid: Option<BlockId>| {
         let mut seen = vec![false; f.blocks.len()];

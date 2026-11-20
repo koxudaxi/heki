@@ -2267,7 +2267,9 @@ the previous value and the value, one returned call handed the last of a long ch
 each of its arguments, a loop carrying a long chain of assignments in reverse, a loop rotating
 aliases of many `self` containers, a chain of merges of many `self` containers, a loop over a
 generator whose body makes many calls, loops whose bodies hold many conditional blocks one after
-another, and a function consuming a generator's result many times in a row.
+another, a function consuming a generator's result many times in a row, methods changing a typed
+dict of `self` thousands of times, and a method storing under a key after each of hundreds of tests
+that such a dict holds the key.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

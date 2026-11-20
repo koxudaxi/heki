@@ -609,6 +609,59 @@ struct Extractor<'a> {
     maybe_new: FxHashSet<VarId>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
+    /// The value each copy copies ([`Self::copied_from`]), built on first use.
+    copy_roots: OnceCell<FxHashMap<VarId, VarId>>,
+    /// The function's dominator tree over all its edges, built on first use.
+    dominators: OnceCell<ownership::DominatorTree>,
+    /// [`KeyFacts`], built on first use.
+    key_facts: OnceCell<KeyFacts<'a>>,
+    /// The changes of checked containers of `self` the visit finds, recorded after it
+    /// ([`Self::self_container_changes`]).
+    self_changes: Vec<SelfChange>,
+}
+
+/// A key of a container as [`Extractor::key_present`] compares keys: the same variable through
+/// copies, or the same constant (`self.items["k"]`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum KeyOf<'a> {
+    Var(VarId),
+    Const(&'a ConstLiteral),
+}
+
+/// The tests and reads of keys of the containers attributes of `self` hold, by attribute
+/// ([`Extractor::key_present`]).
+struct KeyFacts<'a> {
+    /// Per key, the blocks dominated by a side of a branch on which the container holds the key,
+    /// when the branch alone enters that side.
+    sides: FxHashMap<String, FxHashMap<KeyOf<'a>, ownership::Dominated>>,
+    /// The index of the first read of each key in each block.
+    reads: FxHashMap<String, FxHashMap<(BlockId, KeyOf<'a>), usize>>,
+}
+
+/// A change of the checked container (`MUT113`) that `var` holds, `self.<attr>`.
+struct SelfChange {
+    var: VarId,
+    attr: String,
+    change: ContainerChange,
+    span: Span,
+}
+
+/// The stores of a function to the attributes of `self` its changes change, and its reads of
+/// attributes of `self` ([`Extractor::rebound_before`]).
+struct Rebindings<'a> {
+    stores: FxHashMap<&'a str, Rebinding>,
+    /// The attribute each read reads, and where.
+    reads: FxHashMap<VarId, (&'a str, Position)>,
+}
+
+/// The stores of a function to one attribute of `self`.
+struct Rebinding {
+    /// Whether every store is of a new object.
+    all_new: bool,
+    /// The index of the first store in each block.
+    first_in_block: FxHashMap<BlockId, usize>,
+    /// The blocks the stores' blocks dominate.
+    dominated: ownership::Dominated,
 }
 
 /// A project call, for the sites of the object it returns (`SiteRole`).
@@ -844,6 +897,10 @@ impl<'a> Extractor<'a> {
             track: false,
             maybe_new: FxHashSet::default(),
             ownership: false,
+            copy_roots: OnceCell::new(),
+            dominators: OnceCell::new(),
+            key_facts: OnceCell::new(),
+            self_changes: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -1440,6 +1497,7 @@ impl<'a> Extractor<'a> {
                 self.visit(bb.id, index, &inst.kind, inst.span);
             }
         }
+        self.self_container_changes();
         self.resolve_construction();
         self.returned_origins();
         self.iterations();
@@ -2964,69 +3022,100 @@ impl<'a> Extractor<'a> {
         let Some(attr) = self.checked_self_container(obj) else {
             return false;
         };
-        let same_container = |c: VarId| c == obj || self.self_attr_alias.get(&c) == Some(attr);
-        // The same variable, or the same constant (`self.items["k"]`).
-        let same_key = |k: VarId| {
-            self.copied_from(k) == self.copied_from(key)
-                || self
-                    .constant(k)
-                    .is_some_and(|c| self.constant(key) == Some(c))
-        };
+        let key = self.key_identity(key);
+        let facts = self.key_facts();
         // A read of a missing key raises, or inserts it into a `defaultdict`; a `Counter` returns
         // 0 without inserting it.
         let counter = |c: &String| matches!(c.as_str(), "collections.Counter" | "typing.Counter");
         let may_be_counter = matches!(self.val(obj), Some(Val::Inst(c)) if counter(c))
             || matches!(self.val(obj), Some(Val::Union(cs)) if cs.iter().any(counter));
         let read_before = !may_be_counter
-            && self.f.block(bb).insts[..index].iter().any(|i| {
-                matches!(&i.kind, InstKind::SubscriptLoad { obj: o, index: k, is_slice: false, .. }
-                    if same_container(*o) && same_key(*k))
-            });
+            && facts
+                .reads
+                .get(attr.as_str())
+                .and_then(|reads| reads.get(&(bb, key)))
+                .is_some_and(|&first| first < index);
         read_before
-            || self.f.blocks.iter().any(|p| {
-                let Terminator::Branch {
+            || facts
+                .sides
+                .get(attr.as_str())
+                .and_then(|sides| sides.get(&key))
+                .is_some_and(|dominated| self.dominators().contains(dominated, bb))
+    }
+
+    /// [`KeyFacts`] of the function, from one walk on first use.
+    fn key_facts(&self) -> &KeyFacts<'a> {
+        self.key_facts.get_or_init(|| {
+            let preds = self.f.predecessors();
+            let mut reads: FxHashMap<String, FxHashMap<(BlockId, KeyOf<'a>), usize>> =
+                FxHashMap::default();
+            let mut sides: FxHashMap<String, FxHashMap<KeyOf<'a>, Vec<BlockId>>> =
+                FxHashMap::default();
+            for b in &self.f.blocks {
+                for (i, inst) in b.insts.iter().enumerate() {
+                    if let InstKind::SubscriptLoad {
+                        obj,
+                        index,
+                        is_slice: false,
+                        ..
+                    } = &inst.kind
+                        && let Some(attr) = self.self_attr_alias.get(obj)
+                    {
+                        let key = self.key_identity(*index);
+                        let first = reads.entry(attr.clone()).or_default();
+                        first.entry((b.id, key)).or_insert(i);
+                    }
+                }
+                if let Terminator::Branch {
                     cond,
                     then_bb,
                     else_bb,
-                } = p.terminator
-                else {
-                    return false;
-                };
-                let Some(on_then) = self.key_test(cond, &same_container, &same_key) else {
-                    return false;
-                };
-                let side = if on_then { then_bb } else { else_bb };
-                let entered_from_p = self
-                    .f
-                    .blocks
-                    .iter()
-                    .filter(|b| {
-                        b.terminator.successors().contains(&side) || b.exc_target == Some(side)
-                    })
-                    .count()
-                    == 1;
-                entered_from_p && guards::dominated(self.f, side)[bb.0 as usize]
-            })
+                } = b.terminator
+                    && let Some((attr, key, on_then)) = self.key_test(cond)
+                {
+                    let side = if on_then { then_bb } else { else_bb };
+                    if preds[side.0 as usize].len() == 1 {
+                        let by_key = sides.entry(attr.clone()).or_default();
+                        by_key.entry(key).or_default().push(side);
+                    }
+                }
+            }
+            let sides = sides
+                .into_iter()
+                .map(|(attr, by_key)| {
+                    let by_key = by_key
+                        .into_iter()
+                        .map(|(key, blocks)| (key, self.dominators().dominated_by(blocks)))
+                        .collect();
+                    (attr, by_key)
+                })
+                .collect();
+            KeyFacts { sides, reads }
+        })
     }
 
-    /// The side of a branch on `cond` on which the container holds the key (`true`: the
-    /// `then` side): `key in c`, `key not in c`, `c.get(key)`, `c.get(key) is None`,
-    /// `c.get(key) is not None`, through `not` (`same_container` / `same_key` tell the container
-    /// and the key).
-    fn key_test(
-        &self,
-        cond: VarId,
-        same_container: &dyn Fn(VarId) -> bool,
-        same_key: &dyn Fn(VarId) -> bool,
-    ) -> Option<bool> {
+    /// The attribute of `self` whose container a branch on `cond` tests, the key, and the side
+    /// on which the container holds the key (`true`: the `then` side): `key in c`,
+    /// `key not in c`, `c.get(key)`, `c.get(key) is None`, `c.get(key) is not None`, through
+    /// `not`.
+    fn key_test(&self, cond: VarId) -> Option<(&String, KeyOf<'a>, bool)> {
         let none = |v: VarId| self.constant(v) == Some(&ConstLiteral::None);
         // `c.get(key)` (without a default other than `None`): `None` only for a missing key or a
         // stored `None`.
-        let lookup = |v: VarId| {
-            matches!(self.defs.get(&self.copied_from(v)).map(|i| &i.kind), Some(InstKind::MethodCall { recv, method, args, kwargs, .. })
-                if method == "get" && kwargs.is_empty() && same_container(*recv)
-                    && args.first().is_some_and(|k| same_key(*k))
-                    && (args.len() == 1 || args.len() == 2 && none(args[1])))
+        let lookup = |v: VarId| match self.defs.get(&self.copied_from(v)).map(|i| &i.kind) {
+            Some(InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            }) if method == "get"
+                && kwargs.is_empty()
+                && (args.len() == 1 || args.len() == 2 && none(args[1])) =>
+            {
+                Some((*recv, args[0]))
+            }
+            _ => None,
         };
         // `not` and copies (acyclic: neither reads a phi).
         let (mut cur, mut negated) = (self.copied_from(cond), false);
@@ -3039,24 +3128,37 @@ impl<'a> Extractor<'a> {
             negated = !negated;
             cur = self.copied_from(*operand);
         }
-        match self.defs.get(&cur).map(|i| &i.kind) {
+        let (container, key, on_then) = match self.defs.get(&cur).map(|i| &i.kind) {
             Some(InstKind::Compare {
                 op: op @ (CompareOpKind::In | CompareOpKind::NotIn),
                 lhs,
                 rhs,
                 ..
-            }) if same_key(*lhs) && same_container(*rhs) => {
-                Some((*op == CompareOpKind::In) != negated)
-            }
+            }) => (*rhs, *lhs, (*op == CompareOpKind::In) != negated),
             Some(InstKind::Compare {
                 op: op @ (CompareOpKind::Is | CompareOpKind::IsNot),
                 lhs,
                 rhs,
                 ..
-            }) if lookup(*lhs) && none(*rhs) || lookup(*rhs) && none(*lhs) => {
-                Some((*op == CompareOpKind::Is) == negated)
+            }) => {
+                let tested = if none(*rhs) { *lhs } else { *rhs };
+                let (container, key) = lookup(tested).filter(|_| none(*lhs) || none(*rhs))?;
+                (container, key, (*op == CompareOpKind::Is) == negated)
             }
-            _ => lookup(cur).then_some(!negated),
+            _ => {
+                let (container, key) = lookup(cur)?;
+                (container, key, !negated)
+            }
+        };
+        let attr = self.self_attr_alias.get(&container)?;
+        Some((attr, self.key_identity(key), on_then))
+    }
+
+    /// The key `var` is, as the stores and the tests of keys compare them.
+    fn key_identity(&self, var: VarId) -> KeyOf<'a> {
+        match self.constant(var) {
+            Some(literal) => KeyOf::Const(literal),
+            None => KeyOf::Var(self.copied_from(var)),
         }
     }
 
@@ -3070,11 +3172,16 @@ impl<'a> Extractor<'a> {
 
     /// `var` through copies.
     fn copied_from(&self, var: VarId) -> VarId {
-        let mut cur = var;
-        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur).map(|i| &i.kind) {
-            cur = *src;
-        }
-        cur
+        let roots = self
+            .copy_roots
+            .get_or_init(|| ownership::copy_roots(&self.defs));
+        roots.get(&var).copied().unwrap_or(var)
+    }
+
+    /// The function's dominator tree over all its edges.
+    fn dominators(&self) -> &ownership::DominatorTree {
+        self.dominators
+            .get_or_init(|| ownership::DominatorTree::of(self.f))
     }
 
     /// The attribute of `self` whose checked container (`MUT113`) `var` holds.
@@ -3088,47 +3195,71 @@ impl<'a> Extractor<'a> {
     /// `self.<attr>` comes before on every path (`self.xref = {}`, then `self.xref[k] = v`), and
     /// every store of the function to `self.<attr>` is of a new object. Its changes are that
     /// object's, not those of a container an iteration started before the call steps.
-    fn rebound_before(&self, var: VarId, attr: &str) -> bool {
-        let cur = self.copied_from(var);
-        let at = |v: VarId| {
-            self.f.blocks.iter().find_map(|b| {
-                let i = b.insts.iter().position(|i| i.kind.dst() == Some(v))?;
-                Some((b.id, i))
-            })
-        };
-        let reads_attr = matches!(self.defs.get(&cur).map(|i| &i.kind),
-            Some(InstKind::AttrLoad { obj, attr: a, .. }) if a == attr && self.self_vars.contains(obj));
-        let Some((read_bb, read_index)) = at(cur).filter(|_| reads_attr) else {
+    fn rebound_before(&self, var: VarId, attr: &str, rebindings: &Rebindings<'_>) -> bool {
+        let read = rebindings
+            .reads
+            .get(&self.copied_from(var))
+            .filter(|(read, _)| *read == attr);
+        let (Some(&(_, (read_bb, read_index))), Some(stores)) = (read, rebindings.stores.get(attr))
+        else {
             return false;
         };
+        let tree = self.dominators();
+        stores.all_new
+            && (stores
+                .first_in_block
+                .get(&read_bb)
+                .is_some_and(|&first| first < read_index)
+                || tree
+                    .strict_dominator(read_bb)
+                    .is_some_and(|d| tree.contains(&stores.dominated, d)))
+    }
+
+    /// [`Rebindings`] of the attributes `changes` change, from one walk of the function once
+    /// the callees of all its calls are known.
+    fn rebindings(&self, changes: &[SelfChange]) -> Rebindings<'a> {
+        let changed: FxHashSet<&str> = changes.iter().map(|c| c.attr.as_str()).collect();
+        let mut reads = FxHashMap::default();
+        let mut stores: FxHashMap<&'a str, Vec<(Position, VarId)>> = FxHashMap::default();
+        for b in &self.f.blocks {
+            for (i, inst) in b.insts.iter().enumerate() {
+                match &inst.kind {
+                    InstKind::AttrLoad { dst, obj, attr } if self.self_vars.contains(obj) => {
+                        reads.insert(*dst, (attr.as_str(), (b.id, i)));
+                    }
+                    InstKind::AttrStore { obj, attr, value }
+                        if self.self_vars.contains(obj) && changed.contains(attr.as_str()) =>
+                    {
+                        stores
+                            .entry(attr.as_str())
+                            .or_default()
+                            .push(((b.id, i), *value));
+                    }
+                    _ => {}
+                }
+            }
+        }
         let callees = self.callees_by_result();
         let new_object =
             |v: VarId| ownership::made_here(v, &self.defs, &|i| self.ownership_source(i, &callees));
-        let mut before = false;
-        for b in &self.f.blocks {
-            for (i, inst) in b.insts.iter().enumerate() {
-                let InstKind::AttrStore {
-                    obj,
-                    attr: a,
-                    value,
-                } = &inst.kind
-                else {
-                    continue;
-                };
-                if a != attr || !self.self_vars.contains(obj) {
-                    continue;
+        let stores = stores
+            .into_iter()
+            .map(|(attr, at)| {
+                let mut first_in_block = FxHashMap::default();
+                for &((b, i), _) in &at {
+                    first_in_block.entry(b).or_insert(i);
                 }
-                if !new_object(*value) {
-                    return false;
-                }
-                before |= if b.id == read_bb {
-                    i < read_index
-                } else {
-                    guards::dominated(self.f, b.id)[read_bb.0 as usize]
+                let rebinding = Rebinding {
+                    all_new: at.iter().all(|&(_, value)| new_object(value)),
+                    first_in_block,
+                    dominated: self
+                        .dominators()
+                        .dominated_by(at.iter().map(|&((b, _), _)| b)),
                 };
-            }
-        }
-        before
+                (attr, rebinding)
+            })
+            .collect();
+        Rebindings { stores, reads }
     }
 
     /// The project callees of the function's calls, by the variables their results go to.
@@ -3145,27 +3276,47 @@ impl<'a> Extractor<'a> {
     }
 
     /// An in-place change of the container `var` holds (`MUT113`): of a parameter itself, and of
-    /// `self.<attr>` of a class whose iterators check for changes, when it is not a new object
-    /// the function bound there before ([`Self::rebound_before`]).
+    /// `self.<attr>` of a class whose iterators check for changes ([`Self::self_changes`]).
     fn container_change(&mut self, var: VarId, change: ContainerChange, span: Span) {
         if let Some((i, None)) = self.param_alias.get(&var).cloned() {
             let facts = self.summary.iteration_facts_mut();
             iterations::merge_changes(&mut facts.changes_param_containers, [(i, change)]);
         }
-        let Some(attr) = self.checked_self_container(var) else {
-            return;
-        };
-        if self.rebound_before(var, attr) {
+        if let Some(attr) = self.checked_self_container(var).cloned() {
+            self.self_changes.push(SelfChange {
+                var,
+                attr,
+                change,
+                span,
+            });
+        }
+    }
+
+    /// Record the changes of checked containers of `self` the visit found, but those of a new
+    /// object the function bound to the attribute before ([`Self::rebound_before`]): once the
+    /// callees of all the calls are known, which tell the stores of new objects.
+    fn self_container_changes(&mut self) {
+        let changes = std::mem::take(&mut self.self_changes);
+        if changes.is_empty() {
             return;
         }
-        let attr = attr.clone();
-        let facts = self.summary.iteration_facts_mut();
-        iterations::merge_changes(&mut facts.changes_self_containers, [(attr.clone(), change)]);
-        facts
-            .self_container_change_sites
-            .entry(attr)
-            .or_default()
-            .insert(span);
+        let rebindings = self.rebindings(&changes);
+        let kept: Vec<SelfChange> = changes
+            .into_iter()
+            .filter(|c| !self.rebound_before(c.var, &c.attr, &rebindings))
+            .collect();
+        for SelfChange {
+            attr, change, span, ..
+        } in kept
+        {
+            let facts = self.summary.iteration_facts_mut();
+            iterations::merge_changes(&mut facts.changes_self_containers, [(attr.clone(), change)]);
+            facts
+                .self_container_change_sites
+                .entry(attr)
+                .or_default()
+                .insert(span);
+        }
     }
 
     /// In-place mutation of the container held in `var` (mutator method or subscript write):
