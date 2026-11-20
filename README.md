@@ -1,5 +1,11 @@
 # heki
 
+[![PyPI](https://img.shields.io/pypi/v/heki.svg)](https://pypi.org/project/heki/)
+[![Downloads](https://static.pepy.tech/badge/heki/month)](https://pepy.tech/projects/heki)
+[![Python versions](https://img.shields.io/pypi/pyversions/heki.svg)](https://pypi.org/project/heki/)
+[![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
+
 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
