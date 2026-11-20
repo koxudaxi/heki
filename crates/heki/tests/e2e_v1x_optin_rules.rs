@@ -219,8 +219,8 @@ def annotated(rows: Iterator[int], gen: Generator[int, None, None], items: Itera
     n = sum(rows)
     m = max(rows)
     loaded: Iterator[int] = load()
-    k = any(loaded)
-    j = all(loaded)
+    k = sum(loaded)
+    j = max(loaded)
     s = min(gen)
     t = sorted(gen)
     list(items)
@@ -338,6 +338,13 @@ def stepping(lines):
     head = next(it)
     second = next(it)
     return head, second, list(it)
+
+
+def deciding_item(flags):
+    it = iter(flags)
+    found = any(it)
+    rest = all(it)
+    return found, rest, list(it)
 
 
 def rebinding(lines):

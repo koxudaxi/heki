@@ -312,11 +312,12 @@ which module imports which.
   and the single-pass `itertools` functions (never `tee`, `repeat`, `cycle`, `count`); project
   generator functions; and `Iterator` / `Generator` annotations (not `Iterable` / `Sequence`).
 - Consumers: `for` loops and comprehensions, unpacking, `yield from`, and the calls that
-  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `any` / `all`
-  / `min` / `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
+  materialize an iterable (`list` / `tuple` / `set` / `frozenset` / `dict` / `sum` / `min` /
+  `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
   `heapq.nlargest`, `functools.reduce`, ...: one table, `consumption::FULL_CONSUMERS`, which also
-  decides where a generator's body runs), also through wrappers over one iterable; `next()` is
-  stepping, not consumption. A project function consumes its argument when `consumes_params` says
+  decides where a generator's body runs), also through wrappers over one iterable; `next()`,
+  `any`, and `all` are stepping, not consumption (`any` stops at the first true item), though a
+  generator's body runs there too. A project function consumes its argument when `consumes_params` says
   so, and its body runs at the call.
 - The first pass must be full (a loop that can `break`, `return`, or `raise` is partial); the
   second pass must be reachable from it on normal CFG paths; an iterator created outside a loop

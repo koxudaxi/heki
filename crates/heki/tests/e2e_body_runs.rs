@@ -1088,7 +1088,7 @@ fn reported_and_marked(name: &str, files: &[(&str, &str)], rules: &[&str]) -> (M
 }
 
 /// What runs where a generator is made and iterated: the implementation behind
-/// `typing.overload` signatures.
+/// `typing.overload` signatures, and stepping by `any` / `all`.
 const DEFERRED: &str = r#"import time
 import typing
 
@@ -1112,6 +1112,10 @@ async def made():
 
 async def iterated():
     list(rows(1))  # EFF101
+
+
+async def stepped():
+    any(rows(1))  # EFF101
 "#;
 
 #[test]

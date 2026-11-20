@@ -95,8 +95,6 @@ const FULL_CONSUMERS: &[(&str, Consumes)] = &[
     ("builtins.bytes", Consumes::First),
     ("builtins.bytearray", Consumes::First),
     ("builtins.sum", Consumes::First),
-    ("builtins.any", Consumes::First),
-    ("builtins.all", Consumes::First),
     ("builtins.min", Consumes::Sole),
     ("builtins.max", Consumes::Sole),
     ("builtins.sorted", Consumes::First),
@@ -123,6 +121,10 @@ const FULL_CONSUMERS: &[(&str, Consumes)] = &[
     ("math.prod", Consumes::First),
     ("math.fsum", Consumes::First),
 ];
+
+/// Calls stepping their first argument until an item decides the result (`any` at the first true
+/// item, `all` at the first false one): they exhaust it only when no item does.
+const STOPPING_CONSUMERS: &[&str] = &["builtins.any", "builtins.all"];
 
 /// Annotations naming a single-pass iterator (`Iterable`, `Sequence`, ... may be re-iterable).
 const ITERATOR_TYPES: &[&str] = &[
@@ -462,6 +464,20 @@ impl IterFlow {
                     }
                     InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => {
                         match &self.callees[&(bb.id, index)] {
+                            Callee::External(symbol)
+                                if STOPPING_CONSUMERS.contains(&symbol.as_str()) =>
+                            {
+                                let first = &args[..args.len().min(1)];
+                                self.push(
+                                    bb.id,
+                                    index,
+                                    inst.span,
+                                    first,
+                                    false,
+                                    (bb.id, index + 1),
+                                );
+                                continue;
+                            }
                             Callee::External(symbol) => match constructor_args(symbol, args) {
                                 Some(w) if w.eager => w.stepped,
                                 _ => consumer_args(symbol, args),
@@ -747,6 +763,9 @@ mod tests {
             ("functools.reduce", 3, &[1]),
             ("builtins.len", 1, &[]),
             ("builtins.next", 1, &[]),
+            // `any` / `all` stop at the item deciding the result.
+            ("builtins.any", 1, &[]),
+            ("builtins.all", 1, &[]),
             ("starlette.concurrency.iterate_in_threadpool", 1, &[]),
         ];
         for &(symbol, n, expected) in cases {
