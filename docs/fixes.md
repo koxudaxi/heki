@@ -10,7 +10,7 @@ equivalent. Whether the rewrite is **offered** depends on two independent questi
 
 | Safety | What you get |
 | ------ | ------------ |
-| Safe (every obligation established) | A diagnostic with a fix. |
+| Safe (every obligation established) | A diagnostic with a fix; for a statement whose shape heki does not rewrite (a parenthesized `x = (x + [i])`, an annotated `x: list = x + [i]`), a diagnostic that says the rewrite is proven safe, to be made by hand. |
 | Blocked | A diagnostic naming the first blocking obligation, no fix. |
 | Disproved | Nothing: the pattern only looks like a quadratic; rewriting it would be a bug. |
 
@@ -55,6 +55,10 @@ $ heki check --fix                               # apply safe, unconditional fix
 $ heki check --fix --include-size-dependent      # also the proven-safe size-dependent rewrites
 $ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
+
+`--include-size-dependent` applies the proven-safe size-dependent rewrites in every function,
+with or without `--profile`; `--profile` on its own applies them only in the functions the
+profile shows hot.
 
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it

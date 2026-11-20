@@ -25,18 +25,19 @@ homepage = "https://github.com/koxudaxi/heki"
 description = "Experimental Effect & Alias semantic checker for Python — the 3rd static analysis layer alongside Ruff and ty"
 
 [workspace.dependencies]
-# Internal crates
-heki_ast = { path = "crates/heki_ast" }
-heki_env = { path = "crates/heki_env" }
-heki_semantic = { path = "crates/heki_semantic" }
-heki_ir = { path = "crates/heki_ir" }
-heki_kb = { path = "crates/heki_kb" }
-heki_soundness = { path = "crates/heki_soundness" }
-heki_effect = { path = "crates/heki_effect" }
-heki_rules = { path = "crates/heki_rules" }
-heki_profile = { path = "crates/heki_profile" }
-heki_diagnostics = { path = "crates/heki_diagnostics" }
-heki_lsp = { path = "crates/heki_lsp" }
+# Internal crates (crates.io needs a version next to each path; it must equal
+# `workspace.package.version`, which the release workflow checks)
+heki_ast = { path = "crates/heki_ast", version = "0.1.0" }
+heki_env = { path = "crates/heki_env", version = "0.1.0" }
+heki_semantic = { path = "crates/heki_semantic", version = "0.1.0" }
+heki_ir = { path = "crates/heki_ir", version = "0.1.0" }
+heki_kb = { path = "crates/heki_kb", version = "0.1.0" }
+heki_soundness = { path = "crates/heki_soundness", version = "0.1.0" }
+heki_effect = { path = "crates/heki_effect", version = "0.1.0" }
+heki_rules = { path = "crates/heki_rules", version = "0.1.0" }
+heki_profile = { path = "crates/heki_profile", version = "0.1.0" }
+heki_diagnostics = { path = "crates/heki_diagnostics", version = "0.1.0" }
+heki_lsp = { path = "crates/heki_lsp", version = "0.1.0" }
 
 # Frontend parser (STRICTLY isolated to heki_ast per ADR-009 / ADR-016)
 ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5" }
