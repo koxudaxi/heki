@@ -1542,7 +1542,9 @@ opaque_to_layer3 = true
 # --- DB: Django ---
 # `connection.cursor()` opens the connection when needed. QuerySet methods that only build
 # another QuerySet are lazy (no effect); the ones that run the query block, and their `a*`
-# variants are coroutines. Model managers (`Model.objects`) are not resolved.
+# variants are coroutines. Model managers (`Model.objects`) are not resolved. The bulk APIs
+# (`bulk_create`, `in_bulk`) write or read many rows in one statement: they block, but a loop
+# over batches of them is no N+1, so they are no `db_query`.
 
 [[entries]]
 symbol = "django.db.connection.cursor"
@@ -1637,12 +1639,12 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.bulk_create"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.in_bulk"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1712,13 +1714,11 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.abulk_create"
-effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.ain_bulk"
-effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
@@ -2132,7 +2132,8 @@ opaque_to_layer3 = true
 # --- Document DB: pymongo (sync) ---
 # `MongoClient(...)` returns at once and connects on background threads (a `mongodb+srv://`
 # URI also resolves DNS records in the constructor). `find()` returns a cursor that queries
-# on its first iteration; it is listed as the query.
+# on its first iteration; it is listed as the query. The bulk writes (`insert_many`,
+# `bulk_write`) send many documents at once: no `db_query`.
 
 [[entries]]
 symbol = "pymongo.MongoClient"
@@ -2176,7 +2177,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.collection.Collection.insert_many"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2226,7 +2227,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.collection.Collection.bulk_write"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2296,7 +2297,6 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.collection.AsyncCollection.insert_many"
-effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
@@ -2356,7 +2356,6 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.collection.AsyncCollection.bulk_write"
-effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 

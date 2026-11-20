@@ -560,7 +560,9 @@ The entries follow the public API of each package, with three conventions:
   a value of that class is a call of it at the iterable (`async for` is not).
 - `db_query` is one statement sent to the database and waited for: reading the rows of an
   executed statement (`sqlite3.Cursor.fetchone`) is not one, nor is a driver's `commit()`; an ORM
-  `Session.commit()` / `flush()` sends the pending writes and is.
+  `Session.commit()` / `flush()` sends the pending writes and is. A bulk API (`bulk_create`,
+  `in_bulk`, `insert_many`, `bulk_write`) handles many rows in one statement and is called per
+  batch by design: it blocks, but it is no `db_query`.
 
 Lookups are exact, without inheritance or aliases (an entry names the class that a `return_type`,
 an annotation, or a constructor call produces), and the `heki_kb` unit tests pin every entry.

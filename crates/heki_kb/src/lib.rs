@@ -559,10 +559,11 @@ mod tests {
         "delete",
         "get_or_create",
         "update_or_create",
-        "bulk_create",
-        "in_bulk",
         "aggregate",
     ];
+    /// Django `QuerySet` and pymongo `Collection` bulk APIs: many rows in one statement.
+    const QUERYSET_BULK: &[&str] = &["bulk_create", "in_bulk"];
+    const MONGO_BULK: &[&str] = &["insert_many", "bulk_write"];
     const REDIS_COMMANDS: &[&str] = &[
         "get", "set", "setex", "mget", "mset", "delete", "exists", "expire", "ttl", "incr", "decr",
         "hget", "hset", "hmget", "hgetall", "hdel", "lpush", "rpush", "lpop", "rpop", "lrange",
@@ -572,7 +573,6 @@ mod tests {
         "find",
         "find_one",
         "insert_one",
-        "insert_many",
         "update_one",
         "update_many",
         "replace_one",
@@ -582,7 +582,6 @@ mod tests {
         "estimated_document_count",
         "distinct",
         "aggregate",
-        "bulk_write",
         "find_one_and_update",
         "find_one_and_replace",
         "find_one_and_delete",
@@ -959,8 +958,10 @@ mod tests {
                     with_prefix("psycopg.Connection", COMMIT_ROLLBACK),
                     with_prefix("psycopg2.extensions.connection", COMMIT_ROLLBACK),
                     with_prefix("pymysql.connections.Connection", COMMIT_ROLLBACK),
-                    // A cursor loop by design: blocking, but no N+1 query.
+                    // A cursor loop or a bulk API by design: blocking, but no N+1 query.
                     s(&["redis.Redis.scan", "pandas.DataFrame.to_sql"]),
+                    with_prefix(qs, QUERYSET_BULK),
+                    with_prefix("pymongo.collection.Collection", MONGO_BULK),
                 ]
                 .concat(),
                 entry(&[BlockingDb]),
@@ -1092,6 +1093,20 @@ mod tests {
                 ]
                 .concat(),
                 async_safe(entry(&[DbQuery])),
+            ),
+            (
+                [
+                    QUERYSET_BULK
+                        .iter()
+                        .map(|m| format!("{qs}.a{m}"))
+                        .collect(),
+                    with_prefix(
+                        "pymongo.asynchronous.collection.AsyncCollection",
+                        MONGO_BULK,
+                    ),
+                ]
+                .concat(),
+                async_safe(entry(&[])),
             ),
             (
                 s(&["sqlalchemy.ext.asyncio.create_async_engine"]),

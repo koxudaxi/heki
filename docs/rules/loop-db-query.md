@@ -18,7 +18,9 @@ the loop (its body runs where it is iterated, as for `EFF101`).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
 calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
-`Redis.pipeline()`), DDL statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
+`Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
+batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
+statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
 (`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
 own implementation, or loops whose size the code fixes when no data-sized loop is around them
 (`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small

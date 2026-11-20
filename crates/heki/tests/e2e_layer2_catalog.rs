@@ -844,6 +844,55 @@ fn boto3_and_django_block_on_their_calls_and_lazy_querysets_do_not() {
     );
 }
 
+const BULK: &str = r#"from django.db.models.query import QuerySet
+from pymongo.asynchronous.collection import AsyncCollection
+from pymongo.collection import Collection
+
+
+def tn_bulk_apis_per_batch(qs: QuerySet, coll: Collection, batches):
+    for batch in batches:
+        qs.bulk_create(batch)
+        qs.in_bulk(batch)
+        coll.insert_many(batch)
+        coll.bulk_write(batch)
+
+
+async def tn_async_bulk_apis_per_batch(qs: QuerySet, coll: AsyncCollection, batches):
+    for batch in batches:
+        await qs.abulk_create(batch)
+        await qs.ain_bulk(batch)
+        await coll.insert_many(batch)
+        await coll.bulk_write(batch)
+
+
+async def tp_bulk_apis_block(qs: QuerySet, coll: Collection, rows):
+    qs.bulk_create(rows)
+    coll.insert_many(rows)
+"#;
+
+/// The bulk APIs send many rows in one statement: a loop over batches is no N+1, but the
+/// synchronous ones still block.
+#[test]
+fn bulk_apis_per_batch_are_no_n_plus_one() {
+    assert_eq!(
+        check("catalog_bulk", "app/bulk.py", BULK, RULES),
+        vec![
+            d(
+                23,
+                "EFF101",
+                "tp_bulk_apis_block",
+                "django.db.models.query.QuerySet.bulk_create"
+            ),
+            d(
+                24,
+                "EFF101",
+                "tp_bulk_apis_block",
+                "pymongo.collection.Collection.insert_many"
+            ),
+        ]
+    );
+}
+
 const DATA: &str = r#"import numpy as np
 import pandas as pd
 
