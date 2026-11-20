@@ -690,11 +690,7 @@ pub fn family_readers(
         decls.is_project_class(&class).then_some((key, class, name))
     });
     let mut roots = BTreeSet::new();
-    let called = changed
-        .iter()
-        .flat_map(|key| iterated_mutation::callees_of(index, key))
-        .chain(callees.iter().copied());
-    for generator in iterated_mutation::generators_reached(index, called) {
+    for generator in iterated_mutation::generators_reached(index, changed, callees) {
         if let Some((owner, _)) = generator.qualname.rsplit_once('.') {
             roots.insert(format!("{}.{owner}", generator.module));
         }

@@ -28,9 +28,13 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::iterations::changed_at;
-use heki_effect::{CallSite, ContainerIteration, FileSummary, FuncKey, ProjectIndex, SiteRole};
+use heki_effect::{
+    CallSite, ContainerIteration, FileSummary, FuncKey, ProjectIndex, ResultIteration, SiteRole,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 
 /// Dunder methods of the read protocols: reading the object runs them.
 const READ_DUNDERS: &[&str] = &[
@@ -69,6 +73,7 @@ pub(super) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         return;
     }
     let mut sites: FxHashMap<&Path, SitesBySpan<'_>> = FxHashMap::default();
+    let uses = ResultUses::default();
     let mut reported: FxHashSet<(FuncKey, Span, String)> = FxHashSet::default();
     for_each_class_family(cx, |methods, family, init_called| {
         let mut visited: FxHashSet<&FuncKey> = FxHashSet::default();
@@ -83,7 +88,7 @@ pub(super) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             for it in &local.iteration_facts().container_iterations {
                 if it.between.suspends && reported.insert((g.key.clone(), it.span, it.attr.clone()))
                 {
-                    let exposure = exposure.get_or_insert_with(|| Exposure::of(cx, &g.key));
+                    let exposure = exposure.get_or_insert_with(|| Exposure::of(cx, &uses, &g.key));
                     let changing = changing_methods(cx, g, it, family, init_called, exposure);
                     report_suspended(cx, unit, g, it, &changing, out);
                 }
@@ -122,9 +127,9 @@ struct Exposure<'a> {
 type Reached = (FuncKey, Option<u8>);
 
 impl<'a> Exposure<'a> {
-    fn of(cx: &CheckContext<'a>, generator: &FuncKey) -> Self {
+    fn of(cx: &CheckContext<'a>, uses: &ResultUses<'a>, generator: &FuncKey) -> Self {
         let mut out = Self::default();
-        out.follow(cx, generator, Some(0), &mut FxHashSet::default());
+        out.follow(cx, uses, (generator, Some(0)), &mut FxHashSet::default());
         out
     }
 
@@ -136,48 +141,47 @@ impl<'a> Exposure<'a> {
     fn follow(
         &mut self,
         cx: &CheckContext<'a>,
-        func: &FuncKey,
-        instance: Option<u8>,
+        uses: &ResultUses<'a>,
+        (func, instance): (&FuncKey, Option<u8>),
         visited: &mut FxHashSet<Reached>,
     ) {
         if visited.insert((func.clone(), instance)) {
             self.offered |= !is_private(&func.qualname);
-            let callers = cx.index.reverse_call_graph.get(func).into_iter().flatten();
-            let callers = callers.filter_map(|caller| {
-                let (path, file) = cx.index.files.get_key_value(cx.index.file_of(caller)?)?;
-                Some((caller, path.as_path(), file))
-            });
-            for (caller, path, file) in callers {
-                self.follow_calls(cx, (func, instance), (caller, path, file), visited);
+            for caller in cx.index.reverse_call_graph.get(func).into_iter().flatten() {
+                if let Some((path, file_uses)) = uses.of_file(cx.index, caller) {
+                    let of_caller = &file_uses[caller];
+                    self.follow_calls(
+                        cx,
+                        uses,
+                        (func, instance),
+                        (caller, path, of_caller),
+                        visited,
+                    );
+                }
             }
         }
     }
 
-    /// [`Self::follow`] at the calls of `func` in `caller`, a function of `file` (at `path`). A
-    /// loop over a call's result runs its calls on the generator's instance where they bind the
-    /// object the call binds to `instance` (`ResultIteration::on_arguments`).
+    /// [`Self::follow`] at the calls of `func` in `caller`, a function of the file at `path` whose
+    /// uses of its calls' results are `of_caller`. A loop over a call's result runs its calls on
+    /// the generator's instance where they bind the object the call binds to `instance`
+    /// (`ResultIteration::on_arguments`).
     fn follow_calls(
         &mut self,
         cx: &CheckContext<'a>,
+        uses: &ResultUses<'a>,
         (func, instance): (&FuncKey, Option<u8>),
-        (caller, path, file): (&'a FuncKey, &'a Path, &'a FileSummary),
+        (caller, path, of_caller): (&'a FuncKey, &'a Path, &CallerUses<'a>),
         visited: &mut FxHashSet<Reached>,
     ) {
-        let calling = |s: &&CallSite| {
-            s.caller == *caller && s.project_callees().iter().any(|bc| bc.callee == *func)
-        };
-        let sites: Vec<&CallSite> = file.call_sites.iter().filter(calling).collect();
-        let result_iterations = file.local_functions.get(caller).map_or(&[][..], |s| {
-            s.iteration_facts().result_iterations.as_slice()
-        });
-        let mut caller_sites: Option<FxHashMap<Span, Vec<&'a CallSite>>> = None;
-        for call in sites.iter().filter(|s| s.role == SiteRole::Call) {
-            if hands_on(file, caller, call.span) {
+        let calls = of_caller.calling.get(func).into_iter().flatten();
+        for call in calls.filter(|s| s.role == SiteRole::Call) {
+            if of_caller.handed_on.contains(&call.span) {
                 let in_caller = instance.and_then(|p| bound_parameter(call, func, p));
-                self.follow(cx, caller, in_caller, visited);
+                self.follow(cx, uses, (caller, in_caller), visited);
             }
             self.held |= call.result_held;
-            for used in result_iterations.iter().filter(|u| u.call == call.span) {
+            for used in of_caller.iterations.get(&call.span).into_iter().flatten() {
                 let on_instance = |i: usize| {
                     instance.is_some_and(|p| {
                         used.on_arguments
@@ -187,8 +191,7 @@ impl<'a> Exposure<'a> {
                 };
                 let calls = used.between.calls.iter().enumerate();
                 for (_, span) in calls.filter(|(i, _)| on_instance(*i)) {
-                    let at = caller_sites.get_or_insert_with(|| sites_by_span(file, caller));
-                    let found = at.get(span).into_iter().flatten();
+                    let found = of_caller.at.get(span).into_iter().flatten();
                     self.loop_calls.extend(found.map(|site| (path, *site)));
                 }
             }
@@ -196,44 +199,94 @@ impl<'a> Exposure<'a> {
     }
 }
 
-/// The call sites of `caller`, a function of `file`, by span.
-fn sites_by_span<'f>(
-    file: &'f FileSummary,
-    caller: &FuncKey,
-) -> FxHashMap<Span, Vec<&'f CallSite>> {
-    let mut out: FxHashMap<Span, Vec<&CallSite>> = FxHashMap::default();
-    for site in file.call_sites.iter().filter(|s| s.caller == *caller) {
-        out.entry(site.span).or_default().push(site);
+/// What a function does with the objects its project calls return: what [`Exposure::follow`]
+/// and [`generators_reached`] read of it, by call.
+#[derive(Default)]
+struct CallerUses<'i> {
+    /// Its call sites of each project callee.
+    calling: FxHashMap<&'i FuncKey, Vec<&'i CallSite>>,
+    /// Its call sites by span.
+    at: FxHashMap<Span, Vec<&'i CallSite>>,
+    /// Its iterations of each call's result, by the call's span.
+    iterations: FxHashMap<Span, Vec<&'i ResultIteration>>,
+    /// The spans of the calls whose result it hands on: it returns the object, or iterates it
+    /// while suspending (a generator delegating to it). Its own callers then run while a
+    /// generator that object holds is suspended.
+    handed_on: FxHashSet<Span>,
+}
+
+/// The [`CallerUses`] of the functions of a file.
+type FileUses<'i> = FxHashMap<&'i FuncKey, CallerUses<'i>>;
+
+/// The [`CallerUses`] of the project's functions, made for a whole file the first time one of its
+/// functions is asked for, so that each call site and iteration is read once.
+#[derive(Default)]
+pub(super) struct ResultUses<'i> {
+    files: RefCell<FxHashMap<&'i Path, Rc<FileUses<'i>>>>,
+}
+
+impl<'i> ResultUses<'i> {
+    /// The uses of the functions of `func`'s file, which has an entry for `func`, and its path.
+    fn of_file(
+        &self,
+        index: &'i ProjectIndex,
+        func: &FuncKey,
+    ) -> Option<(&'i Path, Rc<FileUses<'i>>)> {
+        let (path, file) = index.files.get_key_value(index.file_of(func)?)?;
+        let mut files = self.files.borrow_mut();
+        let uses = files
+            .entry(path.as_path())
+            .or_insert_with(|| Rc::new(file_uses(file)));
+        uses.contains_key(func)
+            .then(|| (path.as_path(), Rc::clone(uses)))
+    }
+}
+
+fn file_uses(file: &FileSummary) -> FileUses<'_> {
+    let mut out: FileUses<'_> = FxHashMap::default();
+    for site in &file.call_sites {
+        let of_caller = out.entry(&site.caller).or_default();
+        of_caller.at.entry(site.span).or_default().push(site);
+        for bc in site.project_callees() {
+            of_caller.calling.entry(&bc.callee).or_default().push(site);
+        }
+        if site.role == SiteRole::Return {
+            of_caller.handed_on.insert(site.span);
+        }
+    }
+    for (key, summary) in &file.local_functions {
+        for used in &summary.iteration_facts().result_iterations {
+            let of_caller = out.entry(key).or_default();
+            of_caller
+                .iterations
+                .entry(used.call)
+                .or_default()
+                .push(used);
+            if used.between.suspends {
+                of_caller.handed_on.insert(used.call);
+            }
+        }
     }
     out
 }
 
-/// Whether `caller`, a function of `file`, hands on the object its call at `span` returns: it
-/// returns the object, or iterates it while suspending (a generator delegating to it). Its own
-/// callers then run while a generator that object holds is suspended.
-fn hands_on(file: &FileSummary, caller: &FuncKey, span: Span) -> bool {
-    let returned = file
-        .call_sites
-        .iter()
-        .any(|s| s.caller == *caller && s.role == SiteRole::Return && s.span == span);
-    returned
-        || file.local_functions.get(caller).is_some_and(|f| {
-            f.iteration_facts()
-                .result_iterations
-                .iter()
-                .any(|u| u.call == span && u.between.suspends)
-        })
-}
-
 /// The generator methods suspending inside an iteration of their own containers whose objects
-/// a call of one of `callees` may hand its caller: the callees themselves, and in turn the
-/// callees of the calls whose results they hand on ([`hands_on`], the relation
-/// [`Exposure::follow`] walks up).
+/// the calls of the `changed` functions, or of the `callees`, may hand their callers: those
+/// callees themselves, and in turn the callees of the calls whose results they hand on (the
+/// relation [`Exposure::follow`] walks up).
 pub(super) fn generators_reached<'a>(
     index: &'a ProjectIndex,
-    callees: impl IntoIterator<Item = &'a FuncKey>,
+    changed: &'a [FuncKey],
+    callees: &[&'a FuncKey],
 ) -> Vec<&'a FuncKey> {
-    let mut stack: Vec<&FuncKey> = callees.into_iter().collect();
+    let uses = ResultUses::default();
+    let callees_of = |f: &FuncKey| -> Vec<&'a FuncKey> {
+        uses.of_file(index, f)
+            .map(|(_, file_uses)| file_uses[f].calling.keys().copied().collect())
+            .unwrap_or_default()
+    };
+    let mut stack: Vec<&FuncKey> = changed.iter().flat_map(&callees_of).collect();
+    stack.extend(callees.iter().copied());
     let mut seen: FxHashSet<&FuncKey> = FxHashSet::default();
     let mut out = Vec::new();
     while let Some(f) = stack.pop() {
@@ -243,33 +296,18 @@ pub(super) fn generators_reached<'a>(
         if suspends(index, f) {
             out.push(f);
         }
-        for (file, s) in calls_of(index, f) {
-            if s.role == SiteRole::Call && hands_on(file, f, s.span) {
-                stack.extend(s.project_callees().iter().map(|bc| &bc.callee));
+        let Some((_, file_uses)) = uses.of_file(index, f) else {
+            continue;
+        };
+        let of_f = &file_uses[f];
+        for span in &of_f.handed_on {
+            let calls = of_f.at.get(span).into_iter().flatten();
+            for call in calls.filter(|s| s.role == SiteRole::Call) {
+                stack.extend(call.project_callees().iter().map(|bc| &bc.callee));
             }
         }
     }
     out
-}
-
-/// The project callees of `func`'s calls.
-pub(super) fn callees_of<'i>(index: &'i ProjectIndex, func: &FuncKey) -> Vec<&'i FuncKey> {
-    calls_of(index, func)
-        .into_iter()
-        .flat_map(|(_, s)| s.project_callees())
-        .map(|bc| &bc.callee)
-        .collect()
-}
-
-/// The call sites of `func`, with the summary of its file.
-fn calls_of<'i>(index: &'i ProjectIndex, func: &FuncKey) -> Vec<(&'i FileSummary, &'i CallSite)> {
-    let file = index.file_of(func).and_then(|p| index.files.get(p));
-    file.into_iter()
-        .flat_map(|file| {
-            let own = file.call_sites.iter().filter(|s| s.caller == *func);
-            own.map(move |s| (file, s))
-        })
-        .collect()
 }
 
 /// Whether `func` is a generator suspending inside an iteration of its own containers.

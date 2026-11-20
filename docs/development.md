@@ -119,8 +119,8 @@ to a new list of its own, a long chain of conditional expressions each choosing 
 the previous value and the value, one returned call handed the last of a long chain of item reads as
 each of its arguments, a loop carrying a long chain of assignments in reverse, a loop rotating
 aliases of many `self` containers, a chain of merges of many `self` containers, a loop over a
-generator whose body makes many calls, and loops whose bodies hold many conditional blocks one after
-another.
+generator whose body makes many calls, loops whose bodies hold many conditional blocks one after
+another, and a function consuming a generator's result many times in a row.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
