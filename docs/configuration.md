@@ -206,7 +206,39 @@ producers = ["pkg.parser.SchemaGraphBuilder.schema"]
 deep = true
 ```
 
-Functions decorated with `@lru_cache` / `@cache` are protected without configuration.
+| Key | Meaning |
+| --- | ------- |
+| `producers` | Functions, methods, external symbols, or attributes (`Class.attr`) whose result every caller shares (dotted names or globs). |
+| `deep` | Protect the values below the result too (its attributes, items, and elements). |
+
+Functions decorated with `@lru_cache` / `@cache` are protected without configuration, and so
+is every function that returns a protected value, or a part of it, on some path: wrappers and
+property getters need no entry of their own.
+
+## Announced changes: `[[tool.heki.invalidation]]` (`MUT109`)
+
+```toml
+[[tool.heki.invalidation]]
+name = "graph-index"
+targets = ["DataType.data_types", "DataModel.fields"]
+invalidators = ["GenerationStore.note_changed_models", "GenerationStore.refresh_now"]
+exempt-writers = ["pkg.parser.generation.*"]
+message = "tell the store which models changed"
+```
+
+| Key | Meaning |
+| --- | ------- |
+| `targets` | `Class.attr` names (fully qualified or a dotted suffix, globs allowed) whose writes must be announced; subclasses of a target class are covered too. |
+| `invalidators` | Functions or methods (dotted names or globs) whose call announces the change. A call counts when it runs on every path from the write to the function's normal return, directly, in each branch, behind a boolean flag the path sets after the write, or through a helper that calls one on every path of its own. |
+| `exempt-writers` | Functions (dotted names or globs) whose writes need no announcement of their own: the owner's operations, which announce or batch the change themselves, and construction methods. |
+| `message` | Text appended to every report of the contract. |
+
+A write is followed through local aliases, container methods, `setattr` / `__dict__`, and
+helpers. A private helper passes its unannounced writes to its callers; a function whose every
+caller announces the change after calling it is not reported. Writes to objects that did not
+exist before the call (the class's own initialization, objects the function constructs or
+copies) and to objects it gets from a call need no announcement. Only normal returns count: a
+path that ends by raising carries no obligation. At most 64 contracts can be declared.
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 

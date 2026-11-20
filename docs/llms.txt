@@ -60,3 +60,4 @@
 - [summary-effect-regression (MUT103)](https://heki.koxudaxi.dev/rules/summary-effect-regression/): Family: Mutation & State (MUT) · Opt-in · No automatic fix
 - [unretained-async-task (EFF107)](https://heki.koxudaxi.dev/rules/unretained-async-task/): Family: Execution Effects (EFF) · Opt-in · No automatic fix
 - [write-owner-violation (MUT201)](https://heki.koxudaxi.dev/rules/write-owner-violation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix
+- [write-without-invalidation (MUT109)](https://heki.koxudaxi.dev/rules/write-without-invalidation/): Family: Mutation & State (MUT) · Enabled by default · No automatic fix

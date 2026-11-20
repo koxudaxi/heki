@@ -1,13 +1,14 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`)
+//!   `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
 
+mod contracts;
 mod data_rules;
 mod eff_rules;
 mod mut_rules;
@@ -16,6 +17,7 @@ pub mod project;
 pub mod selection;
 pub mod snapshot;
 
+pub use contracts::{MAX_INVALIDATIONS, summary_contracts};
 pub use mut_rules::family_readers;
 pub use selection::{RuleSelection, SelectionError};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
@@ -112,6 +114,16 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/MUT108.md"),
     },
     RuleMeta {
+        code: "MUT109",
+        slug: "write-without-invalidation",
+        family: RuleFamily::Mut,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.",
+        doc: include_str!("../rule-docs/MUT109.md"),
+    },
+    RuleMeta {
         code: "MUT110",
         slug: "readonly-param-mutation",
         family: RuleFamily::Mut,
@@ -138,7 +150,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         default_enabled: true,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`.",
+        summary: "Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.",
         doc: include_str!("../rule-docs/MUT202.md"),
     },
     RuleMeta {
@@ -392,6 +404,8 @@ pub enum RuleConfigError {
         context: &'static str,
         cause: globset::Error,
     },
+    #[error("{0} `invalidation` contracts declared; at most {MAX_INVALIDATIONS} are supported")]
+    TooManyInvalidations(usize),
 }
 
 /// Inputs beyond the Advisory lane: the Layer 1 KB for `OPT` (Soundness lane) and the saved
@@ -468,6 +482,7 @@ pub fn check_project(
     mut_rules::mut101(&cx, &mut out);
     mut_rules::mut107(&cx, &mut out);
     mut_rules::mut108_mut110(&cx, &mut out);
+    mut_rules::mut109(&cx, &mut out)?;
     mut_rules::mut201(&cx, &mut out)?;
     mut_rules::mut203(&cx, &mut out)?;
     mut_rules::mut204(&cx, &mut out)?;
@@ -653,6 +668,7 @@ impl<'a> CheckContext<'a> {
 
 /// Dotted-name pattern: a glob (`pkg.*.Model`, `*Store.*`) that also matches when it equals a
 /// dot-separated suffix of the name (`Model.fields` matches `pkg.model.Model.fields`).
+#[derive(Debug)]
 pub(crate) struct DottedPattern {
     text: String,
     glob: GlobMatcher,

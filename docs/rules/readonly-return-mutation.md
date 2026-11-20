@@ -4,19 +4,25 @@
 
 Family: Mutation & State (MUT) · Enabled by default · No automatic fix
 
-Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`.
+Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.
 
 ## What it does
 Checks mutations of objects returned by a shared producer:
 
 - functions decorated with `@functools.lru_cache` / `@functools.cache` (every caller receives
   the same object);
-- producers declared in `[[tool.heki.readonly-returns]]`.
+- producers declared in `[[tool.heki.readonly-returns]]`;
+- functions that return a producer's value, or a part of it, on some path: a wrapper is a
+  producer itself, without configuration, through any number of wrappers, property getters,
+  and recursion.
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
-that mutate their argument are followed. Copies end the protection: `copy.deepcopy(...)`,
+that mutate their argument are followed, also on the call result itself
+(`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)`, and the copy sanitizers of the ecosystem knowledge base clear it,
-shallow copies (`copy.copy`, `.copy()`) protect the top level only.
+shallow copies (`copy.copy`, `.copy()`) free the top level only: the values below stay shared.
+A wrapper that returns a copy on one path and the shared value on another still returns a
+shared value.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
@@ -32,8 +38,12 @@ def schema(name: str) -> dict[str, list[str]]:
     return {"fields": [name]}
 
 
+def schema_of(name: str) -> dict[str, list[str]]:
+    return schema(name)
+
+
 def extend(name: str) -> None:
-    s = schema(name)
+    s = schema_of(name)
     s["fields"].append("extra")  # MUT202: mutates the cached object
 ```
 
@@ -43,10 +53,17 @@ import copy
 
 
 def extend(name: str) -> dict[str, list[str]]:
-    s = copy.deepcopy(schema(name))
+    s = copy.deepcopy(schema_of(name))
     s["fields"].append("extra")
     return s
 ```
+
+## Known limitations
+- A shared value stored in an attribute (`self.kept = schema(...)`) and changed in another
+  method is not followed.
+- A generator's values and a coroutine's result (`await`) are not followed.
+- A method call on a shared value whose class heki cannot resolve (a producer returning a type
+  variable) is not followed; a wrapper with a concrete return annotation resolves it.
 
 ## Fix safety
 No automatic fix.

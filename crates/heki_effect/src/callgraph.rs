@@ -9,7 +9,7 @@
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Delivery, EffectSummary, Facts,
-    FuncKey, ProjectIndex, SiteRole, TypedFieldWriteSite, WriteKind,
+    FuncKey, ProjectIndex, ProtectedReturn, Shared, SiteRole, TypedFieldWriteSite, WriteKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
@@ -214,11 +214,13 @@ fn recompute(
         .functions
         .get(func)
         .is_some_and(|cur| cur.sync_driven_only);
+    let contracts = index.contracts.as_deref();
     for (site_path, i) in out.get(func).into_iter().flatten() {
         let site = &index.files[site_path].call_sites[*i];
         for bc in site.project_callees() {
             if let Some(callee) = index.summary(&bc.callee) {
                 apply_edge(index, &mut s, func, site, bc, callee, site_path);
+                return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
             }
         }
     }
@@ -229,8 +231,50 @@ fn recompute(
     {
         s.iterated = None;
     }
+    if let Some(c) = contracts {
+        let sites = out.get(func).map(Vec::as_slice).unwrap_or(&[]);
+        crate::invalidation::propagate_facts(index, c, func, sites, &mut s);
+    }
     s.refresh_typed_field_writes();
     s
+}
+
+/// `MUT202` return flow across one call whose result the caller may return: a callee whose
+/// result is shared (an `@lru_cache` function, a declared producer, or a function that returns
+/// one's value) makes the caller return a shared value too.
+fn return_flow_edge(
+    s: &mut EffectSummary,
+    contracts: Option<&dyn crate::Contracts>,
+    caller: &FuncKey,
+    site: &CallSite,
+    bc: &BoundCallee,
+    callee: &EffectSummary,
+    path: &Path,
+) {
+    let Some(step) = site.returned else {
+        return;
+    };
+    if !runs_at_call(callee, site) {
+        return;
+    }
+    let fqn = bc.callee.fqn();
+    let (producer, produced, tail) = if callee.is_lru_cache {
+        (fqn, Shared::produced(true), Vec::new())
+    } else if let Some(deep) = contracts.and_then(|c| c.readonly_producer(&fqn)) {
+        (fqn, Shared::produced(deep), Vec::new())
+    } else if let Some(r) = &callee.returns_protected {
+        (r.producer.clone(), r.shared, r.chain.clone())
+    } else {
+        return;
+    };
+    let mut chain = vec![CallHop {
+        caller: caller.clone(),
+        callee: bc.callee.fqn(),
+        span: site.span,
+        path: path.to_path_buf(),
+    }];
+    chain.extend(tail);
+    ProtectedReturn::add(&mut s.returns_protected, producer, produced, step, chain);
 }
 
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts
