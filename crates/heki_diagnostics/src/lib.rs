@@ -285,26 +285,22 @@ pub fn sarif(diags: &[Diagnostic]) -> serde_json::Value {
 
 /// Parse inline suppressions (`# heki: ignore`, `# heki: ignore[EFF101, async-blocking-call]`,
 /// and `# noqa` / `# noqa: EFF101` compatibility) from one comment directive.
-/// `Some(empty)` suppresses every rule.
+/// `Some(empty)` suppresses every rule: only the bare forms do. A bracketed list without its
+/// closing `]` or without a rule (`# heki: ignore[`, `# heki: ignore[]`) suppresses nothing.
 pub fn parse_inline_ignores(comment: &str) -> Option<Vec<String>> {
     let trimmed = comment.trim_start_matches('#').trim();
     if let Some(rest) = trimmed.strip_prefix("heki:") {
-        let rest = rest.trim();
-        if let Some(after) = rest.strip_prefix("ignore") {
-            let after = after.trim();
-            if after.is_empty() {
-                return Some(Vec::new()); // bare ignore = all rules
-            }
-            if let Some(inner) = after.strip_prefix('[').and_then(|s| s.split(']').next()) {
-                let items = inner
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                return Some(items);
-            }
+        let after = rest.trim().strip_prefix("ignore")?.trim();
+        if after.is_empty() {
+            return Some(Vec::new()); // bare ignore = all rules
         }
-        return None;
+        let (inner, _) = after.strip_prefix('[')?.split_once(']')?;
+        let items: Vec<String> = inner
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        return (!items.is_empty()).then_some(items);
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower == "noqa" {
@@ -721,6 +717,14 @@ mod tests {
         );
         assert_eq!(parse_inline_ignores("# noqa"), Some(vec![]));
         assert_eq!(parse_inline_ignores("# heki: nothing"), None);
+        for unfinished in [
+            "# heki: ignore[",
+            "# heki: ignore[EFF101",
+            "# heki: ignore[]",
+            "# heki: ignore[ , ]",
+        ] {
+            assert_eq!(parse_inline_ignores(unfinished), None, "{unfinished}");
+        }
         assert_eq!(parse_inline_ignores("# ordinary comment"), None);
     }
 

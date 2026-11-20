@@ -284,4 +284,6 @@ w = load()            # noqa: EFF101
 ```
 
 A suppression applies to the line of the diagnostic. Codes and rule names are accepted; a
-comment without codes silences every rule on that line.
+comment without codes (`# heki: ignore`, `# noqa`) silences every rule on that line. A bracketed
+list that is not closed or names no rule (`# heki: ignore[`, `# heki: ignore[]`) silences
+nothing.
