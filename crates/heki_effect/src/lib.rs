@@ -25,6 +25,7 @@ mod contracts;
 pub mod guards;
 mod infer;
 mod invalidation;
+pub mod iterations;
 pub mod ownership;
 pub mod readonly;
 mod report;
@@ -40,6 +41,10 @@ pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
+};
+pub use iterations::{
+    BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IterationFacts,
+    ResultIteration,
 };
 pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
@@ -542,6 +547,11 @@ pub struct EffectSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hashed_whole_self_attrs: Option<Box<BTreeSet<String>>>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
+    /// `MUT113`: what the function changes in place of its instance's containers and how it
+    /// iterates them and the objects its project calls return (`None` when it does none of
+    /// these, as most functions; read through [`Self::iteration_facts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<Box<IterationFacts>>,
     pub invalidates_cached: BTreeSet<String>,
     /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
@@ -779,6 +789,7 @@ impl EffectSummary {
             })
             .collect();
         out.param_change_sites.clear();
+        out.iterations = out.iterations.map(|f| Box::new(f.without_locations()));
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -819,17 +830,30 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites, parameter changes, and unresolved accesses are left out: those are never
-    /// propagated.
+    /// sites, parameter and container changes, iterations, and unresolved accesses are left out:
+    /// those are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
             param_change_sites: BTreeMap::new(),
+            iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
             ..s.clone()
         };
         without_local(self) == without_local(other) && self.same_facts(other)
+    }
+
+    /// [`Self::iterations`], empty when there are none.
+    pub fn iteration_facts(&self) -> &IterationFacts {
+        self.iterations
+            .as_deref()
+            .unwrap_or(&iterations::NO_ITERATION_FACTS)
+    }
+
+    /// [`Self::iterations`], to add facts to.
+    pub(crate) fn iteration_facts_mut(&mut self) -> &mut IterationFacts {
+        self.iterations.get_or_insert_with(Box::default)
     }
 
     /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those

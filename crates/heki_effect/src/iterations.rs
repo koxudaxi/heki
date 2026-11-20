@@ -1,0 +1,549 @@
+//! `MUT113` facts (docs/ANALYSIS_AND_KB_SPEC.md section 2.3): where a method iterates a
+//! container of its own instance (`for k in self.items:`, `yield from self.items.values()`), and
+//! how a function changes such containers in place.
+//!
+//! Python checks a dict, a set, and a deque at every step of an iterator over it: an iterator
+//! whose dict or set changed size since it was created raises `RuntimeError` at its next step
+//! ("dictionary changed size during iteration"), and so does a deque iterator after any change
+//! but an item store or `reverse()`. A list iterator walks indices: it sees appended items and
+//! skips or repeats items when others move, without an error, so a list is no such container.
+//!
+//! The iterations are read from the IR when the method is summarized (local facts, IR-free
+//! afterwards); the changes are propagated through the methods a function calls on `self` and
+//! the helpers it hands a container to (`callgraph`).
+
+use crate::consumption::resolve_inst;
+use crate::resolver::{Callee, TypeCtx, Val};
+use crate::{BoundCallee, CallSite, EffectSummary, Facts, FuncKey, ProjectIndex};
+use heki_ast::Span;
+use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
+use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A function's `MUT113` facts (`EffectSummary::iterations`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IterationFacts {
+    /// The `self` attributes holding a container of a class [`IteratedContainer`] names that the
+    /// function changes in place (rebinding one changes no container), directly, through local
+    /// copies, through the methods and properties it calls on `self`, and through the helpers it
+    /// hands them to, with the strongest change. The only fact propagated to callers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub changes_self_containers: BTreeMap<String, ContainerChange>,
+    /// The spans of the function's own changes of the containers in `changes_self_containers`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub self_container_change_sites: BTreeMap<String, BTreeSet<Span>>,
+    /// A method's iterations over the containers of its own instance that a generator suspends
+    /// in or whose body makes calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub container_iterations: Vec<ContainerIteration>,
+    /// Where the function iterates the objects its project calls return (a generator, or one a
+    /// plain function hands on), with what runs between their steps: what can run while such a
+    /// generator is suspended.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub result_iterations: Vec<ResultIteration>,
+}
+
+/// The facts of a function with none.
+pub(crate) static NO_ITERATION_FACTS: IterationFacts = IterationFacts {
+    changes_self_containers: BTreeMap::new(),
+    self_container_change_sites: BTreeMap::new(),
+    container_iterations: Vec::new(),
+    result_iterations: Vec::new(),
+};
+
+impl IterationFacts {
+    /// The facts without source positions (Early Cutoff).
+    pub(crate) fn without_locations(&self) -> Self {
+        let zero = Span { start: 0, end: 0 };
+        let mut out = Self {
+            self_container_change_sites: BTreeMap::new(),
+            ..self.clone()
+        };
+        for it in &mut out.container_iterations {
+            it.span = zero;
+            it.between.calls.fill(zero);
+        }
+        for used in &mut out.result_iterations {
+            used.call = zero;
+            used.between.calls.fill(zero);
+        }
+        out
+    }
+
+    /// The facts callers copy (`changes_self_containers`), `None` without any.
+    pub(crate) fn propagated(&self) -> Option<Box<Self>> {
+        (!self.changes_self_containers.is_empty()).then(|| {
+            Box::new(Self {
+                changes_self_containers: self.changes_self_containers.clone(),
+                ..Self::default()
+            })
+        })
+    }
+
+    /// Add the facts of another definition of the function.
+    pub(crate) fn merge(&mut self, other: Self) {
+        merge_changes(
+            &mut self.changes_self_containers,
+            other.changes_self_containers,
+        );
+        for (attr, spans) in other.self_container_change_sites {
+            self.self_container_change_sites
+                .entry(attr)
+                .or_default()
+                .extend(spans);
+        }
+        self.container_iterations.extend(other.container_iterations);
+        self.container_iterations.sort();
+        self.container_iterations.dedup();
+        self.result_iterations.extend(other.result_iterations);
+        self.result_iterations.sort();
+        self.result_iterations.dedup();
+    }
+}
+
+/// A container class whose iterators raise `RuntimeError` after it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IteratedContainer {
+    /// `dict`, `OrderedDict`, `defaultdict`, `Counter`, and their `keys()` / `values()` /
+    /// `items()` views.
+    Mapping,
+    Set,
+    Deque,
+}
+
+impl IteratedContainer {
+    /// The checked container an instance of `class` is (`typing` aliases of builtins resolve to
+    /// the builtin). Abstract types (`MutableMapping`, `MutableSet`) promise no such check.
+    pub fn of_class(class: &str) -> Option<Self> {
+        match class {
+            "builtins.dict"
+            | "collections.OrderedDict"
+            | "collections.defaultdict"
+            | "collections.Counter"
+            | "typing.Counter" => Some(Self::Mapping),
+            "builtins.set" => Some(Self::Set),
+            "collections.deque" | "typing.Deque" => Some(Self::Deque),
+            _ => None,
+        }
+    }
+
+    /// The checked container a value of type `val` is: one class, or a union whose classes
+    /// besides `None` agree.
+    pub(crate) fn of_val(val: &Val) -> Option<Self> {
+        match val {
+            Val::Inst(class) => Self::of_class(class),
+            Val::Union(classes) => {
+                let mut kinds = classes
+                    .iter()
+                    .filter(|c| c.as_str() != "builtins.NoneType")
+                    .map(|c| Self::of_class(c));
+                let first = kinds.next()??;
+                kinds.all(|k| k == Some(first)).then_some(first)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a change makes the next step of an iterator over the container raise: any change
+    /// of a mapping (a stored item may be a new key), and any but an item store of a set or a
+    /// deque.
+    pub fn broken_by(self, change: ContainerChange) -> bool {
+        match change {
+            ContainerChange::StoresItems => self == Self::Mapping,
+            ContainerChange::Resizes => true,
+        }
+    }
+}
+
+/// What a function's in-place changes of a container can do to the iterators over it, the
+/// weaker first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerChange {
+    /// Only items stored under a key or an index (`x[k] = v`): a mapping gains the key when it
+    /// is new.
+    StoresItems,
+    /// Items inserted, removed, or moved (`append`, `add`, `update`, `setdefault`, `pop`,
+    /// `del x[k]`, `clear`, `rotate`, `move_to_end`, the in-place operators), or any change a
+    /// helper the container is handed to makes.
+    Resizes,
+}
+
+/// Merge the changes `from` into `into`, keeping the stronger one per attribute.
+pub(crate) fn merge_changes(
+    into: &mut BTreeMap<String, ContainerChange>,
+    from: impl IntoIterator<Item = (String, ContainerChange)>,
+) {
+    for (attr, change) in from {
+        let slot = into.entry(attr).or_insert(change);
+        *slot = (*slot).max(change);
+    }
+}
+
+/// The containers of the calling method's own instance that the project callee `bc` (summarized
+/// by `callee`) changes in place when `facts` run at `site`: those it changes on its own `self`
+/// when the call is on the caller's `self` (`self.helper()`, `super().m()`, a property read), and
+/// the caller's `self.<attr>` handed to a parameter it changes in place.
+pub(crate) fn call_changes(
+    site: &CallSite,
+    bc: &BoundCallee,
+    callee: &EffectSummary,
+    facts: &EffectSummary,
+) -> Vec<(String, ContainerChange)> {
+    let mut out = Vec::new();
+    if site.recv_is_self && callee.owner_class_qualname.is_some() {
+        out.extend(
+            facts
+                .iteration_facts()
+                .changes_self_containers
+                .iter()
+                .map(|(attr, change)| (attr.clone(), *change)),
+        );
+    }
+    for (&i, paths) in &facts.mutated_param_paths {
+        if paths.contains("")
+            && let Some(attr) = bc
+                .params
+                .get(usize::from(i))
+                .and_then(|o| o.self_attr.as_ref())
+        {
+            out.push((attr.clone(), ContainerChange::Resizes));
+        }
+    }
+    out
+}
+
+/// What the project callees of `site` change in place of the calling method's own containers
+/// while the caller's body runs them, by callee ([`ProjectIndex::delivery`]).
+pub fn changed_at<'s>(
+    index: &ProjectIndex,
+    site: &'s CallSite,
+) -> Vec<(&'s FuncKey, String, ContainerChange)> {
+    let running = site.project_callees().iter().filter_map(|bc| {
+        let callee = index.summary(&bc.callee)?;
+        let d = index
+            .delivery(site, callee)
+            .filter(|d| d.into == Facts::Body)?;
+        Some((bc, callee, callee.facts(d.from)?))
+    });
+    running
+        .flat_map(|(bc, callee, facts)| {
+            call_changes(site, bc, callee, facts)
+                .into_iter()
+                .map(|(attr, change)| (&bc.callee, attr, change))
+        })
+        .collect()
+}
+
+/// The change the container method `method` makes in place (`None`: it changes nothing an
+/// iterator checks, as `sort()` and `reverse()` of a list or a deque, or is none). A method of a
+/// project class is its own summary's.
+pub(crate) fn method_change(method: &str) -> Option<ContainerChange> {
+    match method {
+        "__setitem__" => Some(ContainerChange::StoresItems),
+        "append"
+        | "appendleft"
+        | "extend"
+        | "extendleft"
+        | "insert"
+        | "add"
+        | "update"
+        | "setdefault"
+        | "pop"
+        | "popleft"
+        | "popitem"
+        | "remove"
+        | "discard"
+        | "clear"
+        | "difference_update"
+        | "intersection_update"
+        | "symmetric_difference_update"
+        | "rotate"
+        | "move_to_end"
+        | "__delitem__" => Some(ContainerChange::Resizes),
+        _ => None,
+    }
+}
+
+/// A `for` loop or a `yield from` of a method over the container one of its instance's
+/// attributes holds, directly or through a view or a lazy wrapper (`self.items.values()`,
+/// `enumerate(self.items)`); a snapshot (`list(self.items)`, `self.items.copy()`) is a container
+/// of its own.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ContainerIteration {
+    pub attr: String,
+    pub container: IteratedContainer,
+    /// The `for` loop's iterable, or the `yield from` expression.
+    pub span: Span,
+    pub between: BetweenSteps,
+}
+
+/// An iteration of the object a project call returns, in the calling function: a `for` loop, a
+/// `yield from`, or a call consuming it (`list(...)`, `"".join(...)`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ResultIteration {
+    /// The call.
+    pub call: Span,
+    pub between: BetweenSteps,
+}
+
+/// What runs between two steps of an iteration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BetweenSteps {
+    /// The iterating function is a generator that suspends inside the iteration and resumes it
+    /// later: at a `yield` in the loop's body from which the loop goes on, or inside the
+    /// `yield from` itself.
+    pub suspends: bool,
+    /// The call sites in the loop's body from which the loop goes on (calls, reads of
+    /// properties, which run their getters, and iterations running a generator's body), by span.
+    pub calls: Vec<Span>,
+}
+
+impl BetweenSteps {
+    /// What runs between the steps of the iteration at instruction `inst` of `f` (a `for` loop's
+    /// `MakeIter`, a `yield from`, or a consuming call, which runs nothing); `None` for a loop
+    /// without a natural loop. `site_spans` are the spans of `f`'s call sites.
+    pub(crate) fn of(
+        f: &IrFunction,
+        inst: &Inst,
+        site_spans: &FxHashSet<Span>,
+        is_generator: bool,
+    ) -> Option<Self> {
+        let iter = match &inst.kind {
+            InstKind::YieldFrom { .. } => {
+                return Some(Self {
+                    suspends: true,
+                    calls: Vec::new(),
+                });
+            }
+            InstKind::MakeIter { dst, .. } => *dst,
+            _ => return Some(Self::default()),
+        };
+        let body = continuing_body(f, iter)?;
+        let in_body = body.iter().flat_map(|b| &f.block(*b).insts);
+        let suspends = is_generator
+            && in_body
+                .clone()
+                .any(|i| matches!(i.kind, InstKind::Yield { .. } | InstKind::YieldFrom { .. }));
+        let mut calls: Vec<Span> = in_body
+            .map(|i| i.span)
+            .filter(|s| site_spans.contains(s))
+            .collect();
+        calls.sort();
+        calls.dedup();
+        Some(Self { suspends, calls })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.suspends && self.calls.is_empty()
+    }
+}
+
+/// The iterations of the method `f` over the checked containers of its own instance
+/// (`self_attrs` maps the variables holding `self.<attr>` to the attribute) that a generator
+/// suspends in or whose body makes calls. `site_spans` are the spans of `f`'s call sites.
+pub(crate) fn container_iterations(
+    f: &IrFunction,
+    tcx: &TypeCtx<'_>,
+    types: &FxHashMap<VarId, Val>,
+    self_attrs: &FxHashMap<VarId, String>,
+    site_spans: &FxHashSet<Span>,
+    is_generator: bool,
+) -> Vec<ContainerIteration> {
+    if self_attrs.is_empty() {
+        return Vec::new();
+    }
+    let live = live_containers(f, tcx, types, self_attrs);
+    if live.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        let iterated = match &inst.kind {
+            InstKind::YieldFrom { value, .. } => live.get(value),
+            InstKind::MakeIter {
+                iterable,
+                is_async: false,
+                ..
+            } => live.get(iterable),
+            _ => None,
+        };
+        let between = iterated.and_then(|_| BetweenSteps::of(f, inst, site_spans, is_generator));
+        let (Some(iterated), Some(between)) = (iterated, between.filter(|b| !b.is_empty())) else {
+            continue;
+        };
+        for (attr, container) in iterated {
+            out.push(ContainerIteration {
+                attr: attr.clone(),
+                container: *container,
+                span: inst.span,
+                between: between.clone(),
+            });
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The values whose iteration steps an iterator over a checked container of `self`: the
+/// container itself (through copies), its `keys()` / `values()` / `items()` views, lazy wrappers
+/// of either (`enumerate`, `zip`, `reversed`, `itertools.chain`, a generator expression), and
+/// the iterators made from them. A merged value may be any of its inputs.
+fn live_containers(
+    f: &IrFunction,
+    tcx: &TypeCtx<'_>,
+    types: &FxHashMap<VarId, Val>,
+    self_attrs: &FxHashMap<VarId, String>,
+) -> FxHashMap<VarId, BTreeSet<(String, IteratedContainer)>> {
+    let mut live: FxHashMap<VarId, BTreeSet<(String, IteratedContainer)>> = FxHashMap::default();
+    for (var, attr) in self_attrs {
+        if let Some(container) = types.get(var).and_then(IteratedContainer::of_val) {
+            live.entry(*var)
+                .or_default()
+                .insert((attr.clone(), container));
+        }
+    }
+    if live.is_empty() {
+        return live;
+    }
+    loop {
+        let before: usize = live.values().map(BTreeSet::len).sum();
+        for bb in &f.blocks {
+            for phi in &bb.phis {
+                let merged: BTreeSet<_> = phi
+                    .incoming
+                    .iter()
+                    .filter_map(|(_, v)| live.get(v))
+                    .flatten()
+                    .cloned()
+                    .collect();
+                if !merged.is_empty() {
+                    live.entry(phi.dst).or_default().extend(merged);
+                }
+            }
+            for inst in &bb.insts {
+                let (dst, sources): (VarId, Vec<VarId>) = match &inst.kind {
+                    InstKind::Copy { dst, src } => (*dst, vec![*src]),
+                    InstKind::MakeIter { dst, iterable, .. } => (*dst, vec![*iterable]),
+                    InstKind::MakeGenExpr {
+                        dst, outer_iter, ..
+                    } => (*dst, vec![*outer_iter]),
+                    InstKind::MethodCall {
+                        dst,
+                        recv,
+                        method,
+                        args,
+                        kwargs,
+                        ..
+                    } if args.is_empty()
+                        && kwargs.is_empty()
+                        && matches!(method.as_str(), "keys" | "values" | "items") =>
+                    {
+                        let views = live.get(recv).map(|s| {
+                            s.iter()
+                                .filter(|(_, c)| *c == IteratedContainer::Mapping)
+                                .cloned()
+                                .collect::<BTreeSet<_>>()
+                        });
+                        if let Some(views) = views.filter(|v| !v.is_empty()) {
+                            live.entry(*dst).or_default().extend(views);
+                        }
+                        continue;
+                    }
+                    // `itertools.chain(...)` is a method call on the module.
+                    InstKind::Call { dst, args, .. } | InstKind::MethodCall { dst, args, .. }
+                        if args.iter().any(|a| live.contains_key(a)) =>
+                    {
+                        match resolve_inst(tcx, types, &inst.kind) {
+                            Callee::External(symbol) => (*dst, lazily_iterated(&symbol, args)),
+                            _ => continue,
+                        }
+                    }
+                    _ => continue,
+                };
+                let found: BTreeSet<_> = sources
+                    .iter()
+                    .filter_map(|v| live.get(v))
+                    .flatten()
+                    .cloned()
+                    .collect();
+                if !found.is_empty() {
+                    live.entry(dst).or_default().extend(found);
+                }
+            }
+        }
+        if live.values().map(BTreeSet::len).sum::<usize>() == before {
+            return live;
+        }
+    }
+}
+
+/// The arguments iterating the result of the builtin or `itertools` call `symbol` steps while
+/// they stay live: `iter(x)`, `reversed(x)`, and the lazy wrappers. A consuming call (`list(x)`,
+/// `sorted(x)`) makes a snapshot.
+fn lazily_iterated(symbol: &str, args: &[VarId]) -> Vec<VarId> {
+    let from = match symbol {
+        "builtins.iter" if args.len() == 1 => 0,
+        "builtins.reversed"
+        | "builtins.enumerate"
+        | "builtins.zip"
+        | "itertools.chain"
+        | "itertools.islice"
+        | "itertools.zip_longest"
+        | "itertools.pairwise"
+        | "itertools.batched"
+        | "itertools.accumulate"
+        | "itertools.groupby"
+        | "itertools.compress" => 0,
+        "builtins.map"
+        | "builtins.filter"
+        | "itertools.starmap"
+        | "itertools.takewhile"
+        | "itertools.dropwhile"
+        | "itertools.filterfalse" => 1,
+        _ => return Vec::new(),
+    };
+    args.get(from..).unwrap_or_default().to_vec()
+}
+
+/// The blocks of the `for` loop stepping the iterator `iter` from which the loop goes on to its
+/// next step: those reaching the loop's header without leaving the loop, on normal or exception
+/// edges.
+fn continuing_body(f: &IrFunction, iter: VarId) -> Option<Vec<BlockId>> {
+    let lp = f.loops.iter().find(|lp| {
+        f.block(lp.header)
+            .insts
+            .iter()
+            .any(|i| matches!(i.kind, InstKind::IterNext { iter: it, .. } if it == iter))
+    })?;
+    let in_loop: FxHashSet<BlockId> = lp.body.iter().copied().collect();
+    let next = |b: BlockId| {
+        let block = f.block(b);
+        let mut succs = block.terminator.successors();
+        succs.extend(block.exc_target);
+        succs
+    };
+    let reaches_header = |start: BlockId| {
+        let mut seen: FxHashSet<BlockId> = FxHashSet::default();
+        let mut stack = next(start);
+        while let Some(b) = stack.pop() {
+            if b == lp.header {
+                return true;
+            }
+            if in_loop.contains(&b) && seen.insert(b) {
+                stack.extend(next(b));
+            }
+        }
+        false
+    };
+    Some(
+        lp.body
+            .iter()
+            .copied()
+            .filter(|b| *b != lp.header && reaches_header(*b))
+            .collect(),
+    )
+}
