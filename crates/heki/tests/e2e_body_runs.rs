@@ -1088,7 +1088,8 @@ fn reported_and_marked(name: &str, files: &[(&str, &str)], rules: &[&str]) -> (M
 }
 
 /// What runs where a generator is made and iterated: the implementation behind
-/// `typing.overload` signatures, stepping by `any` / `all`, and a generator a property returns.
+/// `typing.overload` signatures, stepping by `any` / `all`, a generator a property returns, and
+/// one of several generators a branch chooses.
 const DEFERRED: &str = r#"import time
 import typing
 
@@ -1132,6 +1133,21 @@ async def through_property(t: Table):
     list(t.rows)  # EFF101
     t.rows
     t.size
+
+
+async def chosen(flag):
+    it = rows(1) if flag else rows(2)
+    list(it)  # EFF101
+
+
+async def chosen_or_empty(flag):
+    it = rows(1) if flag else []
+    list(it)  # EFF101
+
+
+async def chosen_not_iterated(flag):
+    it = rows(1) if flag else rows(2)
+    return it
 "#;
 
 #[test]
