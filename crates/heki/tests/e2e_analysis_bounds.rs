@@ -198,6 +198,65 @@ fn copies_around_a_loop_no_path_enters_form_no_cycle() {
     check_within(&p, Duration::from_secs(20));
 }
 
+/// `MUT112` selected (it reads the `is` tests of a function's branches).
+const MUT112_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT112\"]\n";
+
+/// Functions whose branches all test the last of a long chain of copies of one `is` test
+/// (`c3000 = c2999`, `if c3000:`): the test each copy is, through the chain, is found once per
+/// value for all the branches.
+#[test]
+fn branches_on_a_long_copy_chain_of_an_is_test_read_it_once() {
+    let links = 3_000;
+    let mut lines = Vec::new();
+    for k in 0..4 {
+        lines.push(format!("def chain{k}(x):"));
+        lines.push("    c0 = x is None".to_owned());
+        for i in 1..=links {
+            lines.push(format!("    c{i} = c{}", i - 1));
+        }
+        for _ in 0..links {
+            lines.push(format!("    if c{links}:"));
+            lines.push("        x = []".to_owned());
+        }
+        lines.push(String::new());
+        lines.push(String::new());
+    }
+    let p = Project::new("bounds_is_test_copy_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    check_within(&p, Duration::from_secs(20));
+}
+
+/// A function testing one value against `None` before each of many conditional expressions over
+/// the last of a long chain of its copies: each phi input finds the tests it is on a side of by
+/// the walk up the dominator tree from its edge, once per edge, and the value a copy copies
+/// once per chain.
+#[test]
+fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
+    let tests = 600;
+    let mut lines = vec!["def guards(x, flag):".to_owned(), "    a0 = x".to_owned()];
+    for i in 1..=tests {
+        lines.push(format!("    a{i} = a{}", i - 1));
+    }
+    for k in 0..tests {
+        lines.push("    if x is None:".to_owned());
+        lines.push("        raise ValueError(\"x is required\")".to_owned());
+        lines.push(format!("    y{k} = [] if flag else a{tests}"));
+    }
+    lines.push(format!("    y{}.append(1)", tests - 1));
+    let p = Project::new("bounds_is_test_sides");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let lines: Vec<u64> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT112")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![2 + tests as u64 + 3 * tests as u64 + 1]);
+}
+
 /// Comparisons whose two operands are one value (`b1 = b0 == b0`), under an invalidation
 /// contract: whether a branch depends on a flag, and the flag values on each edge, are decided
 /// once per value instead of once per path to it.
