@@ -1440,3 +1440,59 @@ fn connection_options_decide_where_the_connection_is_made() {
         ]
     );
 }
+
+const SYNC_WAITS: &str = r#"import concurrent.futures
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+
+def drain(q: queue.Queue):
+    return q.get()
+
+
+async def tp_waits(event: threading.Event, lock: threading.Lock, q: queue.Queue, worker: threading.Thread):
+    event.wait()
+    lock.acquire()
+    drain(q)
+    worker.join(5)
+
+
+async def tp_futures(pool: ThreadPoolExecutor, job):
+    future = pool.submit(job)
+    future.result()
+    concurrent.futures.wait([future])
+
+
+async def tn_waits_that_return_at_once(event: threading.Event, lock: threading.Lock, q: queue.Queue, pool: ThreadPoolExecutor):
+    event.wait(0)
+    event.wait(timeout=0.0)
+    lock.acquire(blocking=False)
+    lock.acquire(False)
+    q.get(block=False)
+    q.get_nowait()
+    q.put(1, False)
+    pool.shutdown(wait=False)
+"#;
+
+/// Waiting on a thread, a lock, an event, a queue, or a future blocks the event loop, unless the
+/// call passes a zero timeout or does not block.
+#[test]
+fn synchronous_waits_block_unless_they_return_at_once() {
+    assert_eq!(
+        check("catalog_sync_waits", "app/waits.py", SYNC_WAITS, "EFF101"),
+        vec![
+            d(12, "EFF101", "tp_waits", "threading.Event.wait"),
+            d(13, "EFF101", "tp_waits", "threading.Lock.acquire"),
+            d(14, "EFF101", "tp_waits", "queue.Queue.get"),
+            d(15, "EFF101", "tp_waits", "threading.Thread.join"),
+            d(
+                20,
+                "EFF101",
+                "tp_futures",
+                "concurrent.futures.Future.result"
+            ),
+            d(21, "EFF101", "tp_futures", "concurrent.futures.wait"),
+        ]
+    );
+}

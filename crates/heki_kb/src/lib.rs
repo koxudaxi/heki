@@ -1510,7 +1510,74 @@ mod tests {
             ),
         ];
         required.extend(pandas_url_readers);
+        required.extend(synchronous_waits());
         required
+    }
+
+    /// Waits on the calling thread, with the arguments that make them return at once.
+    fn synchronous_waits() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let zero = |arg, param: &str| ArgCase {
+            arg: Some(arg),
+            param: Some(param.into()),
+            equals: Some(ArgLiteral::Int(0)),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let off = |arg, param: &str| ArgCase {
+            equals: Some(ArgLiteral::Bool(false)),
+            ..zero(arg, param)
+        };
+        let waits = |cases: Vec<ArgCase>| with_cases(cases, entry(&[BlockingSync]));
+        let queues = ["queue.Queue", "queue.LifoQueue", "queue.PriorityQueue"];
+        let executors = [
+            "concurrent.futures.ThreadPoolExecutor",
+            "concurrent.futures.ProcessPoolExecutor",
+        ];
+        vec![
+            (
+                LOCK_CLASSES.iter().map(|c| format!("{c}.acquire")).collect(),
+                waits(vec![off(0, "blocking"), zero(1, "timeout")]),
+            ),
+            (
+                s(&[
+                    "threading.Condition.wait",
+                    "threading.Event.wait",
+                    "threading.Barrier.wait",
+                    "threading.Thread.join",
+                    "concurrent.futures.Future.result",
+                    "concurrent.futures.Future.exception",
+                ]),
+                waits(vec![zero(0, "timeout")]),
+            ),
+            (
+                s(&["threading.Condition.wait_for", "concurrent.futures.wait"]),
+                waits(vec![zero(1, "timeout")]),
+            ),
+            (
+                [
+                    queues.iter().map(|q| format!("{q}.get")).collect(),
+                    s(&["queue.SimpleQueue.get"]),
+                ]
+                .concat(),
+                waits(vec![off(0, "block"), zero(1, "timeout")]),
+            ),
+            (
+                queues.iter().map(|q| format!("{q}.put")).collect(),
+                waits(vec![off(1, "block"), zero(2, "timeout")]),
+            ),
+            (
+                queues.iter().map(|q| format!("{q}.join")).collect(),
+                entry(&[BlockingSync]),
+            ),
+            (
+                executors.iter().map(|e| format!("{e}.shutdown")).collect(),
+                waits(vec![off(0, "wait")]),
+            ),
+            (
+                executors.iter().map(|e| format!("{e}.submit")).collect(),
+                returning("concurrent.futures.Future", entry(&[])),
+            ),
+        ]
     }
 
     /// `EFF106` synchronous locks (instances held by `with`).
@@ -1592,6 +1659,7 @@ mod tests {
         "threading",
         "multiprocessing",
         "concurrent",
+        "queue",
         "requests",
         "httpx",
         "aiohttp",
