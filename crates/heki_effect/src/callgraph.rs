@@ -10,9 +10,9 @@ use crate::guards;
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
-    Facts, FuncKey, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn, ResultOf,
-    ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, TypedFieldWriteSite,
-    UnresolvedWriteSite, WriteKind,
+    Facts, FuncKey, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn, ReturnsNew,
+    Runner, Shared, SharedChain, SharedLine, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite,
+    WriteKind,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -513,6 +513,12 @@ fn return_flow_edge(
 /// (`EffectSummary::returns_results`) return, with the arguments bound to the parameters each
 /// callee returns in their place, through the calls whose results those arguments may be in
 /// turn. `sites` are the function's call sites.
+///
+/// Each call result is resolved once: what its callees return of their own and of the
+/// arguments' known origins, joined with what the calls its arguments may be the results of
+/// resolve to, to a fixpoint over those dependencies (a loop makes a call depend on itself).
+/// The fixpoint only joins, and each change adds a kind or a parameter to one call's value, so
+/// it ends after a bounded number of changes per call.
 fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut EffectSummary) {
     let at: FxHashMap<Span, &CallSite> = sites
         .iter()
@@ -521,26 +527,19 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
         .filter(|site| !site.project_callees().is_empty())
         .map(|site| (site.span, site))
         .collect();
-    let mut resolving: FxHashSet<Span> = FxHashSet::default();
-    for result in s.returns_results.clone() {
-        let o = result_origins(index, &at, result, &mut resolving);
-        s.returns_origins.join(o);
-    }
-}
-
-/// What the call `result` names returns (or an element of it), as [`returned_results`]
-/// resolves it. A call whose result its own argument may be (in a loop) adds nothing more
-/// while it is `resolving`.
-fn result_origins(
-    index: &ProjectIndex,
-    at: &FxHashMap<Span, &CallSite>,
-    result: ResultOf,
-    resolving: &mut FxHashSet<Span>,
-) -> Origins {
-    let mut out = Origins::default();
-    if let Some(site) = at.get(&result.span)
-        && resolving.insert(result.span)
-    {
+    // The calls, by position: their spans, what they resolve to so far, and the calls whose
+    // results their arguments may be, each with whether it reaches the call as an element.
+    let mut node: FxHashMap<Span, usize> = FxHashMap::default();
+    let mut value: Vec<Origins> = Vec::new();
+    let mut needs: Vec<Vec<(Span, bool)>> = Vec::new();
+    let mut pending: Vec<Span> = s.returns_results.iter().map(|r| r.span).collect();
+    while let Some(span) = pending.pop() {
+        if node.contains_key(&span) || !at.contains_key(&span) {
+            continue;
+        }
+        let site = at[&span];
+        let mut own = Origins::default();
+        let mut deps: Vec<(Span, bool)> = Vec::new();
         let callees = site
             .project_callees()
             .iter()
@@ -548,7 +547,7 @@ fn result_origins(
             .filter(|(_, callee)| runs_at_call(callee, site));
         for (bc, callee) in callees {
             let returned = callee.returns_origins;
-            out.join(Origins {
+            own.join(Origins {
                 params: 0,
                 elements: 0,
                 ..returned
@@ -561,21 +560,64 @@ fn result_origins(
                 let Some(local) = arg.origins.as_deref().filter(|_| itself || element) else {
                     continue;
                 };
-                let mut origins = local.known;
-                for inner in &local.results {
-                    origins.join(result_origins(index, at, *inner, resolving));
-                }
                 if itself {
-                    out.join(origins);
+                    own.join(local.known);
                 }
                 if element {
-                    out.join(origins.element());
+                    own.join(local.known.element());
+                }
+                for inner in &local.results {
+                    // An element of what the callee returns an element of is an element.
+                    if itself {
+                        deps.push((inner.span, inner.element));
+                    }
+                    if element {
+                        deps.push((inner.span, true));
+                    }
                 }
             }
         }
-        resolving.remove(&result.span);
+        pending.extend(deps.iter().map(|(span, _)| *span));
+        node.insert(span, value.len());
+        value.push(own);
+        needs.push(deps);
     }
-    if result.element { out.element() } else { out }
+    // The calls each call's result reaches as an argument, with whether as an element.
+    let mut users: Vec<Vec<(usize, bool)>> = vec![Vec::new(); value.len()];
+    for (user, deps) in needs.iter().enumerate() {
+        for (dep, element) in deps
+            .iter()
+            .filter_map(|(span, e)| Some((*node.get(span)?, *e)))
+        {
+            users[dep].push((user, element));
+        }
+    }
+    let mut work: Vec<usize> = (0..value.len()).collect();
+    while let Some(dep) = work.pop() {
+        for &(user, element) in &users[dep] {
+            let add = if element {
+                value[dep].element()
+            } else {
+                value[dep]
+            };
+            let before = value[user];
+            value[user].join(add);
+            if value[user] != before {
+                work.push(user);
+            }
+        }
+    }
+    let resolved: Vec<Origins> = s
+        .returns_results
+        .iter()
+        .filter_map(|result| {
+            let v = value[*node.get(&result.span)?];
+            Some(if result.element { v.element() } else { v })
+        })
+        .collect();
+    for o in resolved {
+        s.returns_origins.join(o);
+    }
 }
 
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts

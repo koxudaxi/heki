@@ -257,6 +257,45 @@ fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
     assert_eq!(lines, vec![2 + tests as u64 + 3 * tests as u64 + 1]);
 }
 
+/// A function returning the last of a long chain of calls, each handed the previous call's
+/// result as two of its arguments (`x40 = choose(x39, x39, flag)`), with `choose` returning
+/// either: what each call returns is resolved once, not once per path down the chain.
+#[test]
+fn returned_calls_handed_the_previous_result_twice_resolve_each_call_once() {
+    let calls = 40;
+    let mut lines = vec![
+        "def choose(a, b, flag):".to_owned(),
+        "    return a if flag else b".to_owned(),
+        String::new(),
+        String::new(),
+        "def chain(x0, flag):".to_owned(),
+    ];
+    for i in 1..=calls {
+        lines.push(format!("    x{i} = choose(x{}, x{}, flag)", i - 1, i - 1));
+    }
+    lines.push(format!("    return x{calls}"));
+    lines.extend(
+        [
+            "",
+            "",
+            "def use(shared, flag):",
+            "    x = chain(shared, flag) if flag else []",
+            "    x.append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_returned_call_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let lines: Vec<u64> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT112")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![6 + calls as u64 + 5]);
+}
+
 /// Comparisons whose two operands are one value (`b1 = b0 == b0`), under an invalidation
 /// contract: whether a branch depends on a flag, and the flag values on each edge, are decided
 /// once per value instead of once per path to it.
