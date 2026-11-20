@@ -589,6 +589,30 @@ def old_list_from_earlier_iteration(n):
     return out
 
 
+# ------------------------------------------------------------------------------
+# OPT110: a subscript with a `slice` object is a new list, not an element
+# ------------------------------------------------------------------------------
+def cx_subscript_with_slice_object(n):
+    keys = list(range(9))
+    s = slice(0, 1)
+    p = keys[s]
+    out = []
+    for _ in range(n):
+        out.append(p in keys)
+    return out
+
+
+def old_subscript_with_slice_object(n):
+    keys = list(range(9))
+    s = slice(0, 1)
+    p = keys[s]
+    out = []
+    keys_set = set(keys)
+    for _ in range(n):
+        out.append(p in keys_set)
+    return out
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -635,6 +659,7 @@ def main() -> int:
         (cx_tuple_or_element, old_tuple_or_element, lambda f: f(False, 0)),
         (cx_elements_after_escape, old_elements_after_escape, lambda f: f(1)),
         (cx_list_from_earlier_iteration, old_list_from_earlier_iteration, lambda f: f(3)),
+        (cx_subscript_with_slice_object, old_subscript_with_slice_object, lambda f: f(2)),
     ]
     lines = []
     for cx, old, call in pairs:

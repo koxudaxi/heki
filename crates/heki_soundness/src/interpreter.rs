@@ -372,6 +372,15 @@ impl FrameState {
     }
 }
 
+/// `seq[index]` reads one element: the index is an `int` or `bool`, not a `slice` object
+/// (`seq[s]` with `s = slice(0, 1)` is a new sequence).
+fn is_scalar_index(st: &FrameState, index: VarId) -> bool {
+    matches!(
+        st.exact_type(index),
+        Some(BuiltinKind::Int | BuiltinKind::Bool)
+    )
+}
+
 /// Containers whose element kinds are tracked.
 fn tracks_elems(kind: BuiltinKind) -> bool {
     matches!(
@@ -576,12 +585,13 @@ impl<'a> FnCtx<'a> {
             InstKind::IterNext { iter, .. } => self.yielded_kinds(st, *iter),
             InstKind::SubscriptLoad {
                 obj,
+                index,
                 is_slice: false,
                 ..
             } if matches!(
                 st.exact_type(*obj),
                 Some(BuiltinKind::List | BuiltinKind::Tuple)
-            ) =>
+            ) && is_scalar_index(st, *index) =>
             {
                 self.elems_of(st, *obj)
             }
@@ -984,12 +994,20 @@ impl<'a> FnCtx<'a> {
                     (Some(BuiltinKind::Str), false) => {
                         self.fresh(st, *dst, BuiltinKind::Str, site, span, ElemKinds::Unknown)
                     }
-                    (Some(BuiltinKind::Bytes), false) => {
+                    (Some(BuiltinKind::Bytes), false) if is_scalar_index(st, *index) => {
                         self.fresh(st, *dst, BuiltinKind::Int, site, span, ElemKinds::Unknown)
                     }
-                    (Some(BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Dict), false) => {
+                    (Some(BuiltinKind::Bytes), false) => {
+                        Self::opaque(st, *dst, "item or slice of `bytes`", span)
+                    }
+                    (
+                        Some(k @ (BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Dict)),
+                        false,
+                    ) => {
+                        let element = k == BuiltinKind::Dict || is_scalar_index(st, *index);
                         let single = self
                             .elems_of(st, *obj)
+                            .filter(|_| element)
                             .and_then(KindMask::single)
                             .filter(|k| !is_mutable(*k));
                         st.define(

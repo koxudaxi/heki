@@ -547,6 +547,18 @@ def probes_measured_first(n):
     return hits
 
 
+def probe_by_index(n):
+    """`keys[True]` reads one `int` element."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    keys = list(range(n + 2))
+    probe = keys[True]
+    hits = []
+    for _ in range(n):
+        if probe in allowed:
+            hits.append(probe)
+    return hits
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -613,6 +625,7 @@ def main() -> int:
             run(probes_from_a_list, n),
             run(probes_from_either_list, n, n % 2),
             run(probes_measured_first, n),
+            run(probe_by_index, n),
         ]
     print("\n".join(lines))
     return 0
