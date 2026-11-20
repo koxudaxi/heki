@@ -2166,28 +2166,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.switch_to(merge_bb);
                 self.read_local_ssa(&temp_name, merge_bb, span)
             }
-            Expr::Compare(c) => {
-                // Chained comparisons left-to-right (`operands[0] op[0] operands[1] ...`); the
-                // parser always produces at least two operands.
-                let mut lhs = self.lower_expr(&c.operands[0]);
-                let mut last_res = lhs;
-                for (op, rhs_expr) in c.ops.iter().zip(&c.operands[1..]) {
-                    let rhs = self.lower_expr(rhs_expr);
-                    let dst = self.fresh_var(None);
-                    self.emit(
-                        InstKind::Compare {
-                            dst,
-                            op: map_cmpop(*op),
-                            lhs,
-                            rhs,
-                        },
-                        span,
-                    );
-                    lhs = rhs;
-                    last_res = dst;
-                }
-                last_res
-            }
+            Expr::Compare(c) => self.lower_compare(c),
             Expr::If(if_expr) => {
                 let temp_name = format!(".ifexpr_{}", self.var_names.len());
                 let cond = self.lower_expr(&if_expr.test);
@@ -2411,6 +2390,76 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.emit_const(ConstLiteral::Other, span)
             }
         }
+    }
+
+    /// `a < b < c` is `a < b and b < c` with `b` evaluated once: each comparison but the last
+    /// branches to the result on a false value before the next operand runs. Each comparison
+    /// spans its own two operands (the first and the last also the expression's parentheses).
+    fn lower_compare(&mut self, c: &'a ast::ExprCompare) -> VarId {
+        let whole = Span::from(c.range);
+        if let ([op], [left, right]) = (&*c.ops, &*c.operands) {
+            let lhs = self.lower_expr(left);
+            let rhs = self.lower_expr(right);
+            let dst = self.fresh_var(None);
+            self.emit(
+                InstKind::Compare {
+                    dst,
+                    op: map_cmpop(*op),
+                    lhs,
+                    rhs,
+                },
+                whole,
+            );
+            return dst;
+        }
+        let last = c.ops.len() - 1;
+        let result_name = format!(".compare_{}", self.var_names.len());
+        let merge_bb = self.new_block(false);
+        let mut lhs = self.lower_expr(&c.operands[0]);
+        for (i, (op, rhs_expr)) in c.ops.iter().zip(&c.operands[1..]).enumerate() {
+            let rhs = self.lower_expr(rhs_expr);
+            let link = Span {
+                start: if i == 0 {
+                    whole.start
+                } else {
+                    Span::from(c.operands[i].range()).start
+                },
+                end: if i == last {
+                    whole.end
+                } else {
+                    Span::from(rhs_expr.range()).end
+                },
+            };
+            let dst = self.fresh_var(None);
+            self.emit(
+                InstKind::Compare {
+                    dst,
+                    op: map_cmpop(*op),
+                    lhs,
+                    rhs,
+                },
+                link,
+            );
+            self.write_local(&result_name, self.cur_bb, dst);
+            if i == last {
+                self.terminate(Terminator::Jump(merge_bb));
+            } else {
+                let next_bb = self.new_block(true);
+                self.terminate_at(
+                    Terminator::Branch {
+                        cond: dst,
+                        then_bb: next_bb,
+                        else_bb: merge_bb,
+                    },
+                    link,
+                );
+                self.switch_to(next_bb);
+                lhs = rhs;
+            }
+        }
+        self.seal_block(merge_bb);
+        self.switch_to(merge_bb);
+        self.read_local_ssa(&result_name, merge_bb, whole)
     }
 
     fn lower_call(&mut self, call: &'a ast::ExprCall, is_awaited: bool) -> VarId {

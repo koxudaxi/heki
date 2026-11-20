@@ -1365,14 +1365,20 @@ impl<'a, 'c> Rules<'a, 'c> {
         Some((ls, indentation(self.m.source, ls).to_owned()))
     }
 
-    /// Hoist `<name> = <expr>` before the loop and replace `replace` with `<name>`.
+    /// Hoist `<name> = <expr>` before the loop and replace `replace`, the source of
+    /// `replaced`, with `<name>`. The middle operand of a chained comparison is also the next
+    /// comparison's operand: replacing its text would change that one too.
     fn hoist_edits(
         &self,
         lp: &NaturalLoop,
         name: &str,
         expr: &str,
         replace: Span,
+        replaced: VarId,
     ) -> Vec<TextEdit> {
+        if self.f().is_shared_chain_operand(replaced) {
+            return Vec::new();
+        }
         let Some((ls, indent)) = self.for_stmt(lp) else {
             return Vec::new();
         };
@@ -1453,7 +1459,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             && let Some(rspan) = self.container_name_span(cmp.span, &name)
         {
             let h = self.m.fresh_name(&format!("{name}_set"));
-            edits = self.hoist_edits(lp, &h, &format!("set({name})"), rspan);
+            edits = self.hoist_edits(lp, &h, &format!("set({name})"), rspan, lst);
         }
         Some(self.candidate(
             OptRule::Opt110,
@@ -1578,7 +1584,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                 _ => format!("hoisted_{callee}"),
             };
             let h = self.m.fresh_name(&base);
-            self.hoist_edits(lp, &h, text, call.span)
+            self.hoist_edits(lp, &h, text, call.span, rebuilt)
         });
         Some(self.candidate(
             OptRule::Opt130,
@@ -1708,7 +1714,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .is_some_and(|t| squash(t) == format!("{name}.append({pn})"))
         {
             let h = self.m.fresh_name(&format!("{name}_set"));
-            let mut e = self.hoist_edits(lp, &h, &format!("set({name})"), rspan);
+            let mut e = self.hoist_edits(lp, &h, &format!("set({name})"), rspan, seen);
             if !e.is_empty() {
                 e.push(TextEdit {
                     span: Span {

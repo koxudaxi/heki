@@ -434,6 +434,40 @@ def old_class_keyword_reaches_user_code(items):
     return Recorder.seen[-1]
 
 
+# ------------------------------------------------------------------------------
+# A chained comparison stops at its first false link
+# ------------------------------------------------------------------------------
+def cx_chained_comparison_short_circuits(items, acc):
+    3 < 2 == (acc := [])
+    for x in items:
+        acc = acc + [x]
+    return len(acc)
+
+
+def old_chained_comparison_short_circuits(items, acc):
+    3 < 2 == (acc := [])
+    for x in items:
+        acc.append(x)
+    return len(acc)
+
+
+def cx_membership_in_chained_comparison(n):
+    keys = list(range(9))
+    hit = None
+    for i in range(n):
+        hit = i in keys in keys
+    return hit
+
+
+def old_membership_in_chained_comparison(n):
+    keys = list(range(9))
+    hit = None
+    keys_set = set(keys)
+    for i in range(n):
+        hit = i in keys in keys_set
+    return hit
+
+
 def run(call, fn):
     try:
         return repr(call(fn))
@@ -499,6 +533,12 @@ def main() -> int:
                 (cx_class_keyword_reaches_user_code, old_class_keyword_reaches_user_code),
             ]
         ],
+        (
+            cx_chained_comparison_short_circuits,
+            old_chained_comparison_short_circuits,
+            with_owned(list),
+        ),
+        (cx_membership_in_chained_comparison, old_membership_in_chained_comparison, lambda f: f(1)),
     ]
     lines = []
     for cx, old, call in pairs:

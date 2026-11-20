@@ -1209,6 +1209,23 @@ const IR_COUNTEREXAMPLES: &[Expect] = &[
     ("cx_type_parameter_bound_keeps_value", CAPTURED),
     ("cx_type_alias_keeps_value", CAPTURED),
     ("cx_class_keyword_reaches_user_code", CAPTURED),
+    // `3 < 2` stops the chain before the assignment expression runs.
+    ("cx_chained_comparison_short_circuits", &[]),
+    // The middle `keys` is also the second comparison's operand: no edit may replace it.
+    (
+        "cx_membership_in_chained_comparison",
+        &[
+            ("OPT110", V::Hand),
+            (
+                "OPT110",
+                V::Blocked("HashConsistentProbe(keys): `keys` may have a custom"),
+            ),
+        ],
+    ),
+    (
+        "old_membership_in_chained_comparison",
+        &[("OPT110", V::Hand)],
+    ),
 ];
 
 const CAPTURED: &[(&str, V)] = &[(
@@ -1255,6 +1272,28 @@ fn string_annotations_keep_nothing() {
         "sound_string_annotations",
         &[("cases.py", src)],
         &[("tagged", &[("OPT101", V::Fix(&["acc.append(x)"]))])],
+        true,
+    );
+}
+
+#[test]
+fn the_last_operand_of_a_chained_comparison_is_its_own() {
+    // `i in keys == keys` would become `i in keys_set == keys`, which changes the second
+    // comparison; the last operand of `0 < i in keys` belongs to one comparison only.
+    let src = "def shared(n):\n    keys = list(range(9))\n    hit = None\n    for i in range(n):\n        hit = i in keys == keys\n    return hit\n\n\ndef last(n):\n    keys = list(range(9))\n    hit = None\n    for i in range(n):\n        hit = 0 < i in keys\n    return hit\n\n\nprint(shared(1), last(2))\n";
+    check_module(
+        "sound_chain_operands",
+        &[("cases.py", src)],
+        &[
+            ("shared", &[("OPT110", V::Hand)]),
+            (
+                "last",
+                &[(
+                    "OPT110",
+                    V::Fix(&["    keys_set = set(keys)\n", "keys_set"]),
+                )],
+            ),
+        ],
         true,
     );
 }

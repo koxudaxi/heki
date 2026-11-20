@@ -146,3 +146,52 @@ async def module_function(items):
         "{captured}"
     );
 }
+
+// =================================================================== evaluation order
+
+#[test]
+fn a_chained_comparison_evaluates_each_operand_once_and_stops_at_a_false_link() {
+    let src = "def chain(a, b, c):\n    return a < (b) <= c\n";
+    let ir = dump_ir("ir_chained_compare", src, "py315");
+    let f = function(&ir, "chain");
+    let compares: Vec<&Value> = f["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .filter(|i| i["kind"].get("Compare").is_some())
+        .collect();
+    let text = |i: &Value| {
+        let (s, e) = (
+            i["span"]["start"].as_u64().unwrap(),
+            i["span"]["end"].as_u64().unwrap(),
+        );
+        &src[s as usize..e as usize]
+    };
+    assert_eq!(
+        compares.iter().map(|i| text(i)).collect::<Vec<_>>(),
+        ["a < (b", "b) <= c"]
+    );
+    // `b` is evaluated once: the second comparison reads the first one's right operand.
+    assert_eq!(
+        compares[0]["kind"]["Compare"]["rhs"],
+        compares[1]["kind"]["Compare"]["lhs"]
+    );
+    // The first comparison's block branches to the second or to the result.
+    let first_block = f["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| {
+            b["insts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i == compares[0])
+        })
+        .unwrap();
+    assert!(
+        first_block["terminator"].get("Branch").is_some(),
+        "{first_block:#}"
+    );
+}

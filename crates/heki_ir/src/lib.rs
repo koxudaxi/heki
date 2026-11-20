@@ -709,6 +709,29 @@ impl IrFunction {
         }
     }
 
+    /// Whether `var` is the middle operand of a chained comparison (`a < var < c`): two
+    /// comparisons read the one evaluation of its expression, so its source text is an operand
+    /// of both.
+    pub fn is_shared_chain_operand(&self, var: VarId) -> bool {
+        let links: Vec<(Span, VarId, VarId)> = self
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(|i| match i.kind {
+                InstKind::Compare { lhs, rhs, .. } if lhs == var || rhs == var => {
+                    Some((i.span, lhs, rhs))
+                }
+                _ => None,
+            })
+            .collect();
+        links.iter().any(|&(left, _, rhs)| {
+            rhs == var
+                && links.iter().any(|&(right, lhs, _)| {
+                    lhs == var && right.start < left.end && left.start < right.end
+                })
+        })
+    }
+
     /// Whether operand `index` of the display or call defining `dst` is written with `*`.
     pub fn is_starred(&self, dst: VarId, index: usize) -> bool {
         self.starred
