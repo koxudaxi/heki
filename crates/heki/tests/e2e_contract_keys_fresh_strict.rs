@@ -866,6 +866,41 @@ fn strict_mode_reports_the_writes_heki_cannot_tie_to_a_class() {
     );
 }
 
+/// Objects of unknown class that `isinstance` tests narrow to a class of the standard library.
+const NARROWED: &str = r#"from dataclasses import Field
+
+
+def narrowed(default: object, name: str) -> None:
+    if isinstance(default, Field):
+        default.name = name
+
+
+def returns_unless(default, name: str) -> None:
+    if not isinstance(default, Field):
+        return
+    default.name = name
+
+
+def not_narrowed(default: object, name: str) -> None:
+    if isinstance(default, Field):
+        pass
+    default.name = name
+"#;
+
+#[test]
+fn strict_mode_knows_the_class_an_isinstance_test_narrows_to() {
+    let p = strict_project("strict_narrowed", true);
+    p.write("pkg/narrowed.py", NARROWED);
+    let narrowed: Vec<_> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|x| x.0 == "pkg/narrowed.py")
+        .collect();
+    assert_eq!(
+        narrowed,
+        vec![d("pkg/narrowed.py", 18, "MUT205", "not_narrowed", "name")]
+    );
+}
+
 #[test]
 fn strict_findings_are_counted_by_the_ratchet_baseline() {
     let p = strict_project("strict_baseline", true);

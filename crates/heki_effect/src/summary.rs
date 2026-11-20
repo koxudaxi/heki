@@ -2366,10 +2366,10 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Whether heki knows nothing of the class of `var`'s object: no inferred value, or an
-    /// annotation that says nothing (`Any`, `object`).
+    /// Whether heki knows nothing of the class of `var`'s object here: no inferred value, or an
+    /// annotation that says nothing (`Any`, `object`) that no `isinstance` test narrows.
     fn unknown_class(&self, var: VarId) -> bool {
-        match self.types.get(&var) {
+        match self.val(var) {
             None => true,
             Some(Val::Inst(c)) => {
                 matches!(
