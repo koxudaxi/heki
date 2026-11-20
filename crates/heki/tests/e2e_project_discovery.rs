@@ -208,3 +208,32 @@ fn type_checking_guards_resolve_to_the_typing_flag_on_every_clause() {
         .collect();
     assert_eq!(reported, ["flags.py"], "{stdout}");
 }
+
+#[test]
+fn a_later_definition_replaces_an_imported_name() {
+    let p = Project::new("disc_import_then_def");
+    let call = "\n\nasync def go():\n    sleep(0)\n";
+    // The local no-op replaces the import before any call can run.
+    p.write(
+        "replaced.py",
+        &format!("from time import sleep\n\n\ndef sleep(n):\n    pass\n{call}"),
+    )
+    // A conditional fallback, or a definition before the import, does not.
+    .write(
+        "fallback.py",
+        &format!(
+            "from time import sleep\n\nif not sleep:\n    def sleep(n):\n        pass\n{call}"
+        ),
+    )
+    .write(
+        "imported_last.py",
+        &format!("def sleep(n):\n    pass\n\n\nfrom time import sleep\n{call}"),
+    );
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    let reported: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.split(':').next().unwrap())
+        .collect();
+    assert_eq!(reported, ["fallback.py", "imported_last.py"], "{stdout}");
+}

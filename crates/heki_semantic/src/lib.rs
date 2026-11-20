@@ -6,7 +6,7 @@
 use heki_ast::raw_ast::{self as ast, Expr, ExprContext, Pattern, Stmt, TypeParam};
 use heki_ast::{LineIndex, ParsedModule, Ranged, Span};
 use heki_env::RuntimeProfile;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -71,6 +71,11 @@ pub struct ModuleImport {
     pub is_from: bool,
     pub is_lazy: bool,
     pub in_type_checking: bool,
+    /// A later statement of the module body that always runs rebinds `bound_name`
+    /// (`from time import sleep`, then `def sleep(n): ...`): once the module has run, the name
+    /// no longer holds the import.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overridden: bool,
     pub span: Span,
 }
 
@@ -463,6 +468,24 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Mark the module-scope imports a later module-body statement always rebinds.
+    fn mark_overridden_imports(&mut self, suite: &[Stmt]) {
+        let mut rebinds: FxHashMap<&str, u32> = FxHashMap::default();
+        let mut names = Vec::new();
+        for stmt in suite {
+            names.clear();
+            unconditional_bindings(stmt, &mut names);
+            for name in &names {
+                rebinds.insert(name, stmt.range().start().to_u32());
+            }
+        }
+        for imp in self.imports.iter_mut().filter(|i| i.scope == ScopeId(0)) {
+            imp.overridden = rebinds
+                .get(imp.bound_name.as_str())
+                .is_some_and(|&last| last > imp.span.end);
+        }
+    }
+
     /// Record what a module-scope statement binds `name` to, for the `TYPE_CHECKING` guards
     /// later statements test.
     fn note_guard_binding(&mut self, name: &str, binding: GuardBinding) {
@@ -749,6 +772,7 @@ impl<'a> Analyzer<'a> {
                         is_from: false,
                         is_lazy: imp.is_lazy,
                         in_type_checking: self.in_type_checking,
+                        overridden: false,
                         span: Span::from(alias.range),
                     });
                 }
@@ -788,6 +812,7 @@ impl<'a> Analyzer<'a> {
                         is_from: true,
                         is_lazy: imp.is_lazy,
                         in_type_checking: self.in_type_checking,
+                        overridden: false,
                         span: Span::from(alias.range),
                     });
                 }
@@ -1626,7 +1651,42 @@ pub fn analyze_module(
 ) -> SemanticModel {
     let mut analyzer = Analyzer::new(source, profile, module.suite());
     analyzer.visit_suite(module.suite());
+    analyzer.mark_overridden_imports(module.suite());
     analyzer.resolve_all()
+}
+
+/// The names a module-body statement always binds when it runs (not those of its nested
+/// suites, which may not run).
+fn unconditional_bindings<'s>(stmt: &'s Stmt, out: &mut Vec<&'s str>) {
+    fn targets<'s>(e: &'s Expr, out: &mut Vec<&'s str>) {
+        match e {
+            Expr::Name(n) => out.push(n.id.as_str()),
+            Expr::Tuple(t) => t.elts.iter().for_each(|e| targets(e, out)),
+            Expr::List(l) => l.elts.iter().for_each(|e| targets(e, out)),
+            Expr::Starred(st) => targets(&st.value, out),
+            _ => {}
+        }
+    }
+    match stmt {
+        Stmt::FunctionDef(f) => out.push(f.name.as_str()),
+        Stmt::ClassDef(c) => out.push(c.name.as_str()),
+        Stmt::Assign(a) => a.targets.iter().for_each(|t| targets(t, out)),
+        Stmt::AnnAssign(a) if a.value.is_some() => targets(&a.target, out),
+        Stmt::AugAssign(a) => targets(&a.target, out),
+        Stmt::TypeAlias(t) => targets(&t.name, out),
+        Stmt::Delete(d) => d.targets.iter().for_each(|t| targets(t, out)),
+        Stmt::Import(i) => out.extend(i.names.iter().map(|a| {
+            a.asname
+                .as_ref()
+                .map_or_else(|| a.name.split('.').next().unwrap_or(""), |n| n.as_str())
+        })),
+        Stmt::ImportFrom(i) => out.extend(
+            i.names
+                .iter()
+                .map(|a| a.asname.as_ref().unwrap_or(&a.name).as_str()),
+        ),
+        _ => {}
+    }
 }
 
 #[cfg(test)]

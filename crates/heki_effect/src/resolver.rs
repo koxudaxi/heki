@@ -1468,7 +1468,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls
                 .type_checking_imports
                 .insert(imp.bound_name.clone(), target);
-        } else {
+        } else if !imp.overridden {
             decls.imports.insert(imp.bound_name.clone(), target);
         }
     }
