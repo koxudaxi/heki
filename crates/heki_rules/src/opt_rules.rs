@@ -492,14 +492,14 @@ impl<'a> Defs<'a> {
         false
     }
 
-    /// Whether the comparison `cmp` selects the pairs a join keeps: through `Copy` and `and` it
-    /// decides a branch; it is never negated, never one alternative of an `or`, never picks a
-    /// value for every pair (`x if a == b else y`, an `else` assigning what the `then`
-    /// assigns), its true side never just continues the loop (`if a == b: continue` skips
-    /// the self-pairs of an all-pairs loop), and its false side does nothing: an `else` /
-    /// `elif` body, an `assert`'s failure, a `break` or a `return` there runs for the pairs an
-    /// index would skip (`if i == j: ... else: ...` and `assert a == b` check every pair).
-    fn selects_pairs(&self, cmp: VarId) -> bool {
+    /// Whether the comparison `cmp` selects the pairs a join keeps, in the inner loop `inner`:
+    /// through `Copy` and `and` it decides a branch; it is never negated, never one alternative
+    /// of an `or`, never picks a value for every pair (`x if a == b else y`, an `else` assigning
+    /// what the `then` assigns), its true side never just continues the loop (`if a == b:
+    /// continue` skips the self-pairs of an all-pairs loop), its false side does nothing of its
+    /// own ([`Self::idle_on_mismatch`]), and it is no `elif` after an `if` handling other pairs
+    /// ([`Self::after_other_work`]).
+    fn selects_pairs(&self, cmp: VarId, inner: &NaturalLoop) -> bool {
         let alias = forward_aliases(self.f, &[cmp]);
         let negated = self.f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
             matches!(&i.kind, InstKind::UnaryOp { op: UnaryOpKind::Not, operand, .. } if alias.contains(operand))
@@ -541,7 +541,7 @@ impl<'a> Defs<'a> {
             && !branches.is_empty()
             && branches.iter().all(|&(from, then_bb, else_bb)| {
                 !self.continues(from, then_bb)
-                    && !self.false_side_works(&preds, else_bb)
+                    && self.idle_on_mismatch(inner, then_bb, else_bb)
                     && !self.after_other_work(&preds, from)
             })
     }
@@ -557,19 +557,36 @@ impl<'a> Defs<'a> {
             if else_bb == from && then_bb != from && !self.continues(*p, then_bb))
     }
 
-    /// Whether the false side of a branch, block `to`, does something: it is entered from the
-    /// branch only (no `if` without `else` merges there) and runs code, raises, returns, or
-    /// leaves the loop, rather than going straight on (`else: pass`, `else: continue`).
-    fn false_side_works(&self, preds: &[Vec<BlockId>], to: BlockId) -> bool {
-        if preds[to.0 as usize].len() != 1 {
-            return false;
+    /// Whether a pair whose keys differ does nothing of its own: the false edge `else_bb` of a
+    /// branch on the comparison reaches, through blocks without instructions, either the next
+    /// pair of the inner loop `inner` or a block of the loop the true edge `then_bb` reaches too
+    /// (what every pair runs after the `if`; the merge of an `and` is one). An `else` with work,
+    /// an `assert` raising on a mismatch, and statements after a `break` the match takes all
+    /// need every pair: an index of the inner collection would skip them.
+    fn idle_on_mismatch(&self, inner: &NaturalLoop, then_bb: BlockId, else_bb: BlockId) -> bool {
+        // The blocks of the inner loop a matching pair runs, without going round the loop.
+        let mut matched = FxHashSet::default();
+        let mut stack = vec![then_bb];
+        while let Some(b) = stack.pop() {
+            if b != inner.header && inner.body.contains(&b) && matched.insert(b) {
+                stack.extend(self.f.block(b).terminator.successors());
+            }
         }
-        let b = self.f.block(to);
-        let goes_on = b.insts.is_empty()
-            && b.phis.is_empty()
-            && matches!(b.terminator, Terminator::Jump(t)
-                if !self.f.loops.iter().any(|lp| lp.exits.contains(&t)));
-        !goes_on
+        let mut seen = FxHashSet::default();
+        let mut b = else_bb;
+        loop {
+            if b == inner.header || matched.contains(&b) {
+                return true;
+            }
+            let block = self.f.block(b);
+            if !inner.body.contains(&b) || !seen.insert(b) || !block.insts.is_empty() {
+                return false;
+            }
+            let Terminator::Jump(next) = block.terminator else {
+                return false;
+            };
+            b = next;
+        }
     }
 
     /// Whether block `to`, entered from block `from`, only continues a loop containing `from`.
@@ -587,6 +604,72 @@ impl<'a> Defs<'a> {
             var = *src;
         }
         matches!(self.kind(var), Some(InstKind::IterNext { .. }))
+    }
+
+    /// The unhashable builtin type (`list`, `dict`, `set`, `bytearray`) the key `var` is known
+    /// to have: its inferred type or, for a whole loop element, the type of every element of
+    /// the displays the loop iterates (through copies and phis), when they all are such.
+    fn unhashable(&self, var: VarId, types: &FxHashMap<VarId, Val>) -> Option<&'static str> {
+        const UNHASHABLE: &[&str] = &["list", "dict", "set", "bytearray"];
+        if let Some(Val::Inst(t)) = types.get(&var)
+            && let Some(name) = t.strip_prefix("builtins.")
+        {
+            return UNHASHABLE.iter().find(|u| **u == name).copied();
+        }
+        let mut elem = var;
+        while let Some(InstKind::Copy { src, .. }) = self.kind(elem) {
+            elem = *src;
+        }
+        let Some(InstKind::IterNext { iter, .. }) = self.kind(elem) else {
+            return None;
+        };
+        let &(iterable, _) = self.iterables.get(iter)?;
+        let mut kinds = Vec::new();
+        self.element_kinds(iterable, &mut FxHashSet::default(), &mut kinds)
+            .then(|| kinds.first().copied())
+            .flatten()
+    }
+
+    /// Collect the unhashable display kind of every element of the displays `var` may hold
+    /// (through copies and phis): `false` when it may hold another value or an element is not
+    /// such a display (a starred element included).
+    fn element_kinds(
+        &self,
+        var: VarId,
+        seen: &mut FxHashSet<VarId>,
+        kinds: &mut Vec<&'static str>,
+    ) -> bool {
+        if let Some((_, phi)) = self.phis.get(&var) {
+            return !seen.insert(var)
+                || phi
+                    .incoming
+                    .iter()
+                    .all(|(_, v)| self.element_kinds(*v, seen, kinds));
+        }
+        match self.kind(var) {
+            Some(InstKind::Copy { src, .. }) => self.element_kinds(*src, seen, kinds),
+            Some(InstKind::AllocBuiltin {
+                kind: BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Set,
+                elems,
+                ..
+            }) => elems.iter().all(|e| {
+                let kind = match self.kind(*e) {
+                    Some(InstKind::AllocBuiltin {
+                        kind: BuiltinKind::List,
+                        ..
+                    }) => "list",
+                    Some(InstKind::AllocBuiltin {
+                        kind: BuiltinKind::Set,
+                        ..
+                    }) => "set",
+                    Some(InstKind::DictLiteral { .. }) => "dict",
+                    _ => return false,
+                };
+                kinds.push(kind);
+                true
+            }),
+            _ => false,
+        }
     }
 
     /// Source form of a loop-element value: `order.customer_id`, `row["id"]`, `pair[0]`, `k`.
@@ -650,6 +733,8 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
         }
         let defs = Defs::new(f);
         let sizes = Sizes::new(cx, &tcx, &no_types, f, unit);
+        // Inferred only for a function with a report.
+        let mut types: Option<FxHashMap<VarId, Val>> = None;
         // Both loops are data-sized `for` loops (inlined comprehensions included).
         let fors: Vec<ForLoop<'_>> = f
             .loops
@@ -683,7 +768,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                         continue;
                     };
                     if hit.as_ref().is_none_or(|h| inst.span.start < h.span.start)
-                        && defs.selects_pairs(*dst)
+                        && defs.selects_pairs(*dst, inner.lp)
                     {
                         hit = Some(Join {
                             span: inst.span,
@@ -700,7 +785,20 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 let rhs = defs.element_text(unit.source, j.rhs);
                 let outer_iter = squash(slice(unit.source, j.outer.iter_span));
                 let inner_iter = squash(slice(unit.source, inner.iter_span));
-                let index = if defs.whole_element(j.inner_side) {
+                let types = types.get_or_insert_with(|| tcx.infer(f));
+                // A `set` or `dict` cannot hold an unhashable key.
+                let unhashable = [
+                    j.inner_side,
+                    if j.inner_side == j.lhs { j.rhs } else { j.lhs },
+                ]
+                .into_iter()
+                .find_map(|k| Some((k, defs.unhashable(k, types)?)));
+                let index = if let Some((k, kind)) = unhashable {
+                    let key = defs.element_text(unit.source, k);
+                    format!(
+                        "`{key}` is an unhashable `{kind}`, so index `{inner_iter}` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
+                    )
+                } else if defs.whole_element(j.inner_side) {
                     format!("build a `set` of `{inner_iter}` before the outer loop")
                 } else {
                     let key = defs.element_text(unit.source, j.inner_side);
