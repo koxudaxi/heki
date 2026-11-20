@@ -217,44 +217,71 @@ impl<'f> Flags<'f> {
             })
             .collect();
         let out = Self { consts, defs, phis };
+        // The operands of comparisons may share values (`b = a == a`): each value is decided
+        // once.
+        let mut decided = FxHashMap::default();
         let tested = f.blocks.iter().any(|b| match b.terminator {
-            Terminator::Branch { cond, .. } => out.depends_on_flag(cond, &flags),
+            Terminator::Branch { cond, .. } => out.depends_on_flag(cond, &flags, &mut decided),
             _ => false,
         });
         (out, tested)
     }
 
-    fn depends_on_flag(&self, v: VarId, flags: &rustc_hash::FxHashSet<VarId>) -> bool {
-        match self.defs.get(&v) {
+    fn depends_on_flag(
+        &self,
+        v: VarId,
+        flags: &rustc_hash::FxHashSet<VarId>,
+        decided: &mut FxHashMap<VarId, bool>,
+    ) -> bool {
+        if let Some(&known) = decided.get(&v) {
+            return known;
+        }
+        let depends = match self.defs.get(&v) {
             _ if flags.contains(&v) => true,
-            Some(InstKind::Copy { src, .. }) => self.depends_on_flag(*src, flags),
+            Some(InstKind::Copy { src, .. }) => self.depends_on_flag(*src, flags, decided),
             Some(InstKind::UnaryOp {
                 op: heki_ir::UnaryOpKind::Not,
                 operand,
                 ..
-            }) => self.depends_on_flag(*operand, flags),
+            }) => self.depends_on_flag(*operand, flags, decided),
             Some(InstKind::Compare { lhs, rhs, .. }) => {
-                self.depends_on_flag(*lhs, flags) || self.depends_on_flag(*rhs, flags)
+                self.depends_on_flag(*lhs, flags, decided)
+                    || self.depends_on_flag(*rhs, flags, decided)
             }
             _ => false,
-        }
+        };
+        decided.insert(v, depends);
+        depends
     }
 
     /// The value of `v` on a path with `env`, if known.
     fn value(&self, v: VarId, env: &FlagEnv) -> Option<bool> {
+        self.value_in(v, env, &mut FxHashMap::default())
+    }
+
+    /// [`Self::value`], deciding each value once (comparisons may share operands).
+    fn value_in(
+        &self,
+        v: VarId,
+        env: &FlagEnv,
+        decided: &mut FxHashMap<VarId, Option<bool>>,
+    ) -> Option<bool> {
         if let Some(b) = self.consts.get(&v) {
             return Some(*b);
         }
         if let Ok(i) = env.binary_search_by_key(&v, |(k, _)| *k) {
             return Some(env[i].1);
         }
-        match self.defs.get(&v)? {
-            InstKind::Copy { src, .. } => self.value(*src, env),
+        if let Some(&known) = decided.get(&v) {
+            return known;
+        }
+        let value = match self.defs.get(&v)? {
+            InstKind::Copy { src, .. } => self.value_in(*src, env, decided),
             InstKind::UnaryOp {
                 op: heki_ir::UnaryOpKind::Not,
                 operand,
                 ..
-            } => self.value(*operand, env).map(|b| !b),
+            } => self.value_in(*operand, env, decided).map(|b| !b),
             InstKind::Compare {
                 op:
                     op @ (heki_ir::CompareOpKind::Is
@@ -264,14 +291,18 @@ impl<'f> Flags<'f> {
                 lhs,
                 rhs,
                 ..
-            } => {
-                let equal = self.value(*lhs, env)? == self.value(*rhs, env)?;
-                let positive =
-                    matches!(op, heki_ir::CompareOpKind::Is | heki_ir::CompareOpKind::Eq);
-                Some(equal == positive)
-            }
+            } => self
+                .value_in(*lhs, env, decided)
+                .zip(self.value_in(*rhs, env, decided))
+                .map(|(l, r)| {
+                    let positive =
+                        matches!(op, heki_ir::CompareOpKind::Is | heki_ir::CompareOpKind::Eq);
+                    (l == r) == positive
+                }),
             _ => None,
-        }
+        };
+        decided.insert(v, value);
+        value
     }
 
     /// The flags known on entering block `to` from `from`, given those known in `from`.
