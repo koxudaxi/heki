@@ -1,6 +1,7 @@
 //! Rules reading the project calls the summaries resolved, end to end through the real binary:
 //! a call on a value an `isinstance` test narrows runs the narrowed class's method (`DATA101`,
-//! `MUT202`, `MUT106`).
+//! `MUT202`, `MUT106`), and a callable an offloading API runs on a worker thread is a call of it
+//! with the arguments after it (`acc = await asyncio.to_thread(grow, acc)`).
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# DATA101`); every other line must not be.
@@ -118,4 +119,37 @@ fn a_call_on_a_narrowed_value_runs_the_narrowed_class_method() {
         &[("pkg/narrowed.py", NARROWED)],
         &["DATA101", "MUT202", "MUT106"],
     );
+}
+
+const WORKER: &str = r#"import asyncio
+
+import numpy
+
+
+def step(acc):
+    numpy.append([0], 1)
+    return acc
+
+
+def grow(acc):
+    return numpy.append(acc, 1)
+
+
+async def on_worker(items):
+    acc = numpy.array([])
+    for _ in items:
+        acc = await asyncio.to_thread(grow, acc)  # DATA101
+    return acc
+
+
+async def on_worker_step(items):
+    acc = numpy.array([])
+    for _ in items:
+        acc = await asyncio.to_thread(step, acc)
+    return acc
+"#;
+
+#[test]
+fn a_callable_run_on_a_worker_takes_the_arguments_after_it() {
+    check_marks("worker_callees", &[("pkg/worker.py", WORKER)], &["DATA101"]);
 }

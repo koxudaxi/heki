@@ -38,7 +38,11 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             // argument that carries it (`acc = grow(acc)`, not `acc = step(acc)` where `step`
             // reallocates something else and returns `acc`).
             let hit = lc.updates.iter().find_map(|v| {
-                let inst = defs.get(v)?;
+                // An awaited call's value is the call's (`acc = await to_thread(grow, acc)`).
+                let inst = match &defs.get(v)?.kind {
+                    InstKind::Await { value, .. } => defs.get(value)?,
+                    _ => defs.get(v)?,
+                };
                 let call = CallInst::of(&inst.kind)?;
                 if !combines(f, &defs, &call, lc.phi_var) {
                     return None;
@@ -81,8 +85,8 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
     }
 }
 
-/// Whether the project call the call instruction `inst` makes (its call site among `sites`)
-/// returns a quadratic
+/// Whether the project call the call instruction `inst` makes (its call site among `sites`:
+/// on the caller's thread, or on a worker an offloading API runs it on) returns a quadratic
 /// reallocation of an argument that carries `previous` (as itself, through copies, or in a
 /// display): a callee's `reallocates_params`.
 fn reallocates_argument(
@@ -92,7 +96,8 @@ fn reallocates_argument(
     inst: &Inst,
     previous: VarId,
 ) -> bool {
-    let Some(call) = site_call(f, sites, inst, false) else {
+    let Some(call) = site_call(f, sites, inst, false).or_else(|| site_call(f, sites, inst, true))
+    else {
         return false;
     };
     let Callee::Project(keys, _) = &call.callee else {
