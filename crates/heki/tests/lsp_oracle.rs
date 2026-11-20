@@ -1589,6 +1589,7 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_shared_module_name());
     steps.extend(steps_boundary_calls());
     steps.extend(steps_recursive_snapshot());
+    steps.extend(steps_moved_lines());
     steps
 }
 
@@ -1664,6 +1665,18 @@ fn steps_recursive_snapshot() -> Vec<Step> {
         .present(&[("app/ping.py", "MUT103"), ("app/pong.py", "MUT103")]),
         Step::new("it stops mutating it", vec![save("app/ping.py", PING)])
             .absent(&[("app/ping.py", "MUT103"), ("app/pong.py", "MUT103")]),
+    ]
+}
+
+/// A call moves down a line, its byte span unchanged: the chain shown in another file moves
+/// with it.
+fn steps_moved_lines() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a comment above a blocking call becomes a blank line",
+            vec![save("app/slow.py", &SLOW.replace("    #x\n", "    #\n\n"))],
+        )
+        .present(&[("app/handler.py", "EFF101")]),
     ]
 }
 

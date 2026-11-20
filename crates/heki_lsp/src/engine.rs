@@ -57,6 +57,37 @@ pub struct EngineStats {
 #[derive(Debug, Clone)]
 struct FileMeta {
     module_name: String,
+    /// Where the file's call sites show in its text (the hops of call chains other files'
+    /// diagnostics show).
+    site_places: Vec<SitePlace>,
+}
+
+/// A span and the line and columns of both its ends: `(line, byte column, UTF-16 column)`, as
+/// the CLI and the LSP show a related location. A span can keep its bytes while its line
+/// changes (a comment above it turned into a blank line).
+type SitePlace = (heki_ast::Span, [(u32, u32, u32); 2]);
+
+/// The places of the call sites `index` holds for `path`, whose text is `source`.
+fn site_places(index: &ProjectIndex, path: &Path, source: &str) -> Vec<SitePlace> {
+    let lines = heki_ast::LineIndex::from_source(source);
+    let place = |offset: u32| {
+        let (line, column) = lines.line_col(offset);
+        let start = lines.line_start(line).unwrap_or(0) as usize;
+        let utf16 = source
+            .get(start..offset as usize)
+            .map_or(0, |t| t.encode_utf16().count());
+        (line, column, u32::try_from(utf16).unwrap_or(u32::MAX))
+    };
+    index
+        .files
+        .get(path)
+        .map(|f| {
+            f.call_sites
+                .iter()
+                .map(|s| (s.span, [place(s.span.start), place(s.span.end)]))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Result of re-analyzing one file.
@@ -185,6 +216,7 @@ impl Workspace {
                     f.path.clone(),
                     FileMeta {
                         module_name: f.module_name.clone(),
+                        site_places: site_places(&index, &f.path, &f.source),
                     },
                 )
             })
@@ -313,16 +345,6 @@ impl Workspace {
             .collect()
     }
 
-    /// Spans of the call sites indexed for `path` (the positions other files' call chains
-    /// show).
-    fn call_site_spans(&self, path: &Path) -> Vec<heki_ast::Span> {
-        self.index
-            .files
-            .get(path)
-            .map(|f| f.call_sites.iter().map(|s| s.span).collect())
-            .unwrap_or_default()
-    }
-
     /// Files whose summary or latest check read declarations in `change` (a re-export, a
     /// class's methods, bases, or attribute types, a property getter, a subclass): their names
     /// may resolve differently now.
@@ -442,19 +464,26 @@ impl Workspace {
         self.check_reads.keys().cloned().collect()
     }
 
-    /// Re-summarize one parsed file; returns the update and what changed in the declarations.
-    fn summarize(&mut self, parsed: &ParsedFile) -> (heki_effect::IncrementalUpdate, DeclKeys) {
-        self.files.insert(
-            parsed.path.clone(),
-            FileMeta {
-                module_name: parsed.module_name.clone(),
-            },
-        );
+    /// Re-summarize one parsed file; returns the update, what changed in the declarations, and
+    /// whether the places of its call sites changed.
+    fn summarize(
+        &mut self,
+        parsed: &ParsedFile,
+    ) -> (heki_effect::IncrementalUpdate, DeclKeys, bool) {
         let out =
             self.index
                 .reanalyze_module_cached(&parsed.input(), &self.env.kb, &mut self.decls);
+        let places = site_places(&self.index, &parsed.path, &parsed.source);
+        let before = self.files.insert(
+            parsed.path.clone(),
+            FileMeta {
+                module_name: parsed.module_name.clone(),
+                site_places: places,
+            },
+        );
+        let moved = before.is_none_or(|b| b.site_places != self.files[&parsed.path].site_places);
         self.stats.indexed_files = self.index.files.len();
-        out
+        (out.0, out.1, moved)
     }
 
     /// Files of the generators handed to the `changed` functions (`SiteRole::Through`): whether
@@ -657,8 +686,7 @@ impl Workspace {
         let callers_before = self.caller_view(&parsed.path);
         let chains_before = chain_facts(&self.index, &parsed.path);
         let ecosystem_before = self.ecosystem_view(&parsed.path);
-        let sites_before = self.call_site_spans(&parsed.path);
-        let (update, change) = self.summarize(&parsed);
+        let (update, change, sites_moved) = self.summarize(&parsed);
         let callers_after = self.caller_view(&parsed.path);
         let chains_after = chain_facts(&self.index, &parsed.path);
         let ecosystem_after = self.ecosystem_view(&parsed.path);
@@ -672,7 +700,7 @@ impl Workspace {
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         // Call chains of other files show this file's call sites: when they move, those
         // diagnostics move with them (the summaries copying them were re-propagated).
-        if self.call_site_spans(&parsed.path) != sites_before {
+        if sites_moved {
             affected.extend(self.showing(&parsed.path));
         }
         affected.remove(&parsed.path);

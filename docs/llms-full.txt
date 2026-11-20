@@ -1313,7 +1313,8 @@ classes of a family a changed method belongs to, the generators handed to a chan
 (whether it iterates them decides where their writes and reads are reported), the files with
 `MUT108` / `MUT110` reports above a function that changed its own in-place changes or its calls
 while its effects stayed the same (a report's call chain ends at the first function whose body
-makes the change), and the files whose call chains show a call site the edit moved. With
+makes the change), and the files whose call chains show a call site the edit moved (to another line or column,
+also when its bytes stay where they were). With
 ownership or `invalidation` contracts configured, a function that changes its calls also
 re-analyzes every function below it (whether a function only runs inside allowed callers, or
 whether its callers announce its writes, depends on all callers above it); with a contract on
