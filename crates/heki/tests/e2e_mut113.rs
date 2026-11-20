@@ -1162,7 +1162,7 @@ fn mut113_counts_the_changes_each_container_class_checks() {
         vec![(72, "`Containers.group` changes `self.groups`".to_owned())]
     );
     assert_eq!(
-        run_python(&p.dir, "run.py").trim(),
+        run_python(&p.dir, "run.py").lines().collect::<Vec<_>>(),
         [
             "dictionary changed size during iteration",
             "Set changed size during iteration",
@@ -1173,7 +1173,6 @@ fn mut113_counts_the_changes_each_container_class_checks() {
             "dictionary changed size during iteration",
             "ok",
         ]
-        .join("\n")
     );
 }
 
