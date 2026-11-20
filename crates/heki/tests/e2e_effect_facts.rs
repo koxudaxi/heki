@@ -113,3 +113,39 @@ async def both_exited() -> None:
     assert_eq!(found[0].0, 10);
     assert!(found[0].1.contains("taken at line 7"), "{found:?}");
 }
+
+#[test]
+fn task_factories_are_found_under_the_names_they_are_imported_as() {
+    let p = Project::new("task_factory_aliases");
+    p.write(
+        "app.py",
+        r#"import asyncio as aio
+from asyncio import create_task as spawn
+from asyncio import ensure_future as later
+
+
+async def work() -> None: ...
+
+
+def create_task(coro):
+    return coro
+
+
+async def aliased() -> None:
+    task = spawn(work())
+
+
+async def module_alias() -> None:
+    task = aio.create_task(work())
+
+
+async def future_alias() -> None:
+    fut = later(work())
+
+
+async def own_function() -> None:
+    task = create_task(work())
+"#,
+    );
+    assert_eq!(lines(&p, "EFF107"), vec![14, 18, 22]);
+}
