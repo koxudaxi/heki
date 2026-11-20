@@ -558,12 +558,10 @@ fn private_methods_called_from_init(
 ) -> FxHashSet<FuncKey> {
     let mut out = FxHashSet::default();
     for init in family.iter().filter(|m| m.name() == "__init__") {
-        let Some(file) = cx.index.files.get(init.path) else {
-            continue;
-        };
+        let file = cx.index.files.get(init.path);
         for site in file
-            .call_sites
-            .iter()
+            .into_iter()
+            .flat_map(|f| &f.call_sites)
             .filter(|s| s.caller == init.key && s.recv_is_self)
         {
             out.extend(
@@ -1182,9 +1180,10 @@ fn indirect_write_outside(
     w: &TypedFieldWriteSite,
     allowed: impl Fn(&FuncKey) -> bool,
 ) -> bool {
-    let Some(hop) = w.via_chain.last() else {
-        return true;
-    };
+    let hop = w
+        .via_chain
+        .last()
+        .expect("the chain of an `IndirectHelper` write ends at the helper call");
     let helpers: Vec<&BoundCallee> = sites
         .get(&hop.caller)
         .into_iter()
@@ -1294,6 +1293,70 @@ fn changes_param<'s>(
         }
     }
     false
+}
+
+/// One call instruction: what it calls (a value, or a method of its receiver) and its arguments.
+pub(crate) struct CallInst<'i> {
+    callee_var: Option<VarId>,
+    /// `recv.method(...)`: the receiver and the method name.
+    pub(crate) recv: Option<(VarId, &'i str)>,
+    pub(crate) args: &'i [VarId],
+    pub(crate) kwargs: &'i [(Option<String>, VarId)],
+}
+
+impl<'i> CallInst<'i> {
+    /// `None` for an instruction that is no call.
+    pub(crate) fn of(kind: &'i InstKind) -> Option<Self> {
+        match kind {
+            InstKind::Call {
+                callee_var,
+                args,
+                kwargs,
+                ..
+            } => Some(Self {
+                callee_var: *callee_var,
+                recv: None,
+                args,
+                kwargs,
+            }),
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            } => Some(Self {
+                callee_var: None,
+                recv: Some((*recv, method)),
+                args,
+                kwargs,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The functions the call runs, with the values `types` infers.
+    pub(crate) fn callee(&self, tcx: &TypeCtx<'_>, types: &FxHashMap<VarId, Val>) -> Callee {
+        match self.recv {
+            Some((recv, method)) => tcx.resolve_method(types.get(&recv), method),
+            None => tcx.resolve_call(self.callee_var.and_then(|v| types.get(&v))),
+        }
+    }
+
+    /// [`bind_arguments`] of this call.
+    pub(crate) fn bind(
+        &self,
+        decl: &heki_effect::FunctionDecl,
+        binds_recv: bool,
+    ) -> Vec<(usize, VarId)> {
+        bind_arguments(
+            decl,
+            binds_recv,
+            self.recv.map(|(v, _)| v),
+            self.args,
+            self.kwargs,
+        )
+    }
 }
 
 /// The arguments of a call of the project function `decl` by the callee's parameter positions:
@@ -1938,34 +2001,13 @@ impl<'a> Mut202Fn<'a> {
 
     /// The parts of a call instruction (`None` for any other instruction).
     fn call_of<'i>(&self, kind: &'i InstKind) -> Option<CallParts<'i>> {
-        match kind {
-            InstKind::Call {
-                callee_var,
-                args,
-                kwargs,
-                ..
-            } => Some(CallParts {
-                recv: None,
-                args,
-                kwargs,
-                callee: self
-                    .tcx
-                    .resolve_call(callee_var.and_then(|v| self.types.get(&v))),
-            }),
-            InstKind::MethodCall {
-                recv,
-                method,
-                args,
-                kwargs,
-                ..
-            } => Some(CallParts {
-                recv: Some((*recv, method)),
-                args,
-                kwargs,
-                callee: self.tcx.resolve_method(self.types.get(recv), method),
-            }),
-            _ => None,
-        }
+        let call = CallInst::of(kind)?;
+        Some(CallParts {
+            callee: call.callee(self.tcx, &self.types),
+            recv: call.recv,
+            args: call.args,
+            kwargs: call.kwargs,
+        })
     }
 
     /// The call an offloading API makes on a worker thread (`asyncio.to_thread(clear, xs)` calls

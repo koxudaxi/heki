@@ -601,12 +601,11 @@ impl<'a> CheckContext<'a> {
         unit: &ModuleUnit<'_>,
     ) -> FxHashMap<(String, Span), Vec<&'a CallSite>> {
         let mut out: FxHashMap<(String, Span), Vec<&CallSite>> = FxHashMap::default();
-        if let Some(file) = self.index.files.get(&unit.input.path) {
-            for site in &file.call_sites {
-                out.entry((site.caller.qualname.clone(), site.span))
-                    .or_default()
-                    .push(site);
-            }
+        let file = self.index.files.get(&unit.input.path);
+        for site in file.into_iter().flat_map(|f| &f.call_sites) {
+            out.entry((site.caller.qualname.clone(), site.span))
+                .or_default()
+                .push(site);
         }
         out
     }

@@ -1,7 +1,7 @@
 //! Family 2 data rule: `DATA101` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::eff_rules::shortest;
-use crate::mut_rules::bind_arguments;
+use crate::mut_rules::CallInst;
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{Callee, SiteEffect, TypeCtx, Val};
@@ -42,11 +42,8 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             // reallocates something else and returns `acc`).
             let hit = lc.updates.iter().find_map(|v| {
                 let inst = defs.get(v)?;
-                if !matches!(
-                    inst.kind,
-                    InstKind::Call { .. } | InstKind::MethodCall { .. }
-                ) || !combines(f, &defs, inst, lc.phi_var)
-                {
+                let call = CallInst::of(&inst.kind)?;
+                if !combines(f, &defs, &call, lc.phi_var) {
                     return None;
                 }
                 let effects: Vec<SiteEffect> = sites
@@ -58,7 +55,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 let chain = shortest(&effects, ExecEffectKind::QuadraticRealloc)?;
                 let reallocates = chain.len() == 1 || {
                     let types = types.get_or_insert_with(|| tcx.infer(f));
-                    reallocates_argument(cx, &tcx, types, f, inst, lc.phi_var)
+                    reallocates_argument(cx, &tcx, types, f, &call, lc.phi_var)
                 };
                 reallocates.then(|| (inst.span, chain.to_vec()))
             });
@@ -88,57 +85,28 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
     }
 }
 
-/// Whether the project call `inst` returns a quadratic reallocation of an argument that carries
+/// Whether the project call `call` returns a quadratic reallocation of an argument that carries
 /// `previous` (as itself, through copies, or in a display): a callee's `reallocates_params`.
 fn reallocates_argument(
     cx: &CheckContext<'_>,
     tcx: &TypeCtx<'_>,
     types: &FxHashMap<VarId, Val>,
     f: &IrFunction,
-    inst: &Inst,
+    call: &CallInst<'_>,
     previous: VarId,
 ) -> bool {
-    let (callee, recv, args, kwargs) = match &inst.kind {
-        InstKind::Call {
-            callee_var,
-            args,
-            kwargs,
-            ..
-        } => (
-            tcx.resolve_call(callee_var.and_then(|v| types.get(&v))),
-            None,
-            args,
-            kwargs,
-        ),
-        InstKind::MethodCall {
-            recv,
-            method,
-            args,
-            kwargs,
-            ..
-        } => (
-            tcx.resolve_method(types.get(recv), method),
-            Some(*recv),
-            args,
-            kwargs,
-        ),
-        _ => return false,
-    };
-    let Callee::Project(keys, binds_recv) = callee else {
+    let Callee::Project(keys, binds_recv) = call.callee(tcx, types) else {
         return false;
     };
     keys.iter().any(|key| {
-        let Some(summary) = cx.index.summary(key) else {
-            return false;
-        };
-        let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
-        bind_arguments(&decl, binds_recv, recv, args, kwargs)
-            .into_iter()
-            .any(|(pos, v)| {
+        cx.index.summary(key).is_some_and(|summary| {
+            let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
+            call.bind(&decl, binds_recv).into_iter().any(|(pos, v)| {
                 pos < 64
                     && summary.reallocates_params & (1u64 << pos) != 0
                     && carries(f, v, previous)
             })
+        })
     })
 }
 
@@ -163,24 +131,22 @@ fn carries(f: &IrFunction, v: VarId, previous: VarId) -> bool {
     false
 }
 
-/// Whether the call `inst` reads `previous` through what it combines: its receiver, its
-/// positional arguments, or a keyword argument other than the `out=` destination, followed back
-/// through the instructions and phis that compute them.
-fn combines(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>, inst: &Inst, previous: VarId) -> bool {
-    let mut work: Vec<VarId> = match &inst.kind {
-        InstKind::Call { args, kwargs, .. } => args
-            .iter()
-            .copied()
-            .chain(destination_free(kwargs))
-            .collect(),
-        InstKind::MethodCall {
-            recv, args, kwargs, ..
-        } => std::iter::once(*recv)
-            .chain(args.iter().copied())
-            .chain(destination_free(kwargs))
-            .collect(),
-        _ => return false,
-    };
+/// Whether `call` reads `previous` through what it combines: its receiver, its positional
+/// arguments, or a keyword argument other than the `out=` destination, followed back through the
+/// instructions and phis that compute them.
+fn combines(
+    f: &IrFunction,
+    defs: &FxHashMap<VarId, &Inst>,
+    call: &CallInst<'_>,
+    previous: VarId,
+) -> bool {
+    let mut work: Vec<VarId> = call
+        .recv
+        .map(|(recv, _)| recv)
+        .into_iter()
+        .chain(call.args.iter().copied())
+        .chain(destination_free(call.kwargs))
+        .collect();
     let phis: FxHashMap<VarId, &heki_ir::PhiNode> = f
         .blocks
         .iter()

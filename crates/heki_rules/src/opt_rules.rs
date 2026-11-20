@@ -9,7 +9,7 @@
 //! receiver types (`heki_effect::TypeCtx`, PEP 484 annotations included), which the Soundness
 //! lane never trusts.
 
-use crate::mut_rules::bind_arguments;
+use crate::mut_rules::CallInst;
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
@@ -382,45 +382,19 @@ impl<'d, 'a> ListUse<'d, 'a> {
         types: &FxHashMap<VarId, Val>,
     ) -> bool {
         self.insts().any(|i| {
-            let (callee, recv, args, kwargs) = match &i.kind {
-                InstKind::Call {
-                    callee_var,
-                    args,
-                    kwargs,
-                    ..
-                } => (
-                    tcx.resolve_call(callee_var.and_then(|v| types.get(&v))),
-                    None,
-                    args,
-                    kwargs,
-                ),
-                InstKind::MethodCall {
-                    recv,
-                    method,
-                    args,
-                    kwargs,
-                    ..
-                } => (
-                    tcx.resolve_method(types.get(recv), method),
-                    Some(*recv),
-                    args,
-                    kwargs,
-                ),
-                _ => return false,
+            let Some(call) = CallInst::of(&i.kind) else {
+                return false;
             };
-            let Callee::Project(keys, binds_recv) = callee else {
+            let Callee::Project(keys, binds_recv) = call.callee(tcx, types) else {
                 return false;
             };
             keys.iter().any(|key| {
-                let Some(summary) = cx.index.summary(key) else {
-                    return false;
-                };
-                let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
-                bind_arguments(&decl, binds_recv, recv, args, kwargs)
-                    .into_iter()
-                    .any(|(pos, v)| {
+                cx.index.summary(key).is_some_and(|summary| {
+                    let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
+                    call.bind(&decl, binds_recv).into_iter().any(|(pos, v)| {
                         pos < 64 && summary.mutates_params & (1u64 << pos) != 0 && self.is_list(v)
                     })
+                })
             })
         })
     }
