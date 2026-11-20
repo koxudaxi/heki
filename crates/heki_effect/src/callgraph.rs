@@ -557,9 +557,14 @@ fn transfer(
         let had = !new || t.direct_exec_effects.contains(e);
         guards::add_occurrence(&mut t.exec_guards, *e, had, &through.guards);
         let chain = extend_chain(lead, tail, rewrite);
-        add_receiver_effect(t, *e, had, site, bc, facts, &chain, lead, rewrite);
+        let kept = add_receiver_effect(t, *e, had, site, bc, facts, &chain, lead, rewrite);
         let slot = t.exec_chains.entry(*e).or_default();
-        if slot.is_empty() || chain.len() < slot.len() {
+        let replaces = match kept {
+            KeptChain::Replaced => true,
+            KeptChain::Shorter => slot.is_empty() || chain.len() < slot.len(),
+            KeptChain::Kept => false,
+        };
+        if replaces {
             *slot = chain;
         }
     }
@@ -730,11 +735,23 @@ fn transfer_typed_writes(
     }
 }
 
+/// What an arrival of an effect does to the chain `EffectSummary::exec_chains` keeps for it:
+/// that chain runs whatever the caller's `self` is when any chain does, so a receiver of any
+/// class sees a path it runs.
+enum KeptChain {
+    /// The first chain that runs whatever `self` is replaces one through a subclass's override.
+    Replaced,
+    /// The shorter of the two.
+    Shorter,
+    /// A chain through a subclass's override leaves one that runs whatever `self` is.
+    Kept,
+}
+
 /// Record in `t` whether effect `e`, arriving through `bc` at `site` with `chain` (the caller
 /// `had` it already), runs only for some classes of the caller's own `self`
 /// (`EffectSummary::receiver_effects`): through a call on `self`, the classes the callee's
 /// facts already depend on, or the subclass providing the callee. Any other arrival runs it
-/// whatever `self` is.
+/// whatever `self` is. Returns how the arrival's chain joins the kept one.
 #[allow(clippy::too_many_arguments)]
 fn add_receiver_effect(
     t: &mut EffectSummary,
@@ -746,7 +763,7 @@ fn add_receiver_effect(
     chain: &SharedChain,
     lead: &[Arc<CallHop>],
     rewrite: bool,
-) {
+) -> KeptChain {
     let mut provided: Vec<(SharedLine, SharedChain)> = Vec::new();
     if site.recv_is_self {
         let inner = facts.receiver_effects.as_ref().and_then(|r| r.get(&e));
@@ -764,6 +781,10 @@ fn add_receiver_effect(
             (None, None) => {}
         }
     }
+    let only_provided = t
+        .receiver_effects
+        .as_ref()
+        .is_some_and(|r| r.contains_key(&e));
     if provided.is_empty() {
         if let Some(r) = &mut t.receiver_effects {
             r.remove(&e);
@@ -771,16 +792,15 @@ fn add_receiver_effect(
                 t.receiver_effects = None;
             }
         }
-        return;
+        return if only_provided {
+            KeptChain::Replaced
+        } else {
+            KeptChain::Shorter
+        };
     }
     // Already reached whatever `self` is.
-    if had
-        && !t
-            .receiver_effects
-            .as_ref()
-            .is_some_and(|r| r.contains_key(&e))
-    {
-        return;
+    if had && !only_provided {
+        return KeptChain::Kept;
     }
     let slot = t
         .receiver_effects
@@ -795,6 +815,7 @@ fn add_receiver_effect(
         }
     }
     slot.sort();
+    KeptChain::Shorter
 }
 
 /// How a callee writes a typed field it does not know through an argument ([`IndirectWrite`]).

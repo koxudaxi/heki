@@ -779,3 +779,68 @@ fn a_class_method_constructs_any_subclass_through_cls() {
         &["EFF101"],
     );
 }
+
+/// The call chain of a report runs for the receiver's class: an effect a hook reaches only in a
+/// subclass's override is not the path shown for a receiver of another subclass.
+#[test]
+fn a_chain_runs_for_the_receivers_class() {
+    let p = Project::new("receiver_chains");
+    p.write("pyproject.toml", CONFIG);
+    p.write("pkg/__init__.py", "");
+    p.write(
+        "pkg/hooks.py",
+        r#"import time
+
+
+def pause():
+    time.sleep(1)
+
+
+class Base:
+    def run(self):
+        self.flush()
+        pause()
+
+
+class FileSink(Base):
+    def flush(self):
+        time.sleep(1)
+
+
+class Quiet(Base):
+    def flush(self):
+        pass
+
+
+async def on_quiet(q: Quiet):
+    q.run()
+
+
+async def on_file(f: FileSink):
+    f.run()
+"#,
+    );
+    let (_, stdout, _) = p.check(&["--output-format", "json"]);
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let chain = |line: u64| -> Vec<String> {
+        let d = diags
+            .iter()
+            .find(|d| d["line"] == line && d["rule_code"] == "EFF101")
+            .unwrap_or_else(|| panic!("no EFF101 at {line}: {diags:#?}"));
+        d["related"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["message"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        chain(25),
+        vec![
+            "`on_quiet` calls `pkg.hooks.Base.run`",
+            "`Base.run` calls `pkg.hooks.pause`",
+            "`pause` calls `time.sleep`",
+        ]
+    );
+    assert_eq!(chain(29).len(), 3);
+}
