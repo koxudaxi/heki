@@ -369,7 +369,9 @@ def main() -> int:
     for p in extra:
         (ROOT / p).unlink()
     for p, text in files.items():
-        p.write_text(text, encoding="utf-8")
+        # LF on every platform, as the checkout keeps them (`.gitattributes`): Python would
+        # write CRLF on Windows.
+        p.write_text(text, encoding="utf-8", newline="\n")
     print(f"Wrote {len(files)} files ({len(stale)} changed, {len(extra)} removed).")
     return 0
 
