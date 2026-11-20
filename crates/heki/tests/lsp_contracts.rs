@@ -1,13 +1,14 @@
 //! Contract rules in the incremental LSP server: editing and saving a callee in another file
 //! updates a scope function's `EFF201` diagnostic, editing a private helper's read updates the
 //! `MUT203` diagnostic at its caller (Early Cutoff does not hide either), an edit that only
-//! moves code changes neither, and a caller that stops calling a private helper hands the
-//! report back to the helper's own file.
+//! moves code changes no fact and re-checks only the file whose diagnostic shows a moved call
+//! site, and a caller that stops calling a private helper hands the report back to the
+//! helper's own file.
 
 mod common;
 
 use common::Project;
-use common::lsp::{DEBOUNCE_WAIT, Lsp, codes, uri};
+use common::lsp::{Lsp, codes, uri};
 use serde_json::{Value, json};
 
 const CONFIG: &str = r#"[[read-owners]]
@@ -43,13 +44,6 @@ fn save(lsp: &mut Lsp, p: &Project, rel: &str, version: i32, text: &str) {
     );
 }
 
-/// After `save` of `rel`: its own diagnostics, then the engine counters of the save.
-fn saved(lsp: &mut Lsp, p: &Project, rel: &str) -> Value {
-    lsp.diagnostics(&uri(&p.dir.join(rel)), |_| true);
-    std::thread::sleep(DEBOUNCE_WAIT);
-    lsp.request("heki/stats", Value::Null)
-}
-
 fn published_for(lsp: &Lsp, u: &str) -> bool {
     lsp.backlog
         .iter()
@@ -66,9 +60,10 @@ fn lsp_contract_diagnostics_follow_callee_and_helper_edits() {
         .write("pkg/app.py", APP)
         .write("pkg/fetch.py", FETCH)
         .write("pkg/view.py", VIEW);
-    let (app, view) = (
+    let (app, view, helpers) = (
         uri(&p.dir.join("pkg/app.py")),
         uri(&p.dir.join("pkg/view.py")),
+        uri(&p.dir.join("pkg/helpers.py")),
     );
     let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
     lsp.request(
@@ -121,8 +116,10 @@ fn lsp_contract_diagnostics_follow_callee_and_helper_edits() {
         "{diags:#?}"
     );
 
-    // Edits that only move code: Early Cutoff, no other file re-checked or re-published.
-    let before = lsp.request("heki/stats", Value::Null);
+    // Edits that only move code change no fact (Early Cutoff). The `EFF201` chain of the
+    // scope function shows the moved call site, so its file is re-checked and shows the new
+    // position; the `MUT203` report shows only its own call site, so its file is not.
+    let before = lsp.settle();
     lsp.backlog.clear();
     save(
         &mut lsp,
@@ -131,7 +128,19 @@ fn lsp_contract_diagnostics_follow_callee_and_helper_edits() {
         3,
         &format!("# moved\n\n{FETCH_BLOCKING}"),
     );
-    let stats = saved(&mut lsp, &p, "pkg/fetch.py");
+    let stats = lsp.settle();
+    assert_eq!(stats["last_summary_changed"], false, "{stats}");
+    assert_eq!(
+        stats["dependent_reanalyses"],
+        before["dependent_reanalyses"].as_u64().unwrap() + 1,
+        "{stats}"
+    );
+    let diags = lsp.diagnostics(&view, |_| true);
+    assert_eq!(
+        diags[0]["relatedInformation"][1]["location"]["range"]["start"],
+        json!({"line": 6, "character": 11})
+    );
+    lsp.backlog.clear();
     save(
         &mut lsp,
         &p,
@@ -139,20 +148,20 @@ fn lsp_contract_diagnostics_follow_callee_and_helper_edits() {
         3,
         &format!("# moved\n\n{HELPERS_READING}"),
     );
-    let stats_helpers = saved(&mut lsp, &p, "pkg/helpers.py");
-    for s in [&stats, &stats_helpers] {
-        assert_eq!(s["last_summary_changed"], false, "{s}");
-        assert_eq!(
-            s["dependent_reanalyses"], before["dependent_reanalyses"],
-            "{s}"
-        );
-    }
-    assert!(!published_for(&lsp, &view), "{:#?}", lsp.backlog);
+    let stats_helpers = lsp.settle();
+    assert_eq!(
+        stats_helpers["last_summary_changed"], false,
+        "{stats_helpers}"
+    );
+    assert_eq!(
+        stats_helpers["dependent_reanalyses"], stats["dependent_reanalyses"],
+        "{stats_helpers}"
+    );
+    assert!(published_for(&lsp, &helpers), "{:#?}", lsp.backlog);
     assert!(!published_for(&lsp, &app), "{:#?}", lsp.backlog);
 
     // The caller stops calling the helper: the helper has no project caller left, so it
     // reports its read itself (its file is re-checked); calling it again moves the report back.
-    let helpers = uri(&p.dir.join("pkg/helpers.py"));
     save(&mut lsp, &p, "pkg/app.py", 2, APP_WITHOUT_CALL);
     let diags = lsp.diagnostics(&helpers, |d| !d.is_empty());
     assert_eq!(codes(&diags), vec!["MUT203"]);

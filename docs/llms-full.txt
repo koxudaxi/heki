@@ -1121,9 +1121,20 @@ Source: https://heki.koxudaxi.dev/lsp/
 
 `heki server` (alias `heki lsp`) is a Language Server Protocol server on stdin / stdout. It
 indexes the workspace in the background, then keeps only the per-function effect summaries in
-memory. Editing a file re-analyzes that file alone (250 ms after the last keystroke); when the
-edit changes what a function does, the files calling it are re-analyzed on save. Edits that do not
-change any summary, such as comments, stop at the edited file.
+memory. Editing a file re-analyzes that file alone (250 ms after the last keystroke). On save, the
+files whose results depend on the edit are re-analyzed too: the callers of a function whose
+effects changed, every file that resolved names through a changed declaration (a re-exported
+class, a new method or base class, a property getter, a subclass), the classes of a family a
+changed method belongs to, and the files whose call chains show a call site the edit moved.
+Edits that change none of these, such as most comments, stop at the edited file. The diagnostics
+are the ones `heki check` reports for the saved files.
+
+Files created, changed, or deleted outside the editor (`git checkout`, code generators) are
+picked up when the client supports watching files: the server registers for
+`workspace/didChangeWatchedFiles` on Python files (`**/*.{py,pyi}`) and on the configuration
+(`pyproject.toml`, `heki.toml`, `.heki.toml`, and the summary snapshot of `MUT103`). A change to
+the configuration indexes the workspace again, like `heki check --watch` does. A file that does
+not parse is left out of the project until it parses again, like `heki check` does.
 
 The server provides:
 
@@ -1133,7 +1144,9 @@ The server provides:
 - `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites;
 - a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic.
 
-It reads the same configuration as `heki check`.
+It reads the same configuration as `heki check`. One difference is deliberate: `heki check`
+reports ten or more `async def` boundaries that reach the same blocking call once, with a count,
+while the server groups them per file, so the file you edit always shows its own boundary.
 
 ## VS Code
 
@@ -1359,7 +1372,7 @@ connection). A property that also defines a setter or deleter is not followed.
 
 The rule reports the boundary: the call (or property read) inside the `async def` that leads to
 the blocking operation, with the call chain as related information. Several boundaries reaching
-the same blocking call are grouped once ten or more of them exist.
+the same blocking call are grouped once ten or more of them exist (in the editor, per file).
 
 It does not report:
 

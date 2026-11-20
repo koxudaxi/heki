@@ -95,6 +95,8 @@ fn analyze(
         soundness_kb: &env.soundness_kb,
         snapshot: snapshot.as_ref(),
         decls: None,
+        project_patches_builtins: None,
+        text_of: None,
     };
     let mut diags = check_project(&units, &env.cfg, &env.kb, &index, &selection, &extras)?;
     drop(units);

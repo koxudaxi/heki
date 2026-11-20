@@ -8,9 +8,8 @@
 use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
-use heki_lsp::{Selectors, Workspace};
+use heki_lsp::{CONFIG_FILES, EditOutcome, Selectors, Workspace};
 use heki_profile::ProfileData;
-use heki_rules::SNAPSHOT_FILE;
 use heki_rules::project::{ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -67,10 +66,7 @@ impl Watcher<'_> {
             .filter_map(|p| Some((display_path(&p), mtime(&p)?)))
             .collect();
         let root = &ws_env.root;
-        let mut config: Vec<PathBuf> = ["pyproject.toml", "heki.toml", ".heki.toml", SNAPSHOT_FILE]
-            .iter()
-            .map(|n| root.join(n))
-            .collect();
+        let mut config: Vec<PathBuf> = CONFIG_FILES.iter().map(|n| root.join(n)).collect();
         config.extend(self.args.config.clone());
         let stamps = config.iter().filter_map(|p| mtime(p)).collect();
         Ok((files, stamps))
@@ -109,6 +105,32 @@ impl Watcher<'_> {
             );
         }
         !all.is_empty()
+    }
+}
+
+/// Keep the latest result of one re-analyzed file: its diagnostics, or none when it does not
+/// parse or check (the error is reported) or left the project (`None`).
+fn record(
+    diags: &mut BTreeMap<PathBuf, Vec<Diagnostic>>,
+    errors: &mut Vec<String>,
+    path: &Path,
+    outcome: Option<EditOutcome>,
+) {
+    match outcome {
+        Some(EditOutcome {
+            diagnostics,
+            error: None,
+            ..
+        }) => {
+            diags.insert(path.to_path_buf(), diagnostics);
+        }
+        Some(EditOutcome { error: Some(e), .. }) => {
+            diags.remove(path);
+            errors.push(e);
+        }
+        None => {
+            diags.remove(path);
+        }
     }
 }
 
@@ -154,31 +176,22 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                 .map(|(p, _)| p)
                 .collect();
             for p in &changed {
-                match std::fs::read_to_string(p)
-                    .map_err(|e| format!("{}: {e}", p.display()))
-                    .and_then(|text| ws.edit(p, &text))
-                {
-                    Ok(out) => {
-                        diags.insert((*p).clone(), out.diagnostics);
-                        affected.extend(out.affected);
+                match std::fs::read_to_string(p) {
+                    Ok(text) => {
+                        let out = ws.edit(p, &text);
+                        affected.extend(out.affected.iter().cloned());
+                        record(&mut diags, &mut errors, p, Some(out));
                     }
                     Err(e) => {
                         diags.remove(*p);
-                        errors.push(e);
+                        errors.push(format!("{}: {e}", p.display()));
                     }
                 }
             }
-            affected.sort();
-            affected.dedup();
-            for p in affected.iter().filter(|p| !changed.contains(p)) {
-                if let Ok(text) = std::fs::read_to_string(p) {
-                    match ws.refresh(p, &text) {
-                        Ok(d) => {
-                            diags.insert(p.clone(), d);
-                        }
-                        Err(e) => errors.push(e),
-                    }
-                }
+            affected.retain(|p| !changed.contains(&p));
+            let read = |p: &Path| std::fs::read_to_string(p).ok();
+            for (p, out) in ws.refresh_all(affected, &read) {
+                record(&mut diags, &mut errors, &p, out);
             }
         } else {
             continue;

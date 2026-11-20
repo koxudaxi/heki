@@ -522,9 +522,15 @@ heki/
   again; rules within one function and cross-function rules that use the cached summaries of
   other files report immediately.
 - **Propagation (`didSave`, or when a summary changes)**: when the `EffectSummary`s before and
-  after the edit are equal (most edits), **Early Cutoff** skips every other file; otherwise only
-  the callers on the reverse call graph are re-evaluated, and the files of functions the edit
-  started or stopped calling are re-checked (their contract reports depend on their callers).
+  after the edit are equal (most edits), **Early Cutoff** skips every other file; otherwise the
+  callers on the reverse call graph are re-evaluated. The files that read a changed declaration
+  are re-checked: each file's summary and check record what they read of the declarations
+  (modules looked up, subclass lists, property names, class facts). So are the files of
+  functions whose callers changed their calls (their contract reports depend on their callers),
+  the class families of changed methods, and the diagnostics showing a call site that only moved;
+  those positions are re-propagated into the callers' summaries without changing facts. Files
+  changed on disk and configuration changes are followed. `crates/heki/tests/lsp_oracle.rs`
+  compares the server with `heki check` after every step of an editing session (46 steps).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
 - **LSP features**: the call chains of `EFF101` / `MUT201` and others are
   `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven

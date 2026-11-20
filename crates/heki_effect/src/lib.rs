@@ -27,9 +27,9 @@ pub use report::{
     boundary_reports_in, group_by_root_cause,
 };
 pub use resolver::{
-    Callee, ClassDecl, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr, ReadOnlyKind,
-    TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path, resolve_relative_module,
-    self_aliases,
+    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
+    ReadOnlyKind, TypeCtx, Val, detect_src_layout, func_qualname, module_name_for_path,
+    resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS};
 
@@ -206,6 +206,10 @@ pub struct EffectSummary {
     pub typed_field_write_sites: BTreeSet<TypedFieldWriteSite>,
     /// The function's own reads of project-class attributes (`MUT203`; never propagated).
     pub typed_field_read_sites: BTreeSet<TypedFieldReadSite>,
+    /// Names of the private methods the function calls on any receiver (`obj._name(...)`),
+    /// resolved or not: `MUT107` leaves the methods a class family's initializers call this
+    /// way to initialization. A local fact: never propagated.
+    pub private_calls: BTreeSet<String>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -258,6 +262,17 @@ impl EffectSummary {
     /// Location-insensitive equality used by Early Cutoff.
     pub fn same_facts(&self, other: &Self) -> bool {
         self.without_locations() == other.without_locations()
+    }
+
+    /// Equality of everything callers copy into their own summaries: the facts, and the
+    /// positions of call chains and write sites. Only the positions of the function's own read
+    /// sites are left out: read sites are never propagated.
+    pub fn same_for_callers(&self, other: &Self) -> bool {
+        let without_reads = |s: &Self| Self {
+            typed_field_read_sites: BTreeSet::new(),
+            ..s.clone()
+        };
+        without_reads(self) == without_reads(other) && self.same_facts(other)
     }
 
     pub(crate) fn refresh_typed_field_writes(&mut self) {
@@ -375,6 +390,11 @@ pub struct FileSummary {
     pub call_sites: Vec<CallSite>,
     /// Declarations other modules need for name and receiver resolution.
     pub decls: ModuleDecls,
+    /// What summarizing the file read of the project declarations (completing its own
+    /// declarations included): a change of any of these keys can change the summary. Recorded
+    /// for the language server's index only (`analyze_project_with_reads`, the incremental
+    /// updates); empty otherwise.
+    pub decl_reads: DeclKeys,
 }
 
 /// Result of an incremental file update (Early Cutoff indicator for `heki_lsp`).
@@ -384,6 +404,9 @@ pub struct IncrementalUpdate {
     pub summary_changed: bool,
     /// Functions (transitive callers) that depend on changed summaries.
     pub affected_callers: Vec<FuncKey>,
+    /// The functions of the file (and of call cycles through it) whose facts changed or that
+    /// disappeared, sorted.
+    pub changed: Vec<FuncKey>,
 }
 
 /// One module handed to the analyzer. The IR is borrowed only during summarization.
@@ -424,10 +447,24 @@ pub(crate) fn is_stub(path: &Path) -> bool {
 
 /// Summarize every module of a project and propagate effects to a fixpoint.
 pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
-    let decls = resolver::project_decls_for(modules, kb, None);
+    analyze(modules, kb, false)
+}
+
+/// [`analyze_project`] recording what each file's summary read of the project declarations
+/// (`FileSummary::decl_reads`), for an index that incremental updates keep current.
+pub fn analyze_project_with_reads(
+    modules: &[ModuleInput<'_>],
+    kb: &EffectiveEcosystemKb,
+) -> ProjectIndex {
+    analyze(modules, kb, true)
+}
+
+fn analyze(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb, track: bool) -> ProjectIndex {
+    let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
     let files = modules
         .iter()
-        .map(|m| summary::summarize_module(m, &decls, kb))
+        .zip(own)
+        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track))
         .collect();
     ProjectIndex::build(files)
 }
@@ -514,13 +551,24 @@ impl ProjectIndex {
     /// Declarations of every indexed module (for re-summarizing an edited module), preferring
     /// `.py` implementations over `.pyi` stubs sharing a module name.
     pub fn project_decls(&self) -> ProjectDecls {
+        ProjectDecls::new(self.preferred_decls())
+    }
+
+    /// [`Self::project_decls`] with its pass 1, for [`Self::reanalyze_module_cached`].
+    pub fn decl_passes(&self) -> DeclPasses {
+        DeclPasses::new(self.preferred_decls())
+    }
+
+    /// Every module's declarations, `.pyi` stubs first (a later `.py` sharing the module name
+    /// replaces them).
+    fn preferred_decls(&self) -> Vec<ModuleDecls> {
         let mut entries: Vec<(bool, ModuleDecls)> = self
             .files
             .values()
             .map(|f| (is_stub(&f.path), f.decls.clone()))
             .collect();
         entries.sort_by_key(|(stub, _)| !*stub);
-        ProjectDecls::new(entries.into_iter().map(|(_, d)| d))
+        entries.into_iter().map(|(_, d)| d).collect()
     }
 
     /// Preferred declarations currently indexed for `module_name` (`.py` over `.pyi`).
@@ -547,30 +595,37 @@ impl ProjectIndex {
             .filter(|f| f.path != input.path)
             .map(|f| (is_stub(&f.path), f.decls.clone()))
             .collect();
-        let decls = resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others));
-        let file = summary::summarize_module(input, &decls, kb);
+        let (decls, own) =
+            resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
+        let own = own.into_iter().next().expect("one module in, one out");
+        let file = summary::summarize_module(input, &decls, kb, own, true);
         self.update_file(file)
     }
 
-    /// [`Self::reanalyze_module`] against cached project declarations (kept up to date in
-    /// place): the edit costs the size of the module unless its declarations changed. Returns
-    /// whether they did.
+    /// [`Self::reanalyze_module`] against cached project declarations (both passes, kept up
+    /// to date in place): the edit costs the size of the module unless its declarations
+    /// changed. Also returns what changed in the declarations (empty: nothing), which every
+    /// file whose summary or diagnostics read it depends on.
     pub fn reanalyze_module_cached(
         &mut self,
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
-        decls: &mut ProjectDecls,
-    ) -> (IncrementalUpdate, bool) {
+        decls: &mut DeclPasses,
+    ) -> (IncrementalUpdate, DeclKeys) {
         let masked_by_impl = is_stub(&input.path)
             && self.files.values().any(|f| {
                 f.module_name == input.module_name && f.path != input.path && !is_stub(&f.path)
             });
-        let changed = if masked_by_impl {
-            false
+        let (changed, own) = if masked_by_impl {
+            (
+                DeclKeys::default(),
+                resolver::own_module_decls(input, kb, decls),
+            )
         } else {
-            resolver::update_module_decls(input, kb, decls)
+            let (changed, own, reads) = resolver::update_module_decls(input, kb, decls);
+            (changed, (own, reads))
         };
-        let file = summary::summarize_module(input, decls, kb);
+        let file = summary::summarize_module(input, decls.completed(), kb, own, true);
         (self.update_file(file), changed)
     }
 
@@ -611,6 +666,19 @@ impl ProjectIndex {
             }
         }
         self.files.insert(path, new_file);
+        // A function the file stopped defining falls back to another file defining it (a
+        // `.pyi` stub next to its `.py` implementation), as a full build links it.
+        for func in owned_before.iter().filter(|f| !own.contains(*f)) {
+            let fallback = self
+                .files
+                .values()
+                .filter(|f| f.local_functions.contains_key(func))
+                .map(|f| (is_stub(&f.path), &f.path))
+                .min();
+            if let Some((_, other)) = fallback {
+                self.func_files.insert(func.clone(), other.clone());
+            }
+        }
 
         // Region 0: the file's functions plus every function sharing a (cross-file) SCC with
         // them, so cycles cannot keep stale effects of the old version alive.
@@ -627,10 +695,16 @@ impl ProjectIndex {
         let sync_changed = callgraph::recompute_sync_driven_for(self, &sync_candidates);
 
         let mut changed: BTreeSet<FuncKey> = BTreeSet::new();
+        // Same facts, but positions callers copy (call chains, write sites) moved.
+        let mut moved: BTreeSet<FuncKey> = BTreeSet::new();
         for func in &region {
             let now = self.summary(func);
             match (previous.get(func), now) {
-                (Some(old), Some(new)) if old.same_facts(new) => {}
+                (Some(old), Some(new)) if old.same_facts(new) => {
+                    if !old.same_for_callers(new) {
+                        moved.insert(func.clone());
+                    }
+                }
                 _ => {
                     changed.insert(func.clone());
                 }
@@ -643,17 +717,42 @@ impl ProjectIndex {
         }
         changed.extend(sync_changed);
 
-        if changed.is_empty() {
+        // Callers whose facts depend on changed summaries (Early Cutoff when there are none),
+        // then callers that only copy moved positions: their summaries are refreshed too, so
+        // the index keeps what a full build computes, but no caller's facts change.
+        let affected = self.callers_closure(&changed, &FxHashSet::default());
+        let excluded: FxHashSet<FuncKey> = changed.iter().chain(&affected).cloned().collect();
+        let relocated = self.callers_closure(&moved, &excluded);
+        let summary_changed = !changed.is_empty();
+        let changed: Vec<FuncKey> = changed.into_iter().collect();
+        if affected.is_empty() && relocated.is_empty() {
             return IncrementalUpdate {
-                summary_changed: false,
+                summary_changed,
                 affected_callers: Vec::new(),
+                changed,
             };
         }
+        region = affected.iter().chain(&relocated).cloned().collect();
+        callgraph::reset_to_local(self, &region);
+        callgraph::propagate(self, &region);
+        callgraph::recompute_sync_driven_for(self, &sync_candidates);
+        IncrementalUpdate {
+            summary_changed,
+            affected_callers: affected,
+            changed,
+        }
+    }
 
-        // BFS over reverse call graph to find affected callers only.
-        let mut visited: FxHashSet<FuncKey> = changed.iter().cloned().collect();
-        let mut queue: std::collections::VecDeque<FuncKey> = changed.iter().cloned().collect();
-        let mut affected = Vec::new();
+    /// Transitive callers of `roots` on the reverse call graph, breadth first (sorted per
+    /// level), without `roots` and `excluded`.
+    fn callers_closure(
+        &self,
+        roots: &BTreeSet<FuncKey>,
+        excluded: &FxHashSet<FuncKey>,
+    ) -> Vec<FuncKey> {
+        let mut visited: FxHashSet<FuncKey> = roots.iter().chain(excluded).cloned().collect();
+        let mut queue: std::collections::VecDeque<FuncKey> = roots.iter().cloned().collect();
+        let mut out = Vec::new();
         while let Some(cur) = queue.pop_front() {
             let mut callers: Vec<&FuncKey> = self
                 .reverse_call_graph
@@ -663,19 +762,12 @@ impl ProjectIndex {
             callers.sort();
             for caller in callers {
                 if visited.insert(caller.clone()) {
-                    affected.push(caller.clone());
+                    out.push(caller.clone());
                     queue.push_back(caller.clone());
                 }
             }
         }
-        region = affected.iter().cloned().collect();
-        callgraph::reset_to_local(self, &region);
-        callgraph::propagate(self, &region);
-        callgraph::recompute_sync_driven_for(self, &sync_candidates);
-        IncrementalUpdate {
-            summary_changed: true,
-            affected_callers: affected,
-        }
+        out
     }
 
     /// Defining file of a summarized function.

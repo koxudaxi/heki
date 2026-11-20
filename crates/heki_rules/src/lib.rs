@@ -16,6 +16,7 @@ pub mod project;
 pub mod selection;
 pub mod snapshot;
 
+pub use mut_rules::family_readers;
 pub use selection::{RuleSelection, SelectionError};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
@@ -383,7 +384,17 @@ pub struct CheckExtras<'a> {
     /// Declarations of every indexed module, when the caller keeps them up to date (the LSP
     /// engine); otherwise they are built from the index.
     pub decls: Option<&'a ProjectDecls>,
+    /// Whether some module of the project patches `builtins` (Assumption A1(b), see
+    /// [`project::ParsedFile::patches_builtins`]), when the caller knows it for files it does
+    /// not check (the LSP engine checks one); otherwise decided from the checked files.
+    pub project_patches_builtins: Option<bool>,
+    /// The text of a file that is not checked, for the positions of the call-chain hops in it
+    /// (the LSP engine checks one file).
+    pub text_of: Option<&'a TextOf>,
 }
+
+/// Reads the text of a file by path.
+pub type TextOf = dyn Fn(&Path) -> Option<String> + Sync;
 
 /// `caller -> [(defining file, call site)]` (see [`CheckContext::sites_by_caller`]).
 pub(crate) type SitesByCaller<'a> = FxHashMap<&'a FuncKey, Vec<(&'a Path, &'a CallSite)>>;
@@ -398,6 +409,7 @@ pub(crate) struct CheckContext<'a> {
     pub units: &'a [ModuleUnit<'a>],
     pub selection: &'a RuleSelection,
     unit_by_path: FxHashMap<&'a Path, usize>,
+    text_of: Option<&'a TextOf>,
 }
 
 /// Run every enabled rule over an analyzed project.
@@ -431,6 +443,7 @@ pub fn check_project(
             .enumerate()
             .map(|(i, u)| (u.input.path.as_path(), i))
             .collect(),
+        text_of: extras.text_of,
     };
     let mut out = Vec::new();
     mut_rules::mut101(&cx, &mut out);
@@ -446,9 +459,11 @@ pub fn check_project(
     let readonly = mut_rules::ReadOnlyProducers::new(config)?;
     // Assumption A1(b) is project-wide: one module patching `builtins` taints them all.
     let opt_opts = heki_soundness::AnalysisOptions {
-        project_patches_builtins: units
-            .iter()
-            .any(|u| heki_soundness::module_patches_builtins(u.input.ir)),
+        project_patches_builtins: extras.project_patches_builtins.unwrap_or_else(|| {
+            units
+                .iter()
+                .any(|u| heki_soundness::module_patches_builtins(u.input.ir))
+        }),
         disabled_obligations: Vec::new(),
     };
     let per_unit: Vec<Vec<Diagnostic>> = units
@@ -532,9 +547,14 @@ impl<'a> CheckContext<'a> {
         chain
             .iter()
             .map(|hop| {
+                // A hop in a file that is not checked: its position comes from its text.
                 let (line, column) = self
                     .unit(&hop.path)
                     .map(|u| u.lines.line_col(hop.span.start))
+                    .or_else(|| {
+                        let text = (self.text_of?)(&hop.path)?;
+                        Some(LineIndex::from_source(&text).line_col(hop.span.start))
+                    })
                     .unwrap_or((0, 0));
                 RelatedLocation {
                     path: hop.path.clone(),

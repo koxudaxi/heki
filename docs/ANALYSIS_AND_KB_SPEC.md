@@ -158,7 +158,17 @@ EffectSummary(f) = {
 ```
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
-does not notify callers.
+changes no caller's facts. The positions callers copy (call chains, write sites) are still
+re-propagated into their summaries, so that the incremental index always equals a full build, and
+the language server re-checks the files whose diagnostics show a moved call site.
+
+The incremental index also records what summarizing each file read of the project declarations
+(`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the
+property getter names tried), and the language server records what each check read. An update of a
+module's declarations reports the keys it changed (the module, and the hierarchy indexes that
+differ); every file that read one of them is re-analyzed. This covers names resolved through
+re-exports, class hierarchy analysis across modules, and property getters, without depending on
+which module imports which.
 
 ### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT201` / `MUT202` / `MUT203`)
 
