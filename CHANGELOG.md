@@ -22,11 +22,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
   or deletes it (`keys.KEY = "x"`, `Keys.KEY = "x"`), and a class constant when its own module
   stores it on the class or an instance outside the class body, or when a subclass's MRO finds
   another definition. A `Final` field of a dataclass is no constant on an instance.
-- `MUT112` (`conditional-ownership-mutation`, opt-in) reports an in-place change of a container
-  that is a new object on one path and borrowed state on another (`items = given or []`,
-  `d.get(k, {})`, a callee returning a memo or its argument), made directly, through a helper,
-  or in a closure, and a store of such a value in `self.<attr>` that a method of the class family
-  changes in place.
+- `MUT112` (`conditional-ownership-mutation`, opt-in, experimental) reports an in-place change of
+  a container that is a new object on one path and borrowed state on another
+  (`items = given or []`, `d.get(k, {})`, a callee returning a memo or its argument), made
+  directly, through a helper, or in a closure, and a store of such a value in `self.<attr>` that a
+  method of the class family changes in place.
 
 ### Changed
 
