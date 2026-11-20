@@ -628,7 +628,7 @@ impl<'a, 'c> Checker<'a, 'c> {
                 },
             );
         }
-        let status = match self.cx.elems_of_bases(st, &st.allocs_of(v)) {
+        let status = match self.cx.elems_of(st, v) {
             Some(m) if m.is_subset_of(KindMask::hash_consistent()) => ObligationStatus::Established {
                 evidence: "every element is an `int` / `str` / `bytes` / `bool` / `float`".into(),
             },

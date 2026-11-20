@@ -323,14 +323,14 @@ fn opt101_opt102_positives_are_safe_unconditional_with_exact_edits() {
         (
             "pos_dict_multi",
             OptRule::Opt102,
-            "d = {**d, k: v, f\"{k}_len\": len(str(v))}",
-            "d.update({k: v, f\"{k}_len\": len(str(v))})",
+            "d = {**d, \"key\": k, \"value\": v}",
+            "d.update({\"key\": k, \"value\": v})",
         ),
         (
             "pos_dict_merge",
             OptRule::Opt102,
-            "merged = {**merged, **extra}",
-            "merged.update({**extra})",
+            "merged = {**merged, **part}",
+            "merged.update(part)",
         ),
         (
             "pos_dict_effects",
@@ -579,12 +579,15 @@ fn opt103_reports_immutable_accumulation_without_edits() {
     let src = "def f(chunks, log):\n    acc = ()\n    for c in chunks:\n        acc += (c,)\n        log(len(acc))\n    return acc\n";
     let c = &analyze(src)[0];
     assert!(!c.is_safe());
-    // `self.s += ...` is reported when the operand type shows a string.
-    let src =
-        "class C:\n    def f(self, xs):\n        for x in xs:\n            self.s += f'{x},'\n";
-    let c = &analyze(src)[0];
+    // `self.s += ...` is reported when the class assigns the attribute a string literal: the
+    // right operand alone does not show it (`list += str` extends a list in place).
+    let method = "    def f(self, xs):\n        for x in xs:\n            self.s += f'{x},'\n";
+    let src = format!("class C:\n    def __init__(self):\n        self.s = ''\n\n{method}");
+    let c = &analyze(&src)[0];
     assert_eq!((c.rule, c.target.as_str()), (OptRule::Opt103, "self.s"));
     assert!(c.is_reportable() && !c.is_safe(), "{:#?}", c.verdict);
+    let c = &analyze(&format!("class C:\n{method}"))[0];
+    assert!(!c.is_reportable(), "{c:#?}");
 }
 
 #[test]

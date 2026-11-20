@@ -93,7 +93,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                             rule.message.as_deref(),
                         )
                     },
-                    || u.via_chain.clone(),
+                    || heki_effect::owned_chain(&u.via_chain),
                 );
             }
         }

@@ -6,17 +6,22 @@ pub(crate) fn slice(source: &str, start: u32, end: u32) -> Option<&str> {
     source.get(start as usize..end as usize)
 }
 
-/// Offset of the first byte of the line containing `pos`.
+/// Offset of the first byte of the line containing `pos` (any byte offset, also one inside a
+/// multi-byte character: a `\n` byte is never part of one).
 pub(crate) fn line_start(source: &str, pos: u32) -> u32 {
     let pos = (pos as usize).min(source.len());
-    source[..pos].rfind('\n').map_or(0, |i| i as u32 + 1)
+    source.as_bytes()[..pos]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i as u32 + 1)
 }
 
 /// Offset of the `\n` ending the line containing `pos` (or the end of the source).
 pub(crate) fn line_end(source: &str, pos: u32) -> u32 {
     let pos = (pos as usize).min(source.len());
-    source[pos..]
-        .find('\n')
+    source.as_bytes()[pos..]
+        .iter()
+        .position(|&b| b == b'\n')
         .map_or(source.len() as u32, |i| (pos + i) as u32)
 }
 
@@ -54,6 +59,41 @@ pub(crate) fn strip_token<'t>(text: &'t str, prefix: &str) -> Option<&'t str> {
     text.trim_start().strip_prefix(prefix)
 }
 
+/// `text` without the blanks around it, but still ending with its own line break when a
+/// comment or a `\` continuation ends its last line: a bracket an edit puts after it must not
+/// land inside the comment or the continued line.
+pub(crate) fn trim_fragment(text: &str) -> &str {
+    let text = text.trim_start();
+    let body = text.trim_end();
+    let last_line = body.rsplit('\n').next().unwrap_or(body);
+    if body.ends_with('\\') || last_line.contains('#') {
+        text
+    } else {
+        body
+    }
+}
+
+/// [`trim_fragment`] without one trailing `,` (an element of a display, an argument).
+pub(crate) fn trim_element(text: &str) -> &str {
+    let e = trim_fragment(text);
+    e.strip_suffix(',').map_or(e, str::trim_end)
+}
+
+/// Only blanks, comments, line continuations, and closing parentheses separate `pos` from a
+/// `:`: `pos` ends the expression of a compound statement's header (`for x in (xs):`).
+pub(crate) fn header_colon_follows(source: &str, pos: u32) -> bool {
+    let Some(mut rest) = source.get(pos as usize..) else {
+        return false;
+    };
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\\' || c == ')');
+        match rest.strip_prefix('#') {
+            Some(comment) => rest = comment.split_once('\n').map_or("", |(_, after)| after),
+            None => return rest.starts_with(':'),
+        }
+    }
+}
+
 /// `name = ` exactly: the text between an assignment target and its value.
 pub(crate) fn is_plain_assign(between: &str) -> bool {
     between.trim() == "="
@@ -87,5 +127,19 @@ mod tests {
         assert_eq!(indentation(src, line_start(src, x)), "    ");
         assert!(is_identifier("acc_1") && !is_identifier("1x") && !is_identifier("a.b"));
         assert_eq!(squash("{ k : v ,\n }"), "{k:v,}");
+        let cafe = "import os as caf\u{e9}\nx = 1\n";
+        let inside_e = cafe.find('\u{e9}').unwrap() as u32 + 1;
+        assert_eq!(
+            (line_start(cafe, inside_e), line_end(cafe, inside_e)),
+            (0, 18)
+        );
+        assert!(header_colon_follows("for x in (xs  # c\n    ) :", 12));
+        assert!(!header_colon_follows("[x for x in xs if x]", 14));
+        assert!(!header_colon_follows("[x for x in xs  # c\n]", 14));
+        assert!(!header_colon_follows("x", 5));
+        assert_eq!(trim_element(" v, "), "v");
+        assert_eq!(trim_element("\n  v  # c\n    "), "v  # c\n    ");
+        assert_eq!(trim_element("v \\\n"), "v \\\n");
+        assert_eq!(trim_element("v,  # c\n"), "v,  # c\n");
     }
 }

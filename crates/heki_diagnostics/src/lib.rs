@@ -3,7 +3,7 @@
 
 mod fix;
 
-pub use fix::{apply_fixes, unified_diff};
+pub use fix::{PythonFixPass, apply_fixes, fix_python_source, unified_diff};
 
 use heki_ast::{LineIndex, Span};
 use heki_env::Severity;

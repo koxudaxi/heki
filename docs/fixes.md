@@ -10,7 +10,7 @@ equivalent. Whether the rewrite is **offered** depends on two independent questi
 
 | Safety | What you get |
 | ------ | ------------ |
-| Safe (every obligation established) | A diagnostic with a fix. |
+| Safe (every obligation established) | A diagnostic with a fix; for a statement whose shape heki does not rewrite (a parenthesized `x = (x + [i])`, an annotated `x: list = x + [i]`), a diagnostic that says the rewrite is proven safe, to be made by hand. |
 | Blocked | A diagnostic naming the first blocking obligation, no fix. |
 | Disproved | Nothing: the pattern only looks like a quadratic; rewriting it would be a bug. |
 
@@ -56,10 +56,17 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 $ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
+`--include-size-dependent` applies the proven-safe size-dependent rewrites in every function,
+with or without `--profile`; `--profile` on its own applies them only in the functions the
+profile shows hot.
+
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
 reports what is left. A file that changed on disk meanwhile (an editor saved it) is not written:
-the run reports it as an error (exit code 2) and keeps that save; run `--fix` again. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. `--diff`
+the run reports it as an error (exit code 2) and keeps that save; run `--fix` again. Suppressed
+diagnostics (`# heki: ignore[...]`) are never fixed. When the fixes of a pass would leave a file
+that does not parse, none of them is applied to that file and the run exits with code 2 (a heki
+bug to report). `--diff`
 prints the paths every other output format prints (relative to the working directory), so
 `patch -p1` applies it where heki ran.
 
@@ -74,7 +81,10 @@ A fix keeps the file acceptable to a type checker and to isort:
   `force-sort-within-sections`); without such a block it starts one before the other imports,
   and in a module without imports it follows the docstring and `__future__` imports, with the
   blank lines isort expects. Only imports run before it, so the rewritten function cannot run
-  before `collections` is bound.
+  before `collections` is bound. It never goes above a shebang, an encoding declaration, or a
+  `from __future__` import. An existing `from collections import deque` or `import
+  collections` is reused only when it runs unconditionally (not under `if TYPE_CHECKING:`)
+  and names the standard library's module (not `from .collections import deque`).
 
 ## Profiles
 
