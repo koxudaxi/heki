@@ -209,3 +209,17 @@ jobs:
           mkdir sdist-tree
           tar -xzf dist/*.tar.gz -C sdist-tree --strip-components 1
           cargo test --workspace --locked --manifest-path sdist-tree/Cargo.toml
+
+  release-draft-scripts:
+    # release-draft.yml runs only on main, so its scripts are tested here, on every pull request.
+    name: release draft scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+      # Python 3.12 is the runner's `python3`, which release-draft.yml runs the scripts with.
+      - run: uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests

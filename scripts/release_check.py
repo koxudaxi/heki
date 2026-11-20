@@ -139,19 +139,28 @@ def sdist_version(path: Path) -> str:
         return email.parser.HeaderParser().parsestr(data.read().decode())["Version"]
 
 
-def versions(dist: Path, tag: str | None) -> None:
-    from packaging.version import InvalidVersion, Version
+WORKSPACE_VERSION = "Cargo.toml `workspace.package.version`"
 
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
-    workspace = cargo["workspace"]["package"]["version"]
+
+def manifest_versions(root: Path = ROOT) -> dict[str, str]:
+    """The version every manifest entry declares, by entry; the release draft reads it too."""
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    cargo = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
     declared: dict[str, str] = {
         "pyproject.toml `project.version`": pyproject["project"]["version"],
-        "Cargo.toml `workspace.package.version`": workspace,
+        WORKSPACE_VERSION: cargo["workspace"]["package"]["version"],
     }
     for name, dep in cargo["workspace"]["dependencies"].items():
         if isinstance(dep, dict) and "path" in dep:
             declared[f"Cargo.toml `workspace.dependencies.{name}`"] = dep.get("version", "(none)")
+    return declared
+
+
+def versions(dist: Path, tag: str | None) -> None:
+    from packaging.version import InvalidVersion, Version
+
+    declared = manifest_versions()
+    workspace = declared[WORKSPACE_VERSION]
     wheels = sorted(dist.glob("*.whl"))
     sdists = sorted(dist.glob("*.tar.gz"))
     if not wheels or len(sdists) != 1:

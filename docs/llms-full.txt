@@ -2080,7 +2080,7 @@ Source: https://heki.koxudaxi.dev/development/
 # Development
 
 This page covers building and testing heki, its checks against CPython, the memory budget, the
-documentation, and the crates. [`AGENTS.md`](https://github.com/koxudaxi/heki/blob/main/AGENTS.md)
+documentation, releases, and the crates. [`AGENTS.md`](https://github.com/koxudaxi/heki/blob/main/AGENTS.md)
 lists the invariants every change must keep and the checks to run.
 
 ## Build and test
@@ -2211,6 +2211,101 @@ $ uvx --from "zensical==0.1.2" zensical serve
 - A pull request from this repository gets a preview deployment of the same Pages project, on the
   branch `pr-<number>`. Both use the repository secrets `CLOUDFLARE_API_TOKEN` and
   `CLOUDFLARE_ACCOUNT_ID`.
+
+## Releases
+
+The Release Draft workflow (`.github/workflows/release-draft.yml`) keeps a draft GitHub release
+of the next version. Publishing the draft runs `release.yml`, which builds and publishes heki.
+A draft is published by hand, and only while no Release Draft run is queued or running.
+
+### How a draft accumulates
+
+After each push to `main`, the workflow takes the pull requests merged at the commits the push
+added (several when a stack merges at once). For each one, Claude reads the merged diff and
+decides whether it breaks something the newest published release has. A change is breaking
+when:
+
+- existing code gets new reports from the rules enabled by default: a new rule enabled by
+  default, a rule turned on by default, or wider detection in a rule enabled by default;
+- a rule enabled by default becomes opt-in or is removed;
+- a rule's default severity changes;
+- a rule code or name changes;
+- configuration keys or their meaning, command-line options, or exit codes change, including how
+  `requires-python` selects the target Python version;
+- fields of the JSON or SARIF output are removed or change meaning;
+- the language server behavior that editors rely on changes;
+- the format of `--fix` rewrites changes;
+- the supported Python versions or platforms change.
+
+These are not breaking: a change that only removes false reports, in a default or an opt-in rule
+(a fixed false positive), even though it narrows what the rule detects; new opt-in rules; new
+optional keys and new output fields; and any change to a feature that `docs/experimental.md`
+lists. The analysis context that Claude reads holds that page as the trusted checkout of `main`
+has it (while the page does not exist, no feature is experimental), and Claude describes each
+change to an experimental feature separately. The workflow then:
+
+- adds the breaking changes to the draft's `## Breaking Changes` section, under one heading per
+  kind, the changes to experimental features to `## Experimental`, and a line
+  `* <title> (#<number>)` to `## Changes`, except for pull requests labeled `maintenance` or
+  `dependencies`; every item ends with `(#<number>)`;
+- labels a breaking pull request `breaking-change`, comments the result on every pull request,
+  and labels each `breaking-change-analyzed`, so that a re-run skips it. A pull request analyzed
+  again keeps one comment, which is updated, and loses `breaking-change` when it is no longer
+  found breaking.
+
+The draft's tag is the version after the newest published release: a breaking change bumps the
+minor version (0.1.x to 0.2.0), anything else the patch, and manifests that already name a
+later version win. Text added to the draft by hand is kept. Pull requests that change only
+tests, documentation, development scripts, or the CI workflows skip Claude and count as not
+breaking. While no release is published, the workflow does nothing: the notes of the first
+release come from `CHANGELOG.md`.
+
+### Publishing a release
+
+1. While the manifests declare another version, the draft's first line asks for a bump. Set the
+   draft's version in a pull request: `pyproject.toml`, `Cargo.toml` (`workspace.package.version`
+   and the internal crates under `workspace.dependencies`), and `Cargo.lock`. Label it
+   `maintenance` to keep it out of the list of changes. `release.yml` fails when the tag and the
+   manifests differ.
+2. Merge it; the workflow removes the first line from the draft.
+3. Wait until no Release Draft run is queued or in progress
+   (`gh run list --workflow release-draft.yml`), then reload the draft and publish it on GitHub.
+   GitHub cannot make a draft update conditional on the release still being a draft, so a run
+   that updates the draft while it is published rewrites the published tag, title, and notes
+   (the run then warns), and a draft page loaded before the run's update publishes without it.
+
+### Replays and dry runs
+
+```console
+$ gh workflow run release-draft.yml --ref main -f pr_number=123
+$ gh workflow run release-draft.yml --ref <branch> -f pr_number=123 -f dry_run=true
+```
+
+- A replay on `main` analyzes one merged pull request again, for example after a failed run. A
+  pull request labeled `breaking-change-analyzed` is skipped: remove the label first. One that a
+  published release already holds is skipped too, so that its changes are not listed again in
+  the next draft; a dry run still analyzes it.
+- Up to 100 runs wait for the one in progress, in order. GitHub cancels a run that arrives while
+  100 are waiting, and a later run does not take over its pull requests. A canceled run shows in
+  `gh run list --workflow release-draft.yml --status cancelled`. Its pull requests are among those
+  merged after the first published release that still lack `breaking-change-analyzed`. List them
+  with `gh pr list --state merged --limit 1000 --search "-label:breaking-change-analyzed
+  merged:>=<first-release-date>"` (`gh pr list` shows 30 without `--limit`, and a search returns
+  at most 1,000, so split the date range when it lists 1,000), and replay each of them, in merge
+  order.
+- A dry run works from any branch, so a change to the workflow can be tried before it is on
+  `main`. It prints the analysis, the planned draft, and the comments in the run's log, and
+  changes no label, comment, or release. The pull request must be merged into `main`, and a
+  release must be published.
+
+The Claude step authenticates with the repository secret `CLAUDE_CODE_OAUTH_TOKEN`, an OAuth
+token of a Claude subscription (`claude setup-token` creates one). No other step receives it.
+
+The scripts of the workflow have tests, which CI runs on every pull request:
+
+```console
+$ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
+```
 
 ## Architecture
 
