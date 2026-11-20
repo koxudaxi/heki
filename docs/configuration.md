@@ -24,7 +24,8 @@ OPT103 = "warning"
 
 1. The project root is the nearest directory at or above the first path given (the current
    directory when no path is given) that holds `heki.toml`, `.heki.toml`, `pyproject.toml`, or
-   `.git`.
+   `.git`. When none does, it is the first path's own directory (the directory given, or the
+   given file's directory).
 2. heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` in that directory. A
    `pyproject.toml` without `[tool.heki]` still marks the root: its project gets the defaults.
 3. `--config <path>` names the file instead. The project root stays where step 1 finds it.
@@ -51,6 +52,21 @@ heki never ignores a setting. These are configuration errors (exit code 2):
 - a `[tool.heki]` table in a file that is not named `pyproject.toml`;
 - a heki setting at the top level of a `pyproject.toml` (`[[ecosystem]]` instead of
   `[[tool.heki.ecosystem]]`).
+
+### Module names follow the project root
+
+Module names are the paths below the project root (`app/api.py` is `app.api`; a `src/` layout
+drops `src`). heki resolves the imports between the project's modules by these names, and they
+appear in messages that name a function by its full name and in the `target`s of
+[baseline](adoption.md#ratchet-baselines) entries, whose `path`s are relative to the root too.
+Without a `heki.toml`, `.heki.toml`, or `pyproject.toml` in the project's directory or above it,
+the root is the top of the enclosing Git working tree (the directory holding `.git`), so the
+names depend on where the project sits in the checkout: in a repository, `services/api/app.py`
+is `services.api.app`, and its `from helpers import slow` does not find
+`services/api/helpers.py`; the same files checked out on their own are `app` and `helpers`.
+Without any of them and outside a Git working tree, `heki check pkg` is rooted inside the
+package: its modules are `a` and `b`, not `pkg.a` and `pkg.b`, and `from pkg.b import slow` is
+not resolved. Put a `pyproject.toml` or a `heki.toml` in the project's directory to fix the root.
 
 ## Top-level settings
 
