@@ -488,6 +488,17 @@ which module imports which.
   method of the class and its subclasses, with `MUT101`'s initialization, memo, and constant-key
   filters, writes directly under a `None` / falsy guard of the same attribute (lazy
   initialization, `CacheFlow` writes), the attributes `__hash__` caches itself (`self._hash`), and stored-hash names.
+- Initialization includes the private methods `__init__` reaches through other private methods on
+  `self` (`__init__` -> `self._load()` -> `self._decode()`).
+- A writer whose class uses another `__hash__` (`ProjectDecls::hash_owner`: a class between it and
+  the hash's class defines `__hash__`, or `__eq__` alone, which leaves its instances unhashable)
+  is not paired with that hash.
+- `hashed_whole_self_attrs` of `__hash__`: the attributes every read of which is handed, as
+  itself, to `hash()` (alone or as an element of a hashed tuple display) or has `__hash__` called
+  on it, read by no `self` method or property the hash calls, with `self` handed to no other code.
+  An in-place change of such an attribute (an item store, a mutator method) changes only the
+  value's own hash: a builtin container that can change in place cannot be hashed, and a project
+  value's own `__hash__` is checked in its own class. Rebinding the attribute is still reported.
 
 #### `MUT201`: declared write ownership
 Declared in `pyproject.toml` (no decorators, no run-time overhead):
@@ -548,15 +559,23 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      function) gets a read-only origin tag.
   2. The tag flows within the function through `Copy`, attribute reads (with `deep = true`),
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
-     `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, and the Layer 2
+     `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, the builtin container
+     constructors `dict` / `list` / `tuple` / `set` / `frozenset`, and the Layer 2
      `copy_sanitizer` entries, as deep as each entry says: a shallow copy ends it for the top
-     level only), and a slice is a shallow copy unless the value's class is inferred and is not a
-     builtin sequence
-     (`readonly::subscript_step`, shared with the return flow). A copy keeps its original's class
-     for receiver typing. A phi joins the tags of all its incoming values, to a fixpoint.
+     level only), a display that only unpacks tagged values (`{**x}`, `[*xs]`,
+     `readonly::display_copies`) is a shallow copy of them, and a slice is a shallow copy unless
+     the value's class is inferred and is not a builtin sequence
+     (`readonly::subscript_step`, shared with the return flow). A copy method of a project class
+     (`Image.copy`) is a call of that method, not a copy by its name (`readonly::call_derivation`).
+     A copy keeps its original's class for receiver typing. A phi joins the tags of all its
+     incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
-     parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
-     the call hop.
+     parameter position the callee changes (`mutated_param_paths` minus `memo_param_paths`; for a
+     shallow copy, below the attributes `changed_param_attrs` names), is reported as **`MUT202`**
+     with the call hop. Filling a memo of the shared object or initializing one of its attributes
+     lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
+     holds) is no change: what the object computes stays the same. A change below a shallow copy
+     of a parameter (`copy.copy(p).tags.append(x)`) is a change of the parameter.
   4. **Return flow**: a backward walk from the returns marks each call whose result may be
      returned (as itself, as an element, or as an item of target unpacking; a copy ends it). A
      callee that is a producer, an `@lru_cache` function, or `returns_protected` makes the caller

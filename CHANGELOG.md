@@ -13,6 +13,26 @@ release can change rules, configuration keys, diagnostics, and output formats.
   not wrong code. The exit code does not change (a warning still makes `heki check` exit 1),
   only the output label and the SARIF level. `[tool.heki.lint.severity]` still overrides it.
 
+### Fixed
+
+- `MUT107` (`hash-attr-mutation`) no longer reports a write that cannot change a hash a `set` or
+  `dict` has filed: an in-place change (an item store, `append`) of an attribute `__hash__`
+  hands whole to `hash()` (`hash(self.items)`: a list or `bytearray` there cannot be hashed, and
+  a project value answers for its own hash), a writer whose class defines its own `__hash__`
+  (or `__eq__` alone) below the hash's class, and a private helper `__init__` reaches through
+  other private helpers (`__init__` -> `self._load()` -> `self._decode()`). A writer in a
+  subclass with its own `__hash__` is now reported against that hash.
+- `MUT202` (`readonly-return-mutation`) no longer reports a shared object filling its own memo
+  (a cache-named attribute changed in place, a store under `if k not in ...`, `setdefault`, a
+  lazy initialization), also in a method or helper it is handed to, nor a change of a copy a
+  project class's own `copy()` makes (it copies as deeply as its body does).
+- `MUT202` reports a change below a shallow copy made with `dict(...)`, `list(...)`,
+  `tuple(...)`, `set(...)`, `frozenset(...)`, or a display that only unpacks the shared value
+  (`{**shared}`, `[*rows]`), as for `.copy()`; they shared the values below and were taken as new
+  objects. A helper changing an attribute's object below its own shallow copy of a parameter
+  (`draft = copy.copy(post); draft.tags.append(t)`) now changes that parameter (`MUT202`,
+  `MUT108`, `EFF201` `mutates-params`).
+
 ## [0.1.2] - 2026-11-21
 
 ### Fixed

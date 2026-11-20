@@ -24,13 +24,23 @@ followed, also on the call result itself
 generator is iterated. Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
 reference), and the deep copy sanitizers of the ecosystem knowledge base clear it, shallow copies
-(`copy.copy`, `.copy()`, `dataclasses.replace(...)`, a sanitizer declared
-`copy-sanitizer = "shallow"`, and slices of builtin lists, other builtin sequences, and values
-whose class heki cannot infer, `rows()[:]`) free the top level only: the values below stay shared, so a helper rebinding an
-attribute of the copy (`b.name = "new"`) changes nothing shared, and one changing the object an
-attribute holds (`b.tags.append(x)`) does. A slice of an object of another known class may
-be a view of it (`numpy`) and stays shared. A wrapper that returns a copy on one path and the shared value on
-another still returns a shared value.
+(`copy.copy`, `.copy()`, `dataclasses.replace(...)`, `dict(...)`, `list(...)`, `tuple(...)`,
+`set(...)`, `frozenset(...)`, displays that only unpack the value (`{**shared}`, `[*rows]`), a
+sanitizer declared `copy-sanitizer = "shallow"`, and slices of builtin lists, other builtin
+sequences, and values whose class heki cannot infer, `rows()[:]`) free the top level only: the
+values below stay shared, so a helper rebinding an attribute of the copy (`b.name = "new"`)
+changes nothing shared, and one changing the object an attribute holds (`b.tags.append(x)`, also
+on its own shallow copy of the argument) does. A slice of an object of another known class may
+be a view of it (`numpy`) and stays shared. A `copy()` method of a project class copies as
+deeply as its body does: its result is shared only when the method returns a shared value. A
+wrapper that returns a copy on one path and the shared value on another still returns a shared
+value.
+
+Filling a memo of the shared object, directly or in a method or helper it is handed to, is no
+mutation: an in-place change of an attribute named as a cache or memo (`self._style_cache[k] =
+v`), a store under `if k not in self._decoders:` or through `setdefault`, and a lazy
+initialization (`if self._runtime is None: self._runtime = load()`) leave what the object
+computes as it was.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
@@ -72,6 +82,10 @@ def extend(name: str) -> dict[str, list[str]]:
 - A generator's values and a coroutine's result (`await`) are not followed.
 - A method call on a shared value whose class heki cannot resolve (a producer returning a type
   variable) is not followed; a wrapper with a concrete return annotation resolves it.
+- A display that also holds values of its own (`{**shared, "extra": []}`) is not followed.
+- A project method returning a part of a shared receiver (`return self._items[key]`) is not
+  followed, nor is a `copy()` method of a project class that shares the receiver's values
+  (`return Post(self.tags)`).
 
 ## Fix safety
 No automatic fix.

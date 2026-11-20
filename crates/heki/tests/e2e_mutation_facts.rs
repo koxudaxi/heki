@@ -193,6 +193,269 @@ class Child(Base):
 }
 
 #[test]
+fn a_hash_of_an_attribute_value_itself_leaves_that_values_changes_to_its_own_class() {
+    let p = project("hashed_whole", "");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/seq.py",
+            r#"class Sequence:
+    def __init__(self, data):
+        self._data = data
+
+    def strip(self, chars):
+        if not isinstance(self._data, bytearray):
+            raise TypeError("the sequence is immutable")
+        self._data[:] = self._data.strip(chars)
+        return self
+
+    def replace(self, data):
+        self._data = data
+
+
+class TableWriter:
+    def __init__(self):
+        self.items = []
+
+    def __hash__(self):
+        # Hashable once `done` has made the items a tuple.
+        return hash(self.items)
+
+    def write(self, item):
+        self.items.append(item)
+
+    def done(self):
+        self.items = tuple(self.items)
+
+
+class Proxy:
+    def __init__(self, wrapped):
+        self.__wrapped__ = wrapped
+        self.kind = "proxy"
+
+    def __hash__(self):
+        return hash((self.kind, self.__wrapped__))
+
+    def __setitem__(self, key, value):
+        self.__wrapped__[key] = value
+
+
+class Counted:
+    def __init__(self):
+        self.items = []
+
+    def __hash__(self):
+        return hash(self.items) ^ len(self.items)
+
+    def write(self, item):
+        self.items.append(item)
+
+
+class Copied:
+    def __init__(self):
+        self.items = []
+
+    def __hash__(self):
+        return hash(tuple(self.items))
+
+    def write(self, item):
+        self.items.append(item)
+
+
+class Measured:
+    def __init__(self):
+        self.items = []
+
+    def __hash__(self):
+        return hash(self.items) ^ self._size()
+
+    def _size(self):
+        return len(self.items)
+
+    def write(self, item):
+        self.items.append(item)
+
+
+class Keyed:
+    def __init__(self, key):
+        self.key = key
+
+    def __hash__(self):
+        return self.key.__hash__()
+
+    def extend(self, part):
+        self.key.append(part)
+
+
+class Indexed:
+    def __init__(self):
+        self.items = []
+
+    def __hash__(self):
+        return hash(self.items[0])
+
+    def write(self, item):
+        self.items.append(item)
+
+
+class Typed:
+    def __init__(self):
+        self.items = []
+
+    def __hash__(self):
+        return hash((type(self), self.items))
+
+    def write(self, item):
+        self.items.append(item)
+"#,
+        )
+        .write(
+            "pkg/frozen.py",
+            r#"from pkg.seq import Sequence
+
+
+class FrozenSequence(Sequence):
+    def __hash__(self):
+        return hash(self._data)
+"#,
+        );
+    // `hash(self._data)` hashes the value itself: a `bytearray` (the only value `strip` changes
+    // in place), a list, or a container behind a proxy cannot be hashed at all, and a project
+    // value answers for its own hash. Rebinding the attribute, and a hash that also reads the
+    // length, a copy, an item, or a helper's view of it, or that hands `self` on, still changes
+    // with the value.
+    assert_eq!(
+        reports(&p, "MUT107"),
+        vec![
+            at("pkg/seq.py", 12, "Sequence.replace"),
+            at("pkg/seq.py", 27, "TableWriter.done"),
+            at("pkg/seq.py", 50, "Counted.write"),
+            at("pkg/seq.py", 61, "Copied.write"),
+            at("pkg/seq.py", 75, "Measured.write"),
+            at("pkg/seq.py", 97, "Indexed.write"),
+            at("pkg/seq.py", 108, "Typed.write"),
+        ]
+    );
+}
+
+#[test]
+fn a_writer_whose_class_hashes_otherwise_leaves_the_base_hash_alone() {
+    let p = project("hash_owner", "");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/fields.py",
+            r#"class Field:
+    def __init__(self, name):
+        self.name = name
+
+    def __hash__(self):
+        return hash(self.name)
+
+
+class MetaField(Field):
+    name = None
+"#,
+        )
+        .write(
+            "pkg/keys.py",
+            r#"from pkg.fields import Field, MetaField
+
+
+class CompositeKey(MetaField):
+    def __init__(self, *field_names):
+        self.field_names = field_names
+
+    def __hash__(self):
+        return hash(self.field_names)
+
+    def bind(self, name):
+        self.name = name
+
+
+class Identity(Field):
+    def __eq__(self, other):
+        return self is other
+
+    def rename(self, name):
+        self.name = name
+
+
+class Column(Field):
+    def rename(self, name):
+        self.name = name
+"#,
+        );
+    // `CompositeKey` instances hash with their own `__hash__`, and `Identity` instances (an
+    // `__eq__` without `__hash__`) cannot be hashed: neither writer changes a `Field` hash.
+    assert_eq!(
+        reports(&p, "MUT107"),
+        vec![at("pkg/keys.py", 25, "Column.rename")]
+    );
+}
+
+#[test]
+fn private_helpers_initialization_reaches_through_other_helpers_initialize() {
+    let p = project("init_helper_chains", "");
+    p.write(
+        "app.py",
+        r#"class Key:
+    def __init__(self, data=None, filename=None):
+        self.public = None
+        if data is not None:
+            self._from_data(data)
+        if filename is not None:
+            self._from_file(filename)
+
+    def __hash__(self):
+        return hash(self.public)
+
+    def _from_data(self, data):
+        self._decode(data)
+
+    def _from_file(self, filename):
+        with open(filename, "rb") as f:
+            self._decode(f.read())
+
+    def _decode(self, data):
+        self.public = data[:32]
+
+    def _reload(self, data):
+        self.public = data
+
+    def refresh(self, data):
+        self._reload(data)
+
+
+class Client:
+    def __init__(self, uri):
+        self.options = None
+        self._topology()
+
+    def __hash__(self):
+        return hash(self.options)
+
+    def _topology(self):
+        self._resolve()
+
+    def _resolve(self):
+        self.options = "resolved"
+
+    def query(self):
+        self._topology()
+"#,
+    );
+    // `_decode` runs only inside initialization (through `_from_data` / `_from_file`);
+    // `_reload` runs from the public `refresh` instead, and `_resolve` through `_topology`,
+    // which `query` calls too.
+    assert_eq!(
+        reports(&p, "MUT107"),
+        vec![
+            at("app.py", 23, "Key._reload"),
+            at("app.py", 41, "Client._resolve")
+        ]
+    );
+}
+
+#[test]
 fn a_write_leaves_no_stale_cached_value_on_any_path() {
     let p = project("invalidation_paths", "");
     p.write(
@@ -303,6 +566,293 @@ def copies_only(flag: bool) -> None:
             at("app.py", 10, "copy_first"),
             at("app.py", 15, "copy_second"),
             at("app.py", 23, "in_branches"),
+        ]
+    );
+}
+
+#[test]
+fn container_constructors_and_unpacking_displays_copy_only_the_top_level() {
+    let p = project("shared_constructors", "");
+    p.write(
+        "app.py",
+        r#"from functools import lru_cache
+
+
+@lru_cache(maxsize=None)
+def schema(name):
+    return {"fields": [name], "meta": {"a": 1}}
+
+
+@lru_cache(maxsize=None)
+def rows(name):
+    return [[name]]
+
+
+def copied(name):
+    return dict(schema(name))
+
+
+def splatted(name):
+    return {**schema(name)}
+
+
+def extend(name):
+    s = dict(schema(name))
+    s["fields"].append("x")
+
+
+def splat(name):
+    s = {**schema(name)}
+    s["meta"]["b"] = 2
+
+
+def first_row(name):
+    r = list(rows(name))
+    r[0].append("x")
+
+
+def each_row(name):
+    for r in tuple(rows(name)):
+        r.append("x")
+
+
+def unpacked(name):
+    r = [*rows(name)]
+    r[0].clear()
+
+
+def through_wrapper(name):
+    copied(name)["fields"].append("x")
+    splatted(name)["meta"]["b"] = 2
+
+
+def retitle(name):
+    s = dict(schema(name))
+    s["fields"] = ["x"]
+    t = {**schema(name), "extra": []}
+    t["extra"].append(1)
+    r = list(rows(name))
+    r.append(["y"])
+    copied(name)["new"] = 1
+"#,
+    );
+    // The new container holds the cached one's values: changing them changes the cache, while
+    // changing the new container's own items does not. A display adding values of its own is
+    // not followed (`t["extra"]` is its own list).
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![
+            at("app.py", 24, "extend"),
+            at("app.py", 29, "splat"),
+            at("app.py", 34, "first_row"),
+            at("app.py", 39, "each_row"),
+            at("app.py", 44, "unpacked"),
+            at("app.py", 48, "through_wrapper"),
+            at("app.py", 49, "through_wrapper"),
+        ]
+    );
+}
+
+#[test]
+fn a_copy_method_of_a_project_class_copies_as_deeply_as_its_body() {
+    let p = project("project_copies", "");
+    p.write(
+        "app.py",
+        r#"from functools import lru_cache
+
+
+class Image:
+    def __init__(self):
+        self.info = {}
+
+    def copy(self):
+        return self._new()
+
+    def _new(self):
+        new = Image()
+        new.info = self.info.copy()
+        return new
+
+
+@lru_cache(maxsize=None)
+def cached_image(name) -> Image:
+    return Image()
+
+
+@lru_cache(maxsize=None)
+def cached_info(name) -> dict[str, list[str]]:
+    return {"modes": [name]}
+
+
+def hopper(name) -> Image:
+    return cached_image(name).copy()
+
+
+def mark(name):
+    im = hopper(name)
+    im.info["transparency"] = 0
+
+
+def mark_cached(name):
+    cached_image(name).info["transparency"] = 0
+
+
+def extend_info(name):
+    info = cached_info(name).copy()
+    info["modes"].append("RGB")
+"#,
+    );
+    // `Image.copy` gives the copy a new `info`; a dict's `copy` shares the lists it holds.
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![
+            at("app.py", 37, "mark_cached"),
+            at("app.py", 42, "extend_info"),
+        ]
+    );
+}
+
+#[test]
+fn a_change_below_a_shallow_copy_of_a_parameter_changes_the_parameter() {
+    let p = project("param_copies", "");
+    p.write(
+        "app.py",
+        r#"import copy
+from functools import lru_cache
+
+
+class Post:
+    def __init__(self, title, tags):
+        self.title = title
+        self.tags = tags
+
+
+@lru_cache(maxsize=None)
+def post(name):
+    return Post(name, [name])
+
+
+def tag(p, t):
+    draft = copy.copy(p)
+    draft.tags.append(t)
+    return draft
+
+
+def tag_copy_of_copy(p, t):
+    draft = copy.copy(copy.copy(p))
+    draft.tags.append(t)
+
+
+def retitle(p, title):
+    draft = copy.copy(p)
+    draft.title = title
+    return draft
+
+
+def use(name):
+    tag(post(name), "x")
+    tag_copy_of_copy(post(name), "x")
+    retitle(post(name), "y")
+"#,
+    );
+    // The copy holds the cached post's tag list; its own title is its own.
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![at("app.py", 34, "use"), at("app.py", 35, "use")]
+    );
+}
+
+#[test]
+fn filling_a_memo_of_a_shared_object_leaves_what_it_computes_alone() {
+    let p = project("shared_memos", "");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/strip.py",
+            r#"class Strip:
+    def __init__(self, segments):
+        self._segments = segments
+        self._style_cache = {}
+        self._runtime = None
+        self._decoders = {}
+        self._ranges = None
+        self.history = []
+
+    def apply_style(self, style):
+        cached = self._style_cache.get(style)
+        if cached is not None:
+            return cached
+        styled = Strip([(s, style) for s in self._segments])
+        self._style_cache[style] = styled
+        return styled
+
+    def runtime(self):
+        if self._runtime is None:
+            self._runtime = object()
+        return self._runtime
+
+    def decoder(self, config):
+        if config not in self._decoders:
+            self._decoders[config] = object()
+        return self._decoders[config]
+
+    def contains(self, value):
+        bounds = self._ranges
+        if bounds is None:
+            bounds = self._ranges = sorted(self._segments)
+        return value in bounds
+
+    def record(self, event):
+        self.history.append(event)
+
+    def reset_styles(self):
+        self._style_cache = {}
+
+
+def known_bases(node):
+    if node.bases_known is None:
+        node.bases_known = all(node.bases)
+    return node.bases_known
+"#,
+        )
+        .write(
+            "pkg/render.py",
+            r#"from functools import lru_cache
+
+from pkg.strip import Strip, known_bases
+
+
+@lru_cache(maxsize=None)
+def blank(width) -> Strip:
+    return Strip([" " * width])
+
+
+def render(width, style):
+    line = blank(width)
+    line.apply_style(style)
+    line.runtime()
+    line.decoder(style)
+    line.contains(" ")
+    known_bases(line)
+    line._style_cache[style] = None
+    return line
+
+
+def render_logged(width):
+    line = blank(width)
+    line.record("render")
+    line.reset_styles()
+    line.history.append("direct")
+"#,
+        );
+    // A memo dictionary (by name, or filled under `not in`) and a lazy initialization (also
+    // through a local copy of the attribute, also by a function taking the object) only cache
+    // what the object computes; appending to its history or replacing a memo changes it.
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![
+            at("pkg/render.py", 24, "render_logged"),
+            at("pkg/render.py", 25, "render_logged"),
+            at("pkg/render.py", 26, "render_logged"),
         ]
     );
 }

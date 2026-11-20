@@ -44,6 +44,35 @@ pub struct SelfAttrWrite {
     pub lazy_init: bool,
 }
 
+impl SelfAttrWrite {
+    /// A write that fills a memo rather than changing what was computed from the object: a
+    /// memo-shaped write (`setdefault`, a store under `if k not in <obj>.<attr>:`), or an
+    /// in-place change of an attribute named as a memo or cache ([`is_memo_name`]). Rebinding
+    /// such an attribute is no memo operation (`self.cache_size = n`).
+    pub fn fills_memo(&self, attr: &str) -> bool {
+        self.memo_shaped || !self.rebinds && is_memo_name(attr)
+    }
+}
+
+/// Memo / cache dictionaries by name: a word of the attribute's name is `cache...` or `memo...`
+/// (`self._cache`, `self.memo`, `self._resultCache`, `self.memoized`), not `memory`.
+pub fn is_memo_name(attr: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    for part in attr.split('_') {
+        let mut word = String::new();
+        for c in part.chars() {
+            if c.is_ascii_uppercase() && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(c.to_ascii_lowercase());
+        }
+        words.push(word);
+    }
+    words
+        .iter()
+        .any(|w| w.starts_with("cache") || w.starts_with("memo") && !w.starts_with("memor"))
+}
+
 /// One block of a method: its normal control flow and the points that invalidate or read a
 /// cached property, by instruction index.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +185,15 @@ fn self_vars(f: &IrFunction) -> FxHashSet<VarId> {
 /// in place (also through local copies of `self.<attr>`). `self.__dict__` itself is no
 /// attribute a property reads.
 pub fn self_attr_writes(f: &IrFunction) -> Vec<(&str, SelfAttrWrite)> {
-    let self_vars = self_vars(f);
+    attr_writes(f, &self_vars(f))
+}
+
+/// [`self_attr_writes`] of the objects the variables `objs` hold (`self`, a parameter): the
+/// writes of `<obj>.<attr>` in `f`'s own body.
+pub fn attr_writes<'f>(
+    f: &'f IrFunction,
+    self_vars: &FxHashSet<VarId>,
+) -> Vec<(&'f str, SelfAttrWrite)> {
     // `var -> attr`: the variables holding `self.<attr>`, through copies.
     let mut alias: FxHashMap<VarId, &str> = FxHashMap::default();
     let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
@@ -195,7 +232,7 @@ pub fn self_attr_writes(f: &IrFunction) -> Vec<(&str, SelfAttrWrite)> {
             _ => false,
         })
     };
-    let lazy = lazy_init_blocks(f, &self_vars);
+    let lazy = lazy_init_blocks(f, self_vars);
     let mut out = Vec::new();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {

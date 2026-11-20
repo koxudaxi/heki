@@ -310,7 +310,8 @@ fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
     let s = "shapes.py";
     // Reported: a direct write, a write through a local alias, a fall-through after an
     // `is not None` check, the second (unguarded) write after a lazy one, subclass methods
-    // (also in another module, and once although `Child.__hash__` overrides `Base.__hash__`),
+    // (also in another module, and against `Child.__hash__`, which `Child` instances use instead
+    // of `Base.__hash__`),
     // writes of attributes `__hash__` reads through `self.key()` / its `self._compute()` cache
     // helper / directly, a nested class, a write under a check that is not a `None` one, and
     // a private method no initializer calls.
@@ -351,7 +352,7 @@ fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
             "Tagged.label->__hash__",
             "Tagged.name->__hash__",
             "Cached.v->__hash__",
-            "Base.name->__hash__",
+            "Child.name->__hash__",
             "Outer.Inner.name->__hash__",
             "Point.x->__hash__",
             "Version.major->__hash__",

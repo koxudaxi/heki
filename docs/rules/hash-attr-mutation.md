@@ -18,8 +18,17 @@ The rule reports the write itself, once per method and attribute. It does not re
 
 - initialization: `__new__`, `__init__`, `__post_init__`, `model_post_init`, `__setstate__`,
   `__enter__`, `setup`, `setup_*` / `_setup_*` / `_init_*` / `_configure_*` methods, and the private helpers they call
-  (`self.__setstate(state)` on the instance `__new__` allocates included); class attributes
-  that `__init_subclass__` sets;
+  (`self.__setstate(state)` on the instance `__new__` allocates included, and the private
+  helpers those call on `self`: `__init__` -> `self._load()` -> `self._decode()`); class
+  attributes that `__init_subclass__` sets;
+- writers whose instances use another hash: a class between the writer's class and the hash's
+  defines its own `__hash__`, or `__eq__` without `__hash__` (Python then makes its instances
+  unhashable);
+- in-place changes (an item store, a mutator method such as `append`) of an attribute
+  `__hash__` hands whole to `hash()` (`hash(self.items)`, `hash((self.kind, self.items))`) and
+  reads for nothing else: the hash is the value's own, so a list, dict, set, or `bytearray`
+  there cannot be hashed at all, and a value of a project class answers for its own hash
+  (`MUT107` checks its class). Rebinding the attribute is reported;
 - classes with a metaclass other than `type` / `abc.ABCMeta` along their MRO (also one heki
   cannot resolve): the metaclass may turn attribute writes into descriptor calls (a generated
   property whose setter invalidates the cached value), which heki does not see;

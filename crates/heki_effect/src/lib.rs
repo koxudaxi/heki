@@ -32,7 +32,9 @@ mod scc;
 mod summary;
 pub mod types;
 
-pub use cache_flow::{CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, self_attr_writes};
+pub use cache_flow::{
+    CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
+};
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
@@ -463,6 +465,15 @@ pub struct EffectSummary {
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> paths` of `mutated_param_paths` that every change, in the function and
+    /// through its calls, only fills a memo or initializes lazily
+    /// ([`cache_flow::SelfAttrWrite::fills_memo`], `lazy_init`): an in-place change of an
+    /// attribute named as a memo or cache (`p._cache[k] = v`), a memo-shaped store
+    /// (`setdefault`, a store under `if k not in p.<attr>:`), or a store of `p.<attr>` where a
+    /// `None` / falsy test of it found it unset. What the object computes stays the same
+    /// (`MUT202`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub memo_param_paths: BTreeMap<u8, BTreeSet<String>>,
     /// `param index -> attributes` of the argument whose objects are changed, in place or
     /// deeper (`p.a.append(...)`, `p.a.b = v`), also through local copies and calls: the
     /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`). A
@@ -496,6 +507,15 @@ pub struct EffectSummary {
     /// leaves such an attribute set (`MUT101`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub lazily_read_self_attrs: BTreeSet<String>,
+    /// `__hash__` methods only: the `self` attributes whose value every read hands, as itself,
+    /// to `hash()` (alone or as an element of a tuple display it hashes) or calls `__hash__`
+    /// on, and that no `self` method or property it calls reads; it hands `self` to no other
+    /// code. The hash is then the value's own: changing that value in place (an item store, a
+    /// mutator method) changes it only through the value's own `__hash__`, which its class
+    /// answers for, and a builtin container that can change in place cannot be hashed at all
+    /// (`MUT107`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub hashed_whole_self_attrs: BTreeSet<String>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
     pub invalidates_cached: BTreeSet<String>,
     /// The facts of every typed write the function reaches, through any callee.
@@ -766,24 +786,42 @@ impl EffectSummary {
         }
     }
 
-    /// Add the `self` attributes `other` reads to the ones this summary reads (its own or a
-    /// `self` call's facts): an attribute stays read only lazily when neither reads it
-    /// otherwise ([`Self::lazily_read_self_attrs`]).
-    pub(crate) fn add_self_reads(&mut self, other: &EffectSummary) {
-        if !self.lazily_read_self_attrs.is_empty() || !other.lazily_read_self_attrs.is_empty() {
-            let eager = |s: &EffectSummary| -> BTreeSet<String> {
-                s.reads_self_attrs
-                    .iter()
-                    .filter(|r| !s.lazily_read_self_attrs.contains(&r.attr))
-                    .map(|r| r.attr.clone())
-                    .collect()
-            };
-            let eager = [eager(self), eager(other)];
-            self.lazily_read_self_attrs
-                .extend(other.lazily_read_self_attrs.iter().cloned());
-            self.lazily_read_self_attrs
-                .retain(|a| !eager.iter().any(|e| e.contains(a)));
+    /// Record that the function changes parameter `p` at `path` (`mutated_param_paths`);
+    /// `memo`: this change only fills a memo or initializes lazily. A path stays in
+    /// `memo_param_paths` only while every change of it does.
+    pub(crate) fn note_param_change(&mut self, p: u8, path: String, memo: bool) {
+        let paths = self.mutated_param_paths.entry(p).or_default();
+        let memos = self.memo_param_paths.entry(p).or_default();
+        let changed_otherwise = paths.contains(&path) && !memos.contains(&path);
+        if memo && !changed_otherwise {
+            memos.insert(path.clone());
+        } else {
+            memos.remove(&path);
         }
+        if memos.is_empty() {
+            self.memo_param_paths.remove(&p);
+        }
+        paths.insert(path);
+        self.mutates_params |= 1u64 << p;
+    }
+
+    /// Whether the function changes parameter `p` other than by filling a memo or initializing
+    /// lazily (`memo_param_paths`); `attrs`: only below those of its attributes.
+    pub fn changes_param_state(&self, p: u8, attrs: Option<&BTreeSet<String>>) -> bool {
+        let memos = self.memo_param_paths.get(&p);
+        let paths = self.mutated_param_paths.get(&p).into_iter().flatten();
+        paths
+            .filter(|path| attrs.is_none_or(|a| a.contains(*path)))
+            .any(|path| memos.is_none_or(|m| !m.contains(path)))
+    }
+
+    /// Add the `self` attributes `other` reads to the ones this summary reads (its own or a
+    /// `self` call's facts): an attribute stays read only lazily
+    /// ([`Self::lazily_read_self_attrs`]) or only as the value hashed
+    /// ([`Self::hashed_whole_self_attrs`]) when neither reads it otherwise.
+    pub(crate) fn add_self_reads(&mut self, other: &EffectSummary) {
+        self.lazily_read_self_attrs = read_only_as(self, other, |s| &s.lazily_read_self_attrs);
+        self.hashed_whole_self_attrs = read_only_as(self, other, |s| &s.hashed_whole_self_attrs);
         self.reads_self_attrs
             .extend(other.reads_self_attrs.iter().cloned());
     }
@@ -1712,6 +1750,32 @@ impl ProjectIndex {
             }
         }
     }
+}
+
+/// The `self` attributes `a` and `b` together read only in the way `kind` holds: those either
+/// holds, minus those either reads otherwise.
+fn read_only_as(
+    a: &EffectSummary,
+    b: &EffectSummary,
+    kind: impl Fn(&EffectSummary) -> &BTreeSet<String>,
+) -> BTreeSet<String> {
+    if kind(a).is_empty() && kind(b).is_empty() {
+        return BTreeSet::new();
+    }
+    let otherwise = |s: &EffectSummary| -> BTreeSet<String> {
+        s.reads_self_attrs
+            .iter()
+            .filter(|r| !kind(s).contains(&r.attr))
+            .map(|r| r.attr.clone())
+            .collect()
+    };
+    let otherwise = [otherwise(a), otherwise(b)];
+    kind(a)
+        .iter()
+        .chain(kind(b))
+        .filter(|attr| !otherwise.iter().any(|o| o.contains(*attr)))
+        .cloned()
+        .collect()
 }
 
 /// Whether `decorators` make a function an abstract method (`@abc.abstractmethod`).

@@ -272,6 +272,11 @@ const CATALOG: &str = "from functools import lru_cache\n\n\nclass Catalog:\n    
 const LOOKUP: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.fresh(key)\n";
 const LOOKUP_SHARED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.entry(key)\n";
 const LOOKUP_CACHED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return defaults()\n";
+// `MUT202`: a method of a cached object in another module fills the object's own memo, then
+// changes its state instead.
+const GLYPHS: &str = "from functools import lru_cache\n\n\nclass Glyphs:\n    def __init__(self):\n        self._width_cache = {}\n        self.seen = []\n\n    def width(self, ch):\n        if ch not in self._width_cache:\n            self._width_cache[ch] = len(ch)\n        return self._width_cache[ch]\n\n\n@lru_cache\ndef shared_glyphs() -> Glyphs:\n    return Glyphs()\n";
+const GLYPHS_RECORDING: &str = "from functools import lru_cache\n\n\nclass Glyphs:\n    def __init__(self):\n        self._width_cache = {}\n        self.seen = []\n\n    def width(self, ch):\n        self.seen.append(ch)\n        return len(ch)\n\n\n@lru_cache\ndef shared_glyphs() -> Glyphs:\n    return Glyphs()\n";
+const GLYPH_USER: &str = "from pkg.glyphs import shared_glyphs\n\n\ndef measure(text):\n    return sum(shared_glyphs().width(ch) for ch in text)\n\n\ndef first(text):\n    return shared_glyphs().width(text[0])\n";
 const TAGGER: &str = "from pkg.catalog import Catalog\nfrom pkg.lookup import find\n\n\ndef tag(c: Catalog):\n    find(c, \"k\")[\"tag\"] = 1\n";
 const NODES: &str = "class Node:\n    def __init__(self):\n        self.kids = []\n\n\nclass Index:\n    def refresh(self):\n        self.stale = False\n\n\ndef attach(node: Node, kid):\n    node.kids.append(kid)\n";
 const ANNOUNCE: &str =
@@ -313,6 +318,14 @@ const SHEET: &str = "from functools import cached_property\n\n\nclass Sheet:\n  
 const GRID: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    pass\n";
 const GRID_RESETTING: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    def __init__(self):\n        super().__init__()\n        self._reset()\n";
 const GRID_INITIALIZING: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    def __init__(self):\n        super().__init__()\n";
+// What `MUT107` takes from a `__hash__` and an `__init__` in another module: whether the hash
+// hands an attribute whole to `hash()` (an in-place change of it is then the value's own), which
+// private helpers initialization runs through others, and whether a class between the writer and
+// the hash defines `__eq__` alone (its instances cannot be hashed).
+const STAMP: &str = "class Stamp:\n    def __init__(self, parts):\n        self.parts = parts\n        self.name = \"\"\n        self._load(parts)\n\n    def __hash__(self):\n        return hash((self.parts, self.name)) ^ len(self.parts)\n\n    def _load(self, parts):\n        self.loaded = True\n";
+const STAMP_MIDDLE: &str = "from pkg.stamp import Stamp\n\n\nclass Middle(Stamp):\n    def _prepare(self, parts):\n        self._decode(parts)\n";
+const STAMP_MIDDLE_EQ: &str = "from pkg.stamp import Stamp\n\n\nclass Middle(Stamp):\n    def __eq__(self, other):\n        return self is other\n\n    def _prepare(self, parts):\n        self._decode(parts)\n";
+const STAMPED: &str = "from pkg.stamp_middle import Middle\n\n\nclass Stamped(Middle):\n    def add(self, part):\n        self.parts.append(part)\n\n    def _decode(self, parts):\n        self.name = str(parts)\n";
 
 // Lazy initialization (`MUT101`): a cached property reads a connection only through a mixin
 // helper in another module that initializes it lazily, so the lazy initialization of a
@@ -494,6 +507,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/catalog.py", CATALOG),
         ("pkg/lookup.py", LOOKUP),
         ("pkg/tagger.py", TAGGER),
+        ("pkg/glyphs.py", GLYPHS),
+        ("pkg/glyph_user.py", GLYPH_USER),
         ("pkg/nodes.py", NODES),
         ("pkg/announce.py", ANNOUNCE),
         ("pkg/grow.py", GROW),
@@ -512,6 +527,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/labeled.py", LABELED),
         ("pkg/sheet.py", SHEET),
         ("pkg/grid.py", GRID),
+        ("pkg/stamp.py", STAMP),
+        ("pkg/stamp_middle.py", STAMP_MIDDLE),
+        ("pkg/stamped.py", STAMPED),
         ("pkg/conn_mixin.py", CONN_MIXIN),
         ("pkg/conn_client.py", CONN_CLIENT),
         ("pkg/conn_pooled.py", CONN_POOLED),
@@ -1224,6 +1242,16 @@ fn steps_mut110() -> Vec<Step> {
 fn steps_mut202_mut109() -> Vec<Step> {
     vec![
         Step::new(
+            "a cached object's method in another module stops filling a memo and records",
+            vec![save("pkg/glyphs.py", GLYPHS_RECORDING)],
+        )
+        .present(&[("pkg/glyph_user.py", "MUT202")]),
+        Step::new(
+            "the method fills its memo again",
+            vec![save("pkg/glyphs.py", GLYPHS)],
+        )
+        .absent(&[("pkg/glyph_user.py", "MUT202")]),
+        Step::new(
             "a wrapper in another module starts returning a declared producer's value",
             vec![save("pkg/lookup.py", LOOKUP_SHARED)],
         )
@@ -1364,6 +1392,50 @@ fn steps_inherited_writers() -> Vec<Step> {
             ("pkg/conn_pooled.py", "MUT101"),
             ("pkg/conn_mixin.py", "MUT101"),
         ]),
+    ]
+}
+
+/// `MUT107`: what a hash and an initializer in other modules decide for a writer in a subclass:
+/// the hash starts hashing the changed attribute whole, the base's private helper starts reaching
+/// the subclass's writer from `__init__` through a helper of the class in between (then a public
+/// method calls that helper too, so the writer runs after initialization), and that class defines
+/// `__eq__` alone.
+fn steps_hash_writers() -> Vec<Step> {
+    let whole = STAMP.replace(" ^ len(self.parts)", "");
+    let loading = whole.replace("self.loaded = True", "self._prepare(parts)");
+    let refreshing =
+        format!("{loading}\n    def refresh(self, parts):\n        self._prepare(parts)\n");
+    vec![
+        Step::new(
+            "the hash in another module hashes the changed list whole",
+            vec![Action::Save("pkg/stamp.py", whole)],
+        )
+        .present(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "initialization reaches the writer through private helpers in two other modules",
+            vec![Action::Save("pkg/stamp.py", loading)],
+        )
+        .absent(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "a public method there also calls the helper in between",
+            vec![Action::Save("pkg/stamp.py", refreshing)],
+        )
+        .present(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "the hash reads the list's length again",
+            vec![save("pkg/stamp.py", STAMP)],
+        )
+        .present(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "a class in another module between them defines `__eq__` alone",
+            vec![save("pkg/stamp_middle.py", STAMP_MIDDLE_EQ)],
+        )
+        .absent(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "the class in between stops defining it",
+            vec![save("pkg/stamp_middle.py", STAMP_MIDDLE)],
+        )
+        .present(&[("pkg/stamped.py", "MUT107")]),
     ]
 }
 
@@ -1543,6 +1615,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut202_mut109());
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());
+    steps.extend(steps_hash_writers());
     steps.extend(steps_mut111());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
