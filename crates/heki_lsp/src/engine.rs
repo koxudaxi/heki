@@ -618,14 +618,15 @@ impl Workspace {
     }
 
     /// Files defining classes whose `MUT101` / `MUT107` / `MUT112` / `MUT113` reports read the
-    /// summaries of the `changed` methods (class families span modules) or the call sites of the
-    /// `calling` functions (`MUT113` follows a generator's object through its callers).
-    fn family_files(&self, changed: &[FuncKey], calling: &[&FuncKey]) -> Vec<PathBuf> {
+    /// summaries of the `changed` methods (class families span modules), or the calls of
+    /// `callees` (`MUT113` follows a generator's object through its callers): those of the
+    /// functions whose call sites changed, before and after the change.
+    fn family_files(&self, changed: &[FuncKey], callees: &[&FuncKey]) -> Vec<PathBuf> {
         let classes = family_readers(
             &self.index,
             self.decls.completed(),
             changed,
-            calling,
+            callees,
             self.selection.is_enabled("MUT112"),
         );
         self.index
@@ -789,7 +790,14 @@ impl Workspace {
             .chain(callers.1.keys())
             .filter(|k| callers.0.get(*k) != callers.1.get(*k))
             .collect();
-        affected.extend(self.family_files(&update.changed, &changed));
+        let callees: Vec<&FuncKey> = changed
+            .iter()
+            .flat_map(|k| callers.0.get(*k).into_iter().chain(callers.1.get(*k)))
+            .flat_map(|(sites, _)| sites)
+            .flat_map(CallSite::project_callees)
+            .map(|bc| &bc.callee)
+            .collect();
+        affected.extend(self.family_files(&update.changed, &callees));
         if self.reach.owners {
             affected.extend(self.below_files(&changed, callers));
         }
