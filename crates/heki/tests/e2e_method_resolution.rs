@@ -526,3 +526,68 @@ fn augmented_assignments_change_containers_in_place() {
         &["MUT201"],
     );
 }
+
+/// A mixin's method calling a method on its own `self` runs the implementation of the class
+/// the receiver is: on a receiver of known class, only the implementations of classes related to
+/// it count (an async client sharing the mixin with a sync one runs the async one).
+const MIXINS: &str = r#"import time
+
+
+class Commands:
+    def masters(self):
+        return self.execute_command("MASTERS")
+
+    def relay(self):
+        return self.masters()
+
+
+class SyncClient(Commands):
+    def execute_command(self, *args):
+        time.sleep(1)
+
+
+class SyncPipeline(SyncClient):
+    pass
+
+
+class AsyncClient(Commands):
+    async def execute_command(self, *args):
+        return args
+
+
+class AsyncCommands(Commands):
+    async def amasters(self):
+        return self.masters()
+
+
+async def on_async(c: AsyncClient):
+    await c.masters()
+    await c.relay()
+
+
+async def on_sync(c: SyncClient):
+    c.masters()  # EFF101
+    c.relay()  # EFF101
+
+
+async def on_sync_subclass(c: SyncPipeline):
+    c.masters()  # EFF101
+
+
+async def on_any(c: Commands):
+    c.masters()  # EFF101
+
+
+class Sentinel:
+    def __init__(self):
+        self.clients = [AsyncClient()]
+
+    async def each(self):
+        for c in self.clients:
+            await c.masters()
+"#;
+
+#[test]
+fn a_mixin_method_runs_the_implementations_of_its_receivers_class() {
+    check_marks("mixins", &[("pkg/mixins.py", MIXINS)], &["EFF101"]);
+}

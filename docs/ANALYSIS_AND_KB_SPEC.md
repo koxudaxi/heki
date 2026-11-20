@@ -135,7 +135,12 @@ A method called on an instance is the definition the class's MRO (Python's C3 li
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
 named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
 `Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
-`cls()` and `cls.method()` dispatch like a call on an instance.
+`cls()` and `cls.method()` dispatch like a call on an instance. A method's calls on its own
+`self` run the overrides of every subclass, so a mixin's summary holds the effects of every
+class sharing it; an execution effect reached only through the override of a subclass records
+that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
+only when that class and the receiver's derive one from the other (an unknown receiver runs them
+all). An async client sharing a command mixin with a sync one runs the async implementation.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that

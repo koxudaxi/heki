@@ -153,6 +153,12 @@ const WALK_B: &str =
 const GATE_NET: &str =
     "import requests\n\n\ndef fetch(url):\n    requests.get(url)\n    requests.get(url)\n";
 const GATE: &str = "from pkg.gate_net import fetch\n\n\ndef render(url):\n    fetch(url)\n";
+// A mixin shared by a sync and an async client in other modules, called on an async client.
+const MIXIN_COMMANDS: &str =
+    "class Commands:\n    def masters(self):\n        return self.execute_command(\"MASTERS\")\n";
+const SYNC_CLIENT: &str = "from pkg.mixin_commands import Commands\n\n\nclass SyncClient(Commands):\n    def execute_command(self, *args):\n        return args\n";
+const ASYNC_CLIENT: &str = "from pkg.mixin_commands import Commands\n\n\nclass AsyncClient(Commands):\n    async def execute_command(self, *args):\n        return args\n";
+const ASYNC_USER: &str = "from pkg.async_client import AsyncClient\n\n\nasync def poll(c: AsyncClient):\n    await c.masters()\n";
 
 // Constant keys, objects under construction, and the strict mode: a `__dict__` key names the
 // guarded attribute through a `Final` constant of another module; a private helper fills a new
@@ -429,6 +435,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/walk_b.py", WALK_B),
         ("pkg/gate_net.py", GATE_NET),
         ("pkg/gate.py", GATE),
+        ("pkg/mixin_commands.py", MIXIN_COMMANDS),
+        ("pkg/sync_client.py", SYNC_CLIENT),
+        ("pkg/async_client.py", ASYNC_CLIENT),
+        ("pkg/async_user.py", ASYNC_USER),
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
         ("pkg/fresh_ops.py", FRESH_OPS),
@@ -616,7 +626,8 @@ fn steps_receiver_typing() -> Vec<Step> {
 }
 
 /// The index across files: facts its callers decide (`sync_driven_only`), members of a call
-/// cycle in other files, and the catalog calls below an effect boundary.
+/// cycle in other files, the catalog calls below an effect boundary, and the implementations a
+/// mixin's method runs for a receiver of known class.
 fn steps_effect_index() -> Vec<Step> {
     vec![
         Step::new(
@@ -664,6 +675,35 @@ fn steps_effect_index() -> Vec<Step> {
             vec![save("pkg/gate_net.py", GATE_NET)],
         )
         .absent(&[("pkg/gate.py", "EFF201")]),
+        Step::new(
+            "the sync client sharing a mixin with the async one starts blocking",
+            vec![save(
+                "pkg/sync_client.py",
+                &format!(
+                    "import time\n\n{}",
+                    SYNC_CLIENT.replace("return args", "time.sleep(1)")
+                ),
+            )],
+        )
+        .absent(&[("pkg/async_user.py", "EFF101")]),
+        Step::new(
+            "the async client's implementation becomes a blocking sync one",
+            vec![save(
+                "pkg/async_client.py",
+                &format!(
+                    "import time\n\n{}",
+                    ASYNC_CLIENT
+                        .replace("async def", "def")
+                        .replace("return args", "time.sleep(1)")
+                ),
+            )],
+        )
+        .present(&[("pkg/async_user.py", "EFF101")]),
+        Step::new(
+            "the async client is async again",
+            vec![save("pkg/async_client.py", ASYNC_CLIENT)],
+        )
+        .absent(&[("pkg/async_user.py", "EFF101")]),
     ]
 }
 

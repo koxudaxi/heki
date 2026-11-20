@@ -14,9 +14,9 @@ use crate::resolver::{
 };
 use crate::{
     ArgBinding, ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Construction,
-    Contracts, EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput, NewArg, NewCond,
-    NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SiteRole, Slot, TypedFieldReadSite,
-    TypedFieldWriteSite, Unresolved, UnresolvedWriteSite, WriteKind,
+    Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput, NewArg,
+    NewCond, NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot,
+    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
@@ -505,6 +505,8 @@ struct Extractor<'a> {
     returned: FxHashMap<VarId, ReturnStep>,
     /// Position (block, instruction index) of the instruction being visited.
     pos: (BlockId, usize),
+    /// The class line of the method's own class (`Self::own_line`).
+    own_line: OnceCell<Option<SharedLine>>,
     /// The points `MUT109` describes (`Some` when an `invalidation` contract is configured).
     events: Option<Events>,
     /// Contracts naming this function an exempt writer (`MUT109`), matched at its first write
@@ -614,6 +616,7 @@ impl<'a> Extractor<'a> {
             sites: Vec::new(),
             callees: FxHashMap::default(),
             project_calls: Vec::new(),
+            own_line: OnceCell::new(),
             contracts,
             returned: FxHashMap::default(),
             pos: (BlockId(0), 0),
@@ -2623,6 +2626,7 @@ impl<'a> Extractor<'a> {
                         once_per: None,
                         once_loops: 0,
                         runner: Runner::Caller,
+                        dispatch: None,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -2820,6 +2824,7 @@ impl<'a> Extractor<'a> {
                 self.sites.push(CallSite {
                     recv_is_self: call.recv_is_self,
                     drives_coroutine_manually: drives,
+                    dispatch: self.dispatch(call, site.project_callees()),
                     constructs: call.constructs.clone(),
                     returned: if constructor {
                         None
@@ -2837,6 +2842,80 @@ impl<'a> Extractor<'a> {
                 None
             }
         }
+    }
+
+    /// The class line of the method's own class: what its `self` is an instance of.
+    fn own_line(&self) -> Option<SharedLine> {
+        self.own_line
+            .get_or_init(|| {
+                let owner = self.cx.owner_fqn(self.f)?;
+                self.cx
+                    .project
+                    .is_project_class(&owner)
+                    .then(|| self.cx.project.lineage(&owner, false))
+            })
+            .clone()
+    }
+
+    /// What the receiver of `call` tells about the implementations `callees` run
+    /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
+    /// class, or the class a constructor call makes) when a callee is inherited from a proper
+    /// base of it, and, on `self`, the callees that are overrides of subclasses.
+    fn dispatch(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<Box<Dispatch>> {
+        let project = self.cx.project;
+        let own;
+        let class: &str = if call.recv_is_self {
+            own = self.cx.owner_fqn(self.f)?;
+            &own
+        } else {
+            call.constructs
+                .as_deref()
+                .or_else(|| call.recv.as_ref()?.typed_instance.as_deref())?
+        };
+        // The class of a method among the callees, as `(module, class qualname)`.
+        fn class_of<'b>(project: &ProjectDecls, bc: &'b BoundCallee) -> Option<(&'b str, &'b str)> {
+            let (owner, _) = bc.callee.qualname.rsplit_once('.')?;
+            project
+                .function_decl(&bc.callee)
+                .is_some_and(|d| d.is_method)
+                .then_some((bc.callee.module.as_str(), owner))
+        }
+        let class_of = |bc| class_of(project, bc);
+        let is = |(module, owner): (&str, &str), fqn: &str| {
+            fqn.strip_prefix(module)
+                .and_then(|r| r.strip_prefix('.'))
+                .is_some_and(|r| r == owner)
+        };
+        if callees.iter().filter_map(class_of).all(|c| is(c, class)) {
+            return None;
+        }
+        let line = if call.recv_is_self {
+            self.own_line()?
+        } else {
+            project.lineage(class, true)
+        };
+        let in_line = |c: (&str, &str)| line.mro.iter().any(|m| is(c, m));
+        let receiver = callees
+            .iter()
+            .filter_map(class_of)
+            .any(|c| !is(c, class) && in_line(c))
+            .then(|| Arc::clone(&line));
+        let mut providers: Vec<(u16, SharedLine)> = Vec::new();
+        if call.recv_is_self {
+            for (i, bc) in callees.iter().enumerate() {
+                if let Some(c) = class_of(bc).filter(|c| !in_line(*c))
+                    && let Ok(i) = u16::try_from(i)
+                {
+                    providers.push((i, project.lineage(&format!("{}.{}", c.0, c.1), false)));
+                }
+            }
+        }
+        (receiver.is_some() || !providers.is_empty()).then(|| {
+            Box::new(Dispatch {
+                receiver,
+                providers,
+            })
+        })
     }
 
     /// The site of `callees` an offloading API runs on a worker thread for `call`
@@ -2932,6 +3011,7 @@ impl<'a> Extractor<'a> {
             once_per: self.guards.once_per_at(&cx, bb),
             once_loops: self.guards.once_loops_at(&cx, bb, self.loops_around(bb)),
             runner: Runner::Caller,
+            dispatch: None,
         }
     }
 
@@ -3359,6 +3439,7 @@ fn role_site(
         once_per: site.once_per,
         once_loops: 0,
         runner: site.runner,
+        dispatch: site.dispatch.clone(),
     }
 }
 

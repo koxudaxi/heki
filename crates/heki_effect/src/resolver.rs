@@ -913,6 +913,8 @@ pub struct ProjectDecls {
     /// The C3 linearizations computed so far of classes with multiple inheritance along their
     /// bases (`Self::mro`); cleared with the indexes.
     linearized: RwLock<FxHashMap<String, Vec<String>>>,
+    /// One shared [`crate::ClassLine`] per class (`Self::lineage`); cleared with the indexes.
+    lines: RwLock<FxHashMap<String, crate::SharedLine>>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -1031,6 +1033,10 @@ impl ProjectDecls {
 
     fn rebuild_indexes(&mut self) {
         self.linearized
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.lines
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
@@ -1540,6 +1546,39 @@ impl ProjectDecls {
         self.mro(class)
             .iter()
             .any(|c| ENUMS.contains(&c.as_str()) || self.own_method(c, "__new__").is_some())
+    }
+
+    /// The MRO of `class` as a [`crate::ClassLine`], one copy shared by every site and fact
+    /// naming the class. `resolved`: the caller has just resolved a method on `class`, which
+    /// read every declaration its MRO depends on, so a line computed before serves; otherwise
+    /// the MRO is computed again, which reads them.
+    pub(crate) fn lineage(&self, class: &str, resolved: bool) -> crate::SharedLine {
+        if resolved
+            && let Some(line) = self
+                .lines
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(class)
+        {
+            return Arc::clone(line);
+        }
+        let mro = self.mro(class);
+        let known = self
+            .lines
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&mro[0])
+            .filter(|line| line.mro == mro)
+            .cloned();
+        if let Some(line) = known {
+            return line;
+        }
+        let line = Arc::new(crate::ClassLine { mro });
+        self.lines
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(line.mro[0].clone(), Arc::clone(&line));
+        line
     }
 
     /// The method `name` defined directly in project class `class`.

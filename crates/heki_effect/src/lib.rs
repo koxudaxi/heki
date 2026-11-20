@@ -108,6 +108,42 @@ pub struct CallHop {
 /// a chain copies pointers. `Arc` compares, orders, and hashes by value, so the chains do too.
 pub type SharedChain = Vec<Arc<CallHop>>;
 
+/// A project class and its MRO (the class first), shared by every call site and fact naming it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ClassLine {
+    pub mro: Vec<String>,
+}
+
+impl ClassLine {
+    pub fn class(&self) -> &str {
+        &self.mro[0]
+    }
+
+    /// Whether an instance of one class may be an instance of the other: one derives from the
+    /// other (a class is related to itself).
+    pub fn related(&self, other: &ClassLine) -> bool {
+        self.mro.iter().any(|c| c == other.class()) || other.mro.iter().any(|c| c == self.class())
+    }
+}
+
+pub type SharedLine = Arc<ClassLine>;
+
+/// [`EffectSummary::receiver_effects`].
+pub type ReceiverEffects = BTreeMap<ExecEffectKind, Vec<(SharedLine, SharedChain)>>;
+
+/// What a method call's receiver tells about the implementations its callees run
+/// ([`EffectSummary::receiver_effects`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dispatch {
+    /// The receiver's class (a receiver of one project class, the class a constructor makes,
+    /// or the caller's own `self`), when a callee is inherited from a proper base of it: the
+    /// callee's facts may come from implementations of classes unrelated to it.
+    pub receiver: Option<SharedLine>,
+    /// For a call on the caller's own `self`: the callees (by index) that are overrides of
+    /// subclasses, each with its class (it runs only when `self` is an instance of it).
+    pub providers: Vec<(u16, SharedLine)>,
+}
+
 /// The hops of a kept chain, owned (what a report shows).
 pub fn owned_chain(chain: &[Arc<CallHop>]) -> Vec<CallHop> {
     chain.iter().map(|hop| CallHop::clone(hop)).collect()
@@ -396,6 +432,11 @@ pub struct EffectSummary {
     pub transitive_exec_effects: BTreeSet<ExecEffectKind>,
     /// Shortest known call chain reaching each effect (direct or transitive).
     pub exec_chains: BTreeMap<ExecEffectKind, SharedChain>,
+    /// The execution effects reached only through implementations that subclasses of a
+    /// method's class give its own `self` (a mixin method's `self.execute_command()`): per
+    /// effect, each class providing one, with the shortest chain through it. A call on a
+    /// receiver of known class runs only those of the classes related to it.
+    pub receiver_effects: Option<Box<ReceiverEffects>>,
 
     // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
     pub mutates_params: u64,
@@ -596,6 +637,12 @@ impl EffectSummary {
         self.direct_exec_effects.retain(|e| !hidden.contains(e));
         self.transitive_exec_effects.retain(|e| !hidden.contains(e));
         self.exec_chains.retain(|e, _| !hidden.contains(e));
+        if let Some(r) = &mut self.receiver_effects {
+            r.retain(|e, _| !hidden.contains(e));
+            if r.is_empty() {
+                self.receiver_effects = None;
+            }
+        }
         self.exec_guards.retain(|e, _| !hidden.contains(e));
         if let Some(iterated) = &mut self.iterated {
             iterated.hide_exec_effects(hidden);
@@ -607,6 +654,14 @@ impl EffectSummary {
     pub fn without_locations(&self) -> Self {
         let mut out = self.clone();
         for chain in out.exec_chains.values_mut() {
+            zero_hop_spans(chain);
+        }
+        for (_, chain) in out
+            .receiver_effects
+            .iter_mut()
+            .flat_map(|r| r.values_mut())
+            .flatten()
+        {
             zero_hop_spans(chain);
         }
         out.typed_field_write_sites = out
@@ -689,6 +744,27 @@ impl EffectSummary {
     /// nothing a call of one of its overrides lacks.
     pub fn is_abstract(&self) -> bool {
         is_abstract_method(&self.decorators)
+    }
+
+    /// The chain by which the function reaches execution effect `e` on a receiver of class
+    /// `receiver` (`None`: unknown), or `None` when only implementations of classes unrelated to
+    /// it reach `e` ([`Self::receiver_effects`]).
+    pub fn effect_chain_for(
+        &self,
+        e: ExecEffectKind,
+        receiver: Option<&ClassLine>,
+    ) -> Option<&[Arc<CallHop>]> {
+        match (
+            self.receiver_effects.as_ref().and_then(|r| r.get(&e)),
+            receiver,
+        ) {
+            (Some(provided), Some(r)) => provided
+                .iter()
+                .filter(|(p, _)| p.related(r))
+                .map(|(_, chain)| chain.as_slice())
+                .min_by_key(|chain| chain.len()),
+            _ => Some(self.exec_chains.get(&e).map_or(&[][..], Vec::as_slice)),
+        }
     }
 
     /// Which of the function's facts its own body is: a generator function's body runs when
@@ -861,6 +937,8 @@ pub struct CallSite {
     pub once_loops: u64,
     /// How the callees run when an API runs them for the caller (`Runner`).
     pub runner: Runner,
+    /// What the receiver tells about the implementations the callees run (`None`: nothing).
+    pub dispatch: Option<Box<Dispatch>>,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).
@@ -891,6 +969,26 @@ impl CallSite {
 }
 
 impl CallSite {
+    /// The class of the receiver ([`Dispatch::receiver`]).
+    pub fn receiver(&self) -> Option<&ClassLine> {
+        self.dispatch.as_ref()?.receiver.as_deref()
+    }
+
+    /// The class of the subclass providing the callee `bc` of a call on the caller's own
+    /// `self` ([`Dispatch::providers`]).
+    pub fn provider(&self, bc: &BoundCallee) -> Option<&SharedLine> {
+        let i = self
+            .project_callees()
+            .iter()
+            .position(|b| std::ptr::eq(b, bc))?;
+        self.dispatch
+            .as_ref()?
+            .providers
+            .iter()
+            .find(|(k, _)| usize::from(*k) == i)
+            .map(|(_, line)| line)
+    }
+
     /// The resolved project callees (none for a Layer 2 API).
     pub fn project_callees(&self) -> &[BoundCallee] {
         match &self.target {
@@ -1172,7 +1270,9 @@ impl ProjectIndex {
                         else {
                             continue;
                         };
-                        let tail = facts.exec_chains.get(&e).map_or(&[][..], Vec::as_slice);
+                        let Some(tail) = facts.effect_chain_for(e, site.receiver()) else {
+                            continue;
+                        };
                         let chain = callgraph::extend_chain(&lead, tail, rewrite);
                         out.push(SiteEffect {
                             effect: e,

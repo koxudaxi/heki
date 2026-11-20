@@ -11,8 +11,9 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
     Facts, FuncKey, NewArg, NewCond, NewKind, ProjectIndex, ProtectedReturn, ReturnsNew, Shared,
-    SharedChain, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
+    SharedChain, SharedLine, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
 };
+use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -522,7 +523,9 @@ fn transfer(
     // b. Execution effects, with the shortest chain to each. An effect whose guard the call
     //    decides against does not run here; the others take the call's guards and the
     //    callee's undecided tests of caller inputs (except of an attribute the caller assigns
-    //    itself).
+    //    itself). On a receiver of known class, the effects only implementations of unrelated
+    //    classes reach do not run.
+    let receiver = site.receiver();
     for e in facts
         .direct_exec_effects
         .iter()
@@ -532,6 +535,9 @@ fn transfer(
         if site.hides(*e) {
             continue;
         }
+        let Some(tail) = facts.effect_chain_for(*e, receiver) else {
+            continue;
+        };
         let Some(mut through) = guards::through_call(site, bc, facts.exec_guards.get(e)) else {
             continue;
         };
@@ -545,8 +551,8 @@ fn transfer(
         let new = t.transitive_exec_effects.insert(*e);
         let had = !new || t.direct_exec_effects.contains(e);
         guards::add_occurrence(&mut t.exec_guards, *e, had, &through.guards);
-        let tail = facts.exec_chains.get(e).map_or(&[][..], Vec::as_slice);
         let chain = extend_chain(lead, tail, rewrite);
+        add_receiver_effect(t, *e, had, site, bc, facts, &chain, lead, rewrite);
         let slot = t.exec_chains.entry(*e).or_default();
         if slot.is_empty() || chain.len() < slot.len() {
             *slot = chain;
@@ -738,6 +744,73 @@ fn transfer_typed_writes(
         };
         insert_site(t, caller, site);
     }
+}
+
+/// Record in `t` whether effect `e`, arriving through `bc` at `site` with `chain` (the caller
+/// `had` it already), runs only for some classes of the caller's own `self`
+/// (`EffectSummary::receiver_effects`): through a call on `self`, the classes the callee's
+/// facts already depend on, or the subclass providing the callee. Any other arrival runs it
+/// whatever `self` is.
+#[allow(clippy::too_many_arguments)]
+fn add_receiver_effect(
+    t: &mut EffectSummary,
+    e: ExecEffectKind,
+    had: bool,
+    site: &CallSite,
+    bc: &BoundCallee,
+    facts: &EffectSummary,
+    chain: &SharedChain,
+    lead: &[Arc<CallHop>],
+    rewrite: bool,
+) {
+    let mut provided: Vec<(SharedLine, SharedChain)> = Vec::new();
+    if site.recv_is_self {
+        let inner = facts.receiver_effects.as_ref().and_then(|r| r.get(&e));
+        match (inner, site.provider(bc)) {
+            (Some(inner), _) => {
+                let receiver = site.receiver();
+                provided.extend(
+                    inner
+                        .iter()
+                        .filter(|(p, _)| receiver.is_none_or(|r| p.related(r)))
+                        .map(|(p, c)| (Arc::clone(p), extend_chain(lead, c, rewrite))),
+                );
+            }
+            (None, Some(p)) => provided.push((Arc::clone(p), chain.clone())),
+            (None, None) => {}
+        }
+    }
+    if provided.is_empty() {
+        if let Some(r) = &mut t.receiver_effects {
+            r.remove(&e);
+            if r.is_empty() {
+                t.receiver_effects = None;
+            }
+        }
+        return;
+    }
+    // Already reached whatever `self` is.
+    if had
+        && !t
+            .receiver_effects
+            .as_ref()
+            .is_some_and(|r| r.contains_key(&e))
+    {
+        return;
+    }
+    let slot = t
+        .receiver_effects
+        .get_or_insert_with(Box::default)
+        .entry(e)
+        .or_default();
+    for (p, c) in provided {
+        match slot.iter_mut().find(|(q, _)| *q == p) {
+            Some((_, kept)) if kept.len() <= c.len() => {}
+            Some((_, kept)) => *kept = c,
+            None => slot.push((p, c)),
+        }
+    }
+    slot.sort();
 }
 
 /// The caller parameters the objects bound to the callee parameters in `mask` may be.
