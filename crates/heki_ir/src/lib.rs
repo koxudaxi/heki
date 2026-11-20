@@ -274,9 +274,13 @@ pub enum InstKind {
         dst: VarId,
         src: VarId,
     },
+    /// `del name`; the name is possibly unbound afterwards (a `LoadName` defines it).
     Delete {
         var: Option<VarId>,
         name: String,
+        /// The name is a module global (`del` in the module body or after `global name`).
+        #[serde(default)]
+        global: bool,
     },
     BinOp {
         dst: VarId,

@@ -900,8 +900,10 @@ pub(crate) fn module_constants(
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             match &inst.kind {
                 InstKind::StoreGlobal { name, .. } => *stores.entry(name).or_default() += 1,
-                // `del NAME` (at module level or after `global NAME`) may unbind it.
-                InstKind::Delete { name, .. } => {
+                // `del NAME` at module level or after `global NAME` unbinds it.
+                InstKind::Delete {
+                    name, global: true, ..
+                } => {
                     deleted.insert(name);
                 }
                 InstKind::Call {

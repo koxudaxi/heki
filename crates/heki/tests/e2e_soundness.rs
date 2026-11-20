@@ -366,13 +366,8 @@ const ACCUMULATE: &[Expect] = &[
         "rhs_changes_other",
         &[("OPT101", V::Fix(&["x.append(other.pop())"]))],
     ),
-    (
-        "deleted_accumulator",
-        &[(
-            "OPT101",
-            V::Blocked("ExactType(x): its value is not tracked here"),
-        )],
-    ),
+    // The read after `del x` is of an unbound name, not of the accumulator.
+    ("deleted_accumulator", &[]),
     (
         "merge_exact_dict",
         &[("OPT102", V::Fix(&["d.update(extra)"]))],
@@ -1258,6 +1253,8 @@ const IR_COUNTEREXAMPLES: &[Expect] = &[
         "cx_eval_called_by_map",
         &[("OPT101", V::Blocked("A1HazardFree: A1 hazard: `eval`"))],
     ),
+    // `keys` may be unbound where the hoisted statement would run.
+    ("cx_deleted_on_one_branch", &[]),
 ];
 
 const CAPTURED: &[(&str, V)] = &[(

@@ -599,6 +599,30 @@ def old_eval_called_by_map(items):
     return old
 
 
+# ------------------------------------------------------------------------------
+# A name deleted on one path is unbound after the merge
+# ------------------------------------------------------------------------------
+def cx_deleted_on_one_branch(n):
+    keys = list(range(9))
+    if not n:
+        del keys
+    hit = None
+    for i in range(n):
+        hit = i in keys
+    return hit
+
+
+def old_deleted_on_one_branch(n):
+    keys = list(range(9))
+    if not n:
+        del keys
+    hit = None
+    keys_set = set(keys)
+    for i in range(n):
+        hit = i in keys_set
+    return hit
+
+
 def run(call, fn):
     try:
         return repr(call(fn))
@@ -677,6 +701,7 @@ def main() -> int:
         (cx_template_keeps_value, old_template_keeps_value, lambda f: f([1])),
         (cx_locals_through_alias, old_locals_through_alias, lambda f: f([1])),
         (cx_eval_called_by_map, old_eval_called_by_map, lambda f: f([1])),
+        (cx_deleted_on_one_branch, old_deleted_on_one_branch, lambda f: f(0)),
     ]
     lines = []
     for cx, old, call in pairs:

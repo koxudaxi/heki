@@ -348,3 +348,38 @@ def unrelated_here():
         "{stdout}"
     );
 }
+
+// ================================================================================== del
+
+#[test]
+fn only_deleting_the_global_unfixes_a_module_constant() {
+    let src = "\
+import httpx
+
+N = 2
+M = 2
+
+
+def unrelated(N):
+    del N
+
+
+def rebinds():
+    global M
+    del M
+
+
+def fixed():
+    for _ in range(N):
+        httpx.Client()
+
+
+def unfixed():
+    for _ in range(M):
+        httpx.Client()
+";
+    assert_eq!(
+        reports("ir_local_del", src, "EFF102"),
+        pairs(&[("unfixed", "EFF102")])
+    );
+}

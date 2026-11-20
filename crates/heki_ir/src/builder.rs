@@ -1560,22 +1560,39 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
     }
 
+    /// `del name`: the name is possibly unbound until it is bound again.
+    fn lower_name_delete(&mut self, name: &str, span: Span) {
+        let prev = self
+            .current_def
+            .get(&(self.cur_bb, name.to_owned()))
+            .copied();
+        let global = self.is_module_body || self.scope.globals.contains(name);
+        self.emit(
+            InstKind::Delete {
+                var: prev,
+                name: name.to_owned(),
+                global,
+            },
+            span,
+        );
+        // Reading it now raises (in a module or class body it falls back to the builtins).
+        if !self.scope.globals.contains(name) && !self.scope.nonlocals.contains(name) {
+            let unbound = self.fresh_var(Some(name.to_owned()));
+            self.emit(
+                InstKind::LoadName {
+                    dst: unbound,
+                    name: name.to_owned(),
+                },
+                span,
+            );
+            self.write_local(name, self.cur_bb, unbound);
+        }
+    }
+
     fn lower_delete_target(&mut self, target: &'a Expr) {
         let span = Span::from(target.range());
         match target {
-            Expr::Name(n) => {
-                let prev = self
-                    .current_def
-                    .get(&(self.cur_bb, n.id.to_string()))
-                    .copied();
-                self.emit(
-                    InstKind::Delete {
-                        var: prev,
-                        name: n.id.to_string(),
-                    },
-                    span,
-                );
-            }
+            Expr::Name(n) => self.lower_name_delete(n.id.as_str(), span),
             Expr::Attribute(attr) => {
                 let obj = self.lower_expr(&attr.value);
                 let attr_name = attr.attr.to_string();
@@ -1991,6 +2008,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     self.write_var(n.as_str(), v, Span::from(n.range));
                 }
                 self.lower_suite(&eh.body);
+                // `except E as e:` ends with `del e`.
+                if let Some(n) = &eh.name
+                    && !self.is_terminated(self.cur_bb)
+                {
+                    self.lower_name_delete(n.as_str(), Span::from(n.range));
+                }
                 self.terminate(Terminator::Jump(normal_next));
                 cur_disp = fallthrough_bb;
             }
