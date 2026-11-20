@@ -2073,15 +2073,17 @@ impl<'a> Mut202Fn<'a> {
                     continue;
                 };
                 // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
+                // A shallow copy shares only the objects below its top level: rebinding its
+                // attributes changes the copy alone.
                 let mutates = self
                     .facts_run_by_call(inst.span, key, callee)
                     .iter()
                     .any(|facts| {
-                        let paths = u8::try_from(pos)
-                            .ok()
-                            .and_then(|p| facts.mutated_param_paths.get(&p));
                         if r.shallow_copy {
-                            paths.is_some_and(|p| p.iter().any(|path| !path.is_empty()))
+                            u8::try_from(pos)
+                                .ok()
+                                .and_then(|p| facts.changed_param_attrs.get(&p))
+                                .is_some_and(|attrs| !attrs.is_empty())
                         } else {
                             pos < 64 && facts.mutates_params & (1u64 << pos) != 0
                         }

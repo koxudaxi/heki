@@ -182,6 +182,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     for (i, paths) in other.mutated_param_paths {
         into.mutated_param_paths.entry(i).or_default().extend(paths);
     }
+    for (i, attrs) in other.changed_param_attrs {
+        into.changed_param_attrs.entry(i).or_default().extend(attrs);
+    }
     for (i, slots) in other.inplace_param_slots {
         into.inplace_param_slots.entry(i).or_default().extend(slots);
     }
@@ -1491,6 +1494,16 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// A change below the attribute `attr` of parameter `i` (of the object `p.attr` holds).
+    fn change_below_param_attr(&mut self, i: u8, attr: String) {
+        self.summary
+            .changed_param_attrs
+            .entry(i)
+            .or_default()
+            .insert(attr.clone());
+        self.mutate_param(i, attr);
+    }
+
     fn mutate_param(&mut self, i: u8, path: String) {
         self.summary.mutates_params |= 1u64 << i;
         self.summary
@@ -1581,7 +1594,7 @@ impl<'a> Extractor<'a> {
         }
         match owner.param {
             Some((i, None)) => self.mutate_param(i, attr.to_owned()),
-            Some((i, Some(path))) => self.mutate_param(i, path),
+            Some((i, Some(path))) => self.change_below_param_attr(i, path),
             None => {}
         }
         if let Some(class) = owner.typed_class {
@@ -1612,7 +1625,7 @@ impl<'a> Extractor<'a> {
         }
         match self.param_alias.get(&var).cloned() {
             Some((i, None)) => self.mutate_param(i, String::new()),
-            Some((i, Some(path))) => self.mutate_param(i, path),
+            Some((i, Some(path))) => self.change_below_param_attr(i, path),
             None => {}
         }
         if let Some((i, slot)) = self.param_slot_alias.get(&var).cloned() {

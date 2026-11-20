@@ -459,3 +459,70 @@ async def handler() -> bool:
     assert!(lines[1].starts_with("app.py:26:12: MUT106"), "{stdout}");
     assert!(lines[2].starts_with("app.py:35:12: EFF101"), "{stdout}");
 }
+
+#[test]
+fn a_helper_rebinding_a_shallow_copys_attribute_leaves_the_shared_value_alone() {
+    let p = project(
+        "shallow_copy_helpers",
+        "[[tool.heki.readonly-returns]]\nname = \"box\"\nproducers = [\"app.box\"]\ndeep = true\n",
+    );
+    p.write(
+        "app.py",
+        r#"import copy
+
+
+class Inner:
+    def __init__(self) -> None:
+        self.n = 0
+
+
+class Box:
+    def __init__(self) -> None:
+        self.name = "old"
+        self.tags: list[str] = []
+        self.inner = Inner()
+
+
+BOX = Box()
+
+
+def box() -> Box:
+    return BOX
+
+
+def rename(b):
+    b.name = "new"
+
+
+def tag(b):
+    b.tags.append("x")
+
+
+def bump(b):
+    b.inner.n += 1
+
+
+def clear_all(xs):
+    xs.clear()
+
+
+def tag_through(b):
+    clear_all(b.tags)
+
+
+def use() -> None:
+    rename(copy.copy(box()))
+    tag(copy.copy(box()))
+    bump(copy.copy(box()))
+    tag_through(copy.copy(box()))
+"#,
+    );
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![
+            at("app.py", 45, "use"),
+            at("app.py", 46, "use"),
+            at("app.py", 47, "use")
+        ]
+    );
+}

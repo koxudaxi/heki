@@ -423,10 +423,22 @@ fn transfer(
                     .entry(*p)
                     .or_default()
                     .extend(paths.iter().cloned());
+                if let Some(attrs) = facts.changed_param_attrs.get(&i) {
+                    t.changed_param_attrs
+                        .entry(*p)
+                        .or_default()
+                        .extend(attrs.iter().cloned());
+                }
             }
+            // The callee's parameter is the caller's `p.attr`: any change of it changes the
+            // object that attribute holds.
             Some((p, Some(attr))) => {
                 t.mutates_params |= 1u64 << p;
                 t.mutated_param_paths
+                    .entry(*p)
+                    .or_default()
+                    .insert(attr.clone());
+                t.changed_param_attrs
                     .entry(*p)
                     .or_default()
                     .insert(attr.clone());

@@ -212,6 +212,12 @@ pub struct EffectSummary {
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> attributes` of the argument whose objects are changed, in place or
+    /// deeper (`p.a.append(...)`, `p.a.b = v`), also through local copies and calls: the
+    /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`). A
+    /// shallow copy of the argument shares exactly these objects (`MUT202`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub changed_param_attrs: BTreeMap<u8, BTreeSet<String>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself
     /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
     /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
