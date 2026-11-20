@@ -9,6 +9,7 @@
 //! graph, so a wrapper needs no configuration of its own.
 
 use crate::CallHop;
+use crate::resolver::Val;
 use heki_ir::{Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::FxHashMap;
@@ -195,6 +196,42 @@ impl ProtectedReturn {
     }
 }
 
+/// Values a slice of which is a new value holding the same items: the built-in sequences.
+const COPYING_SLICES: &[&str] = &[
+    "builtins.list",
+    "builtins.tuple",
+    "builtins.str",
+    "builtins.bytes",
+    "builtins.bytearray",
+];
+
+/// The step from the subscripted value to the result of the `SubscriptLoad` `inst`: an item of
+/// target unpacking keeps the value ([`crate::consumption::is_unpacking`]); a slice is a
+/// shallow copy (`xs[:]`) unless the value is known to be of another class than the built-in
+/// sequences (a library's or the project's slice may be a view); any other subscript reads an
+/// element.
+pub fn subscript_step(f: &IrFunction, inst: &Inst, subscripted: Option<&Val>) -> ReturnStep {
+    let InstKind::SubscriptLoad {
+        index, is_slice, ..
+    } = &inst.kind
+    else {
+        return ReturnStep::ELEMENT;
+    };
+    if crate::consumption::is_unpacking(f, *index, inst.span) {
+        return ReturnStep::TARGET_ITEM;
+    }
+    let copies = match subscripted {
+        None => true,
+        Some(Val::Inst(class)) => COPYING_SLICES.contains(&class.as_str()),
+        Some(_) => false,
+    };
+    if *is_slice && copies {
+        ReturnStep::SHALLOW_COPY
+    } else {
+        ReturnStep::ELEMENT
+    }
+}
+
 /// The values a function's result may derive from without a deep copy: for each such variable,
 /// the step from it to the returned value, joined over the paths that return it. The walk goes
 /// back from every `return v` through copies, phis, attribute and item loads, iterations, and
@@ -204,6 +241,7 @@ impl ProtectedReturn {
 pub(crate) fn returned_values(
     f: &IrFunction,
     defs: &FxHashMap<VarId, &Inst>,
+    types: &FxHashMap<VarId, Val>,
     derive: impl Fn(&InstKind) -> Vec<(VarId, Derivation)>,
 ) -> FxHashMap<VarId, ReturnStep> {
     let mut steps: FxHashMap<VarId, ReturnStep> = FxHashMap::default();
@@ -249,12 +287,8 @@ pub(crate) fn returned_values(
             InstKind::MakeIter { iterable, .. } => work.push((*iterable, step)),
             InstKind::IterNext { iter, .. } => work.push((*iter, step.after(ReturnStep::ELEMENT))),
             InstKind::AttrLoad { obj, .. } => work.push((*obj, step.after(ReturnStep::ELEMENT))),
-            InstKind::SubscriptLoad { obj, index, .. } => {
-                let derived = if crate::consumption::is_unpacking(f, *index, inst.span) {
-                    ReturnStep::TARGET_ITEM
-                } else {
-                    ReturnStep::ELEMENT
-                };
+            InstKind::SubscriptLoad { obj, .. } => {
+                let derived = subscript_step(f, inst, types.get(obj));
                 work.push((*obj, step.after(derived)));
             }
             // A call's result derives from its receiver or first argument when it copies or

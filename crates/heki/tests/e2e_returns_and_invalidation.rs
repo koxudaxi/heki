@@ -1150,3 +1150,40 @@ fn lsp_mut109_follows_a_distant_caller_that_stops_announcing() {
     lsp.diagnostics(&graft, <[Value]>::is_empty);
     lsp.stop(true);
 }
+
+/// A slice of a built-in sequence is a new sequence holding the same items: changing it leaves
+/// the shared list alone, changing an item changes the shared item.
+#[test]
+fn mut202_a_slice_is_a_shallow_copy() {
+    let p = Project::new("ro_slices");
+    p.write("pkg/__init__.py", "").write(
+        "pkg/slices.py",
+        r#"import functools
+
+
+@functools.cache
+def cached_list():
+    return [[1], [2]]
+
+
+def clone():
+    return cached_list()[:]
+
+
+def head():
+    return cached_list()[0]
+
+
+def use():
+    clone().clear()
+    cached_list()[1:].append([3])
+    clone()[0].append(3)
+    head().append(3)
+"#,
+    );
+    let f = "pkg/slices.py";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![d(f, 20, "MUT202", "use"), d(f, 21, "MUT202", "use")]
+    );
+}

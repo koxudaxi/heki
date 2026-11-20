@@ -1324,13 +1324,14 @@ impl<'a> Mut202Fn<'a> {
     fn transfer(&self, inst: &Inst) -> Option<Ro> {
         match &inst.kind {
             InstKind::Copy { src, .. } => self.ro.get(src).cloned(),
-            InstKind::SubscriptLoad { obj, index, .. } => {
-                let step = if heki_effect::consumption::is_unpacking(self.f, *index, inst.span) {
-                    ReturnStep::TARGET_ITEM
-                } else {
-                    ReturnStep::ELEMENT
-                };
-                self.ro.get(obj)?.derive(step)
+            InstKind::SubscriptLoad { obj, .. } => {
+                self.ro
+                    .get(obj)?
+                    .derive(heki_effect::readonly::subscript_step(
+                        self.f,
+                        inst,
+                        self.types.get(obj),
+                    ))
             }
             InstKind::AttrLoad { obj, attr, .. } => {
                 if let Some(r) = self.ro.get(obj) {

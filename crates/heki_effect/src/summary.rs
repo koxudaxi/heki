@@ -448,7 +448,8 @@ impl<'a> Extractor<'a> {
             ex.build_reach();
         }
         ex.build_aliases();
-        let returned = readonly::returned_values(f, &ex.defs, |kind| ex.derivations(kind));
+        let returned =
+            readonly::returned_values(f, &ex.defs, &ex.types, |kind| ex.derivations(kind));
         ex.returned = returned;
         ex.summary.typed_params = (0..64u32)
             .zip(&f.params)
