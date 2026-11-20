@@ -1,5 +1,5 @@
 //! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT112`,
-//! `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
+//! `MUT113`, `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::{
     CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
@@ -624,15 +624,19 @@ fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
         || (is_private(name) && init_called.contains(&m.key))
 }
 
-/// The project classes whose methods' `MUT101` / `MUT107` / `MUT112` reports read the summaries
-/// of the methods `changed` (a class family spans modules, see [`ClassMethods::family`]): a
-/// changed `@cached_property` or `__hash__` (or a removed method) is read for its own family, any
-/// changed method for the families of its ancestors and subclasses that have either (the calls of
-/// every method decide which private methods only initialization runs), and a method overriding
-/// an inherited one for its own family. With `in_place_changes` (`MUT112` selected), every
-/// changed method is read for its own family: a store in `self.<attr>` is reported when a method
-/// of the family changes the attribute in place. A family's classes include the ancestors whose
-/// methods it inherits. A changed writer is reported in its own file only.
+/// The project classes whose methods' `MUT101` / `MUT107` / `MUT112` / `MUT113` reports read
+/// the summaries of the methods `changed` (a class family spans modules, see
+/// [`ClassMethods::family`]): a changed `@cached_property` or `__hash__` (or a removed method) is
+/// read for its own family, any changed method for the families of its ancestors and subclasses
+/// that have either (the calls of every method decide which private methods only initialization
+/// runs), a method overriding an inherited one for its own family, and any method for its own
+/// family when a class of it has a generator suspending inside an iteration of its own containers
+/// (`MUT113` reports the generator with the methods changing them, and with what its callers run
+/// while it is suspended: a changed function is read for the families of the generators it
+/// calls). With `in_place_changes` (`MUT112` selected), every changed method is read for its own
+/// family: a store in `self.<attr>` is reported when a method of the family changes the attribute
+/// in place. A family's classes include the ancestors whose methods it inherits. A changed writer
+/// is otherwise reported in its own file only.
 pub fn family_readers(
     index: &ProjectIndex,
     decls: &ProjectDecls,
@@ -645,12 +649,35 @@ pub fn family_readers(
                 || index.summary(k).is_some_and(|s| s.is_cached_property)
         })
     };
+    let suspends = |key: &FuncKey| {
+        index.summary(key).is_some_and(|s| {
+            s.iteration_facts()
+                .container_iterations
+                .iter()
+                .any(|it| it.between.suspends)
+        })
+    };
+    let has_suspending_generator = |class: &String| decls.methods_of(class).iter().any(&suspends);
     let methods = changed.iter().filter_map(|key| {
         let (owner, name) = key.qualname.rsplit_once('.')?;
         let class = format!("{}.{owner}", key.module);
         decls.is_project_class(&class).then_some((key, class, name))
     });
     let mut roots = BTreeSet::new();
+    for key in changed {
+        let file = index.file_of(key).and_then(|p| index.files.get(p));
+        let generators = file
+            .into_iter()
+            .flat_map(|f| &f.call_sites)
+            .filter(|s| s.caller == *key)
+            .flat_map(CallSite::project_callees)
+            .filter(|bc| suspends(&bc.callee));
+        for bc in generators {
+            if let Some((owner, _)) = bc.callee.qualname.rsplit_once('.') {
+                roots.insert(format!("{}.{owner}", bc.callee.module));
+            }
+        }
+    }
     for (key, class, name) in methods {
         if in_place_changes
             || name == "__hash__"
@@ -667,6 +694,15 @@ pub fn family_readers(
                 .any(|k| k.qualname.rsplit('.').next() == Some(name))
         });
         if overrides {
+            roots.insert(class.clone());
+        }
+        let suspending = decls
+            .ancestors_of(&class)
+            .iter()
+            .chain(&decls.subclasses_of(&class))
+            .chain([&class])
+            .any(has_suspending_generator);
+        if suspending {
             roots.insert(class.clone());
         }
         // Initialization, and the private helpers it alone calls, write nothing a cached
@@ -2700,6 +2736,17 @@ pub(crate) fn mut109(
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
     invalidation::run(cx, out)
+}
+
+// ==================================================================================== MUT113
+
+mod iterated_mutation;
+
+/// `MUT113` (opt-in): a dict, set, or deque of the instance changed while a method iterates it,
+/// by another method while a generator is suspended inside the loop, or by a function the loop's
+/// body calls.
+pub(crate) fn mut113(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
+    iterated_mutation::run(cx, out);
 }
 
 // ==================================================================================== MUT106

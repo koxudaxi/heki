@@ -144,6 +144,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) |
 | Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) |
+| Opt-in: a dict or set changed while a suspended generator, or a loop calling a helper, iterates it | [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) |
 
 ### A safety net for reviews and coding agents
 
@@ -205,7 +206,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [34 rules](https://heki.koxudaxi.dev/rules/).
+- 📏 Browse the [35 rules](https://heki.koxudaxi.dev/rules/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
@@ -921,8 +922,8 @@ supported version that every clause admits:
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
 - A prefix or `ALL` enables only the default rules. The opt-in rules (`EFF105`, `EFF106`,
-  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`) need their exact code or
-  name. In `ignore`, a prefix covers every rule it matches.
+  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`) need their
+  exact code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, and `--extend-select` and `--ignore` add
   to the configured lists.
 
@@ -2024,10 +2025,12 @@ On a save, the edit reaches other files only through what it changes:
 | a function's effects, or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
 | a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator | every file that resolved names through it |
 | a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
+| what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
 | the writes that leave a `@cached_property` stale (`MUT111`, when selected) | the files reading such a property: whether a read is reported depends on every writer of the class family, wherever it is |
 | a function generators are handed to | those generators: whether it iterates them decides where their writes and reads are reported |
 | a function's own in-place changes or its calls, while its effects stay the same | the files with `MUT108` / `MUT110` reports above it: a report's call chain ends at the first function whose body makes the change |
 | the position of a call site, also when its bytes stay where they were | the files whose call chains show that call site |
+| the position of a method's own change of a container | the files whose `MUT113` reports show it |
 
 Contracts reach further when a function changes its calls:
 
@@ -3330,6 +3333,121 @@ def encode(parts: list[bytes]) -> bytes:
 No automatic fix (the rewrite needs a buffer before the loop and a join after it). The
 diagnostic still lists the proof obligations: the accumulator must not be read inside the loop
 or by an exception handler, and its intermediate values must not escape.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/iterated-container-mutation/
+
+# iterated-container-mutation (MUT113)
+
+Family: Mutation & State (MUT) · Opt-in · No automatic fix
+
+Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).
+
+## What it does
+Checks for a `dict`, `set`, or `collections.deque` held in an attribute of `self` that is
+changed in place while a method of the class iterates it, by code outside the loop:
+
+- a method of the class that runs while a generator method is suspended inside the iteration (at
+  a `yield` from which the loop goes on, or inside a `yield from`);
+- a function or method that the loop's body calls.
+
+The rule is opt-in: enable it with `--extend-select MUT113` or `extend-select = ["MUT113"]`.
+
+An iteration is a `for` loop or a `yield from` over the container, over its `keys()`,
+`values()`, or `items()` view, or over a lazy wrapper of either (`iter`, `enumerate`, `zip`,
+`map`, `filter`, `reversed`, `itertools.chain`, a generator expression, ...). A snapshot
+(`list(...)`, `tuple(...)`, `sorted(...)`, `.copy()`) is a container of its own. The
+container's class comes from its annotation or its assignment in `__init__` (`OrderedDict`,
+`defaultdict`, and `Counter` are mappings).
+
+A change is an in-place change of the attribute's container, made by the method itself, by the
+methods and properties it calls on `self`, or by a helper it hands the container to:
+
+- inserting, removing, or moving items: `append`, `add`, `update`, `setdefault`, `pop`,
+  `popleft`, `discard`, `clear`, `del self.items[k]`, `rotate`, `move_to_end`, `|=`, ...;
+- storing an item (`self.items[k] = v`), which counts for a mapping (the key may be new) but not
+  for a deque, whose iterators allow it;
+- reading a missing key of a `defaultdict` (`self.groups[k].append(v)`), unless the read is
+  directly inside `if k in self.groups:`.
+
+Rebinding the attribute (`self.items = {}`) changes no container.
+
+What runs while a generator is suspended depends on where its generator object goes:
+
+- A private generator (`_name`) runs only where the project iterates it. Between its steps, the
+  body of the loop iterating it runs: the methods of the class that this body calls count. A
+  call that consumes it (`list(...)`, `sorted(...)`) runs nothing in between, and a generator
+  that suspends inside such a loop is followed in turn.
+- When the generator object outlives the call making it (it is stored on the instance, stepped
+  with `next()`, or handed to code heki does not follow), any public method of the class, its
+  project subclasses, and the bases it inherits from can run in between. Initialization does
+  not count: `__init__`, `__post_init__`, `__new__`, `__setstate__`, `__enter__`, `setup`, and
+  the other two-phase initialization methods `MUT101` names run before any iteration. A private
+  method counts through the methods calling it.
+- A public generator, `__iter__` included, is an iteration the class offers its callers, as
+  `dict.items()` is: its public methods that change the container are the rest of that
+  interface, and changing a container while iterating it is the caller's mistake, as for a
+  builtin container. Only the changes made by reads count: property getters and the read dunder
+  methods (`__getitem__`, `__len__`, `__contains__`, ...). The project's own loops over it count
+  as for a private generator.
+
+A change written in the loop's body itself is the linters' check (Ruff's `B909` and
+`PLE4703`), and not reported. The rule reports one diagnostic per iteration of a suspended
+generator, at the iteration, naming one changing method and listing each one as a related
+location, and one per call in a loop's body that changes the container, at the call.
+
+## Why is this bad?
+A dict or set iterator raises `RuntimeError: dictionary changed size during iteration` (or
+`Set changed size during iteration`) at its next step after its container gained or lost an
+item, and a deque iterator raises `RuntimeError: deque mutated during iteration` after any
+change but an item store. A generator suspended inside such an iteration fails when it resumes
+after another method ran, which may be far from both and only for some orders of calls.
+
+## Example
+```python
+class Subscriptions:
+    def __init__(self) -> None:
+        self.by_node: dict[str, object] = {}
+        self._cursor = self._cycle()
+
+    def _cycle(self):
+        while True:
+            yield from self.by_node.values()  # MUT113
+
+    def next_subscriber(self) -> object:
+        return next(self._cursor)
+
+    def drop(self, node: str) -> None:
+        self.by_node.pop(node, None)
+```
+
+Use instead:
+```python
+    def _cycle(self):
+        while True:
+            yield from list(self.by_node.values())
+```
+
+## How to fix
+Iterate over a snapshot taken before the loop (`list(self.by_node.values())`), or collect the
+changes and apply them after the loop has finished.
+
+## Fix safety
+No automatic fix: a snapshot no longer sees the items added during the iteration, which can be
+what the code wants.
+
+## Known limitations
+- A `list` does not count: a list iterator sees the items appended during the iteration and
+  skips or repeats items when others move, without an error.
+- A container of an abstract class (`MutableMapping`, `MutableSet`) or of a class heki does not
+  know does not count. A `deque()` or `defaultdict(...)` assigned without an annotation has no
+  class for heki: annotate the attribute (`self.queue: deque[int] = deque()`).
+- An `await` inside a loop, and threads, are not suspensions the rule follows.
+- A method returning an iterator or a view instead of being a generator
+  (`return iter(self.items)`) is not followed, and neither is a generator passed to a project
+  function that iterates it.
 
 
 ---
