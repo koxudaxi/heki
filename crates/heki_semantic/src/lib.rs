@@ -1594,7 +1594,10 @@ fn detect_future_annotations(suite: &[Stmt]) -> bool {
     for stmt in suite {
         match stmt {
             Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_)) => continue,
-            Stmt::ImportFrom(imp) if imp.module.as_deref() == Some("__future__") => {
+            // `from .__future__ import x` is an ordinary relative import.
+            Stmt::ImportFrom(imp)
+                if imp.level == 0 && imp.module.as_deref() == Some("__future__") =>
+            {
                 if imp.names.iter().any(|a| a.name.as_str() == "annotations") {
                     return true;
                 }

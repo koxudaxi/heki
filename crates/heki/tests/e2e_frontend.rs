@@ -666,6 +666,21 @@ def factory():
 }
 
 #[test]
+fn semantic_a_relative_future_import_is_an_ordinary_import() {
+    let source = "from .__future__ import annotations\nx: Limit = 1\n";
+    let m = dump_source("dump-semantic", "fe_relative_future", source, "py312");
+    assert_eq!(m["has_future_annotations"], false);
+    assert_eq!(reads(&m["scopes"][0])["Limit"], "builtin");
+    let future = dump_source(
+        "dump-semantic",
+        "fe_future",
+        "from __future__ import annotations\nx: Limit = 1\n",
+        "py312",
+    );
+    assert_eq!(future["has_future_annotations"], true);
+}
+
+#[test]
 fn semantic_generator_walrus_writes_the_declared_global() {
     let source = "\
 def f():
