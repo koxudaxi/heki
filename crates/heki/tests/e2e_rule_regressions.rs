@@ -501,3 +501,91 @@ fn eff101_sees_a_query_iterated_on_the_event_loop() {
         "{found:#?}"
     );
 }
+
+// ====================================================== OPT112: advice the loop lets you follow
+
+/// The pytest review item (`src/_pytest/raises.py:1279`, greedy matching): the loop iterates the
+/// list it removes from, so the removals cannot wait for a rebuild after the loop. The advice
+/// follows what the loop does with the list: deferred removals only when it reads the list
+/// nowhere else (a membership test guarding the removal aside), an index or a count built once
+/// only when it does not change the list.
+const SCANS: &str = r#"def greedy(expected: list, actual: list, check) -> list:
+    remaining_actual = list(range(len(actual)))
+    failed = []
+    for i_exp, exp in enumerate(expected):
+        for i_rem in remaining_actual:
+            if check(exp, actual[i_rem]):
+                remaining_actual.remove(i_rem)
+                break
+        else:
+            failed.append(i_exp)
+    return failed
+
+
+def drop(items: list[int], unwanted):
+    for x in unwanted:
+        items.remove(x)
+
+
+def guarded(items: list[int], unwanted):
+    for x in unwanted:
+        if x in items:
+            items.remove(x)
+
+
+def drain(queue: list[int], pick):
+    while queue:
+        queue.remove(pick())
+
+
+def path(stack: list[int], nodes):
+    for node in nodes:
+        i = stack.index(node)
+        stack.append(i)
+
+
+def counts(items: list[int], xs):
+    for x in xs:
+        if items.count(x):
+            items.append(x)
+
+
+def positions(names: list[str], wanted):
+    return [names.index(w) for w in wanted]
+"#;
+
+#[test]
+fn opt112_advice_holds_for_what_the_loop_does_with_the_list() {
+    let p = Project::new("regr_opt112_advice");
+    p.write("scans.py", SCANS);
+    let found = reports(&p, "OPT112");
+    let advice: Vec<(u64, &str)> = found
+        .iter()
+        .map(|(line, _, m)| (*line, m.split_once("(O(n²)); ").unwrap().1))
+        .collect();
+    let keep = "the loop reads the list after each removal, so keep its values in a `set` or a `dict` (`dict.fromkeys(...)` keeps their order) and delete them from it";
+    let defer =
+        "collect the values to drop in a `set` and rebuild the list once with a comprehension";
+    assert_eq!(
+        advice,
+        vec![
+            (7, keep),
+            (16, defer),
+            (22, defer),
+            (27, keep),
+            (
+                32,
+                "the loop changes the list, so keep a `dict` (value → index) up to date with each change"
+            ),
+            (
+                38,
+                "the loop changes the list, so keep a `collections.Counter(items)` up to date with each change"
+            ),
+            (
+                43,
+                "build a `dict` (value → index) or a `set` once before the loop"
+            ),
+        ],
+        "{found:#?}"
+    );
+}

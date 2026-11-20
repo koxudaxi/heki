@@ -12,7 +12,7 @@
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
-use heki_effect::{TypeCtx, Val};
+use heki_effect::{CONTAINER_MUTATORS, TypeCtx, Val};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
@@ -240,13 +240,17 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             let is_list = matches!(types.get(&recv), Some(Val::Inst(t)) if t == "builtins.list");
             // A data-sized loop (not a small constant range or display, a retry, or daemon
             // polling) runs the call again on the same list.
-            let hot = f.loops.iter().any(|lp| {
-                lp.body.contains(&bb)
-                    && runs_again(f, lp, bb)
-                    && sizes.ix.lives_across(lp, recv)
-                    && sizes.data_sized(lp)
-            });
-            if !is_list || !hot || sizes.small_container(recv, LIST) {
+            let hot: Vec<&NaturalLoop> = f
+                .loops
+                .iter()
+                .filter(|lp| {
+                    lp.body.contains(&bb)
+                        && runs_again(f, lp, bb)
+                        && sizes.ix.lives_across(lp, recv)
+                        && sizes.data_sized(lp)
+                })
+                .collect();
+            if !is_list || hot.is_empty() || sizes.small_container(recv, LIST) {
                 continue;
             }
             let call = slice(unit.source, span);
@@ -255,11 +259,24 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     .map_or(call, |(head, _)| head)
                     .to_owned()
             });
+            // The advice holds for what the loop does with the list: removals can wait for
+            // the end of the loop only when it reads the list nowhere else, and an index or a
+            // count built before the loop stays right only while the loop does not change it.
+            let use_of = ListUse::new(&defs, &hot, recv);
             let advice = match method {
+                "index" if use_of.changed() => {
+                    "the loop changes the list, so keep a `dict` (value → index) up to date with each change".into()
+                }
                 "index" => "build a `dict` (value → index) or a `set` once before the loop".into(),
+                "remove" if use_of.read_besides_removals() => {
+                    "the loop reads the list after each removal, so keep its values in a `set` or a `dict` (`dict.fromkeys(...)` keeps their order) and delete them from it".into()
+                }
                 "remove" => {
                     "collect the values to drop in a `set` and rebuild the list once with a comprehension".into()
                 }
+                _ if use_of.changed() => format!(
+                    "the loop changes the list, so keep a `collections.Counter({target})` up to date with each change"
+                ),
                 _ => format!("count once before the loop with `collections.Counter({target})`"),
             };
             cx.emit(
@@ -275,6 +292,112 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 &[],
             );
         }
+    }
+}
+
+/// What the loops running an `OPT112` call again do with its list (the receiver `list`).
+struct ListUse<'d, 'a> {
+    defs: &'d Defs<'a>,
+    /// The blocks of those loops.
+    blocks: FxHashSet<BlockId>,
+    /// Their iterables.
+    iterables: Vec<VarId>,
+    /// Copies and phis of the value the receiver copies.
+    alias: FxHashSet<VarId>,
+    /// The receiver's source form (`items`, `self.items`): loads of the same name or path.
+    name: Option<String>,
+}
+
+impl<'d, 'a> ListUse<'d, 'a> {
+    fn new(defs: &'d Defs<'a>, hot: &[&NaturalLoop], list: VarId) -> Self {
+        let mut root = list;
+        while let Some(InstKind::Copy { src, .. }) = defs.kind(root) {
+            root = *src;
+        }
+        Self {
+            defs,
+            blocks: hot.iter().flat_map(|lp| lp.body.iter().copied()).collect(),
+            iterables: hot
+                .iter()
+                .filter_map(|lp| Some(defs.iterables.get(&defs.next_of(lp)?.1)?.0))
+                .collect(),
+            alias: forward_aliases(defs.f, &[root]),
+            name: defs.receiver_name(list),
+        }
+    }
+
+    /// Whether `var` holds the list.
+    fn is_list(&self, var: VarId) -> bool {
+        self.alias.contains(&var)
+            || self.name.is_some() && self.defs.receiver_name(var) == self.name
+    }
+
+    fn insts(&self) -> impl Iterator<Item = &'a Inst> + '_ {
+        self.blocks
+            .iter()
+            .flat_map(|b| &self.defs.f.block(*b).insts)
+    }
+
+    /// Whether the loops change the list in place: a mutating method, an item assignment or
+    /// deletion, an augmented assignment.
+    fn changed(&self) -> bool {
+        self.insts().any(|i| match &i.kind {
+            InstKind::MethodCall { recv, method, .. } => {
+                self.is_list(*recv) && CONTAINER_MUTATORS.contains(&method.as_str())
+            }
+            InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
+                self.is_list(*obj)
+            }
+            InstKind::BinOp {
+                lhs,
+                in_place: true,
+                ..
+            } => self.is_list(*lhs),
+            _ => false,
+        })
+    }
+
+    /// Whether the loops read the list other than by removing values from it: they iterate it,
+    /// test it, pass it on, or read its items. A membership test of a value they remove
+    /// (`if x in items: items.remove(x)`) only guards the removal.
+    fn read_besides_removals(&self) -> bool {
+        let removal = |kind: &InstKind| match kind {
+            InstKind::MethodCall {
+                recv, method, args, ..
+            } if method == "remove" && self.is_list(*recv) => args.first().copied(),
+            _ => None,
+        };
+        let removed: FxHashSet<VarId> = self.insts().filter_map(|i| removal(&i.kind)).collect();
+        if self.iterables.iter().any(|v| self.is_list(*v)) {
+            return true;
+        }
+        let reads = self.insts().any(|i| {
+            let allowed = match &i.kind {
+                InstKind::Copy { .. } => true,
+                InstKind::Compare {
+                    op: CompareOpKind::In | CompareOpKind::NotIn,
+                    lhs,
+                    ..
+                } => removed.contains(lhs),
+                kind => removal(kind).is_some(),
+            };
+            let operands = i.kind.operands();
+            match &i.kind {
+                // The receiver of a removal; its value must not be the list.
+                _ if allowed && removal(&i.kind).is_some() => {
+                    operands[1..].iter().any(|v| self.is_list(*v))
+                }
+                _ if allowed => false,
+                _ => operands.iter().any(|v| self.is_list(*v)),
+            }
+        });
+        reads
+            || self.blocks.iter().any(|b| {
+                matches!(self.defs.f.block(*b).terminator,
+                    Terminator::Branch { cond: v, .. }
+                    | Terminator::Return(Some(v))
+                    | Terminator::Raise(Some(v)) if self.is_list(v))
+            })
     }
 }
 
