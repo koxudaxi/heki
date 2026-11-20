@@ -464,6 +464,18 @@ async def tp_async_queries_and_connections_in_loops(dsn, ids):
         await conn.execute("SELECT * FROM t WHERE id = %s", (i,))
     for d in ids:
         await psycopg.AsyncConnection.connect(d)
+
+
+def tp_pools_in_loops(dsns):
+    for dsn in dsns:
+        with ConnectionPool(dsn) as per_dsn:
+            per_dsn.check()
+
+
+async def tp_async_pools_in_loops(dsns):
+    for dsn in dsns:
+        async with AsyncConnectionPool(dsn) as per_dsn:
+            await per_dsn.check()
 "#;
 
 #[test]
@@ -538,6 +550,19 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
                 "EFF102",
                 "tp_async_queries_and_connections_in_loops",
                 "psycopg.AsyncConnection.connect"
+            ),
+            // A pool per iteration (the module-level pools are built once).
+            d(
+                91,
+                "EFF102",
+                "tp_pools_in_loops",
+                "psycopg_pool.ConnectionPool"
+            ),
+            d(
+                97,
+                "EFF102",
+                "tp_async_pools_in_loops",
+                "psycopg_pool.AsyncConnectionPool"
             ),
         ]
     );

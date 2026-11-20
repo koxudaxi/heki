@@ -1371,7 +1371,9 @@ opaque_to_layer3 = true
 
 # --- DB: psycopg (3) and psycopg_pool ---
 # `psycopg.connect` is `Connection.connect`. A client-side cursor receives the whole result in
-# `execute`, so its `fetch*` methods do no I/O and are not listed.
+# `execute`, so its `fetch*` methods do no I/O and are not listed. A pool's constructor starts
+# its workers, which connect in the background (`open(wait=True)` would wait): it allocates a
+# pool of connections without blocking.
 
 [[entries]]
 symbol = "psycopg.connect"
@@ -1443,6 +1445,17 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg.AsyncCursor.executemany"
 effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg_pool.ConnectionPool"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg_pool.AsyncConnectionPool"
+effects = ["unpooled_client_alloc"]
 async_safe = true
 opaque_to_layer3 = true
 
