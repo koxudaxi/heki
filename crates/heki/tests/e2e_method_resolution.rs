@@ -1,7 +1,8 @@
 //! Which functions a call runs, end to end through the real binary: methods found along
 //! Python's MRO (C3 linearization), constructing a named class (its own `__init__`, not a
 //! subclass's) and calling a method through it, class methods called through their class,
-//! calling an instance (`__call__`), and constructions through a module.
+//! calling an instance (`__call__`), constructions through a module, and the targets of `with`
+//! statements.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -274,5 +275,73 @@ fn constructing_through_a_module_makes_a_new_object() {
         "qualified_construction",
         &[("pkg/records.py", RECORDS), ("pkg/uses.py", USES)],
         &["MUT108"],
+    );
+}
+
+/// The target of `with m as r` is what `m.__enter__()` returns (`await m.__aenter__()` for
+/// `async with`): the declared return type, else the manager itself.
+const MANAGERS: &str = r#"import time
+
+
+class Resource:
+    def read(self):
+        time.sleep(1)
+
+
+class Manager:
+    def __enter__(self) -> Resource:
+        return Resource()
+
+    def __exit__(self, *exc):
+        return None
+
+    def read(self):
+        return None
+
+
+class AsyncManager:
+    async def __aenter__(self) -> Resource:
+        return Resource()
+
+    async def __aexit__(self, *exc):
+        return None
+
+    def read(self):
+        return None
+
+
+class Itself:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def read(self):
+        time.sleep(1)
+
+
+async def entered():
+    with Manager() as r:
+        r.read()  # EFF101
+
+
+async def entered_async():
+    async with AsyncManager() as r:
+        r.read()  # EFF101
+
+
+async def manager_itself(m: Manager):
+    m.read()
+    with Itself() as i:
+        i.read()  # EFF101
+"#;
+
+#[test]
+fn a_with_target_is_what_the_manager_enters() {
+    check_marks(
+        "with_targets",
+        &[("pkg/managers.py", MANAGERS)],
+        &["EFF101"],
     );
 }

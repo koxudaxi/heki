@@ -798,10 +798,19 @@ impl<'e, 'a> Engine<'e, 'a> {
             InstKind::LoadName { name, .. } if self.reads_globals => Some(cx.global(name)),
             InstKind::LoadName { .. } => return Err(Pending),
             InstKind::Import { .. } => cx.import_type(inst.span),
-            // `with C() as c` binds `C().__enter__()`; clients / sessions / files return self.
-            InstKind::Copy { src, .. }
-            | InstKind::EnterWith { mgr: src, .. }
-            | InstKind::Await { value: src, .. } => self.need(*src)?.cloned(),
+            InstKind::Copy { src, .. } | InstKind::Await { value: src, .. } => {
+                self.need(*src)?.cloned()
+            }
+            // `with m as c` binds `m.__enter__()` (`async with`: `await m.__aenter__()`): what
+            // its definition declares it returns; without a declaration, the manager itself, as
+            // clients, sessions, and files return.
+            InstKind::EnterWith { mgr, is_async, .. } => {
+                let manager = self.need(*mgr)?;
+                let enter = if *is_async { "__aenter__" } else { "__enter__" };
+                manager
+                    .and_then(|m| self.member_call(m, enter))
+                    .or_else(|| manager.cloned())
+            }
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
                 Some(Ty::Ref(fqn) | Ty::Class(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
                 Some(recv) => self.member(recv, attr),
