@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 17 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 25 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
@@ -18,8 +18,11 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | ---- | ---- | ------- | ------: |
 | MUT101 | [cached-property-stale-mutation](cached-property-stale-mutation.md) | Mutating an attribute read by `@cached_property` without invalidating the cache. |  |
 | MUT103 | [summary-effect-regression](summary-effect-regression.md) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
+| MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
+| MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`. |  |
+| MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
 
 ## Execution Effects (EFF)
 
@@ -31,6 +34,9 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. |  |
 | EFF103 | [loop-db-query](loop-db-query.md) | Explicit DB query / external RPC executed inside a loop (N+1). |  |
 | EFF105 | [async-blocking-fs](async-blocking-fs.md) | Opt-in: blocking local filesystem I/O reachable from `async def`. | 🔌 |
+| EFF106 | [lock-or-tx-held-across-io](lock-or-tx-held-across-io.md) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | 🔌 |
+| EFF107 | [unretained-async-task](unretained-async-task.md) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | 🔌 |
+| EFF201 | [effect-boundary-violation](effect-boundary-violation.md) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. |  |
 
 ## Data Pipelines (DATA)
 
@@ -51,6 +57,8 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 | OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
 | OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
 | OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
+| OPT112 | [loop-linear-list-lookup](loop-linear-list-lookup.md) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). |  |
+| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
 | OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
 | OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
 | OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
