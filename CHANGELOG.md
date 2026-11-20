@@ -5,6 +5,19 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.1.2] - Unreleased
+
+### Fixed
+
+- `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
+  passed to a call or stored, as in `self.addCleanup(task.cancel)` or
+  `loop.call_later(1, task.cancel)`: the bound method holds the task.
+- `EFF107` no longer reports a call that makes no new task because its argument is known not
+  to be a coroutine: the result of a plain `def` or a generator function, such as a method
+  returning a future (`asyncio.ensure_future(event.wait())`), or a future from
+  `loop.run_in_executor`, `loop.create_future`, `asyncio.gather`, `asyncio.wrap_future`, or an
+  annotation. The `coro=` and `coro_or_future=` keyword forms are checked the same way.
+
 ## [0.1.1] - 2026-11-21
 
 ### Changed
@@ -39,14 +52,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   either loop, such as a module tuple of operation names or `range(10)`: the cost then grows
   with the other side only. Its help for the grouped index now says to read each outer key with
   `.get(key, [])`, so that a key with no element keeps its empty list.
-- `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
-  passed to a call or stored, as in `self.addCleanup(task.cancel)` or
-  `loop.call_later(1, task.cancel)`: the bound method holds the task.
-- `EFF107` no longer reports a call that makes no new task because its argument is known not
-  to be a coroutine: the result of a plain `def` or a generator function, such as a method
-  returning a future (`asyncio.ensure_future(event.wait())`), or a future from
-  `loop.run_in_executor`, `loop.create_future`, `asyncio.gather`, `asyncio.wrap_future`, or an
-  annotation. The `coro=` and `coro_or_future=` keyword forms are checked the same way.
 
 ## [0.1.0] - 2026-11-21
 
@@ -124,5 +129,6 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.1.2]: https://github.com/koxudaxi/heki/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/koxudaxi/heki/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/koxudaxi/heki/releases/tag/v0.1.0
