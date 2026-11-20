@@ -62,9 +62,9 @@ pub struct EngineStats {
 #[derive(Debug, Clone)]
 struct FileMeta {
     module_name: String,
-    /// Where the file's call sites show in its text (the hops of call chains other files'
-    /// diagnostics show).
-    site_places: Vec<SitePlace>,
+    /// Where the spans of the file that other files' diagnostics can show are in its text
+    /// ([`shown_places`]).
+    shown_places: Vec<SitePlace>,
 }
 
 /// A span and the line and columns of both its ends: `(line, byte column, UTF-16 column)`, as
@@ -72,8 +72,10 @@ struct FileMeta {
 /// changes (a comment above it turned into a blank line).
 type SitePlace = (heki_ast::Span, [(u32, u32, u32); 2]);
 
-/// The places of a file's call sites `sites` in its text `source`.
-fn site_places(sites: &[CallSite], source: &str) -> Vec<SitePlace> {
+/// The places in its text `source` of the spans of `file` that other files' diagnostics can
+/// show: its call sites (the hops of call chains) and the changes its methods make to their own
+/// containers (the methods `MUT113` names).
+fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace> {
     let lines = heki_ast::LineIndex::from_source(source);
     let place = |offset: u32| {
         let (line, column) = lines.line_col(offset);
@@ -83,9 +85,23 @@ fn site_places(sites: &[CallSite], source: &str) -> Vec<SitePlace> {
             .map_or(0, |t| t.encode_utf16().count());
         (line, column, u32::try_from(utf16).unwrap_or(u32::MAX))
     };
-    sites
+    let mut changes: Vec<heki_ast::Span> = file
+        .local_functions
+        .values()
+        .flat_map(|s| {
+            s.iteration_facts()
+                .self_container_change_sites
+                .values()
+                .flatten()
+                .copied()
+        })
+        .collect();
+    changes.sort();
+    file.call_sites
         .iter()
-        .map(|s| (s.span, [place(s.span.start), place(s.span.end)]))
+        .map(|s| s.span)
+        .chain(changes)
+        .map(|span| (span, [place(span.start), place(span.end)]))
         .collect()
 }
 
@@ -97,8 +113,8 @@ pub struct EditOutcome {
     /// or check read changed declarations, files of functions whose callers here changed their
     /// calls, the class families of changed methods, the `MUT108` / `MUT110` reports above
     /// functions whose own in-place changes or calls their call chains walk changed, files whose
-    /// diagnostics show call sites of this file that moved, and every checked file when the
-    /// project starts or stops patching `builtins`.
+    /// diagnostics show call sites or container changes of this file that moved, and every
+    /// checked file when the project starts or stops patching `builtins`.
     pub affected: Vec<PathBuf>,
     /// Why the file has no diagnostics: a syntax error (the file then leaves the index, as a
     /// file `heki check` cannot parse is not part of the project).
@@ -342,7 +358,7 @@ impl Workspace {
                     f.path.clone(),
                     FileMeta {
                         module_name: f.module_name.clone(),
-                        site_places: site_places(&summary.call_sites, &f.source),
+                        shown_places: shown_places(summary, &f.source),
                     },
                 )
             })
@@ -682,7 +698,7 @@ impl Workspace {
     }
 
     /// Re-summarize one parsed file; returns the update, what changed in the declarations, and
-    /// whether the places of its call sites changed.
+    /// whether the places other files' diagnostics can show changed ([`shown_places`]).
     fn summarize(
         &mut self,
         parsed: &ParsedFile,
@@ -690,20 +706,19 @@ impl Workspace {
         let out =
             self.index
                 .reanalyze_module_cached(&parsed.input(), &self.env.kb, &mut self.decls);
-        let sites = self
+        let places = self
             .index
             .files
             .get(&parsed.path)
-            .map_or(&[][..], |f| f.call_sites.as_slice());
-        let places = site_places(sites, &parsed.source);
+            .map_or_else(Vec::new, |f| shown_places(f, &parsed.source));
         let before = self.files.insert(
             parsed.path.clone(),
             FileMeta {
                 module_name: parsed.module_name.clone(),
-                site_places: places,
+                shown_places: places,
             },
         );
-        let moved = before.is_none_or(|b| b.site_places != self.files[&parsed.path].site_places);
+        let moved = before.is_none_or(|b| b.shown_places != self.files[&parsed.path].shown_places);
         self.stats.indexed_files = self.index.files.len();
         (out.0, out.1, moved)
     }
@@ -908,7 +923,7 @@ impl Workspace {
         let callers_before = self.caller_view(&parsed.path);
         let chains_before = chain_facts(&self.index, &parsed.path);
         let ecosystem_before = self.ecosystem_view(&parsed.path);
-        let (update, change, sites_moved) = self.summarize(&parsed);
+        let (update, change, places_moved) = self.summarize(&parsed);
         let callers_after = self.caller_view(&parsed.path);
         let chains_after = chain_facts(&self.index, &parsed.path);
         let ecosystem_after = self.ecosystem_view(&parsed.path);
@@ -921,9 +936,10 @@ impl Workspace {
         );
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         affected.extend(self.note_stale_writes(&parsed.path));
-        // Call chains of other files show this file's call sites: when they move, those
-        // diagnostics move with them (the summaries copying them were re-propagated).
-        if sites_moved {
+        // Call chains of other files show this file's call sites, and `MUT113` reports the
+        // container changes of its methods: when they move, those diagnostics move with them
+        // (the summaries copying call sites were re-propagated).
+        if places_moved {
             affected.extend(self.showing(&parsed.path));
         }
         affected.remove(&parsed.path);
