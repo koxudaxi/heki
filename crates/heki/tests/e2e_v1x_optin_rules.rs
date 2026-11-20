@@ -1121,6 +1121,18 @@ async def attributes_that_are_no_methods():
     b = asyncio.create_task(work())
     c = asyncio.create_task(work())
     print(a._state, b.__class__, c.__dict__)
+
+
+async def bound_methods_called():
+    done = asyncio.create_task(work())
+    finished = done.done
+    finished()
+    hb = asyncio.create_task(work())
+    stop = hb.cancel
+    try:
+        await asyncio.sleep(1)
+    finally:
+        stop()
 "##;
 
 #[test]
@@ -1133,7 +1145,8 @@ fn eff107_bound_methods_of_the_task_keep_it_where_they_are_kept() {
     // container through a copy, or returned holds the task. The results of its methods, what is
     // read from a bound method, a method read only to be tested, and attributes that are no
     // methods (`_state`, `__class__`, `__dict__`) hold nothing, nor does an alias both branches
-    // bind.
+    // bind, nor calling a bound method; calling a bound `cancel` ends the task as `hb.cancel()`
+    // does.
     assert_eq!(
         found(&diags),
         vec![
@@ -1142,6 +1155,7 @@ fn eff107_bound_methods_of_the_task_keep_it_where_they_are_kept() {
             d("pkg/bound.py", 55, "EFF107", "asyncio.create_task->a"),
             d("pkg/bound.py", 56, "EFF107", "asyncio.create_task->b"),
             d("pkg/bound.py", 57, "EFF107", "asyncio.create_task->c"),
+            d("pkg/bound.py", 62, "EFF107", "asyncio.create_task->done"),
         ]
     );
 }

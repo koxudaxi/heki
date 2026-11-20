@@ -206,8 +206,10 @@ struct TaskFlow<'f> {
     copies: FxHashMap<VarId, Vec<VarId>>,
     /// The phis each value flows into.
     phis: FxHashMap<VarId, Vec<VarId>>,
-    /// The [`TASK_METHODS`] bound to each value (`task.cancel`).
-    methods: FxHashMap<VarId, Vec<VarId>>,
+    /// The [`TASK_METHODS`] bound to each value (`task.cancel`), with their names.
+    methods: FxHashMap<VarId, Vec<(VarId, &'f str)>>,
+    /// The values a `Call` calls.
+    called: FxHashSet<VarId>,
     /// The local name each `Copy` binds, with its source position.
     names: FxHashMap<VarId, (u32, &'f str)>,
     /// The call each value is the result of, through copies (`pending = e.wait()`).
@@ -241,9 +243,16 @@ impl<'f> TaskFlow<'f> {
                     InstKind::AttrLoad { dst, obj, attr }
                         if TASK_METHODS.contains(&attr.as_str()) =>
                     {
-                        flow.methods.entry(*obj).or_default().push(*dst);
+                        flow.methods.entry(*obj).or_default().push((*dst, attr));
                     }
                     kind @ (InstKind::Call { dst, .. } | InstKind::MethodCall { dst, .. }) => {
+                        if let InstKind::Call {
+                            callee_var: Some(callee),
+                            ..
+                        } = kind
+                        {
+                            flow.called.insert(*callee);
+                        }
                         calls.push((*dst, kind));
                     }
                     _ => {}
@@ -297,22 +306,31 @@ impl<'f> TaskFlow<'f> {
 
     /// Whether an alias of the task, or a method bound to one (`task.cancel`, which holds the
     /// task as its `__self__`), is kept, or whether an alias is ended by a [`LIFETIME_METHODS`]
-    /// call on it. What is read from a bound method (`task.cancel.__name__`) holds nothing.
+    /// call on it, directly or through the bound method (`stop = task.cancel`, then `stop()`).
+    /// What is read from a bound method (`task.cancel.__name__`) holds nothing.
     fn keeps(&self, aliases: &FxHashSet<VarId>) -> bool {
-        let methods = self.aliases(
+        let bound = || {
             aliases
                 .iter()
-                .flat_map(|a| self.methods.get(a).into_iter().flatten().copied()),
+                .flat_map(|a| self.methods.get(a).into_iter().flatten())
+        };
+        let methods = self.aliases(bound().map(|(m, _)| *m));
+        let ending = self.aliases(
+            bound()
+                .filter(|(_, name)| LIFETIME_METHODS.contains(name))
+                .map(|(m, _)| *m),
         );
         aliases
             .iter()
             .any(|v| self.kept.contains(v) || self.ended.contains(v))
             || methods.iter().any(|v| self.kept.contains(v))
+            || ending.iter().any(|v| self.called.contains(v))
     }
 }
 
-/// The operands an instruction keeps: see [`TaskFlow::kept`]. Only being the receiver of a
-/// method call keeps nothing alive (`task.add_done_callback(...)`).
+/// The operands an instruction keeps: see [`TaskFlow::kept`]. Being the receiver of a method
+/// call (`task.add_done_callback(...)`) or the value a call calls (`done = task.done`, then
+/// `done()`) keeps nothing alive.
 fn kept_operands(kind: &InstKind) -> Vec<VarId> {
     match kind {
         InstKind::Await { value, .. }
@@ -321,7 +339,7 @@ fn kept_operands(kind: &InstKind) -> Vec<VarId> {
         | InstKind::StoreGlobal { value, .. }
         | InstKind::StoreDeref { value, .. } => vec![*value],
         InstKind::SubscriptStore { index, value, .. } => vec![*index, *value],
-        InstKind::MethodCall { args, kwargs, .. } => args
+        InstKind::Call { args, kwargs, .. } | InstKind::MethodCall { args, kwargs, .. } => args
             .iter()
             .chain(kwargs.iter().map(|(_, v)| v))
             .copied()
@@ -330,8 +348,7 @@ fn kept_operands(kind: &InstKind) -> Vec<VarId> {
         | InstKind::AllocBuiltin { .. }
         | InstKind::DictLiteral { .. }
         | InstKind::MakeClosure { .. }
-        | InstKind::MakeGenExpr { .. }
-        | InstKind::Call { .. } => kind.operands(),
+        | InstKind::MakeGenExpr { .. } => kind.operands(),
         _ => Vec::new(),
     }
 }
