@@ -7,7 +7,7 @@
 use globset::GlobSet;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, analyze_project_with_reads,
+    CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, summarize_project_with_reads,
 };
 use heki_rules::project::{
     ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, exclude_set, parse_source,
@@ -130,7 +130,8 @@ struct ContractReach {
 type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
 
 impl Workspace {
-    /// Index every Python file under `paths` (IR is dropped once the index is built).
+    /// Index every Python file under `paths` (IR is dropped once the files are summarized, before
+    /// propagation).
     /// `overrides` replaces the disk text of open documents.
     pub fn load(
         opts: &ProjectOptions<'_>,
@@ -169,7 +170,8 @@ impl Workspace {
         // A configuration error is reported by every check (`check_project`); without valid
         // contracts the summaries carry no contract facts.
         let contracts = heki_rules::summary_contracts(env_cfg).ok().flatten();
-        let index = analyze_project_with_reads(&project.inputs(), &project.env.kb, contracts);
+        let summaries =
+            summarize_project_with_reads(&project.inputs(), &project.env.kb, contracts.as_deref());
         let files = project
             .files
             .iter()
@@ -193,7 +195,14 @@ impl Workspace {
                     .iter()
                     .any(|b| b.forbid.iter().any(|t| t == "calls")),
         };
-        let Project { env, errors, .. } = project;
+        // Every file's IR, semantic model, and text go before propagation: only the index stays.
+        let Project {
+            env,
+            files: parsed,
+            errors,
+        } = project;
+        drop(parsed);
+        let index = ProjectIndex::build_with(summaries, contracts);
         let decls = index.decl_passes();
         let stats = EngineStats {
             indexed_files: index.files.len(),

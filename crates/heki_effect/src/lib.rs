@@ -863,7 +863,7 @@ pub struct FileSummary {
     pub decls: ModuleDecls,
     /// What summarizing the file read of the project declarations (completing its own
     /// declarations included): a change of any of these keys can change the summary. Recorded
-    /// for the language server's index only (`analyze_project_with_reads`, the incremental
+    /// for the language server's index only (`summarize_project_with_reads`, the incremental
     /// updates); empty otherwise.
     pub decl_reads: DeclKeys,
     /// The `MUT109` flow facts of the file's functions (local, IR-free; empty unless an
@@ -927,7 +927,7 @@ pub(crate) fn is_stub(path: &Path) -> bool {
 
 /// Summarize every module of a project and propagate effects to a fixpoint.
 pub fn analyze_project(modules: &[ModuleInput<'_>], kb: &EffectiveEcosystemKb) -> ProjectIndex {
-    analyze(modules, kb, false, None)
+    analyze_project_with(modules, kb, None)
 }
 
 /// [`analyze_project`] with the declared contracts the summaries depend on (`MUT202` producers,
@@ -937,32 +937,34 @@ pub fn analyze_project_with(
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
 ) -> ProjectIndex {
-    analyze(modules, kb, false, contracts)
+    let files = summarize(modules, kb, false, contracts.as_deref());
+    ProjectIndex::build_with(files, contracts)
 }
 
-/// [`analyze_project_with`] recording what each file's summary read of the project declarations
-/// (`FileSummary::decl_reads`), for an index that incremental updates keep current.
-pub fn analyze_project_with_reads(
+/// The local summaries of every module of a project with `contracts`, recording what each read
+/// of the project declarations (`FileSummary::decl_reads`), for an index that incremental
+/// updates keep current. [`ProjectIndex::build_with`] propagates them; it needs no IR, so the
+/// caller can drop the modules first.
+pub fn summarize_project_with_reads(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
-    contracts: Option<Arc<dyn Contracts>>,
-) -> ProjectIndex {
-    analyze(modules, kb, true, contracts)
+    contracts: Option<&dyn Contracts>,
+) -> Vec<FileSummary> {
+    summarize(modules, kb, true, contracts)
 }
 
-fn analyze(
+fn summarize(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     track: bool,
-    contracts: Option<Arc<dyn Contracts>>,
-) -> ProjectIndex {
+    contracts: Option<&dyn Contracts>,
+) -> Vec<FileSummary> {
     let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
-    let files = modules
+    modules
         .iter()
         .zip(own)
-        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts.as_deref()))
-        .collect();
-    ProjectIndex::build_with(files, contracts)
+        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+        .collect()
 }
 
 impl ProjectIndex {
