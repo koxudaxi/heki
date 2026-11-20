@@ -1105,6 +1105,15 @@ async def method_results_only():
     print(task.get_name(), task.done(), task.cancel.__name__)
     if task.cancelled:
         pass
+
+
+async def merged_aliases(flag):
+    task = asyncio.create_task(work())
+    if flag:
+        alias = task
+    else:
+        alias = task
+    alias.add_done_callback(print)
 "##;
 
 #[test]
@@ -1115,10 +1124,14 @@ fn eff107_bound_methods_of_the_task_keep_it_where_they_are_kept() {
     let diags = diagnostics(&p, &["--select", "EFF107"]);
     // A bound method passed to a call (positionally or by keyword), stored in an attribute or a
     // container through a copy, or returned holds the task. The results of its methods, what is
-    // read from a bound method, and a method read only to be tested hold nothing.
+    // read from a bound method, and a method read only to be tested hold nothing, nor does an
+    // alias both branches bind.
     assert_eq!(
         found(&diags),
-        vec![d("pkg/bound.py", 39, "EFF107", "asyncio.create_task->task")]
+        vec![
+            d("pkg/bound.py", 39, "EFF107", "asyncio.create_task->task"),
+            d("pkg/bound.py", 46, "EFF107", "asyncio.create_task->task"),
+        ]
     );
 }
 
