@@ -94,25 +94,53 @@ jobs:
           path: dist/*
 
   smoke:
-    name: installed wheel smoke test
+    # Every wheel must carry the executable, and the executable must report a known diagnostic
+    # (exit 1) and pass a clean project (exit 0). Each wheel is installed on a runner of its
+    # platform; the static musl binary runs, extracted from its wheel, on a glibc runner.
+    name: wheel smoke test (${{ matrix.target }})
     needs: wheels
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            install: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            install: true
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            install: false
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            install: true
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            install: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            install: true
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: wheels-x86_64-unknown-linux-gnu
+          name: wheels-${{ matrix.target }}
           path: dist
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       - name: heki runs from the wheel
+        shell: bash
+        env:
+          INSTALL: ${{ matrix.install }}
         run: |
-          uv venv .smoke
-          uv pip install --python .smoke dist/*.whl
-          .smoke/bin/heki --version
-          .smoke/bin/heki rule --all
-          .smoke/bin/heki check tests/semantic/fixtures.py --output-format concise || test $? -eq 1
+          if [ "$INSTALL" = true ]; then set -- --install; fi
+          python scripts/release_check.py smoke dist/*.whl "$@"
 
   pypi:
     name: publish to PyPI
