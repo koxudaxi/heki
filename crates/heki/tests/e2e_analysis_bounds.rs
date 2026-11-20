@@ -1499,3 +1499,35 @@ fn many_key_tests_of_a_container_of_self_find_their_sides_once() {
         vec![lines.len() as u64]
     );
 }
+
+/// A module binding thousands of names, each to the one before (`a1 = a0`, `a2 = a1`, ...):
+/// every alias is resolved once, and the last still names `object.__setattr__`.
+#[test]
+fn a_long_chain_of_module_aliases_resolves_each_once() {
+    let names = 5_000;
+    let mut lines = vec!["a0 = object.__setattr__".to_owned()];
+    lines.extend((1..names).map(|i| format!("a{i} = a{}", i - 1)));
+    lines.extend(
+        [
+            "",
+            "",
+            "class Node:",
+            "    def __init__(self) -> None:",
+            "        self.kind = \"\"",
+            "",
+            "",
+            "def mark(node: Node) -> None:",
+        ]
+        .map(str::to_owned),
+    );
+    lines.push(format!("    a{}(node, \"kind\", \"x\")", names - 1));
+    let p = Project::new("bounds_module_alias_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n[[tool.heki.write-owners]]\nname = \"kinds\"\ntargets = [\"Node.kind\"]\nallowed-writers = [\"Node.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let diags = check_within(&p, Duration::from_secs(20));
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(diags[0]["qualname"], "mark");
+}

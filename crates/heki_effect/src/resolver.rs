@@ -64,6 +64,10 @@ const MAX_ALIAS_CHASE: usize = 8;
 /// (`KEY = pkg.sub.keys.OTHER`: three): a dotted name a few modules deep takes a few.
 const MAX_CONSTANT_ATTRS: usize = 16;
 
+/// The most dotted segments past the first that a module alias's object may have
+/// ([`module_aliases`]).
+const MAX_ALIAS_SEGMENTS: usize = 8;
+
 /// Decorators that leave calling a function what its definition makes it: a generator function
 /// returns a generator, an `async def` a coroutine, a plain `def` what its body returns.
 const CALL_KEEPING_DECORATORS: &[&str] =
@@ -1551,6 +1555,12 @@ impl ProjectDecls {
 
     /// Chase re-exports (`pkg.Foo` where `pkg/__init__.py` does `from .sub import Foo`).
     pub fn canonical(&self, fqn: &str) -> String {
+        self.chase(fqn, false)
+    }
+
+    /// `fqn` through re-exports and, with `aliases`, the module aliases it names (at most
+    /// `MAX_ALIAS_CHASE` steps).
+    fn chase(&self, fqn: &str, aliases: bool) -> String {
         let mut cur = fqn.to_owned();
         for _ in 0..MAX_ALIAS_CHASE {
             let Some((m, rest)) = self.split_module(&cur) else {
@@ -1566,8 +1576,13 @@ impl ProjectDecls {
             // `imports` holds the names an import binds once the module has run
             // (`ModuleImport::rebound_at`): a class or function of the same name is shadowed by
             // it.
-            let Some(target) = m.imports.get(first) else {
-                break;
+            let target = match m.imports.get(first) {
+                Some(target) => target,
+                None if aliases => match m.aliases.get(first) {
+                    Some(target) if !self.alias_rebound(&m.module_name, first) => target,
+                    _ => break,
+                },
+                None => break,
             };
             let next = match tail {
                 Some(t) => format!("{target}.{t}"),
@@ -1589,23 +1604,11 @@ impl ProjectDecls {
         self.rebound_elsewhere.contains(&fqn)
     }
 
-    /// The object the name `fqn` stands for: [`Self::canonical`], then through the module
-    /// aliases it names (`pkg.model._set` for `_set = object.__setattr__` in `pkg.model`).
-    /// The name itself stays the alias's: only values are the object.
+    /// The object the name `fqn` stands for: through re-exports, as [`Self::canonical`], and
+    /// through the module aliases it names (`pkg.model._set` for `_set = object.__setattr__` in
+    /// `pkg.model`). The name itself stays the alias's: only values are the object.
     pub(crate) fn object_named(&self, fqn: &str) -> String {
-        let mut cur = self.canonical(fqn);
-        for _ in 0..MAX_ALIAS_CHASE {
-            let Some((m, rest)) = self.split_module(&cur) else {
-                break;
-            };
-            match m.aliases.get(rest) {
-                Some(target) if !self.alias_rebound(&m.module_name, rest) => {
-                    cur = self.canonical(target);
-                }
-                _ => break,
-            }
-        }
-        cur
+        self.chase(fqn, true)
     }
 
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
@@ -3146,6 +3149,7 @@ fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Stri
         imports: &imports,
         builtins: &builtins,
     };
+    let mut known = FxHashMap::default();
     let mut out = BTreeMap::new();
     for inst in insts() {
         let InstKind::StoreGlobal { name, value } = &inst.kind else {
@@ -3154,7 +3158,7 @@ fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Stri
         if stores.get(name.as_str()) != Some(&1) || imported.contains(name.as_str()) {
             continue;
         }
-        let Some(target) = named.object(*value) else {
+        let Some(target) = named.object(*value, &mut known) else {
             continue;
         };
         // `def f` and `class C` bind their own name.
@@ -3178,36 +3182,59 @@ struct Named<'n> {
 
 impl Named<'_> {
     /// The fqn of the object the module-body variable `var` holds when it is a name or an
-    /// attribute of one.
-    fn object(&self, var: VarId) -> Option<String> {
+    /// attribute of one. Each variable is resolved once (`known`): a chain of aliases bound to
+    /// one another (`a1 = a0`, `a2 = a1`, ...) shares the walk.
+    fn object(&self, var: VarId, known: &mut FxHashMap<VarId, Option<String>>) -> Option<String> {
+        // The variables walked through, each with the attribute it loads (`None`: a copy).
+        let mut walked: Vec<(VarId, Option<&str>)> = Vec::new();
         let mut cur = var;
-        let mut attrs: Vec<&str> = Vec::new();
         // SSA definitions form no cycle without a phi, which ends the walk.
-        let base = loop {
-            let inst = self.defs.get(&cur)?;
-            match &inst.kind {
-                InstKind::Copy { src, .. } => cur = *src,
-                InstKind::AttrLoad { obj, attr, .. } => {
-                    attrs.push(attr);
-                    cur = *obj;
+        let mut object = loop {
+            if let Some(object) = known.get(&cur) {
+                break object.clone();
+            }
+            let Some(inst) = self.defs.get(&cur) else {
+                break None;
+            };
+            let base = match &inst.kind {
+                InstKind::Copy { src, .. } => {
+                    walked.push((cur, None));
+                    cur = *src;
+                    continue;
                 }
-                InstKind::Import { .. } => break self.imports.get(&inst.span)?.clone(),
+                InstKind::AttrLoad { obj, attr, .. } => {
+                    walked.push((cur, Some(attr.as_str())));
+                    cur = *obj;
+                    continue;
+                }
+                InstKind::Import { .. } => self.imports.get(&inst.span).cloned(),
                 // A module body loads the names it never binds (and lazily imported ones).
                 InstKind::LoadGlobal {
                     name,
                     is_lazy_import: false,
                     ..
-                } if self.builtins.contains(name.as_str()) => break format!("builtins.{name}"),
+                } if self.builtins.contains(name.as_str()) => Some(format!("builtins.{name}")),
                 InstKind::MakeClosure {
                     func_id: Some(id), ..
                 } if self.defines(*id) => {
                     let f = self.input.ir.function(*id);
-                    break format!("{}.{}", self.decls.module_name, f.qualname);
+                    Some(format!("{}.{}", self.decls.module_name, f.qualname))
                 }
-                _ => return None,
-            }
+                _ => None,
+            };
+            known.insert(cur, base.clone());
+            break base;
         };
-        Some(attrs.iter().rev().fold(base, |acc, a| format!("{acc}.{a}")))
+        for (v, attr) in walked.into_iter().rev() {
+            if let (Some(base), Some(attr)) = (&object, attr) {
+                // A name of more than a few dotted segments is no alias anyone writes; the cap
+                // keeps a chain of attribute loads (`a2 = a1.x`) linear.
+                object = (base.matches('.').count() < MAX_ALIAS_SEGMENTS)
+                    .then(|| format!("{base}.{attr}"));
+            }
+            known.insert(v, object.clone());
+        }
+        object
     }
 
     /// Whether the function or class body `id` is a module-level `def` or `class` statement
