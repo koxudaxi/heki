@@ -95,7 +95,7 @@ Found 2 diagnostic(s) in 4 file(s).
 - **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of
-  [`[tool.heki]` configuration](configuration.md): `write-owners`, `read-owners`,
+  [`[tool.heki]` configuration](configuration.md): `write-owners`, `read-owners`, `call-owners`,
   `readonly-returns`, and `effect-boundaries`. heki checks them through aliases, helpers, and
   subclasses, with no decorators and nothing running at run time.
 - **A safety net for reviews and coding agents.** The [language server](lsp.md) shows the
@@ -133,7 +133,7 @@ CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive 
 the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
 the obligation instead of offering a fix. See [Fixes and safety](fixes.md).
 
-See the [rules reference](rules/index.md) for all 27 rules.
+See the [rules reference](rules/index.md) for all 28 rules.
 
 ## Next steps
 
@@ -249,13 +249,14 @@ is allowed. None of them follows the call into `load_user` or the alias into `ad
    each function mutates and which effects it reaches, and propagates the summaries over the
    project's call graph until nothing changes.
 2. **A catalog of library behavior.** The effects of standard-library and third-party APIs are
-   declared, not inferred: `requests.get` blocks on the network, `asyncio.to_thread(fn)` runs
-   `fn` on another thread, `logging` calls are never reported, `sqlite3.connect()` returns a
+   declared, not inferred: `requests.get` blocks on the network, `asyncio.to_thread(fn)` and
+   `@sync_to_async` run a function on another thread, `logging` calls are never reported, `sqlite3.connect()` returns a
    `Connection`, `threading.Lock` is a synchronous lock. heki does not analyze the source of
    the standard library or of installed packages. Add your own APIs with
    [`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem).
 3. **Contracts you declare.** What no type can say is declared once in configuration: who may
-   write or read an attribute (`write-owners`, `read-owners`), which returned objects are
+   write or read an attribute or call a function (`write-owners`, `read-owners`,
+   `call-owners`), which returned objects are
    shared (`readonly-returns`), and which functions must not reach I/O or writes to model state
    (`effect-boundaries`). heki needs no decorators, no special types, and nothing at run time.
 4. **Type annotations, as hints only.** The checking rules (`MUT`, `EFF`, `DATA`, `OPT112`,
@@ -286,8 +287,9 @@ state that matters.
 
 ## Known limitations
 
-- **Dynamic names.** `setattr(obj, "fields", v)`, `getattr(obj, "fields")`, and
-  `obj.__dict__["fields"]` are followed only when the name is a constant.
+- **Dynamic names.** `setattr(obj, "fields", v)`, `getattr(obj, "fields")`,
+  `getattr(obj, "method")(...)`, and `obj.__dict__["fields"]` are followed only when the name is a
+  constant.
 - **Objects without a known class.** Reads and writes through `Any` or unannotated parameters
   are not tied to a class, so contracts on that class do not see them. A write in an
   unannotated helper is still found where a caller passes it an object of a known class; a
@@ -311,6 +313,13 @@ state that matters.
   attributes, and `ReadOnly` `TypedDict` keys; transforms of installed packages (attrs,
   Pydantic) are not seen, and an instance the function constructs itself counts as under
   construction.
+- **Generators.** A generator's body runs where it is iterated: a `for` loop or comprehension,
+  unpacking, `yield from`, a consuming call (`list(...)`, `"".join(...)`, `items.extend(...)`), a
+  lazy wrapper iterated there (`enumerate(...)`), or a project function iterating it; one a
+  function returns runs where its caller iterates it. A generator handed to anything else
+  (`StreamingResponse(rows())`, a container), only stepped with `next()`, or unpacked into a call
+  (`f(*rows())`) is not followed; a generator expression counts where it is written. A coroutine
+  runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on its own.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
@@ -346,8 +355,8 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT201`, `MUT203` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT201`, `MUT203`, `MUT204` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT201`–`MUT203` |
 
@@ -1219,15 +1228,16 @@ indexes the workspace in the background, then keeps only the per-function effect
 memory. Editing a file re-analyzes that file alone (250 ms after the last keystroke). On save, the
 files whose results depend on the edit are re-analyzed too: the callers of a function whose
 effects changed, every file that resolved names through a changed declaration (a re-exported
-class, a new method or base class, a property getter, a subclass), the classes of a family a
-changed method belongs to, and the files whose call chains show a call site the edit moved.
-With ownership contracts configured, a function that changes its calls also re-analyzes every
-function below it (whether a function only runs inside allowed callers depends on all callers
-above it); with a contract on calls (`call-owners`, an effect boundary forbidding `calls`), also
-every function above it (a call of a target is reported at the callers of the private helper
-making it, and at the scope functions reaching it). Edits that change none of these, such as
-most comments, stop at the edited file. The diagnostics are the ones `heki check` reports for the
-saved files.
+class, a new method or base class, a property getter, a subclass, an offloading decorator), the
+classes of a family a changed method belongs to, the generators handed to a changed function
+(whether it iterates them decides where their writes and reads are reported), and the files whose
+call chains show a call site the edit moved. With ownership contracts configured, a function that
+changes its calls also re-analyzes every function below it (whether a function only runs inside
+allowed callers depends on all callers above it); with a contract on calls (`call-owners`, an
+effect boundary forbidding `calls`), also every function above it (a call of a target is reported
+at the callers of the private helper making it, and at the scope functions reaching it). Edits
+that change none of these, such as most comments, stop at the edited file. The diagnostics are the
+ones `heki check` reports for the saved files.
 
 Files created, changed, or deleted outside the editor (`git checkout`, code generators) are
 picked up when the client supports watching files: the server registers for
@@ -1470,15 +1480,32 @@ Reading a `@property` or `functools.cached_property` attribute of a project clas
 getter, so the read counts as a call of the getter (`self.client` whose getter opens a
 connection). A property that also defines a setter or deleter is not followed.
 
-The rule reports the boundary: the call (or property read) inside the `async def` that leads to
-the blocking operation, with the call chain as related information. Several boundaries reaching
-the same blocking call are grouped once ten or more of them exist (in the editor, per file).
+Calling a generator function only creates the generator; its body runs where the generator is
+iterated: a `for` loop or comprehension over it, unpacking it, `yield from` it, a call that
+consumes it (`list(...)`, `sorted(...)`, `"".join(...)`, `items.extend(...)`, ...), a lazy wrapper
+iterated there (`enumerate(...)`, `zip(...)`, `itertools.islice(...)`, ...), or a project
+function iterating the parameter it is handed. A generator returned by a plain function runs
+where its caller iterates it. `next(gen)` runs the body only up to its first `yield`, which heki
+does not separate from the rest, so it is not followed.
+
+The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
+that leads to the blocking operation, with the call chain as related information. Several
+boundaries reaching the same blocking call are grouped once ten or more of them exist (in the
+editor, per file).
 
 It does not report:
 
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
-  `anyio.to_thread.run_sync`, `run_in_threadpool`, and project wrappers that forward their
-  callable to them);
+  `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
+  `asyncer.asyncify`, and project wrappers that forward their callable to them);
+- functions decorated to run on a thread: `@sync_to_async` (also as a factory,
+  `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
+  and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
+  calling `f` calls `d(f)`; other decorators (`functools.wraps` wrappers) are followed;
+- generators that leave the `async def` without being iterated there: returned, stored, or
+  handed to a call that is not a consuming one, such as `StreamingResponse(rows())` or
+  `iterate_in_threadpool(rows())` (whatever iterates them later, often a thread pool, is not
+  analyzed);
 - `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
   `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
   `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
@@ -1523,7 +1550,8 @@ No automatic fix.
 ## Options
 - `lint.relax-async-in-tests` (default `true`): skip test code.
 - `[[tool.heki.ecosystem]]` declares project functions as blocking (`effects`), as offload
-  wrappers (`offloads-blocking-arg`), or as async-safe (`async-safe`).
+  wrappers (`offloads-blocking-arg`; with `0`, also an offloading decorator), or as async-safe
+  (`async-safe`).
 
 
 ---
@@ -1540,7 +1568,7 @@ Opt-in: blocking local filesystem I/O reachable from `async def`.
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
 `pathlib.Path.read_text` / `write_text` / `read_bytes` / `write_bytes` / `open`, `os.listdir`,
 `os.scandir`, `os.walk`, and `shutil` copies and removals. It follows the same boundary and
-offload rules as `EFF101`.
+offload rules as `EFF101`, generators and offloading decorators included.
 
 This rule is opt-in: enable it with `--extend-select EFF105` or `extend-select = ["EFF105"]`.
 Selecting the `EFF` prefix does not enable it.
@@ -1669,8 +1697,10 @@ heki does not know (an unannotated parameter, `Any`) is not seen.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
 callers hands its calls to its callers: the call is reported at the call sites of the first
-non-private callers, with the chain of calls down to the call as related information. Not
-reported either:
+non-private callers, with the chain of calls down to the call as related information. A call runs
+where the body holding it runs, as for `MUT201`: a generator's calls where it is iterated (a
+generator an allowed caller creates and returns calls outside it when its caller iterates it), a
+coroutine's where it is awaited. Not reported either:
 
 - a function that only runs inside allowed callers: it has project callers, and every path of
   callers above it starts in an allowed caller, an exempt method, or a class's own
@@ -1792,7 +1822,11 @@ chain is a shortest one. The search does not enter:
   effects are allowed;
 - other functions of the scopes: each reports its own violations, so a violation is reported
   once, at the boundary, not again by every scope function above it;
-- `async def` functions called without `await` (calling one only creates a coroutine).
+- `async def` functions called without `await` (calling one only creates a coroutine), and
+  generators that are not iterated (calling a generator function only creates the generator;
+  its body is searched where it is iterated, as for `EFF101`, and a generator a function
+  returns where the object it returns is iterated);
+- functions an offloading decorator runs on another thread (`@sync_to_async`, ...).
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope
@@ -2006,8 +2040,8 @@ iterator is exhausted, every further pass over it sees no items, silently.
 Single-pass values are:
 
 - generator expressions (`(x for x in xs)`);
-- `iter`, `zip`, `map`, `filter`, `enumerate`, `reversed`, and the single-pass `itertools`
-  functions (`chain`, `islice`, `starmap`, `takewhile`, `dropwhile`, `filterfalse`,
+- `iter`, `zip`, `map`, `filter`, `enumerate`, `reversed`, `heapq.merge`, and the single-pass
+  `itertools` functions (`chain`, `islice`, `starmap`, `takewhile`, `dropwhile`, `filterfalse`,
   `compress`, `accumulate`, `groupby`, `pairwise`, `batched`, `zip_longest`, `product`,
   `permutations`, `combinations`, `combinations_with_replacement`), resolved through imports
   so a shadowed name is never matched;
@@ -2016,12 +2050,18 @@ Single-pass values are:
   `AsyncGenerator` (`typing` or `collections.abc`; `Iterable`, `Sequence`, and `Collection`
   may be re-iterable and are not tracked).
 
-A value is consumed by a `for` loop or comprehension over it, `yield from`, `list`, `tuple`,
-`set`, `frozenset`, `dict`, `sum`, `any`, `all`, `min`, `max`, `sorted`, `str.join`, a wrapper
-that is itself consumed (`enumerate(it)`, `map(f, it)`, `chain(it, other)`, `zip(it, it)`, a
-generator expression over it, ...), or a project function that iterates the parameter it is
-passed to exhaustion. `next(it)` and `len` are not consumptions, and neither is `zip` / `map`
-over several iterables: they stop at the shortest one (`zip(range(n), it)` takes `n` items).
+A value is consumed by a `for` loop or comprehension over it, unpacking (`a, *rest = it`),
+`yield from`, a call that materializes it (`list`, `tuple`, `set`, `frozenset`, `dict`, `bytes`,
+`bytearray`, `sum`, `any`, `all`, `min`, `max`, `sorted`, `str.join`, `bytes.join`,
+`dict.fromkeys`, `list.extend`, `set.update` / `union` / `intersection` / `difference`,
+`dict.update`, `collections.deque` / `Counter` / `OrderedDict` / `defaultdict`,
+`heapq.nlargest` / `nsmallest`, `functools.reduce`, `math.prod` / `fsum`), a wrapper that is
+itself consumed (`enumerate(it)`, `map(f, it)`, `chain(it, other)`, `heapq.merge(it, other)`,
+`zip(it, it)`, a generator expression over it, ...), or a project function that iterates the
+parameter it is passed to exhaustion. `next(it)` and `len` are not consumptions, and neither are
+`zip` / `map` over several iterables, `islice`, or `takewhile`: they stop at the shortest one or
+early (`zip(range(n), it)` takes `n` items). The same table decides where a generator's body
+runs for the effect and contract rules.
 
 The rule reports the second pass when the first one runs to exhaustion and the second is
 reachable from it, without rebinding the variable in between. It also reports a value created
@@ -2354,7 +2394,8 @@ Checks loops that run a database query on every iteration (the "N+1 queries" pro
 `cursor.execute(...)`, `session.execute(...)` (awaited ones on async sessions and connections
 too), the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their
 `a*` variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project
-functions that reach them, including the getter of a property read in the loop.
+functions that reach them, including the getter of a property read in the loop and a generator
+iterated in the loop (its body runs where it is iterated, as for `EFF101`).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
 calls that only build a query (`QuerySet.filter(...)`, `Redis.pipeline()`), DDL statements
@@ -2742,7 +2783,8 @@ so a private getter (`ref._kids` returning `self.children`) hands its read to th
 reading it. Reads in a class's own initializer on its own `self` are allowed, and so are reads
 in a function that only runs inside allowed contexts (every path of callers above it starts in
 an allowed reader or an exempt method), as for `MUT201`. One report stands for every read behind
-its call (`sites` in JSON), as for `MUT201`.
+its call (`sites` in JSON), as for `MUT201`. A read runs where the body holding it runs, as for
+`MUT201`: a generator's reads where it is iterated, a coroutine's where it is awaited.
 
 ## Why is this bad?
 Some state is only meaningful through the component that maintains it: an index that keeps a
@@ -3247,6 +3289,15 @@ report stands for every write behind that call (`sites` in JSON), so a Ratchet b
 second write inside a recorded helper.
 Reading a `@property` or `functools.cached_property` attribute calls its getter, so a private
 getter hands its writes to the functions reading it; a read never calls a property's setter.
+
+A write runs where the body holding it runs. Calling a generator function only creates the
+generator: its writes run where it is iterated (as for `EFF101`), so a generator created by an
+allowed writer and iterated elsewhere writes elsewhere, and one handed to an allowed writer that
+iterates it writes inside the owner. A generator that is created and never iterated writes
+nothing. A coroutine that is never awaited or driven at a project call (handed to
+`asyncio.create_task`, `ensure_future`, `gather`, ...) runs on the event loop: a private one
+reports its own writes instead of handing them to the function that created it. Functions run on
+another thread by an offloading decorator (`@sync_to_async`, ...) are not followed either.
 
 A function that only runs inside the owner's operations is not reported either: it has project
 callers, and every path of callers above it starts in an allowed writer, an exempt method, or

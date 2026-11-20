@@ -7,7 +7,7 @@
 use globset::GlobSet;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, analyze_project_with_reads,
+    CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, analyze_project_with_reads,
 };
 use heki_rules::project::{
     ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, exclude_set, parse_source,
@@ -411,9 +411,42 @@ impl Workspace {
         out
     }
 
+    /// Files of the generators handed to the `changed` functions (`SiteRole::Through`): whether
+    /// such a call runs a generator depends on the function iterating the parameter it is
+    /// handed, and so do the generator's `MUT201` / `MUT203` reports (it hands them only to
+    /// callers that run it).
+    fn handed_over_files(&self, changed: &[FuncKey]) -> Vec<PathBuf> {
+        let mut out = FxHashSet::default();
+        for p in changed {
+            let sites = self
+                .index
+                .reverse_call_graph
+                .get(p)
+                .into_iter()
+                .flatten()
+                .flat_map(|caller| {
+                    self.index
+                        .file_of(caller)
+                        .and_then(|f| self.index.files.get(f))
+                        .into_iter()
+                        .flat_map(|file| &file.call_sites)
+                        .filter(move |s| &s.caller == caller)
+                });
+            let handed = |s: &&CallSite| matches!(&s.role, SiteRole::Through { via, .. } if via.iter().any(|(k, _)| k == p));
+            for site in sites.filter(handed) {
+                out.extend(
+                    site.project_callees()
+                        .iter()
+                        .filter_map(|bc| self.index.file_of(&bc.callee).map(Path::to_path_buf)),
+                );
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// The files an update of the index affects besides the updated file: callers of changed
-    /// summaries, readers of changed declarations, callees whose callers changed, and class
-    /// families whose members changed.
+    /// summaries, readers of changed declarations, callees whose callers changed, generators
+    /// handed to changed functions, and class families whose members changed.
     fn affected_by(
         &self,
         update: &heki_effect::IncrementalUpdate,
@@ -427,6 +460,7 @@ impl Workspace {
             .collect();
         affected.extend(self.reading(change));
         affected.extend(self.callee_files(callers.0, callers.1));
+        affected.extend(self.handed_over_files(&update.changed));
         affected.extend(self.family_files(&update.changed));
         let changed: Vec<&FuncKey> = callers
             .0

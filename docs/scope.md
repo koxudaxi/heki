@@ -98,13 +98,14 @@ is allowed. None of them follows the call into `load_user` or the alias into `ad
    each function mutates and which effects it reaches, and propagates the summaries over the
    project's call graph until nothing changes.
 2. **A catalog of library behavior.** The effects of standard-library and third-party APIs are
-   declared, not inferred: `requests.get` blocks on the network, `asyncio.to_thread(fn)` runs
-   `fn` on another thread, `logging` calls are never reported, `sqlite3.connect()` returns a
+   declared, not inferred: `requests.get` blocks on the network, `asyncio.to_thread(fn)` and
+   `@sync_to_async` run a function on another thread, `logging` calls are never reported, `sqlite3.connect()` returns a
    `Connection`, `threading.Lock` is a synchronous lock. heki does not analyze the source of
    the standard library or of installed packages. Add your own APIs with
    [`[[tool.heki.ecosystem]]`](configuration.md#ecosystem-knowledge-toolhekiecosystem).
 3. **Contracts you declare.** What no type can say is declared once in configuration: who may
-   write or read an attribute (`write-owners`, `read-owners`), which returned objects are
+   write or read an attribute or call a function (`write-owners`, `read-owners`,
+   `call-owners`), which returned objects are
    shared (`readonly-returns`), and which functions must not reach I/O or writes to model state
    (`effect-boundaries`). heki needs no decorators, no special types, and nothing at run time.
 4. **Type annotations, as hints only.** The checking rules (`MUT`, `EFF`, `DATA`, `OPT112`,
@@ -135,8 +136,9 @@ state that matters.
 
 ## Known limitations
 
-- **Dynamic names.** `setattr(obj, "fields", v)`, `getattr(obj, "fields")`, and
-  `obj.__dict__["fields"]` are followed only when the name is a constant.
+- **Dynamic names.** `setattr(obj, "fields", v)`, `getattr(obj, "fields")`,
+  `getattr(obj, "method")(...)`, and `obj.__dict__["fields"]` are followed only when the name is a
+  constant.
 - **Objects without a known class.** Reads and writes through `Any` or unannotated parameters
   are not tied to a class, so contracts on that class do not see them. A write in an
   unannotated helper is still found where a caller passes it an object of a known class; a
@@ -160,6 +162,13 @@ state that matters.
   attributes, and `ReadOnly` `TypedDict` keys; transforms of installed packages (attrs,
   Pydantic) are not seen, and an instance the function constructs itself counts as under
   construction.
+- **Generators.** A generator's body runs where it is iterated: a `for` loop or comprehension,
+  unpacking, `yield from`, a consuming call (`list(...)`, `"".join(...)`, `items.extend(...)`), a
+  lazy wrapper iterated there (`enumerate(...)`), or a project function iterating it; one a
+  function returns runs where its caller iterates it. A generator handed to anything else
+  (`StreamingResponse(rows())`, a container), only stepped with `next()`, or unpacked into a call
+  (`f(*rows())`) is not followed; a generator expression counts where it is written. A coroutine
+  runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on its own.
 - **Separate scopes.** Generator expressions and lambdas are analyzed as functions of their
   own, so `next(b for b in bs if b.id == a.id)` inside a loop is not reported as a nested-loop
   join.
@@ -195,8 +204,8 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT201`, `MUT203` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT110`, `MUT201`, `MUT203`, `MUT204` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT110`, `MUT201`–`MUT203` |
 

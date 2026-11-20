@@ -22,10 +22,19 @@
 opaque_packages = [
     "requests", "httpx", "aiohttp", "urllib3", "sqlalchemy", "sqlmodel", "django", "psycopg",
     "psycopg_pool", "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc",
-    "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi",
+    "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi", "asgiref", "asyncer",
+    "channels",
 ]
 
 # --- Offloads blocking work (argument index of the offloaded callable) ---
+# An entry offloading argument 0 is also an offloading decorator: `@d def f` is `f = d(f)`, so
+# calling `f` runs its body on another thread; a decorator factory with that entry
+# (`@sync_to_async(thread_sensitive=False)`) is one too.
+#
+# `starlette.concurrency.iterate_in_threadpool(iterator)` (an async generator calling
+# `next(iterator)` through `anyio.to_thread.run_sync`) needs no entry: an iterator passed to a
+# function that is not a consuming call runs nothing where it is passed, and the argument is no
+# callable, so `offloads_blocking_arg` would not describe it.
 
 [[entries]]
 symbol = "anyio.to_thread.run_sync"
@@ -59,6 +68,31 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "fastapi.concurrency.run_in_threadpool"
+async_safe = true
+offloads_blocking_arg = 0
+opaque_to_layer3 = true
+
+# `sync_to_async(func=None, *, thread_sensitive=True, executor=None, context=None)`: returns
+# `SyncToAsync(func, ...)`, whose call awaits `func` run in a thread pool; without `func` it
+# returns that decorator (`@sync_to_async(thread_sensitive=False)`).
+[[entries]]
+symbol = "asgiref.sync.sync_to_async"
+async_safe = true
+offloads_blocking_arg = 0
+opaque_to_layer3 = true
+
+# `asyncify(function, *, abandon_on_cancel=False, cancellable=None, limiter=None)`: an async
+# function calling `function` through `anyio.to_thread.run_sync`.
+[[entries]]
+symbol = "asyncer.asyncify"
+async_safe = true
+offloads_blocking_arg = 0
+opaque_to_layer3 = true
+
+# `database_sync_to_async = DatabaseSyncToAsync`, an `asgiref.sync.SyncToAsync(func,
+# thread_sensitive=True, ...)` closing old database connections around the call.
+[[entries]]
+symbol = "channels.db.database_sync_to_async"
 async_safe = true
 offloads_blocking_arg = 0
 opaque_to_layer3 = true

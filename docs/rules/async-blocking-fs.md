@@ -10,7 +10,7 @@ Opt-in: blocking local filesystem I/O reachable from `async def`.
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
 `pathlib.Path.read_text` / `write_text` / `read_bytes` / `write_bytes` / `open`, `os.listdir`,
 `os.scandir`, `os.walk`, and `shutil` copies and removals. It follows the same boundary and
-offload rules as `EFF101`.
+offload rules as `EFF101`, generators and offloading decorators included.
 
 This rule is opt-in: enable it with `--extend-select EFF105` or `extend-select = ["EFF105"]`.
 Selecting the `EFF` prefix does not enable it.

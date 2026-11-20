@@ -6,8 +6,8 @@ use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCal
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    AttrKeyPath, CONTAINER_MUTATORS, CallHop, Callee, EffectSummary, FuncKey, ProjectDecls,
-    ProjectIndex, TypeCtx, Val, WriteKind, self_aliases,
+    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, Facts,
+    FuncKey, ProjectDecls, ProjectIndex, TypeCtx, Val, WriteKind, self_aliases,
 };
 use heki_env::HekiConfig;
 use heki_ir::{CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -650,14 +650,82 @@ impl Allowance {
     }
 }
 
-/// A private helper with project callers delegates responsibility to its callers.
-fn delegates(cx: &CheckContext<'_>, key: &FuncKey) -> bool {
+/// A private helper delegates responsibility to its project callers: the call sites that run
+/// its own body (`EffectSummary::body_facts`) and so receive its writes and reads. A private
+/// `async def` only scheduled (never awaited) or a private generator whose generators all
+/// escape keeps its reports.
+fn delegates(cx: &CheckContext<'_>, sites: &SitesByCaller<'_>, key: &FuncKey) -> bool {
     is_private(&key.qualname)
         && cx
             .index
-            .reverse_call_graph
-            .get(key)
-            .is_some_and(|c| !c.is_empty())
+            .summary(key)
+            .is_some_and(|s| !callers_of(cx, sites, key, s.body_facts()).is_empty())
+}
+
+/// One project call site that runs the facts `facts` of a function: the caller, the site and
+/// the binding of the function there, and which of the caller's facts receive them (its body,
+/// or what iterating the object it returns runs).
+struct Caller<'a> {
+    caller: &'a FuncKey,
+    path: &'a Path,
+    site: &'a CallSite,
+    bc: &'a BoundCallee,
+    into: Facts,
+    /// The project function that iterates the function's result there (`SiteRole::Through`).
+    via: Option<&'a FuncKey>,
+}
+
+/// The call sites running `facts` of `callee` ([`heki_effect::ProjectIndex::delivery`]), by
+/// caller and in source order. A generator caller's body is its iteration (`Facts::Result`).
+fn callers_of<'a>(
+    cx: &CheckContext<'a>,
+    sites: &SitesByCaller<'a>,
+    callee: &FuncKey,
+    facts: Facts,
+) -> Vec<Caller<'a>> {
+    let summary = cx.index.summary(callee);
+    let mut callers: Vec<&FuncKey> = cx
+        .index
+        .reverse_call_graph
+        .get(callee)
+        .into_iter()
+        .flatten()
+        .collect();
+    callers.sort();
+    let mut out = Vec::new();
+    for caller in callers {
+        let caller_body = cx
+            .index
+            .summary(caller)
+            .map_or(Facts::Body, EffectSummary::body_facts);
+        for &(path, site) in sites.get(caller).into_iter().flatten() {
+            for bc in site
+                .project_callees()
+                .iter()
+                .filter(|bc| bc.callee == *callee)
+            {
+                let Some(d) = summary
+                    .and_then(|s| cx.index.delivery(site, s))
+                    .filter(|d| d.from == facts)
+                else {
+                    continue;
+                };
+                let into = match d.into {
+                    Facts::Body => caller_body,
+                    Facts::Result => Facts::Result,
+                };
+                out.push(Caller {
+                    caller: &site.caller,
+                    path,
+                    site,
+                    bc,
+                    into,
+                    via: d.via,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// A class's own initialization: `key` is an initializer (`INITIALIZERS`) of a class of the
@@ -685,10 +753,12 @@ pub(crate) fn initializes_itself(
 /// reverse call graph reaches an allowed or exempt function, or an initializer of the target
 /// family on its own `self`, before a function without callers. Such a function is part of the
 /// owner's operations, like a hook that a store operation runs. The walk goes breadth first over
-/// `(function, object parameters)` states; paths that only cycle add no allowed context, so a
-/// function reached through cycles alone keeps its report. Initializers end the walk negatively:
-/// constructor calls also bind the initializers of subclasses (CHA), so their callers are not
-/// known exactly.
+/// `(function, facts, object parameters)` states along the call sites that run those facts; a
+/// function returning a generator is no context of the generator's body (it does not run it), so
+/// the walk goes on to where the object it returns is iterated. Paths that only cycle add no
+/// allowed context, so a function reached through cycles alone keeps its report. Initializers
+/// end the walk negatively: constructor calls also bind the initializers of subclasses (CHA), so
+/// their callers are not known exactly.
 fn runs_inside_allowed(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
@@ -702,46 +772,68 @@ fn runs_inside_allowed(
     if is_initializer(func) {
         return false;
     }
-    let mut queue = std::collections::VecDeque::from([(func.clone(), obj)]);
-    let mut visited: FxHashSet<(FuncKey, u64)> = FxHashSet::default();
-    visited.insert((func.clone(), obj));
+    let facts = cx
+        .index
+        .summary(func)
+        .map_or(Facts::Body, EffectSummary::body_facts);
+    let mut queue = std::collections::VecDeque::from([(func.clone(), facts, obj)]);
+    let mut visited: FxHashSet<(FuncKey, Facts, u64)> = FxHashSet::default();
+    visited.insert((func.clone(), facts, obj));
     let mut allowed_contexts = false;
-    while let Some((callee, obj)) = queue.pop_front() {
-        let Some(callers) = cx
-            .index
-            .reverse_call_graph
-            .get(&callee)
-            .filter(|c| !c.is_empty())
-        else {
+    while let Some((callee, facts, obj)) = queue.pop_front() {
+        let callers = callers_of(cx, sites, &callee, facts);
+        if callers.is_empty() {
             // A function without project callers, outside every allowed context.
             return false;
-        };
-        let mut callers: Vec<&FuncKey> = callers.iter().collect();
-        callers.sort();
-        for caller in callers {
-            if allowance.allows(caller) {
-                allowed_contexts = true;
+        }
+        for c in callers {
+            let caller_obj = c.bc.caller_params_of(obj);
+            // A function returning the object does not run what iterating it runs.
+            if c.into == Facts::Result {
+                if visited.insert((c.caller.clone(), Facts::Result, caller_obj)) {
+                    queue.push_back((c.caller.clone(), Facts::Result, caller_obj));
+                }
                 continue;
             }
-            for (_, site) in sites.get(caller).into_iter().flatten() {
-                for bc in site
-                    .project_callees()
-                    .iter()
-                    .filter(|bc| bc.callee == callee)
-                {
-                    let caller_obj = bc.caller_params_of(obj);
-                    if initializes_itself(cx, caller, family, caller_obj) {
-                        allowed_contexts = true;
-                    } else if is_initializer(caller) {
-                        return false;
-                    } else if visited.insert((caller.clone(), caller_obj)) {
-                        queue.push_back((caller.clone(), caller_obj));
-                    }
-                }
+            if allowance.allows(c.caller)
+                || c.via.is_some_and(|p| allowance.allows(p))
+                || initializes_itself(cx, c.caller, family, caller_obj)
+            {
+                allowed_contexts = true;
+            } else if is_initializer(c.caller) {
+                return false;
+            } else if visited.insert((c.caller.clone(), c.into, caller_obj)) {
+                queue.push_back((c.caller.clone(), c.into, caller_obj));
             }
         }
     }
     allowed_contexts
+}
+
+/// Whether `func`'s own summary holds the write `site` (as its caller sees it): the same write
+/// at the same location, by `func` itself (`own`) or through its callees. A function iterating a
+/// generator it is handed does not: the generator's writes reach the function that handed it
+/// over, and only that one.
+fn holds_write(
+    cx: &CheckContext<'_>,
+    func: &FuncKey,
+    site: &heki_effect::TypedFieldWriteSite,
+    own: bool,
+) -> bool {
+    let origin = site.via_chain.last().map(|h| h.callee.as_str());
+    cx.index.summary(func).is_some_and(|s| {
+        s.typed_field_write_sites.iter().any(|t| {
+            t.class_qualname == site.class_qualname
+                && t.attr == site.attr
+                && t.kind == site.kind
+                && t.span == site.span
+                && if own {
+                    t.via_chain.is_empty()
+                } else {
+                    t.via_chain.last().map(|h| h.callee.as_str()) == origin
+                }
+        })
+    })
 }
 
 /// `base`, then `: note` when the contract sets a `message`.
@@ -904,18 +996,22 @@ pub(crate) fn mut201(
                             chain.len() - 1
                         };
                         // Report at the outermost function: helpers in between must be private
-                        // (they delegate), and a delegating function leaves it to its callers.
+                        // (they delegate) unless they do not hold the write themselves (a function
+                        // iterating a generator it is handed runs the generator's writes without
+                        // knowing them), and a delegating function leaves it to its callers.
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
-                        if !chain[1..=origin].iter().all(|k| is_private(&k.qualname))
-                            || delegates(cx, key)
+                        let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
+                        let last = chain.len() - 1;
+                        if !chain[1..=origin].iter().enumerate().all(|(i, k)| {
+                            is_private(&k.qualname) || !holds_write(cx, k, site, i + 1 == last)
+                        }) || delegates(cx, sites, key)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
                         {
                             continue;
                         }
                         // A function that only runs inside the owner's operations (every caller
                         // path starts in an allowed context) writes inside them.
-                        let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
                         if runs_inside_allowed(
                             cx,
                             sites,
@@ -1795,22 +1891,26 @@ pub(crate) fn mut203(
 /// One state of the walk from an access up the reverse call graph.
 struct WalkState {
     func: FuncKey,
+    /// Which facts of `func` run the access: its body, or what iterating its result runs.
+    facts: Facts,
     /// Parameters of `func` the accessed object may be.
     obj: u64,
-    /// A function from the accessing one up to `func` falls under `forbidden-*`
-    /// (`Allowance::in_scope`).
+    /// A function from the accessing one up to `func` that runs the access falls under
+    /// `forbidden-*` (`Allowance::in_scope`).
     in_scope: bool,
-    /// The state below (towards the accessing function) and the hop from `func` down to it.
-    down: Option<(usize, CallHop)>,
+    /// The state below (towards the accessing function) and the hops from `func` down to it.
+    down: Option<(usize, Vec<CallHop>)>,
 }
 
 /// Where an access in `func` (at `span`, to an object that may be its parameters `obj`) is
-/// reported: at the access itself, or — for a private helper with project callers — at every
-/// call site of each outermost non-private caller, found breadth first over `(function, object
-/// parameters)` states (cycle-safe). Allowed functions end a path; an initializer accessing its
-/// own instance and a function that only runs inside allowed contexts (MUT201's rules) are not
-/// reported. With `forbidden-*`, a report needs a forbidden function between the reporting
-/// function and the access (both included).
+/// reported: at the access itself, or — for a private helper with project callers running it —
+/// at every call site of each outermost non-private caller, found breadth first over
+/// `(function, facts, object parameters)` states (cycle-safe) along the call sites that run
+/// those facts. A function returning a generator that accesses does not run the access: the
+/// walk goes on to where the object it returns is iterated. Allowed functions end a path; an
+/// initializer accessing its own instance and a function that only runs inside allowed
+/// contexts (MUT201's rules) are not reported. With `forbidden-*`, a report needs a forbidden
+/// function running the access between the reporting function and the access (both included).
 pub(crate) fn delegated_reports(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
@@ -1824,7 +1924,7 @@ pub(crate) fn delegated_reports(
         return Vec::new();
     }
     let in_scope = allowance.in_scope(func);
-    if !delegates(cx, func) {
+    if !delegates(cx, sites, func) {
         if !in_scope
             || initializes_itself(cx, func, family, obj)
             || runs_inside_allowed(cx, sites, allowance, family, func, obj)
@@ -1837,69 +1937,85 @@ pub(crate) fn delegated_reports(
             chain: Vec::new(),
         }];
     }
+    let facts = cx
+        .index
+        .summary(func)
+        .map_or(Facts::Body, EffectSummary::body_facts);
     let mut states = vec![WalkState {
         func: func.clone(),
+        facts,
         obj,
         in_scope,
         down: None,
     }];
-    let mut visited: FxHashSet<(FuncKey, u64, bool)> = FxHashSet::default();
-    visited.insert((func.clone(), obj, in_scope));
+    let mut visited: FxHashSet<(FuncKey, Facts, u64, bool)> = FxHashSet::default();
+    visited.insert((func.clone(), facts, obj, in_scope));
     let mut out = Vec::new();
     let mut i = 0;
     while i < states.len() {
-        let (callee, obj, below_in_scope) =
-            (states[i].func.clone(), states[i].obj, states[i].in_scope);
-        let mut callers: Vec<&FuncKey> = cx
-            .index
-            .reverse_call_graph
-            .get(&callee)
-            .into_iter()
-            .flatten()
-            .filter(|c| !allowance.allows(c))
-            .collect();
-        callers.sort();
-        for caller in callers {
-            let in_scope = below_in_scope || allowance.in_scope(caller);
-            for (path, site) in sites.get(caller).into_iter().flatten() {
-                for bc in site
-                    .project_callees()
-                    .iter()
-                    .filter(|bc| bc.callee == callee)
-                {
-                    let caller_obj = bc.caller_params_of(obj);
-                    let hop = CallHop {
-                        caller: caller.clone(),
-                        callee: callee.fqn(),
-                        span: site.span,
-                        path: path.to_path_buf(),
-                    };
-                    if delegates(cx, caller) {
-                        if visited.insert((caller.clone(), caller_obj, in_scope)) {
-                            states.push(WalkState {
-                                func: caller.clone(),
-                                obj: caller_obj,
-                                in_scope,
-                                down: Some((i, hop)),
-                            });
-                        }
-                    } else if in_scope
-                        && !initializes_itself(cx, caller, family, caller_obj)
-                        && !runs_inside_allowed(cx, sites, allowance, family, caller, caller_obj)
-                    {
-                        let mut chain = vec![hop];
-                        let mut j = i;
-                        while let Some((below, h)) = &states[j].down {
-                            chain.push(h.clone());
-                            j = *below;
-                        }
-                        out.push(DelegatedReport {
-                            func: caller.clone(),
-                            span: site.span,
-                            chain,
-                        });
-                    }
+        let (callee, facts, obj, below_in_scope) = (
+            states[i].func.clone(),
+            states[i].facts,
+            states[i].obj,
+            states[i].in_scope,
+        );
+        for c in callers_of(cx, sites, &callee, facts) {
+            let caller_obj = c.bc.caller_params_of(obj);
+            let hop = |from: &FuncKey, to: &FuncKey| CallHop {
+                caller: from.clone(),
+                callee: to.fqn(),
+                span: c.site.span,
+                path: c.path.to_path_buf(),
+            };
+            let hops = match c.via {
+                None => vec![hop(c.caller, &callee)],
+                Some(p) => vec![hop(c.caller, p), hop(p, &callee)],
+            };
+            if c.into == Facts::Result {
+                // The function returning the object does not run the access.
+                let state = (c.caller.clone(), Facts::Result, caller_obj, below_in_scope);
+                if visited.insert(state) {
+                    states.push(WalkState {
+                        func: c.caller.clone(),
+                        facts: Facts::Result,
+                        obj: caller_obj,
+                        in_scope: below_in_scope,
+                        down: Some((i, hops)),
+                    });
                 }
+                continue;
+            }
+            if allowance.allows(c.caller) || c.via.is_some_and(|p| allowance.allows(p)) {
+                continue;
+            }
+            let in_scope = below_in_scope
+                || allowance.in_scope(c.caller)
+                || c.via.is_some_and(|p| allowance.in_scope(p));
+            if delegates(cx, sites, c.caller) {
+                if visited.insert((c.caller.clone(), c.into, caller_obj, in_scope)) {
+                    states.push(WalkState {
+                        func: c.caller.clone(),
+                        facts: c.into,
+                        obj: caller_obj,
+                        in_scope,
+                        down: Some((i, hops)),
+                    });
+                }
+            } else if in_scope
+                && !initializes_itself(cx, c.caller, family, caller_obj)
+                && !runs_inside_allowed(cx, sites, allowance, family, c.caller, caller_obj)
+            {
+                let mut chain = hops;
+                let mut j = i;
+                while let Some((below, h)) = &states[j].down {
+                    chain.extend(h.iter().cloned());
+                    j = *below;
+                }
+                out.push(DelegatedReport {
+                    func: c.caller.clone(),
+                    span: c.site.span,
+                    chain,
+                });
             }
         }
         i += 1;

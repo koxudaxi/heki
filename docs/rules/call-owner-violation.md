@@ -28,8 +28,10 @@ heki does not know (an unannotated parameter, `Any`) is not seen.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
 callers hands its calls to its callers: the call is reported at the call sites of the first
-non-private callers, with the chain of calls down to the call as related information. Not
-reported either:
+non-private callers, with the chain of calls down to the call as related information. A call runs
+where the body holding it runs, as for `MUT201`: a generator's calls where it is iterated (a
+generator an allowed caller creates and returns calls outside it when its caller iterates it), a
+coroutine's where it is awaited. Not reported either:
 
 - a function that only runs inside allowed callers: it has project callers, and every path of
   callers above it starts in an allowed caller, an exempt method, or a class's own

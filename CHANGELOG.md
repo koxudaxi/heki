@@ -17,9 +17,9 @@ The first public preview.
   `concise`, `json`, `github`, `sarif`), and exit codes `0` / `1` / `2`. The target Python
   version (`py311` to `py315`) comes from `requires-python` or `--target-version`, and `--watch`
   re-checks on every change.
-- 27 rules in four families:
-  - Mutation and state: `MUT101`, `MUT107`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, and the
-    opt-in `MUT103`, `MUT106`, and `MUT108`.
+- 28 rules in four families:
+  - Mutation and state: `MUT101`, `MUT107`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`,
+    and the opt-in `MUT103`, `MUT106`, and `MUT108`.
   - Execution effects: `EFF101`, `EFF102`, `EFF103`, `EFF201`, and the opt-in `EFF105`,
     `EFF106`, and `EFF107`.
   - Data pipelines: `DATA101`.
@@ -30,14 +30,23 @@ The first public preview.
   functions of a sampling profile (CPython 3.15's profiler or py-spy), and `--diff` previews
   them.
 - Contracts in `[tool.heki]`: `write-owners` (`MUT201`), `read-owners` (`MUT203`),
-  `readonly-returns` (`MUT202`), and `effect-boundaries` (`EFF201`).
+  `call-owners` (`MUT204`), `readonly-returns` (`MUT202`), and `effect-boundaries` (`EFF201`, with
+  `reads-targets`, `calls`, and `allow-writes` / `write-universe`); `forbidden-writers` /
+  `forbidden-readers` / `forbidden-callers` restrict an owner contract to a layer.
 - A catalog of library behavior (blocking network, database, and file calls, their async
   counterparts, offloading helpers, locks and transactions) for the standard library, requests,
   httpx, urllib3, aiohttp, SQLAlchemy, SQLModel, psycopg, psycopg2, PyMySQL, Django, redis,
-  pymongo, boto3, pandas, numpy, and the offloading helpers of anyio, trio, Starlette, and
-  FastAPI, extensible with `[[tool.heki.ecosystem]]`.
+  pymongo, boto3, pandas, numpy, the offloading helpers of anyio, trio, Starlette, and FastAPI,
+  and asgiref (`sync_to_async`), asyncer (`asyncify`), and Django Channels
+  (`database_sync_to_async`), also followed as decorators; extensible with
+  `[[tool.heki.ecosystem]]`.
+- Generator functions are followed where their generators are iterated (`for`, comprehensions,
+  unpacking, `yield from`, consuming calls, lazy wrappers, project functions iterating them),
+  generators returned by helpers included; a generator handed to a framework
+  (`StreamingResponse(rows())`) is not reported.
 - Ratchet baselines (`--baseline`, `--update-baseline`), keyed by file, function, rule, and
-  target instead of line numbers.
+  target instead of line numbers, that count violation sites (`version = 2`); older files keep
+  counting reports until `--update-baseline`.
 - `heki snapshot` saves the effect summaries of public functions for `MUT103`.
 - `heki server` (alias `heki lsp`), an incremental language server: call chains as related
   information, quick fixes for the proven-safe rewrites, and suppression quick fixes.

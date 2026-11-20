@@ -151,6 +151,25 @@ const FROZEN_MODEL: &str = "from dataclasses import dataclass, field\n\nfrom pkg
 const FROZEN_HELPERS: &str = "def add_default(tags):\n    tags.append(\"default\")\n\n\ndef clear_names(entry):\n    entry.names.clear()\n";
 const CONFIGURE: &str = "from pkg.frozen.helpers import add_default, clear_names\nfrom pkg.frozen.model import Config, Entry\n\n\ndef configure(config: Config) -> None:\n    add_default(config.tags)\n\n\ndef reset(entry: Entry) -> None:\n    clear_names(entry)\n";
 
+// Where a body runs: a helper an `async def` in another module awaits gains an offloading
+// decorator (`@sync_to_async`, `FunctionDecl::offloaded_by`), and a helper whose result an
+// `async def` iterates turns into a generator (`EffectSummary::is_generator`): the report moves
+// from the call to the iteration.
+const OFFLOAD: &str = "import requests\n\n\ndef fetch_profile():\n    return requests.post(\"https://example.com\")\n";
+const OFFLOAD_DECORATED: &str = "import requests\nfrom asgiref.sync import sync_to_async\n\n\n@sync_to_async\ndef fetch_profile():\n    return requests.post(\"https://example.com\")\n";
+const VIEW: &str = "from pkg.offload import fetch_profile\n\n\nasync def view():\n    return await fetch_profile()\n";
+const FEED: &str =
+    "import httpx\n\n\ndef rows():\n    return [httpx.get(\"https://example.com\")]\n";
+const FEED_GENERATOR: &str =
+    "import httpx\n\n\ndef rows():\n    yield httpx.get(\"https://example.com\")\n";
+const FEED_USER: &str = "from pkg.feed import rows\n\n\nasync def stream():\n    pending = rows()\n    for row in pending:\n        print(row)\n";
+// A private generator writing a guarded attribute, handed to a helper in another module: its
+// write runs where the helper iterates it, and it reports itself once the helper stops.
+const FILLS: &str = "from pkg.model import Registry\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n    yield r\n";
+const DRAIN: &str = "def drain(g):\n    for _ in g:\n        pass\n";
+const DRAIN_RETURNING: &str = "def drain(g):\n    return g\n";
+const HANDOFF: &str = "from pkg.drain import drain\nfrom pkg.fills import _fill\nfrom pkg.model import Registry\n\n\ndef hand(r: Registry):\n    drain(_fill(r))\n";
+
 // Assumption A1(b): one module patching `builtins` makes no module trust builtin names, so the
 // size-dependent rewrites that rely on them (`OPT110` builds a `set(...)`) are not proven.
 const LOOPS: &str = "def member(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n";
@@ -207,6 +226,13 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/chain_low.py", CHAIN_LOW),
         ("pkg/chain_mid.py", CHAIN_MID),
         ("pkg/chain_top.py", CHAIN_TOP),
+        ("pkg/offload.py", OFFLOAD),
+        ("pkg/view.py", VIEW),
+        ("pkg/feed.py", FEED),
+        ("pkg/feed_user.py", FEED_USER),
+        ("pkg/fills.py", FILLS),
+        ("pkg/drain.py", DRAIN),
+        ("pkg/handoff.py", HANDOFF),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -407,6 +433,45 @@ fn steps_contract_extensions() -> Vec<Step> {
     ]
 }
 
+/// Where a body runs (`EFF101`): an offloading decorator added to and removed from a function
+/// another module awaits, and a helper turned into a generator and back.
+fn steps_body_runs() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a function another module awaits gains an offloading decorator",
+            vec![save("pkg/offload.py", OFFLOAD_DECORATED)],
+        )
+        .absent(&[("pkg/view.py", "EFF101")]),
+        Step::new(
+            "the offloading decorator is removed",
+            vec![save("pkg/offload.py", OFFLOAD)],
+        )
+        .present(&[("pkg/view.py", "EFF101")]),
+        Step::new(
+            "a helper becomes a generator: the report moves to the iteration",
+            vec![save("pkg/feed.py", FEED_GENERATOR)],
+        )
+        .present(&[("pkg/feed_user.py", "EFF101")]),
+        Step::new(
+            "the generator becomes a helper again",
+            vec![save("pkg/feed.py", FEED)],
+        )
+        .present(&[("pkg/feed_user.py", "EFF101")]),
+        Step::new(
+            "the helper a private generator is handed to stops iterating it",
+            vec![save("pkg/drain.py", DRAIN_RETURNING)],
+        )
+        .present(&[("pkg/fills.py", "MUT201")])
+        .absent(&[("pkg/handoff.py", "MUT201")]),
+        Step::new(
+            "the helper iterates it again",
+            vec![save("pkg/drain.py", DRAIN)],
+        )
+        .present(&[("pkg/handoff.py", "MUT201")])
+        .absent(&[("pkg/fills.py", "MUT201")]),
+    ]
+}
+
 /// Reserved for `MUT110` (`Sequence` / `Mapping` / `ReadOnly` parameters changed in place by
 /// helpers, default-on), which lands next; its steps go here.
 fn steps_mut110() -> Vec<Step> {
@@ -498,9 +563,10 @@ fn steps() -> Vec<Step> {
         )
         .absent(&[("pkg/reader.py", "EFF101")]),
     ];
-    // 4. `MUT108`, then the place reserved for `MUT110`.
+    // 4. `MUT108`, then the place reserved for `MUT110`, then where bodies run.
     steps.extend(steps_mut108());
     steps.extend(steps_mut110());
+    steps.extend(steps_body_runs());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(
