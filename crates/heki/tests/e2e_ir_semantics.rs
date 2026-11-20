@@ -460,3 +460,46 @@ class Worker:
         ])
     );
 }
+
+#[test]
+fn unpacking_reads_every_item_before_it_writes_a_target() {
+    let src =
+        "def f(xs):\n    xs[1], x = xs\n    head, *rest, last = xs\n    return x, rest, last\n";
+    let ir = dump_ir("ir_unpacking", src, "py315");
+    let f = function(&ir, "f");
+    let kinds: Vec<String> = f["blocks"][0]["insts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| {
+            i["kind"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+    // `xs[1], x = xs`: both items are read, then `xs[1]` is stored, then `x` is bound.
+    let first_store = kinds.iter().position(|k| k == "SubscriptStore").unwrap();
+    let loads_before = kinds[..first_store]
+        .iter()
+        .filter(|k| *k == "SubscriptLoad")
+        .count();
+    assert_eq!(loads_before, 2, "{kinds:?}");
+    // `*rest` is a new list; `last` is item -1.
+    let insts = f["blocks"][0]["insts"].as_array().unwrap();
+    let ints: Vec<i64> = insts
+        .iter()
+        .filter_map(|i| i["kind"]["Const"]["literal"]["int"].as_i64())
+        .collect();
+    // Items 0 and 1, the store's index 1, then items 0 and -1.
+    assert_eq!(ints, [0, 1, 1, 0, -1]);
+    assert!(
+        insts
+            .iter()
+            .any(|i| i["kind"]["AllocBuiltin"]["kind"] == "list"),
+        "{insts:#?}"
+    );
+}

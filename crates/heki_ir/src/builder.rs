@@ -1577,48 +1577,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     span,
                 );
             }
-            Expr::Tuple(t) => {
-                for (i, elt) in t.elts.iter().enumerate() {
-                    let idx_var =
-                        self.emit_const(ConstLiteral::Int(i as i64), Span::from(elt.range()));
-                    let elem = self.fresh_var(None);
-                    self.emit(
-                        InstKind::SubscriptLoad {
-                            dst: elem,
-                            obj: value,
-                            index: idx_var,
-                            key_const: None,
-                            is_slice: false,
-                            slice_lower_const: None,
-                            slice_upper_const: None,
-                        },
-                        Span::from(elt.range()),
-                    );
-                    self.lower_assign_target(elt, elem, Span::from(elt.range()));
-                }
-            }
-            Expr::List(l) => {
-                for (i, elt) in l.elts.iter().enumerate() {
-                    let idx_var =
-                        self.emit_const(ConstLiteral::Int(i as i64), Span::from(elt.range()));
-                    let elem = self.fresh_var(None);
-                    self.emit(
-                        InstKind::SubscriptLoad {
-                            dst: elem,
-                            obj: value,
-                            index: idx_var,
-                            key_const: None,
-                            is_slice: false,
-                            slice_lower_const: None,
-                            slice_upper_const: None,
-                        },
-                        Span::from(elt.range()),
-                    );
-                    self.lower_assign_target(elt, elem, Span::from(elt.range()));
-                }
-            }
-            Expr::Starred(s) => {
-                self.lower_assign_target(&s.value, value, Span::from(s.range));
+            Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+                self.lower_unpacking(elts, value);
             }
             // The parser rejects every other target (`InvalidAssignmentTarget`).
             _ => {}
@@ -1651,6 +1611,51 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 span,
             );
             self.write_local(name, self.cur_bb, unbound);
+        }
+    }
+
+    /// `a, *rest, b = value`: every item is read (and their number checked) before any target
+    /// is written, so `xs[1], x = xs` binds `x` to the old `xs[1]`. `*rest` binds a new list;
+    /// the items after it are counted from the end.
+    fn lower_unpacking(&mut self, elts: &'a [Expr], value: VarId) {
+        let star = elts.iter().position(|e| matches!(e, Expr::Starred(_)));
+        let items: Vec<VarId> = elts
+            .iter()
+            .enumerate()
+            .map(|(i, elt)| {
+                let span = Span::from(elt.range());
+                if matches!(elt, Expr::Starred(_)) {
+                    return self.unpacked_list(value, span);
+                }
+                let index = match star {
+                    Some(s) if i > s => -((elts.len() - i) as i64),
+                    _ => i as i64,
+                };
+                // Index and item share the target's span: the unpacking of an assignment
+                // (`heki_effect::consumption::is_unpacking`).
+                let index_var = self.emit_const(ConstLiteral::Int(index), span);
+                let item = self.fresh_var(None);
+                self.emit(
+                    InstKind::SubscriptLoad {
+                        dst: item,
+                        obj: value,
+                        index: index_var,
+                        key_const: None,
+                        is_slice: false,
+                        slice_lower_const: None,
+                        slice_upper_const: None,
+                    },
+                    span,
+                );
+                item
+            })
+            .collect();
+        for (elt, item) in elts.iter().zip(items) {
+            let target = match elt {
+                Expr::Starred(s) => &s.value,
+                other => other,
+            };
+            self.lower_assign_target(target, item, Span::from(elt.range()));
         }
     }
 

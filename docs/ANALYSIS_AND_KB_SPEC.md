@@ -85,6 +85,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   (depth `d + 1`) starts with `IterNext(it)` (this removed, by construction, the 7 Stage 0-A
   false positives of `EFF102` / `EFF103` that took the one-time `for.iter` call for a call in the
   loop).
+- **Unpacking** (`a, *rest, b = value`, also in `for` and `with` targets): every item is read
+  (`SubscriptLoad` of a constant index at the target's position, negative after a star) before
+  any target is written; `*rest` binds a new list.
 - **`match`**: each case tests its pattern (PEP 634) and goes to the next case when a test
   fails: a value pattern is a `Compare` (`==`, or `is` for `None` / `True` / `False`), and the
   shape tests of sequence, mapping, and class patterns are an opaque `Const` (both outcomes
