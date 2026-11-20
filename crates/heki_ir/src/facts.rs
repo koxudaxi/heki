@@ -139,6 +139,14 @@ pub struct ModuleConstants {
     /// conditions, over every load of the name).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub displays: BTreeMap<String, SmallDisplay>,
+    /// String constants (`SCHEMA = "CREATE TABLE ..."`). A string is immutable, so the name
+    /// holds this text whatever the code does with it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub strs: BTreeMap<String, String>,
+    /// Tuple displays of string constants, their items in order (`STATEMENTS = ("CREATE ...",
+    /// ...)`): a tuple is immutable too.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub str_tuples: BTreeMap<String, Vec<String>>,
     /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
@@ -164,6 +172,12 @@ pub(crate) struct LoopHint {
     /// Spans of the `len(x) < N`-shaped comparisons a `while` test requires (the test itself
     /// or its `and` operands).
     pub cap_tests: Vec<Span>,
+    /// The loop does not step through items: a `while` loop, or a `for` loop whose body never
+    /// reads its target (`for _ in range(30):`). When every iteration of such a loop waits, it
+    /// polls or retries.
+    pub repeats: bool,
+    /// `while True:`: a loop that waits on every iteration is a resident one, not a retry.
+    pub forever: bool,
 }
 
 /// Where a variable is defined.
@@ -774,6 +788,44 @@ impl<'a> FnIndex<'a> {
         (!self.grows(&[built], &[kind], None)).then_some(())
     }
 
+    /// The instruction defining the value `v` holds, through copies.
+    fn source(&self, v: VarId) -> Option<&'a Inst> {
+        let mut inst = self.def_inst(v)?;
+        // Copies of an SSA variable form a tree, so the walk ends.
+        while let InstKind::Copy { src, .. } = inst.kind {
+            inst = self.def_inst(src)?;
+        }
+        Some(inst)
+    }
+
+    /// The string constant `v` holds.
+    fn str_constant(&self, v: VarId) -> Option<String> {
+        match &self.source(v)?.kind {
+            InstKind::Const {
+                literal: ConstLiteral::Str(s),
+                ..
+            } => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    /// The items of the tuple display of string constants `v` holds.
+    fn str_tuple(&self, v: VarId) -> Option<Vec<String>> {
+        match &self.source(v)?.kind {
+            InstKind::AllocBuiltin {
+                dst,
+                kind: BuiltinKind::Tuple,
+                elems,
+            } => (elems.iter().enumerate())
+                .map(|(i, e)| {
+                    self.str_constant(*e)
+                        .filter(|_| !self.f.is_starred(*dst, i))
+                })
+                .collect(),
+            _ => None,
+        }
+    }
+
     /// The value of an integer expression the code fixes: a literal, a module constant, or
     /// `+`, `-`, `*` and negation of them.
     pub fn const_int(&self, v: VarId) -> Option<i64> {
@@ -863,6 +915,98 @@ impl<'a> FnIndex<'a> {
         Some(LenCap { var, limit })
     }
 
+    /// How many times the `while` loop `lp` runs at most when it counts with an integer the code
+    /// fixes, if at most [`SMALL_MAX`] times: its test compares the counter with a constant
+    /// (`while i < 6:`, `while 0 <= n:`) or tests the counter itself (`while tries:`, counting
+    /// down to zero), the counter starts at a constant, and every iteration that goes on steps it
+    /// by one constant (`i += 1` on each path back to the test). The test's false side leaves the
+    /// loop, so an operand of `and` bounds the loop and one of `or` does not.
+    pub fn counted_trips(&self, lp: &NaturalLoop) -> Option<u32> {
+        let header = self.f.block(lp.header);
+        let cond = match header.terminator {
+            Terminator::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } if lp.body.contains(&then_bb) && !lp.body.contains(&else_bb) => cond,
+            _ => return None,
+        };
+        // The test as `(counter, limit)` and whether it holds for their order.
+        let (counter, limit, op, counter_first) = match self.def(cond) {
+            Def::Phi(..) => (cond, 0, CompareOpKind::NotEq, true),
+            Def::Inst(b, i) if b == lp.header => match header.insts[i as usize].kind {
+                InstKind::Compare { op, lhs, rhs, .. } => match self.const_int(rhs) {
+                    Some(n) => (lhs, n, op, true),
+                    None => (rhs, self.const_int(lhs)?, op, false),
+                },
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let body: FxHashSet<BlockId> = lp.body.iter().copied().collect();
+        let (mut value, step) = self.counter(&body, lp.header, counter)?;
+        // Run the test and the step as the loop does, up to one trip past a small count.
+        for trips in 0..=SMALL_MAX {
+            let order = if counter_first {
+                value.cmp(&limit)
+            } else {
+                limit.cmp(&value)
+            };
+            if !compare_holds(op, order)? {
+                return Some(trips);
+            }
+            value = value.checked_add(step)?;
+        }
+        None
+    }
+
+    /// The start and the step of the counter `v` of the loop with `header` and `body`: a phi of
+    /// the header whose input from before the loop is an integer constant and whose input along
+    /// every path back is `v` plus (or minus) one integer constant.
+    fn counter(&self, body: &FxHashSet<BlockId>, header: BlockId, v: VarId) -> Option<(i64, i64)> {
+        let Def::Phi(b, i) = self.def(v) else {
+            return None;
+        };
+        if b != header {
+            return None;
+        }
+        let mut start = None;
+        let mut step = None;
+        for &(pred, x) in self.phi_incoming(b, i) {
+            // The value that enters the loop (the header's only predecessor outside it).
+            if !body.contains(&pred) {
+                start = Some(self.const_int(x)?);
+                continue;
+            }
+            let this = match &self.source(x)?.kind {
+                InstKind::BinOp {
+                    op: BinOpKind::Add,
+                    lhs,
+                    rhs,
+                    ..
+                } if *lhs == v => self.const_int(*rhs)?,
+                InstKind::BinOp {
+                    op: BinOpKind::Add,
+                    lhs,
+                    rhs,
+                    ..
+                } if *rhs == v => self.const_int(*lhs)?,
+                InstKind::BinOp {
+                    op: BinOpKind::Sub,
+                    lhs,
+                    rhs,
+                    ..
+                } if *lhs == v => self.const_int(*rhs)?.checked_neg()?,
+                _ => return None,
+            };
+            if this == 0 || step.is_some_and(|s| s != this) {
+                return None;
+            }
+            step = Some(this);
+        }
+        Some((start?, step?))
+    }
+
     /// The iterable of the `for` loop (or comprehension clause) `lp`: the operand of the
     /// `MakeIter` its header's `IterNext` advances (`None` for a `while` loop).
     pub fn loop_iterable(&self, lp: &NaturalLoop) -> Option<VarId> {
@@ -929,6 +1073,97 @@ impl<'a> FnIndex<'a> {
             _ => (true, false),
         }
     }
+}
+
+/// Whether every path from the header of `lp` back to it runs a call that waits (a sleep, or a
+/// wait with a timeout): the loop is paced by time, as a poll or a retry is, and the data
+/// decides nothing about how often it runs. An exception edge leaves a block before its wait.
+fn waits_every_iteration(f: &IrFunction, lp: &NaturalLoop) -> bool {
+    let waits = |b: BlockId| f.block(b).insts.iter().any(|i| waits_for_time(f, i));
+    if !lp.body.iter().any(|b| waits(*b)) {
+        return false;
+    }
+    let body: FxHashSet<BlockId> = lp.body.iter().copied().collect();
+    let mut seen: FxHashSet<BlockId> = FxHashSet::default();
+    let mut stack = vec![lp.header];
+    while let Some(b) = stack.pop() {
+        if !seen.insert(b) {
+            continue;
+        }
+        let bb = f.block(b);
+        let next = if waits(b) {
+            Vec::new()
+        } else {
+            bb.terminator.successors()
+        };
+        for s in next.into_iter().chain(bb.exc_target) {
+            if s == lp.header {
+                return false;
+            }
+            if body.contains(&s) {
+                stack.push(s);
+            }
+        }
+    }
+    true
+}
+
+/// A call that waits before the program goes on: a sleep of a duration other than a literal
+/// zero (`time.sleep(5)`, `await asyncio.sleep(delay)`; `sleep(0)` only yields), or a wait
+/// with a timeout (`stop.wait(1)`, `event.wait(timeout=delay)`). A `wait` given anything else
+/// may wait for futures that are done already (`asyncio.wait(tasks)`).
+fn waits_for_time(f: &IrFunction, inst: &Inst) -> bool {
+    let (name, args, kwargs) = match &inst.kind {
+        InstKind::Call {
+            callee,
+            args,
+            kwargs,
+            ..
+        } => (callee.rsplit('.').next().unwrap_or(callee), args, kwargs),
+        InstKind::MethodCall {
+            method,
+            args,
+            kwargs,
+            ..
+        } => (method.as_str(), args, kwargs),
+        _ => return false,
+    };
+    let seconds = |v: VarId| match f.def_inst(v).map(|(_, i)| &i.kind) {
+        Some(InstKind::Const {
+            literal: ConstLiteral::Int(n),
+            ..
+        }) => Some(*n as f64),
+        Some(InstKind::Const {
+            literal: ConstLiteral::Float(x),
+            ..
+        }) => x.parse::<f64>().ok(),
+        _ => None,
+    };
+    match name {
+        "sleep" => args
+            .first()
+            .or(kwargs.first().map(|(_, v)| v))
+            .is_some_and(|v| seconds(*v) != Some(0.0)),
+        "wait" => {
+            kwargs.iter().any(|(k, _)| k.as_deref() == Some("timeout"))
+                || matches!(args.as_slice(), [t] if seconds(*t).is_some_and(|s| s > 0.0))
+        }
+        _ => false,
+    }
+}
+
+/// Whether integers in `order` pass the comparison `op` (`None` for a test of identity or
+/// membership).
+fn compare_holds(op: CompareOpKind, order: std::cmp::Ordering) -> Option<bool> {
+    Some(match op {
+        CompareOpKind::Eq => order.is_eq(),
+        CompareOpKind::NotEq => order.is_ne(),
+        CompareOpKind::Lt => order.is_lt(),
+        CompareOpKind::LtE => order.is_le(),
+        CompareOpKind::Gt => order.is_gt(),
+        CompareOpKind::GtE => order.is_ge(),
+        _ => return None,
+    })
 }
 
 /// The number of items `range(*args)` yields (`None` for a zero step).
@@ -1001,6 +1236,8 @@ pub(crate) fn module_constants(
     // Ints first: displays and later ints may use them (`range(N)` only through loads).
     let ix = FnIndex::new(module, &out);
     let mut ints = BTreeMap::new();
+    let mut strs = BTreeMap::new();
+    let mut str_tuples = BTreeMap::new();
     let mut candidates: Vec<(String, SmallDisplay)> = Vec::new();
     for bb in &module.blocks {
         if module.is_in_loop(bb.id) {
@@ -1023,9 +1260,16 @@ pub(crate) fn module_constants(
             } else if let Some(d) = ix.stored_display(*value, (bb.id, i)) {
                 candidates.push((name.clone(), d));
             }
+            if let Some(text) = ix.str_constant(*value) {
+                strs.insert(name.clone(), text);
+            } else if let Some(items) = ix.str_tuple(*value) {
+                str_tuples.insert(name.clone(), items);
+            }
         }
     }
     out.ints = ints;
+    out.strs = strs;
+    out.str_tuples = str_tuples;
     if candidates.is_empty() {
         return out;
     }
@@ -1143,6 +1387,19 @@ pub(crate) fn refine_loops(
                     LoopBound::RetryPattern
                 } else {
                     LoopBound::ConstSmall(n)
+                };
+            }
+            if bound == LoopBound::Unbounded {
+                bound = if let Some(n) = ix.counted_trips(lp) {
+                    LoopBound::ConstSmall(n)
+                } else if hint.repeats && waits_every_iteration(f, lp) {
+                    if hint.forever {
+                        LoopBound::DaemonPolling
+                    } else {
+                        LoopBound::RetryPattern
+                    }
+                } else {
+                    LoopBound::Unbounded
                 };
             }
             let caps: Vec<LenCap> = if hint.cap_tests.is_empty() {

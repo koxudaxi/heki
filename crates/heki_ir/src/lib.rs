@@ -667,6 +667,10 @@ pub struct IrFunction {
     /// `f(*xs)` passes the elements of `xs`, not `xs`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starred: Vec<(VarId, u32)>,
+    /// The text each f-string starts with (`heki_ast::fstring_head`): the `dst` of the string
+    /// it builds and `ALTER TABLE ` of `f"ALTER TABLE {name}"`, in the order of the variables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub str_heads: Vec<(VarId, String)>,
     pub blocks: Vec<BasicBlock>,
     pub loops: Vec<NaturalLoop>,
     pub loop_carried: Vec<LoopCarriedInfo>,
@@ -786,6 +790,15 @@ impl IrFunction {
         self.starred
             .iter()
             .any(|&(d, i)| d == dst && i as usize == index)
+    }
+
+    /// The text the f-string `var` holds starts with ([`Self::str_heads`]).
+    pub fn str_head(&self, var: VarId) -> Option<&str> {
+        let i = self
+            .str_heads
+            .binary_search_by_key(&var, |(v, _)| *v)
+            .ok()?;
+        Some(self.str_heads[i].1.as_str())
     }
 
     /// Check whether any decorator ends with one of the provided names (e.g. `cached_property`).

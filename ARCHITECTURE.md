@@ -209,8 +209,10 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
 - **Classes, decorators, and loops**: natural loops with a `LoopBound` (`ConstSmall(k)` /
   `RetryPattern` / `DaemonPolling` / `Unbounded`), nested classes kept apart from their outer
   class, and decorator metadata (`@cached_property`, `@lru_cache`, CLI and web decorators).
-- **Size facts in one home** (`heki_ir::facts`): small displays, constant trip counts, and
-  `while len(x) < N` caps, for profitability and Advisory noise only. The Soundness lane reads
+- **Size facts in one home** (`heki_ir::facts`): small displays, constant trip counts (also of
+  `while` loops over a counter the code bounds), loops paced by a sleep or a timed wait on
+  every iteration (polls and retries), and `while len(x) < N` caps, for profitability and
+  Advisory noise only. The Soundness lane reads
   them within one module (`FnIndex`); the Advisory rules read other modules' small displays
   through the declarations (`ModuleDecls.small_globals`, `ClassDecl.attr_displays`).
 - **Original byte spans**: fixes are produced as minimal `TextEdit`s, never by regenerating code
@@ -300,9 +302,12 @@ EffectSummary(f) = {
    - Awaited calls (such as `await redis.delete(...)`) and non-blocking spawns (`subprocess.Popen`
      itself; `.wait()` / `.communicate()` do block) are excluded from `EFF101`.
    - `EFF103` excludes DDL (`CREATE TABLE` / `CREATE INDEX`) run by a DB-API `execute`, also
-     inside helpers, migration helpers, and the internals of ORM implementations.
+     inside helpers and when the statement is built at run time from a DDL start (`f"ALTER
+     TABLE {t} ..."`) or taken from a module's schema constants, migration helpers, and the
+     internals of ORM implementations.
    - `EFF102` recognizes and relaxes the polling loops of resident daemons (reconnect loops such
-     as `while self._running:`).
+     as `while self._running:` or `while not stop.is_set():`) and loops that wait on every
+     iteration (polls and retries).
    - `DATA101` requires an SSA **`LoopCarried`** value (accumulation through reassignment) and
      excludes one-off concatenation or padding in a loop.
    - `MUT101` excludes (1) two-phase initialization hooks (`__init__` / `__post_init__` /

@@ -213,6 +213,7 @@ fn release_spare_capacity(f: &mut IrFunction) {
     f.var_names.shrink_to_fit();
     f.captured_vars.shrink_to_fit();
     f.starred.shrink_to_fit();
+    f.str_heads.shrink_to_fit();
     for bb in &mut f.blocks {
         bb.insts.shrink_to_fit();
         bb.phis.shrink_to_fit();
@@ -414,6 +415,7 @@ impl<'a> ModuleLowerer<'a> {
             var_names: Vec::new(),
             captured_vars: Vec::new(),
             starred: Vec::new(),
+            str_heads: Vec::new(),
             blocks: Vec::new(),
             loops: Vec::new(),
             loop_carried: Vec::new(),
@@ -632,6 +634,8 @@ struct FnBuilder<'m, 'a> {
     a1_hazards: Vec<A1Hazard>,
     /// `*x` operands of displays and calls (`IrFunction::starred`).
     starred: Vec<(VarId, u32)>,
+    /// `IrFunction::str_heads`.
+    str_heads: Vec<(VarId, String)>,
     /// Local names bound by importing a frame-introspection function, with its kind.
     introspection_locals: FxHashMap<String, &'static str>,
 
@@ -711,6 +715,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             finished_hints: Vec::new(),
             a1_hazards: Vec::new(),
             starred: Vec::new(),
+            str_heads: Vec::new(),
             introspection_locals: FxHashMap::default(),
             comp_target_renames: Vec::new(),
             units_left: unit_budget(span),
@@ -2037,7 +2042,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             back_edges: Vec::new(),
             hint: LoopHint {
                 retry_body,
-                cap_tests: Vec::new(),
+                repeats: !reads_target(&f.body, &f.target),
+                ..LoopHint::default()
             },
         });
 
@@ -2134,8 +2140,10 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             body_blocks: vec![header_bb],
             back_edges: Vec::new(),
             hint: LoopHint {
-                retry_body: false,
                 cap_tests: len_cap_tests(&w.test),
+                repeats: true,
+                forever: matches!(w.test.as_ref(), Expr::BooleanLiteral(b) if b.value),
+                ..LoopHint::default()
             },
         });
 
@@ -3136,6 +3144,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     let _ = self.lower_expr(field);
                 }
                 let dst = self.fresh_var(None);
+                if let Some(head) = heki_ast::fstring_head(expr) {
+                    self.str_heads.push((dst, head));
+                }
                 self.emit(
                     InstKind::AllocBuiltin {
                         dst,
@@ -3722,6 +3733,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.finished_loops.clear();
         self.finished_hints.clear();
         self.starred.clear();
+        self.str_heads.clear();
         self.a1_hazards.push(A1Hazard {
             kind: crate::UNMODELED.to_owned(),
             span: self.span,
@@ -3788,6 +3800,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             var_names: self.var_names,
             captured_vars,
             starred: self.starred,
+            str_heads: self.str_heads,
             blocks: self.blocks,
             loops: self.finished_loops,
             loop_carried,
@@ -3979,6 +3992,7 @@ fn classify_while_bound(w: &ast::StmtWhile) -> LoopBound {
         Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => (&u.operand, looks_like_stop_flag),
         test => (test, looks_like_daemon_flag),
     };
+    let flag = tested_event(flag).unwrap_or(flag);
     let named = match flag {
         Expr::Attribute(a) => looks_like_flag(a.attr.as_str()),
         Expr::Name(n) => looks_like_flag(n.id.as_str()),
@@ -3994,6 +4008,63 @@ fn classify_while_bound(w: &ast::StmtWhile) -> LoopBound {
         return LoopBound::RetryPattern;
     }
     LoopBound::Unbounded
+}
+
+/// The event a loop test reads as its flag: `stop` of `stop.is_set()`, or of `stop.wait(1)`,
+/// which waits for the event and then tests it.
+fn tested_event(test: &Expr) -> Option<&Expr> {
+    match test {
+        Expr::Call(c) => match c.func.as_ref() {
+            Expr::Attribute(a) if matches!(a.attr.as_str(), "is_set" | "wait") => Some(&a.value),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `body` reads a name the `for` target binds (also in a scope nested in it).
+fn reads_target(body: &[Stmt], target: &Expr) -> bool {
+    use heki_ast::raw_ast::visitor::{self, Visitor};
+
+    struct Reads<'t> {
+        bound: Vec<&'t str>,
+        found: bool,
+    }
+    impl<'e> Visitor<'e> for Reads<'_> {
+        fn visit_expr(&mut self, expr: &'e Expr) {
+            if let Expr::Name(n) = expr
+                && n.ctx == ast::ExprContext::Load
+                && self.bound.contains(&n.id.as_str())
+            {
+                self.found = true;
+            }
+            visitor::walk_expr(self, expr);
+        }
+    }
+
+    let mut bound = Vec::new();
+    target_names(target, &mut bound);
+    let mut v = Reads {
+        bound,
+        found: false,
+    };
+    v.visit_body(body);
+    v.found
+}
+
+/// The names a `for` target binds (`i` of `for i, (a, *b) in ...` and the others). A target
+/// that binds an attribute or an item binds no name.
+fn target_names<'t>(target: &'t Expr, out: &mut Vec<&'t str>) {
+    match target {
+        Expr::Name(n) => out.push(n.id.as_str()),
+        Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+            for e in elts {
+                target_names(e, out);
+            }
+        }
+        Expr::Starred(s) => target_names(&s.value, out),
+        _ => {}
+    }
 }
 
 /// Whether `body` takes items out of the collection `tested` names (`while queue: item =
@@ -4109,13 +4180,15 @@ fn looks_like_stop_flag(name: &str) -> bool {
     })
 }
 
+/// A target that names an attempt: `attempt`, `retry_count`, or one name of a tuple target
+/// (`for attempt, proxy in enumerate(proxies)`).
 fn target_looks_like_retry(target: &Expr) -> bool {
-    if let Expr::Name(n) = target {
-        let lower = n.id.to_ascii_lowercase();
+    let mut names = Vec::new();
+    target_names(target, &mut names);
+    names.iter().any(|n| {
+        let lower = n.to_ascii_lowercase();
         lower.contains("retry") || lower.contains("retries") || lower.contains("attempt")
-    } else {
-        false
-    }
+    })
 }
 
 fn is_retry_body(body: &[Stmt]) -> bool {

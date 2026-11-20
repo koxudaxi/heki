@@ -15,7 +15,7 @@ use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_ir::{
-    BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
+    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
     SmallDisplay, VarId,
 };
 use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
@@ -2943,15 +2943,43 @@ pub(crate) fn literal<'i>(
     }
 }
 
-/// [`ArgFact`] of `var`: its constant, and the class `class_of` gives it.
+/// [`ArgFact`] of `var`: its constant, the class `class_of` gives it, and the flags it sets
+/// through the named objects `name_of` gives its operands.
 pub(crate) fn arg_fact<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     class_of: impl Fn(VarId) -> Option<String>,
+    name_of: impl Fn(VarId) -> Option<String>,
     var: VarId,
 ) -> ArgFact {
+    let mut flags = Vec::new();
+    set_flags(&def, &name_of, var, &mut flags);
     ArgFact {
-        literal: literal(def, var),
+        literal: literal(&def, var),
         class: class_of(var),
+        flags,
+    }
+}
+
+/// The named objects `var` sets with `|` (`ArgFact::flags`), through copies.
+fn set_flags<'i>(
+    def: &impl Fn(VarId) -> Option<&'i Inst>,
+    name_of: &impl Fn(VarId) -> Option<String>,
+    var: VarId,
+    out: &mut Vec<String>,
+) {
+    // The operands of an SSA expression form a tree, so the walk ends.
+    match def(var).map(|i| &i.kind) {
+        Some(InstKind::Copy { src, .. }) => set_flags(def, name_of, *src, out),
+        Some(InstKind::BinOp {
+            op: BinOpKind::BitOr,
+            lhs,
+            rhs,
+            ..
+        }) => {
+            set_flags(def, name_of, *lhs, out);
+            set_flags(def, name_of, *rhs, out);
+        }
+        _ => out.extend(name_of(var)),
     }
 }
 

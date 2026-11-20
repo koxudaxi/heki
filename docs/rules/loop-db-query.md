@@ -22,8 +22,11 @@ It does not report reading the rows of a statement already executed (`cursor.fet
 calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
 `Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
 batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
-statements (a literal starting with `CREATE`, `ALTER`, `DROP`, or `PRAGMA` run by a DB-API
-`execute` / `executemany` / `executescript`, also inside a helper the loop calls), migration code
+statements (SQL starting with `CREATE`, `ALTER`, `DROP`, or `PRAGMA` run by a DB-API
+`execute` / `executemany` / `executescript` or SQLAlchemy's `exec_driver_sql`, also inside a
+helper the loop calls: a literal, an f-string, `%`, or `.format()` whose literal start is one,
+SQLAlchemy's `text()` of one, and the statements of a module's string constants: the items of a
+tuple, the pieces `.split(";")` / `.splitlines()` cut a schema into), migration code
 (`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
 own implementation, or loops whose size the code fixes when no data-sized loop is around them
 (`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small

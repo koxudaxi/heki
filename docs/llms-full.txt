@@ -2383,7 +2383,8 @@ Direct or indirect blocking network/DB/subprocess/sleep call reachable from `asy
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
 synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), host name lookups
-(`socket.getaddrinfo` / `gethostbyname` / `getfqdn`; the event loop has `loop.getaddrinfo()`),
+(`socket.getaddrinfo` / `gethostbyname` / `getfqdn`; the event loop has `loop.getaddrinfo()`;
+`getaddrinfo` with the `AI_NUMERICHOST` flag only parses an address and is not reported),
 database drivers
 (`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
 `conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
@@ -3542,8 +3543,11 @@ It does not report reading the rows of a statement already executed (`cursor.fet
 calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
 `Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
 batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
-statements (a literal starting with `CREATE`, `ALTER`, `DROP`, or `PRAGMA` run by a DB-API
-`execute` / `executemany` / `executescript`, also inside a helper the loop calls), migration code
+statements (SQL starting with `CREATE`, `ALTER`, `DROP`, or `PRAGMA` run by a DB-API
+`execute` / `executemany` / `executescript` or SQLAlchemy's `exec_driver_sql`, also inside a
+helper the loop calls: a literal, an f-string, `%`, or `.format()` whose literal start is one,
+SQLAlchemy's `text()` of one, and the statements of a module's string constants: the items of a
+tuple, the pieces `.split(";")` / `.splitlines()` cut a schema into), migration code
 (`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
 own implementation, or loops whose size the code fixes when no data-sized loop is around them
 (`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
@@ -3860,7 +3864,20 @@ The iterable of a `for` loop is evaluated once and is not reported; neither are 
 loops whose size the code fixes, when no data-sized loop is around them: displays of at most 16
 items (also through a name or a module constant bound to one that nothing in the project
 grows, and through `enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer
-constants with at most 16 steps (`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
+constants with at most 16 steps (`range(ATTEMPTS - 1)`), a `while` loop over a counter the code
+starts, steps, and limits with constants (`i = 1` ... `while i < 6:` ... `i += 1`, at most 16
+times), retry loops, and daemon polling loops.
+
+A retry loop repeats one attempt: its body leaves the loop on success or sleeps in an exception
+handler, and it runs over a small constant range or a target named like `attempt` / `retry`
+(also one name of a tuple target: `for attempt, proxy in enumerate(proxies)`). A loop that
+waits on every path back to its test is paced by time, as polls and retries are: a `while` loop,
+or a `for` loop whose body never reads its target (`for _ in range(30):`), in which every
+iteration sleeps or waits with a timeout (`time.sleep(5)`, `stop.wait(1)`; `sleep(0)` only
+yields, and a sleep an exception can skip does not count). A daemon polling loop runs until a
+flag or an event says to stop (`while self._running:`, `while not self._stopped:`, `while not
+stop_event.is_set():`), or is a `while True:` loop that waits on every iteration. A `for` loop
+reading its target steps through items, also when it sleeps per item.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
 initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`
