@@ -439,3 +439,42 @@ fn watch_rechecks_the_user_of_a_small_display_in_another_file() {
         "the watch's re-check of the user equals `heki check`"
     );
 }
+
+const SORT_LOW: &str = "def sort_values(values):\n    values.sort()\n";
+const SORT_MID: &str =
+    "from pkg.low import sort_values\n\n\ndef relay(values):\n    sort_values(values)\n";
+const SORT_STATS: &str = "from collections.abc import Sequence\n\nfrom pkg.mid import relay\n\n\ndef median(values: Sequence[float]) -> float:\n    relay(values)\n    return values[len(values) // 2]\n";
+
+#[test]
+fn watch_rechecks_a_call_chain_whose_end_moves() {
+    // `MUT110`'s call chain ends at the first function whose own body changes the parameter:
+    // when the middle helper starts changing it too, its summary stays the same, but the chain
+    // of the report two files up loses its last hop.
+    let p = Project::new("watch_chain_end");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/low.py", SORT_LOW)
+        .write("pkg/mid.py", SORT_MID)
+        .write("pkg/stats.py", SORT_STATS);
+    let (child, rx) = spawn_watch(&p, &[], "1");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 4 file(s)");
+    p.write("pkg/mid.py", &format!("{SORT_MID}    values[0] = 0\n"));
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 4 file(s)");
+    let (code, check, _) = p.check(&[]);
+    assert_eq!(code, 1, "{check}");
+    assert_eq!(
+        check.matches("  = related: ").count(),
+        1,
+        "the chain ends in `relay`:\n{check}"
+    );
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout.contains("  = related: pkg/mid.py:5:5: `relay` calls `pkg.low.sort_values`"),
+        "the first report goes down to `sort_values`:\n{stdout}"
+    );
+    assert!(
+        stdout.ends_with(&check),
+        "the watch's re-check equals `heki check`:\n{stdout}"
+    );
+}
