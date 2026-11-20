@@ -15,8 +15,11 @@ constructors, sync and async (`requests.Session()`, `httpx.AsyncClient()`,
 including the getter of a property read in the loop (`self.client.get(url)` where the `client`
 getter builds a new client).
 
-The iterable of a `for` loop is evaluated once and is not reported; bounded loops (small
-constant ranges, retry loops, daemon polling loops) are not reported either.
+The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
+loops whose size the code fixes, when no data-sized loop is around them: displays of at most 8
+items (also through a name or a module constant bound to one that nothing grows, and through
+`enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer constants
+(`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
 
 ## Why is this bad?
 Each new client pays for DNS, TCP, and TLS setup again and throws its connection pool away.

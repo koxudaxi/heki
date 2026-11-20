@@ -769,6 +769,12 @@ equivalent. Whether the rewrite is **offered** depends on two independent questi
 | Size-dependent (can be slower for tiny inputs or loops that run zero times) | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` for hot functions |
 | — | `OPT103` | suggestion only |
 
+A size-dependent candidate is not reported at all when the code fixes its size: the container
+is a display of at most 8 items that nothing grows (it may shrink: `expected.pop(0)` on
+`expected = [b"a", b""]`), the loop runs a fixed number of times (a small display or `range` of
+constants), the list is rebuilt in every iteration, or the loop's own test caps the accumulator
+(`while len(buf) < 10`). These facts decide profitability only, never safety.
+
 ## What the analysis proves
 
 The analysis behind the `OPT` rules is separate from the one behind the other rules and is
@@ -801,7 +807,22 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
 
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
-reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed.
+reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. `--diff`
+prints the paths every other output format prints (relative to the working directory), so
+`patch -p1` applies it where heki ran.
+
+A fix keeps the file acceptable to a type checker and to isort:
+
+- A `collections.deque` rewrite (`OPT120`, `OPT121`) also rewrites the variable's annotation
+  (`q: list[int] = []` becomes `q: collections.deque[int] = collections.deque([])`); an
+  annotation it cannot rewrite (`Sequence[int]`, a union) or another annotated declaration of
+  the variable blocks the fix.
+- `import collections` goes into the module's block of standard-library imports, in the order
+  that block follows (straight imports first, or sorted by module as with
+  `force-sort-within-sections`); without such a block it starts one before the other imports,
+  and in a module without imports it follows the docstring and `__future__` imports, with the
+  blank lines isort expects. Only imports run before it, so the rewritten function cannot run
+  before `collections` is bound.
 
 ## Profiles
 
@@ -1728,7 +1749,12 @@ Checks quadratic accumulation of immutable values in a loop:
 - `self.text += piece` on an attribute (string, bytes, or tuple pieces).
 
 Local `str` accumulation is not reported: CPython already appends in place when the string has
-no other reference.
+no other reference. Neither are:
+
+- an accumulator the loop's own test caps at a small constant (`while len(buf) < 10`, also
+  as one `and` operand or with a module constant: at most 4096), whatever the input;
+- `obj.attr += x` where `obj` is a different object in every iteration (the loop element, or
+  an object created in the iteration): each attribute gets one piece.
 
 ## Why is this bad?
 Each concatenation copies everything accumulated so far.
@@ -1849,7 +1875,8 @@ Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests 
 `collections.deque` with `appendleft(v)`.
 
 Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions.
+functions. A list rebuilt in every iteration of the loop is not reported: its front insert
+costs no more than building it.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.
@@ -1876,7 +1903,7 @@ def reverse(items: list[int]) -> list[int]:
 ```
 
 ## Fix safety
-The same obligations as `OPT120`.
+The same obligations as `OPT120`, and the same rewrite of annotations and imports.
 
 
 ---
@@ -1894,8 +1921,14 @@ Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, an
 `q = q[1:]`, and suggests a `collections.deque` with `popleft()`.
 
 Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
-functions. The rewrite changes the list's creation to `collections.deque(...)` and adds
-`import collections` when needed.
+functions. The rewrite changes the list's creation to `collections.deque(...)`, rewrites the
+variable's `list[...]` annotation to `collections.deque[...]`, and adds `import collections`
+when needed: in sorted position among the module's standard-library imports, or after the
+docstring and `__future__` imports of a module without other imports.
+
+Not reported: a small display that the loop only drains (`expected = [b"a", b""]` and
+`expected.pop(0)` in the loop: it never holds more than its items), and a list rebuilt in every
+iteration of the loop.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is
@@ -1930,7 +1963,9 @@ def bfs(start: int) -> list[int]:
 Proven safe only when the list is created in the function, never leaves it (not returned,
 stored, or passed to other code except read-only builtins such as `len`), and every use has a
 `deque` equivalent: no sorting, no slicing, no indexes other than `0` and `-1`, no `==`
-against lists.
+against lists. An annotation the rewrite cannot turn into a `deque` one (`Sequence[str]`, a
+union) or another annotated declaration of the variable blocks the fix, so that a type checker
+accepts the fixed file.
 
 
 ---
@@ -2075,8 +2110,10 @@ Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumul
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
 `df = pd.concat([df, chunk])`, `arr = np.vstack([arr, row])`, `arr = np.append(arr, x)`, and
 the other quadratic reallocations of the ecosystem knowledge base. Only loop-carried
-accumulation is reported (the result feeds the next iteration); one-off concatenations inside a
-loop are not.
+accumulation is reported: the result feeds the next iteration and is computed from the previous
+value, also when it grows on some iterations only. One-off concatenations inside a loop are
+not, also on a branch that leaves the variable unchanged otherwise
+(`if step: x = np.append(edges, last)`).
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -2124,7 +2161,9 @@ functions that reach them, including the getter of a property read in the loop.
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
 calls that only build a query (`QuerySet.filter(...)`, `Redis.pipeline()`), DDL statements
 (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code (`upgrade` / `downgrade` functions, files
-under `migrations/` or `alembic/`), the ORM packages' own implementation, or bounded loops.
+under `migrations/` or `alembic/`), the ORM packages' own implementation, or loops whose size the
+code fixes when no data-sized loop is around them (`for ident in enumerate((1, 2), 1)`,
+`zip(order, ["m1", "m2"])`, a name bound to a small display; see `EFF102`).
 
 ## Why is this bad?
 One round trip per item makes the run time grow with the number of rows and with the network
@@ -2269,13 +2308,18 @@ or a `list[...]` / `List[...]` annotation on a parameter, a local, or a class at
 not reported. Neither are:
 
 - loops whose size does not depend on the data: small constant ranges and displays
-  (`for i in range(3)`, `for s in SUFFIXES` with `SUFFIXES = (".py", ".pyi")`), retry loops,
-  and daemon polling loops; the iterable of a `for` loop, which runs once;
+  (`for i in range(3)`, `for s in SUFFIXES` with `SUFFIXES = (".py", ".pyi")`, also through
+  `enumerate` / `zip` / `reversed` / `sorted` / `.items()` and `range(ATTEMPTS - 1)` with a
+  constant `ATTEMPTS`), retry loops, and daemon polling loops; the iterable of a `for` loop,
+  which runs once;
 - lists built in the iteration (`parts = [...]` inside the loop) and lists of the loop element
   (`row.cells.index(x)`);
-- small constant lists: a display of at most 8 constants that nothing changes, in the
-  function, as a module global (`LEVELS = ["low", "mid", "high"]`), or as an attribute its
-  class only ever assigns such a display (`self.preferred = [",", ";"]`, a class attribute);
+- small lists: a display of at most 8 items that nothing grows (the loop may shrink it with
+  `remove()` / `pop()` or replace its items), in the function, as a module global (also of
+  another module: `LEVELS = ["low", "mid", "high"]`), or as an attribute its class and
+  subclasses only ever assign such a display (`self.preferred = [",", ";"]`, a class
+  attribute). A display handed to code that may grow it (any call but read-only builtins; a
+  `*items` argument passes the items only) is not small;
 - calls after which the loop always ends (`return items.index(x)`, a `break` on every path);
 - `index(x, start)`, which scans from a position that usually moves forward.
 
@@ -2333,7 +2377,11 @@ not change during the loop, and suggests building a `set` once before the loop.
 
 This is a size-dependent rewrite: it is reported as a suggestion and applied only with
 `heki check --fix --include-size-dependent`, or for functions that a `--profile` dump shows
-hot. Small constant displays (`x in ("a", "b")`) are not reported.
+hot. Not reported:
+
+- small displays: at most 8 items that nothing grows, whatever the items are
+  (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one);
+- lists whose elements are dicts, lists, or sets: no `set` can hold them.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is
@@ -2385,8 +2433,11 @@ constructors, sync and async (`requests.Session()`, `httpx.AsyncClient()`,
 including the getter of a property read in the loop (`self.client.get(url)` where the `client`
 getter builds a new client).
 
-The iterable of a `for` loop is evaluated once and is not reported; bounded loops (small
-constant ranges, retry loops, daemon polling loops) are not reported either.
+The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
+loops whose size the code fixes, when no data-sized loop is around them: displays of at most 8
+items (also through a name or a module constant bound to one that nothing grows, and through
+`enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer constants
+(`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
 
 ## Why is this bad?
 Each new client pays for DNS, TCP, and TLS setup again and throws its connection pool away.
@@ -2439,9 +2490,13 @@ its first matching comparison. It does not report:
   (`for b in a.children`, `for b in index[a.k]`, `for b in f(a)`, `for b in xs[i + 1:]`);
 - comparisons that do not select pairs: `!=`, a negated `==`, one alternative of an `or`
   (`a.k == b.k or match(a, b)`), a result that is stored instead of tested, a value picked for
-  every pair (`1 if a.k == b.k else 0`), or a match that only skips to the next iteration
-  (`if a == b: continue` in an all-pairs loop);
-- small constant loops (`for b in ("x", "y")`, `for i in range(3)`, a constant tuple).
+  every pair (`1 if a.k == b.k else 0`), a match that only skips to the next iteration
+  (`if a == b: continue` in an all-pairs loop), or a comparison whose false side does work:
+  an `else` / `elif` body, the failure of an `assert a == b`, or a `break` / `return` on a
+  mismatch runs for the pairs an index would skip, so every pair is needed;
+- loops whose size the code fixes: a display of at most 8 items (`for b in ("x", "y")`, also
+  through a name or a module constant bound to one that nothing grows, and through
+  `enumerate` / `zip` / `sorted` / `.items()` ...), and `range` of integer constants.
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.

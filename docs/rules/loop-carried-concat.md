@@ -10,8 +10,10 @@ Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumul
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
 `df = pd.concat([df, chunk])`, `arr = np.vstack([arr, row])`, `arr = np.append(arr, x)`, and
 the other quadratic reallocations of the ecosystem knowledge base. Only loop-carried
-accumulation is reported (the result feeds the next iteration); one-off concatenations inside a
-loop are not.
+accumulation is reported: the result feeds the next iteration and is computed from the previous
+value, also when it grows on some iterations only. One-off concatenations inside a loop are
+not, also on a branch that leaves the variable unchanged otherwise
+(`if step: x = np.append(edges, last)`).
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total

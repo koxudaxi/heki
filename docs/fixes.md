@@ -20,6 +20,12 @@ equivalent. Whether the rewrite is **offered** depends on two independent questi
 | Size-dependent (can be slower for tiny inputs or loops that run zero times) | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` for hot functions |
 | — | `OPT103` | suggestion only |
 
+A size-dependent candidate is not reported at all when the code fixes its size: the container
+is a display of at most 8 items that nothing grows (it may shrink: `expected.pop(0)` on
+`expected = [b"a", b""]`), the loop runs a fixed number of times (a small display or `range` of
+constants), the list is rebuilt in every iteration, or the loop's own test caps the accumulator
+(`while len(buf) < 10`). These facts decide profitability only, never safety.
+
 ## What the analysis proves
 
 The analysis behind the `OPT` rules is separate from the one behind the other rules and is
@@ -52,7 +58,22 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
 
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
-reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed.
+reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. `--diff`
+prints the paths every other output format prints (relative to the working directory), so
+`patch -p1` applies it where heki ran.
+
+A fix keeps the file acceptable to a type checker and to isort:
+
+- A `collections.deque` rewrite (`OPT120`, `OPT121`) also rewrites the variable's annotation
+  (`q: list[int] = []` becomes `q: collections.deque[int] = collections.deque([])`); an
+  annotation it cannot rewrite (`Sequence[int]`, a union) or another annotated declaration of
+  the variable blocks the fix.
+- `import collections` goes into the module's block of standard-library imports, in the order
+  that block follows (straight imports first, or sorted by module as with
+  `force-sort-within-sections`); without such a block it starts one before the other imports,
+  and in a module without imports it follows the docstring and `__future__` imports, with the
+  blank lines isort expects. Only imports run before it, so the rewritten function cannot run
+  before `collections` is bound.
 
 ## Profiles
 
