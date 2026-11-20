@@ -589,9 +589,10 @@ which module imports which.
    whose results it may be. Propagation (`returned_results`) adds what those calls return: each
    callee's `returns_origins` without its parameters, and the origins of the arguments bound to
    the parameters it returns (or an element of them), through any number of nested calls
-   (`identity(identity(x))`); a call whose result its own argument may be (in a loop) adds
-   nothing more the second time. The facts take part in Early Cutoff like every summary
-   field.
+   (`identity(identity(x))`). Each call's result is resolved once, to a fixpoint over the calls
+   whose results its arguments may be (a loop makes a call depend on itself): the fixpoint only
+   joins, and each change adds a kind or a parameter to one call's value. The facts take part
+   in Early Cutoff like every summary field.
 3. **The forward analysis** (`heki_rules`, per function, to a fixpoint) joins the kinds of a
    value at phis, maps a project call's result through its callees' `returns_origins` and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it

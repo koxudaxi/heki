@@ -112,8 +112,9 @@ module binding thousands of names each to an attribute of the one before, a func
 thousand calls of eight operands each, a helper that types nothing making thousands of strict
 accesses of one name that one caller calls as many times, a helper that types nothing reading,
 calling, or writing one strict target name thousands of times, which a caller calls as many times,
-many `is` tests each followed by a conditional expression on the tested parameter, and many branches
-on a long chain of copies of one `is` test.
+many `is` tests each followed by a conditional expression on the tested parameter, many branches on
+a long chain of copies of one `is` test, and a long chain of returned calls each handed the previous
+call's result as two of its arguments.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
