@@ -257,6 +257,91 @@ fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
     assert_eq!(lines, vec![2 + tests as u64 + 3 * tests as u64 + 1]);
 }
 
+/// A function returning the last of a long chain of conditional expressions, each choosing
+/// between a call of the previous value and the previous value itself
+/// (`x400 = identity(x399) if flag else x399`): each phi is walked once and referred to by the
+/// walks that meet it, instead of every argument walking all the phis before it.
+#[test]
+fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
+    let links = 400;
+    let mut lines = vec![
+        "def identity(x):".to_owned(),
+        "    return x".to_owned(),
+        String::new(),
+        String::new(),
+        "def chain(x0, flag, other):".to_owned(),
+    ];
+    for i in 1..=links {
+        let prev = i - 1;
+        lines.push(format!("    x{i} = identity(x{prev}) if flag else x{prev}"));
+    }
+    lines.push(format!("    return x{links} if other else []"));
+    lines.extend(
+        [
+            "",
+            "",
+            "def use(shared, flag, other):",
+            "    x = chain(shared, flag, other)",
+            "    x.append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_returned_phi_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "MUT112")
+            .map(|d| d["qualname"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["use"]
+    );
+}
+
+/// One returned call handed the last 256 of a long chain of item reads (`z2000 = z1999[0]`) as
+/// its arguments: each argument walks the chain, so past the budget of walked values
+/// proportional to the source what the function returns is unknown, and nothing is reported
+/// from it.
+#[test]
+fn origin_walks_past_their_budget_return_unknown() {
+    let (links, args) = (2_000, 256);
+    let mut lines = vec![
+        "def pick(*rows):".to_owned(),
+        "    return rows[0]".to_owned(),
+        String::new(),
+        String::new(),
+        "def deep(z0, flag):".to_owned(),
+    ];
+    for i in 1..=links {
+        lines.push(format!("    z{i} = z{}[0]", i - 1));
+    }
+    let picked: Vec<String> = (links - args + 1..=links)
+        .map(|i| format!("z{i}"))
+        .collect();
+    let picked = picked.join(", ");
+    lines.push(format!("    return pick({picked}) if flag else []"));
+    lines.extend(
+        [
+            "",
+            "",
+            "def use(shared, flag):",
+            "    x = deep(shared, flag)",
+            "    x.append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_origin_walk_budget");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found.iter().all(|d| d["rule_code"] != "MUT112"),
+        "{found:#?}"
+    );
+}
+
 /// A function appending each alias of a long chain to a list (one list for all of them, or a new
 /// list per alias) and returning the last alias or its parameter, and a caller changing what it
 /// returns.

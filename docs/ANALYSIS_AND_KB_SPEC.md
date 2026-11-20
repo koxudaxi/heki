@@ -585,16 +585,21 @@ which module imports which.
    container method) is an element of that object; one stored in a global or a closure cell is
    held. One walk takes each stored value and the values it copies (through copies and phis)
    with each place once, for all the stores; past a budget of such pairs proportional to the
-   function's source, what the function returns is unknown. A project call's result the walk reaches is one of `returns_results` (the call's
-   span, and whether the object is the result or an element of it), and each argument of such a
-   call gets `ArgOrigin::origins` from the same walk: its own origins and, in turn, the calls
-   whose results it may be. Propagation (`returned_results`) adds what those calls return: each
+   function's source, what the function returns is unknown. A project call's result the walk
+   reaches is one of `returns_results` (the call's span, and whether the object is the result or
+   an element of it), and each argument of such a call gets `ArgOrigin::origins` from the same
+   walk: its own origins and, in turn, the calls whose results it may be. A phi the walk meets
+   (other than where it starts) is a node of `origin_nodes`, as itself or as an element, walked
+   once and referred to by every walk that meets it (`returns_nodes`, `LocalOrigins::nodes`);
+   past a budget of walked values proportional to the function's source, what the function
+   returns is unknown. Propagation (`returned_results`) adds what those calls return: each
    callee's `returns_origins` without its parameters, and the origins of the arguments bound to
    the parameters it returns (or an element of them), through any number of nested calls
-   (`identity(identity(x))`). Each call's result is resolved once, to a fixpoint over the calls
-   whose results its arguments may be (a loop makes a call depend on itself): the fixpoint only
-   joins, and each change adds a kind or a parameter to one call's value. The facts take part
-   in Early Cutoff like every summary field.
+   (`identity(identity(x))`). Each call's result and each node is resolved once, to a fixpoint
+   over the calls and nodes it depends on (a loop makes a call or a phi depend on itself): the
+   fixpoint only joins, and each change adds a kind or a parameter to one value. A second
+   definition of the same qualname appends its nodes after the first one's. The facts take
+   part in Early Cutoff like every summary field.
 3. **The forward analysis** (`heki_rules`, per function, to a fixpoint) joins the kinds of a
    value at phis, maps a project call's result through its callees' `returns_origins` and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it

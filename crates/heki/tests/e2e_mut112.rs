@@ -1131,6 +1131,41 @@ fn mut112_reports_a_loop_value_a_raising_sentinel_test_guards() {
     );
 }
 
+/// Two definitions of one function under a condition, each returning through a phi: what the
+/// second returns through a call of a phi's value refers to its own phis, after the first's.
+const CONDITIONAL_DEFINITIONS: &str = r#"FAST = True
+
+
+def identity(x):
+    return x
+
+
+if FAST:
+    def pick(rows, flag, other):
+        z = [] if flag else [0]
+        return z if other else []
+else:
+    def pick(rows, flag, other):
+        y = rows if flag else []
+        return identity(y) if other else []
+
+
+def use_pick(rows, flag, other):
+    x = pick(rows, flag, other)
+    x.append(1)
+"#;
+
+#[test]
+fn mut112_follows_the_phis_of_both_conditional_definitions() {
+    let p = Project::new("mut112_conditional_definitions");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/pick.py", CONDITIONAL_DEFINITIONS);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let f = "pkg/pick.py";
+    assert_eq!(found(&diags), vec![d(f, 20, "use_pick", "x")], "{diags:#?}");
+    assert!(message(at(&diags, f, 20)).ends_with("the parameter `rows` on another"));
+}
+
 #[test]
 fn mut112_follows_returned_calls_through_nested_calls() {
     let p = Project::new("mut112_nested_calls");

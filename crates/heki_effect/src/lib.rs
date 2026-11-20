@@ -564,6 +564,13 @@ pub struct EffectSummary {
     /// arguments may be ([`ArgOrigin::origins`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub returns_results: Vec<ResultOf>,
+    /// The phis the returned object may be ([`Self::origin_nodes`] positions; `MUT112`, local).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returns_nodes: Vec<u32>,
+    /// What each phi the origin walks of the function meet may be ([`LocalOrigins::nodes`]),
+    /// each walked once (`MUT112`, local).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin_nodes: Vec<LocalOrigins>,
     /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
     pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
