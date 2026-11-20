@@ -415,6 +415,16 @@ class Switched:
 
 def switch() -> None:
     Switched.KEY = "_other"
+
+
+class Retitled:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+Retitled.KEY = "_other"
 "#;
 
 #[test]
@@ -482,11 +492,12 @@ unresolved = "report"
             d(u, 53, "MUT201", "Overridden.write", forced),
             // A class constant the class body deletes is no constant, nor one stored on its
             // class elsewhere (a `Final` one stays: line 32), also through `cls` and in its
-            // own module.
+            // own module, in a function or in the module body.
             d(u, 65, "MUT205", "Deleted.write", class),
             d(u, 72, "MUT205", "Configured.write", class),
             d(u, 83, "MUT205", "Reconfigured.write", class),
             d(u, 90, "MUT205", "Switched.write", class),
+            d(u, 101, "MUT205", "Retitled.write", class),
         ]
     );
 }

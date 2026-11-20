@@ -2638,9 +2638,10 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
 }
 
 /// The class attributes the module stores into or deletes outside their class bodies, as
-/// `(class qualname, attribute)`: on the class object (`Keys.KEY = "x"`, `cls.KEY = "x"` in a
-/// class method) or on an instance in a method of the class (`self.KEY = "x"`, which shadows the
-/// class attribute for that instance).
+/// `(class qualname, attribute)`: on the class object (`Keys.KEY = "x"` in a function, or in
+/// the module body after the `class` statement, where the name holds the class it made;
+/// `cls.KEY = "x"` in a class method) or on an instance in a method of the class
+/// (`self.KEY = "x"`, which shadows the class attribute for that instance).
 fn class_attrs_rebound<'i>(
     input: &'i ModuleInput<'_>,
     decls: &ModuleDecls,
@@ -2665,11 +2666,20 @@ fn class_attrs_rebound<'i>(
             else {
                 continue;
             };
-            let class = match defs.get(obj) {
+            let mut cur = *obj;
+            while let Some(InstKind::Copy { src, .. }) = defs.get(&cur) {
+                cur = *src;
+            }
+            let class = match defs.get(&cur) {
                 Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
                     if decls.classes.contains_key(name.as_str()) =>
                 {
                     Some(name.as_str())
+                }
+                Some(InstKind::MakeClosure {
+                    func_id: Some(id), ..
+                }) if input.ir.function(*id).is_class_body => {
+                    Some(input.ir.function(*id).qualname.as_str())
                 }
                 _ => receiver
                     .as_ref()
