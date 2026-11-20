@@ -114,10 +114,47 @@ impl ParsedFile {
     }
 }
 
+/// The absolute path of `path` with every symbolic link resolved: the one form in which heki
+/// compares paths. On Windows it is written without the `\\?\` prefix that
+/// `std::fs::canonicalize` adds, as editors and users write paths (`C:\...`, `\\server\share\...`);
+/// Rust's file functions add that prefix again where a path needs it.
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path).map(without_verbatim_prefix)
+}
+
+#[cfg(windows)]
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    use std::ffi::OsString;
+    use std::path::Prefix;
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let mut plain = OsString::new();
+    match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => plain.push(format!("{}:", char::from(drive))),
+        Prefix::VerbatimUNC(server, share) => {
+            plain.push(r"\\");
+            plain.push(server);
+            plain.push(r"\");
+            plain.push(share);
+        }
+        _ => return path,
+    }
+    let mut out = PathBuf::from(plain);
+    out.push(components.as_path());
+    out
+}
+
+#[cfg(not(windows))]
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
+}
+
 /// The canonical form of `path`, or `path` itself when it cannot be resolved (it does not exist,
 /// e.g. an unsaved document, or no longer exists).
 fn canonical_or_given(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    canonical(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Project-relative POSIX path (falls back to the display path outside the root).
@@ -281,24 +318,22 @@ pub fn discovers(dir: &Path, root: &Path, exclude: &GlobSet, file: &Path) -> boo
         .any(|e| e.path() == on_disk && e.depth() > 0)
 }
 
-/// Parse `source` as the module at `path` (`Err`: a `path:line:col: syntax error` message).
+/// Parse `source` as the module at `path` (`Err`: its first syntax error).
 pub fn parse_source(
     path: &Path,
     root: &Path,
     source: String,
     layout: ModuleLayout,
     runtime: RuntimeProfile,
-) -> Result<ParsedFile, String> {
+) -> Result<ParsedFile, FileError> {
     let parsed = heki_ast::parse_module(&source).map_err(|errs| {
         let index = LineIndex::from_source(&source);
         let first = &errs[0];
-        let (line, col) = index.line_col(first.span.start);
-        format!(
-            "{}:{line}:{col}: syntax error: {} ({} error(s))",
-            path.display(),
-            first.message,
-            errs.len()
-        )
+        FileError {
+            path: display_path(path),
+            position: Some(index.line_col(first.span.start)),
+            message: format!("syntax error: {} ({} error(s))", first.message, errs.len()),
+        }
     })?;
     let rel = rel_posix(path, root);
     let (module_name, is_package) = module_name_for_path(Path::new(&rel), layout.src)
@@ -387,12 +422,35 @@ impl ProjectEnv {
 pub struct FileError {
     /// Keyed like [`ParsedFile::path`].
     pub path: PathBuf,
+    /// The 1-based line and column of a syntax error.
+    pub position: Option<(u32, u32)>,
     pub message: String,
 }
 
+impl FileError {
+    /// A read error of the file at `path`.
+    pub fn unreadable(path: &Path, cause: &impl std::fmt::Display) -> Self {
+        Self {
+            path: display_path(path),
+            position: None,
+            message: cause.to_string(),
+        }
+    }
+
+    /// `path:line:col: message` (`path: message` without a position), with the path written as
+    /// `path_text` (the caller's choice: `heki check` writes it relative to the working directory).
+    pub fn report(&self, path_text: &str) -> String {
+        match self.position {
+            Some((line, col)) => format!("{path_text}:{line}:{col}: {}", self.message),
+            None => format!("{path_text}: {}", self.message),
+        }
+    }
+}
+
+/// With the path as reports write it ([`heki_diagnostics::path_text`]).
 impl std::fmt::Display for FileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(&self.report(&heki_diagnostics::path_text(&self.path)))
     }
 }
 
@@ -427,14 +485,10 @@ impl Project {
             .map(|p| {
                 let source = match opts.overrides.and_then(|o| o.get(&display_path(p))) {
                     Some(text) => Ok(text.clone()),
-                    None => heki_ast::read_source(p).map_err(|e| format!("{}: {e}", p.display())),
+                    None => heki_ast::read_source(p).map_err(|e| FileError::unreadable(p, &e)),
                 };
                 source
                     .and_then(|source| parse_source(p, &env.root, source, env.layout, env.runtime))
-                    .map_err(|message| FileError {
-                        path: display_path(p),
-                        message,
-                    })
             })
             .collect();
         let mut files = Vec::new();
@@ -476,4 +530,30 @@ pub fn retain_unsuppressed<'f>(
             .get(d.path.as_path())
             .is_some_and(|ign| ign.is_suppressed(d.line, &d.rule_code, &d.rule_slug))
     });
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::without_verbatim_prefix;
+    use std::path::PathBuf;
+
+    #[test]
+    fn verbatim_drive_and_unc_paths_lose_the_prefix_and_others_stay() {
+        for (given, plain) in [
+            (r"\\?\C:\Users\me\pkg\a.py", r"C:\Users\me\pkg\a.py"),
+            (r"\\?\C:\", r"C:\"),
+            (r"\\?\UNC\server\share\pkg\a.py", r"\\server\share\pkg\a.py"),
+            (r"C:\Users\me\pkg\a.py", r"C:\Users\me\pkg\a.py"),
+            (
+                r"\\?\GLOBALROOT\Device\X\a.py",
+                r"\\?\GLOBALROOT\Device\X\a.py",
+            ),
+        ] {
+            assert_eq!(
+                without_verbatim_prefix(PathBuf::from(given)),
+                PathBuf::from(plain),
+                "{given}"
+            );
+        }
+    }
 }

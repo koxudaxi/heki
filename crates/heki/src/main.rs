@@ -305,7 +305,7 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
         for (func, hazard) in file.ir.all_a1_hazards() {
             let (line, column) = lines.line_col(hazard.span.start);
             all_records.push(AssumptionRecord {
-                path: file.path.display().to_string(),
+                path: check::shown_text(&file.path),
                 line,
                 column,
                 qualname: func.qualname.clone(),
@@ -334,7 +334,11 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
             project.errors.len()
         );
     }
-    check::finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS)
+    check::finish(
+        OutputFormat::Full,
+        &check::shown_errors(&project.errors),
+        ExitCode::SUCCESS,
+    )
 }
 
 fn main() -> ExitCode {

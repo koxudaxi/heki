@@ -233,6 +233,9 @@ jobs:
     needs: [pypi]
     if: github.event_name == 'release'
     uses: ./.github/workflows/docs.yml
+    # A called workflow sees no secret unless the caller passes them: the deploy job needs
+    # the Cloudflare token.
+    secrets: inherit
     permissions:
       contents: read
 

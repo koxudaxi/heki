@@ -87,6 +87,11 @@ python3.15 scripts/check_memory.py --heki target/release/heki
   unit's IR), so that the language server's single-file check equals `heki check`. Every new
   rule and every new cross-file fact gets a step in `crates/heki/tests/lsp_oracle.rs`, which
   compares the server with `heki check` after each step of an editing session.
+- A new walk, fixpoint, or per-function state follows "Analysis cost" in
+  `docs/development.md`: answers kept per value, fixpoints that join and have a pass limit,
+  budgets proportional to the source, and a shape in `crates/heki/tests/e2e_analysis_bounds.rs`
+  for each bound. Such a change is also run over a large corpus under a memory cap and a timeout
+  before it is merged.
 - Rules the Stage 0-A measurements rejected (`MUT102a/b`, `DATA102`, `EFF104`, `MUT104` for
   `ALL_CAPS` constants, `MUT105`, `EFF108`) are not revived without new evidence.
 

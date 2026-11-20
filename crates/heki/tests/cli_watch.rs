@@ -547,7 +547,7 @@ fn watch_keeps_reporting_errors_of_unchanged_files_and_forgets_unreadable_ones()
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("pkg/bad.py:1:7: syntax error")),
+            .any(|l| l.starts_with("error: pkg/bad.py:1:7: syntax error")),
         "{lines:#?}"
     );
     // The helper can no longer be read: like `heki check`, the project goes on without it, and
@@ -561,7 +561,7 @@ fn watch_keeps_reporting_errors_of_unchanged_files_and_forgets_unreadable_ones()
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("pkg/bad.py:1:7: syntax error")),
+            .any(|l| l.starts_with("error: pkg/bad.py:1:7: syntax error")),
         "{lines:#?}"
     );
     let out = child.wait_with_output().unwrap();
@@ -696,6 +696,8 @@ fn watch_drops_a_package_moved_away_with_its_modules() {
     assert_eq!(out.status.code(), Some(0));
 }
 
+// Unix only: the directory is made unreadable with permission bits; on Windows that takes an
+// access control list, which std cannot set.
 #[cfg(unix)]
 #[test]
 fn watch_reports_a_directory_it_cannot_list_until_it_can() {
