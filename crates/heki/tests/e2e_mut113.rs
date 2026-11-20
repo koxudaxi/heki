@@ -1126,6 +1126,49 @@ for gen, change in [
         print(e)
 "#;
 
+/// A loop over a private generator calls a function of the module and a method of the class:
+/// only the method, which changes the iterated dict, counts.
+const LEDGER: &str = r#"def note(key):
+    return key
+
+
+class Ledger:
+    def __init__(self) -> None:
+        self.entries: dict[str, int] = {}
+
+    def _walk(self):
+        for key in self.entries:
+            yield key
+
+    def drop(self, key):
+        self.entries.pop(key, None)
+
+    def prune(self):
+        for key in self._walk():
+            note(key)
+            self.drop(key)
+"#;
+
+#[test]
+fn mut113_counts_only_the_loop_calls_of_the_class_family() {
+    let p = Project::new("mut113_ledger");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/ledger.py", LEDGER);
+    let diags = diagnostics(&p, &["--extend-select", "MUT113"]);
+    assert_eq!(
+        reports(&diags),
+        vec![d("pkg/ledger.py", 10, "Ledger._walk", "Ledger.entries")],
+        "{diags:#?}"
+    );
+    assert_eq!(
+        related(&diags, "pkg/ledger.py", 10)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect::<Vec<_>>(),
+        vec![19]
+    );
+}
+
 #[test]
 fn mut113_counts_the_changes_each_container_class_checks() {
     let p = Project::new("mut113_containers");
