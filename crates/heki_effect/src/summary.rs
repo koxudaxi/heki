@@ -1355,6 +1355,7 @@ impl<'a> Extractor<'a> {
                         let role = SiteRole::Through {
                             via: via.clone(),
                             iterated: false,
+                            returned: false,
                         };
                         let flags = Some((x_site.is_awaited, x_site.drives_coroutine_manually));
                         extra.push((
@@ -1366,8 +1367,22 @@ impl<'a> Extractor<'a> {
                         let role = SiteRole::Through {
                             via: via.clone(),
                             iterated: true,
+                            returned: false,
                         };
                         extra.push((role_site(y_site, role, span, depth, None), Some(at)));
+                    }
+                    // A returned adapter iterates its input where the caller's result is
+                    // iterated.
+                    if returned[x] {
+                        let role = SiteRole::Through {
+                            via: via.clone(),
+                            iterated: true,
+                            returned: true,
+                        };
+                        extra.push((
+                            role_site(y_site, role, x_site.span, x_site.loop_depth, None),
+                            None,
+                        ));
                     }
                 }
             }

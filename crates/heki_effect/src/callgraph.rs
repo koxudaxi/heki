@@ -856,7 +856,11 @@ pub(crate) fn delivery<'s, 'i>(
         }),
         SiteRole::Iterate => result(Facts::Body),
         SiteRole::Return => result(Facts::Result),
-        SiteRole::Through { via, iterated } => {
+        SiteRole::Through {
+            via,
+            iterated,
+            returned,
+        } => {
             callee.facts(Facts::Result)?;
             // The first candidate that iterates the parameter: its body runs at its call, or
             // iterating its result runs what iterates the parameter.
@@ -872,7 +876,11 @@ pub(crate) fn delivery<'s, 'i>(
             })?;
             Some(Delivery {
                 from: Facts::Result,
-                into: Facts::Body,
+                into: if *returned {
+                    Facts::Result
+                } else {
+                    Facts::Body
+                },
                 via: Some(p),
             })
         }

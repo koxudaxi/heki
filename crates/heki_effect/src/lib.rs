@@ -894,10 +894,13 @@ pub enum SiteRole {
     Return,
     /// The object the call returns is passed to a project call here, as parameter `.1` of its
     /// candidate `.0`, which iterates it when its body runs at its call (`iterated == false`)
-    /// or when its result is iterated here (`iterated == true`).
+    /// or when its result is iterated (`iterated == true`): here, or (`returned`) where the
+    /// caller's own result is, which that result is (`relay(rows())` returned by a plain
+    /// function).
     Through {
         via: Vec<(FuncKey, u8)>,
         iterated: bool,
+        returned: bool,
     },
 }
 

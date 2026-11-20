@@ -252,7 +252,8 @@ table (`consumption`):
 - `Return`: a plain function returns it, directly or through lazy wrappers: its `Result` goes into
   the function's own `iterated`;
 - `Through`: it is passed to a project call whose body iterates that parameter (`iterates_params`)
-  at the call, or whose result is iterated there: its `Result` runs inside that call.
+  at the call, or whose result is iterated there or returned by a plain caller (`return
+  relay(rows())`): its `Result` runs inside that call, or goes into the caller's `iterated`.
 
 Any other use runs nothing in the caller: a generator stored, yielded, returned from an
 `async def`, handed to an external or unresolved call (`StreamingResponse(rows())`), or only

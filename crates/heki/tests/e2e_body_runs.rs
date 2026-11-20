@@ -1100,8 +1100,8 @@ forbid = ["sleep"]
 /// What runs where a function is called, a generator is made and iterated, and a class is
 /// defined: the implementation behind `typing.overload` signatures, stepping by `any` / `all`,
 /// a generator a property returns, one of several generators a branch chooses, the body of a
-/// class a function defines (its methods run only when called), and a coroutine awaited after
-/// it is made.
+/// class a function defines (its methods run only when called), a coroutine awaited after it is
+/// made, and a generator handed to an adapter a function returns.
 const DEFERRED: &str = r#"import time
 import typing
 
@@ -1187,6 +1187,22 @@ async def render_awaited_later():
 async def render_never_awaited():
     pending = _work()
     return pending
+
+
+def relay(it):
+    yield from it
+
+
+def adapter():
+    return relay(rows(1))
+
+
+async def through_adapter():
+    list(adapter())  # EFF101
+
+
+async def adapter_not_iterated():
+    adapter()
 "#;
 
 #[test]
