@@ -71,7 +71,9 @@ message = "use GenerationStore.set_fields() instead"
 
 A class's own initialization is always allowed: an initializer (`__init__`, `__post_init__`,
 `__new__`, `model_post_init`, `__setstate__`) of a target class or a subclass may write its own
-`self`, directly, through `super().__init__()`, or through helpers it passes `self` to.
+`self`, directly, through `super().__init__()`, or through helpers it passes `self` to. So is a
+function that only runs inside the owner's operations: every path of project callers above it
+starts in an allowed writer, an exempt method, or such an initialization.
 
 ## Read contracts: `[[tool.heki.read-owners]]` (`MUT203`)
 
