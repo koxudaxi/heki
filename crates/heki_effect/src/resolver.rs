@@ -2812,7 +2812,9 @@ fn complete_decls(
                     (Some(d), Some(t)) if !project.narrower(t, d) => Some(d),
                     (d, t) => t.or(d),
                 };
-                if let Some(t @ (Ty::Inst(_) | Ty::Union(_))) = stored {
+                if let Some(t) = stored
+                    && kept_in_declarations(t)
+                {
                     decls.global_types.insert(name.clone(), t.clone());
                 }
             }
@@ -2846,7 +2848,8 @@ fn complete_decls(
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let InstKind::AttrStore { obj, attr, value } = &inst.kind
                 && self_vars.contains(obj)
-                && let Some(t @ (Ty::Inst(_) | Ty::Union(_))) = types.ty(*value)
+                && let Some(t) = types.ty(*value)
+                && kept_in_declarations(t)
             {
                 class
                     .attr_types
@@ -2856,6 +2859,17 @@ fn complete_decls(
         }
     }
     decls
+}
+
+/// Whether the declarations keep an inferred type of a global or a `self` attribute: an
+/// instance, a union of instances, or a coroutine of one (`self.ready = self.setup()`, awaited
+/// in another method).
+fn kept_in_declarations(t: &Ty) -> bool {
+    match t {
+        Ty::Inst(_) | Ty::Union(_) => true,
+        Ty::Coroutine(result) => kept_in_declarations(result),
+        _ => false,
+    }
 }
 
 fn module_scope(semantic: &SemanticModel) -> Option<heki_semantic::ScopeId> {

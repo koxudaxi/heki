@@ -944,7 +944,8 @@ fn a_class_derives_from_the_import_its_own_name_shadows() {
 
 /// Calling an `async def` gives a coroutine, and awaiting it gives what the function's
 /// annotation says it returns: the awaited store's method runs, a coroutine has no `save`, and
-/// awaiting either of two coroutines gives either result.
+/// awaiting either of two coroutines gives either result, also for a coroutine kept in an
+/// attribute or a global and awaited in another function.
 const AWAITED: &str = r#"import time
 
 
@@ -985,6 +986,25 @@ async def either(flag):
     pending = open_store() if flag else open_cache()
     obj = await pending
     obj.save()  # EFF101
+
+
+class Holder:
+    def __init__(self):
+        self.pending = open_store()
+        self.factory = open_store
+
+    async def run(self):
+        store = await self.pending
+        store.save()  # EFF101
+
+
+ready = open_store()
+factory = open_store
+
+
+async def use_global():
+    store = await ready
+    store.save()  # EFF101
 
 
 async def never_awaited(pool: Pool):
