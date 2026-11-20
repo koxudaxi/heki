@@ -410,12 +410,15 @@ impl<'a> FnIndex<'a> {
             return true;
         }
         let list_only = !kinds.is_empty() && kinds.iter().all(|k| *k == BuiltinKind::List);
+        let mut ops = Vec::new();
         for bb in &f.blocks {
             for (i, inst) in bb.insts.iter().enumerate() {
-                if inst.kind.operands().iter().any(|v| alias.contains(v))
-                    && sink != Some((bb.id, i))
-                    && self.use_grows(inst, &alias, list_only)
-                {
+                if sink == Some((bb.id, i)) {
+                    continue;
+                }
+                ops.clear();
+                self.grown_operands(inst, list_only, &mut ops);
+                if ops.iter().any(|v| alias.contains(v)) {
                     return true;
                 }
             }
@@ -428,10 +431,10 @@ impl<'a> FnIndex<'a> {
         false
     }
 
-    /// Whether `inst`, which uses an alias in `alias`, may grow the container or hand it to
-    /// code that may.
-    fn use_grows(&self, inst: &Inst, alias: &FxHashSet<VarId>, list_only: bool) -> bool {
-        let is = |v: &VarId| alias.contains(v);
+    /// Push the operands of `inst` that it may grow or hand to code that may grow them
+    /// (`list_only`: the containers are lists, so an element store by a constant index keeps
+    /// their size).
+    fn grown_operands(&self, inst: &Inst, list_only: bool, out: &mut Vec<VarId>) {
         let starred = |dst: VarId, i: usize| self.f.is_starred(dst, i);
         match &inst.kind {
             InstKind::Copy { .. }
@@ -443,25 +446,37 @@ impl<'a> FnIndex<'a> {
             | InstKind::SubscriptDelete { .. }
             | InstKind::AttrDelete { .. }
             | InstKind::Delete { .. }
-            | InstKind::YieldFrom { .. } => false,
-            InstKind::AttrStore { value, .. } => is(value),
+            | InstKind::YieldFrom { .. }
+            | InstKind::Const { .. }
+            | InstKind::LoadGlobal { .. }
+            | InstKind::LoadDeref { .. }
+            | InstKind::LoadName { .. }
+            | InstKind::CatchException { .. }
+            | InstKind::Import { .. } => {}
+            InstKind::AttrStore { value, .. } => out.push(*value),
             InstKind::SubscriptStore {
                 obj, index, value, ..
             } => {
-                is(value)
-                    || (is(obj)
-                        && !(list_only
-                            && matches!(
-                                self.def_inst(*index).map(|i| &i.kind),
-                                Some(InstKind::Const {
-                                    literal: ConstLiteral::Int(_),
-                                    ..
-                                })
-                            )))
+                out.push(*value);
+                let item_store = list_only
+                    && matches!(
+                        self.def_inst(*index).map(|i| &i.kind),
+                        Some(InstKind::Const {
+                            literal: ConstLiteral::Int(_),
+                            ..
+                        })
+                    );
+                if !item_store {
+                    out.push(*obj);
+                }
             }
             InstKind::BinOp {
                 lhs, rhs, in_place, ..
-            } => *in_place && (is(lhs) || is(rhs)),
+            } => {
+                if *in_place {
+                    out.extend([*lhs, *rhs]);
+                }
+            }
             InstKind::MethodCall {
                 dst,
                 recv,
@@ -470,6 +485,9 @@ impl<'a> FnIndex<'a> {
                 kwargs,
                 ..
             } => {
+                if !NON_GROWING_METHODS.contains(&method.as_str()) {
+                    out.push(*recv);
+                }
                 let str_recv = matches!(
                     self.def_inst(*recv).map(|i| &i.kind),
                     Some(InstKind::Const {
@@ -477,12 +495,15 @@ impl<'a> FnIndex<'a> {
                         ..
                     })
                 );
-                (is(recv) && !NON_GROWING_METHODS.contains(&method.as_str()))
-                    || args
-                        .iter()
-                        .enumerate()
-                        .any(|(i, a)| is(a) && !starred(*dst, i) && !str_recv)
-                    || kwargs.iter().any(|(_, v)| is(v))
+                if !str_recv {
+                    out.extend(
+                        args.iter()
+                            .enumerate()
+                            .filter(|(i, _)| !starred(*dst, *i))
+                            .map(|(_, a)| *a),
+                    );
+                }
+                out.extend(kwargs.iter().map(|(_, v)| *v));
             }
             InstKind::Call {
                 dst,
@@ -495,37 +516,93 @@ impl<'a> FnIndex<'a> {
                 let reads_only = self
                     .builtin(*callee_var, callee)
                     .is_some_and(|n| READ_ONLY_BUILTINS.contains(&n));
-                args.iter()
-                    .enumerate()
-                    .any(|(i, a)| is(a) && !starred(*dst, i) && !reads_only)
-                    || kwargs.iter().any(|(_, v)| is(v))
+                if !reads_only {
+                    out.extend(
+                        args.iter()
+                            .enumerate()
+                            .filter(|(i, _)| !starred(*dst, *i))
+                            .map(|(_, a)| *a),
+                    );
+                }
+                out.extend(kwargs.iter().map(|(_, v)| *v));
             }
-            InstKind::AllocBuiltin { dst, elems, .. } => elems
-                .iter()
-                .enumerate()
-                .any(|(i, e)| is(e) && !starred(*dst, i)),
-            InstKind::DictLiteral { entries, .. } => entries.iter().any(|e| match e {
-                DictEntry::KeyValue { key, value } => is(key) || is(value),
-                DictEntry::Unpack { .. } => false,
-            }),
-            InstKind::MakeGenExpr { captured, .. } => captured.iter().any(is),
+            InstKind::AllocBuiltin { dst, elems, .. } => out.extend(
+                elems
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !starred(*dst, *i))
+                    .map(|(_, e)| *e),
+            ),
+            InstKind::DictLiteral { entries, .. } => {
+                for e in entries {
+                    if let DictEntry::KeyValue { key, value } = e {
+                        out.extend([*key, *value]);
+                    }
+                }
+            }
+            InstKind::MakeGenExpr { captured, .. } | InstKind::MakeClosure { captured, .. } => {
+                out.extend(captured);
+            }
             // Binding a module constant: every load of it was checked (`module_constants`).
-            InstKind::StoreGlobal { name, .. } => !self.module.displays.contains_key(name),
-            // A bound method (`f = xs.append`), a store, a closure cell, a sent or awaited
-            // value, a context manager: anything may happen to it.
-            InstKind::AttrLoad { .. }
-            | InstKind::StoreDeref { .. }
-            | InstKind::MakeClosure { .. }
-            | InstKind::Yield { .. }
-            | InstKind::Await { .. }
-            | InstKind::EnterWith { .. }
-            | InstKind::ExitWith { .. } => true,
-            InstKind::Const { .. }
-            | InstKind::LoadGlobal { .. }
-            | InstKind::LoadDeref { .. }
-            | InstKind::LoadName { .. }
-            | InstKind::CatchException { .. }
-            | InstKind::Import { .. } => false,
+            InstKind::StoreGlobal { name, value } => {
+                if !self.module.displays.contains_key(name) {
+                    out.push(*value);
+                }
+            }
+            // A bound method (`f = xs.append`), a closure cell, a sent or awaited value, a
+            // context manager: anything may happen to it.
+            InstKind::AttrLoad { obj: v, .. }
+            | InstKind::StoreDeref { value: v, .. }
+            | InstKind::Await { value: v, .. }
+            | InstKind::EnterWith { mgr: v, .. }
+            | InstKind::ExitWith { mgr: v, .. } => out.push(*v),
+            InstKind::Yield { value, .. } => out.extend(*value),
+        }
+    }
+
+    /// The variables whose object something in this function may grow, directly or through an
+    /// alias (copies and phis), for loads of several globals or attributes at once.
+    pub fn grown_vars(&self) -> FxHashSet<VarId> {
+        let f = self.f;
+        let mut grown: FxHashSet<VarId> = FxHashSet::default();
+        let mut ops = Vec::new();
+        for bb in &f.blocks {
+            for inst in &bb.insts {
+                self.grown_operands(inst, false, &mut ops);
+            }
+            if let Terminator::Return(Some(v)) | Terminator::Raise(Some(v)) = &bb.terminator {
+                ops.push(*v);
+            }
+        }
+        grown.extend(ops);
+        for (i, name) in f.var_names.iter().enumerate() {
+            if name
+                .as_deref()
+                .is_some_and(|n| f.captured_vars.iter().any(|c| c == n))
+            {
+                grown.insert(VarId(i as u32));
+            }
+        }
+        // An alias's growth is its source's.
+        loop {
+            let before = grown.len();
+            for bb in &f.blocks {
+                for phi in &bb.phis {
+                    if grown.contains(&phi.dst) {
+                        grown.extend(phi.incoming.iter().map(|(_, v)| *v));
+                    }
+                }
+                for inst in &bb.insts {
+                    if let InstKind::Copy { dst, src } = &inst.kind
+                        && grown.contains(dst)
+                    {
+                        grown.insert(*src);
+                    }
+                }
+            }
+            if grown.len() == before {
+                return grown;
+            }
         }
     }
 
@@ -891,9 +968,9 @@ pub(crate) fn module_constants(
         if loads.is_empty() {
             continue;
         }
-        let fx = FnIndex::new(f, &out);
+        let grown = FnIndex::new(f, &out).grown_vars();
         for (dst, name) in loads {
-            if !fx.load_unchanged(dst) {
+            if grown.contains(&dst) {
                 changed.insert(name.to_owned());
             }
         }
