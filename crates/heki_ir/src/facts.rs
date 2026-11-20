@@ -115,7 +115,8 @@ impl SmallDisplay {
 }
 
 /// Module-level names the code fixes: bound once, by the module body, outside loops, and
-/// never rebound (no other store, `del`, `global` assignment, star import, or dynamic globals).
+/// never rebound (no other store, `del`, `global` assignment, later star import of a public
+/// name, or dynamic globals).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleConstants {
     /// Integer constants (`ATTEMPTS = 5`, `LIMIT = BASE * 2`).
@@ -128,8 +129,9 @@ pub struct ModuleConstants {
     /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
-    /// Module globals may be bound behind the IR (`from m import *`, `exec` or `globals()` at
-    /// module level): no name is fixed and no builtin is trusted.
+    /// Module globals may be bound behind the IR (`exec` or `globals()` at module level): no
+    /// name is fixed and no builtin is trusted. (A `from m import *` only rebinds the public
+    /// names bound before it.)
     #[serde(default)]
     pub dynamic: bool,
 }
@@ -799,12 +801,12 @@ fn range_len(args: &[i64]) -> Option<i64> {
 pub(crate) fn module_constants(
     functions: &[IrFunction],
     module_fn: FunctionId,
-    has_star_import: bool,
+    last_star_import: Option<u32>,
 ) -> ModuleConstants {
     let module = &functions[module_fn.0 as usize];
     let mut stores: FxHashMap<&str, u32> = FxHashMap::default();
     let mut deleted: FxHashSet<&str> = FxHashSet::default();
-    let mut dynamic = has_star_import || !module.a1_hazards.is_empty();
+    let mut dynamic = !module.a1_hazards.is_empty();
     for f in functions {
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             match &inst.kind {
@@ -847,7 +849,12 @@ pub(crate) fn module_constants(
             let InstKind::StoreGlobal { name, value } = &inst.kind else {
                 continue;
             };
-            if stores.get(name.as_str()) != Some(&1) || deleted.contains(name.as_str()) {
+            let star_rebinds =
+                last_star_import.is_some_and(|s| inst.span.start < s) && !name.starts_with('_');
+            if stores.get(name.as_str()) != Some(&1)
+                || deleted.contains(name.as_str())
+                || star_rebinds
+            {
                 continue;
             }
             if let Some(n) = ix.const_int(*value) {
@@ -905,9 +912,9 @@ pub(crate) fn refine_loops(
     functions: &mut [IrFunction],
     module_fn: FunctionId,
     hints: &[(FunctionId, Vec<LoopHint>)],
-    has_star_import: bool,
+    last_star_import: Option<u32>,
 ) -> ModuleConstants {
-    let constants = module_constants(functions, module_fn, has_star_import);
+    let constants = module_constants(functions, module_fn, last_star_import);
     let mut updates: Vec<(usize, usize, LoopBound, Vec<LenCap>)> = Vec::new();
     for (fid, loop_hints) in hints {
         let f = &functions[fid.0 as usize];
