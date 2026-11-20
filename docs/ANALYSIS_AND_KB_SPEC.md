@@ -566,8 +566,9 @@ The entries follow the public API of each package, with three conventions:
   `sqlalchemy.create_engine`) carries only `unpooled_client_alloc`; a call that only builds an
   object (`Redis.pipeline`, a lazy `QuerySet.filter`, `Session.query` and the `Query` builder
   methods) carries only a `return_type`. Iterating an object runs its class's `__iter__` entry
-  (`sqlalchemy.orm.Query.__iter__`): a `for` loop, a comprehension, or a generator expression over
-  a value of that class is a call of it at the iterable (`async for` is not).
+  (`sqlalchemy.orm.Query.__iter__`): a `for` loop, a comprehension, a generator expression, or a
+  consuming call (`list(query)`, `items.extend(query)`, the `consumption` table) over a value of
+  that class is a call of it at the iterable (`async for` is not).
 - `db_query` is one statement sent to the database and waited for: reading the rows of an
   executed statement (`sqlite3.Cursor.fetchone`) is not one, nor is a driver's `commit()`; an ORM
   `Session.commit()` / `flush()` sends the pending writes and is. A bulk API (`bulk_create`,

@@ -1330,9 +1330,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Iterating `iterable` with `for` runs `__iter__` of its class: the catalog's entry for it
-    /// is a call at `span` (`for row in session.query(User):` runs the query). Project classes'
-    /// `__iter__` are not followed.
+    /// Iterating `iterable` (a `for` loop, a comprehension, a consuming call such as `list(...)`)
+    /// runs `__iter__` of its class: the catalog's entry for it is a call at `span` (`for row in
+    /// session.query(User):` runs the query). Project classes' `__iter__` are not followed.
     fn iteration(&mut self, bb: BlockId, iterable: VarId, span: Span) {
         let Some(Val::Inst(class)) = self.types.get(&iterable) else {
             return;
@@ -1731,6 +1731,10 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 self.external_call(bb, symbol.clone(), call.passed(), call.is_awaited, call.span);
+                // `list(query)` iterates the query as a `for` loop does.
+                for iterable in crate::consumption::iterated_args(symbol, call.args) {
+                    self.iteration(bb, iterable, call.span);
+                }
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
                 if let Some(class) = &call.constructs {

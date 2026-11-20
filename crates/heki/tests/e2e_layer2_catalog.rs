@@ -1532,3 +1532,36 @@ fn synchronous_waits_block_unless_they_return_at_once() {
         ]
     );
 }
+
+const CONSUMED_QUERIES: &str = r#"from sqlalchemy.orm import Query, Session
+
+
+async def tp_consuming_calls(q: Query, session: Session, model):
+    list(q)
+    sorted(session.query(model))
+    rows = []
+    rows.extend(q)
+
+
+async def tn_lazy_query(q: Query):
+    return q.filter(True)
+"#;
+
+/// A consuming call iterates a catalog-typed iterable as a `for` loop does: `list(query)` runs
+/// the query.
+#[test]
+fn consuming_calls_iterate_catalog_iterables() {
+    assert_eq!(
+        check(
+            "catalog_consumed_queries",
+            "app/consumed.py",
+            CONSUMED_QUERIES,
+            "EFF101"
+        ),
+        vec![
+            d(5, "EFF101", "tp_consuming_calls", "sqlalchemy.orm.Query.__iter__"),
+            d(6, "EFF101", "tp_consuming_calls", "sqlalchemy.orm.Query.__iter__"),
+            d(8, "EFF101", "tp_consuming_calls", "sqlalchemy.orm.Query.__iter__"),
+        ]
+    );
+}
