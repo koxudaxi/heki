@@ -2853,7 +2853,11 @@ pub(crate) fn mut203(
     let sites = cx.sites_by_caller();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
-        for read in &s.typed_field_read_sites {
+        for read in s
+            .typed_field_read_sites
+            .iter()
+            .filter(|r| r.counts_for_contracts())
+        {
             for rule in &rules {
                 for t in rule
                     .targets

@@ -3009,13 +3009,13 @@ impl<'a> Extractor<'a> {
         if let Some(var) = owner.var {
             self.unresolved_access(attr, Access::Read(kind), var, span);
         }
-        // A read through a protocol declaring the attribute is judged by the protocol, the
-        // type the code reads it through, not by the classes implementing it.
-        let classes = match owner.var.and_then(|v| self.val(v)) {
-            Some(Val::Inst(p)) if self.cx.project.protocol_declares(p, attr) => vec![p.clone()],
-            _ => owner.typed_classes,
+        // A read through a protocol declaring the attribute is one of every class implementing
+        // it; the read contracts judge it by the protocol, the type the code reads it through.
+        let declared_by = match owner.var.and_then(|v| self.val(v)) {
+            Some(Val::Inst(p)) if self.cx.project.protocol_declares(p, attr) => Some(p.clone()),
+            _ => None,
         };
-        for class in classes {
+        for class in owner.typed_classes {
             self.summary
                 .typed_field_read_sites
                 .insert(TypedFieldReadSite {
@@ -3024,6 +3024,7 @@ impl<'a> Extractor<'a> {
                     kind,
                     obj_params: owner.may_params,
                     span,
+                    declared_by: declared_by.clone(),
                 });
         }
     }

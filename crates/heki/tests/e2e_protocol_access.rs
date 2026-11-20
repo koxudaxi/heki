@@ -104,3 +104,53 @@ fn accesses_through_a_protocol_declaring_the_member_are_judged_by_the_protocol()
         ]
     );
 }
+
+const CACHED: &str = r#"from functools import cached_property
+from typing import Protocol
+
+
+class Host(Protocol):
+    total: int
+
+
+class Concrete:
+    def __init__(self) -> None:
+        self.value = 1
+
+    @cached_property
+    def total(self) -> int:
+        return self.value * 2
+
+    def bump(self) -> None:
+        self.value += 1
+
+
+def read(h: Host) -> int:
+    return h.total
+"#;
+
+/// The read through the protocol is still one of the implementation for the rules about what
+/// the read returns: `Concrete.bump` can leave the cached `total` stale (`MUT111`).
+#[test]
+fn a_read_through_a_protocol_still_reads_the_implementation() {
+    let p = Project::new("protocol_cached_read");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT111\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/m.py", CACHED);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let found: Vec<(u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(found, vec![(22, "MUT111")]);
+}

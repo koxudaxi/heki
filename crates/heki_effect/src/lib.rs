@@ -380,6 +380,21 @@ pub struct TypedFieldReadSite {
     /// Parameters of the reading function the read object may be, as itself (bit 0: `self`).
     pub obj_params: u64,
     pub span: Span,
+    /// The project protocol the object is typed with, when it declares the attribute: the read
+    /// is one of every class implementing it, but the read and call contracts judge it by the
+    /// protocol ([`Self::counts_for_contracts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_by: Option<String>,
+}
+
+impl TypedFieldReadSite {
+    /// Whether the read and call contracts count the read: one through a protocol declaring
+    /// the attribute counts as a read of the protocol only, not of its implementations.
+    pub fn counts_for_contracts(&self) -> bool {
+        self.declared_by
+            .as_ref()
+            .is_none_or(|p| *p == self.class_qualname)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

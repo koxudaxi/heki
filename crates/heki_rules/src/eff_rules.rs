@@ -930,7 +930,8 @@ impl<'a> Reach<'a> {
             .index
             .summary(func)
             .into_iter()
-            .flat_map(|s| &s.typed_field_read_sites);
+            .flat_map(|s| &s.typed_field_read_sites)
+            .filter(|r| r.counts_for_contracts());
         for r in reads {
             for (ti, _) in b.read_targets.iter().enumerate().filter(|(_, t)| {
                 t.matches(&r.class_qualname, &r.attr)
