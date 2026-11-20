@@ -19,7 +19,7 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 28 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 29 rules in four families
 
 ## Integrations
 

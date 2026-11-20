@@ -821,8 +821,10 @@ message = "tell the store which models changed"
 | `message` | Text appended to every report of the contract. |
 
 A write is followed through local aliases, container methods, `setattr` / `__dict__`, and
-helpers. A private helper passes its unannounced writes to its callers; a function whose every
-caller announces the change after calling it is not reported. Writes to objects that did not
+helpers. A private helper passes its unannounced writes to its callers, where one report at
+the call stands for every write behind it and a Ratchet baseline counts each of them (`sites`
+in JSON output); a function whose every caller announces the change after calling it is not
+reported. Writes to objects that did not
 exist before the call (the class's own initialization, objects the function constructs or
 copies) and to objects it gets from a call need no announcement. Only normal returns count: a
 path that ends by raising carries no obligation. At most 64 contracts can be declared.
@@ -1211,7 +1213,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 28 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 29 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
@@ -1291,13 +1293,14 @@ effects changed, every file that resolved names through a changed declaration (a
 class, a new method or base class, a property getter, a subclass, an offloading decorator), the
 classes of a family a changed method belongs to, the generators handed to a changed function
 (whether it iterates them decides where their writes and reads are reported), and the files whose
-call chains show a call site the edit moved. With ownership contracts configured, a function that
-changes its calls also re-analyzes every function below it (whether a function only runs inside
-allowed callers depends on all callers above it); with a contract on calls (`call-owners`, an
-effect boundary forbidding `calls`), also every function above it (a call of a target is reported
-at the callers of the private helper making it, and at the scope functions reaching it). Edits
-that change none of these, such as most comments, stop at the edited file. The diagnostics are the
-ones `heki check` reports for the saved files.
+call chains show a call site the edit moved. With ownership or `invalidation` contracts
+configured, a function that changes its calls also re-analyzes every function below it (whether a
+function only runs inside allowed callers, or whether its callers announce its writes, depends on
+all callers above it); with a contract on calls (`call-owners`, an effect boundary forbidding
+`calls`), also every function above it (a call of a target is reported at the callers of the
+private helper making it, and at the scope functions reaching it). Edits that change none of
+these, such as most comments, stop at the edited file. The diagnostics are the ones `heki check`
+reports for the saved files.
 
 Files created, changed, or deleted outside the editor (`git checkout`, code generators) are
 picked up when the client supports watching files: the server registers for
@@ -3532,7 +3535,8 @@ attribute: an index, a cache, a revision counter).
 A write is followed through local aliases, container methods (`.append()`, `[k] = v`),
 `setattr` / `__dict__`, and helpers: a private helper that writes without announcing the change
 passes the obligation to its callers, and the call of such a helper must be announced like a
-direct write. An invalidator counts when it is called directly, in each branch, or through
+direct write (one report at the call stands for every write behind it, and a Ratchet baseline
+counts each of them: `sites` in JSON output). An invalidator counts when it is called directly, in each branch, or through
 calls (a helper that calls an invalidator on every path to its own return), also behind a
 boolean flag set after the write (`changed = True ... if changed: notify()`); one called before
 the write does not count, nor an `async` invalidator that is not awaited.
