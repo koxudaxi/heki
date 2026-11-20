@@ -38,7 +38,7 @@ command line are always checked.
 | Key | Meaning |
 | --- | ------- |
 | `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). |
-| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `MUT103`) need their exact code or name. |
+| `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) need their exact code or name. |
 | `ignore` | Rules to disable (prefixes match every rule they cover). |
 | `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
 | `severity` | Rule → `"error"` or `"warning"` (affects output and SARIF level; both make `heki check` fail). |
@@ -54,14 +54,64 @@ configured lists.
 name = "generation-store"
 targets = ["pkg.model.DataModel.fields", "DataType.data_types"]
 allowed-writers = ["pkg.parser.generation.*", "Store.*"]
+exempt-methods = ["__deepcopy__", "copy_deep"]
 forbid-cached-property-on = ["DataModel"]
+message = "use GenerationStore.set_fields() instead"
 ```
 
 - `targets`: `Class.attr` names. A target matches the fully qualified name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`), and globs are allowed. Subclasses of
   a target class are covered too.
 - `allowed-writers`: functions allowed to write (fully qualified or qualname, globs allowed).
+- `exempt-methods`: construction and copy methods allowed to write the targets. A plain name
+  (`__deepcopy__`) matches any method of that name; an entry with a dot or a glob
+  (`DataModel.copy_deep`, `create_*`) is matched like `allowed-writers`.
 - `forbid-cached-property-on`: classes on which defining a `@cached_property` is itself reported.
+- `message`: text appended to every report of the contract (where to write instead).
+
+A class's own initialization is always allowed: an initializer (`__init__`, `__post_init__`,
+`__new__`, `model_post_init`, `__setstate__`) of a target class or a subclass may write its own
+`self`, directly, through `super().__init__()`, or through helpers it passes `self` to.
+
+## Read contracts: `[[tool.heki.read-owners]]` (`MUT203`)
+
+```toml
+[[tool.heki.read-owners]]
+name = "reference-children"
+targets = ["pkg.reference.Reference.children"]
+allowed-readers = ["*GenerationIndex*", "*GenerationStore*"]
+exempt-methods = ["__deepcopy__"]
+message = "read children through GenerationIndex instead"
+```
+
+The read side of `write-owners`: reads of a target (`ref.children`, a local alias,
+`getattr(ref, "children")`, `ref.__dict__["children"]`) outside `allowed-readers` and
+`exempt-methods` are reported. Targets, subclasses, initializers, private helpers, and
+`message` work as for `write-owners`. Reads through a parameter without a project-class
+annotation are not seen.
+
+## Effect boundaries: `[[tool.heki.effect-boundaries]]` (`EFF201`)
+
+```toml
+[[tool.heki.effect-boundaries]]
+name = "pure-render"
+scopes = ["*.render", "*.render_module_code", "pkg.domain.*"]
+forbid = ["writes-targets", "blocking"]
+write-targets = ["DataModel.*", "DataType.*"]
+allowed-callees = ["pkg.logging.*"]
+message = "render entry points must not mutate model state"
+```
+
+| Key | Meaning |
+| --- | ------- |
+| `scopes` | Modules, classes, or functions (dotted names or globs) whose functions must stay inside the boundary; nested functions are included. |
+| `forbid` | `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`, `sleep`, `blocking` (all six), `mutates-params` (for a method, `self` is a parameter), `writes-targets`. An unknown token is a configuration error. |
+| `write-targets` | `Class.attr` targets of `writes-targets` (required with it; subclasses included). |
+| `allowed-callees` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed. |
+| `message` | Text appended to every report of the boundary. |
+
+Each scope function is checked through any number of calls; a violation inside another scope
+function is reported there only, once.
 
 ## Shared return values: `[[tool.heki.readonly-returns]]` (`MUT202`)
 

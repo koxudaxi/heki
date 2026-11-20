@@ -90,7 +90,7 @@ $ heki check --ignore OPT110         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are all accepted. Opt-in rules
-(`EFF105`, `MUT103`) are enabled only by their exact code or name.
+(`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) are enabled only by their exact code or name.
 
 ## Machine-readable output
 

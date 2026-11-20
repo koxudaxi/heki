@@ -24,14 +24,17 @@ Found 2 diagnostic(s) in 4 file(s).
 
 ## Highlights
 
-- **Shared state** (`MUT`): stale `@cached_property` values, writes to state another
-  component owns (declared once in `pyproject.toml`), mutation of `@lru_cache` results, and
-  side effects a public function gained since a saved snapshot.
+- **Shared state** (`MUT`): stale `@cached_property` values, attributes `__hash__` reads
+  changing after hashing, iterators consumed twice, writes and reads of state another component
+  owns (declared once in `pyproject.toml`), mutation of `@lru_cache` results, and side effects a
+  public function gained since a saved snapshot.
 - **Execution effects** (`EFF`, `DATA`): blocking calls reachable from `async def` through any
-  number of helpers, clients created inside loops, N+1 queries, quadratic DataFrame growth.
+  number of helpers, clients created inside loops, N+1 queries, I/O while a lock or transaction
+  is held, tasks left to the garbage collector, declared effect boundaries, quadratic DataFrame
+  growth.
 - **Proven rewrites** (`OPT`): quadratic list / dict / set / bytes / queue patterns, rewritten
   by `heki check --fix` only when an alias analysis that never trusts annotations proves the
-  rewrite keeps behavior.
+  rewrite keeps behavior, plus linear list lookups and nested-loop joins inside loops.
 - **Fast and incremental**: about a second for a 200,000-line project; the LSP server
   re-analyzes only the edited file and stops propagating when a function's effects did not
   change.
@@ -61,7 +64,7 @@ $ heki server                                   # LSP server for editors
 
 - [Getting started](docs/getting-started.md)
 - [Configuration](docs/configuration.md)
-- [Rules](docs/rules/index.md) (17 rules)
+- [Rules](docs/rules/index.md) (25 rules)
 - [Fixes and safety](docs/fixes.md)
 - [Adopting heki in a code base](docs/adoption.md)
 - [Editors (LSP)](docs/lsp.md) and [coding agents](docs/coding-agents.md)

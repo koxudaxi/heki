@@ -26,17 +26,21 @@ Found 2 diagnostic(s) in 4 file(s).
 ## What it finds
 
 - **Shared state** (`MUT`): a `@cached_property` left stale after the attribute it reads
-  changes, writes to state another component owns (declared once in configuration), mutation
-  of objects returned by `@lru_cache`, and side effects a public function gained since a saved
-  snapshot.
+  changes, an attribute `__hash__` reads changing after the object was hashed, a single-pass
+  iterator consumed twice, writes and reads of state another component owns (declared once in
+  configuration), mutation of objects returned by `@lru_cache`, and side effects a public
+  function gained since a saved snapshot.
 - **Execution effects** (`EFF`, `DATA`): blocking calls reachable from `async def` through any
-  number of helpers, HTTP / database clients created inside loops, N+1 queries, and quadratic
-  DataFrame / array accumulation.
+  number of helpers, HTTP / database clients created inside loops, N+1 queries, `await` or
+  network I/O while a `threading` lock or a database transaction is held, tasks that only a
+  weak reference keeps alive, effects a declared boundary forbids, and quadratic DataFrame /
+  array accumulation.
 - **Complexity rewrites** (`OPT`): quadratic list, dict, set, bytes, and queue patterns. heki
   rewrites them only when its alias analysis **proves** the rewrite preserves behavior; when it
-  cannot, the diagnostic names the proof obligation that failed.
+  cannot, the diagnostic names the proof obligation that failed. Linear `list` lookups and
+  nested-loop joins inside loops are reported as suggestions.
 
-See the [rules reference](rules/index.md) for all 17 rules.
+See the [rules reference](rules/index.md) for all 25 rules.
 
 ## Why another tool
 
