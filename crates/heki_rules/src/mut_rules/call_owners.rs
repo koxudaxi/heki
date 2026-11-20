@@ -60,17 +60,18 @@ impl CallTargets {
             let hits = self.constructors.get(class).map_or(&[][..], Vec::as_slice);
             return hits.iter().map(|&i| vec![i]).collect();
         }
-        let per_callee: Vec<Vec<usize>> = site
-            .project_callees()
-            .iter()
-            .map(|bc| self.functions.matching(&bc.callee))
+        let per_callee: Vec<Vec<usize>> = judged_callees(site)
+            .map(|callee| self.functions.matching(callee))
             .collect();
         groups(&per_callee)
     }
 
-    /// What `site` calls of target `i`: the class it constructs, or every candidate the target
-    /// names.
+    /// What `site` calls of target `i`: the method the protocol typing the receiver declares
+    /// ([`CallSite::declared`]), the class it constructs, or every candidate the target names.
     fn called_at(&self, i: usize, site: &CallSite) -> Vec<String> {
+        if let Some(declared) = &site.declared {
+            return vec![declared.fqn()];
+        }
         match &site.constructs {
             Some(class) => vec![class.clone()],
             None => site
@@ -164,6 +165,15 @@ impl Families {
     }
 }
 
+/// The functions a call contract judges `site` by: the method the protocol typing the
+/// receiver declares ([`CallSite::declared`]), else the project functions it may call.
+fn judged_callees(site: &CallSite) -> Box<dyn Iterator<Item = &FuncKey> + '_> {
+    match &site.declared {
+        Some(declared) => Box::new(std::iter::once(declared)),
+        None => Box::new(site.project_callees().iter().map(|bc| &bc.callee)),
+    }
+}
+
 /// The groups of [`CallTargets::called`] from the targets each candidate of a call matches
 /// (each list ascending).
 fn groups(per_callee: &[Vec<usize>]) -> Vec<Vec<usize>> {
@@ -227,9 +237,9 @@ impl ContractCalls {
             }
             return by_contract.into_iter().collect();
         }
-        let callees = site.project_callees();
-        for (k, bc) in callees.iter().enumerate() {
-            for m in self.functions.matching(&bc.callee) {
+        let callees: Vec<&FuncKey> = judged_callees(site).collect();
+        for (k, callee) in callees.iter().enumerate() {
+            for m in self.functions.matching(callee) {
                 let (c, t) = self.owners[m];
                 let per_callee = by_contract
                     .entry(c)

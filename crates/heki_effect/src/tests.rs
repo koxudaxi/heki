@@ -770,6 +770,7 @@ fn gate_5_handbuilt_file_summaries() {
         handed_callable: None,
         per_item: None,
         dispatch: None,
+        declared: None,
         result_discarded: false,
         result_held: false,
     });
@@ -1389,6 +1390,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         handed_callable: None,
         per_item: None,
         dispatch: None,
+        declared: None,
         result_discarded: false,
         result_held: false,
     });
@@ -1417,6 +1419,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         handed_callable: None,
         per_item: None,
         dispatch: None,
+        declared: None,
         result_discarded: false,
         result_held: false,
     });
@@ -1443,6 +1446,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         handed_callable: None,
         per_item: None,
         dispatch: None,
+        declared: None,
         result_discarded: false,
         result_held: false,
     });

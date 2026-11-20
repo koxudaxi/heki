@@ -1118,14 +1118,21 @@ impl Allowance {
 /// escape keeps its reports. So does a private function that only private functions of its own
 /// recursion call (`_walk` calling itself, exposed as a callback): going up through private
 /// callers never reaches a function that reports, so the access would be reported nowhere.
-fn delegates(cx: &CheckContext<'_>, sites: &SitesByCaller<'_>, key: &FuncKey) -> bool {
+fn delegates(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    key: &FuncKey,
+    handover: Handover,
+) -> bool {
     if !is_private(&key.qualname) {
         return false;
     }
     let callers_running = |func: &FuncKey| {
-        cx.index
-            .summary(func)
-            .map_or_else(Vec::new, |s| callers_of(cx, sites, func, s.body_facts()))
+        cx.index.summary(func).map_or_else(Vec::new, |s| {
+            let mut callers = callers_of(cx, sites, func, s.body_facts());
+            callers.retain(|c| handover.hands_over(c));
+            callers
+        })
     };
     let mut queue = vec![key.clone()];
     let mut seen: FxHashSet<FuncKey> = FxHashSet::from_iter([key.clone()]);
@@ -1143,6 +1150,26 @@ fn delegates(cx: &CheckContext<'_>, sites: &SitesByCaller<'_>, key: &FuncKey) ->
         }
     }
     false
+}
+
+/// Which call sites hand the accesses of a private callee to its callers ([`delegates`]).
+#[derive(Debug, Clone, Copy)]
+enum Handover {
+    /// Every call running the callee's body.
+    Every,
+    /// Every call but one through a protocol that declares the method
+    /// ([`heki_effect::CallSite::declared`]): the read and call contracts judge such a call by
+    /// the declaration, so what an implementation does inside stays with the implementation.
+    ByImplementation,
+}
+
+impl Handover {
+    fn hands_over(self, c: &Caller<'_>) -> bool {
+        match self {
+            Self::Every => true,
+            Self::ByImplementation => c.site.declared.is_none(),
+        }
+    }
 }
 
 /// One project call site that runs the facts `facts` of a function: the caller, the site and
@@ -1827,11 +1854,11 @@ pub(crate) fn mut201(
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let kept_below = chain[1..=origin]
-                            .iter()
-                            .any(|k| is_private(&k.qualname) && !delegates(cx, sites, k));
+                        let kept_below = chain[1..=origin].iter().any(|k| {
+                            is_private(&k.qualname) && !delegates(cx, sites, k, Handover::Every)
+                        });
                         if kept_below
-                            || delegates(cx, sites, key)
+                            || delegates(cx, sites, key, Handover::Every)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
                         {
                             continue;
@@ -2920,7 +2947,7 @@ pub(crate) fn delegated_reports(
         return Vec::new();
     }
     let in_scope = allowance.in_scope(func);
-    if !delegates(cx, sites, func) {
+    if !delegates(cx, sites, func, Handover::ByImplementation) {
         if !in_scope
             || initializes_itself(cx, func, family, obj)
             || runs_inside_allowed(cx, sites, allowance, family, func, obj)
@@ -2955,7 +2982,10 @@ pub(crate) fn delegated_reports(
             states[i].obj,
             states[i].in_scope,
         );
-        for c in callers_of(cx, sites, &callee, facts) {
+        for c in callers_of(cx, sites, &callee, facts)
+            .into_iter()
+            .filter(|c| Handover::ByImplementation.hands_over(c))
+        {
             let caller_obj = c.bc.caller_params_of(obj);
             let hop = |from: &FuncKey, to: &FuncKey| CallHop {
                 caller: from.clone(),
@@ -2987,7 +3017,7 @@ pub(crate) fn delegated_reports(
             let in_scope = below_in_scope
                 || allowance.in_scope(c.caller)
                 || c.via.is_some_and(|p| allowance.in_scope(p));
-            if delegates(cx, sites, c.caller) {
+            if delegates(cx, sites, c.caller, Handover::ByImplementation) {
                 if visited.insert((c.caller.clone(), c.into, caller_obj, in_scope)) {
                     states.push(WalkState {
                         func: c.caller.clone(),

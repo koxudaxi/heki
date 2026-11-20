@@ -1137,6 +1137,11 @@ pub struct CallSite {
     pub per_item: Option<Box<PerItem>>,
     /// What the receiver tells about the implementations the callees run (`None`: nothing).
     pub dispatch: Option<Box<Dispatch>>,
+    /// The method a project protocol declares, when the receiver is typed with the protocol
+    /// (`h._helper()` with `h: Host`): the call contracts judge the call by that declaration,
+    /// the type the code calls it through, while the callees are the implementations it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<FuncKey>,
     /// A call on `self` whose result nothing reads (`self.prepare()` as a statement): it
     /// reaches what its caller computes only through the attributes it writes (`MUT101`,
     /// [`EffectSummary::returns_self_attrs`]).

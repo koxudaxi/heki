@@ -1030,6 +1030,12 @@ unresolved = "report"
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
 `getattr(ref, "children")`, or `ref.__dict__["children"]`.
 
+A read, or a call (`call-owners`), through a value typed with a project protocol that declares
+the member is judged by the protocol, the type the code uses it through: `def f(h: Host):
+h._m` reads `Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
+implementation called through the protocol keeps what it reads and calls. A write through such
+a value still writes the implementations' attribute.
+
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
@@ -2868,6 +2874,10 @@ the allowed callers and resolves to a target:
   `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
   its own.
 
+A call through a value typed with a project `Protocol` that declares the method is judged by the
+protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
+implementations it runs, and what an implementation's private method calls inside stays with it.
+
 A target's last segment names the function, method, or class: a glob there matches within that
 name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,
 and `pkg.api_*` is `pkg.api_commit`, not `pkg.api_helpers.api_reset`), and the report names the
@@ -4468,7 +4478,11 @@ annotation or from different assignments) is each of them, and an `isinstance` c
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
 also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
 classes that implement it structurally (having every member it defines; at most eight, counting
-a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
+a class and not its subclasses), but a read of a member the protocol declares is judged by the
+protocol, the type the code reads it through: it reads the protocol's member, not the
+implementations' (`def f(h: Host): h._m` reads `Host._m` when `Host` declares `_m`), and a
+private method of an implementation called through the protocol keeps its own reads instead of
+handing them to the caller. An object whose class heki cannot see (an unannotated parameter
 or return, `Any`, a value of more than three classes) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with

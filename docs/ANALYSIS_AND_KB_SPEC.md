@@ -226,7 +226,7 @@ the targets of write and read boundaries.
 | 1 | Local constructors and direct imports (relative imports, `src/` layout, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
 | 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
-| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
+| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
 A method called on an instance is the definition the class's MRO (Python's C3 linearization of
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A

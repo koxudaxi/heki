@@ -3009,7 +3009,13 @@ impl<'a> Extractor<'a> {
         if let Some(var) = owner.var {
             self.unresolved_access(attr, Access::Read(kind), var, span);
         }
-        for class in owner.typed_classes {
+        // A read through a protocol declaring the attribute is judged by the protocol, the
+        // type the code reads it through, not by the classes implementing it.
+        let classes = match owner.var.and_then(|v| self.val(v)) {
+            Some(Val::Inst(p)) if self.cx.project.protocol_declares(p, attr) => vec![p.clone()],
+            _ => owner.typed_classes,
+        };
+        for class in classes {
             self.summary
                 .typed_field_read_sites
                 .insert(TypedFieldReadSite {
@@ -3755,6 +3761,7 @@ impl<'a> Extractor<'a> {
                         handed_callable: None,
                         per_item: None,
                         dispatch: None,
+                        declared: None,
                         result_discarded: false,
                         result_held: false,
                     });
@@ -3977,6 +3984,7 @@ impl<'a> Extractor<'a> {
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
                     dispatch: self.dispatch(call, site.project_callees()),
+                    declared: self.declared_method(call, site.project_callees()),
                     constructs: call.constructs.clone(),
                     returned: if constructor || call.per_item.is_some() {
                         None
@@ -4013,6 +4021,19 @@ impl<'a> Extractor<'a> {
     /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
     /// class, or the class a constructor call makes) when a callee is inherited from a proper
     /// base of it, and, on `self`, the callees that are overrides of subclasses.
+    /// [`CallSite::declared`]: the definition of the called method in the project protocol the
+    /// receiver is typed with, when the protocol declares it.
+    fn declared_method(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<FuncKey> {
+        let Some(Val::Inst(protocol)) = self.val(call.recv_var?) else {
+            return None;
+        };
+        let name = callees.first()?.callee.qualname.rsplit('.').next()?;
+        let project = self.cx.project;
+        project
+            .protocol_declares(protocol, name)
+            .then(|| project.mro_method(protocol, name))?
+    }
+
     fn dispatch(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<Box<Dispatch>> {
         let project = self.cx.project;
         let own;
@@ -4410,6 +4431,7 @@ impl<'a> Extractor<'a> {
             handed_callable: None,
             per_item: None,
             dispatch: None,
+            declared: None,
             result_discarded: false,
             result_held: false,
         }
@@ -4943,6 +4965,7 @@ fn role_site(
         handed_callable: site.handed_callable,
         per_item: site.per_item.clone(),
         dispatch: site.dispatch.clone(),
+        declared: site.declared.clone(),
         result_discarded: false,
         result_held: false,
     }

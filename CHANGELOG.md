@@ -150,6 +150,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   targets up from the callee's names instead of trying every target, and `MUT204` indexes the
   targets of all its contracts together: a contract of 1,300 targets on a 200,000-line project
   took about 30 s and now takes about 1 s, with the same reports.
+- A read or a call through a value typed with a project `Protocol` that declares the member is
+  judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` is no
+  `MUT203` read of `_m` of the classes implementing `Host`, `h._helper()` no `MUT204` call of
+  theirs, and what an implementation's private method reads or calls inside stays with it
+  instead of being handed to the caller. A member the protocol does not declare is still one of
+  the implementations', and a write through the protocol still writes their attribute.
 
 ## [0.1.2] - 2026-11-21
 
