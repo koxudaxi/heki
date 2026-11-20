@@ -1,7 +1,7 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT110`, `MUT201`, `MUT202`, `MUT203`)
+//!   `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -23,7 +23,9 @@ pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 use globset::{Glob, GlobMatcher};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, RelatedLocation};
-use heki_effect::{CallHop, CallSite, FuncKey, ModuleInput, ProjectDecls, ProjectIndex};
+use heki_effect::{
+    CallHop, CallSite, EffectSummary, FuncKey, ModuleInput, ProjectDecls, ProjectIndex,
+};
 use heki_env::{HekiConfig, Severity};
 use heki_ir::IrFunction;
 use heki_kb::{EffectiveEcosystemKb, EffectiveSoundnessKb};
@@ -148,6 +150,16 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.",
         doc: include_str!("../rule-docs/MUT203.md"),
+    },
+    RuleMeta {
+        code: "MUT204",
+        slug: "call-owner-violation",
+        family: RuleFamily::Mut,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.",
+        doc: include_str!("../rule-docs/MUT204.md"),
     },
     RuleMeta {
         code: "EFF101",
@@ -365,8 +377,15 @@ pub enum RuleConfigError {
         token: String,
         expected: &'static str,
     },
-    #[error("effect-boundaries `{0}` forbids `writes-targets` but sets no `write-targets`")]
-    MissingWriteTargets(String),
+    /// A `forbid` token of an effect boundary without the targets it needs.
+    #[error("effect-boundaries `{boundary}` forbids `{token}` but sets no `{key}`")]
+    MissingTargets {
+        boundary: String,
+        token: &'static str,
+        key: &'static str,
+    },
+    #[error("effect-boundaries `{0}` sets `allow-writes` but no `write-universe`")]
+    AllowWritesWithoutUniverse(String),
     #[error("invalid glob `{pattern}` in {context}: {cause}")]
     Glob {
         pattern: String,
@@ -451,6 +470,7 @@ pub fn check_project(
     mut_rules::mut108_mut110(&cx, &mut out);
     mut_rules::mut201(&cx, &mut out)?;
     mut_rules::mut203(&cx, &mut out)?;
+    mut_rules::mut204(&cx, &mut out)?;
     eff_rules::eff101_105(&cx, &mut out);
     eff_rules::eff201(&cx, &mut out)?;
     if let Some(snap) = extras.snapshot {
@@ -522,6 +542,22 @@ impl<'a> CheckContext<'a> {
             }
         }
         out
+    }
+
+    /// Every summarized function once, from its defining file, sorted by key.
+    pub fn defined_functions(&self) -> Vec<(&'a FuncKey, &'a EffectSummary)> {
+        let mut funcs: Vec<(&FuncKey, &EffectSummary)> = self
+            .index
+            .files
+            .iter()
+            .flat_map(|(path, f)| {
+                f.functions
+                    .iter()
+                    .filter(move |(k, _)| self.index.file_of(k) == Some(path.as_path()))
+            })
+            .collect();
+        funcs.sort_by(|a, b| a.0.cmp(b.0));
+        funcs
     }
 
     /// Call sites of every summarized function with their file, keyed by caller, from its
@@ -609,6 +645,7 @@ impl<'a> CheckContext<'a> {
             blocker: None,
             related: self.related(chain),
             fix: None,
+            sites: 1,
         });
         out.last_mut()
     }

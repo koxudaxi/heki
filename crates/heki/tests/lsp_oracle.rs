@@ -36,6 +36,29 @@ allowed-writers = ["Store.*"]
 name = "vault"
 targets = ["Vault.secret"]
 allowed-readers = ["Store.*"]
+
+[[tool.heki.read-owners]]
+name = "layer"
+targets = ["Ledger.balance"]
+forbidden-readers = ["pkg.layer.*"]
+
+[[tool.heki.call-owners]]
+name = "ledger"
+targets = ["Ledger.post", "Receipt"]
+allowed-callers = ["Store.*"]
+
+[[tool.heki.effect-boundaries]]
+name = "pure"
+scopes = ["pkg.pure"]
+forbid = ["reads-targets", "calls"]
+read-targets = ["Vault.secret"]
+call-targets = ["Ledger.post", "Receipt"]
+
+[[tool.heki.effect-boundaries]]
+name = "pass"
+scopes = ["pkg.pure.tidy"]
+allow-writes = ["Ledger.rows"]
+write-universe = ["Ledger.*"]
 "#;
 
 // An `async def` two modules above a sync helper (`EFF101` with its chain).
@@ -67,6 +90,24 @@ const STORE_CALLING: &str = "from pkg.model import Registry, Vault\nfrom pkg.ops
 const SERVICE: &str =
     "from pkg.model import Registry, Vault\n\n\ndef sync(r: Registry, v: Vault):\n    return r\n";
 const SERVICE_CALLING: &str = "from pkg.model import Registry, Vault\nfrom pkg.ops import _append, _peek\n\n\ndef sync(r: Registry, v: Vault):\n    _append(r, 1)\n    return _peek(v)\n";
+
+// Contract extensions (`MUT204`, `EFF201` reads / calls / allowed writes, `forbidden-readers`):
+// a private helper in another module constructs a guarded dataclass (no effect, so no summary
+// changes), helpers below boundaries read, call, and write, a private helper reads for a
+// forbidden layer, and writers, readers, and callers two modules below their callers become
+// reachable from a non-allowed function (the allowed-context walk climbs every caller).
+const LEDGER: &str = "from dataclasses import dataclass\n\n\nclass Ledger:\n    def __init__(self):\n        self.rows = []\n        self.balance = 0\n\n    def post(self, amount):\n        return amount\n\n\n@dataclass\nclass Receipt:\n    amount: int\n";
+const ACCT_OPS: &str =
+    "from pkg.ledger import Ledger, Receipt\n\n\ndef _record(l: Ledger):\n    return None\n";
+const ACCOUNTS: &str = "from pkg.acct_ops import _record\nfrom pkg.ledger import Ledger\n\n\ndef settle(l: Ledger):\n    return _record(l)\n";
+const PURE_OPS: &str = "from pkg.ledger import Ledger, Receipt\nfrom pkg.model import Vault\n\n\ndef helper(v: Vault, l: Ledger):\n    return None\n\n\ndef grow(l: Ledger):\n    l.rows.append(1)\n";
+const PURE: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Vault\nfrom pkg.pure_ops import grow, helper\n\n\ndef decide(v: Vault, l: Ledger):\n    return helper(v, l)\n\n\ndef tidy(l: Ledger):\n    grow(l)\n";
+const LAYER_OPS: &str = "from pkg.ledger import Ledger\n\n\ndef _bal(l: Ledger):\n    return 0\n";
+const LAYER_VIEW: &str = "from pkg.layer_ops import _bal\nfrom pkg.ledger import Ledger\n\n\ndef show(l: Ledger):\n    return _bal(l)\n";
+const OUTSIDE_VIEW: &str = "from pkg.layer_ops import _bal\nfrom pkg.ledger import Ledger\n\n\ndef summary(l: Ledger):\n    return _bal(l)\n";
+const CHAIN_LOW: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Registry, Vault\n\n\ndef stamp(r: Registry):\n    r.entries.append(1)\n\n\ndef peek(v: Vault):\n    return v.secret\n\n\ndef book(l: Ledger):\n    return l.post(1)\n";
+const CHAIN_MID: &str = "from pkg.chain_low import book, peek, stamp\n\n\ndef relay(r, v, l):\n    stamp(r)\n    peek(v)\n    return book(l)\n";
+const CHAIN_TOP: &str = "from pkg.chain_mid import relay\n\n\nclass Store:\n    def run(self, r, v, l):\n        return relay(r, v, l)\n\n\ndef outside(r, v, l):\n    return None\n";
 
 // Files: a module a caller already imports is created, then deleted; a stub is put next to a
 // module, then removed.
@@ -154,6 +195,18 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/frozen/configure.py", CONFIGURE),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
+        ("pkg/ledger.py", LEDGER),
+        ("pkg/acct_ops.py", ACCT_OPS),
+        ("pkg/accounts.py", ACCOUNTS),
+        ("pkg/pure_ops.py", PURE_OPS),
+        ("pkg/pure.py", PURE),
+        ("pkg/layer_ops.py", LAYER_OPS),
+        ("pkg/layer/__init__.py", ""),
+        ("pkg/layer/view.py", LAYER_VIEW),
+        ("pkg/outside_view.py", OUTSIDE_VIEW),
+        ("pkg/chain_low.py", CHAIN_LOW),
+        ("pkg/chain_mid.py", CHAIN_MID),
+        ("pkg/chain_top.py", CHAIN_TOP),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -247,6 +300,110 @@ fn steps_mut108() -> Vec<Step> {
             vec![save("pkg/frozen/model.py", FROZEN_MODEL)],
         )
         .absent(&[("pkg/frozen/configure.py", "MUT108")]),
+    ]
+}
+
+/// Step 5b: the contract extensions. A call of a function without effects (constructing a
+/// dataclass) changes no summary, so the reports of the private helper's callers and of the
+/// boundary above follow the call facts; the allowed-context walk reads the calls of callers two
+/// modules up.
+fn steps_contract_extensions() -> Vec<Step> {
+    let constructing = ACCT_OPS.replace("    return None\n", "    return Receipt(1)\n");
+    let helper = |body: &str| PURE_OPS.replace("    return None\n", body);
+    let two_reads = LAYER_OPS.replace("    return 0\n", "    return l.balance + l.balance\n");
+    // The function exists before: only its calls change, not the declarations.
+    let outside = CHAIN_TOP.replace(
+        "def outside(r, v, l):\n    return None\n",
+        "def outside(r, v, l):\n    return relay(r, v, l)\n",
+    );
+    vec![
+        Step::new(
+            "a private helper in another module constructs a guarded dataclass",
+            vec![Action::Save("pkg/acct_ops.py", constructing)],
+        )
+        .present(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "the helper stops constructing it",
+            vec![save("pkg/acct_ops.py", ACCT_OPS)],
+        )
+        .absent(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "a helper below a boundary reads a guarded attribute",
+            vec![Action::Save(
+                "pkg/pure_ops.py",
+                helper("    return v.secret\n"),
+            )],
+        )
+        .present(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the helper calls a guarded method instead",
+            vec![Action::Save(
+                "pkg/pure_ops.py",
+                helper("    return l.post(1)\n"),
+            )],
+        )
+        .present(&[("pkg/pure.py", "EFF201"), ("pkg/pure_ops.py", "MUT204")]),
+        Step::new(
+            "the helper constructs a guarded dataclass instead",
+            vec![Action::Save(
+                "pkg/pure_ops.py",
+                helper("    return Receipt(1)\n"),
+            )],
+        )
+        .present(&[("pkg/pure.py", "EFF201"), ("pkg/pure_ops.py", "MUT204")]),
+        Step::new(
+            "a pass helper also writes an attribute the pass does not allow",
+            vec![Action::Save(
+                "pkg/pure_ops.py",
+                PURE_OPS.replace(
+                    "    l.rows.append(1)\n",
+                    "    l.rows.append(1)\n    l.balance = 0\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the helpers are pure again",
+            vec![save("pkg/pure_ops.py", PURE_OPS)],
+        )
+        .absent(&[("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "a private helper of a forbidden layer starts reading",
+            vec![Action::Save(
+                "pkg/layer_ops.py",
+                LAYER_OPS.replace("    return 0\n", "    return l.balance\n"),
+            )],
+        )
+        .present(&[("pkg/layer/view.py", "MUT203")])
+        .absent(&[("pkg/outside_view.py", "MUT203")]),
+        Step::new(
+            "a second read inside the helper: still one report",
+            vec![Action::Save("pkg/layer_ops.py", two_reads)],
+        )
+        .present(&[("pkg/layer/view.py", "MUT203")]),
+        Step::new(
+            "the helper stops reading",
+            vec![save("pkg/layer_ops.py", LAYER_OPS)],
+        )
+        .absent(&[("pkg/layer/view.py", "MUT203")]),
+        Step::new(
+            "a function two modules above the writers that is no allowed caller calls them",
+            vec![Action::Save("pkg/chain_top.py", outside)],
+        )
+        .present(&[
+            ("pkg/chain_low.py", "MUT201"),
+            ("pkg/chain_low.py", "MUT203"),
+            ("pkg/chain_low.py", "MUT204"),
+        ]),
+        Step::new(
+            "only the allowed caller is left two modules above",
+            vec![save("pkg/chain_top.py", CHAIN_TOP)],
+        )
+        .absent(&[
+            ("pkg/chain_low.py", "MUT201"),
+            ("pkg/chain_low.py", "MUT203"),
+            ("pkg/chain_low.py", "MUT204"),
+        ]),
     ]
 }
 
@@ -366,6 +523,9 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/store.py", STORE)],
         )
         .present(&[("pkg/ops.py", "MUT201"), ("pkg/ops.py", "MUT203")]),
+    ]);
+    steps.extend(steps_contract_extensions());
+    steps.extend([
         // 7. Files.
         Step::new(
             "a module its caller imports is created",

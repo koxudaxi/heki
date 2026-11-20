@@ -22,7 +22,9 @@ class family).
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call
-sites of the first non-private callers, with the chain of calls as related information.
+sites of the first non-private callers, with the chain of calls as related information. One
+report stands for every write behind that call (`sites` in JSON), so a Ratchet baseline counts a
+second write inside a recorded helper.
 Reading a `@property` or `functools.cached_property` attribute calls its getter, so a private
 getter hands its writes to the functions reading it; a read never calls a property's setter.
 
@@ -93,6 +95,10 @@ No automatic fix.
   - `allowed-writers`: functions allowed to write the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`Store.*`,
     `pkg.parser.generation.*`).
+  - `forbidden-writers`: when set, only writes by these functions are reported (matched like
+    `allowed-writers`, `pkg.render.*`); `allowed-writers` and `exempt-methods` stay exceptions
+    inside them. A write is in scope when a function on its chain (the reporting function, the
+    private helpers it hands the write through, or the writer) is forbidden.
   - `exempt-methods`: construction and copy methods allowed to write the targets. A plain name
     (`__deepcopy__`, `copy_deep`) matches any function or method of that name; an entry with a
     dot or a glob (`Model.copy_deep`, `create_*`) is matched like `allowed-writers`. A write is

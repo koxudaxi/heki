@@ -15,6 +15,17 @@ edits and reformatting do not break the baseline. When findings are fixed, `heki
 note that the entry can shrink; run `--update-baseline` again to lock in the progress. Set
 `baseline = "heki-baseline.toml"` in the configuration to use it without the flag.
 
+Each entry counts violation sites, not reports. A contract report at the caller of a private
+helper stands for every write, read, or call inside the helper, and an effect boundary report for
+every forbidden call or write its scope function reaches (`sites` in JSON output), so a second
+violation behind a recorded report is a regression too. `heki check` prints a note with the
+allowed and found counts for every entry that grew.
+
+Baselines written before heki counted sites have no `version` key and keep counting reports: a
+new report is a regression, a second site behind a recorded report is not. `heki check` says so
+in a note, and `--update-baseline` rewrites the file with `version = 2`. A version this heki does
+not know is an error.
+
 ## Effect snapshots (`MUT103`)
 
 For libraries, a regression in what a public function *does* — it starts mutating an argument or
@@ -75,9 +86,10 @@ custom tooling.
 ## Rolling out rules
 
 - Start with the default rules and a baseline, or `--select` one family at a time.
-- Declare ownership contracts (`write-owners`, `read-owners`) for the shared state you care
-  about and effect boundaries (`effect-boundaries`) for the code that must stay pure; `MUT201`,
-  `MUT203`, and `EFF201` report nothing until a contract exists.
+- Declare ownership contracts (`write-owners`, `read-owners`, `call-owners`) for the shared
+  state and the operations you care about and effect boundaries (`effect-boundaries`) for the
+  code that must stay pure; `MUT201`, `MUT203`, `MUT204`, and `EFF201` report nothing until a
+  contract exists.
 - Keep the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`) for code where they
   matter: async services, threaded code, and library APIs.
 - Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.

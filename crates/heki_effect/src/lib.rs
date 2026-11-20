@@ -357,6 +357,10 @@ pub struct CallSite {
     pub recv_is_self: bool,
     /// The returned coroutine is driven by hand (`.send(None)` or a `run_sync` driver).
     pub drives_coroutine_manually: bool,
+    /// Fqn of the project class the call constructs (`Model(...)`, `cls(...)` in a class
+    /// method). A class without a project `__init__` still gets a site, with no callees: the
+    /// call ownership rules (`MUT204`) see every construction.
+    pub constructs: Option<String>,
 }
 
 impl CallSite {

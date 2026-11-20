@@ -657,6 +657,7 @@ fn gate_5_handbuilt_file_summaries() {
         loop_depth: 0,
         recv_is_self: false,
         drives_coroutine_manually: false,
+        constructs: None,
     });
     index.update_file(file_b);
 
@@ -1246,6 +1247,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         loop_depth: 0,
         recv_is_self: false,
         drives_coroutine_manually: false,
+        constructs: None,
     });
     let live = key("c", "live");
     let mut file_c = file("c.py", "c", &[&live]);
@@ -1261,6 +1263,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         loop_depth: 0,
         recv_is_self: false,
         drives_coroutine_manually: true,
+        constructs: None,
     });
     file_c.call_sites.push(CallSite {
         caller: live.clone(),
@@ -1273,6 +1276,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         loop_depth: 0,
         recv_is_self: false,
         drives_coroutine_manually: false,
+        constructs: None,
     });
     let dup = file("b_alt.py", "b", &[&caller]);
     let mut index = ProjectIndex::build(vec![file_a.clone(), file_b, file_c, dup]);

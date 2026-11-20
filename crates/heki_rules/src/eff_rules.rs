@@ -2,7 +2,8 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    ContractTarget, initializes_itself, parse_targets, patterns, project_classes, with_note,
+    CallTargetPattern, ContractTarget, SiteId, initializes_itself, parse_call_targets,
+    parse_targets, patterns, project_classes, site_callee, with_note,
 };
 use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
 use heki_ast::Span;
@@ -244,7 +245,8 @@ pub(crate) fn eff107(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one
-/// forbids (`mutates-params` / `writes-targets` forbid mutation facts instead).
+/// forbids (`mutates-params`, `writes-targets`, `reads-targets`, and `calls` forbid facts of
+/// another kind instead).
 const FORBID_TOKENS: &[(&str, &[ExecEffectKind])] = &[
     ("blocking", BLOCKING_EFFECTS),
     ("blocking-net", &[ExecEffectKind::BlockingNet]),
@@ -255,6 +257,8 @@ const FORBID_TOKENS: &[(&str, &[ExecEffectKind])] = &[
     ("sleep", &[ExecEffectKind::Sleep]),
     ("mutates-params", &[]),
     ("writes-targets", &[]),
+    ("reads-targets", &[]),
+    ("calls", &[]),
 ];
 
 /// `UnknownForbid::expected`, built from [`FORBID_TOKENS`].
@@ -274,6 +278,13 @@ struct Boundary<'r> {
     mutates_params: bool,
     writes_targets: bool,
     write_targets: Vec<ContractTarget>,
+    /// Writes reported unless `allow_writes` names them (with or without `writes-targets`).
+    write_universe: Vec<ContractTarget>,
+    allow_writes: Vec<ContractTarget>,
+    reads_targets: bool,
+    read_targets: Vec<ContractTarget>,
+    calls: bool,
+    call_targets: Vec<CallTargetPattern>,
     allowed_callees: Vec<DottedPattern>,
     note: Option<&'r str>,
 }
@@ -299,11 +310,24 @@ impl Boundary<'_> {
         key.qualname != "<module>" && names_function(&self.scopes, key)
     }
 
-    /// A Layer 2 symbol (or one of its modules / classes) that `allowed-callees` names.
+    /// A Layer 2 symbol or a project class (or one of its modules / classes) that
+    /// `allowed-callees` names.
     fn allows_symbol(&self, symbol: &str) -> bool {
         self.allowed_callees
             .iter()
             .any(|p| with_prefixes(symbol).any(|n| p.matches(n)))
+    }
+
+    /// Whether `allowed-callees` names everything `site` calls: the class it constructs, or
+    /// each of its project callees.
+    fn allows_call(&self, site: &CallSite) -> bool {
+        match &site.constructs {
+            Some(class) => self.allows_symbol(class),
+            None => site
+                .project_callees()
+                .iter()
+                .all(|bc| names_function(&self.allowed_callees, &bc.callee)),
+        }
     }
 
     /// Whether the effects of a project callee count at `site`: its body runs at the call and
@@ -319,6 +343,11 @@ impl Boundary<'_> {
     /// function of the scopes (that one reports its own violations).
     fn follows(&self, cx: &CheckContext<'_>, site: &CallSite, callee: &FuncKey) -> bool {
         self.counts(cx, site, callee) && !self.in_scope(callee)
+    }
+
+    /// Whether the boundary checks writes: `writes-targets`, or a `write-universe`.
+    fn checks_writes(&self) -> bool {
+        self.writes_targets || !self.write_universe.is_empty()
     }
 }
 
@@ -337,22 +366,43 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             };
             effects.extend(kinds.iter().copied());
         }
-        let writes_targets = b.forbid.iter().any(|t| t == "writes-targets");
-        if writes_targets && b.write_targets.is_empty() {
-            return Err(RuleConfigError::MissingWriteTargets(b.name.clone()));
+        let forbids = |token: &str| b.forbid.iter().any(|t| t == token);
+        for (token, key, targets) in [
+            ("writes-targets", "write-targets", &b.write_targets),
+            ("reads-targets", "read-targets", &b.read_targets),
+            ("calls", "call-targets", &b.call_targets),
+        ] {
+            if forbids(token) && targets.is_empty() {
+                return Err(RuleConfigError::MissingTargets {
+                    boundary: b.name.clone(),
+                    token,
+                    key,
+                });
+            }
         }
+        if !b.allow_writes.is_empty() && b.write_universe.is_empty() {
+            return Err(RuleConfigError::AllowWritesWithoutUniverse(b.name.clone()));
+        }
+        let targets = |texts: &[String], context: &'static str| {
+            parse_targets(cx, &all_classes, texts, context, context)
+        };
         out.push(Boundary {
             name: &b.name,
             scopes: patterns(&b.scopes, "effect-boundaries.scopes")?,
             effects,
-            mutates_params: b.forbid.iter().any(|t| t == "mutates-params"),
-            writes_targets,
-            write_targets: parse_targets(
+            mutates_params: forbids("mutates-params"),
+            writes_targets: forbids("writes-targets"),
+            write_targets: targets(&b.write_targets, "effect-boundaries.write-targets")?,
+            write_universe: targets(&b.write_universe, "effect-boundaries.write-universe")?,
+            allow_writes: targets(&b.allow_writes, "effect-boundaries.allow-writes")?,
+            reads_targets: forbids("reads-targets"),
+            read_targets: targets(&b.read_targets, "effect-boundaries.read-targets")?,
+            calls: forbids("calls"),
+            call_targets: parse_call_targets(
                 cx,
                 &all_classes,
-                &b.write_targets,
-                "effect-boundaries.write-targets",
-                "effect-boundaries.write-targets",
+                &b.call_targets,
+                "effect-boundaries.call-targets",
             )?,
             allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
             note: b.message.as_deref(),
@@ -393,17 +443,85 @@ pub(crate) fn eff201(
     Ok(())
 }
 
+/// Reached functions in breadth-first order (`0`: the scope function) with the parent node and
+/// the hop from it.
+type Nodes = Vec<(FuncKey, Option<(usize, CallHop)>)>;
+
+/// Hops from the scope function down to node `i`.
+fn chain_to(nodes: &Nodes, mut i: usize) -> Vec<CallHop> {
+    let mut chain = Vec::new();
+    while let Some((parent, hop)) = &nodes[i].1 {
+        chain.push(hop.clone());
+        i = *parent;
+    }
+    chain.reverse();
+    chain
+}
+
+/// The first (shortest) reached violation of one kind, and every distinct site of that kind the
+/// scope function reaches (`Diagnostic::sites`).
+struct Found {
+    /// From the scope function; ends at the sink for an effect and at the target for a call.
+    chain: Vec<CallHop>,
+    /// The write or read itself (reported there when the scope function holds it).
+    span: Span,
+    /// The kind of the first site (`direct_attr`, ..., or `calls` / `constructs`).
+    kind: &'static str,
+    sites: BTreeSet<SiteId>,
+}
+
+/// Record `site` under `key`, keeping the first violation `first` builds.
+fn note<K: Ord>(
+    map: &mut BTreeMap<K, Found>,
+    key: K,
+    site: SiteId,
+    first: impl FnOnce() -> (Vec<CallHop>, Span, &'static str),
+) {
+    map.entry(key)
+        .or_insert_with(|| {
+            let (chain, span, kind) = first();
+            Found {
+                chain,
+                span,
+                kind,
+                sites: BTreeSet::new(),
+            }
+        })
+        .sites
+        .insert(site);
+}
+
+/// The target of a reported `write-universe` write: the universe entry it matches, with a glob
+/// attribute part replaced by the written attribute (`DataModel.*` -> `DataModel.fields`), so
+/// writes to a subclass instance keep the class the configuration names.
+fn undeclared_text(entry: &str, attr: &str) -> String {
+    match entry.rsplit_once('.') {
+        Some((class, pattern)) if pattern.contains(['*', '?', '[', '{']) => {
+            format!("{class}.{attr}")
+        }
+        _ => entry.to_owned(),
+    }
+}
+
+/// What a forbidden write is reported as: a `write-targets` entry (by index), or, for a
+/// `write-universe` write that `allow-writes` does not name, its `undeclared_text`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum WriteBucket {
+    Target(usize),
+    Undeclared(String),
+}
+
 /// The part of the call graph one scope function reaches.
 struct Reach<'a> {
-    /// Reached functions in breadth-first order (`0`: the scope function) with the parent
-    /// node and the hop from it.
-    nodes: Vec<(FuncKey, Option<(usize, CallHop)>)>,
+    nodes: Nodes,
     /// Followed call edges `(caller node, callee node, binding)`.
     edges: Vec<(usize, usize, &'a BoundCallee)>,
-    /// Shortest chain to each forbidden execution effect.
-    exec: BTreeMap<ExecEffectKind, Vec<CallHop>>,
-    /// First (shortest) write of each write target: chain, write span, kind.
-    writes: BTreeMap<usize, (Vec<CallHop>, Span, WriteKind)>,
+    exec: BTreeMap<ExecEffectKind, Found>,
+    writes: BTreeMap<WriteBucket, Found>,
+    /// By `read-targets` index.
+    reads: BTreeMap<usize, Found>,
+    /// By `call-targets` index.
+    calls: BTreeMap<usize, Found>,
 }
 
 impl<'a> Reach<'a> {
@@ -418,6 +536,8 @@ impl<'a> Reach<'a> {
             edges: Vec::new(),
             exec: BTreeMap::new(),
             writes: BTreeMap::new(),
+            reads: BTreeMap::new(),
+            calls: BTreeMap::new(),
         };
         let mut index_of: FxHashMap<FuncKey, usize> = FxHashMap::default();
         index_of.insert(start.clone(), 0);
@@ -425,8 +545,11 @@ impl<'a> Reach<'a> {
         while i < reach.nodes.len() {
             let func = reach.nodes[i].0.clone();
             let own: &[(&'a Path, &'a CallSite)] = sites.get(&func).map_or(&[], Vec::as_slice);
-            if b.writes_targets {
+            if b.checks_writes() {
                 reach.collect_writes(cx, b, i, &func, own);
+            }
+            if b.reads_targets {
+                reach.collect_reads(cx, b, i, &func);
             }
             for &(path, site) in own {
                 let hop = |callee: String| CallHop {
@@ -435,6 +558,26 @@ impl<'a> Reach<'a> {
                     span: site.span,
                     path: path.to_path_buf(),
                 };
+                if b.calls && !b.allows_call(site) {
+                    for (ti, _) in b
+                        .call_targets
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| t.hit(site))
+                    {
+                        let nodes = &reach.nodes;
+                        note(&mut reach.calls, ti, (func.fqn(), site.span), || {
+                            let mut chain = chain_to(nodes, i);
+                            chain.push(hop(site_callee(site)));
+                            let kind = if site.constructs.is_some() {
+                                "constructs"
+                            } else {
+                                "calls"
+                            };
+                            (chain, site.span, kind)
+                        });
+                    }
+                }
                 match &site.target {
                     CallTarget::Layer2 {
                         symbol, effects, ..
@@ -443,11 +586,12 @@ impl<'a> Reach<'a> {
                             continue;
                         }
                         for e in effects.iter().filter(|e| b.effects.contains(*e)) {
-                            if !reach.exec.contains_key(e) {
-                                let mut chain = reach.chain_to(i);
+                            let nodes = &reach.nodes;
+                            note(&mut reach.exec, *e, (func.fqn(), site.span), || {
+                                let mut chain = chain_to(nodes, i);
                                 chain.push(hop(symbol.clone()));
-                                reach.exec.insert(*e, chain);
-                            }
+                                (chain, site.span, "")
+                            });
                         }
                     }
                     CallTarget::Project(callees) => {
@@ -468,20 +612,11 @@ impl<'a> Reach<'a> {
         reach
     }
 
-    /// Hops from the scope function down to node `i`.
-    fn chain_to(&self, mut i: usize) -> Vec<CallHop> {
-        let mut chain = Vec::new();
-        while let Some((parent, hop)) = &self.nodes[i].1 {
-            chain.push(hop.clone());
-            i = *parent;
-        }
-        chain.reverse();
-        chain
-    }
-
-    /// Writes of `write-targets` node `i` performs: its own writes, and `IndirectHelper` writes
-    /// created at its own call sites (a helper whose effects count mutating the field it is
-    /// handed). Writes propagated from callees are left to the callees' own nodes.
+    /// Writes node `i` performs: its own writes, and `IndirectHelper` writes created at its own
+    /// call sites (a helper whose effects count mutating the field it is handed). Writes
+    /// propagated from callees are left to the callees' own nodes. A write is forbidden when it
+    /// matches `write-targets` (with `writes-targets`) or `write-universe`, and `allow-writes`
+    /// does not name it.
     fn collect_writes(
         &mut self,
         cx: &CheckContext<'_>,
@@ -512,16 +647,60 @@ impl<'a> Reach<'a> {
                 }
                 _ => continue,
             };
+            if b.allow_writes
+                .iter()
+                .any(|a| a.matches(&w.class_qualname, &w.attr))
+            {
+                continue;
+            }
             // A class's own initialization (constructing a fresh object) is not a write.
-            for (ti, _) in b.write_targets.iter().enumerate().filter(|(_, t)| {
+            let forbidden = |t: &ContractTarget| {
                 t.matches(&w.class_qualname, &w.attr)
                     && !initializes_itself(cx, func, &t.classes, w.obj_params)
-            }) {
-                if !self.writes.contains_key(&ti) {
-                    let mut chain = self.chain_to(i);
+            };
+            let mut buckets: Vec<WriteBucket> = Vec::new();
+            if b.writes_targets {
+                buckets.extend(
+                    b.write_targets
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| forbidden(t))
+                        .map(|(ti, _)| WriteBucket::Target(ti)),
+                );
+            }
+            if buckets.is_empty()
+                && let Some(t) = b.write_universe.iter().find(|t| forbidden(t))
+            {
+                buckets.push(WriteBucket::Undeclared(undeclared_text(&t.text, &w.attr)));
+            }
+            for bucket in buckets {
+                let nodes = &self.nodes;
+                note(&mut self.writes, bucket, (func.fqn(), w.span), || {
+                    let mut chain = chain_to(nodes, i);
                     chain.extend(extra.clone());
-                    self.writes.insert(ti, (chain, w.span, w.kind));
-                }
+                    (chain, w.span, w.kind.as_str())
+                });
+            }
+        }
+    }
+
+    /// Reads of `read-targets` node `i` performs (read sites are local facts of every
+    /// summary); an initializer reading its own instance is no read.
+    fn collect_reads(&mut self, cx: &CheckContext<'_>, b: &Boundary<'_>, i: usize, func: &FuncKey) {
+        let reads = cx
+            .index
+            .summary(func)
+            .into_iter()
+            .flat_map(|s| &s.typed_field_read_sites);
+        for r in reads {
+            for (ti, _) in b.read_targets.iter().enumerate().filter(|(_, t)| {
+                t.matches(&r.class_qualname, &r.attr)
+                    && !initializes_itself(cx, func, &t.classes, r.obj_params)
+            }) {
+                let nodes = &self.nodes;
+                note(&mut self.reads, ti, (func.fqn(), r.span), || {
+                    (chain_to(nodes, i), r.span, r.kind.as_str())
+                });
             }
         }
     }
@@ -581,47 +760,78 @@ impl<'a> Reach<'a> {
                 b.note,
             )
         };
-        for (effect, chain) in &self.exec {
-            let sink = chain.last().map_or("", |h| h.callee.as_str());
-            let via = match chain.as_slice() {
+        let mut emit = |found: &Found, target: String, message: String| {
+            let span = found.chain.first().map_or(found.span, |h| h.span);
+            if let Some(d) = cx.emit(
+                out,
+                "EFF201",
+                unit,
+                span,
+                &key.qualname,
+                format!("{}:{target}", b.name),
+                message,
+                &found.chain,
+            ) {
+                d.sites = u32::try_from(found.sites.len()).unwrap_or(u32::MAX);
+            }
+        };
+        for (effect, found) in &self.exec {
+            let sink = found.chain.last().map_or("", |h| h.callee.as_str());
+            let via = match found.chain.as_slice() {
                 [first, _, ..] => format!(" via `{}`", first.callee),
                 _ => String::new(),
             };
-            cx.emit(
-                out,
-                "EFF201",
-                unit,
-                chain[0].span,
-                &key.qualname,
-                format!("{}:{}", b.name, effect_name(*effect)),
-                forbids(format!(
-                    "`{}` reaches {} (`{sink}`{via})",
-                    key.qualname,
-                    effect_name(*effect)
-                )),
-                chain,
-            );
+            let name = effect_name(*effect);
+            let message = forbids(format!("`{}` reaches {name} (`{sink}`{via})", key.qualname));
+            emit(found, name.to_owned(), message);
         }
-        for (ti, (chain, span, kind)) in &self.writes {
-            let target = &b.write_targets[*ti].text;
-            let via = chain
+        let via_first = |found: &Found| {
+            found
+                .chain
                 .first()
                 .map(|h| format!(" via `{}`", h.callee))
-                .unwrap_or_default();
-            cx.emit(
-                out,
-                "EFF201",
-                unit,
-                chain.first().map_or(*span, |h| h.span),
-                &key.qualname,
-                format!("{}:{target}", b.name),
-                forbids(format!(
-                    "`{}` writes `{target}` ({}{via})",
-                    key.qualname,
-                    kind.as_str()
-                )),
-                chain,
-            );
+                .unwrap_or_default()
+        };
+        for (bucket, found) in &self.writes {
+            let via = via_first(found);
+            match bucket {
+                WriteBucket::Target(ti) => {
+                    let target = &b.write_targets[*ti].text;
+                    let message = forbids(format!(
+                        "`{}` writes `{target}` ({}{via})",
+                        key.qualname, found.kind
+                    ));
+                    emit(found, target.clone(), message);
+                }
+                WriteBucket::Undeclared(attr) => {
+                    let message = with_note(
+                        format!(
+                            "`{}` writes `{attr}` ({}{via}), which effect boundary `{}` does not allow",
+                            key.qualname, found.kind, b.name
+                        ),
+                        b.note,
+                    );
+                    emit(found, attr.clone(), message);
+                }
+            }
+        }
+        for (ti, found) in &self.reads {
+            let target = &b.read_targets[*ti].text;
+            let via = via_first(found);
+            let message = forbids(format!(
+                "`{}` reads `{target}` ({}{via})",
+                key.qualname, found.kind
+            ));
+            emit(found, target.clone(), message);
+        }
+        for (ti, found) in &self.calls {
+            let target = &b.call_targets[*ti].text;
+            let via = match found.chain.as_slice() {
+                [first, _, ..] => format!(" (via `{}`)", first.callee),
+                _ => String::new(),
+            };
+            let message = forbids(format!("`{}` {} `{target}`{via}", key.qualname, found.kind));
+            emit(found, target.clone(), message);
         }
         if b.mutates_params {
             let bits = self.mutated_params(cx, f.params.len());

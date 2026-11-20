@@ -48,10 +48,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         params,
         sites: None,
         seen: FxHashSet::default(),
-        none: Allowance {
-            allowed: Vec::new(),
-            exempt_names: FxHashSet::default(),
-        },
+        none: Allowance::default(),
     };
     let mut paths: Vec<&Path> = cx.index.files.keys().map(|p| p.as_path()).collect();
     paths.sort();

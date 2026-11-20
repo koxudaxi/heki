@@ -55,6 +55,22 @@ pub struct Diagnostic {
     pub blocker: Option<String>,
     pub related: Vec<RelatedLocation>,
     pub fix: Option<Vec<TextEdit>>,
+    /// Distinct violation sites the diagnostic stands for (at least 1): a contract report at the
+    /// caller of a private helper covers every write, read, or call inside it, and an effect
+    /// boundary report every forbidden site its scope function reaches. Ratchet baselines count
+    /// sites, so a second violation behind a recorded report is a regression. Written to JSON
+    /// only when above 1.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub sites: u32,
+}
+
+fn one() -> u32 {
+    1
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // `skip_serializing_if` passes a reference.
+fn is_one(n: &u32) -> bool {
+    *n == 1
 }
 
 impl Diagnostic {
@@ -361,9 +377,42 @@ pub struct BaselineKey {
     pub target: String,
 }
 
+/// What the counts of a Ratchet baseline count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CountUnit {
+    /// Violation sites ([`Diagnostic::sites`]): the files this version writes (`version = 2`).
+    #[default]
+    Sites,
+    /// Diagnostics: files written before baselines counted sites (no `version`, or 1). They
+    /// keep their meaning until `--update-baseline` rewrites them.
+    Diagnostics,
+}
+
+impl CountUnit {
+    /// The on-disk `version` of a baseline with this unit.
+    fn version(self) -> u32 {
+        match self {
+            Self::Diagnostics => 1,
+            Self::Sites => BASELINE_VERSION,
+        }
+    }
+
+    /// What a count counts, for messages (`2 site(s)`).
+    pub fn noun(self) -> &'static str {
+        match self {
+            Self::Sites => "site(s)",
+            Self::Diagnostics => "diagnostic(s)",
+        }
+    }
+}
+
+/// The baseline format this version writes: counts are violation sites.
+pub const BASELINE_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RatchetBaseline {
     pub counts: BTreeMap<BaselineKey, u32>,
+    pub unit: CountUnit,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -389,12 +438,19 @@ pub enum BaselineError {
         path: PathBuf,
         cause: toml::de::Error,
     },
+    #[error(
+        "baseline {path} has version {version}; this heki reads versions 1 and {BASELINE_VERSION}"
+    )]
+    Version { path: PathBuf, version: u32 },
 }
 
-/// On-disk shape: `[[entries]]` sorted by key (minimal git diffs).
+/// On-disk shape: `version`, then `[[entries]]` sorted by key (minimal git diffs).
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BaselineFile {
+    /// Absent (or 1) in files written before baselines counted sites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<u32>,
     #[serde(default)]
     entries: Vec<BaselineEntry>,
 }
@@ -410,9 +466,11 @@ struct BaselineEntry {
 }
 
 impl RatchetBaseline {
+    /// A baseline of site counts ([`baseline_counts`] with [`CountUnit::Sites`]).
     pub fn from_counts(counts: BTreeMap<BaselineKey, u32>) -> Self {
         Self {
             counts: counts.into_iter().filter(|(_, c)| *c > 0).collect(),
+            unit: CountUnit::Sites,
         }
     }
 
@@ -439,6 +497,16 @@ impl RatchetBaseline {
             path: path.to_path_buf(),
             cause,
         })?;
+        let unit = match file.version {
+            None | Some(1) => CountUnit::Diagnostics,
+            Some(BASELINE_VERSION) => CountUnit::Sites,
+            Some(version) => {
+                return Err(BaselineError::Version {
+                    path: path.to_path_buf(),
+                    version,
+                });
+            }
+        };
         let mut counts = BTreeMap::new();
         for e in file.entries {
             let key = BaselineKey {
@@ -449,11 +517,12 @@ impl RatchetBaseline {
             };
             *counts.entry(key).or_insert(0) += e.count;
         }
-        Ok(Self { counts })
+        Ok(Self { counts, unit })
     }
 
     pub fn to_toml_string(&self) -> String {
         let file = BaselineFile {
+            version: Some(self.unit.version()),
             entries: self
                 .counts
                 .iter()
@@ -498,14 +567,19 @@ pub fn baseline_key(d: &Diagnostic, path: String) -> BaselineKey {
     }
 }
 
-/// Count diagnostics per baseline key.
+/// Count violation sites (or diagnostics) per baseline key.
 pub fn baseline_counts(
     diags: &[Diagnostic],
     key_path: &dyn Fn(&Path) -> String,
+    unit: CountUnit,
 ) -> BTreeMap<BaselineKey, u32> {
     let mut out = BTreeMap::new();
     for d in diags {
-        *out.entry(baseline_key(d, key_path(&d.path))).or_insert(0) += 1;
+        let n = match unit {
+            CountUnit::Sites => d.sites.max(1),
+            CountUnit::Diagnostics => 1,
+        };
+        *out.entry(baseline_key(d, key_path(&d.path))).or_insert(0) += n;
     }
     out
 }
@@ -545,6 +619,7 @@ mod tests {
                 message: "calls helper".into(),
             }],
             fix: None,
+            sites: 1,
         }
     }
 
@@ -554,6 +629,7 @@ mod tests {
         let k2 = key("src/b.py", "Parser.old", "DataType.data_types");
         let baseline = RatchetBaseline {
             counts: BTreeMap::from([(k1.clone(), 1), (k2.clone(), 2)]),
+            unit: CountUnit::Sites,
         };
         let current = BTreeMap::from([(k1.clone(), 2), (k2.clone(), 1)]);
         let cmp = baseline.compare(&current);
@@ -582,8 +658,54 @@ mod tests {
     #[test]
     fn baseline_counts_group_by_key() {
         let d = diag(1, "MUT201", "m");
-        let counts = baseline_counts(&[d.clone(), d], &|p| display_path(p));
-        assert_eq!(counts.values().copied().collect::<Vec<_>>(), vec![2]);
+        let mut two_sites = d.clone();
+        two_sites.sites = 2;
+        let diags = [d.clone(), d, two_sites];
+        let counts = |unit| {
+            baseline_counts(&diags, &|p| display_path(p), unit)
+                .values()
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        // Sites: a report standing for two sites counts twice; diagnostics: once.
+        assert_eq!(counts(CountUnit::Sites), vec![4]);
+        assert_eq!(counts(CountUnit::Diagnostics), vec![3]);
+    }
+
+    #[test]
+    fn baseline_versions_set_the_count_unit() {
+        let path = Path::new("b.toml");
+        let entry = "[[entries]]\npath = \"a.py\"\nqualname = \"f\"\nrule_code = \"MUT201\"\ntarget = \"M.f\"\ncount = 1\n";
+        // Files written before baselines counted sites keep counting diagnostics.
+        for old in [entry.to_owned(), format!("version = 1\n{entry}")] {
+            let b = RatchetBaseline::from_toml_str(&old, path).unwrap();
+            assert_eq!(b.unit, CountUnit::Diagnostics);
+            assert_eq!(b.unit.noun(), "diagnostic(s)");
+            assert!(b.to_toml_string().contains("version = 1\n"));
+        }
+        let new = RatchetBaseline::from_toml_str(&format!("version = 2\n{entry}"), path).unwrap();
+        assert_eq!(new.unit, CountUnit::Sites);
+        assert_eq!(new.unit.noun(), "site(s)");
+        assert!(new.to_toml_string().contains("version = 2\n"));
+        let err = RatchetBaseline::from_toml_str(&format!("version = 7\n{entry}"), path)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "baseline b.toml has version 7; this heki reads versions 1 and 2"
+        );
+    }
+
+    #[test]
+    fn diagnostics_write_sites_to_json_only_above_one() {
+        let mut d = diag(1, "MUT201", "m");
+        let one = render(std::slice::from_ref(&d), OutputFormat::Json, &|_, _| None);
+        assert!(!one.contains("\"sites\""), "{one}");
+        d.sites = 3;
+        let three = render(std::slice::from_ref(&d), OutputFormat::Json, &|_, _| None);
+        assert!(three.contains("\"sites\": 3"), "{three}");
+        let back: Vec<Diagnostic> = serde_json::from_str(&one).unwrap();
+        assert_eq!(back[0].sites, 1);
     }
 
     #[test]

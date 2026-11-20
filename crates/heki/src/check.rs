@@ -5,7 +5,8 @@
 use crate::{CheckArgs, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
 use heki_diagnostics::{
-    Diagnostic, RatchetBaseline, apply_fixes, baseline_counts, baseline_key, render, unified_diff,
+    BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
+    baseline_key, render, unified_diff,
 };
 use heki_effect::analyze_project;
 use heki_profile::ProfileData;
@@ -249,7 +250,8 @@ pub(crate) fn report(
                 "`--update-baseline` needs `--baseline <path>` or `baseline` in the configuration"
             );
         };
-        let baseline = RatchetBaseline::from_counts(baseline_counts(&diags, &key_path));
+        let baseline =
+            RatchetBaseline::from_counts(baseline_counts(&diags, &key_path, CountUnit::Sites));
         baseline.save(bp)?;
         eprintln!(
             "Wrote Ratchet baseline {} ({} entries, {} diagnostic(s)).",
@@ -261,11 +263,28 @@ pub(crate) fn report(
     }
     if let Some(bp) = &baseline_path {
         let baseline = RatchetBaseline::load(bp)?;
-        let cmp = baseline.compare(&baseline_counts(&diags, &key_path));
+        let unit = baseline.unit;
+        if unit == CountUnit::Diagnostics {
+            eprintln!(
+                "note: baseline {} counts diagnostics, not violation sites (written before version {BASELINE_VERSION}); `--update-baseline` rewrites it to count sites",
+                bp.display()
+            );
+        }
+        let cmp = baseline.compare(&baseline_counts(&diags, &key_path, unit));
         for (key, allowed, cur) in &cmp.stale_entries {
             eprintln!(
                 "note: baseline entry {}::{} {} `{}` can shrink {allowed} -> {cur} (`--update-baseline`)",
                 key.path, key.qualname, key.rule_code, key.target
+            );
+        }
+        for (key, allowed, cur) in &cmp.regressions {
+            eprintln!(
+                "note: baseline entry {}::{} {} `{}` allows {allowed} {}, found {cur}",
+                key.path,
+                key.qualname,
+                key.rule_code,
+                key.target,
+                unit.noun()
             );
         }
         let regressed: FxHashSet<_> = cmp.regressions.iter().map(|(k, _, _)| k.clone()).collect();
