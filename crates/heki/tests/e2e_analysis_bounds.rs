@@ -664,3 +664,58 @@ fn stores_through_a_long_alias_chain_resolve_each_copy_once() {
     p.write("m.py", &(lines.join("\n") + "\n"));
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
 }
+
+/// A class with thousands of subclasses and as many functions reading its class constant on an
+/// instance (`field.__dict__[keys.KEY]`): whether the constant holds on every class the instance
+/// may be is decided once per class and name, not once per read. The contract allows every
+/// writer but one, which is reported through the constant.
+#[test]
+fn class_constant_reads_on_a_class_with_many_subclasses_decide_it_once() {
+    let classes = 3_000;
+    let mut lines = vec![
+        "from typing import ClassVar".to_owned(),
+        String::new(),
+        String::new(),
+        "class Field:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.public = 0".to_owned(),
+        String::new(),
+        String::new(),
+        "class Keys:".to_owned(),
+        "    KEY: ClassVar[str] = \"public\"".to_owned(),
+    ];
+    for i in 0..classes {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Keys{i}(Keys):"),
+            "    pass".to_owned(),
+        ]);
+    }
+    for i in 0..=classes {
+        let name = if i == classes {
+            "write".to_owned()
+        } else {
+            format!("allowed{i}")
+        };
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def {name}(keys: Keys, field: Field):"),
+            "    field.__dict__[keys.KEY] = 1".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_class_constant_reads");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"m\"\ntargets = [\"Field.public\"]\nallowed-writers = [\"m.allowed*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .collect();
+    assert_eq!(reported.len(), 1, "{found:#?}");
+    assert_eq!(reported[0]["qualname"], "write");
+}

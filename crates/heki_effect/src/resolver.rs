@@ -1007,7 +1007,38 @@ fn note(keys: &mut BTreeSet<String>, key: &str) {
 #[derive(Debug, Default)]
 struct Recorder {
     on: AtomicBool,
-    keys: Mutex<DeclKeys>,
+    keys: Mutex<Recorded>,
+}
+
+/// What a recording has read so far.
+#[derive(Debug, Default)]
+struct Recorded {
+    keys: DeclKeys,
+    /// What computing each kept answer read, once per time the answer is read again
+    /// ([`ProjectDecls::class_str_constant`]): merged into `keys` once per answer when the
+    /// recording ends, so reading an answer again copies no keys.
+    replayed: Vec<Arc<DeclKeys>>,
+}
+
+impl Recorded {
+    fn into_keys(self) -> DeclKeys {
+        let mut keys = self.keys;
+        let mut merged = FxHashSet::default();
+        for reads in self.replayed {
+            if merged.insert(Arc::as_ptr(&reads)) {
+                keys.extend(DeclKeys::clone(&reads));
+            }
+        }
+        keys
+    }
+}
+
+/// A kept answer of [`ProjectDecls::class_str_constant`], with what computing it read of the
+/// declarations (`None`: it was computed without recording).
+#[derive(Debug, Clone)]
+struct KnownConstant {
+    value: Option<String>,
+    reads: Option<Arc<DeclKeys>>,
 }
 
 /// Declarations of every project module plus derived indexes.
@@ -1039,6 +1070,9 @@ pub struct ProjectDecls {
     linearized: RwLock<FxHashMap<String, Vec<String>>>,
     /// One shared [`crate::ClassLine`] per class (`Self::lineage`); cleared with the indexes.
     lines: RwLock<FxHashMap<String, crate::SharedLine>>,
+    /// The answers of [`Self::class_str_constant`] so far, by class, name, and whether the
+    /// object may be of a subclass; cleared with the indexes.
+    class_constants: RwLock<FxHashMap<(String, String, bool), KnownConstant>>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -1101,11 +1135,11 @@ impl ProjectDecls {
         self.recorder.on.store(true, Ordering::SeqCst);
         let out = f();
         self.recorder.on.store(false, Ordering::SeqCst);
-        let keys = std::mem::take(&mut *self.recorded());
+        let keys = std::mem::take(&mut *self.recorded()).into_keys();
         (out, keys)
     }
 
-    fn recorded(&self) -> MutexGuard<'_, DeclKeys> {
+    fn recorded(&self) -> MutexGuard<'_, Recorded> {
         self.recorder
             .keys
             .lock()
@@ -1115,7 +1149,7 @@ impl ProjectDecls {
     /// Note a key read during [`Self::record`].
     fn read(&self, note: impl FnOnce(&mut DeclKeys)) {
         if self.recorder.on.load(Ordering::Relaxed) {
-            note(&mut self.recorded());
+            note(&mut self.recorded().keys);
         }
     }
 
@@ -1166,6 +1200,10 @@ impl ProjectDecls {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.lines
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.class_constants
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
@@ -1475,7 +1513,51 @@ impl ProjectDecls {
     /// (`Child.KEY = "x"`, in its module or another) defines it too: its own value then hides
     /// the inherited constant. An instance of a protocol is one of its structural
     /// implementations, which define the name themselves: each must hold the same constant.
-    pub fn class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<&str> {
+    ///
+    /// The answer is kept for the life of the indexes: a read of it while recording reads
+    /// what computing it read.
+    pub fn class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<String> {
+        let key = (class.to_owned(), attr.to_owned(), subclasses);
+        let recording = self.recorder.on.load(Ordering::Relaxed);
+        let known = self
+            .class_constants
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(known) = known {
+            if !recording {
+                return known.value;
+            }
+            if let Some(reads) = known.reads {
+                self.recorded().replayed.push(reads);
+                return known.value;
+            }
+        }
+        let (value, reads) = if recording {
+            // What this computation reads, apart from what the recording read before.
+            let before = std::mem::take(&mut *self.recorded());
+            let value = self.find_class_str_constant(class, attr, subclasses);
+            let mut recorded = self.recorded();
+            let reads = Arc::new(std::mem::replace(&mut *recorded, before).into_keys());
+            recorded.replayed.push(Arc::clone(&reads));
+            (value, Some(reads))
+        } else {
+            (self.find_class_str_constant(class, attr, subclasses), None)
+        };
+        let known = KnownConstant {
+            value: value.clone(),
+            reads,
+        };
+        self.class_constants
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, known);
+        value
+    }
+
+    /// [`Self::class_str_constant`], computed.
+    fn find_class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<String> {
         let defines = |c: &str| {
             self.class(c)
                 .is_some_and(|d| d.members.contains(attr) || d.rebound_attrs.contains(attr))
@@ -1494,12 +1576,12 @@ impl ProjectDecls {
         }
         let value = self.str_constant(&format!("{owner}.{attr}"))?;
         if subclasses && let Some(implementers) = self.protocol(&class) {
-            let same = |i: &String| self.class_str_constant(i, attr, true) == Some(value);
+            let same = |i: &String| self.class_str_constant(i, attr, true).as_deref() == Some(value);
             if !implementers?.iter().all(same) {
                 return None;
             }
         }
-        Some(value)
+        Some(value.to_owned())
     }
 
     pub(crate) fn symbol(&self, fqn: &str) -> Symbol<'_> {
@@ -3716,18 +3798,19 @@ impl<'a> TypeCtx<'a> {
                 }
                 InstKind::AttrLoad { obj, attr, .. } => {
                     let project = self.project;
-                    let value = match types.get(obj)? {
+                    return match types.get(obj)? {
                         Val::Ref(class) if project.is_project_class(class) => {
                             project.class_str_constant(class, attr, false)
                         }
-                        Val::Ref(module) => project.str_constant(&format!("{module}.{attr}")),
+                        Val::Ref(module) => project
+                            .str_constant(&format!("{module}.{attr}"))
+                            .map(str::to_owned),
                         // An instance, or a class object that may be a subclass (`cls`).
                         Val::Inst(class) | Val::Class(class) if project.is_project_class(class) => {
                             project.class_str_constant(class, attr, true)
                         }
                         _ => None,
                     };
-                    return value.map(str::to_owned);
                 }
                 _ => return None,
             }

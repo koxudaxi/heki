@@ -202,6 +202,8 @@ const KEY_SUBCLASS: &str =
 const KEY_CLASS_REBIND: &str =
     "from pkg.key_class import Keys\n\n\ndef reset():\n    Keys.KEY = \"other\"\n";
 const KEY_SUBCLASS_REBIND: &str = "from pkg.key_class import Keys\n\n\nclass QuietKeys(Keys):\n    pass\n\n\nQuietKeys.KEY = \"other\"\n";
+// Another module reads the class constant on an instance, as the class's own method does.
+const KEY_CLASS_READER: &str = "from pkg.key_class import Keys\nfrom pkg.model import Registry\n\n\ndef mark_with(keys: Keys, r: Registry):\n    r.__dict__[keys.KEY] = []\n";
 // A subclass lists a base defining the name before the class: its MRO finds the base's value.
 const KEY_OTHER_FIRST: &str = "from typing import ClassVar\n\nfrom pkg.key_class import Keys\n\n\nclass OtherKey:\n    KEY: ClassVar[str] = \"other\"\n\n\nclass OtherFirstKeys(OtherKey, Keys):\n    pass\n";
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
@@ -607,6 +609,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
         ("pkg/key_class.py", KEY_CLASS),
+        ("pkg/key_class_reader.py", KEY_CLASS_READER),
         ("pkg/seal.py", SEAL),
         ("pkg/seal_peek.py", SEAL_PEEK),
         ("pkg/journal.py", JOURNAL),
@@ -1214,12 +1217,18 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
                 KEY_SUBCLASS.to_owned(),
             )],
         )
-        .absent(&[("pkg/key_class.py", "MUT201")]),
+        .absent(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
         Step::new(
             "the subclass is deleted",
             vec![Action::Delete("pkg/key_subclass.py")],
         )
-        .present(&[("pkg/key_class.py", "MUT201")]),
+        .present(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
         Step::new(
             "another module rebinds the `ClassVar` constant on its class",
             vec![Action::Create(
@@ -1227,12 +1236,18 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
                 KEY_CLASS_REBIND.to_owned(),
             )],
         )
-        .absent(&[("pkg/key_class.py", "MUT201")]),
+        .absent(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
         Step::new(
             "the module rebinding it is deleted",
             vec![Action::Delete("pkg/key_class_rebind.py")],
         )
-        .present(&[("pkg/key_class.py", "MUT201")]),
+        .present(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
         Step::new(
             "a subclass in another module is given its own value of the class constant",
             vec![Action::Create(
@@ -1240,12 +1255,27 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
                 KEY_SUBCLASS_REBIND.to_owned(),
             )],
         )
-        .absent(&[("pkg/key_class.py", "MUT201")]),
+        .absent(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
         Step::new(
             "the subclass storing it is deleted",
             vec![Action::Delete("pkg/key_subclass_rebind.py")],
         )
-        .present(&[("pkg/key_class.py", "MUT201")]),
+        .present(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "a reader of the class constant is edited, its declarations unchanged",
+            vec![Action::Save(
+                "pkg/key_class_reader.py",
+                format!("{KEY_CLASS_READER}# The class constant names the attribute.\n"),
+            )],
+        )
+        .present(&[("pkg/key_class_reader.py", "MUT201")])
+        .cutoff(),
         Step::new(
             "a subclass in another module lists a base defining the name before the class",
             vec![Action::Create(
@@ -1253,12 +1283,18 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
                 KEY_OTHER_FIRST.to_owned(),
             )],
         )
-        .absent(&[("pkg/key_class.py", "MUT201")]),
+        .absent(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
         Step::new(
             "the subclass listing the other base is deleted",
             vec![Action::Delete("pkg/key_other_first.py")],
         )
-        .present(&[("pkg/key_class.py", "MUT201")]),
+        .present(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
         Step::new(
             "a helper starts storing the fresh object before writing it",
             vec![Action::Save("pkg/fresh_ops.py", storing)],

@@ -104,8 +104,9 @@ slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many 
 `isinstance` tests, a long chain of assignments a loop carries, many loops one after another, each
 with a lazy initialization (the blocks each covers count toward a budget proportional to the
 source), many waits on one future before many `await`s of it, task factories at the end of a long
-chain of copies, and a long chain of aliases of a class with an attribute store through the last one
-per alias.
+chain of copies, a long chain of aliases of a class with an attribute store through the last one per
+alias, and a class with thousands of subclasses whose class constant as many functions read on an
+instance.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
