@@ -625,10 +625,35 @@ pub struct CallSite {
     /// a lazy initialization of the caller around the call is tested, on an object the loop does
     /// not construct: across them, its effects run at most once (`EFF102` / `EFF103`).
     pub once_loops: u64,
-    /// The callees run on a worker thread: an offloading API's callable (`asyncio.to_thread(f,
-    /// x)`, a function decorated with `@sync_to_async`). Everything they do happens, but their
-    /// blocking effects never block the caller's thread.
-    pub on_worker: bool,
+    /// How the callees run when an API runs them for the caller (`Runner`).
+    pub runner: Runner,
+}
+
+/// How an API runs a callable it is handed ([`CallSite::runner`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Runner {
+    /// Called directly, on the caller's thread.
+    #[default]
+    Caller,
+    /// On a worker thread: an offloading API's callable (`asyncio.to_thread(f, x)`), a function
+    /// decorated with `@sync_to_async`. Everything it does happens, but its blocking effects
+    /// never block the caller's thread.
+    Worker,
+    /// On the caller's thread with a synchronous facade over an async database connection
+    /// (SQLAlchemy's `AsyncSession.run_sync(f)`, Layer 2 `sync_facade_arg`): its database I/O
+    /// through the facade is awaited for it; its other blocking calls block.
+    SyncFacade,
+}
+
+impl CallSite {
+    /// Whether the effect `e` of the callees does not block the caller's thread here.
+    pub fn hides(&self, e: ExecEffectKind) -> bool {
+        match self.runner {
+            Runner::Caller => false,
+            Runner::Worker => e.blocks(),
+            Runner::SyncFacade => e == ExecEffectKind::BlockingDb,
+        }
+    }
 }
 
 impl CallSite {
@@ -841,7 +866,7 @@ impl ProjectIndex {
                         .copied()
                         .collect();
                     for e in effects {
-                        if site.on_worker && e.blocks() {
+                        if site.hides(e) {
                             continue;
                         }
                         // A guard the call decides against: the effect does not run here.

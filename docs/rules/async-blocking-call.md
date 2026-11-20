@@ -13,7 +13,10 @@ synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), databas
 `conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
 waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
 `queue.Queue.get()` / `put()`, `Future.result()`, `concurrent.futures.wait()`; a zero timeout or
-`blocking=False` / `block=False` returns at once and is not reported). Where an argument decides what a library call does, a literal
+`blocking=False` / `block=False` returns at once and is not reported). A function SQLAlchemy's
+`AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
+its database I/O through the session or connection it receives is awaited for it, its other
+blocking calls are reported. Where an argument decides what a library call does, a literal
 one is followed: `pd.read_csv("https://...")` downloads the file.
 
 Reading a `@property` or `functools.cached_property` attribute of a project class runs its

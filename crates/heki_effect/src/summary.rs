@@ -13,7 +13,7 @@ use crate::resolver::{
 };
 use crate::{
     ArgBinding, ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Contracts,
-    EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput, ProjectDecls, ReadKind,
+    EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput, ProjectDecls, ReadKind, Runner,
     SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, WriteKind,
 };
 use heki_ast::Span;
@@ -1776,10 +1776,10 @@ impl<'a> Extractor<'a> {
                         guards: Vec::new(),
                         once_per: None,
                         once_loops: 0,
-                        on_worker: false,
+                        runner: Runner::Caller,
                     });
                 }
-                self.offloaded_call(bb, symbol, call);
+                self.handed_callable(bb, symbol, call);
                 None
             }
             Callee::Project(keys, binds_recv) => {
@@ -1941,7 +1941,7 @@ impl<'a> Extractor<'a> {
     }
 
     /// The site of `callees` an offloading API runs on a worker thread for `call`
-    /// (`CallSite::on_worker`).
+    /// (`Runner::Worker`).
     fn worker_site(&mut self, bb: BlockId, callees: Vec<BoundCallee>, call: &Call<'_>) {
         if let Some(events) = self.events.as_mut() {
             events
@@ -1951,21 +1951,33 @@ impl<'a> Extractor<'a> {
         let site = self.site(bb, CallTarget::Project(callees), false, call.span);
         self.sites.push(CallSite {
             recv_is_self: call.recv_is_self,
-            on_worker: true,
+            runner: Runner::Worker,
             ..site
         });
     }
 
-    /// An offloading API's callable (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None,
-    /// f, *args)`) runs on a worker thread at the call: a project function there is called
-    /// with the positional arguments after it. Keyword arguments are left unbound: some APIs
-    /// forward them, others take their own.
-    fn offloaded_call(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
-        let Some((callable, first)) =
-            offloaded_callable(self.cx.kb, symbol, call.args, call.star_from)
-        else {
-            return;
+    /// A callable a library API runs at the call, when it is a project function: an offloading
+    /// API's (`asyncio.to_thread(f, *args)`, `loop.run_in_executor(None, f, *args)`) on a worker
+    /// thread, with the positional arguments after it (keyword arguments are left unbound: some
+    /// APIs forward them, others take their own), and a sync-facade API's
+    /// (`AsyncSession.run_sync(f, *args)`) on the caller's thread, with the facade first and
+    /// the arguments left unbound.
+    fn handed_callable(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
+        let facade = || {
+            let k = usize::from(self.cx.kb.lookup(symbol)?.sync_facade_arg?);
+            if call.star_from.is_some_and(|s| usize::from(s) <= k) {
+                return None;
+            }
+            Some(*call.args.get(k)?)
         };
+        let (callable, args, runner) =
+            match offloaded_callable(self.cx.kb, symbol, call.args, call.star_from) {
+                Some((callable, first)) => (callable, &call.args[first..], Runner::Worker),
+                None => match facade() {
+                    Some(callable) => (callable, &[][..], Runner::SyncFacade),
+                    None => return,
+                },
+            };
         let (callee, recv, recv_is_self) = match self.bound_method(callable) {
             Some((recv, method)) => {
                 let callee = self.cx.resolve_method(self.types.get(&recv), &method);
@@ -1977,21 +1989,24 @@ impl<'a> Extractor<'a> {
         let Callee::Project(..) = &callee else {
             return;
         };
-        let after = u8::try_from(first).unwrap_or(u8::MAX);
-        let worker = Call {
+        let after = call.args.len() - args.len();
+        let handed = Call {
             dst: call.dst,
             value: Some(callable),
             recv,
-            args: &call.args[first..],
+            args,
             kwargs: &[],
-            star_from: call.star_from.map(|s| s - after),
+            star_from: call
+                .star_from
+                .filter(|_| !args.is_empty())
+                .map(|s| s - u8::try_from(after).unwrap_or(u8::MAX)),
             is_awaited: false,
             recv_is_self,
             constructs: None,
             span: call.span,
         };
-        if let Some((site, _)) = self.call(bb, &callee, &worker) {
-            self.sites[site].on_worker = true;
+        if let Some((site, _)) = self.call(bb, &callee, &handed) {
+            self.sites[site].runner = runner;
         }
     }
 
@@ -2013,7 +2028,7 @@ impl<'a> Extractor<'a> {
             guards: self.guards.facts_at(&cx, bb),
             once_per: self.guards.once_per_at(&cx, bb),
             once_loops: self.guards.once_loops_at(&cx, bb, self.loops_around(bb)),
-            on_worker: false,
+            runner: Runner::Caller,
         }
     }
 
@@ -2226,7 +2241,7 @@ fn role_site(
         guards: site.guards.clone(),
         once_per: site.once_per,
         once_loops: 0,
-        on_worker: site.on_worker,
+        runner: site.runner,
     }
 }
 

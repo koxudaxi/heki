@@ -245,14 +245,17 @@ A function decorated with a catalog entry offloading argument 0, applied directl
 (`@sync_to_async`, `@sync_to_async(thread_sensitive=False)`), is `d(f)`: calling it is a call of
 `d` with the function as its offloaded argument (`FunctionDecl::offloaded_by`, resolved through
 imports and re-exports when the declarations are completed; every definition of the name must be
-decorated so), and its body runs at the call on a worker thread: a site of its own, marked
-`CallSite::on_worker`. The callable an offloading API is given runs so too, as a call of the
+decorated so), and its body runs at the call on a worker thread: a site of its own, whose
+`CallSite::runner` is `Runner::Worker`. The callable an offloading API is given runs so too, as a call of the
 project function with the positional arguments after it (`asyncio.to_thread(f, a)` calls `f(a)`,
 `loop.run_in_executor(None, f, a)` too; keyword arguments are left unbound, since some APIs take
 their own). Every fact of such a site moves to the caller except the blocking effects, which do
 not block the caller's thread: its queries per item (`EFF103`), its clients (`EFF102`), and its
 changes to shared objects (`MUT202`, which reads the offloading call the same way) count, and
-`EFF201` does not enter it.
+`EFF201` does not enter it. A callable a Layer 2 `sync_facade_arg` API runs
+(`AsyncSession.run_sync(fn)`) gets a site with `Runner::SyncFacade`: it runs on the caller's
+thread, so only its `blocking_db` (the database I/O through the synchronous facade it receives,
+awaited for it) is dropped; its arguments are left unbound.
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
@@ -549,7 +552,8 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 (`blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`,
 `unpooled_client_alloc`, `db_query`, `quadratic_realloc`), `async_safe` (`asyncio.StreamWriter.write`),
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
-`asgiref.sync.sync_to_async`), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
+`asgiref.sync.sync_to_async`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
+the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and

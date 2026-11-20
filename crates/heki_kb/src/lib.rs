@@ -195,6 +195,11 @@ pub struct EcosystemEntry {
     pub sync_lock_or_tx: bool,
     /// What the call does instead when an argument is known (the first case that holds).
     pub cases: Vec<ArgCase>,
+    /// Index of a callable argument the call runs on the calling thread, handing it a
+    /// synchronous facade over an async database connection as its first argument
+    /// (SQLAlchemy's `AsyncSession.run_sync(fn)`): the database I/O through the facade is
+    /// awaited for it, its other blocking calls block.
+    pub sync_facade_arg: Option<u8>,
 }
 
 /// One case of an entry (`EcosystemEntry::cases`): when the argument at position `arg` (the
@@ -1409,6 +1414,18 @@ mod tests {
                 ]
                 .concat(),
                 async_safe(entry(&[])),
+            ),
+            (
+                // `fn(sync_session, *args)` runs on the loop's thread through a greenlet.
+                s(&[
+                    "sqlalchemy.ext.asyncio.AsyncConnection.run_sync",
+                    "sqlalchemy.ext.asyncio.AsyncSession.run_sync",
+                    "sqlmodel.ext.asyncio.session.AsyncSession.run_sync",
+                ]),
+                EcosystemEntry {
+                    sync_facade_arg: Some(0),
+                    ..async_safe(entry(&[]))
+                },
             ),
             (
                 s(&["sqlalchemy.ext.asyncio.create_async_engine"]),

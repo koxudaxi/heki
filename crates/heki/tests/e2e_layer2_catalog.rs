@@ -1929,3 +1929,54 @@ fn concatenation_into_a_supplied_buffer_does_not_accumulate() {
         vec![d(14, "DATA101", "tp_accumulated_into_a_buffer", "acc")]
     );
 }
+
+const SYNC_FACADES: &str = r#"import requests
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
+from sqlalchemy.orm import Session
+
+
+def fetch(sync_session):
+    return requests.get("https://example.com")
+
+
+def load(sync_session: Session):
+    return sync_session.execute("SELECT 1")
+
+
+async def tp_blocking_call_in_run_sync(session: AsyncSession):
+    return await session.run_sync(fetch)
+
+
+async def tn_database_io_through_the_facade(session: AsyncSession, conn: AsyncConnection):
+    await session.run_sync(load)
+    await conn.run_sync(lambda sync_conn: sync_conn.execute("SELECT 1"))
+
+
+async def tp_query_per_item_through_the_facade(session: AsyncSession, ids):
+    for i in ids:
+        await session.run_sync(load)
+"#;
+
+/// SQLAlchemy's `run_sync(fn)` runs `fn` on the event loop's thread with a synchronous facade:
+/// its database I/O through the facade is awaited for it (still a query per call), its other
+/// blocking calls block the loop.
+#[test]
+fn run_sync_callables_run_on_the_event_loop() {
+    assert_eq!(
+        check(
+            "catalog_sync_facades",
+            "app/facades.py",
+            SYNC_FACADES,
+            "EFF101,EFF103"
+        ),
+        vec![
+            d(15, "EFF101", "tp_blocking_call_in_run_sync", "requests.get"),
+            d(
+                25,
+                "EFF103",
+                "tp_query_per_item_through_the_facade",
+                "sqlalchemy.orm.Session.execute"
+            ),
+        ]
+    );
+}

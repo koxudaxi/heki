@@ -12,8 +12,8 @@ use heki_diagnostics::Diagnostic;
 use heki_effect::guards::loop_bit;
 use heki_effect::{
     BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, EffectSummary,
-    Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
-    boundary_reports_in, group_by_root_cause,
+    Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, Runner, SiteEffect, TypeCtx, WriteKind,
+    anchors_call_site, boundary_reports_in, group_by_root_cause,
 };
 use heki_ir::{InstKind, IrFunction, VarId};
 use heki_kb::ExecEffectKind;
@@ -379,7 +379,7 @@ impl Boundary<'_> {
     /// `into` ([`heki_effect::ProjectIndex::delivery`]): `allowed-callees` names neither the
     /// callee whose body runs nor the function iterating its result (`SiteRole::Through`). A
     /// function returning a generator is not checked itself: its own body does not run there,
-    /// nor does a callee run on a worker thread (`CallSite::on_worker`).
+    /// nor does a callee run on a worker thread (`Runner::Worker`).
     fn counts<'s>(
         &self,
         cx: &CheckContext<'_>,
@@ -387,7 +387,7 @@ impl Boundary<'_> {
         callee: &FuncKey,
         into: Facts,
     ) -> Option<heki_effect::Delivery<'s>> {
-        if site.on_worker {
+        if site.runner == Runner::Worker {
             return None;
         }
         let s = cx.index.summary(callee)?;
