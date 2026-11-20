@@ -993,6 +993,192 @@ fn contract_baselines_round_trip() {
     );
 }
 
+// ========================================================== inside the owners' operations
+
+#[test]
+fn functions_that_only_run_inside_allowed_contexts_are_not_reported() {
+    // dcg `DataModel.set_base_class`: a public method writing its own field that only the class
+    // initializer (on `self`) and the store call runs inside the owner's operations.
+    let p = Project::new("v1x_inside_owners");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["Model.bases"]
+allowed-writers = ["Store.*"]
+
+[[tool.heki.read-owners]]
+name = "index"
+targets = ["Ref.children"]
+allowed-readers = ["Index.*"]
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        r#"class Model:
+    def __init__(self):
+        self.bases = []
+        self.set_bases()
+
+    def set_bases(self):
+        self.bases = ["object"]
+
+    def reorder(self):
+        self.bases.reverse()
+
+    def spin(self, n):
+        self.bases = []
+        if n:
+            self.spin(n - 1)
+
+
+class Store:
+    def reset(self, model: Model):
+        model.set_bases()
+        model.reorder()
+
+
+def rebuild(model: Model):
+    model.reorder()
+
+
+class Ref:
+    def __init__(self):
+        self.children = []
+
+    def kids(self):
+        return list(self.children)
+
+    def count(self):
+        return len(self.children)
+
+
+class Index:
+    def build(self, ref: Ref):
+        return ref.kids() + [ref.count()]
+
+
+def render(ref: Ref):
+    return ref.count()
+"#,
+    );
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            // `reorder` also runs from `rebuild`, which nothing calls.
+            d("pkg/model.py", 10, "Model.reorder", "Model.bases"),
+            // `spin` only calls itself: no allowed context.
+            d("pkg/model.py", 13, "Model.spin", "Model.bases"),
+            // `count` also runs from `render`.
+            d("pkg/model.py", 36, "Ref.count", "Ref.children"),
+        ],
+        "{diags:#?}"
+    );
+}
+
+#[test]
+fn inside_allowed_contexts_needs_callers_and_every_path_allowed() {
+    // Edge cases of the "only runs inside allowed contexts" exclusion, for writes and reads:
+    // a function without callers, a cycle of functions outside every allowed context, and
+    // allowed and non-allowed callers mixed (`Store` and `Parser`).
+    let p = Project::new("v1x_inside_owners_edges");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["Model.bases"]
+allowed-writers = ["Store.*"]
+
+[[tool.heki.read-owners]]
+name = "index"
+targets = ["Model.bases"]
+allowed-readers = ["Store.*"]
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        r#"class Model:
+    def __init__(self):
+        self.bases = []
+
+    def orphan(self):
+        self.bases = []
+
+    def touch(self):
+        self.bases.append(1)
+
+    def peek(self):
+        return self.bases
+
+
+def ping(model: Model, n):
+    model.bases = []
+    if n:
+        pong(model, n - 1)
+
+
+def pong(model: Model, n):
+    ping(model, n)
+
+
+def tick(model: Model, n):
+    model.bases = []
+    if n:
+        tock(model, n - 1)
+
+
+def tock(model: Model, n):
+    tick(model, n)
+
+
+class Store:
+    def save(self, model: Model):
+        model.touch()
+        tick(model, 2)
+        return model.peek()
+
+
+class Parser:
+    def parse(self, model: Model):
+        model.touch()
+        return model.peek()
+"#,
+    );
+    let diags = diagnostics(&p, &[]);
+    let w = "Model.bases";
+    assert_eq!(
+        found(&diags),
+        vec![
+            // No callers at all: never excluded (no vacuous "every caller is allowed").
+            d("pkg/model.py", 6, "Model.orphan", w),
+            // `Store.save` and `Parser.parse` both call them: `Parser.parse` is no allowed
+            // context, so the writes and reads stay reported (`self.bases.append` is both).
+            d("pkg/model.py", 9, "Model.touch", w),
+            d("pkg/model.py", 9, "Model.touch", w),
+            d("pkg/model.py", 12, "Model.peek", w),
+            // `ping` <-> `pong` with no allowed caller anywhere on the cycle.
+            d("pkg/model.py", 16, "ping", w),
+            // `tick` <-> `tock` is entered only from `Store.save`: inside the store's
+            // operation, so not reported.
+        ],
+        "{diags:#?}"
+    );
+    assert_eq!(
+        diags.iter().map(|x| x["rule_code"].as_str().unwrap()).collect::<Vec<_>>(),
+        ["MUT201", "MUT201", "MUT203", "MUT203", "MUT201"],
+        "{diags:#?}"
+    );
+}
+
 // ================================================================================ heki rule
 
 #[test]
