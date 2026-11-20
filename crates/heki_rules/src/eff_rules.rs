@@ -1,7 +1,7 @@
-//! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`
-//! (docs/DETAILED_SPEC_M3_M7.md section 3.2).
+//! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
+//! `EFF107`, `EFF201` (docs/DETAILED_SPEC_M3_M7.md section 3.2).
 
-use crate::{CheckContext, ModuleUnit};
+use crate::{CheckContext, ModuleUnit, RuleConfigError};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
     BoundaryReport, CallHop, EffectSummary, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect,
@@ -216,4 +216,24 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             }
         }
     }
+}
+
+/// `EFF106`: `await` / blocking network I/O while a sync lock or DB transaction is held
+/// (scaffold).
+pub(crate) fn eff106(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    let _ = (cx, unit, out);
+}
+
+/// `EFF107`: a locally bound `asyncio.create_task` result that is never retained (scaffold).
+pub(crate) fn eff107(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    let _ = (cx, unit, out);
+}
+
+/// `EFF201`: forbidden effects reached from `effect-boundaries` scopes (scaffold).
+pub(crate) fn eff201(
+    cx: &CheckContext<'_>,
+    out: &mut Vec<Diagnostic>,
+) -> Result<(), RuleConfigError> {
+    let _ = (cx, out);
+    Ok(())
 }

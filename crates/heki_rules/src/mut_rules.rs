@@ -1,4 +1,5 @@
-//! Family 1 rules: `MUT101`, `MUT201`, `MUT202` (docs/DETAILED_SPEC_M3_M7.md section 3.2).
+//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT201`, `MUT202`, `MUT203`
+//! (docs/DETAILED_SPEC_M3_M7.md section 3.2).
 
 use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError};
 use heki_ast::Span;
@@ -348,7 +349,10 @@ pub(crate) fn mut201(
         let mut targets = Vec::new();
         for t in &rule.targets {
             let Some((class, attr)) = t.rsplit_once('.') else {
-                return Err(RuleConfigError::InvalidTarget(t.clone()));
+                return Err(RuleConfigError::InvalidTarget {
+                    section: "write-owners",
+                    target: t.clone(),
+                });
             };
             let class = DottedPattern::new(class, "write-owners.targets")?;
             targets.push(OwnerTarget {
@@ -943,4 +947,29 @@ impl<'a> Mut202Fn<'a> {
         }
         out
     }
+}
+
+// ==================================================================================== MUT107
+
+/// `MUT107`: attributes read by `__hash__` mutated after initialization (scaffold).
+pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
+    let _ = (cx, out);
+}
+
+// ==================================================================================== MUT106
+
+/// `MUT106`: a single-pass iterator consumed twice (scaffold).
+pub(crate) fn mut106(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    let _ = (cx, unit, out);
+}
+
+// ==================================================================================== MUT203
+
+/// `MUT203`: reads of `read-owners` targets outside their allowed readers (scaffold).
+pub(crate) fn mut203(
+    cx: &CheckContext<'_>,
+    out: &mut Vec<Diagnostic>,
+) -> Result<(), RuleConfigError> {
+    let _ = (cx, out);
+    Ok(())
 }

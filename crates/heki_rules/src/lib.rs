@@ -1,8 +1,12 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
-//! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT201`, `MUT202`)
-//! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`)
-//! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`)
+//! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT201`,
+//!   `MUT202`, `MUT203`)
+//! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
+//!   `EFF107`, `EFF201`, `DATA101`)
+//! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
+//!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
+//!   reports without a rewrite.
 
 mod data_rules;
 mod eff_rules;
@@ -43,6 +47,9 @@ pub struct RuleMeta {
     pub family: RuleFamily,
     pub default_enabled: bool,
     pub auto_fix_default: bool,
+    /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent` or in a
+    /// function a `--profile` dump shows hot.
+    pub size_dependent_fix: bool,
     pub summary: &'static str,
     /// Ruff-style documentation (`crates/heki_rules/rule-docs/<CODE>.md`): printed by
     /// `heki rule <CODE>` and published as the rule's page.
@@ -56,6 +63,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "cached-property-stale-mutation",
         family: RuleFamily::Mut,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating an attribute read by `@cached_property` without invalidating the cache.",
         doc: include_str!("../rule-docs/MUT101.md"),
@@ -65,15 +73,37 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "summary-effect-regression",
         family: RuleFamily::Mut,
         default_enabled: false,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Interprocedural mutation/escape/effect regression against saved summary snapshot.",
         doc: include_str!("../rule-docs/MUT103.md"),
+    },
+    RuleMeta {
+        code: "MUT106",
+        slug: "iterator-double-consumption",
+        family: RuleFamily::Mut,
+        default_enabled: false,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).",
+        doc: include_str!("../rule-docs/MUT106.md"),
+    },
+    RuleMeta {
+        code: "MUT107",
+        slug: "hash-attr-mutation",
+        family: RuleFamily::Mut,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).",
+        doc: include_str!("../rule-docs/MUT107.md"),
     },
     RuleMeta {
         code: "MUT201",
         slug: "write-owner-violation",
         family: RuleFamily::Mut,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.",
         doc: include_str!("../rule-docs/MUT201.md"),
@@ -83,15 +113,27 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "readonly-return-mutation",
         family: RuleFamily::Mut,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`.",
         doc: include_str!("../rule-docs/MUT202.md"),
+    },
+    RuleMeta {
+        code: "MUT203",
+        slug: "read-owner-violation",
+        family: RuleFamily::Mut,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.",
+        doc: include_str!("../rule-docs/MUT203.md"),
     },
     RuleMeta {
         code: "EFF101",
         slug: "async-blocking-call",
         family: RuleFamily::Eff,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.",
         doc: include_str!("../rule-docs/EFF101.md"),
@@ -101,6 +143,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-unpooled-client",
         family: RuleFamily::Eff,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.",
         doc: include_str!("../rule-docs/EFF102.md"),
@@ -110,6 +153,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-db-query",
         family: RuleFamily::Eff,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Explicit DB query / external RPC executed inside a loop (N+1).",
         doc: include_str!("../rule-docs/EFF103.md"),
@@ -119,15 +163,47 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "async-blocking-fs",
         family: RuleFamily::Eff,
         default_enabled: false,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: blocking local filesystem I/O reachable from `async def`.",
         doc: include_str!("../rule-docs/EFF105.md"),
+    },
+    RuleMeta {
+        code: "EFF106",
+        slug: "lock-or-tx-held-across-io",
+        family: RuleFamily::Eff,
+        default_enabled: false,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.",
+        doc: include_str!("../rule-docs/EFF106.md"),
+    },
+    RuleMeta {
+        code: "EFF107",
+        slug: "unretained-async-task",
+        family: RuleFamily::Eff,
+        default_enabled: false,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.",
+        doc: include_str!("../rule-docs/EFF107.md"),
+    },
+    RuleMeta {
+        code: "EFF201",
+        slug: "effect-boundary-violation",
+        family: RuleFamily::Eff,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.",
+        doc: include_str!("../rule-docs/EFF201.md"),
     },
     RuleMeta {
         code: "DATA101",
         slug: "loop-carried-concat",
         family: RuleFamily::Data,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.",
         doc: include_str!("../rule-docs/DATA101.md"),
@@ -137,6 +213,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-quadratic-concat",
         family: RuleFamily::Opt,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: true,
         summary: "Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).",
         doc: include_str!("../rule-docs/OPT101.md"),
@@ -146,6 +223,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "set-dict-quadratic-merge",
         family: RuleFamily::Opt,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: true,
         summary: "Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).",
         doc: include_str!("../rule-docs/OPT102.md"),
@@ -155,6 +233,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "immutable-quadratic-concat",
         family: RuleFamily::Opt,
         default_enabled: true,
+        size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
         doc: include_str!("../rule-docs/OPT103.md"),
@@ -164,6 +243,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-linear-membership",
         family: RuleFamily::Opt,
         default_enabled: true,
+        size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
         doc: include_str!("../rule-docs/OPT110.md"),
@@ -173,15 +253,37 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-linear-dedup",
         family: RuleFamily::Opt,
         default_enabled: true,
+        size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
         doc: include_str!("../rule-docs/OPT111.md"),
+    },
+    RuleMeta {
+        code: "OPT112",
+        slug: "loop-linear-list-lookup",
+        family: RuleFamily::Opt,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).",
+        doc: include_str!("../rule-docs/OPT112.md"),
+    },
+    RuleMeta {
+        code: "OPT113",
+        slug: "nested-loop-equijoin",
+        family: RuleFamily::Opt,
+        default_enabled: true,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.",
+        doc: include_str!("../rule-docs/OPT113.md"),
     },
     RuleMeta {
         code: "OPT120",
         slug: "list-front-pop",
         family: RuleFamily::Opt,
         default_enabled: true,
+        size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
         doc: include_str!("../rule-docs/OPT120.md"),
@@ -191,6 +293,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-front-insert",
         family: RuleFamily::Opt,
         default_enabled: true,
+        size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `q.insert(0, v)` -> `collections.deque`.",
         doc: include_str!("../rule-docs/OPT121.md"),
@@ -200,6 +303,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-invariant-container-rebuild",
         family: RuleFamily::Opt,
         default_enabled: true,
+        size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
         doc: include_str!("../rule-docs/OPT130.md"),
@@ -226,8 +330,22 @@ pub struct ModuleUnit<'a> {
 
 #[derive(Debug, Error)]
 pub enum RuleConfigError {
-    #[error("invalid write-owners target `{0}` (expected `Class.attr`)")]
-    InvalidTarget(String),
+    /// A `targets` / `write-targets` entry of `section` that is not `Class.attr`.
+    #[error("invalid {section} target `{target}` (expected `Class.attr`)")]
+    InvalidTarget {
+        section: &'static str,
+        target: String,
+    },
+    #[error(
+        "unknown `forbid` token `{token}` in effect-boundaries `{boundary}` (expected {expected})"
+    )]
+    UnknownForbid {
+        boundary: String,
+        token: String,
+        expected: &'static str,
+    },
+    #[error("effect-boundaries `{0}` forbids `writes-targets` but sets no `write-targets`")]
+    MissingWriteTargets(String),
     #[error("invalid glob `{pattern}` in {context}: {cause}")]
     Glob {
         pattern: String,
@@ -293,8 +411,11 @@ pub fn check_project(
     };
     let mut out = Vec::new();
     mut_rules::mut101(&cx, &mut out);
+    mut_rules::mut107(&cx, &mut out);
     mut_rules::mut201(&cx, &mut out)?;
+    mut_rules::mut203(&cx, &mut out)?;
     eff_rules::eff101_105(&cx, &mut out);
+    eff_rules::eff201(&cx, &mut out)?;
     if let Some(snap) = extras.snapshot {
         snapshot::mut103(&cx, snap, &mut out);
     }
@@ -310,10 +431,15 @@ pub fn check_project(
         .par_iter()
         .map(|u| {
             let mut d = Vec::new();
+            mut_rules::mut106(&cx, u, &mut d);
             mut_rules::mut202(&cx, u, &readonly, &mut d);
             eff_rules::eff102_103(&cx, u, &mut d);
+            eff_rules::eff106(&cx, u, &mut d);
+            eff_rules::eff107(&cx, u, &mut d);
             data_rules::data101(&cx, u, &mut d);
             opt_rules::opt(&cx, u, &opt_opts, &mut d);
+            opt_rules::opt112(&cx, u, &mut d);
+            opt_rules::opt113(&cx, u, &mut d);
             d
         })
         .collect();
@@ -485,5 +611,16 @@ mod registry_tests {
         assert_eq!(find_rule("write-owner-violation").unwrap().code, "MUT201");
         assert!(find_rule("OPT101").unwrap().auto_fix_default);
         assert!(!find_rule("OPT110").unwrap().auto_fix_default);
+        // `size_dependent_fix` names exactly the size-dependent Soundness-lane rewrites.
+        for r in CORE_RULES {
+            let lane = heki_soundness::OptRule::ALL
+                .iter()
+                .find(|o| o.code() == r.code);
+            let expected = lane.is_some_and(|o| {
+                o.profitability() == heki_soundness::ProfitabilityTier::SizeDependent
+                    && r.code != "OPT103"
+            });
+            assert_eq!(r.size_dependent_fix, expected, "{}", r.code);
+        }
     }
 }

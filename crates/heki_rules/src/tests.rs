@@ -93,7 +93,7 @@ fn owners(targets: &[&str], allowed: &[&str]) -> HekiConfig {
             name: "store".into(),
             targets: targets.iter().map(|s| (*s).to_owned()).collect(),
             allowed_writers: allowed.iter().map(|s| (*s).to_owned()).collect(),
-            forbid_cached_property_on: Vec::new(),
+            ..WriteOwnerRule::default()
         }],
         ..HekiConfig::default()
     }
@@ -450,7 +450,7 @@ fn mut201_glob_writers_and_bad_targets() {
         decls: None,
             }
         ),
-        Err(RuleConfigError::InvalidTarget(t)) if t == "nodot"
+        Err(RuleConfigError::InvalidTarget { section: "write-owners", target: t }) if t == "nodot"
     ));
 }
 
