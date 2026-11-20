@@ -3,6 +3,7 @@
 //! Produces the function's local `EffectSummary` plus the `CallSite`s the interprocedural
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
+use crate::cache_flow;
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{IterFlow, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards};
@@ -192,6 +193,9 @@ fn extract_module(
             let slot = file.flows.entry(key.clone()).or_default();
             slot.entries.extend(flow.entries);
             slot.writes.extend(flow.writes);
+        }
+        if let Some(flow) = cache_flow::cache_flow(f, &key, &sites, &cx) {
+            file.cache_flows.entry(key.clone()).or_default().push(flow);
         }
         file.call_sites.extend(sites);
         // Same qualname defined twice (conditional definitions): keep the union of facts.

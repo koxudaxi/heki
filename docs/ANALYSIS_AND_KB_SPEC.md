@@ -299,6 +299,15 @@ invalidation contracts announced after the call on every normal path, and the ne
 `Iterate` / `Through` sites too), with `FileSummary.flows`, are computed at extraction from the
 CFG and its post-dominator tree, only when a contract is configured; `ProjectIndex` keeps no IR.
 
+`FileSummary.cache_flows` (`heki_effect::CacheFlow`, one per definition) holds the `MUT101` facts
+of every method that writes a `self` attribute in its own body: the writes (attribute, position,
+whether they rebind the attribute or fill a memo), and the blocks of the method (normal
+successors, returns, exception targets) with the points that invalidate or read a cached
+property of its own instance (`del self.<name>`, a constant-key removal from `self.__dict__`,
+`self.__dict__.clear()`, `self.<name>`, and calls on `self`, whose callees' summaries say what
+they do). They are local facts, never propagated, and they let `MUT101` decide staleness from the
+index alone, for a method of any indexed file.
+
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
 `if x is None:`, `isinstance(x, T)`, also through `and` / `or` / `not`, early returns, and
 conditional expressions; on a parameter, or an attribute of one the function never assigns)
@@ -408,6 +417,9 @@ which module imports which.
    itself, into a display or a container that is returned; `self` reaches no other code), minus
    the attributes the `self` methods and properties it calls read (final summary). A starred
    display element (`(*self.a,)`) is a copy: the IR lowers it to a copy named `.unpacked`.
+5. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
+   stale writes of a method are known without its IR; `MUT101` reports those of the checked
+   methods.
 
 #### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
 - The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,

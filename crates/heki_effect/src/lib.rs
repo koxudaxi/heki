@@ -17,6 +17,7 @@
 //!    callee's guards across each call site (pruning the effects an argument switches off).
 //! 4. `report`: Boundary-Only Reporting.
 
+pub mod cache_flow;
 mod callgraph;
 mod construction;
 pub mod consumption;
@@ -31,6 +32,7 @@ mod scc;
 mod summary;
 pub mod types;
 
+pub use cache_flow::{CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, self_attr_writes};
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
@@ -1079,6 +1081,9 @@ pub struct FileSummary {
     /// The `MUT109` flow facts of the file's functions (local, IR-free; empty unless an
     /// `invalidation` contract is configured).
     pub flows: FxHashMap<FuncKey, FuncFlow>,
+    /// The `MUT101` facts of the file's methods that write a `self` attribute themselves, one
+    /// per definition in source order (local, IR-free).
+    pub cache_flows: FxHashMap<FuncKey, Vec<CacheFlow>>,
 }
 
 impl FileSummary {

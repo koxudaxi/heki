@@ -8,12 +8,13 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CallHop, CallSite, Callee, Construction,
-    Delivery, EffectSummary, Facts, FuncKey, INITIALIZERS, ProjectDecls, ProjectIndex, ReturnStep,
-    Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val, WriteKind, self_aliases,
+    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CacheEvent, CacheFlow, CallHop, CallSite, Callee,
+    Construction, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS, ProjectDecls,
+    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
+    WriteKind, self_aliases, self_attr_writes,
 };
 use heki_env::HekiConfig;
-use heki_ir::{CompareOpKind, Inst, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -35,9 +36,8 @@ const INIT_METHODS: &[&str] = &[
     "_setup",
 ];
 
-/// A method of a project class. Methods of the checked files carry their IR (only they are
-/// reported); the methods of the other indexed files take part in their class families through
-/// their summaries.
+/// A method of a project class. Its summaries and `MUT101` facts are in the index; a method of
+/// a checked file also carries its IR, one per definition (only checked methods are reported).
 struct Method<'a> {
     key: FuncKey,
     /// The file defining it.
@@ -70,80 +70,102 @@ fn is_private(name: &str) -> bool {
     heki_effect::delegates_to_callers(name)
 }
 
+/// The methods of every project class, keyed by owner class fqn (nested classes stay
+/// separate): from the IR of the checked files, and from the summaries of the other indexed
+/// files.
+struct ClassMethods<'a> {
+    by_class: BTreeMap<String, Vec<Method<'a>>>,
+}
+
+impl<'a> ClassMethods<'a> {
+    fn new(units: &'a [ModuleUnit<'a>], index: &'a ProjectIndex) -> Self {
+        let mut by_class: BTreeMap<String, Vec<Method<'a>>> = BTreeMap::new();
+        for unit in units {
+            for f in &unit.input.ir.functions {
+                if f.is_class_body || f.is_module_body {
+                    continue;
+                }
+                let Some(owner) = &f.owner_class_qualname else {
+                    continue;
+                };
+                by_class
+                    .entry(format!("{}.{owner}", unit.input.module_name))
+                    .or_default()
+                    .push(Method {
+                        key: CheckContext::key(unit, f),
+                        path: &unit.input.path,
+                        checked: Some(Checked { unit, f }),
+                    });
+            }
+        }
+        let checked: FxHashSet<&Path> = units.iter().map(|u| u.input.path.as_path()).collect();
+        let mut others: Vec<(&FuncKey, &Path, &str)> = Vec::new();
+        for (path, file) in &index.files {
+            if checked.contains(path.as_path()) {
+                continue;
+            }
+            others.extend(file.local_functions.iter().filter_map(|(key, s)| {
+                let owner = s.owner_class_qualname.as_deref()?;
+                (index.file_of(key) == Some(path.as_path())).then_some((key, path.as_path(), owner))
+            }));
+        }
+        others.sort();
+        for (key, path, owner) in others {
+            by_class
+                .entry(format!("{}.{owner}", key.module))
+                .or_default()
+                .push(Method {
+                    key: key.clone(),
+                    path,
+                    checked: None,
+                });
+        }
+        Self { by_class }
+    }
+
+    /// The family of `class`: its own methods, those of every project subclass, and the methods
+    /// it inherits from its project ancestors that no class before them in the MRO overrides
+    /// (they run on its instances too). A family spans modules: what a checked method is
+    /// reported for does not depend on which other files are checked with it (the language
+    /// server checks one).
+    fn family(&self, decls: &ProjectDecls, class: &str) -> Vec<&Method<'a>> {
+        let methods = self.by_class.get(class).into_iter().flatten();
+        let mut family: Vec<&Method<'a>> = methods.clone().collect();
+        for sub in decls.subclasses_of(class) {
+            family.extend(self.by_class.get(&sub).into_iter().flatten());
+        }
+        let mut defined: FxHashSet<&str> = methods.map(Method::name).collect();
+        for ancestor in decls.ancestors_of(class) {
+            let inherited = self.by_class.get(&ancestor).into_iter().flatten();
+            family.extend(inherited.clone().filter(|m| !defined.contains(m.name())));
+            defined.extend(inherited.map(Method::name));
+        }
+        family
+    }
+}
+
 /// Visit every project class whose family has checked methods with its own methods, its
-/// family (its methods, those of every project subclass, and the methods it inherits from its
-/// project ancestors that no class before them in the MRO overrides: they run on its instances
-/// too), and the private methods its family's `__init__`s call on `self`. Classes are keyed by
-/// owner class fqn, so nested classes stay separate. A family spans modules: what a checked
-/// method is reported for does not depend on which other files are checked with it (the
-/// language server checks one).
+/// family ([`ClassMethods::family`]), and the private methods its family's `__init__`s call on
+/// `self`.
 fn for_each_class_family<'a>(
     cx: &CheckContext<'a>,
     mut visit: impl FnMut(&[Method<'a>], &[&Method<'a>], &FxHashSet<FuncKey>),
 ) {
-    let mut by_class: BTreeMap<String, Vec<Method<'a>>> = BTreeMap::new();
-    for unit in cx.units {
-        for f in &unit.input.ir.functions {
-            if f.is_class_body || f.is_module_body {
-                continue;
-            }
-            let Some(owner) = &f.owner_class_qualname else {
-                continue;
-            };
-            by_class
-                .entry(format!("{}.{owner}", unit.input.module_name))
-                .or_default()
-                .push(Method {
-                    key: CheckContext::key(unit, f),
-                    path: &unit.input.path,
-                    checked: Some(Checked { unit, f }),
-                });
-        }
-    }
-    let mut others: Vec<(&FuncKey, &Path, &str)> = Vec::new();
-    for (path, file) in &cx.index.files {
-        if cx.unit(path).is_some() {
-            continue;
-        }
-        others.extend(file.local_functions.iter().filter_map(|(key, s)| {
-            let owner = s.owner_class_qualname.as_deref()?;
-            (cx.index.file_of(key) == Some(path.as_path())).then_some((key, path.as_path(), owner))
-        }));
-    }
-    others.sort();
-    for (key, path, owner) in others {
-        by_class
-            .entry(format!("{}.{owner}", key.module))
-            .or_default()
-            .push(Method {
-                key: key.clone(),
-                path,
-                checked: None,
-            });
-    }
-    for (class, methods) in &by_class {
-        let mut family: Vec<&Method<'a>> = methods.iter().collect();
-        for sub in cx.decls.subclasses_of(class) {
-            family.extend(by_class.get(&sub).into_iter().flatten());
-        }
-        let mut defined: FxHashSet<&str> = methods.iter().map(Method::name).collect();
-        for ancestor in cx.decls.ancestors_of(class) {
-            let inherited = by_class.get(&ancestor).into_iter().flatten();
-            family.extend(inherited.clone().filter(|m| !defined.contains(m.name())));
-            defined.extend(inherited.map(Method::name));
-        }
+    let classes = ClassMethods::new(cx.units, cx.index);
+    for (class, methods) in &classes.by_class {
+        let family = classes.family(cx.decls, class);
         if family.iter().all(|m| m.checked.is_none()) {
             continue;
         }
-        let init_called = private_methods_called_from_init(cx, &family);
+        let init_called = private_methods_called_from_init(cx.index, &family);
         visit(methods, &family, &init_called);
     }
 }
 
 /// The method's own (local) summary: one write is one report, where it happens, so the
 /// writes merged up from the helpers it calls do not count.
-fn local_summary<'a>(cx: &CheckContext<'a>, m: &Method<'_>) -> Option<&'a EffectSummary> {
-    cx.index
+fn local_summary<'a>(index: &'a ProjectIndex, m: &Method<'_>) -> Option<&'a EffectSummary> {
+    index
         .files
         .get(m.path)
         .and_then(|f| f.local_functions.get(&m.key))
@@ -173,7 +195,7 @@ fn is_memo_name(attr: &str) -> bool {
 /// memo-shaped write (`setdefault`, a store under `if k not in self.<attr>:`), or an in-place
 /// change of an attribute named as a memo or cache. Rebinding such an attribute is no memo
 /// operation (`self.cache_size = n`).
-fn is_memo_write(attr: &str, w: &SelfWrite) -> bool {
+fn is_memo_write(attr: &str, w: &SelfAttrWrite) -> bool {
     w.memo_shaped || !w.rebinds && is_memo_name(attr)
 }
 
@@ -188,116 +210,164 @@ fn disjoint_keys<'k>(
     matches!((k_read, k_write), (Some(kr), Some(kw)) if kr.is_disjoint(&kw))
 }
 
+/// A write that leaves a `@cached_property` stale: `writer` changes `self.<attr>`, which the
+/// cached property `prop` reads, at `span` (its first such write), without invalidating it.
+struct StaleWrite<'m, 'a> {
+    prop: &'m Method<'a>,
+    writer: &'m Method<'a>,
+    attr: &'a str,
+    span: Span,
+}
+
+/// The writes of `family` that leave a `@cached_property` of the class (`methods`) stale, in
+/// the order `MUT101` reports them, among the family members `writers` admits. Decided from the
+/// index alone ([`heki_effect::CacheFlow`]), so a writer in a file that is not checked counts
+/// too.
+fn stale_writes<'m, 'a>(
+    index: &'a ProjectIndex,
+    methods: &'m [Method<'a>],
+    family: &[&'m Method<'a>],
+    init_called: &FxHashSet<FuncKey>,
+    writers: impl Fn(&Method<'_>) -> bool,
+    mut found: impl FnMut(StaleWrite<'m, 'a>),
+) {
+    for p in methods {
+        let Some(ps) = index.summary(&p.key) else {
+            continue;
+        };
+        if !ps.is_cached_property {
+            continue;
+        }
+        let p_name = p.name();
+        let mut reads: BTreeMap<&str, Vec<&Option<String>>> = BTreeMap::new();
+        for r in &ps.reads_self_attrs {
+            if r.attr != p_name {
+                reads.entry(&r.attr).or_default().push(&r.const_key);
+            }
+        }
+        // A checked file has one method per definition, and the facts of a method cover all
+        // of its definitions in the file.
+        let mut visited: FxHashSet<(&Path, &FuncKey)> = FxHashSet::default();
+        for &m in family {
+            if !writers(m) || !visited.insert((m.path, &m.key)) {
+                continue;
+            }
+            if m.key == p.key || filter1_init(m, init_called) {
+                continue;
+            }
+            let Some(ms) = index.summary(&m.key) else {
+                continue;
+            };
+            let flows = index
+                .files
+                .get(m.path)
+                .and_then(|f| f.cache_flows.get(&m.key))
+                .map_or(&[][..], Vec::as_slice);
+            // Filter 4: the method invalidates the cache after the write on every path.
+            let invalidations: Vec<Option<CacheEvents>> = flows
+                .iter()
+                .map(|flow| {
+                    invalidates(ms, p_name).then(|| CacheEvents::of(index, m, flow, p_name))
+                })
+                .collect();
+            let Some(local) = local_summary(index, m) else {
+                continue;
+            };
+            // A private helper whose every caller invalidates the property is covered.
+            let covered_by_callers = is_private(m.name())
+                && index.reverse_call_graph.get(&m.key).is_some_and(|callers| {
+                    !callers.is_empty()
+                        && callers
+                            .iter()
+                            .all(|c| index.summary(c).is_some_and(|cs| invalidates(cs, p_name)))
+                });
+            if covered_by_callers {
+                continue;
+            }
+            for (&attr, read_keys) in &reads {
+                let writes: Vec<&AttrKeyPath> = local
+                    .mutates_self_attrs
+                    .iter()
+                    .filter(|w| w.attr == attr)
+                    .collect();
+                if writes.is_empty() {
+                    continue;
+                }
+                let first = flows.iter().zip(&invalidations).find_map(|(flow, points)| {
+                    // Filter 2: memo / cache dictionaries.
+                    let mut own: Vec<&SelfAttrWrite> = flow
+                        .writes_of(attr)
+                        .filter(|w| !is_memo_write(attr, w))
+                        .collect();
+                    // The cached value holds the attribute's object itself: it sees the
+                    // changes made in place, and only rebinding the attribute leaves it behind.
+                    if ps.returns_self_attrs.contains(attr) {
+                        own.retain(|w| w.rebinds);
+                    }
+                    if let Some(points) = points {
+                        own.retain(|w| !points.cover(flow, w.block, w.index));
+                    }
+                    own.first().map(|w| w.span)
+                });
+                let Some(span) = first else {
+                    continue;
+                };
+                // Filter 3: disjoint constant dict keys.
+                if disjoint_keys(
+                    read_keys.iter().copied(),
+                    writes.iter().map(|w| &w.const_key),
+                ) {
+                    continue;
+                }
+                found(StaleWrite {
+                    prop: p,
+                    writer: m,
+                    attr,
+                    span,
+                });
+            }
+        }
+    }
+}
+
 pub(crate) fn mut101(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.selection.is_enabled("MUT101") {
         return;
     }
     let mut seen = FxHashSet::default();
     for_each_class_family(cx, |methods, family, init_called| {
-        for p in methods {
-            let Some(ps) = cx.index.summary(&p.key) else {
-                continue;
-            };
-            if !ps.is_cached_property {
-                continue;
+        // Only checked methods are reported.
+        let writers = |m: &Method<'_>| m.checked.is_some();
+        stale_writes(cx.index, methods, family, init_called, writers, |w| {
+            // An overriding `@cached_property` shares the instance `__dict__` slot: one report
+            // per property name.
+            if let Some(Checked { unit, .. }) = w.writer.checked
+                && seen.insert((w.writer.key.clone(), w.attr, w.prop.name().to_owned()))
+            {
+                let p_name = w.prop.name();
+                let class_qualname = cx
+                    .index
+                    .summary(&w.prop.key)
+                    .and_then(|ps| ps.owner_class_qualname.as_deref())
+                    .unwrap_or_default();
+                cx.emit(
+                    out,
+                    "MUT101",
+                    unit,
+                    w.span,
+                    &w.writer.key.qualname,
+                    format!("{class_qualname}.{}->{p_name}", w.attr),
+                    format!(
+                        "`{}` mutates `self.{}`, read by `@cached_property` `{p_name}`, without invalidating it",
+                        w.writer.key.qualname, w.attr
+                    ),
+                    Some(format!(
+                        "invalidate it after the change with `del self.{p_name}`, or `self.__dict__.pop(\"{p_name}\", None)` when it may not be computed yet"
+                    )),
+                    &[],
+                );
             }
-            let p_name = p.name();
-            let mut reads: BTreeMap<&str, Vec<&Option<String>>> = BTreeMap::new();
-            for r in &ps.reads_self_attrs {
-                if r.attr != p_name {
-                    reads.entry(&r.attr).or_default().push(&r.const_key);
-                }
-            }
-            for m in family {
-                // Only checked methods are reported.
-                let Some(Checked { unit, f }) = m.checked else {
-                    continue;
-                };
-                if m.key == p.key || filter1_init(m, init_called) {
-                    continue;
-                }
-                let Some(ms) = cx.index.summary(&m.key) else {
-                    continue;
-                };
-                // Filter 4: the method invalidates the cache after the write on every path.
-                let invalidations =
-                    invalidates(ms, p_name).then(|| CacheEvents::of(cx, unit, f, p_name));
-                let Some(local) = local_summary(cx, m) else {
-                    continue;
-                };
-                // A private helper whose every caller invalidates the property is covered.
-                let covered_by_callers = is_private(m.name())
-                    && cx
-                        .index
-                        .reverse_call_graph
-                        .get(&m.key)
-                        .is_some_and(|callers| {
-                            !callers.is_empty()
-                                && callers.iter().all(|c| {
-                                    cx.index
-                                        .summary(c)
-                                        .is_some_and(|cs| invalidates(cs, p_name))
-                                })
-                        });
-                if covered_by_callers {
-                    continue;
-                }
-                for (attr, read_keys) in &reads {
-                    let writes: Vec<&AttrKeyPath> = local
-                        .mutates_self_attrs
-                        .iter()
-                        .filter(|w| w.attr == *attr)
-                        .collect();
-                    if writes.is_empty() {
-                        continue;
-                    }
-                    // Filter 2: memo / cache dictionaries.
-                    let mut own = self_attr_writes(f, attr);
-                    own.retain(|w| !is_memo_write(attr, w));
-                    // The cached value holds the attribute's object itself: it sees the changes
-                    // made in place, and only rebinding the attribute leaves it behind.
-                    if ps.returns_self_attrs.contains(*attr) {
-                        own.retain(|w| w.rebinds);
-                    }
-                    if let Some(points) = &invalidations {
-                        own.retain(|w| !points.cover(f, w.block, w.index));
-                    }
-                    if own.is_empty() {
-                        continue;
-                    }
-                    // Filter 3: disjoint constant dict keys.
-                    if disjoint_keys(
-                        read_keys.iter().copied(),
-                        writes.iter().map(|w| &w.const_key),
-                    ) {
-                        continue;
-                    }
-                    // An overriding `@cached_property` shares the instance `__dict__` slot:
-                    // one report per property name.
-                    if !seen.insert((m.key.clone(), attr.to_string(), p_name.to_owned())) {
-                        continue;
-                    }
-                    let span = own[0].span;
-                    let class_qualname = ps.owner_class_qualname.as_deref().unwrap_or_default();
-                    cx.emit(
-                        out,
-                        "MUT101",
-                        unit,
-                        span,
-                        &m.key.qualname,
-                        format!("{class_qualname}.{attr}->{p_name}"),
-                        format!(
-                            "`{}` mutates `self.{attr}`, read by `@cached_property` `{p_name}`, without invalidating it",
-                            m.key.qualname
-                        ),
-                        Some(format!(
-                            "invalidate it after the change with `del self.{p_name}`, or `self.__dict__.pop(\"{p_name}\", None)` when it may not be computed yet"
-                        )),
-                        &[],
-                    );
-                }
-            }
-        }
+        });
     });
 }
 
@@ -313,51 +383,22 @@ fn invalidates(s: &EffectSummary, prop: &str) -> bool {
 struct CacheEvents {
     /// `del self.prop`, removing `"prop"` from `self.__dict__` (`pop`, `del`, `clear`), and calls
     /// on `self` of methods whose summary invalidates it.
-    invalidations: FxHashSet<(heki_ir::BlockId, usize)>,
+    invalidations: FxHashSet<(BlockId, u32)>,
     /// `self.prop`, and calls on `self` of methods whose summary reads it.
-    reads: FxHashSet<(heki_ir::BlockId, usize)>,
+    reads: FxHashSet<(BlockId, u32)>,
 }
 
 impl CacheEvents {
-    fn of(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, f: &IrFunction, prop: &str) -> Self {
-        let self_vars = f
-            .params
-            .first()
-            .map(|p| self_aliases(f, p.var))
-            .unwrap_or_default();
-        let dicts = heki_effect::aliases_of(
-            f,
-            f.blocks
-                .iter()
-                .flat_map(|b| &b.insts)
-                .filter_map(|i| match &i.kind {
-                    InstKind::AttrLoad { dst, obj, attr }
-                        if attr == "__dict__" && self_vars.contains(obj) =>
-                    {
-                        Some(*dst)
-                    }
-                    _ => None,
-                }),
-        );
-        // A key naming the property: a string literal or a `Final` string constant.
-        let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
-        let types = std::cell::OnceCell::new();
-        let names_prop = |v: &VarId| {
-            f.const_str(*v) == Some(prop)
-                || tcx
-                    .str_constant_in(f, *v, types.get_or_init(|| tcx.infer(f)))
-                    .is_some_and(|k| k == prop)
-        };
-        let key = CheckContext::key(unit, f);
-        let file = cx.index.files.get(&unit.input.path);
+    fn of(index: &ProjectIndex, m: &Method<'_>, flow: &CacheFlow, prop: &str) -> Self {
+        let file = index.files.get(m.path);
         // What the `self` calls at `span` do to the property: `(invalidate, read)`.
         let self_call = |span: Span| {
             let callees = file
                 .into_iter()
                 .flat_map(|file| &file.call_sites)
-                .filter(|site| site.span == span && site.caller == key && site.recv_is_self)
+                .filter(|site| site.span == span && site.caller == m.key && site.recv_is_self)
                 .flat_map(|site| site.project_callees())
-                .filter_map(|bc| cx.index.summary(&bc.callee));
+                .filter_map(|bc| index.summary(&bc.callee));
             callees.fold((false, false), |(inv, read), s| {
                 (
                     inv || invalidates(s, prop),
@@ -369,32 +410,21 @@ impl CacheEvents {
             invalidations: FxHashSet::default(),
             reads: FxHashSet::default(),
         };
-        for bb in &f.blocks {
-            for (index, inst) in bb.insts.iter().enumerate() {
-                let (invalidates, reads) = match &inst.kind {
-                    InstKind::AttrDelete { obj, attr } => {
-                        (self_vars.contains(obj) && attr == prop, false)
+        for (b, block) in flow.blocks.iter().enumerate() {
+            let b = BlockId(u32::try_from(b).unwrap_or(u32::MAX));
+            for &(index, event) in &block.events {
+                let (invalidates, reads) = match event {
+                    CacheEvent::DeleteAttr(name) | CacheEvent::RemoveEntry(name) => {
+                        (flow.name(name) == prop, false)
                     }
-                    InstKind::AttrLoad { obj, attr, .. } => {
-                        (false, self_vars.contains(obj) && attr == prop)
-                    }
-                    InstKind::SubscriptDelete { obj, index, .. } => {
-                        (dicts.contains(obj) && names_prop(index), false)
-                    }
-                    InstKind::MethodCall {
-                        recv, method, args, ..
-                    } if dicts.contains(recv) => match method.as_str() {
-                        "clear" => (true, false),
-                        "pop" | "__delitem__" => (args.first().is_some_and(names_prop), false),
-                        _ => (false, false),
-                    },
-                    InstKind::MethodCall { .. } | InstKind::Call { .. } => self_call(inst.span),
-                    _ => (false, false),
+                    CacheEvent::LoadAttr(name) => (false, flow.name(name) == prop),
+                    CacheEvent::ClearDict => (true, false),
+                    CacheEvent::SelfCall(span) => self_call(span),
                 };
                 if invalidates {
-                    out.invalidations.insert((bb.id, index));
+                    out.invalidations.insert((b, index));
                 } else if reads {
-                    out.reads.insert((bb.id, index));
+                    out.reads.insert((b, index));
                 }
             }
         }
@@ -404,35 +434,31 @@ impl CacheEvents {
     /// Whether the write at instruction `index` of `block` leaves no stale value behind on any
     /// normal path: the property is invalidated on every path after it, or its value is gone
     /// on every path to it (invalidated, and not read again since).
-    fn cover(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
-        self.invalidated_after(f, block, index) || self.absent_before(f, block, index)
+    fn cover(&self, flow: &CacheFlow, block: BlockId, index: u32) -> bool {
+        self.invalidated_after(flow, block, index) || self.absent_before(flow, block, index)
     }
 
     /// Every normal path from just after the instruction to a return passes an invalidation.
     /// Raising paths carry no obligation (as for `MUT109`), and a loop that never returns adds
     /// none.
-    fn invalidated_after(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
-        let point_after = |b: heki_ir::BlockId, after: Option<usize>| {
+    fn invalidated_after(&self, flow: &CacheFlow, block: BlockId, index: u32) -> bool {
+        let point_after = |b: BlockId, after: Option<u32>| {
             self.invalidations
                 .iter()
                 .any(|(pb, pi)| *pb == b && after.is_none_or(|a| *pi > a))
         };
-        let leaves_covered = |b: &heki_ir::BasicBlock, covered: &[bool]| match b.terminator {
-            Terminator::Return(_) => false,
-            _ => b
-                .terminator
-                .successors()
-                .iter()
-                .all(|s| covered[s.0 as usize]),
+        let leaves_covered = |b: &FlowBlock, covered: &[bool]| {
+            !b.returns && b.succs.iter().all(|s| covered[s.0 as usize])
         };
         // Covered from each block's start: a greatest fixpoint from `true`.
-        let mut covered = vec![true; f.blocks.len()];
+        let mut covered = vec![true; flow.blocks.len()];
         loop {
             let mut changed = false;
-            for b in f.blocks.iter().rev() {
-                let v = point_after(b.id, None) || leaves_covered(b, &covered);
-                if v != covered[b.id.0 as usize] {
-                    covered[b.id.0 as usize] = v;
+            for (i, b) in flow.blocks.iter().enumerate().rev() {
+                let id = BlockId(u32::try_from(i).unwrap_or(u32::MAX));
+                let v = point_after(id, None) || leaves_covered(b, &covered);
+                if v != covered[i] {
+                    covered[i] = v;
                     changed = true;
                 }
             }
@@ -440,15 +466,16 @@ impl CacheEvents {
                 break;
             }
         }
-        point_after(block, Some(index)) || leaves_covered(f.block(block), &covered)
+        point_after(block, Some(index)) || leaves_covered(&flow.blocks[block.0 as usize], &covered)
     }
 
     /// Every path from the entry to the instruction passes an invalidation with no read of the
     /// property after it: the cached value is gone when the write happens. A block an exception
-    /// enters may hold any value.
-    fn absent_before(&self, f: &IrFunction, block: heki_ir::BlockId, index: usize) -> bool {
-        let through = |b: heki_ir::BlockId, mut absent: bool, upto: usize| {
-            for i in 0..upto {
+    /// enters may hold any value, and a block no path enters keeps its first value.
+    fn absent_before(&self, flow: &CacheFlow, block: BlockId, index: u32) -> bool {
+        let events_of = |b: BlockId| flow.blocks[b.0 as usize].events.iter().map(|(i, _)| *i);
+        let through = |b: BlockId, mut absent: bool, upto: Option<u32>| {
+            for i in events_of(b).filter(|i| upto.is_none_or(|u| *i < u)) {
                 if self.invalidations.contains(&(b, i)) {
                     absent = true;
                 } else if self.reads.contains(&(b, i)) {
@@ -457,29 +484,29 @@ impl CacheEvents {
             }
             absent
         };
-        let n = f.blocks.len();
-        let mut preds: Vec<Vec<heki_ir::BlockId>> = vec![Vec::new(); n];
+        let n = flow.blocks.len();
+        let mut preds: Vec<Vec<BlockId>> = vec![Vec::new(); n];
         let mut handlers = vec![false; n];
-        for b in &f.blocks {
-            for s in b.terminator.successors() {
-                preds[s.0 as usize].push(b.id);
+        for (i, b) in flow.blocks.iter().enumerate() {
+            for s in &b.succs {
+                preds[s.0 as usize].push(BlockId(u32::try_from(i).unwrap_or(u32::MAX)));
             }
             if let Some(h) = b.exc_target {
                 handlers[h.0 as usize] = true;
             }
         }
+        let reachable = reachable_blocks(flow);
         // Absent at each block's start: a greatest fixpoint from `true` (the entry: present).
         let mut absent_in = vec![true; n];
         absent_in[0] = false;
         loop {
             let mut changed = false;
-            for b in f.rpo_blocks() {
-                let i = b.0 as usize;
+            for i in (0..n).filter(|i| reachable[*i]) {
                 let v = i != 0
                     && !handlers[i]
                     && preds[i]
                         .iter()
-                        .all(|p| through(*p, absent_in[p.0 as usize], f.block(*p).insts.len()));
+                        .all(|p| through(*p, absent_in[p.0 as usize], None));
                 if v != absent_in[i] {
                     absent_in[i] = v;
                     changed = true;
@@ -489,8 +516,24 @@ impl CacheEvents {
                 break;
             }
         }
-        through(block, absent_in[block.0 as usize], index)
+        through(block, absent_in[block.0 as usize], Some(index))
     }
+}
+
+/// The blocks of a method a path from its entry enters, through normal and exception edges.
+fn reachable_blocks(flow: &CacheFlow) -> Vec<bool> {
+    let mut reachable = vec![false; flow.blocks.len()];
+    let mut stack = vec![BlockId(0)];
+    while let Some(b) = stack.pop() {
+        let i = b.0 as usize;
+        if i >= reachable.len() || reachable[i] {
+            continue;
+        }
+        reachable[i] = true;
+        let block = &flow.blocks[i];
+        stack.extend(block.succs.iter().copied().chain(block.exc_target));
+    }
+    reachable
 }
 
 fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
@@ -502,7 +545,7 @@ fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
 }
 
 /// The project classes whose methods' `MUT101` / `MUT107` reports read the summaries of the
-/// methods `changed` (a class family spans modules, see [`for_each_class_family`]): a changed
+/// methods `changed` (a class family spans modules, see [`ClassMethods::family`]): a changed
 /// `@cached_property` or `__hash__` (or a removed method) is read for its own family, a changed
 /// initialization method for the families of its ancestors and subclasses that have either, and
 /// a method overriding an inherited one for its own family. A family's classes include the
@@ -564,12 +607,12 @@ pub fn family_readers(
 
 /// Private methods `__init__` of the class family calls on `self` directly.
 fn private_methods_called_from_init(
-    cx: &CheckContext<'_>,
+    index: &ProjectIndex,
     family: &[&Method<'_>],
 ) -> FxHashSet<FuncKey> {
     let mut out = FxHashSet::default();
     for init in family.iter().filter(|m| m.name() == "__init__") {
-        let file = cx.index.files.get(init.path);
+        let file = index.files.get(init.path);
         for site in file
             .into_iter()
             .flat_map(|f| &f.call_sites)
@@ -583,98 +626,6 @@ fn private_methods_called_from_init(
             );
         }
     }
-    out
-}
-
-struct SelfWrite {
-    span: Span,
-    block: heki_ir::BlockId,
-    /// The write's instruction index in `block`.
-    index: usize,
-    /// `setdefault`, or a subscript store guarded by `if k not in self.<attr>:`.
-    memo_shaped: bool,
-    /// `self.<attr> = ...` / `del self.<attr>`: the attribute is rebound, not changed in place.
-    rebinds: bool,
-}
-
-/// Writes to `self.<attr>` in `f`'s own body (none without a `self` parameter).
-fn self_attr_writes(f: &IrFunction, attr: &str) -> Vec<SelfWrite> {
-    let self_vars = f
-        .params
-        .first()
-        .map(|p| self_aliases(f, p.var))
-        .unwrap_or_default();
-    let mut alias: FxHashSet<VarId> = FxHashSet::default();
-    let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
-    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-        if let Some(d) = inst.kind.dst() {
-            defs.insert(d, &inst.kind);
-        }
-        if let InstKind::AttrLoad { dst, obj, attr: a } = &inst.kind
-            && self_vars.contains(obj)
-            && a == attr
-        {
-            alias.insert(*dst);
-        }
-    }
-    loop {
-        let before = alias.len();
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            if let InstKind::Copy { dst, src } = &inst.kind
-                && alias.contains(src)
-            {
-                alias.insert(*dst);
-            }
-        }
-        if alias.len() == before {
-            break;
-        }
-    }
-    let guarded = |bb: heki_ir::BlockId| {
-        f.blocks.iter().any(|p| match &p.terminator {
-            Terminator::Branch { cond, then_bb, .. } if *then_bb == bb => matches!(
-                defs.get(cond),
-                Some(InstKind::Compare { op: CompareOpKind::NotIn, rhs, .. }) if alias.contains(rhs)
-            ),
-            _ => false,
-        })
-    };
-    let mut out = Vec::new();
-    for bb in &f.blocks {
-        for (index, inst) in bb.insts.iter().enumerate() {
-            // `(memo_shaped, rebinds)`.
-            let w = match &inst.kind {
-                InstKind::AttrStore { obj, attr: a, .. }
-                | InstKind::AttrDelete { obj, attr: a }
-                    if self_vars.contains(obj) && a == attr =>
-                {
-                    Some((false, true))
-                }
-                InstKind::SubscriptStore { obj, .. } if alias.contains(obj) => {
-                    Some((guarded(bb.id), false))
-                }
-                InstKind::SubscriptDelete { obj, .. } if alias.contains(obj) => {
-                    Some((false, false))
-                }
-                InstKind::MethodCall { recv, method, .. }
-                    if alias.contains(recv) && CONTAINER_MUTATORS.contains(&method.as_str()) =>
-                {
-                    Some((method == "setdefault", false))
-                }
-                _ => None,
-            };
-            if let Some((memo_shaped, rebinds)) = w {
-                out.push(SelfWrite {
-                    span: inst.span,
-                    block: bb.id,
-                    index,
-                    memo_shaped,
-                    rebinds,
-                });
-            }
-        }
-    }
-    out.sort_by_key(|w| w.span);
     out
 }
 
@@ -2402,7 +2353,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         && !filter1_init(m, init_called)
                         && !init_helpers.contains(&m.key)
                 })
-                .filter_map(|(m, checked)| Some((m, checked, local_summary(cx, m)?)));
+                .filter_map(|(m, checked)| Some((m, checked, local_summary(cx.index, m)?)));
             for (m, Checked { unit, f }, local) in writers {
                 for (attr, read_keys) in &reads {
                     let writes: Vec<&AttrKeyPath> = local
@@ -2423,10 +2374,12 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     }
                     // Filters 2 and 3: lazy initialization, memo dictionaries.
                     let lazy = lazy_init_branches(f, attr);
-                    let first = self_attr_writes(f, attr).into_iter().find(|w| {
-                        !is_memo_write(attr, w) && !lazy.iter().any(|b| dominates(f, *b, w.block))
+                    let first = self_attr_writes(f).into_iter().find(|(a, w)| {
+                        *a == *attr
+                            && !is_memo_write(attr, w)
+                            && !lazy.iter().any(|b| dominates(f, *b, w.block))
                     });
-                    let Some(write) = first else {
+                    let Some((_, write)) = first else {
                         continue;
                     };
                     if !seen.insert((m.key.clone(), attr.to_string())) {
