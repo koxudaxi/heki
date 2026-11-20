@@ -589,7 +589,12 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     /// The parts of a call instruction: a project call as the summaries resolved it, any other
     /// call by the inferred values.
     fn call_of(&self, inst: &'a Inst) -> Option<CallParts<'a>> {
-        if let Some(call) = site_call(self.f, self.sites_at(inst.span), inst, false) {
+        if let Some(call) = site_call(
+            &|v| self.defs.get(&v).copied(),
+            self.sites_at(inst.span),
+            inst,
+            false,
+        ) {
             return Some(call);
         }
         let call = CallInst::of(&inst.kind)?;
@@ -942,7 +947,12 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             }
             _ => {}
         }
-        let Some(call) = site_call(self.f, self.sites_at(inst.span), inst, false) else {
+        let Some(call) = site_call(
+            &|v| self.defs.get(&v).copied(),
+            self.sites_at(inst.span),
+            inst,
+            false,
+        ) else {
             return match &inst.kind {
                 InstKind::MethodCall { recv, method, .. }
                     if CONTAINER_MUTATORS.contains(&method.as_str()) =>
