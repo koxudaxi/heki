@@ -480,13 +480,13 @@ const HOIST: &[Expect] = &[
             V::Blocked("ZeroTripExceptionSafe(allowed): element types are unknown"),
         )],
     ),
+    // The path where `allowed` is unbound returns first: code after the `return` flows
+    // nowhere, and the hoisted set is always built from a bound name.
     (
         "unbound_in_dead_code",
         &[(
             "OPT110",
-            V::Blocked(
-                "ZeroTripExceptionSafe(allowed): `allowed` may be unbound before the loop; hoisting would raise `NameError`",
-            ),
+            V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
         )],
     ),
     (

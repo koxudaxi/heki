@@ -843,3 +843,42 @@ async def plain(query: sqlalchemy.orm.Query):
         pairs(&[("later_async_clause", "EFF101"), ("plain", "EFF101")])
     );
 }
+
+#[test]
+fn unreachable_code_gives_no_value_to_a_merge() {
+    let src = "\
+import httpx
+
+
+class Pool:
+    def open(self):
+        return httpx.Client()
+
+
+def first_open(pool: Pool, hosts):
+    for _ in hosts:
+        try:
+            return pool.open()
+        except OSError:
+            continue
+
+
+def after_continue(pool: Pool, hosts):
+    for _ in hosts:
+        pool.open()
+        continue
+        pool = None
+";
+    // No path reaches the end of the `try` or the code after `continue`: the loop header
+    // merges nothing from there, so `pool` keeps its type and both calls are resolved.
+    assert_eq!(
+        reports("ir_dead_code_merges", src, "EFF102"),
+        pairs(&[("first_open", "EFF102"), ("after_continue", "EFF102")])
+    );
+    let ir = dump_ir("ir_dead_code_merges", src, "py315");
+    for name in ["first_open", "after_continue"] {
+        let header = function(&ir, name)["loops"][0]["header"].as_u64().unwrap();
+        let phis = &function(&ir, name)["blocks"][header as usize]["phis"];
+        assert_eq!(phis.as_array().unwrap().len(), 0, "{name}: {phis}");
+    }
+}

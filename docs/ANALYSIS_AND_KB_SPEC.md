@@ -86,6 +86,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   (depth `d + 1`) starts with `IterNext(it)` (this removed, by construction, the 7 Stage 0-A
   false positives of `EFF102` / `EFF103` that took the one-time `for.iter` call for a call in the
   loop).
+- **Unreachable code** (after a `return`, `break`, `continue`, or `raise`, or after a `try`
+  every path of which leaves) is lowered into blocks without predecessors that end in
+  `Unreachable`: no merge, back edge, or handler takes a value from it.
 - **Exception edges carry the bindings of the point that raised**: inside a `try` or `with`
   body a name is never rebound after an instruction that may raise in the same block
   (`InstKind::may_raise`; the binding starts a new block), so a handler's phi merges the

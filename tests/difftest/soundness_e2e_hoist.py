@@ -125,7 +125,7 @@ def unknown_elements(items, n):
 
 
 def unbound_in_dead_code(n, c):
-    """`allowed` is unbound on a path that cannot run (after `return`)."""
+    """`allowed` is unbound only on a path that returns before the loop."""
     if c:
         allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
     else:

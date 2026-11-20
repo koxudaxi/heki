@@ -681,6 +681,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.terminated[bb.0 as usize]
     }
 
+    /// No path reaches `bb`: all its predecessors are known, and there are none.
+    fn is_dead(&self, bb: BlockId) -> bool {
+        bb != BlockId(0) && self.sealed[bb.0 as usize] && self.preds[bb.0 as usize].is_empty()
+    }
+
     fn switch_to(&mut self, bb: BlockId) {
         self.cur_bb = bb;
     }
@@ -703,6 +708,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     /// `bb` may raise into the innermost exception target: the edge to it.
     fn raise_edge(&mut self, bb: BlockId) {
+        if self.is_dead(bb) {
+            return;
+        }
         if let Some(exc) = self.exc_target_stack.last().copied() {
             self.blocks[bb.0 as usize].exc_target = Some(exc);
             self.add_edge(bb, exc);
@@ -739,6 +747,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         if self.terminated[bb.0 as usize] {
             return;
         }
+        // Code no path reaches (after a `return`, or after a `try` every path leaves) flows
+        // nowhere: its jumps would give live blocks a predecessor with unbound values.
+        let term = if self.is_dead(bb) {
+            Terminator::Unreachable
+        } else {
+            term
+        };
         if matches!(term, Terminator::Raise(_)) {
             self.raise_edge(bb);
         }
@@ -1291,7 +1306,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 if let Some(header_bb) = self.loop_stack.last().map(|l| l.header) {
                     self.leave(true, |b| {
                         let cur = b.cur_bb;
-                        if let Some(top) = b.loop_stack.last_mut() {
+                        if !b.is_dead(cur)
+                            && let Some(top) = b.loop_stack.last_mut()
+                        {
                             top.back_edges.push(cur);
                         }
                         b.terminate(Terminator::Jump(header_bb));
@@ -1907,7 +1924,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.unwind.pop();
         if !self.is_terminated(self.cur_bb) {
             let tail = self.cur_bb;
-            if let Some(top) = self.loop_stack.last_mut() {
+            if !self.is_dead(tail)
+                && let Some(top) = self.loop_stack.last_mut()
+            {
                 top.back_edges.push(tail);
             }
             self.terminate(Terminator::Jump(header_bb));
@@ -1991,7 +2010,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.unwind.pop();
         if !self.is_terminated(self.cur_bb) {
             let tail = self.cur_bb;
-            if let Some(top) = self.loop_stack.last_mut() {
+            if !self.is_dead(tail)
+                && let Some(top) = self.loop_stack.last_mut()
+            {
                 top.back_edges.push(tail);
             }
             self.terminate(Terminator::Jump(header_bb));
@@ -3375,7 +3396,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             );
             self.switch_to(skip_bb);
             let cur = self.cur_bb;
-            if let Some(top) = self.loop_stack.last_mut() {
+            if !self.is_dead(cur)
+                && let Some(top) = self.loop_stack.last_mut()
+            {
                 top.back_edges.push(cur);
             }
             self.terminate(Terminator::Jump(header_bb));
@@ -3390,7 +3413,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         // Expressions never terminate their block, so the element always loops back.
         let tail = self.cur_bb;
-        if let Some(top) = self.loop_stack.last_mut() {
+        if !self.is_dead(tail)
+            && let Some(top) = self.loop_stack.last_mut()
+        {
             top.back_edges.push(tail);
         }
         self.terminate(Terminator::Jump(header_bb));
