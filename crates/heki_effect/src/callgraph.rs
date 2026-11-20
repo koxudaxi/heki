@@ -606,10 +606,22 @@ fn transfer(
                     .entry(*p)
                     .or_default()
                     .extend(paths.iter().cloned());
+                if let Some(attrs) = facts.changed_param_attrs.get(&i) {
+                    t.changed_param_attrs
+                        .entry(*p)
+                        .or_default()
+                        .extend(attrs.iter().cloned());
+                }
             }
+            // The callee's parameter is the caller's `p.attr`: any change of it changes the
+            // object that attribute holds.
             Some((p, Some(attr))) => {
                 t.mutates_params |= 1u64 << p;
                 t.mutated_param_paths
+                    .entry(*p)
+                    .or_default()
+                    .insert(attr.clone());
+                t.changed_param_attrs
                     .entry(*p)
                     .or_default()
                     .insert(attr.clone());
@@ -624,6 +636,10 @@ fn transfer(
         }
     }
     t.escapes_params |= caller_params(facts.escapes_params, bc);
+    // Returning the callee's reallocation of its argument reallocates the caller's parameter.
+    if site.returned.is_some() {
+        t.reallocates_params |= caller_params(facts.reallocates_params, bc);
+    }
     // A generator passed to a callee that iterates it runs there.
     t.iterates_params |= caller_params(facts.iterates_params, bc);
 }
@@ -647,68 +663,31 @@ fn transfer_typed_writes(
     contexts: u64,
 ) {
     let origin = |k: usize| bc.params.get(k);
-    for (&i, paths) in &facts.mutated_param_paths {
-        let Some(o) = origin(usize::from(i)) else {
-            continue;
-        };
-        let mut indirect = Vec::new();
-        if let Some((class, attr)) = &o.typed_field
-            && paths.contains("")
-        {
-            // `helper(obj.attr)` changing the value in place (`items.append(x)`): the written
-            // object is `obj`, the caller's parameter `p` when the argument is `p.attr`. A
-            // helper writing the value's own attributes writes those, as `obj.attr.x = v` does.
-            let obj = match &o.param {
-                Some((p, Some(path))) if path == attr => 1u64 << p,
-                _ => 0,
-            };
-            indirect.push((class.clone(), attr.clone(), obj, Construction::No));
-        }
-        if let Some(class) = &o.typed_instance
-            && callee.typed_params >> i & 1 == 0
-        {
-            // `helper(obj)` with a parameter the helper does not type: the written object is
-            // the argument itself, under construction when the caller hands over a new object
-            // the helper does not keep.
-            let construction = match here {
-                Some(r) if i < 64 && facts.retains_params & (1u64 << i) == 0 => {
-                    r.through_arg(Some(o), true)
-                }
-                _ => Construction::No,
-            };
-            indirect.extend(
-                paths
-                    .iter()
-                    .filter(|p| !p.is_empty())
-                    .map(|p| (class.clone(), p.clone(), o.may_params, construction.clone())),
-            );
-        }
-        for (class, attr, obj_params, construction) in indirect {
-            // A callee that already records a typed write of this field (itself or through its
-            // callees) reports it: there, or here when the callee hands its sites over below.
-            let known = facts
-                .typed_field_writes
-                .iter()
-                .any(|w| w.class_qualname == class && w.attr == attr);
-            if !known {
-                insert_site(
-                    t,
-                    caller,
-                    TypedFieldWriteSite {
-                        class_qualname: class,
-                        attr,
-                        kind: WriteKind::IndirectHelper,
-                        span: site.span,
-                        via_chain: lead.to_vec(),
-                        obj_params,
-                        fresh: o.fresh,
-                        key: None,
-                        construction,
-                        contexts,
-                    },
-                );
+    for w in indirect_writes(bc, callee, facts) {
+        // A new object the caller hands over and the helper does not keep is under
+        // construction.
+        let construction = match (w.through, here) {
+            (Through::Instance, Some(r)) if facts.retains_params & (1u64 << w.param) == 0 => {
+                r.through_arg(Some(w.origin), true)
             }
-        }
+            _ => Construction::No,
+        };
+        insert_site(
+            t,
+            caller,
+            TypedFieldWriteSite {
+                class_qualname: w.class.to_owned(),
+                attr: w.attr.to_owned(),
+                kind: WriteKind::IndirectHelper,
+                span: site.span,
+                via_chain: lead.to_vec(),
+                obj_params: w.obj_params,
+                fresh: w.origin.fresh,
+                key: None,
+                construction,
+                contexts,
+            },
+        );
     }
     // Typed writes: every callee's facts reach the caller. A private callee hands its write
     // sites to its callers too, a public one reports its own; what iterating a plain function's
@@ -811,6 +790,100 @@ fn add_receiver_effect(
         }
     }
     slot.sort();
+}
+
+/// How a callee writes a typed field it does not know through an argument ([`IndirectWrite`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Through {
+    /// `helper(obj.attr)` changing the value in place (`items.append(x)`).
+    Field,
+    /// `helper(obj)` writing attributes of a parameter the helper does not type.
+    Instance,
+}
+
+/// A typed field write a call makes through one of its arguments, which the callee cannot tie
+/// to a class itself.
+pub(crate) struct IndirectWrite<'a> {
+    /// The callee parameter the argument is bound to (below 64).
+    pub param: u8,
+    pub origin: &'a ArgOrigin,
+    pub through: Through,
+    pub class: &'a str,
+    pub attr: &'a str,
+    /// The caller parameters the written object may be, as itself (for [`Through::Field`] the
+    /// object holding the attribute: `p` when the argument is `p.attr`).
+    pub obj_params: u64,
+}
+
+/// The typed field writes `callee` (bound by `bc`, with the facts `facts` that run here) makes
+/// through the arguments, which the caller's argument binding ties to a class: the one home of
+/// that decision for the ownership rules and `MUT109`. A write the callee records itself, on
+/// the same object, is its own: it reports or hands over that one.
+pub(crate) fn indirect_writes<'a>(
+    bc: &'a BoundCallee,
+    callee: &EffectSummary,
+    facts: &'a EffectSummary,
+) -> Vec<IndirectWrite<'a>> {
+    let mut out = Vec::new();
+    for (&param, paths) in &facts.mutated_param_paths {
+        let Some(origin) = bc.params.get(usize::from(param)).filter(|_| param < 64) else {
+            continue;
+        };
+        if let Some((class, attr)) = &origin.typed_field
+            && paths.contains("")
+        {
+            // A helper writing the value's own attributes writes those, as `obj.attr.x = v`
+            // does.
+            let obj_params = match &origin.param {
+                Some((p, Some(path))) if path == attr => 1u64 << p,
+                _ => 0,
+            };
+            out.push(IndirectWrite {
+                param,
+                origin,
+                through: Through::Field,
+                class,
+                attr,
+                obj_params,
+            });
+        }
+        if let Some(class) = &origin.typed_instance
+            && callee.typed_params >> param & 1 == 0
+        {
+            out.extend(
+                paths
+                    .iter()
+                    .filter(|p| !p.is_empty())
+                    .map(|attr| IndirectWrite {
+                        param,
+                        origin,
+                        through: Through::Instance,
+                        class,
+                        attr,
+                        obj_params: origin.may_params,
+                    }),
+            );
+        }
+    }
+    out.retain(|w| !records_write(bc, facts, w));
+    out
+}
+
+/// Whether the callee records `w` among its own typed writes: one of the same field on an
+/// object that may be the same caller parameter. Without a parameter to compare (the object is
+/// none of the caller's parameters), any write of the field counts.
+fn records_write(bc: &BoundCallee, facts: &EffectSummary, w: &IndirectWrite<'_>) -> bool {
+    if w.obj_params == 0 {
+        return facts
+            .typed_field_writes
+            .iter()
+            .any(|own| own.class_qualname == w.class && own.attr == w.attr);
+    }
+    facts.typed_field_write_sites.iter().any(|own| {
+        own.class_qualname == w.class
+            && own.attr == w.attr
+            && bound_params(own.obj_params, bc) & w.obj_params != 0
+    })
 }
 
 /// The caller parameters the objects bound to the callee parameters in `mask` may be.

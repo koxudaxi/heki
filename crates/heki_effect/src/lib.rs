@@ -15,7 +15,7 @@
 //!    with the guards of each effect and call site (`guards`).
 //! 3. `scc` + `callgraph`: Tarjan SCC reverse-topological worklist fixpoint; `guards` maps a
 //!    callee's guards across each call site (pruning the effects an argument switches off).
-//! 4. `report`: Boundary-Only Reporting and Root-Cause Grouping helpers.
+//! 4. `report`: Boundary-Only Reporting.
 
 mod callgraph;
 mod construction;
@@ -34,17 +34,14 @@ pub mod types;
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
-    delegates_to_callers, is_initializer, reach_across,
+    builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
-pub use report::{
-    BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
-    boundary_reports_in, group_by_root_cause,
-};
+pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ProjectDecls, ReadOnlyAttr,
-    ReadOnlyKind, StrConstant, TypeCtx, Val, detect_src_layout, func_qualname,
-    module_name_for_path, resolve_relative_module, self_aliases,
+    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ModuleLayout, ProjectDecls,
+    ReadOnlyAttr, ReadOnlyKind, StrConstant, TypeCtx, Val, aliases_of, detect_src_layout,
+    func_qualname, module_name_for_path, resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
 
@@ -101,6 +98,10 @@ pub struct CallHop {
     pub callee: String,
     pub span: Span,
     pub path: PathBuf,
+}
+
+fn is_zero(bits: &u64) -> bool {
+    *bits == 0
 }
 
 /// A call chain kept in a summary. Propagation copies a callee's chains into its callers, so
@@ -445,6 +446,12 @@ pub struct EffectSummary {
     /// every change of them, so a caller passing an instance adds no `IndirectHelper` site.
     pub typed_params: u64,
     pub escapes_params: u64,
+    /// Parameters the function returns a quadratic reallocation of on some path: the result of
+    /// a `QuadraticRealloc` call taking the parameter (`return np.append(acc, x)`,
+    /// `return pd.concat([df, part])`), or of a project call doing so whose result it returns
+    /// (`DATA101` follows an accumulation through such helpers).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reallocates_params: u64,
     /// Parameters iterated to exhaustion on every path that returns normally when the body
     /// runs at the call (`MUT106`: passing a single-pass iterator consumes it).
     pub consumes_params: u64,
@@ -459,6 +466,17 @@ pub struct EffectSummary {
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> attributes` of the argument whose objects are changed, in place or
+    /// deeper (`p.a.append(...)`, `p.a.b = v`), also through local copies and calls: the
+    /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`). A
+    /// shallow copy of the argument shares exactly these objects (`MUT202`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub changed_param_attrs: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> spans` of the function's own changes of the argument (a local fact,
+    /// never propagated: a rule walking the call graph counts each change once, in the body
+    /// making it; `EFF201` `mutates-params`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_change_sites: BTreeMap<u8, BTreeSet<Span>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself
     /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
     /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
@@ -681,6 +699,7 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.param_change_sites.clear();
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -713,10 +732,11 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites and unresolved writes are left out: those are never propagated.
+    /// sites, parameter changes, and unresolved writes are left out: those are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
+            param_change_sites: BTreeMap::new(),
             unresolved_write_sites: BTreeSet::new(),
             ..s.clone()
         };
@@ -831,11 +851,27 @@ pub struct ArgOrigin {
     /// Where the argument comes from among the objects that existed before the call (`MUT109`;
     /// only computed when an `invalidation` contract is configured).
     pub reach: Reach,
+    /// The `invalidation` targets a callee may write through the argument without knowing them
+    /// (`MUT109`; `None` unless a contract names `typed_field`, or an attribute of
+    /// `typed_instance`'s class).
+    pub targets: Option<Box<ArgTargets>>,
     /// What the caller knows about the parameter's value (`None`: not bound exactly).
     pub binding: Option<ArgBinding>,
     /// The argument (for `typed_field`, the object holding the attribute) is a new object of the
     /// caller, or its parameter, that nothing kept before this call (`fresh-objects`).
     pub new_object: NewArg,
+}
+
+/// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
+/// contracts, which propagation cannot look up (it has no class hierarchy).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgTargets {
+    /// The contracts whose targets include the field the argument is (`typed_field`): changing
+    /// the value in place writes it.
+    pub field: u64,
+    /// `typed_instance` and its project bases when a contract names an attribute of one of
+    /// them (empty otherwise), for [`Contracts::target_of`] with the attributes a callee writes.
+    pub classes: Vec<String>,
 }
 
 impl ArgOrigin {
@@ -1071,6 +1107,8 @@ pub struct ModuleInput<'a> {
     pub path: PathBuf,
     pub module_name: String,
     pub is_package: bool,
+    /// [`ModuleLayout::root_is_package`] of the project.
+    pub root_is_package: bool,
     pub content_hash: String,
     pub semantic: &'a SemanticModel,
     pub ir: &'a ModuleIr,
@@ -1108,8 +1146,17 @@ pub struct ProjectIndex {
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
-pub(crate) fn is_stub(path: &Path) -> bool {
+pub fn is_stub(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "pyi")
+}
+
+/// Which of the files sharing a module name defines it, the greatest winning: an
+/// implementation before its `.pyi` stub, a package (`pkg/__init__.py`) before a module file of
+/// the same name (`pkg.py`, which Python never imports next to it), then the greater path. Full
+/// and incremental analysis both pick the owner this way, whatever order they meet the files in.
+pub(crate) fn module_precedence(path: &Path) -> (bool, bool, &Path) {
+    let package = path.file_stem().is_some_and(|s| s == "__init__");
+    (!is_stub(path), package, path)
 }
 
 /// Summarize every module of a project and propagate effects to a fixpoint.
@@ -1206,8 +1253,8 @@ impl ProjectIndex {
         contracts: Option<Arc<dyn Contracts>>,
         typed_writes: TypedWrites,
     ) -> Self {
-        // Index stubs first so a sibling `.py` implementation always owns the module's symbols.
-        files.sort_by_key(|f| !is_stub(&f.path));
+        // The owners of shared module names last (`add_file_links` keeps them either way).
+        files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
             skips_typed_writes: typed_writes == TypedWrites::Local,
@@ -1313,7 +1360,7 @@ impl ProjectIndex {
     }
 
     /// Declarations of every indexed module (for re-summarizing an edited module), preferring
-    /// `.py` implementations over `.pyi` stubs sharing a module name.
+    /// the owner ([`module_precedence`]) among the files sharing a module name.
     pub fn project_decls(&self) -> ProjectDecls {
         ProjectDecls::new(self.preferred_decls())
     }
@@ -1323,28 +1370,22 @@ impl ProjectIndex {
         DeclPasses::new(self.preferred_decls())
     }
 
-    /// Every module's declarations, `.pyi` stubs first (a later `.py` sharing the module name
-    /// replaces them).
+    /// Every module's declarations in [`module_precedence`] order (a later file sharing a
+    /// module name replaces the earlier ones).
     fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
-        let mut entries: Vec<(bool, Arc<ModuleDecls>)> = self
-            .files
-            .values()
-            .map(|f| (is_stub(&f.path), Arc::clone(&f.decls)))
-            .collect();
-        entries.sort_by_key(|(stub, _)| !*stub);
-        entries.into_iter().map(|(_, d)| d).collect()
+        let mut files: Vec<&FileSummary> = self.files.values().collect();
+        files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
+        files.into_iter().map(|f| Arc::clone(&f.decls)).collect()
     }
 
-    /// Preferred declarations currently indexed for `module_name` (`.py` over `.pyi`).
+    /// Declarations currently indexed for `module_name`: those of its owner
+    /// ([`module_precedence`]).
     pub fn module_decls(&self, module_name: &str) -> Option<Arc<ModuleDecls>> {
-        let mut stub = None;
-        for f in self.files.values().filter(|f| f.module_name == module_name) {
-            if !is_stub(&f.path) {
-                return Some(Arc::clone(&f.decls));
-            }
-            stub = Some(Arc::clone(&f.decls));
-        }
-        stub
+        self.files
+            .values()
+            .filter(|f| f.module_name == module_name)
+            .max_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)))
+            .map(|f| Arc::clone(&f.decls))
     }
 
     /// Re-summarize one edited module against the index's declarations and update it.
@@ -1353,11 +1394,11 @@ impl ProjectIndex {
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
     ) -> IncrementalUpdate {
-        let others: Vec<(bool, Arc<ModuleDecls>)> = self
+        let others: Vec<(PathBuf, Arc<ModuleDecls>)> = self
             .files
             .values()
             .filter(|f| f.path != input.path)
-            .map(|f| (is_stub(&f.path), Arc::clone(&f.decls)))
+            .map(|f| (f.path.clone(), Arc::clone(&f.decls)))
             .collect();
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
@@ -1377,11 +1418,13 @@ impl ProjectIndex {
         kb: &EffectiveEcosystemKb,
         decls: &mut DeclPasses,
     ) -> (IncrementalUpdate, DeclKeys) {
-        let masked_by_impl = is_stub(&input.path)
-            && self.files.values().any(|f| {
-                f.module_name == input.module_name && f.path != input.path && !is_stub(&f.path)
-            });
-        let (changed, own) = if masked_by_impl {
+        // Another file owns the module name: its declarations stay the module's.
+        let masked = self.files.values().any(|f| {
+            f.module_name == input.module_name
+                && f.path != input.path
+                && module_precedence(&f.path) > module_precedence(&input.path)
+        });
+        let (changed, own) = if masked {
             (
                 DeclKeys::default(),
                 resolver::own_module_decls(input, kb, decls),
@@ -1445,16 +1488,16 @@ impl ProjectIndex {
             }
         }
         self.files.insert(path, new_file);
-        // A function the file stopped defining falls back to another file defining it (a
-        // `.pyi` stub next to its `.py` implementation), as a full build links it.
+        // A function the file stopped defining falls back to the highest-ranked other file
+        // defining it (a `.pyi` stub next to its `.py` implementation), as a full build links it.
         for func in owned_before.iter().filter(|f| !own.contains(*f)) {
             let fallback = self
                 .files
                 .values()
                 .filter(|f| f.local_functions.contains_key(func))
-                .map(|f| (is_stub(&f.path), &f.path))
-                .min();
-            if let Some((_, other)) = fallback {
+                .map(|f| &f.path)
+                .max_by(|a, b| module_precedence(a).cmp(&module_precedence(b)));
+            if let Some(other) = fallback {
                 self.func_files.insert(func.clone(), other.clone());
             }
         }
@@ -1594,10 +1637,11 @@ impl ProjectIndex {
     }
 
     fn add_file_links(&mut self, file: &FileSummary) {
-        let file_is_stub = is_stub(&file.path);
         for func in file.local_functions.keys() {
-            let keep_impl = file_is_stub && self.func_files.get(func).is_some_and(|p| !is_stub(p));
-            if !keep_impl {
+            let owned_elsewhere = self.func_files.get(func).is_some_and(|p| {
+                p != &file.path && module_precedence(p) > module_precedence(&file.path)
+            });
+            if !owned_elsewhere {
                 self.func_files.insert(func.clone(), file.path.clone());
             }
         }

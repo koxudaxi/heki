@@ -502,15 +502,35 @@ fn eff201_reads_calls_and_allowed_writes() {
         found(&diags),
         vec![
             // Two calls deep, through helpers outside the scope.
-            d(dec, 7, "decide", "decisions:DataType.is_optional"),
-            d(dec, 11, "decide_twice", "decisions:DataType.is_optional"),
+            d(dec, 7, "decide", "decisions:reads:DataType.is_optional"),
+            d(
+                dec,
+                11,
+                "decide_twice",
+                "decisions:reads:DataType.is_optional"
+            ),
             // Reading a property runs its getter, which reads the target.
-            d(dec, 19, "decide_property", "decisions:DataType.is_optional"),
-            d(dec, 23, "decide_getattr", "decisions:Model.class_name"),
+            d(
+                dec,
+                19,
+                "decide_property",
+                "decisions:reads:DataType.is_optional"
+            ),
+            d(
+                dec,
+                23,
+                "decide_getattr",
+                "decisions:reads:Model.class_name"
+            ),
             // A subclass of the target class.
-            d(dec, 27, "decide_sub", "decisions:Model.class_name"),
-            d(dec, 35, "seal", "decisions:DataType.replace_reference"),
-            d(dec, 36, "seal", "decisions:FinalFacts"),
+            d(dec, 27, "decide_sub", "decisions:reads:Model.class_name"),
+            d(
+                dec,
+                35,
+                "seal",
+                "decisions:calls:DataType.replace_reference"
+            ),
+            d(dec, 36, "seal", "decisions:calls:FinalFacts"),
             // Writes of the universe that `allow-writes` does not name.
             d(pas, 10, "sort_bases", "pass-sort:Model.fields"),
             d(pas, 11, "sort_bases", "pass-sort:DataType.is_optional"),
@@ -613,8 +633,8 @@ def direct(store: Store) -> None:
     assert_eq!(
         found(&diags),
         vec![
-            d(r, 7, "page", "no-store-ops:Store.*"),
-            d(r, 15, "direct", "no-store-ops:Store.*"),
+            d(r, 7, "page", "no-store-ops:calls:Store.*"),
+            d(r, 15, "direct", "no-store-ops:calls:Store.*"),
         ],
         "{diags:#?}"
     );
@@ -949,7 +969,17 @@ fn baselines_count_violation_sites() {
         ),
         "{stderr}"
     );
-    // Recording them again accepts them.
+    // The baseline only shrinks: `--update-baseline` reports them and keeps the file.
+    let recorded = p.read("heki-baseline.toml");
+    let (code, _, stderr) = p.check(&update);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("error: baseline heki-baseline.toml not updated: 6 entry(ies) grew"),
+        "{stderr}"
+    );
+    assert_eq!(p.read("heki-baseline.toml"), recorded);
+    // Recording them takes a new baseline.
+    std::fs::remove_file(p.dir.join("heki-baseline.toml")).unwrap();
     assert_eq!(p.check(&update).0, 0);
     assert!(p.read("heki-baseline.toml").contains("count = 2"));
     assert_eq!(p.check(&args).0, 0);
@@ -996,7 +1026,16 @@ fn baselines_without_a_version_keep_counting_diagnostics() {
         ),
         "{stderr}"
     );
-    // `--update-baseline` rewrites it to count sites.
+    // `--update-baseline` compares in the old unit first: the new diagnostics keep it as it is.
+    let (code, _, stderr) = p.check(&update);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("error: baseline heki-baseline.toml not updated: 2 entry(ies) grew"),
+        "{stderr}"
+    );
+    assert_eq!(p.read("heki-baseline.toml"), old);
+    // Without them, it is rewritten to count sites.
+    p.write("pkg/m.py", BASELINE_SRC);
     assert_eq!(p.check(&update).0, 0);
     assert!(p.read("heki-baseline.toml").contains("\nversion = 2\n"));
     // A version this heki does not know is an error.

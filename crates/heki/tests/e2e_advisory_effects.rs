@@ -592,9 +592,15 @@ fn a_project_root_that_is_itself_a_package() {
             "from . import util\nfrom .util import helper\n\n\nasync def handler():\n    helper()\n    util.helper()\n",
         );
     let diags = diagnostics(&p, &[]);
-    // `from .util import helper` in a top-level module resolves `util.helper`;
-    // `from . import util` has no parent package to resolve against.
-    assert_eq!(found(&diags), vec![d("api.py", 6, "EFF101", "util.helper")]);
+    // The root is the package of the top-level modules: `from .util import helper` and
+    // `from . import util` both resolve to `util`.
+    assert_eq!(
+        found(&diags),
+        vec![
+            d("api.py", 6, "EFF101", "util.helper"),
+            d("api.py", 7, "EFF101", "util.helper")
+        ]
+    );
 }
 
 #[test]

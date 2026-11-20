@@ -27,6 +27,11 @@ pub enum ScopeKind {
     Class,
     Comprehension,
     TypeParameters,
+    /// The lazily evaluated bound, constraints, or default of one PEP 695 / PEP 696 type
+    /// parameter (`T: Base`, `T = int`).
+    TypeVariable,
+    /// The lazily evaluated value of a PEP 695 `type` statement.
+    TypeAlias,
     Annotation,
 }
 
@@ -40,14 +45,13 @@ pub enum NameResolution {
     Builtin,
 }
 
-/// Binding metadata for a symbol within a scope.
+/// A name a scope binds: assigned, imported, deleted, defined, or a parameter. A `global` /
+/// `nonlocal` declaration alone binds nothing ([`Scope::global_decls`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
     pub name: String,
     pub span: Span,
     pub is_parameter: bool,
-    pub is_global_decl: bool,
-    pub is_nonlocal_decl: bool,
     /// True when bound by Python 3.15 PEP 810 `lazy import` / `lazy from ... import ...`.
     pub is_lazy_import: bool,
 }
@@ -59,10 +63,19 @@ pub struct ModuleImport {
     pub module: Option<String>,
     pub imported_name: String,
     pub bound_name: String,
+    /// An explicit `as` clause: `import a.b as x` binds `x` to `a.b`, while `import a.b`
+    /// binds `a` to `a` (also when the alias spells the first component, `import a.b as a`).
+    #[serde(default)]
+    pub has_alias: bool,
     pub level: u32,
     pub is_from: bool,
     pub is_lazy: bool,
     pub in_type_checking: bool,
+    /// A later statement of the module body that always runs rebinds `bound_name`
+    /// (`from time import sleep`, then `def sleep(n): ...`): once the module has run, the name
+    /// no longer holds the import.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overridden: bool,
     pub span: Span,
 }
 
@@ -72,12 +85,15 @@ pub struct ClassInfo {
     pub id: ClassId,
     pub scope: ScopeId,
     pub name: String,
+    /// Python's `__qualname__`: `Outer.Inner`, `factory.<locals>.Local`.
     pub qualname: String,
+    /// The class whose body holds this class statement directly.
     pub parent_class: Option<ClassId>,
     pub bases: Vec<String>,
     /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
     /// `**kwargs` is left out.
     pub keywords: Vec<(String, String)>,
+    /// The functions defined directly in the class body.
     pub methods: Vec<String>,
     pub span: Span,
 }
@@ -91,6 +107,13 @@ pub struct Scope {
     pub name: String,
     pub line: u32,
     pub bindings: Vec<Binding>,
+    /// Names declared `global` here, sorted (a PEP 572 walrus in a comprehension declares its
+    /// target like the scope that receives it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub global_decls: Vec<String>,
+    /// Names declared `nonlocal` here, sorted (walrus targets as for `global_decls`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nonlocal_decls: Vec<String>,
     pub reads: Vec<(String, NameResolution)>,
     /// Reads occurring exclusively inside a PEP 709 inlined comprehension
     /// (CPython 3.12+ `symtable` drops `is_referenced()` on outer symbols read only there).
@@ -119,7 +142,19 @@ struct ScopeBuilder {
     bound_names: FxHashSet<String>,
     /// Names bound exclusively as PEP 709 inlined comprehension targets (lexically isolated).
     comp_target_bindings: Vec<(String, Span)>,
-    comp_target_names: FxHashSet<String>,
+    /// The PEP 709 inlined comprehensions open at the current point of this scope's body
+    /// (indices into `Analyzer::comp_regions`), innermost last.
+    open_comp_regions: Vec<usize>,
+    /// The PEP 649 `__annotate__` scope of this module, class, or function body's variable
+    /// annotations, once it has one.
+    annotation_scope: Option<ScopeId>,
+    /// A function body's `__annotate__` scope: never evaluated, so its own name loads are no
+    /// references (names read inside its comprehensions and lambdas are).
+    unevaluated: bool,
+    /// The inlined comprehensions of the parent scope that lexically enclose this scope: their
+    /// targets are cells this scope can capture (`[lambda: i for i in r]`), unlike every other
+    /// comprehension target of the parent.
+    enclosing_comp_regions: Vec<usize>,
     /// Names assigned via walrus (`:=`) inside a module-level inlined comprehension.
     module_walrus_globals: FxHashSet<String>,
     global_decls: FxHashSet<String>,
@@ -156,7 +191,10 @@ impl ScopeBuilder {
             bindings: Vec::new(),
             bound_names: FxHashSet::default(),
             comp_target_bindings: Vec::new(),
-            comp_target_names: FxHashSet::default(),
+            open_comp_regions: Vec::new(),
+            annotation_scope: None,
+            unevaluated: false,
+            enclosing_comp_regions: Vec::new(),
             module_walrus_globals: FxHashSet::default(),
             global_decls: FxHashSet::default(),
             nonlocal_decls: FxHashSet::default(),
@@ -195,55 +233,41 @@ impl ScopeBuilder {
                 name,
                 span,
                 is_parameter,
-                is_global_decl: false,
-                is_nonlocal_decl: false,
                 is_lazy_import,
             });
         }
     }
 
-    fn add_global(&mut self, raw_name: &str, span: Span) {
+    fn add_global(&mut self, raw_name: &str) {
         let name = self.mangle(raw_name);
-        self.global_decls.insert(name.clone());
-        if self.bound_names.insert(name.clone()) {
-            self.bindings.push(Binding {
-                name,
-                span,
-                is_parameter: false,
-                is_global_decl: true,
-                is_nonlocal_decl: false,
-                is_lazy_import: false,
-            });
-        } else if let Some(b) = self.bindings.iter_mut().find(|b| b.name == name) {
-            b.is_global_decl = true;
-        }
+        self.global_decls.insert(name);
     }
 
-    fn add_nonlocal(&mut self, raw_name: &str, span: Span) {
+    fn add_nonlocal(&mut self, raw_name: &str) {
         let name = self.mangle(raw_name);
-        self.nonlocal_decls.insert(name.clone());
-        if self.bound_names.insert(name.clone()) {
-            self.bindings.push(Binding {
-                name,
-                span,
-                is_parameter: false,
-                is_global_decl: false,
-                is_nonlocal_decl: true,
-                is_lazy_import: false,
-            });
-        } else if let Some(b) = self.bindings.iter_mut().find(|b| b.name == name) {
-            b.is_nonlocal_decl = true;
-        }
+        self.nonlocal_decls.insert(name);
     }
 
-    fn add_comp_target_binding(&mut self, raw_name: &str, span: Span) {
-        let name = self.mangle(raw_name);
-        if self.comp_target_names.insert(name.clone()) {
+    /// Declared `global` or `nonlocal` here: a comprehension target of the same name stays
+    /// isolated instead of becoming a local of this scope.
+    fn declares(&self, name: &str) -> bool {
+        self.global_decls.contains(name) || self.nonlocal_decls.contains(name)
+    }
+
+    fn add_comp_target_binding(&mut self, name: String, span: Span) {
+        if !self.comp_target_bindings.iter().any(|(n, _)| *n == name) {
             self.comp_target_bindings.push((name, span));
         }
     }
 
+    fn in_inlined_comp(&self) -> bool {
+        !self.open_comp_regions.is_empty()
+    }
+
     fn add_read(&mut self, raw_name: &str, in_inlined_comp: bool, in_class_comp: bool) {
+        if self.unevaluated && !in_inlined_comp {
+            return;
+        }
         let name = self.mangle(raw_name);
         if in_inlined_comp {
             self.in_comp_reads.insert(name.clone());
@@ -260,6 +284,15 @@ impl ScopeBuilder {
     }
 }
 
+/// What a module-scope binding makes a name, for `TYPE_CHECKING` guards.
+enum GuardBinding {
+    /// `typing.TYPE_CHECKING` itself, or `False`.
+    TypeChecking,
+    /// Any other imported name (a module whose `TYPE_CHECKING` attribute a guard may read).
+    Import,
+    Other,
+}
+
 struct Analyzer<'a> {
     profile: RuntimeProfile,
     lines: LineIndex,
@@ -267,11 +300,22 @@ struct Analyzer<'a> {
     scopes: Vec<ScopeBuilder>,
     scope_stack: Vec<ScopeId>,
     class_stack: Vec<(ClassId, String)>,
+    /// Python `__qualname__` of each enclosing `def` / `class`, and whether it is a function
+    /// (whose nested definitions are `<locals>`).
+    qualnames: Vec<(String, bool)>,
     imports: Vec<ModuleImport>,
     classes: Vec<ClassInfo>,
     in_type_checking: bool,
-    inlined_comp_depth: u32,
-    in_inlined_class_comp: bool,
+    /// Module names holding `typing.TYPE_CHECKING` (`from typing import TYPE_CHECKING as TC`,
+    /// a re-export of it, or `TYPE_CHECKING = False`): false whenever the program runs.
+    type_checking_names: FxHashSet<String>,
+    /// Module names bound by an import, which `X.TYPE_CHECKING` guards read through
+    /// (`typing.TYPE_CHECKING`); a class attribute of that name is no guard.
+    imported_names: FxHashSet<String>,
+    /// `from m import *` (only allowed at module level).
+    has_star_import: bool,
+    /// Target names of every PEP 709 inlined comprehension, by region index.
+    comp_regions: Vec<FxHashSet<String>>,
     source: &'a str,
 }
 
@@ -293,13 +337,38 @@ impl<'a> Analyzer<'a> {
             scopes: vec![root],
             scope_stack: vec![ScopeId(0)],
             class_stack: Vec::new(),
+            qualnames: Vec::new(),
             imports: Vec::new(),
             classes: Vec::new(),
             in_type_checking: false,
-            inlined_comp_depth: 0,
-            in_inlined_class_comp: false,
+            type_checking_names: FxHashSet::default(),
+            imported_names: FxHashSet::default(),
+            has_star_import: false,
+            comp_regions: Vec::new(),
             source,
         }
+    }
+
+    /// PEP 709 inlines list / set / dict comprehensions (3.12+), except in the annotation
+    /// scopes that can see a class body's names: annotation, type-parameter, type-variable, and
+    /// type-alias scopes of a class body or of such a scope.
+    fn inlines_comprehensions(&self) -> bool {
+        self.profile.pep709_inlined_comprehensions && !self.sees_class_scope(self.cur_scope_id())
+    }
+
+    fn sees_class_scope(&self, id: ScopeId) -> bool {
+        let sc = &self.scopes[id.0 as usize];
+        let annotation_scope = matches!(
+            sc.kind,
+            ScopeKind::Annotation
+                | ScopeKind::TypeParameters
+                | ScopeKind::TypeVariable
+                | ScopeKind::TypeAlias
+        );
+        annotation_scope
+            && sc.parent.is_some_and(|p| {
+                self.scopes[p.0 as usize].kind == ScopeKind::Class || self.sees_class_scope(p)
+            })
     }
 
     fn cur_scope_id(&self) -> ScopeId {
@@ -311,6 +380,22 @@ impl<'a> Analyzer<'a> {
         &mut self.scopes[id]
     }
 
+    /// `__qualname__` of a definition named `name` in the current block: `f.<locals>.C` in a
+    /// function, `C.m` in a class body.
+    fn child_qualname(&self, name: &str) -> String {
+        match self.qualnames.last() {
+            None => name.to_owned(),
+            Some((outer, true)) => format!("{outer}.<locals>.{name}"),
+            Some((outer, false)) => format!("{outer}.{name}"),
+        }
+    }
+
+    /// The class whose body the current statement is directly in (not in one of its methods).
+    fn cur_class_body(&self) -> Option<ClassId> {
+        let (cid, _) = self.class_stack.last()?;
+        (self.classes[cid.0 as usize].scope == self.cur_scope_id()).then_some(*cid)
+    }
+
     fn cur_enclosing_class_name(&self) -> Option<String> {
         self.class_stack.last().map(|(_, name)| name.clone())
     }
@@ -319,8 +404,9 @@ impl<'a> Analyzer<'a> {
         let id = ScopeId(self.scopes.len() as u32);
         let parent = Some(self.cur_scope_id());
         let cls_name = self.cur_enclosing_class_name();
-        self.scopes
-            .push(ScopeBuilder::new(id, parent, kind, name, line, cls_name));
+        let mut scope = ScopeBuilder::new(id, parent, kind, name, line, cls_name);
+        scope.enclosing_comp_regions = self.cur_scope_mut().open_comp_regions.clone();
+        self.scopes.push(scope);
         self.scope_stack.push(id);
         id
     }
@@ -345,12 +431,14 @@ impl<'a> Analyzer<'a> {
         let cur_sid = self.cur_scope_id();
         let target_sid = self.walrus_target_scope();
         if self.scopes[target_sid.0 as usize].kind == ScopeKind::Module
-            && (cur_sid != target_sid || self.inlined_comp_depth > 0)
+            && (cur_sid != target_sid || self.scopes[cur_sid.0 as usize].in_inlined_comp())
         {
             // PEP 572 + PEP 709: walrus inside a module-level generator or inlined
             // comprehension writes a global dynamically without binding a static module local.
             if cur_sid != target_sid {
-                self.scopes[cur_sid.0 as usize].add_global(n.id.as_str(), Span::from(n.range));
+                let cur = &mut self.scopes[cur_sid.0 as usize];
+                cur.add_binding(n.id.as_str(), Span::from(n.range), false, false);
+                cur.add_global(n.id.as_str());
             } else {
                 let mangled = self.scopes[cur_sid.0 as usize].mangle(n.id.as_str());
                 self.scopes[cur_sid.0 as usize]
@@ -365,58 +453,158 @@ impl<'a> Analyzer<'a> {
                 false,
             );
         } else {
-            self.scopes[target_sid.0 as usize].add_binding(
-                n.id.as_str(),
-                Span::from(n.range),
-                false,
-                false,
-            );
-            self.scopes[cur_sid.0 as usize].add_nonlocal(n.id.as_str(), Span::from(n.range));
+            let target = &mut self.scopes[target_sid.0 as usize];
+            target.add_binding(n.id.as_str(), Span::from(n.range), false, false);
+            // The comprehension declares the target as the receiving function does: `global`
+            // there writes the module global, otherwise the function's local.
+            let target_is_global = target.global_decls.contains(&target.mangle(n.id.as_str()));
+            let cur = &mut self.scopes[cur_sid.0 as usize];
+            cur.add_binding(n.id.as_str(), Span::from(n.range), false, false);
+            if target_is_global {
+                cur.add_global(n.id.as_str());
+            } else {
+                cur.add_nonlocal(n.id.as_str());
+            }
+        }
+    }
+
+    /// Mark the module-scope imports a later module-body statement always rebinds.
+    fn mark_overridden_imports(&mut self, suite: &[Stmt]) {
+        let mut rebinds: FxHashMap<&str, u32> = FxHashMap::default();
+        let mut names = Vec::new();
+        for stmt in suite {
+            names.clear();
+            unconditional_bindings(stmt, &mut names);
+            for name in &names {
+                rebinds.insert(name, stmt.range().start().to_u32());
+            }
+        }
+        for imp in self.imports.iter_mut().filter(|i| i.scope == ScopeId(0)) {
+            imp.overridden = rebinds
+                .get(imp.bound_name.as_str())
+                .is_some_and(|&last| last > imp.span.end);
+        }
+    }
+
+    /// Record what a module-scope statement binds `name` to, for the `TYPE_CHECKING` guards
+    /// later statements test.
+    fn note_guard_binding(&mut self, name: &str, binding: GuardBinding) {
+        if self.cur_scope_id() != ScopeId(0) {
+            return;
+        }
+        self.type_checking_names.remove(name);
+        self.imported_names.remove(name);
+        match binding {
+            GuardBinding::TypeChecking => {
+                self.type_checking_names.insert(name.to_owned());
+            }
+            GuardBinding::Import => {
+                self.imported_names.insert(name.to_owned());
+            }
+            GuardBinding::Other => {}
+        }
+    }
+
+    /// The value an `if` test has when the program runs, when it is a `TYPE_CHECKING` guard:
+    /// `TYPE_CHECKING` is false, `not TYPE_CHECKING` true.
+    fn runtime_guard_value(&self, test: &Expr) -> Option<bool> {
+        match test {
+            Expr::Name(n) => self
+                .type_checking_names
+                .contains(n.id.as_str())
+                .then_some(false),
+            Expr::Attribute(a) => (a.attr.as_str() == "TYPE_CHECKING"
+                && matches!(a.value.as_ref(), Expr::Name(m) if self.imported_names.contains(m.id.as_str())))
+            .then_some(false),
+            Expr::UnaryOp(u) if u.op == ast::UnaryOp::Not => {
+                self.runtime_guard_value(&u.operand).map(|v| !v)
+            }
+            _ => None,
+        }
+    }
+
+    /// The names an assignment binds, for [`Self::note_guard_binding`]: `TYPE_CHECKING = False`
+    /// holds the guard's run-time value.
+    fn note_assignment_guards(&mut self, target: &Expr, value: Option<&Expr>) {
+        match target {
+            Expr::Name(n) => {
+                let false_flag = n.id.as_str() == "TYPE_CHECKING"
+                    && matches!(value, Some(Expr::BooleanLiteral(b)) if !b.value);
+                let binding = if false_flag {
+                    GuardBinding::TypeChecking
+                } else {
+                    GuardBinding::Other
+                };
+                self.note_guard_binding(n.id.as_str(), binding);
+            }
+            Expr::Tuple(t) => t
+                .elts
+                .iter()
+                .for_each(|e| self.note_assignment_guards(e, None)),
+            Expr::List(l) => l
+                .elts
+                .iter()
+                .for_each(|e| self.note_assignment_guards(e, None)),
+            Expr::Starred(st) => self.note_assignment_guards(&st.value, None),
+            _ => {}
         }
     }
 
     fn visit_suite(&mut self, suite: &[Stmt]) {
-        // On Python 3.14+ without `from __future__ import annotations`, module/class-level
-        // variable annotations (`x: T`) are collected into a single `__annotate__` scope.
-        let cur_kind = self.scopes[self.cur_scope_id().0 as usize].kind;
-        let collect_ann_scope = self.profile.pep649_deferred_annotations
-            && !self.has_future_annotations
-            && matches!(cur_kind, ScopeKind::Module | ScopeKind::Class);
-
-        let mut deferred_anns: Vec<&Expr> = Vec::new();
         for stmt in suite {
-            if collect_ann_scope && let Stmt::AnnAssign(aa) = stmt {
-                self.visit_ann_assign_with_deferred(aa, &mut deferred_anns);
-                continue;
-            }
             self.visit_stmt(stmt);
-        }
-        if !deferred_anns.is_empty() {
-            let line = self.lines.line(deferred_anns[0].range().start().to_u32());
-            self.push_scope(ScopeKind::Annotation, "__annotate__".to_string(), line);
-            for ann in deferred_anns {
-                self.visit_expr(ann);
-            }
-            self.pop_scope();
         }
     }
 
-    fn visit_ann_assign_with_deferred<'b>(
-        &mut self,
-        aa: &'b ast::StmtAnnAssign,
-        deferred: &mut Vec<&'b Expr>,
-    ) {
-        if aa.simple {
-            if let Expr::Name(n) = aa.target.as_ref() {
-                self.cur_scope_mut()
-                    .add_binding(n.id.as_str(), Span::from(n.range), false, false);
-            }
-        } else {
-            self.visit_expr(&aa.target);
+    /// The annotation of a variable annotation statement (`x: T`) of the current block.
+    fn visit_variable_annotation(&mut self, annotation: &Expr) {
+        if self.has_future_annotations {
+            return;
         }
-        deferred.push(&aa.annotation);
-        if let Some(val) = &aa.value {
-            self.visit_expr(val);
+        if !self.profile.pep649_deferred_annotations {
+            // Evaluated in place in module and class bodies; a function's are never evaluated,
+            // but CPython's symtable still records their names.
+            self.visit_expr(annotation);
+            return;
+        }
+        // PEP 649: the block's annotations share one `__annotate__` scope, opened at its first
+        // annotation (wherever it is nested in the block's statements).
+        let block = self.cur_scope_id();
+        let annotate = match self.scopes[block.0 as usize].annotation_scope {
+            Some(id) => id,
+            None => {
+                let line = self.lines.line(annotation.range().start().to_u32());
+                let id = self.push_scope(ScopeKind::Annotation, "__annotate__".to_string(), line);
+                self.pop_scope();
+                let block_kind = self.scopes[block.0 as usize].kind;
+                // A function's annotations are never evaluated: the names they read directly
+                // are no references (CPython 3.14 `ste_in_unevaluated_annotation`).
+                self.scopes[id.0 as usize].unevaluated = block_kind == ScopeKind::Function;
+                self.scopes[block.0 as usize].annotation_scope = Some(id);
+                id
+            }
+        };
+        self.scope_stack.push(annotate);
+        self.visit_expr(annotation);
+        self.scope_stack.pop();
+    }
+
+    /// `x: T` binds `x` even without a value (an unassigned local in a function); a
+    /// parenthesized `(x): T` binds it only when it assigns a value. An attribute or subscript
+    /// target evaluates its object.
+    fn visit_ann_assign_target(&mut self, aa: &ast::StmtAnnAssign) {
+        match aa.target.as_ref() {
+            Expr::Name(n) => {
+                if aa.simple || aa.value.is_some() {
+                    self.cur_scope_mut().add_binding(
+                        n.id.as_str(),
+                        Span::from(n.range),
+                        false,
+                        false,
+                    );
+                }
+            }
+            target => self.visit_expr(target),
         }
     }
 
@@ -443,6 +631,7 @@ impl<'a> Analyzer<'a> {
             Stmt::Assign(assign) => {
                 for t in &assign.targets {
                     self.visit_expr(t);
+                    self.note_assignment_guards(t, Some(&assign.value));
                 }
                 self.visit_expr(&assign.value);
             }
@@ -461,23 +650,11 @@ impl<'a> Analyzer<'a> {
                 self.visit_expr(&aug.value);
             }
             Stmt::AnnAssign(aa) => {
-                if aa.simple {
-                    if let Expr::Name(n) = aa.target.as_ref() {
-                        self.cur_scope_mut().add_binding(
-                            n.id.as_str(),
-                            Span::from(n.range),
-                            false,
-                            false,
-                        );
-                    }
-                } else {
-                    self.visit_expr(&aa.target);
+                self.visit_ann_assign_target(aa);
+                if aa.value.is_some() {
+                    self.note_assignment_guards(&aa.target, aa.value.as_deref());
                 }
-                // In function scopes, local variable annotations are never evaluated at runtime in Python 3.
-                let cur_kind = self.scopes[self.cur_scope_id().0 as usize].kind;
-                if !self.has_future_annotations && cur_kind != ScopeKind::Function {
-                    self.visit_expr(&aa.annotation);
-                }
+                self.visit_variable_annotation(&aa.annotation);
                 if let Some(val) = &aa.value {
                     self.visit_expr(val);
                 }
@@ -494,19 +671,28 @@ impl<'a> Analyzer<'a> {
                 self.visit_suite(&w.orelse);
             }
             Stmt::If(if_stmt) => {
-                self.visit_expr(&if_stmt.test);
                 let prev_tc = self.in_type_checking;
-                if is_type_checking_expr(&if_stmt.test) {
-                    self.in_type_checking = true;
-                }
-                self.visit_suite(&if_stmt.body);
-                self.in_type_checking = prev_tc;
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(test) = &clause.test {
-                        self.visit_expr(test);
+                // A clause runs only when every earlier test is false: after `not TYPE_CHECKING`
+                // (true at run time) no later clause does.
+                let mut reached_at_runtime = true;
+                let clauses = std::iter::once((Some(&*if_stmt.test), &if_stmt.body)).chain(
+                    if_stmt
+                        .elif_else_clauses
+                        .iter()
+                        .map(|c| (c.test.as_ref(), &c.body)),
+                );
+                for (test, body) in clauses {
+                    let value = test.and_then(|t| {
+                        self.visit_expr(t);
+                        self.runtime_guard_value(t)
+                    });
+                    self.in_type_checking = prev_tc || !reached_at_runtime || value == Some(false);
+                    self.visit_suite(body);
+                    if value == Some(true) {
+                        reached_at_runtime = false;
                     }
-                    self.visit_suite(&clause.body);
                 }
+                self.in_type_checking = prev_tc;
             }
             Stmt::With(w) => {
                 for item in &w.items {
@@ -575,15 +761,18 @@ impl<'a> Analyzer<'a> {
                         false,
                         imp.is_lazy,
                     );
+                    self.note_guard_binding(&bound, GuardBinding::Import);
                     self.imports.push(ModuleImport {
                         scope,
                         module: None,
                         imported_name: alias.name.to_string(),
                         bound_name: bound,
+                        has_alias: alias.asname.is_some(),
                         level: 0,
                         is_from: false,
                         is_lazy: imp.is_lazy,
                         in_type_checking: self.in_type_checking,
+                        overridden: false,
                         span: Span::from(alias.range),
                     });
                 }
@@ -593,6 +782,7 @@ impl<'a> Analyzer<'a> {
                 let module = imp.module.as_ref().map(|m| m.to_string());
                 for alias in &imp.names {
                     if alias.name.as_str() == "*" {
+                        self.has_star_import = true;
                         continue;
                     }
                     let bound = alias
@@ -606,29 +796,35 @@ impl<'a> Analyzer<'a> {
                         false,
                         imp.is_lazy,
                     );
+                    let binding = if alias.name.as_str() == "TYPE_CHECKING" {
+                        GuardBinding::TypeChecking
+                    } else {
+                        GuardBinding::Import
+                    };
+                    self.note_guard_binding(&bound, binding);
                     self.imports.push(ModuleImport {
                         scope,
                         module: module.clone(),
                         imported_name: alias.name.to_string(),
                         bound_name: bound,
+                        has_alias: alias.asname.is_some(),
                         level: imp.level,
                         is_from: true,
                         is_lazy: imp.is_lazy,
                         in_type_checking: self.in_type_checking,
+                        overridden: false,
                         span: Span::from(alias.range),
                     });
                 }
             }
             Stmt::Global(g) => {
                 for name in &g.names {
-                    self.cur_scope_mut()
-                        .add_global(name.as_str(), Span::from(name.range));
+                    self.cur_scope_mut().add_global(name.as_str());
                 }
             }
             Stmt::Nonlocal(nl) => {
                 for name in &nl.names {
-                    self.cur_scope_mut()
-                        .add_nonlocal(name.as_str(), Span::from(name.range));
+                    self.cur_scope_mut().add_nonlocal(name.as_str());
                 }
             }
             Stmt::Expr(e) => self.visit_expr(&e.value),
@@ -636,8 +832,17 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Line of the `def` / `async def` / `class` keyword, CPython's line of the definition:
+    /// a decorated statement's range starts at its first decorator.
+    fn definition_line(&self, stmt: heki_ast::TextRange, decorators: &[ast::Decorator]) -> u32 {
+        let start = decorators.last().map_or(stmt.start().to_usize(), |d| {
+            skip_trivia(self.source, d.range().end().to_usize())
+        });
+        self.lines.line(start as u32)
+    }
+
     fn visit_function_def(&mut self, func: &ast::StmtFunctionDef) {
-        let line = self.lines.line(func.range.start().to_u32());
+        let line = self.definition_line(func.range, &func.decorator_list);
         // Decorators and defaults are evaluated in the enclosing scope.
         for dec in &func.decorator_list {
             self.visit_expr(&dec.expression);
@@ -651,11 +856,13 @@ impl<'a> Analyzer<'a> {
             false,
             false,
         );
-        if let Some((cid, _)) = self.class_stack.last()
-            && let Some(ci) = self.classes.get_mut(cid.0 as usize)
-        {
-            ci.methods.push(func.name.to_string());
+        self.note_guard_binding(func.name.as_str(), GuardBinding::Other);
+        if let Some(cid) = self.cur_class_body() {
+            self.classes[cid.0 as usize]
+                .methods
+                .push(func.name.to_string());
         }
+        let qualname = self.child_qualname(func.name.as_str());
 
         // Optional PEP 695 type parameters scope.
         let has_type_params = func
@@ -690,7 +897,9 @@ impl<'a> Analyzer<'a> {
         // Function body scope.
         self.push_scope(ScopeKind::Function, func.name.to_string(), line);
         self.bind_parameters(&func.parameters);
+        self.qualnames.push((qualname, true));
         self.visit_suite(&func.body);
+        self.qualnames.pop();
         self.pop_scope();
 
         if has_type_params {
@@ -699,7 +908,9 @@ impl<'a> Analyzer<'a> {
     }
 
     fn visit_class_def(&mut self, cls: &ast::StmtClassDef) {
-        let line = self.lines.line(cls.range.start().to_u32());
+        let line = self.definition_line(cls.range, &cls.decorator_list);
+        let parent_class = self.cur_class_body();
+        let qualname = self.child_qualname(cls.name.as_str());
         for dec in &cls.decorator_list {
             self.visit_expr(&dec.expression);
         }
@@ -709,6 +920,7 @@ impl<'a> Analyzer<'a> {
             false,
             false,
         );
+        self.note_guard_binding(cls.name.as_str(), GuardBinding::Other);
 
         let has_type_params = cls
             .type_params
@@ -739,17 +951,11 @@ impl<'a> Analyzer<'a> {
             }
         }
 
-        let parent_class = self.class_stack.last().map(|(cid, _)| *cid);
-        let qualname = if self.class_stack.is_empty() {
-            cls.name.to_string()
-        } else {
-            let prefix: Vec<&str> = self.class_stack.iter().map(|(_, n)| n.as_str()).collect();
-            format!("{}.{}", prefix.join("."), cls.name)
-        };
         let class_id = ClassId(self.classes.len() as u32);
 
         self.class_stack.push((class_id, cls.name.to_string()));
         let scope = self.push_scope(ScopeKind::Class, cls.name.to_string(), line);
+        self.qualnames.push((qualname.clone(), false));
         self.classes.push(ClassInfo {
             id: class_id,
             scope,
@@ -762,6 +968,7 @@ impl<'a> Analyzer<'a> {
             span: Span::from(cls.range),
         });
         self.visit_suite(&cls.body);
+        self.qualnames.pop();
         self.pop_scope();
         self.class_stack.pop();
 
@@ -786,7 +993,7 @@ impl<'a> Analyzer<'a> {
             self.push_scope(ScopeKind::TypeParameters, alias_name.clone(), line);
             self.bind_type_params(tp);
         }
-        self.push_scope(ScopeKind::Function, alias_name, line);
+        self.push_scope(ScopeKind::TypeAlias, alias_name, line);
         self.visit_expr(&ta.value);
         self.pop_scope();
         if has_type_params {
@@ -796,43 +1003,20 @@ impl<'a> Analyzer<'a> {
 
     fn bind_type_params(&mut self, tp: &ast::TypeParams) {
         for param in &tp.type_params {
-            match param {
-                TypeParam::TypeVar(tv) => {
-                    self.cur_scope_mut().add_binding(
-                        tv.name.as_str(),
-                        Span::from(tv.name.range),
-                        false,
-                        false,
-                    );
-                    if let Some(bound) = &tv.bound {
-                        self.visit_expr(bound);
-                    }
-                    if let Some(def) = &tv.default {
-                        self.visit_expr(def);
-                    }
-                }
-                TypeParam::TypeVarTuple(tvt) => {
-                    self.cur_scope_mut().add_binding(
-                        tvt.name.as_str(),
-                        Span::from(tvt.name.range),
-                        false,
-                        false,
-                    );
-                    if let Some(def) = &tvt.default {
-                        self.visit_expr(def);
-                    }
-                }
-                TypeParam::ParamSpec(ps) => {
-                    self.cur_scope_mut().add_binding(
-                        ps.name.as_str(),
-                        Span::from(ps.name.range),
-                        false,
-                        false,
-                    );
-                    if let Some(def) = &ps.default {
-                        self.visit_expr(def);
-                    }
-                }
+            let (name, bound, default) = match param {
+                TypeParam::TypeVar(tv) => (&tv.name, tv.bound.as_deref(), tv.default.as_deref()),
+                TypeParam::TypeVarTuple(tvt) => (&tvt.name, None, tvt.default.as_deref()),
+                TypeParam::ParamSpec(ps) => (&ps.name, None, ps.default.as_deref()),
+            };
+            self.cur_scope_mut()
+                .add_binding(name.as_str(), Span::from(name.range), false, false);
+            // The bound (or constraints) and the default are evaluated lazily, each in its own
+            // scope named after the parameter.
+            for lazy in [bound, default].into_iter().flatten() {
+                let line = self.lines.line(param.range().start().to_u32());
+                self.push_scope(ScopeKind::TypeVariable, name.to_string(), line);
+                self.visit_expr(lazy);
+                self.pop_scope();
             }
         }
     }
@@ -894,11 +1078,9 @@ impl<'a> Analyzer<'a> {
             self.visit_expr(&first.iter);
         }
         if inlined {
-            let prev_in_cc = self.in_inlined_class_comp;
-            if self.scopes[self.cur_scope_id().0 as usize].kind == ScopeKind::Class {
-                self.in_inlined_class_comp = true;
-            }
-            self.inlined_comp_depth += 1;
+            let region = self.comp_regions.len();
+            self.comp_regions.push(FxHashSet::default());
+            self.cur_scope_mut().open_comp_regions.push(region);
             for (idx, g) in generators.iter().enumerate() {
                 if idx > 0 {
                     self.visit_expr(&g.iter);
@@ -909,8 +1091,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             visit_elts(self);
-            self.inlined_comp_depth -= 1;
-            self.in_inlined_class_comp = prev_in_cc;
+            self.cur_scope_mut().open_comp_regions.pop();
         } else {
             let line = self.lines.line(range.start().to_u32());
             self.push_scope(ScopeKind::Comprehension, name.to_string(), line);
@@ -997,23 +1178,25 @@ impl<'a> Analyzer<'a> {
         match expr {
             Expr::Name(n) => match n.ctx {
                 ExprContext::Store | ExprContext::Del => {
-                    let in_ic = self.inlined_comp_depth > 0;
-                    let in_cc = self.in_inlined_class_comp;
-                    let sc = self.cur_scope_mut();
-                    if in_ic {
-                        sc.add_comp_target_binding(n.id.as_str(), Span::from(n.range));
-                    } else {
-                        sc.add_binding(n.id.as_str(), Span::from(n.range), false, false);
-                    }
-                    if in_cc {
-                        let mangled = sc.mangle(n.id.as_str());
-                        sc.class_comp_bindings.insert(mangled);
+                    let sid = self.cur_scope_id().0 as usize;
+                    let sc = &mut self.scopes[sid];
+                    match sc.open_comp_regions.last() {
+                        Some(&region) => {
+                            let name = sc.mangle(n.id.as_str());
+                            if sc.kind == ScopeKind::Class {
+                                sc.class_comp_bindings.insert(name.clone());
+                            }
+                            self.comp_regions[region].insert(name.clone());
+                            sc.add_comp_target_binding(name, Span::from(n.range));
+                        }
+                        None => sc.add_binding(n.id.as_str(), Span::from(n.range), false, false),
                     }
                 }
                 ExprContext::Load | ExprContext::Invalid => {
-                    let in_ic = self.inlined_comp_depth > 0;
-                    let in_cc = self.in_inlined_class_comp;
-                    self.cur_scope_mut().add_read(n.id.as_str(), in_ic, in_cc);
+                    let sc = self.cur_scope_mut();
+                    let in_ic = sc.in_inlined_comp();
+                    let in_cc = in_ic && sc.kind == ScopeKind::Class;
+                    sc.add_read(n.id.as_str(), in_ic, in_cc);
                 }
             },
             Expr::Named(named) => {
@@ -1036,19 +1219,19 @@ impl<'a> Analyzer<'a> {
                 self.pop_scope();
             }
             Expr::ListComp(lc) => {
-                let inlined = self.profile.pep709_inlined_comprehensions;
+                let inlined = self.inlines_comprehensions();
                 self.visit_comprehension("<listcomp>", lc.range, &lc.generators, inlined, |a| {
                     a.visit_expr(&lc.elt);
                 });
             }
             Expr::SetComp(sc) => {
-                let inlined = self.profile.pep709_inlined_comprehensions;
+                let inlined = self.inlines_comprehensions();
                 self.visit_comprehension("<setcomp>", sc.range, &sc.generators, inlined, |a| {
                     a.visit_expr(&sc.elt);
                 });
             }
             Expr::DictComp(dc) => {
-                let inlined = self.profile.pep709_inlined_comprehensions;
+                let inlined = self.inlines_comprehensions();
                 self.visit_comprehension("<dictcomp>", dc.range, &dc.generators, inlined, |a| {
                     if let Some(k) = &dc.key {
                         a.visit_expr(k);
@@ -1191,9 +1374,12 @@ impl<'a> Analyzer<'a> {
     }
 
     fn resolve_all(self) -> SemanticModel {
-        let module_bindings: FxHashSet<String> = self.scopes[0].bound_names.clone();
-        let parent_map: FxHashMap<ScopeId, Option<ScopeId>> =
-            self.scopes.iter().map(|s| (s.id, s.parent)).collect();
+        let module_globals = ModuleGlobals::of(&self.scopes, self.has_star_import);
+        let resolver = Resolver {
+            scopes: &self.scopes,
+            comp_regions: &self.comp_regions,
+            module_globals,
+        };
 
         let scopes = self
             .scopes
@@ -1204,7 +1390,7 @@ impl<'a> Analyzer<'a> {
                 let mut effective_bindings = sc.bindings.clone();
                 let mut effective_comp_locals = FxHashSet::default();
                 for (cname, cspan) in &sc.comp_target_bindings {
-                    if sc.bound_names.contains(cname) {
+                    if sc.bound_names.contains(cname) || sc.declares(cname) {
                         continue;
                     }
                     // If the enclosing scope itself reads `cname` OUTSIDE the comprehension
@@ -1218,8 +1404,6 @@ impl<'a> Analyzer<'a> {
                         name: cname.clone(),
                         span: *cspan,
                         is_parameter: false,
-                        is_global_decl: false,
-                        is_nonlocal_decl: false,
                         is_lazy_import: false,
                     });
                 }
@@ -1244,7 +1428,7 @@ impl<'a> Analyzer<'a> {
                             NameResolution::Local
                         }
                     } else {
-                        resolve_name(sc.id, name, &self.scopes, &parent_map, &module_bindings)
+                        resolver.resolve(sc.id, name)
                     };
                     if comp_only {
                         inlined_comp_only_reads.push(name.clone());
@@ -1262,6 +1446,8 @@ impl<'a> Analyzer<'a> {
                     name: sc.name.clone(),
                     line: sc.line,
                     bindings: effective_bindings,
+                    global_decls: sorted(&sc.global_decls),
+                    nonlocal_decls: sorted(&sc.nonlocal_decls),
                     reads,
                     inlined_comp_only_reads,
                 }
@@ -1277,76 +1463,141 @@ impl<'a> Analyzer<'a> {
     }
 }
 
-fn resolve_name(
-    scope_id: ScopeId,
-    name: &str,
-    scopes: &[ScopeBuilder],
-    parent_map: &FxHashMap<ScopeId, Option<ScopeId>>,
-    module_bindings: &FxHashSet<String>,
-) -> NameResolution {
-    let sc = &scopes[scope_id.0 as usize];
-    if sc.global_decls.contains(name) {
-        return if module_bindings.contains(name) {
-            NameResolution::Global
-        } else {
-            NameResolution::Builtin
-        };
-    }
-    if sc.nonlocal_decls.contains(name) {
-        return NameResolution::Enclosing;
-    }
-    if sc.kind == ScopeKind::Module {
-        return if module_bindings.contains(name) {
-            NameResolution::Global
-        } else {
-            NameResolution::Builtin
-        };
-    }
-    if sc.bound_names.contains(name) {
-        return NameResolution::Local;
+/// The names a module's globals may hold, for telling a module global from a builtin.
+struct ModuleGlobals {
+    bound: FxHashSet<String>,
+    /// `from m import *` binds names no static view lists: no read is known to be a builtin.
+    star_import: bool,
+}
+
+impl ModuleGlobals {
+    /// Module-scope bindings plus what nested scopes write into the module: a name declared
+    /// `global` and bound there (`global state; state = 1` in a function), and walrus targets
+    /// of module-level comprehensions.
+    fn of(scopes: &[ScopeBuilder], star_import: bool) -> Self {
+        let module = &scopes[0];
+        let mut bound = module.bound_names.clone();
+        bound.extend(module.module_walrus_globals.iter().cloned());
+        for sc in &scopes[1..] {
+            bound.extend(
+                sc.global_decls
+                    .iter()
+                    .filter(|n| sc.bound_names.contains(*n))
+                    .cloned(),
+            );
+        }
+        Self { bound, star_import }
     }
 
-    // Walk enclosing scopes (Python LEGB rule: skip Class scopes!).
-    let mut cursor = parent_map.get(&scope_id).copied().flatten();
-    while let Some(pid) = cursor {
-        let p = &scopes[pid.0 as usize];
-        match p.kind {
-            ScopeKind::Module => break,
-            ScopeKind::Class => {}
-            ScopeKind::Function
-            | ScopeKind::Comprehension
-            | ScopeKind::TypeParameters
-            | ScopeKind::Annotation => {
-                if p.global_decls.contains(name) {
-                    return if module_bindings.contains(name) {
-                        NameResolution::Global
-                    } else {
-                        NameResolution::Builtin
-                    };
-                }
-                if p.nonlocal_decls.contains(name)
-                    || p.bound_names.contains(name)
-                    || p.comp_target_names.contains(name)
-                {
-                    return NameResolution::Enclosing;
+    fn resolve(&self, name: &str) -> NameResolution {
+        if self.star_import || self.bound.contains(name) {
+            NameResolution::Global
+        } else {
+            NameResolution::Builtin
+        }
+    }
+}
+
+/// LEGB resolution of a name read over the finished scope tree.
+struct Resolver<'s> {
+    scopes: &'s [ScopeBuilder],
+    comp_regions: &'s [FxHashSet<String>],
+    module_globals: ModuleGlobals,
+}
+
+impl Resolver<'_> {
+    fn scope(&self, id: ScopeId) -> &ScopeBuilder {
+        &self.scopes[id.0 as usize]
+    }
+
+    fn resolve(&self, scope_id: ScopeId, name: &str) -> NameResolution {
+        let sc = self.scope(scope_id);
+        if sc.global_decls.contains(name) {
+            return self.module_globals.resolve(name);
+        }
+        if sc.nonlocal_decls.contains(name) {
+            return NameResolution::Enclosing;
+        }
+        if sc.kind == ScopeKind::Module {
+            return self.module_globals.resolve(name);
+        }
+        if sc.bound_names.contains(name) {
+            return NameResolution::Local;
+        }
+
+        // Walk enclosing scopes (Python LEGB rule: skip Class scopes!).
+        let mut child = sc;
+        while let Some(pid) = child.parent {
+            let p = self.scope(pid);
+            // A target of an inlined comprehension of `p` around `child` is that
+            // comprehension's cell, whatever kind of scope `p` is.
+            if child
+                .enclosing_comp_regions
+                .iter()
+                .any(|r| self.comp_regions[*r].contains(name))
+            {
+                return NameResolution::Enclosing;
+            }
+            match p.kind {
+                ScopeKind::Module => break,
+                // A class body hides its names from nested scopes but gives them the implicit
+                // `__class__` cell (what zero-argument `super()` reads).
+                ScopeKind::Class if name == "__class__" => return NameResolution::Enclosing,
+                ScopeKind::Class => {}
+                ScopeKind::Function
+                | ScopeKind::Comprehension
+                | ScopeKind::TypeParameters
+                | ScopeKind::TypeVariable
+                | ScopeKind::TypeAlias
+                | ScopeKind::Annotation => {
+                    if p.global_decls.contains(name) {
+                        return self.module_globals.resolve(name);
+                    }
+                    if p.nonlocal_decls.contains(name) || p.bound_names.contains(name) {
+                        return NameResolution::Enclosing;
+                    }
                 }
             }
+            child = p;
         }
-        cursor = parent_map.get(&pid).copied().flatten();
-    }
 
-    if module_bindings.contains(name) {
-        NameResolution::Global
-    } else {
-        NameResolution::Builtin
+        self.module_globals.resolve(name)
     }
+}
+
+/// The offset of the first token at or after `at`: whitespace, line continuations, and
+/// comments skipped.
+fn skip_trivia(source: &str, mut at: usize) -> usize {
+    let bytes = source.as_bytes();
+    while let Some(&b) = bytes.get(at) {
+        match b {
+            b' ' | b'\t' | b'\x0c' | b'\r' | b'\n' | b'\\' => at += 1,
+            b'#' => {
+                at = bytes[at..]
+                    .iter()
+                    .position(|&c| c == b'\n' || c == b'\r')
+                    .map_or(bytes.len(), |n| at + n);
+            }
+            _ => break,
+        }
+    }
+    at
+}
+
+fn sorted(names: &FxHashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = names.iter().cloned().collect();
+    out.sort();
+    out
 }
 
 fn detect_future_annotations(suite: &[Stmt]) -> bool {
     for stmt in suite {
         match stmt {
             Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_)) => continue,
-            Stmt::ImportFrom(imp) if imp.module.as_deref() == Some("__future__") => {
+            // `from .__future__ import x` is an ordinary relative import.
+            Stmt::ImportFrom(imp)
+                if imp.level == 0 && imp.module.as_deref() == Some("__future__") =>
+            {
                 if imp.names.iter().any(|a| a.name.as_str() == "annotations") {
                     return true;
                 }
@@ -1386,14 +1637,6 @@ fn collect_func_annotations(func: &ast::StmtFunctionDef) -> Vec<&Expr> {
     out
 }
 
-fn is_type_checking_expr(expr: &Expr) -> bool {
-    match expr {
-        Expr::Name(n) => n.id.as_str() == "TYPE_CHECKING",
-        Expr::Attribute(a) => a.attr.as_str() == "TYPE_CHECKING",
-        _ => false,
-    }
-}
-
 fn expr_dotted_name(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Name(n) => Some(n.id.to_string()),
@@ -1411,7 +1654,42 @@ pub fn analyze_module(
 ) -> SemanticModel {
     let mut analyzer = Analyzer::new(source, profile, module.suite());
     analyzer.visit_suite(module.suite());
+    analyzer.mark_overridden_imports(module.suite());
     analyzer.resolve_all()
+}
+
+/// The names a module-body statement always binds when it runs (not those of its nested
+/// suites, which may not run).
+fn unconditional_bindings<'s>(stmt: &'s Stmt, out: &mut Vec<&'s str>) {
+    fn targets<'s>(e: &'s Expr, out: &mut Vec<&'s str>) {
+        match e {
+            Expr::Name(n) => out.push(n.id.as_str()),
+            Expr::Tuple(t) => t.elts.iter().for_each(|e| targets(e, out)),
+            Expr::List(l) => l.elts.iter().for_each(|e| targets(e, out)),
+            Expr::Starred(st) => targets(&st.value, out),
+            _ => {}
+        }
+    }
+    match stmt {
+        Stmt::FunctionDef(f) => out.push(f.name.as_str()),
+        Stmt::ClassDef(c) => out.push(c.name.as_str()),
+        Stmt::Assign(a) => a.targets.iter().for_each(|t| targets(t, out)),
+        Stmt::AnnAssign(a) if a.value.is_some() => targets(&a.target, out),
+        Stmt::AugAssign(a) => targets(&a.target, out),
+        Stmt::TypeAlias(t) => targets(&t.name, out),
+        Stmt::Delete(d) => d.targets.iter().for_each(|t| targets(t, out)),
+        Stmt::Import(i) => out.extend(i.names.iter().map(|a| {
+            a.asname
+                .as_ref()
+                .map_or_else(|| a.name.split('.').next().unwrap_or(""), |n| n.as_str())
+        })),
+        Stmt::ImportFrom(i) => out.extend(
+            i.names
+                .iter()
+                .map(|a| a.asname.as_ref().unwrap_or(&a.name).as_str()),
+        ),
+        _ => {}
+    }
 }
 
 #[cfg(test)]

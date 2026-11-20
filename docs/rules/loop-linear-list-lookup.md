@@ -70,8 +70,9 @@ the loop only when the loop reads the list nowhere else (a membership test guard
 `if x in items: items.remove(x)`, aside); when it iterates, tests, indexes, or passes on the list
 after a removal (a greedy match over the remaining values), the message advises a `set` or a
 `dict` with constant-time deletion instead. An index or a count built once before the loop stays
-right only while the loop does not change the list; otherwise the message advises keeping it up
-to date with each change.
+right only while the loop does not change the list, in place or through a project function it
+hands the list to (`change(names)` where `change` calls `names.reverse()`); otherwise the
+message advises keeping it up to date with each change.
 
 ## Fix safety
 No automatic fix.

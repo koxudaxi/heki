@@ -6,7 +6,7 @@ use crate::ModuleUnit;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, InlineIgnores};
-use heki_effect::{ModuleInput, detect_src_layout, module_name_for_path};
+use heki_effect::{ModuleInput, ModuleLayout, module_name_for_path};
 use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
@@ -71,17 +71,25 @@ pub struct ParsedFile {
     pub rel: String,
     pub module_name: String,
     pub is_package: bool,
+    /// [`ModuleLayout::root_is_package`] of the project.
+    pub root_is_package: bool,
     pub source: String,
     pub semantic: SemanticModel,
     pub ir: ModuleIr,
     pub comments: Vec<Span>,
 }
 
+/// The module imports `builtins` or touches `__builtins__` when it runs: it may patch builtin
+/// names, and then no module of the project can trust them (Assumption A1(b)). A typing stub
+/// never runs (`import builtins` there only spells annotations).
+pub fn runtime_patches_builtins(input: &ModuleInput<'_>) -> bool {
+    !heki_effect::is_stub(&input.path) && heki_soundness::module_patches_builtins(input.ir)
+}
+
 impl ParsedFile {
-    /// The module imports `builtins` or touches `__builtins__`: it may patch builtin names, and
-    /// then no module of the project can trust them (Assumption A1(b)).
+    /// [`runtime_patches_builtins`] of this module.
     pub fn patches_builtins(&self) -> bool {
-        heki_soundness::module_patches_builtins(&self.ir)
+        runtime_patches_builtins(&self.input())
     }
 
     pub fn input(&self) -> ModuleInput<'_> {
@@ -89,6 +97,7 @@ impl ParsedFile {
             path: self.path.clone(),
             module_name: self.module_name.clone(),
             is_package: self.is_package,
+            root_is_package: self.root_is_package,
             content_hash: String::new(),
             semantic: &self.semantic,
             ir: &self.ir,
@@ -179,6 +188,24 @@ pub fn exclude_set(cfg: &HekiConfig) -> Result<GlobSet, ProjectError> {
     glob_set(&exclude, "exclude")
 }
 
+/// The files whose changes change which files discovery finds (`.hekiignore` and the ignore
+/// files the walk reads besides it).
+pub const IGNORE_FILES: &[&str] = &[".gitignore", ".ignore", ".hekiignore"];
+
+/// The walk of a directory `collect_files` makes: hidden files and directories, `.gitignore`
+/// (inside a Git repository), `.ignore`, and `.hekiignore` files leave entries out.
+fn walk(dir: &Path) -> ignore::WalkBuilder {
+    let mut builder = ignore::WalkBuilder::new(dir);
+    builder.add_custom_ignore_filename(".hekiignore");
+    builder
+}
+
+/// A file the walk keeps when no ignore file or `exclude` leaves it out.
+fn walked_python(path: &Path, root: &Path, exclude: &GlobSet) -> bool {
+    path.extension().is_some_and(|e| e == "py" || e == "pyi")
+        && !is_excluded(&rel_posix(path, root), exclude)
+}
+
 /// Python files under `paths` (explicitly named files are always included, Ruff semantics).
 pub fn collect_files(
     paths: &[PathBuf],
@@ -194,18 +221,20 @@ pub fn collect_files(
             files.push(p.clone());
             continue;
         }
-        let mut builder = ignore::WalkBuilder::new(p);
-        builder.add_custom_ignore_filename(".hekiignore");
+        let mut builder = walk(p);
+        // An excluded directory is never entered (it may not even be readable).
+        let (dir_root, dir_exclude) = (root.to_path_buf(), exclude.clone());
+        builder.filter_entry(move |e| {
+            !e.file_type().is_some_and(|t| t.is_dir())
+                || !is_excluded(&rel_posix(e.path(), &dir_root), &dir_exclude)
+        });
         for entry in builder.build() {
             let entry = entry.map_err(|cause| ProjectError::Walk {
                 path: p.clone(),
                 cause,
             })?;
             let ep = entry.path();
-            if ep.is_file()
-                && ep.extension().is_some_and(|e| e == "py" || e == "pyi")
-                && !is_excluded(&rel_posix(ep, root), exclude)
-            {
+            if ep.is_file() && walked_python(ep, root, exclude) {
                 files.push(ep.to_path_buf());
             }
         }
@@ -216,12 +245,48 @@ pub fn collect_files(
     Ok(files)
 }
 
+/// Whether [`collect_files`] over the directory `dir` finds `file` (both absolute): the same
+/// walk, entering only the directories on the way to `file`. Of a file that does not exist (an
+/// unsaved document, maybe in a directory that does not exist either), the walk judges the part
+/// of the path on the disk; the rest only by its names (hidden ones are skipped) and `exclude`:
+/// the ignore patterns naming it apply once it is on the disk.
+pub fn discovers(dir: &Path, root: &Path, exclude: &GlobSet, file: &Path) -> bool {
+    if !file.starts_with(dir) || !walked_python(file, root, exclude) {
+        return false;
+    }
+    let Some(on_disk) = file
+        .ancestors()
+        .take_while(|a| a.starts_with(dir))
+        .find(|a| a.exists())
+        .map(Path::to_path_buf)
+    else {
+        return false;
+    };
+    let unsaved_hidden = file.strip_prefix(&on_disk).is_ok_and(|rest| {
+        rest.components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    });
+    if unsaved_hidden {
+        return false;
+    }
+    if on_disk == dir {
+        return true;
+    }
+    let target = on_disk.clone();
+    let mut builder = walk(dir);
+    builder.filter_entry(move |e| target.starts_with(e.path()));
+    builder
+        .build()
+        .flatten()
+        .any(|e| e.path() == on_disk && e.depth() > 0)
+}
+
 /// Parse `source` as the module at `path` (`Err`: a `path:line:col: syntax error` message).
 pub fn parse_source(
     path: &Path,
     root: &Path,
     source: String,
-    src_layout: bool,
+    layout: ModuleLayout,
     runtime: RuntimeProfile,
 ) -> Result<ParsedFile, String> {
     let parsed = heki_ast::parse_module(&source).map_err(|errs| {
@@ -236,7 +301,7 @@ pub fn parse_source(
         )
     })?;
     let rel = rel_posix(path, root);
-    let (module_name, is_package) = module_name_for_path(Path::new(&rel), src_layout)
+    let (module_name, is_package) = module_name_for_path(Path::new(&rel), layout.src)
         .unwrap_or_else(|| {
             let stem = path
                 .file_stem()
@@ -251,6 +316,7 @@ pub fn parse_source(
         rel,
         module_name,
         is_package,
+        root_is_package: layout.root_is_package,
         comments: parsed.comment_spans(),
         source,
         semantic,
@@ -264,7 +330,8 @@ pub struct ProjectOptions<'a> {
     pub paths: &'a [PathBuf],
     pub config: Option<&'a Path>,
     pub target_version: Option<&'a str>,
-    /// In-memory sources replacing files on disk (keyed like [`ParsedFile::path`]).
+    /// In-memory sources replacing files on disk (keyed like [`ParsedFile::path`]); one that is
+    /// not on the disk is a file of the project when discovery would find it there.
     pub overrides: Option<&'a FxHashMap<PathBuf, String>>,
 }
 
@@ -275,7 +342,7 @@ pub struct ProjectEnv {
     pub runtime: RuntimeProfile,
     pub kb: EffectiveEcosystemKb,
     pub soundness_kb: EffectiveSoundnessKb,
-    pub src_layout: bool,
+    pub layout: ModuleLayout,
 }
 
 impl ProjectEnv {
@@ -303,15 +370,29 @@ impl ProjectEnv {
             .collect::<Result<Vec<_>, _>>()?;
         let kb = EffectiveEcosystemKb::load_builtin(&overrides)?;
         let soundness_kb = EffectiveSoundnessKb::load_builtin(runtime.python_version)?;
-        let src_layout = detect_src_layout(&root);
+        let layout = ModuleLayout::detect(&root);
         Ok(Self {
             root,
             cfg,
             runtime,
             kb,
             soundness_kb,
-            src_layout,
+            layout,
         })
+    }
+}
+
+/// A file that could not be read or parsed (the CLI exits with 2 after its report).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileError {
+    /// Keyed like [`ParsedFile::path`].
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl std::fmt::Display for FileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
 }
 
@@ -319,8 +400,7 @@ impl ProjectEnv {
 pub struct Project {
     pub env: ProjectEnv,
     pub files: Vec<ParsedFile>,
-    /// Read / syntax errors (the CLI exits with 2 after its report).
-    pub errors: Vec<String>,
+    pub errors: Vec<FileError>,
 }
 
 impl Project {
@@ -332,17 +412,29 @@ impl Project {
         } else {
             opts.paths.to_vec()
         };
-        let found = collect_files(&paths, &env.root, &exclude)?;
-        let results: Vec<Result<ParsedFile, String>> = found
+        let mut found = collect_files(&paths, &env.root, &exclude)?;
+        // An open document that is not on the disk yet belongs to the project as it will once
+        // saved (`discovers`); its text is in `overrides`.
+        if let Some(overrides) = opts.overrides {
+            let unsaved = overrides.keys().filter(|p| {
+                !p.exists() && paths.iter().any(|d| discovers(d, &env.root, &exclude, p))
+            });
+            found.extend(unsaved.cloned());
+            found.sort();
+        }
+        let results: Vec<Result<ParsedFile, FileError>> = found
             .par_iter()
             .map(|p| {
                 let source = match opts.overrides.and_then(|o| o.get(&display_path(p))) {
-                    Some(text) => text.clone(),
-                    None => {
-                        std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?
-                    }
+                    Some(text) => Ok(text.clone()),
+                    None => heki_ast::read_source(p).map_err(|e| format!("{}: {e}", p.display())),
                 };
-                parse_source(p, &env.root, source, env.src_layout, env.runtime)
+                source
+                    .and_then(|source| parse_source(p, &env.root, source, env.layout, env.runtime))
+                    .map_err(|message| FileError {
+                        path: display_path(p),
+                        message,
+                    })
             })
             .collect();
         let mut files = Vec::new();

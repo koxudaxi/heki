@@ -344,7 +344,11 @@ state that matters.
 - **The target Python version.** Results follow `target-version`. From Python 3.12, list, set,
   and dict comprehensions run in the enclosing function (PEP 709), so a comprehension inside a
   loop can be reported for `py312` and not for `py311`. heki infers the version from
-  `requires-python`, which keeps it at the oldest version you support.
+  `requires-python`, which keeps it at the oldest version you support. Syntax newer than the
+  target version is analyzed, not reported: that is Ruff's check.
+- **Source encodings.** Sources are read in the encoding a PEP 263 declaration names: heki reads
+  UTF-8 (with or without a BOM), Latin-1, and ASCII, and reports any other declared encoding as
+  an error instead of checking the file.
 - **Sizes known only at run time.** Whether a collection is small is decided from the code: a
   list built from a short constant display is not reported, a list built at run time is, even
   when it always holds three items. A container counts as small only when it is a display of at
@@ -615,7 +619,7 @@ own configurations in separate runs: `heki check a/`, then `heki check b/`.
 [tool.heki]
 target-version = "py312"            # default: inferred from project.requires-python
 extend-exclude = ["generated"]      # added to the default excludes
-baseline = "heki-baseline.toml"     # Ratchet baseline used by `heki check`
+baseline = "heki-baseline.toml"     # Ratchet baseline (heki check, --watch, the server)
 
 [tool.heki.lint]
 select = ["MUT", "EFF", "DATA", "OPT"]
@@ -632,10 +636,10 @@ OPT103 = "warning"
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes its oldest admitted version, clamped to 3.11–3.15 (`>=3.9` → `py311`). `--target-version` overrides both. |
+| `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes the oldest supported version it admits, every clause counted (`>=3.11, !=3.11.*` → `py312`); a specifier admitting only older or newer versions selects `py311` or `py315` (`>=3.9, <3.11` → `py311`), and one without a lower bound that admits 3.12 (`<4`) keeps `py312`. `--target-version` overrides both. Syntax newer than the target (`lazy import` before `py315`, t-strings before `py314`, ...) is analyzed, not reported: that is Ruff's check. |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths (globs, matched against paths and path components). |
 | `extend-exclude` | `[]` | Adds excluded paths. |
-| `baseline` | none | Ratchet baseline file used when `--baseline` is not given. |
+| `baseline` | none | Ratchet baseline file used when `--baseline` is not given (also by `--watch` and the language server). |
 
 `.gitignore` and `.hekiignore` files are honored during discovery. Files named explicitly on the
 command line are always checked.
@@ -644,10 +648,10 @@ command line are always checked.
 
 | Key | Meaning |
 | --- | ------- |
-| `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). |
+| `select` | Rules to enable instead of the defaults (codes, prefixes such as `EFF`, rule names, or `ALL`). An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | Rules to add. Opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT103`, `MUT106`, `MUT108`) need their exact code or name. |
 | `ignore` | Rules to disable (prefixes match every rule they cover). |
-| `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). |
+| `per-file-ignores` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
 | `severity` | Rule → `"error"` or `"warning"` (affects output and SARIF level; both make `heki check` fail). |
 | `relax-async-in-tests` | `true` (default) skips `EFF101` / `EFF105` in `test_*` functions and files under `tests/`. |
 
@@ -709,7 +713,8 @@ starts in an allowed writer, an exempt method, or such an initialization.
 
 A write in a private helper (`_name`) with project callers is reported at the call sites of its
 first non-private callers; one report stands for every write behind its call, and a Ratchet
-baseline counts each of them (`sites` in JSON output).
+baseline counts each of them (`sites` in JSON output). A private function called only by its own
+recursion reports its writes itself.
 
 ## Read contracts: `[[tool.heki.read-owners]]` (`MUT203`)
 
@@ -843,7 +848,8 @@ deep = true
 | `producers` | Functions, methods, external symbols, or attributes (`Class.attr`) whose result every caller shares (dotted names or globs). |
 | `deep` | Protect the values below the result too (its attributes, items, and elements). |
 
-Functions decorated with `@lru_cache` / `@cache` are protected without configuration, and so
+Functions decorated with `@lru_cache` / `@cache` (also through an import alias; not a `cache`
+decorator the module defines itself) are protected without configuration, and so
 is every function that returns a protected value, or a part of it, on some path: wrappers and
 property getters need no entry of their own.
 
@@ -869,9 +875,10 @@ A write is followed through local aliases, container methods, `setattr` / `__dic
 helpers. A private helper passes its unannounced writes to its callers, where one report at
 the call stands for every write behind it and a Ratchet baseline counts each of them (`sites`
 in JSON output); a function whose every caller announces the change after calling it is not
-reported. Writes to objects that did not
-exist before the call (the class's own initialization, objects the function constructs or
-copies) and to objects it gets from a call need no announcement. Only normal returns count: a
+reported. A helper changing an argument it does not type writes the field or instance its caller
+binds to it. Writes to objects that did not exist before the call (an initializer's own `self`,
+not the objects reached through its attributes; objects the function constructs or copies) and
+to objects it gets from a call need no announcement. Only normal returns count: a
 path that ends by raising carries no obligation. At most 64 contracts can be declared.
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
@@ -926,7 +933,9 @@ w = load()            # noqa: EFF101
 ```
 
 A suppression applies to the line of the diagnostic. Codes and rule names are accepted; a
-comment without codes silences every rule on that line.
+comment without codes (`# heki: ignore`, `# noqa`) silences every rule on that line. A bracketed
+list that is not closed or names no rule (`# heki: ignore[`, `# heki: ignore[]`) silences
+nothing.
 
 
 ---
@@ -977,7 +986,8 @@ deliberately conservative:
 - The evaluation order and exception behavior must be preserved: `{**d, f(): g()}` becomes
   `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first.
 - Builtin names are trusted only while they are not rebound in the module (an assignment, a
-  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`).
+  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`; a `.pyi`
+  stub never runs, so its `import builtins` does not count).
 - Functions using `eval`, `exec`, `locals()`, `sys._getframe`, or frame attributes can change
   locals behind any analysis: their candidates are always blocked. `heki assumptions` lists such
   places in a project.
@@ -997,11 +1007,16 @@ profile shows hot.
 
 `--fix` applies non-overlapping fixes, re-analyzes the result, and repeats until nothing changes
 (at most ten passes), so a fix that becomes provable after another one is applied too. Then it
-reports what is left. Suppressed diagnostics (`# heki: ignore[...]`) are never fixed. When the
-fixes of a pass would leave a file that does not parse, none of them is applied to that file and
-the run exits with code 2 (a heki bug to report). `--diff`
+reports what is left. A file that changed on disk meanwhile (an editor saved it) is not written:
+the run reports it as an error (exit code 2) and keeps that save; run `--fix` again. Suppressed
+diagnostics (`# heki: ignore[...]`) are never fixed. When the fixes of a pass would leave a file
+that does not parse, none of them is applied to that file and the run exits with code 2 (a heki
+bug to report). `--diff`
 prints the paths every other output format prints (relative to the working directory), so
 `patch -p1` applies it where heki ran.
+
+Fixes work the same in files with `\n`, `\r\n`, or lone `\r` line breaks, and the lines they insert
+use the file's own line break.
 
 A fix keeps the file acceptable to a type checker and to isort:
 
@@ -1027,7 +1042,12 @@ A fix keeps the file acceptable to a type checker and to isort:
   stacks.txt app.py`, or `--gecko -o profile.json`);
 - py-spy (`py-spy record --format raw -o stacks.txt -- python app.py`).
 
-A function on the stack in at least 1 % of the samples is hot. The profile is used to promote
+A function on the stack in at least 1 % of the samples is hot. A frame counts for a function when
+its name names the function on a dotted boundary (`run` or `A.run` for `A.run`, never for
+`BA.run`), its file is the function's file (a basename, a relative, or an absolute path), and its
+line, when the profiler recorded one, lies inside the function. A frame that fits several
+functions (a plain `run` without a line in a file with two `run` methods, a `models.py` two
+packages have) counts for none. `--watch` matches frames by their names only. The profile is used to promote
 size-dependent fixes in hot functions and adds the sample share to the diagnostics' evidence; it
 never makes an unsafe rewrite safe.
 
@@ -1050,7 +1070,10 @@ $ heki check --baseline heki-baseline.toml                     # fail on regress
 
 Entries are keyed by file, function, rule, and target (not by line number), so unrelated
 edits and reformatting do not break the baseline. When findings are fixed, `heki check` prints a
-note that the entry can shrink; run `--update-baseline` again to lock in the progress. Set
+note that the entry can shrink; run `--update-baseline` again to lock in the progress. On an
+existing baseline, `--update-baseline` checks first: when an entry grew or a new finding appeared,
+it reports them like `heki check`, leaves the file as it is, and exits with 1. To record new
+findings on purpose, delete the baseline and record it again. Set
 `baseline = "heki-baseline.toml"` in the configuration to use it without the flag.
 
 Each entry counts violation sites, not reports. A contract report at the caller of a private
@@ -1061,8 +1084,9 @@ allowed and found counts for every entry that grew.
 
 Baselines written before heki counted sites have no `version` key and keep counting reports: a
 new report is a regression, a second site behind a recorded report is not. `heki check` says so
-in a note, and `--update-baseline` rewrites the file with `version = 2`. A version this heki does
-not know is an error.
+in a note, and `--update-baseline` rewrites the file with `version = 2` (after comparing in the
+old unit, so nothing that grew is taken in). A version this heki does
+not know is an error, and so is a file listing one entry twice (a hand merge of two baselines).
 
 ## Effect snapshots (`MUT103`)
 
@@ -1075,7 +1099,9 @@ $ heki snapshot --write                        # writes .heki-summary-snapshot.j
 $ heki check --extend-select MUT103            # reports functions that gained effects
 ```
 
-Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
+A run that cannot analyze every file (a syntax error, an unreadable file) writes neither a
+snapshot nor a baseline: it reports the errors and exits with 2, so the entries of those files are
+not lost. Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
 same pull request; the diff of the JSON file shows reviewers what changed.
 
 ## pre-commit
@@ -1359,31 +1385,38 @@ Source: https://heki.koxudaxi.dev/lsp/
 `heki server` (alias `heki lsp`) is a Language Server Protocol server on stdin / stdout. It
 indexes the workspace in the background, then keeps only the per-function effect summaries in
 memory. Editing a file re-analyzes that file alone (250 ms after the last keystroke). On save, the
-files whose results depend on the edit are re-analyzed too: the files of the functions whose
-effects changed (a call cycle through the edited file spans other files) and of their callers,
-every file that resolved names through a changed declaration (a re-exported
+files whose results depend on the edit are re-analyzed too: the callers of a function whose
+effects changed and the functions of a call cycle through it (their effects change with it), every file that resolved names through a changed declaration (a re-exported
 class, a new method or base class, a property getter, a subclass, an offloading decorator), the
 classes of a family a changed method belongs to, the generators handed to a changed function
 (whether it iterates them decides where their writes and reads are reported), the files with
 `MUT108` / `MUT110` reports above a function that changed its own in-place changes or its calls
 while its effects stayed the same (a report's call chain ends at the first function whose body
-makes the change), and the files whose call chains show a call site the edit moved. With
+makes the change), and the files whose call chains show a call site the edit moved (to another line or column,
+also when its bytes stay where they were). With
 ownership or `invalidation` contracts configured, a function that changes its calls also
 re-analyzes every function below it (whether a function only runs inside allowed callers, or
 whether its callers announce its writes, depends on all callers above it); with a contract on
 calls (`call-owners`, an effect boundary forbidding `calls`), also every function above it (a
 call of a target is reported at the callers of the private helper making it, and at the scope
-functions reaching it); with an effect boundary forbidding an execution effect, a function that
-changes its library calls also re-analyzes every function above it (a boundary's report names
-the call it reaches, and `allowed-callees` may allow one call of an effect and not another).
-Edits that change none of these, such as most comments, stop at the
-edited file. The diagnostics are the ones `heki check` reports for the saved files.
+functions reaching it); with an effect boundary, a function that changes its calls of library APIs
+re-analyzes every function above it too (a boundary may allow one API and forbid another of the
+same effect, and counts every call it reaches). Edits that change none of these, such as most comments, stop at the
+edited file. The diagnostics are the ones `heki check` reports for the saved files. Closing a
+document with unsaved changes discards them for the analysis too: the file is analyzed from the
+disk again (or leaves the project when it was never saved), and so is everything that affects.
 
 Files created, changed, or deleted outside the editor (`git checkout`, code generators) are
 picked up when the client supports watching files: the server registers for
-`workspace/didChangeWatchedFiles` on Python files (`**/*.{py,pyi}`) and on the configuration
-(`pyproject.toml`, `heki.toml`, `.heki.toml`, and the summary snapshot of `MUT103`). A change to
-the configuration indexes the workspace again, like `heki check --watch` does. A file that does
+`workspace/didChangeWatchedFiles` on Python files (`**/*.{py,pyi}`), on the configuration
+(`pyproject.toml`, `heki.toml`, `.heki.toml`, and the summary snapshot of `MUT103`), and on the
+ignore files (`.gitignore`, `.ignore`, `.hekiignore`). A change to the configuration or to an
+ignore file indexes the workspace again, like `heki check --watch` does. A file belongs to the
+project when `heki check` would find it: a file an ignore file, a hidden directory, or `exclude`
+leaves out is not analyzed, also when it is created or opened. An open document stays the file's
+text until it is closed: indexing the workspace again keeps documents that were never saved, and
+a file deleted on the disk while its document is open stays in the project until the document
+closes. A file that does
 not parse is left out of the project until it parses again, like `heki check` does.
 
 The server provides:
@@ -1391,10 +1424,21 @@ The server provides:
 - diagnostics for open files, with every hop of a call chain (for example the path from an
   `async def` to `time.sleep`) as related information you can jump to;
 - quick fixes for the safe `OPT101` / `OPT102` rewrites;
-- `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites;
-- a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic.
+- `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites (a fix whose result
+  would not parse is never offered, as `heki check --fix` refuses it);
+- a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a
+  comment cannot go there (the line ends inside a string or with a `\` continuation).
 
-It reads the same configuration as `heki check`. One difference is deliberate: `heki check`
+Code actions edit the version of the document their diagnostics were computed on: while an edit
+waits for its analysis, none are offered, and a client that applies versioned workspace edits
+(`workspaceEdit.documentChanges`) gets them with that version, so it rejects them if the
+document changed meanwhile.
+
+It reads the same configuration as `heki check`, including the Ratchet baseline: with
+`baseline` configured, a file shows what `heki check` reports against it (every finding of an
+entry that grew), and a change of the baseline file re-checks every file. A configuration `heki check` rejects (an
+unknown rule, a contract target that is not `Class.attr`, an invalid pattern) is logged as a
+warning, and the server analyzes nothing until it is fixed. One difference is deliberate: `heki check`
 reports ten or more `async def` boundaries that reach the same blocking call once, with a count,
 while the server groups them per file, so the file you edit always shows its own boundary.
 
@@ -1458,8 +1502,16 @@ $ heki check --watch
 ```
 
 re-checks changed files and the files affected by them, using the same incremental engine, and
-prints the full list of diagnostics after every change. A change to `pyproject.toml`,
-`heki.toml`, or the summary snapshot reloads everything.
+prints the full list of diagnostics after every change, compared with the Ratchet baseline
+(`--baseline` or `baseline`) as `heki check` compares them. A change to `pyproject.toml`,
+`heki.toml`, or the summary snapshot reloads everything, and so does `src/__init__.py` or a root
+`__init__.py` appearing or disappearing (module names under `src/`, or relative imports that climb
+to the root, change with the module layout); the server does the same. What fails once the watch runs, a
+configuration that no longer parses or a watched path that disappears, is reported, and the watch
+goes on until it is fixed. A file counts as changed when its size, modification time, or (on Unix)
+inode or status-change time changes, so a replacement that keeps the modification time is seen
+too; a file stamped within the last two seconds is also compared by content, for file systems
+whose timestamps are coarse.
 
 
 ---
@@ -1556,7 +1608,11 @@ $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/difftest/counterexamples.py
 ```
 
-- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15).
+- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15):
+  the scope tree (kind, name, definition line, parent), bindings, parameters, `global` /
+  `nonlocal` declarations, and every read. Every target must exist and every file must parse on
+  the running CPython, except fixtures marked for a newer one in their name (`312_315`,
+  `313_315`, `_314`, `pep810`); a run that compares no file fails.
 - `verify_soundness_kb.py` checks every claim of the Layer 1 knowledge base
   (`kb/soundness/builtins.toml`) on the running interpreter.
 - `counterexamples.py` shows that the naive rewrites heki refuses really change behavior.
@@ -1669,8 +1725,9 @@ blocks the event loop that once.
 
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several
-boundaries reaching the same blocking call are grouped once ten or more of them exist (in the
-editor, per file).
+boundaries reaching the same blocking call are shown as one report with a count once more than
+ten of them are shown (in the editor, per file). Inline suppressions and Ratchet baselines see
+every boundary: suppressing the first one leaves the others reported, and a baseline counts each.
 
 It does not report:
 
@@ -1803,7 +1860,12 @@ Mutating an attribute read by `@cached_property` without invalidating the cache.
 
 ## What it does
 Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
-of the same class (or of a subclass) reads, without invalidating the cached value.
+of the same class (or of a subclass) reads, without invalidating the cached value. A method the
+class inherits from a project base class and does not override runs on its instances too, so it
+is checked against the class's cached properties (reported in the base class).
+A decorator is known by what its name is bound to in the module: an import alias counts
+(`from functools import cached_property as cached`), a decorator the module defines itself does
+not (a `def cache(fn)` of its own), and a name bound by neither counts by its spelling.
 
 ## Why is this bad?
 A `cached_property` computes its value once and stores it in the instance `__dict__`. Once the
@@ -1820,9 +1882,15 @@ It does not report:
   `__enter__`, `setup`, `_init_*` / `_configure_*` methods, and private helpers called from
   `__init__`;
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
-  `if key not in self._memo:` pattern);
+  `if key not in self._memo:` pattern): in-place changes of an attribute with a `cache` or
+  `memo` word in its name; rebinding it (`self.cache_size = n`) and names such as
+  `memory_limit` are no memo operation;
 - constant dictionary keys the property never reads (`self.params["proxy"]` while the property
   reads `self.params["outtmpl"]`);
+- writes after which every path invalidates the property (`del self.prop`,
+  `self.__dict__.pop("prop", None)`, a `self` method that does), or before which every path
+  already did and nothing read it since; an invalidation under a condition, such as
+  `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
 - changes made in place (`clear()`, `append()`, item assignment) to an attribute whose object
   the cached value holds itself, when the getter reads it for nothing else: it returns
@@ -1888,8 +1956,11 @@ the allowed callers and resolves to a target:
 
 A call is reported only when every function it may call is a target: when the receiver's class
 hierarchy also offers a method that is no target (a receiver typed with a base class whose own
-`replace_reference` is not guarded), the call is not reported. A call on a receiver whose class
-heki does not know (an unannotated parameter, `Any`) is not seen.
+`replace_reference` is not guarded), the call is not reported. The functions it may call can be
+targets of different entries of one contract: with `A.reset` and `B.reset` both listed, `obj.reset()`
+on `obj: Base`, whose subclasses `A` and `B` implement `reset`, is one report for
+`A.reset|B.reset`. A call on a receiver whose class heki does not know (an unannotated
+parameter, `Any`) is not seen.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
 callers hands its calls to its callers: the call is reported at the call sites of the first
@@ -2020,7 +2091,9 @@ Each scope function is searched breadth first over the project call graph, so th
 chain is a shortest one. The search does not enter:
 
 - `allowed-callees` (project functions or ecosystem symbols, matched like `scopes`): their
-  effects are allowed;
+  effects are allowed, also when a helper hands them a field it was given
+  (`helper(model.fields)` writes nothing when `helper` only passes `fields` to an allowed
+  callee that changes it);
 - other functions of the scopes: each reports its own violations, so a violation is reported
   once, at the boundary, not again by every scope function above it;
 - `async def` functions called without `await` (calling one only creates a coroutine), and
@@ -2035,7 +2108,8 @@ target; a `write-universe` write once per written `Class.attr`), at the call in 
 function that starts the shortest chain (or at the blocking call, write, read, or call itself),
 with the chain as related information; `mutates-params` is reported at the function's
 definition. The report counts every distinct site of that kind the scope function reaches
-(`sites` in JSON), so a Ratchet baseline sees a second blocking call or write below a recorded
+(`sites` in JSON; for `mutates-params`, every change of a parameter, in the body making it), so
+a Ratchet baseline sees a second blocking call, write, or parameter change below a recorded
 report.
 
 `allow-writes` is only as precise as heki's view of which object each write changes. A write
@@ -2088,7 +2162,9 @@ No automatic fix.
 ## Options
 - `[[tool.heki.effect-boundaries]]`:
   - `name`: the boundary name, used in messages and in the diagnostic target
-    (`pure-render:blocking_net`, `pure-render:DataModel.fields`, `pure-render:mutates-params`).
+    (`pure-render:blocking_net`, `pure-render:DataModel.fields` for a write,
+    `pure-render:reads:DataModel.fields`, `pure-render:calls:GenerationStore.*`,
+    `pure-render:mutates-params`), so a read and a write of one field are two reports.
   - `scopes`: modules, classes, or functions (dotted names or globs).
   - `forbid`: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
     `blocking-sync`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`,
@@ -2121,8 +2197,9 @@ Mutating an attribute read by `__hash__` after initialization (stored `set` / `d
 ## What it does
 Checks methods that rebind or mutate an attribute that the class's `__hash__` reads (directly,
 through a `self.helper()` call, or through the getter of a property it reads, such as
-`hash(self.key)` where the `@property` `key` reads `self.name`), when the class or one of its
-subclasses changes the attribute after initialization. A property that also defines a setter
+`hash(self.key)` where the `@property` `key` reads `self.name`), when the class, one of its
+subclasses, or a base-class method it inherits without overriding changes the attribute after
+initialization. A property that also defines a setter
 or deleter is not followed.
 
 The rule reports the write itself, once per method and attribute. It does not report:
@@ -2134,7 +2211,9 @@ The rule reports the write itself, once per method and attribute. It does not re
 - lazy initialization: a write under a `None` / falsy check of the same attribute
   (`if self._key is None: self._key = ...`, `if not self._parts: ...`);
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
-  `if key not in self._memo:` pattern);
+  `if key not in self._memo:` pattern): in-place changes of an attribute with a `cache` or
+  `memo` word in its name; rebinding it (`self.cache_size = n`) and names such as
+  `memory_limit` are no memo operation;
 - constant dictionary keys `__hash__` never reads (`self.meta["note"]` while `__hash__` reads
   `self.meta["id"]`);
 - the hash's own cache: an attribute the hash computation writes itself (`self._hash = ...`
@@ -2269,9 +2348,8 @@ itself consumed (`enumerate(it)`, `map(f, it)`, `chain(it, other)`, `heapq.merge
 `zip(it, it)`, a generator expression over it, ...), or a project function that iterates the
 parameter it is passed to exhaustion (for a method, every implementation the call may run must;
 an `@abstractmethod` never runs). `next(it)` and `len` are not consumptions, and neither are
-`zip` / `map` over several iterables, `islice`, `takewhile`, `any`, or `all`: they stop at the
-shortest one or early (`zip(range(n), it)` takes `n` items, `any(it)` stops at the first true
-one). The same table decides where a generator's body
+`zip` / `map` over several iterables, `islice`, or `takewhile`: they stop at the shortest one or
+early (`zip(range(n), it)` takes `n` items). The same table decides where a generator's body
 runs for the effect and contract rules.
 
 The rule reports the second pass when the first one runs to exhaustion and the second is
@@ -2282,7 +2360,8 @@ It does not report:
 
 - a first pass that may stop early: a `for` loop with `break`, `return`, or `raise` inside
   (`it = iter(lines)`, then `for line in it: ... break`, then `for line in it:` is the
-  idiomatic way to resume);
+  idiomatic way to resume), and `any(it)` / `all(it)`, which stop at the first item that decides
+  the result (they still run a generator's body where they are called);
 - passes on exclusive branches (`if c: list(it) else: sorted(it)`);
 - a variable rebound to a fresh iterator in between;
 - `itertools.tee` results, `repeat`, `cycle`, and `count`;
@@ -2527,7 +2606,8 @@ The held resource must be type-certain:
 
 The rule reports the `await` or the call while the resource is certainly held (on every path),
 with the call chain to the network I/O as related information. Leaving the `with` block
-releases it.
+releases what that block acquired: a re-entrant lock entered again by a nested `with` stays held
+until the outer block exits.
 
 It does not report:
 
@@ -2593,11 +2673,14 @@ Checks loops that grow a DataFrame or array by re-concatenating it on every iter
 `df = pd.concat([df, chunk])`, `arr = np.vstack([arr, row])`, `arr = np.append(arr, x)`, and
 the other quadratic reallocations of the ecosystem knowledge base. Only loop-carried
 accumulation is reported: the result feeds the next iteration and is computed from the previous
-value, also when it grows on some iterations only. One-off concatenations inside a loop are
-not, also on a branch that leaves the variable unchanged otherwise
-(`if step: x = np.append(edges, last)`), nor is writing into a buffer passed as `out=`
-(`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous value must be
-among the data that is combined.
+value, also when it grows on some iterations only. An update through a project function counts
+when that function returns a reallocation of the argument carrying the previous value, directly
+or through further helpers (`acc = grow(acc)` where `grow` returns `np.append(acc, x)`); a helper
+that reallocates something else and returns its argument unchanged does not. One-off
+concatenations inside a loop are not reported, also on a branch that leaves the variable
+unchanged otherwise (`if step: x = np.append(edges, last)`), nor is writing into a buffer passed
+as `out=` (`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous
+value must be among the data that is combined.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -2651,7 +2734,8 @@ It does not report reading the rows of a statement already executed (`cursor.fet
 calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
 `Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
 batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
-statements (`CREATE`, `ALTER`, `DROP`, `PRAGMA`), migration code
+statements (a literal starting with `CREATE`, `ALTER`, `DROP`, or `PRAGMA` run by a DB-API
+`execute` / `executemany` / `executescript`, also inside a helper the loop calls), migration code
 (`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
 own implementation, or loops whose size the code fixes when no data-sized loop is around them
 (`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
@@ -2879,8 +2963,9 @@ the loop only when the loop reads the list nowhere else (a membership test guard
 `if x in items: items.remove(x)`, aside); when it iterates, tests, indexes, or passes on the list
 after a removal (a greedy match over the remaining values), the message advises a `set` or a
 `dict` with constant-time deletion instead. An index or a count built once before the loop stays
-right only while the loop does not change the list; otherwise the message advises keeping it up
-to date with each change.
+right only while the loop does not change the list, in place or through a project function it
+hands the list to (`change(names)` where `change` calls `names.reverse()`); otherwise the
+message advises keeping it up to date with each change.
 
 ## Fix safety
 No automatic fix.
@@ -3071,6 +3156,12 @@ def attach(orders, customers):
             order.customer = customer
 ```
 
+The advice follows how the matches are used. When a match leaves the inner loop (`break`,
+`return`, `raise`), one element per key is enough: a `set` of the elements, or a `dict` from the
+key to its first element, as above. When every match is used (`out.append((a, b))` for each
+equal pair), a `set` or a one-element `dict` would drop the repeated matches, so the message
+advises a `dict` from each key (or value) to the list of its elements.
+
 The keys must be hashable, and `==` must agree with their hash. When a key is known to be a
 `list`, `dict`, `set`, or `bytearray` (from its annotation, or as an element of a display of
 such displays), the message advises indexing a hashable form of it instead (a `tuple` or
@@ -3221,7 +3312,9 @@ inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself or throu
 deep.
 
 The rule reports the call that hands the parameter over, with the calls down to the change as
-related locations.
+related locations. A generator function changes what it is handed where its generator is
+iterated (`for`, `list(...)`, a function iterating it), and is reported there; one that is
+created and never iterated changes nothing.
 
 It does not report:
 
@@ -3292,7 +3385,8 @@ Mutating a shared object returned by a declared `readonly-returns` producer or `
 Checks mutations of objects returned by a shared producer:
 
 - functions decorated with `@functools.lru_cache` / `@functools.cache` (every caller receives
-  the same object);
+  the same object), also through an import alias (`lru_cache as _lru_cache`); a `cache`
+  decorator the module defines itself is not one;
 - producers declared in `[[tool.heki.readonly-returns]]`;
 - functions that return a producer's value, or a part of it, on some path: a wrapper is a
   producer itself, without configuration, through any number of wrappers, property getters,
@@ -3301,14 +3395,17 @@ Checks mutations of objects returned by a shared producer:
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
 that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`) are
 followed, also on the call result itself
-(`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
+(`schema_of(raw).items.append(x)`); a generator function mutates its argument only when its
+generator is iterated. Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
 reference), and the deep copy sanitizers of the ecosystem knowledge base clear it, shallow copies
 (`copy.copy`, `.copy()`, `dataclasses.replace(...)`, a sanitizer declared
-`copy-sanitizer = "shallow"`, and a slice `xs[:]` unless the value is known to be of a class
-other than the built-in sequences, whose slice may be a view) free the top level only: the values
-below stay shared. A wrapper that returns a copy on one path and the shared value on another still
-returns a shared value.
+`copy-sanitizer = "shallow"`, and slices of builtin lists and other builtin sequences,
+`rows()[:]`) free the top level only: the values below stay shared, so a helper rebinding an
+attribute of the copy (`b.name = "new"`) changes nothing shared, and one changing the object an
+attribute holds (`b.tags.append(x)`) does. A slice of any other object may be a view of it
+(`numpy`) and stays shared. A wrapper that returns a copy on one path and the shared value on
+another still returns a shared value.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
@@ -3389,7 +3486,8 @@ helpers, annotated or not and any number of calls deep, that change what they ar
 attribute itself (`add_default(config.tags)`) or the object holding it (`reset(config)`). Such a
 change is reported at the call that hands the attribute or the object over, with the calls down
 to the change as related locations. A helper that sees the object's type reports its own change
-instead.
+instead. A generator function changes what it is handed where its generator is iterated, and is
+reported there; one that is created and never iterated changes nothing.
 
 The rule does not report:
 
@@ -3567,6 +3665,9 @@ def add(items: list[int], x: int) -> list[int]:  # MUT103: `add` now mutates par
 The report is on the function's `def` line, which is also where a suppression comment goes.
 
 If the new effect is intended, refresh the snapshot with `heki snapshot --write` and commit it.
+The refresh writes nothing while a file of the project cannot be read or parsed (it exits with
+2): the snapshot would lose that module's entries. A module with a `.pyi` stub is recorded and
+compared with the parameter names of its `.py` file.
 
 ## Fix safety
 No automatic fix.
@@ -3671,7 +3772,9 @@ returned, yielded, stored (in an attribute, a container, a global, or an enclosi
 passed to a call (`tasks.add(task)`, `asyncio.gather(task)`), captured by a closure, cancelled,
 or asked for its result.
 
-`loop.create_task` needs a receiver known to be an event loop (`asyncio.get_running_loop()`,
+The factories are known by what their names are bound to: an import alias
+(`from asyncio import create_task as spawn`) counts, a project function named `create_task` does
+not. `loop.create_task` needs a receiver known to be an event loop (`asyncio.get_running_loop()`,
 `get_event_loop()`, `new_event_loop()`, or an annotated `asyncio.AbstractEventLoop`).
 
 It does not report:
@@ -3747,7 +3850,8 @@ allowed writers:
   parameter, `self` of a method) reports its own write instead, so a write it routes through
   the allowed writers stays allowed for its callers; a helper handed the value of an attribute
   (`helper(field.data_type)`) writes that attribute only when it changes the value in place,
-  and otherwise writes the value's own attributes.
+  and otherwise writes the value's own attributes. A helper that does not see the class and
+  only hands the value on to an allowed writer or an exempt method writes inside the owner.
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
 class family). A target can also name one entry of the container an attribute holds,
@@ -3782,7 +3886,9 @@ or return, `Any`, a value of more than three classes) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call
-sites of the first non-private callers, with the chain of calls as related information. One
+sites of the first non-private callers, with the chain of calls as related information. A
+private function that only its own recursion calls (`_walk` calling itself, handed out as a
+callback) has no such caller and reports its writes itself. One
 report stands for every write behind that call (`sites` in JSON), so a Ratchet baseline counts a
 second write inside a recorded helper. A write reached through an allowed writer on one path and
 around it on another (or through a forbidden writer on one path only) is reported for the path
@@ -3916,8 +4022,10 @@ A write is followed through local aliases, container methods (`.append()`, `[k] 
 passes the obligation to its callers, and the call of such a helper must be announced like a
 direct write (one report at the call stands for every write behind it, and a Ratchet baseline
 counts each of them: `sites` in JSON output). A private generator's writes run where it is
-iterated, or inside the function it is handed to that iterates it, and are reported there. An
-invalidator counts when it is called directly, in each branch, or through
+iterated, or inside the function it is handed to that iterates it, and are reported there. A
+helper changing an argument it does not type (`_add(xs): xs.append(1)` called as
+`_add(model.items)`, `_set(o): o.x = 1` called as `_set(model)`) writes the field or instance
+the caller binds to it: the caller's call is the write. An invalidator counts when it is called directly, in each branch, or through
 calls (a helper that calls an invalidator on every path to its own return), also behind a
 boolean flag set after the write (`changed = True ... if changed: notify()`); one called before
 the write does not count, nor an `async` invalidator that is not awaited. A call of a method
@@ -3931,7 +4039,9 @@ It does not report:
 - a function named in `exempt-writers` (the owner's operations announce or batch the change
   themselves), nor calls from one;
 - writes to objects that did not exist before the call: the class's own initialization (an
-  initializer writing its own `self`) and objects the function constructs or copies, which
+  initializer writing its own `self`, directly or through a helper it hands `self` to; an
+  object reached through `self`'s attributes, such as a model it was given, existed before)
+  and objects the function constructs or copies, which
   nothing has derived facts from yet; objects it gets from a call are left alone too, since
   heki cannot tell whether they are new;
 - a function whose every caller announces the change after calling it (invalidation in bulk by
@@ -3992,4 +4102,6 @@ No automatic fix: where to announce the change is a design decision.
 
 ## Options
 - `[[tool.heki.invalidation]]`: `name`, `targets` (`Class.attr`, subclasses included),
-  `invalidators` (functions or methods), `exempt-writers`, `message`.
+  `invalidators` (functions or methods), `exempt-writers`, `message`. The diagnostic target is
+  `<name>:<target>` (`graph-index:DataModel.fields`): two contracts naming one write are two
+  reports.

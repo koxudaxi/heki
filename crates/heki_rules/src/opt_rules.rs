@@ -9,10 +9,11 @@
 //! receiver types (`heki_effect::TypeCtx`, PEP 484 annotations included), which the Soundness
 //! lane never trusts.
 
+use crate::mut_rules::bind_arguments;
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
-use heki_effect::{CONTAINER_MUTATORS, TypeCtx, Val};
+use heki_effect::{CONTAINER_MUTATORS, Callee, TypeCtx, Val};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
@@ -263,8 +264,9 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             // the end of the loop only when it reads the list nowhere else, and an index or a
             // count built before the loop stays right only while the loop does not change it.
             let use_of = ListUse::new(&defs, &hot, recv);
+            let changed = use_of.changed() || use_of.handed_to_mutator(cx, &tcx, &types);
             let advice = match method {
-                "index" if use_of.changed() => {
+                "index" if changed => {
                     "the loop changes the list, so keep a `dict` (value → index) up to date with each change".into()
                 }
                 "index" => "build a `dict` (value → index) or a `set` once before the loop".into(),
@@ -274,7 +276,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 "remove" => {
                     "collect the values to drop in a `set` and rebuild the list once with a comprehension".into()
                 }
-                _ if use_of.changed() => format!(
+                _ if changed => format!(
                     "the loop changes the list, so keep a `collections.Counter({target})` up to date with each change"
                 ),
                 _ => format!("count once before the loop with `collections.Counter({target})`"),
@@ -354,6 +356,58 @@ impl<'d, 'a> ListUse<'d, 'a> {
                 ..
             } => self.is_list(*lhs),
             _ => false,
+        })
+    }
+
+    /// Whether the loops hand the list to a project function that changes that parameter in
+    /// place (its summary's `mutates_params`), itself or through further calls.
+    fn handed_to_mutator(
+        &self,
+        cx: &CheckContext<'_>,
+        tcx: &TypeCtx<'_>,
+        types: &FxHashMap<VarId, Val>,
+    ) -> bool {
+        self.insts().any(|i| {
+            let (callee, recv, args, kwargs) = match &i.kind {
+                InstKind::Call {
+                    callee_var,
+                    args,
+                    kwargs,
+                    ..
+                } => (
+                    tcx.resolve_call(callee_var.and_then(|v| types.get(&v))),
+                    None,
+                    args,
+                    kwargs,
+                ),
+                InstKind::MethodCall {
+                    recv,
+                    method,
+                    args,
+                    kwargs,
+                    ..
+                } => (
+                    tcx.resolve_method(types.get(recv), method),
+                    Some(*recv),
+                    args,
+                    kwargs,
+                ),
+                _ => return false,
+            };
+            let Callee::Project(keys, binds_recv) = callee else {
+                return false;
+            };
+            keys.iter().any(|key| {
+                let Some(summary) = cx.index.summary(key) else {
+                    return false;
+                };
+                let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
+                bind_arguments(&decl, binds_recv, recv, args, kwargs)
+                    .into_iter()
+                    .any(|(pos, v)| {
+                        pos < 64 && summary.mutates_params & (1u64 << pos) != 0 && self.is_list(v)
+                    })
+            })
         })
     }
 
@@ -669,6 +723,26 @@ impl<'a> Defs<'a> {
             })
     }
 
+    /// Whether a match of the comparison `cmp` leaves the inner loop `inner` (`break`,
+    /// `return`, `raise`): only the first matching element of the inner collection is used.
+    fn stops_at_first_match(&self, cmp: VarId, inner: &NaturalLoop) -> bool {
+        let alias = forward_aliases(self.f, &[cmp]);
+        let matches: Vec<BlockId> = self
+            .f
+            .blocks
+            .iter()
+            .filter_map(|b| match b.terminator {
+                Terminator::Branch { cond, then_bb, .. } if alias.contains(&cond) => Some(then_bb),
+                _ => None,
+            })
+            .collect();
+        !matches.is_empty()
+            && matches.iter().all(|&then_bb| {
+                then_bb != inner.header
+                    && !(inner.body.contains(&then_bb) && runs_again(self.f, inner, then_bb))
+            })
+    }
+
     /// Whether block `from` runs only on the false side of another branch whose true side does
     /// work: an `elif` after an `if` that handles other pairs (`if a.x == b.k: ... elif a.y ==
     /// b.k: ...` matches on two keys, so one index skips pairs the other test handles).
@@ -794,6 +868,8 @@ struct Join<'l, 'a> {
     rhs: VarId,
     /// The side derived from the inner loop's element.
     inner_side: VarId,
+    /// The comparison's result.
+    cmp: VarId,
 }
 
 /// `OPT113`: a nested-loop equi-join — `for a in A: for b in B: if a.k == b.k:` costs
@@ -854,6 +930,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                             lhs: *lhs,
                             rhs: *rhs,
                             inner_side,
+                            cmp: *dst,
                         });
                     }
                 }
@@ -876,6 +953,19 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     format!(
                         "`{key}` is an unhashable `{kind}`, so index `{inner_iter}` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
                     )
+                } else if !defs.stops_at_first_match(j.cmp, inner.lp) {
+                    // Every match is used: an index must keep each key's elements, duplicates
+                    // included.
+                    if defs.whole_element(j.inner_side) {
+                        format!(
+                            "group the elements of `{inner_iter}` by value in a `dict` (value → list of equal elements) before the outer loop"
+                        )
+                    } else {
+                        let key = defs.element_text(unit.source, j.inner_side);
+                        format!(
+                            "index `{inner_iter}` in a `dict` from `{key}` to the list of elements with that key before the outer loop"
+                        )
+                    }
                 } else if defs.whole_element(j.inner_side) {
                     format!("build a `set` of `{inner_iter}` before the outer loop")
                 } else {

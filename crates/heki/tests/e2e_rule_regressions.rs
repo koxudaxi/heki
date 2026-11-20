@@ -206,7 +206,7 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
             "nested loops join `A` and `rows` on `a == r` (O(n·m)); `r` is an unhashable `dict`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
             "nested loops join `A` and `B` on `a.tags == tags` (O(n·m)); `tags` is an unhashable `list`, so index `B` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
             "nested loops join `expected` and `actual` on `actual_item == expected_item` (O(n·m)); build a `set` of `actual` before the outer loop",
-            "nested loops join `A` and `rows + rows` on `a == r` (O(n·m)); build a `set` of `rows + rows` before the outer loop",
+            "nested loops join `A` and `rows + rows` on `a == r` (O(n·m)); group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop",
         ],
         "{found:#?}"
     );
@@ -749,13 +749,19 @@ fn opt113_unhashable_display_elements() {
                 14,
                 "`r` is an unhashable `set`, so index `alias` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
             ),
-            (22, "build a `set` of `rows` before the outer loop"),
+            (
+                22,
+                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop"
+            ),
             // Elements of two unhashable classes; class objects are hashable.
             (
                 30,
                 "`r` is an unhashable `list`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
             ),
-            (38, "build a `set` of `rows` before the outer loop"),
+            (
+                38,
+                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop"
+            ),
         ],
         "{found:#?}"
     );

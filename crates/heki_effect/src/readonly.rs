@@ -9,11 +9,39 @@
 //! graph, so a wrapper needs no configuration of its own.
 
 use crate::SharedChain;
-use crate::resolver::Val;
 use heki_ir::{Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use heki_kb::{CopyDepth, EffectiveEcosystemKb};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+
+/// Builtin sequences whose slices are new objects holding the same elements (`xs[:]`,
+/// `xs[1:]`): a slice of one is a shallow copy. Other objects' slices may be views (`numpy`).
+pub const SLICE_COPYING_TYPES: &[&str] = &[
+    "builtins.list",
+    "builtins.bytearray",
+    "builtins.tuple",
+    "builtins.str",
+    "builtins.bytes",
+];
+
+/// The step from `obj` to what the `SubscriptLoad` `inst` reads from it: an item of target
+/// unpacking, a shallow copy for a slice of a builtin sequence (`obj_type`, its inferred class),
+/// or an element.
+pub fn subscript_step(f: &IrFunction, inst: &Inst, obj_type: Option<&str>) -> ReturnStep {
+    match &inst.kind {
+        InstKind::SubscriptLoad { index, .. }
+            if crate::consumption::is_unpacking(f, *index, inst.span) =>
+        {
+            ReturnStep::TARGET_ITEM
+        }
+        InstKind::SubscriptLoad { is_slice: true, .. }
+            if obj_type.is_some_and(|t| SLICE_COPYING_TYPES.contains(&t)) =>
+        {
+            ReturnStep::SHALLOW_COPY
+        }
+        _ => ReturnStep::ELEMENT,
+    }
+}
 
 /// Methods returning (views of) a container's elements.
 pub const ELEMENT_ACCESSORS: &[&str] = &["get", "__getitem__", "values", "items"];
@@ -211,53 +239,17 @@ impl ProtectedReturn {
     }
 }
 
-/// Values a slice of which is a new value holding the same items: the built-in sequences.
-const COPYING_SLICES: &[&str] = &[
-    "builtins.list",
-    "builtins.tuple",
-    "builtins.str",
-    "builtins.bytes",
-    "builtins.bytearray",
-];
-
-/// The step from the subscripted value to the result of the `SubscriptLoad` `inst`: an item of
-/// target unpacking keeps the value ([`crate::consumption::is_unpacking`]); a slice is a
-/// shallow copy (`xs[:]`) unless the value is known to be of another class than the built-in
-/// sequences (a library's or the project's slice may be a view); any other subscript reads an
-/// element.
-pub fn subscript_step(f: &IrFunction, inst: &Inst, subscripted: Option<&Val>) -> ReturnStep {
-    let InstKind::SubscriptLoad {
-        index, is_slice, ..
-    } = &inst.kind
-    else {
-        return ReturnStep::ELEMENT;
-    };
-    if crate::consumption::is_unpacking(f, *index, inst.span) {
-        return ReturnStep::TARGET_ITEM;
-    }
-    let copies = match subscripted {
-        None => true,
-        Some(Val::Inst(class)) => COPYING_SLICES.contains(&class.as_str()),
-        Some(_) => false,
-    };
-    if *is_slice && copies {
-        ReturnStep::SHALLOW_COPY
-    } else {
-        ReturnStep::ELEMENT
-    }
-}
-
 /// The values a function's result may derive from without a deep copy: for each such variable,
 /// the step from it to the returned value, joined over the paths that return it. The walk goes
 /// back from every `return v` through copies, phis, attribute and item loads, iterations, and
 /// the derivations `derive` reports for an instruction (a call's receiver and first argument);
 /// it does not pass a deep copy, and a generator's or coroutine's caller gets a generator or a
 /// coroutine, never the returned value, so neither is walked.
-pub(crate) fn returned_values(
+pub(crate) fn returned_values<'t>(
     f: &IrFunction,
     defs: &FxHashMap<VarId, &Inst>,
-    types: &FxHashMap<VarId, Val>,
     derive: impl Fn(&InstKind) -> Vec<(VarId, Derivation)>,
+    type_of: impl Fn(VarId) -> Option<&'t str>,
 ) -> FxHashMap<VarId, ReturnStep> {
     let mut steps: FxHashMap<VarId, ReturnStep> = FxHashMap::default();
     if !matches!(f.kind, heki_ir::FunctionKind::Sync) {
@@ -303,7 +295,7 @@ pub(crate) fn returned_values(
             InstKind::IterNext { iter, .. } => work.push((*iter, step.after(ReturnStep::ELEMENT))),
             InstKind::AttrLoad { obj, .. } => work.push((*obj, step.after(ReturnStep::ELEMENT))),
             InstKind::SubscriptLoad { obj, .. } => {
-                let derived = subscript_step(f, inst, types.get(obj));
+                let derived = subscript_step(f, inst, type_of(*obj));
                 work.push((*obj, step.after(derived)));
             }
             // A call's result derives from its receiver or first argument when it copies or

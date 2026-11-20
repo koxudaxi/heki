@@ -13,10 +13,11 @@ use crate::resolver::{
     is_generator_function, self_aliases,
 };
 use crate::{
-    ArgBinding, ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Construction,
-    Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, ModuleInput, NewArg,
-    NewCond, NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot,
-    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedWriteSite, WriteKind,
+    ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget,
+    Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject,
+    ModuleInput, NewArg, NewCond, NewKind, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine,
+    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedWriteSite,
+    WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
@@ -303,6 +304,12 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     for (i, paths) in other.mutated_param_paths {
         into.mutated_param_paths.entry(i).or_default().extend(paths);
     }
+    for (i, attrs) in other.changed_param_attrs {
+        into.changed_param_attrs.entry(i).or_default().extend(attrs);
+    }
+    for (i, spans) in other.param_change_sites {
+        into.param_change_sites.entry(i).or_default().extend(spans);
+    }
     for (i, slots) in other.inplace_param_slots {
         into.inplace_param_slots.entry(i).or_default().extend(slots);
     }
@@ -549,6 +556,11 @@ struct ProjectCall {
     params: Vec<(FuncKey, Vec<(u8, VarId)>)>,
 }
 
+/// Whether a decorator of `f` is one of `names` ([`ModuleDecls::decorator_is`]).
+fn decorated_as(module: &ModuleDecls, f: &IrFunction, names: &[&str]) -> bool {
+    f.decorators.iter().any(|d| module.decorator_is(d, names))
+}
+
 impl<'a> Extractor<'a> {
     fn new(
         f: &'a IrFunction,
@@ -582,8 +594,8 @@ impl<'a> Extractor<'a> {
         let summary = EffectSummary {
             is_async: matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator),
             is_generator: is_generator_function(f),
-            is_cached_property: f.has_decorator(&["cached_property"]),
-            is_lru_cache: f.has_decorator(&["lru_cache", "cache"]),
+            is_cached_property: decorated_as(cx.module, f, &["cached_property"]),
+            is_lru_cache: decorated_as(cx.module, f, &["lru_cache", "cache"]),
             owner_class_qualname: f.owner_class_qualname.clone(),
             decorators: f.decorators.clone(),
             ..EffectSummary::default()
@@ -641,8 +653,15 @@ impl<'a> Extractor<'a> {
             ex.build_reach();
         }
         ex.build_aliases();
-        let returned =
-            readonly::returned_values(f, &ex.defs, &ex.types, |kind| ex.derivations(kind));
+        let returned = readonly::returned_values(
+            f,
+            &ex.defs,
+            |kind| ex.derivations(kind),
+            |v| match ex.types.get(&v) {
+                Some(Val::Inst(class)) => Some(class.as_str()),
+                _ => None,
+            },
+        );
         ex.returned = returned;
         ex.summary.typed_params = (0..64u32)
             .zip(&f.params)
@@ -1089,20 +1108,44 @@ impl<'a> Extractor<'a> {
 
     fn origin(&self, var: VarId) -> ArgOrigin {
         let field = self.obj_attr_alias.get(&var);
+        let typed_field = field
+            .filter(|a| a.classes.len() == 1)
+            .map(|a| (a.classes[0].clone(), a.attr.clone()));
+        let typed_instance = self.project_class(var);
         ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
-            typed_field: field
-                .filter(|a| a.classes.len() == 1)
-                .map(|a| (a.classes[0].clone(), a.attr.clone())),
-            typed_instance: self.project_class(var),
+            targets: self.arg_targets(typed_field.as_ref(), typed_instance.as_deref()),
+            typed_field,
+            typed_instance,
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
             reach: self.reach_of(var),
             binding: None,
             new_object: NewArg::Old,
         }
+    }
+
+    /// [`ArgOrigin::targets`] of an argument that is the field `field` and an instance of
+    /// `instance` (`None` without an `invalidation` contract naming either).
+    fn arg_targets(
+        &self,
+        field: Option<&(String, String)>,
+        instance: Option<&str>,
+    ) -> Option<Box<ArgTargets>> {
+        let c = self.contracts.filter(|_| self.events.is_some())?;
+        let with_bases = |class: &str| {
+            let mut classes = vec![class.to_owned()];
+            classes.extend(self.cx.project.ancestors_of(class));
+            classes
+        };
+        let field = field.map_or(0, |(class, attr)| c.target_of(&with_bases(class), attr));
+        let classes = instance
+            .map(with_bases)
+            .filter(|classes| c.names_class(classes))
+            .unwrap_or_default();
+        (field != 0 || !classes.is_empty()).then(|| Box::new(ArgTargets { field, classes }))
     }
 
     /// String constant behind `var` (through `Copy`): a string literal, or, for contract
@@ -2164,13 +2207,53 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    fn mutate_param(&mut self, i: u8, path: String) {
+    /// A returned result of the quadratic reallocation `symbol` taking a parameter, as itself or
+    /// in a display (`np.append(acc, x)`, `pd.concat([df, part])`): `reallocates_params`.
+    fn note_returned_realloc(&mut self, symbol: &str, call: &Call<'_>) {
+        let reallocates = self
+            .cx
+            .kb
+            .lookup(symbol)
+            .is_some_and(|e| e.effects.contains(&ExecEffectKind::QuadraticRealloc));
+        if !reallocates || !self.returned.contains_key(&call.dst) {
+            return;
+        }
+        for &arg in call.args {
+            let held: Vec<VarId> = match self.defs.get(&arg).map(|i| &i.kind) {
+                Some(InstKind::AllocBuiltin { elems, .. }) => elems.clone(),
+                _ => vec![arg],
+            };
+            for v in held {
+                if let Some((i, None)) = self.param_alias.get(&v) {
+                    self.summary.reallocates_params |= 1u64 << i;
+                }
+            }
+        }
+    }
+
+    /// A change below the attribute `attr` of parameter `i` (of the object `p.attr` holds).
+    fn change_below_param_attr(&mut self, i: u8, attr: String, span: Span) {
+        self.summary
+            .changed_param_attrs
+            .entry(i)
+            .or_default()
+            .insert(attr.clone());
+        self.mutate_param(i, attr, span);
+    }
+
+    /// The function's own change, at `span`, of parameter `i` at `path`.
+    fn mutate_param(&mut self, i: u8, path: String, span: Span) {
         self.summary.mutates_params |= 1u64 << i;
         self.summary
             .mutated_param_paths
             .entry(i)
             .or_default()
             .insert(path);
+        self.summary
+            .param_change_sites
+            .entry(i)
+            .or_default()
+            .insert(span);
     }
 
     /// Record a typed write of `attr` on the object `obj`; its construction is answered once the
@@ -2190,7 +2273,8 @@ impl<'a> Extractor<'a> {
         if let (Some(c), Some(events)) = (self.contracts, self.events.as_mut())
             && reach.any()
         {
-            let own_init = invalidation::is_initializer(self.key) && reach.params & 1 != 0;
+            let initializer = invalidation::is_initializer(self.key);
+            let own_init = invalidation::builds_written_object(initializer, reach, obj.params);
             // The class and its project bases: a target class covers its subclasses.
             let mut classes = vec![class.clone()];
             classes.extend(self.cx.project.ancestors_of(&class));
@@ -2212,6 +2296,7 @@ impl<'a> Extractor<'a> {
                         kind,
                         span,
                         reach,
+                        obj_params: obj.params,
                         flow: SiteFlow::default(),
                     },
                 ));
@@ -2267,8 +2352,8 @@ impl<'a> Extractor<'a> {
             });
         }
         match owner.param {
-            Some((i, None)) => self.mutate_param(i, attr.to_owned()),
-            Some((i, Some(path))) => self.mutate_param(i, path),
+            Some((i, None)) => self.mutate_param(i, attr.to_owned(), span),
+            Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
             None => {}
         }
         let unknown = owner.typed_classes.is_empty();
@@ -2391,8 +2476,8 @@ impl<'a> Extractor<'a> {
             });
         }
         match self.param_alias.get(&var).cloned() {
-            Some((i, None)) => self.mutate_param(i, String::new()),
-            Some((i, Some(path))) => self.mutate_param(i, path),
+            Some((i, None)) => self.mutate_param(i, String::new(), span),
+            Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
             None => {}
         }
         if let Some((i, slot)) = self.param_slot_alias.get(&var).cloned() {
@@ -2622,6 +2707,7 @@ impl<'a> Extractor<'a> {
                 for iterable in crate::consumption::iterated_args(symbol, call.args) {
                     self.iteration(bb, iterable, false, call.span);
                 }
+                self.note_returned_realloc(symbol, call);
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
                 if let Some(class) = &call.constructs {
@@ -3229,13 +3315,16 @@ impl<'a> Extractor<'a> {
                 resolver::arg_fact(|d| self.defs.get(&d).copied(), |c| self.instance_of(c), v)
             })
         });
-        // Stage 0-A filter: an awaited call never blocks the loop itself; loop-sensitive
-        // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103.
+        // Stage 0-A filters: an awaited call never blocks the loop itself; loop-sensitive
+        // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103. A schema
+        // or setting statement is no data query, though running it still blocks.
+        let ddl = runs_ddl(&symbol, args.first().and_then(|a| self.const_str(*a)));
         let effects: std::collections::BTreeSet<ExecEffectKind> = entry
             .effects_in(case)
             .iter()
             .copied()
             .filter(|e| !(is_awaited && BLOCKING_EFFECTS.contains(e)))
+            .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
             .collect();
         if let Some(k) = entry.offloads_blocking_arg
             && let Some((p, None)) = args
@@ -3363,6 +3452,29 @@ impl<'a> Extractor<'a> {
             chain,
         );
     }
+}
+
+/// DB-API (PEP 249) methods whose first argument is the statement they run.
+const SQL_EXECUTORS: &[&str] = &["execute", "executemany", "executescript"];
+
+/// Leading keywords of statements that change a schema or a connection setting.
+const DDL_KEYWORDS: &[&str] = &["CREATE", "ALTER", "DROP", "PRAGMA"];
+
+/// Whether the call of `symbol` runs the literal SQL `statement` and that statement is DDL or a
+/// setting (`cur.execute("CREATE TABLE IF NOT EXISTS ...")`): its first word is a
+/// [`DDL_KEYWORDS`] keyword. Other calls' first arguments are no statements (a Redis key named
+/// `created_at`).
+fn runs_ddl(symbol: &str, statement: Option<String>) -> bool {
+    let executes = SQL_EXECUTORS.contains(&symbol.rsplit('.').next().unwrap_or(symbol));
+    executes
+        && statement.is_some_and(|q| {
+            let first = q
+                .trim_start()
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .next()
+                .unwrap_or_default();
+            DDL_KEYWORDS.iter().any(|k| first.eq_ignore_ascii_case(k))
+        })
 }
 
 /// The arguments a call passes, as written.

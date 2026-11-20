@@ -43,4 +43,8 @@ pub trait Contracts: Debug + Send + Sync {
     /// The contracts whose targets include attribute `attr` of an object of class `classes[0]`;
     /// `classes` lists that class and then its bases (a target class covers its subclasses).
     fn target_of(&self, classes: &[String], attr: &str) -> u64;
+
+    /// Whether a target of some contract names an attribute of class `classes[0]` or of one of
+    /// its bases (`classes` as for [`Contracts::target_of`]).
+    fn names_class(&self, classes: &[String]) -> bool;
 }

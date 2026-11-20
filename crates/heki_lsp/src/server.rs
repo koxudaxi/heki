@@ -4,13 +4,15 @@
 //! - `initialized`: index the workspace in the background, then publish diagnostics of every
 //!   open document; register file watchers when the client supports them.
 //! - `didOpen` / `didChange` / `didSave` / `didClose` change the documents in message order;
-//!   the analyses run after, on the documents as they are then.
+//!   the analyses run after, on the documents as they are then. Closing a document with
+//!   unsaved changes re-analyzes the file from the disk.
 //! - `didChange`: after a 250 ms debounce, re-analyze only the edited document (its summary
 //!   update uses Early Cutoff); files it affects are queued.
 //! - `didSave`: re-analyze the document, then every queued file and, in turn, what those
 //!   affect (`Workspace::refresh_all`), and publish their diagnostics.
 //! - `workspace/didChangeWatchedFiles`: files changed on the disk are re-analyzed like saved
-//!   documents, deleted ones leave the project, and a configuration change re-indexes it.
+//!   documents, deleted ones leave the project, and a change of the configuration or of an
+//!   ignore file re-indexes it.
 //! - `codeAction`: `OPT` fixes and `# heki: ignore[CODE]` insertions.
 //! - `heki/stats`: engine counters (`EngineStats`), used to verify Early Cutoff, the number of
 //!   open documents, and the work still in flight (`Activity`), which lets a client wait until
@@ -23,14 +25,16 @@
 use crate::convert;
 use crate::engine::{CONFIG_FILES, Selectors, Workspace};
 use heki_diagnostics::Diagnostic;
-use heki_rules::project::{ProjectOptions, find_root};
+use heki_effect::ModuleLayout;
+use heki_rules::project::{IGNORE_FILES, ProjectOptions, find_root};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-use tower_lsp::jsonrpc::Result as RpcResult;
+use tower_lsp::jsonrpc::{Request, Result as RpcResult};
 use tower_lsp::lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionParams, CodeActionProviderCapability,
     CodeActionResponse, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
@@ -46,9 +50,6 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 /// Delay between the last `didChange` and the re-analysis of the document.
 pub const DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// Time the client gets after `shutdown` to send `exit` and close stdin.
-const EXIT_GRACE: Duration = Duration::from_secs(2);
-
 struct Doc {
     uri: Url,
     text: String,
@@ -63,7 +64,9 @@ struct State {
     workspace: Option<Workspace>,
     docs: FxHashMap<PathBuf, Doc>,
     /// Last published heki diagnostics per file (code actions read them).
-    diags: FxHashMap<PathBuf, Vec<Diagnostic>>,
+    diags: FxHashMap<PathBuf, Published>,
+    /// The client applies versioned document edits (`workspaceEdit.documentChanges`).
+    versioned_edits: bool,
     /// Files to re-analyze on the next save.
     pending: BTreeSet<PathBuf>,
     /// Debounce tokens per document.
@@ -72,6 +75,14 @@ struct State {
     /// not gone out yet is dropped, so the client ends with the newest diagnostics.
     latest_publication: FxHashMap<PathBuf, u64>,
     publications: u64,
+}
+
+/// The diagnostics last published for a file, and the version of the document they were
+/// computed on (`None`: the file on the disk). Their fixes and suppressions are edits of that
+/// text only.
+struct Published {
+    version: Option<i32>,
+    diags: Vec<Diagnostic>,
 }
 
 /// Work the server has accepted but not finished (`heki/stats`: `in_flight`, `published`).
@@ -157,8 +168,10 @@ impl State {
         }
     }
 
-    fn publish_for(&mut self, path: &Path, diags: Vec<Diagnostic>) -> Option<Publish> {
+    fn publish_for(&mut self, path: &Path, mut diags: Vec<Diagnostic>) -> Option<Publish> {
         let uri = self.uri_of(path)?;
+        // Per file: the document always shows its own boundaries (docs/lsp.md).
+        heki_rules::fold_root_causes(&mut diags);
         // Positions are converted with the text; a file without diagnostics needs none (it may
         // be gone).
         let text = if diags.is_empty() {
@@ -170,19 +183,25 @@ impl State {
             .iter()
             .map(|d| convert::diagnostic(d, &text, &|p| self.text_of(p)))
             .collect();
-        self.diags.insert(path.to_path_buf(), diags);
+        // Analyses run on the documents as they are under the state lock, so the version now
+        // is the version analyzed.
+        let version = self.docs.get(path).map(|d| d.version);
+        self.diags
+            .insert(path.to_path_buf(), Published { version, diags });
         Some(Publish {
             path: path.to_path_buf(),
             seq: self.stamp(path),
             uri,
             diagnostics: lsp,
-            version: self.docs.get(path).map(|d| d.version),
+            version,
         })
     }
 
-    /// Index the workspace (again, when the configuration changed), then publish the
-    /// diagnostics of every open document and of every file published before. Returns the
-    /// number of indexed files (`None`: the configuration is invalid; nothing is analyzed).
+    /// Index the workspace (again, when the configuration or an ignore file changed), then
+    /// publish the diagnostics of every open document, of every file published before, and,
+    /// when it is indexed again, of every file that entered the project (as a created file's
+    /// are). Returns the number of indexed files (`None`: the configuration is invalid; nothing
+    /// is analyzed).
     fn load(&mut self) -> (Vec<Publish>, Vec<String>, Option<usize>) {
         let root = self.root.clone().unwrap_or_else(|| PathBuf::from("."));
         let texts: FxHashMap<PathBuf, String> = self
@@ -198,11 +217,17 @@ impl State {
                 ..ProjectOptions::default()
             },
             &Selectors::default(),
+            None,
         );
         self.pending.clear();
-        let files: BTreeSet<PathBuf> = self.docs.keys().chain(self.diags.keys()).cloned().collect();
+        let mut files: BTreeSet<PathBuf> =
+            self.docs.keys().chain(self.diags.keys()).cloned().collect();
+        let indexed_before: Option<BTreeSet<PathBuf>> = self
+            .workspace
+            .as_ref()
+            .map(|ws| ws.indexed().cloned().collect());
         let (mut ws, errors) = match loaded {
-            Ok(loaded) => loaded,
+            Ok((ws, errors)) => (ws, errors.iter().map(ToString::to_string).collect()),
             Err(e) => {
                 self.workspace = None;
                 let pubs = files.iter().filter_map(|p| self.clear(p)).collect();
@@ -210,6 +235,9 @@ impl State {
             }
         };
         let n = ws.stats().indexed_files;
+        if let Some(before) = &indexed_before {
+            files.extend(ws.indexed().filter(|p| !before.contains(*p)).cloned());
+        }
         let checked: Vec<(PathBuf, Vec<Diagnostic>)> = files
             .into_iter()
             .map(|p| {
@@ -285,12 +313,25 @@ impl State {
     /// file is re-analyzed like a saved document (an open document with its own text), a
     /// deleted one leaves the project; then everything they affect is re-analyzed.
     fn files_changed(&mut self, changes: Vec<FileEvent>) -> (Vec<Publish>, Vec<String>) {
-        // The configuration (or the summary snapshot) changed: everything is analyzed again,
-        // as `heki check --watch` does.
+        // The configuration, the summary snapshot, or an ignore file changed: everything is
+        // analyzed again (an ignore file changes which files belong to the project), as
+        // `heki check --watch` does.
         let config_root = find_root(self.root.as_deref().unwrap_or(Path::new(".")));
-        if changes.iter().any(|c| {
-            path_of(&c.uri).is_some_and(|p| CONFIG_FILES.iter().any(|n| config_root.join(n) == p))
-        }) {
+        let baseline = self
+            .workspace
+            .as_ref()
+            .and_then(|ws| ws.baseline_path().map(Path::to_path_buf));
+        let reloads = |p: &Path| {
+            CONFIG_FILES.iter().any(|n| config_root.join(n) == p)
+                || p.file_name()
+                    .is_some_and(|n| IGNORE_FILES.iter().any(|i| n == *i))
+                || baseline.as_deref() == Some(p)
+        };
+        if changes
+            .iter()
+            .any(|c| path_of(&c.uri).is_some_and(|p| reloads(&p)))
+            || self.layout_changed()
+        {
             let (pubs, errors, _) = self.load();
             return (pubs, errors);
         }
@@ -301,6 +342,11 @@ impl State {
             .filter(|(path, _)| self.workspace.as_ref().is_some_and(|ws| ws.accepts(path)))
             .collect();
         for (path, typ) in changes {
+            // An open document's text is the file's until it is closed (`State::closed`), also
+            // when the file leaves the disk.
+            if typ == FileChangeType::DELETED && self.docs.contains_key(&path) {
+                continue;
+            }
             if typ == FileChangeType::DELETED {
                 let ws = self.workspace.as_mut().expect("checked above");
                 let affected = ws.remove(&path);
@@ -317,13 +363,65 @@ impl State {
         errors.extend(more_errors);
         (pubs, errors)
     }
+
+    /// Whether a package marker that appeared or disappeared (`src/__init__.py`, a root
+    /// `__init__.py`) switched the module layout the workspace was indexed with
+    /// (`ModuleLayout`): module names under `src/`, or relative imports climbing to the root,
+    /// change with it.
+    fn layout_changed(&self) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root) != ws.env.layout)
+    }
+
+    /// A document was closed (`text`: what it held): the file on the disk is its text again.
+    /// When they differ (an unsaved edit was discarded), the index forgets the editor's text: the
+    /// file is re-analyzed from the disk, or leaves the project when it is not on the disk, and
+    /// so is everything that affects. The document's diagnostics leave with it.
+    fn closed(
+        &mut self,
+        path: &Path,
+        uri: Url,
+        text: Option<String>,
+    ) -> (Vec<Publish>, Vec<String>) {
+        let (mut pubs, mut errors) = (Vec::new(), Vec::new());
+        let disk = heki_ast::read_source(path).ok();
+        let indexed = self.workspace.as_ref().is_some_and(|ws| ws.accepts(path));
+        if text.is_some() && text != disk && indexed {
+            let ws = self.workspace.as_mut().expect("checked above");
+            match &disk {
+                Some(on_disk) => {
+                    let outcome = ws.edit(path, on_disk);
+                    self.pending.remove(path);
+                    self.pending.extend(outcome.affected);
+                    errors.extend(outcome.error);
+                }
+                None => {
+                    let affected = ws.remove(path);
+                    self.pending.extend(affected);
+                }
+            }
+            let (more, more_errors) = self.flush_pending();
+            pubs.extend(more);
+            errors.extend(more_errors);
+        }
+        self.diags.remove(path);
+        pubs.push(Publish {
+            seq: self.stamp(path),
+            path: path.to_path_buf(),
+            uri,
+            diagnostics: Vec::new(),
+            version: None,
+        });
+        (pubs, errors)
+    }
 }
 
 /// An open document's text, else the file on the disk.
 fn text_of(docs: &FxHashMap<PathBuf, Doc>, path: &Path) -> Option<String> {
     match docs.get(path) {
         Some(d) => Some(d.text.clone()),
-        None => std::fs::read_to_string(path).ok(),
+        None => heki_ast::read_source(path).ok(),
     }
 }
 
@@ -337,6 +435,9 @@ fn watched_files_registration() -> Registration {
         watchers: vec![
             watcher("**/*.{py,pyi}".into()),
             watcher(format!("**/{{{}}}", CONFIG_FILES.join(","))),
+            watcher(format!("**/{{{}}}", IGNORE_FILES.join(","))),
+            // Ratchet baselines (any name; the configuration says which).
+            watcher("**/*.toml".into()),
         ],
     };
     Registration {
@@ -350,6 +451,8 @@ pub struct Backend {
     client: Client,
     state: Arc<Mutex<State>>,
     activity: Arc<Activity>,
+    /// The client sent `shutdown`: the process exits with 0 (else 1) when the session ends.
+    shut_down: Arc<AtomicBool>,
 }
 
 impl Backend {
@@ -358,6 +461,7 @@ impl Backend {
             client,
             state: Arc::new(Mutex::new(State::default())),
             activity: Arc::default(),
+            shut_down: Arc::default(),
         }
     }
 
@@ -433,15 +537,20 @@ impl LanguageServer for Backend {
             .or(params.root_uri)
             .and_then(|u| path_of(&u))
             .or_else(|| std::env::current_dir().ok());
-        let watch_files = params
-            .capabilities
-            .workspace
+        let workspace = params.capabilities.workspace;
+        let watch_files = workspace
+            .as_ref()
             .and_then(|w| w.did_change_watched_files)
             .and_then(|w| w.dynamic_registration)
+            .unwrap_or(false);
+        let versioned_edits = workspace
+            .and_then(|w| w.workspace_edit)
+            .and_then(|e| e.document_changes)
             .unwrap_or(false);
         let mut st = lock(&self.state);
         st.root = root;
         st.watch_files = watch_files;
+        st.versioned_edits = versioned_edits;
         drop(st);
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -507,12 +616,7 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> RpcResult<()> {
-        // `exit` only ends the transport once the client closes stdin; a client that keeps it
-        // open would leave the process behind, so end it shortly after `shutdown`.
-        tokio::spawn(async {
-            tokio::time::sleep(EXIT_GRACE).await;
-            std::process::exit(0);
-        });
+        self.shut_down.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -591,6 +695,10 @@ impl LanguageServer for Backend {
             doc.text = text;
         }
         let (pubs, errors) = Self::blocking(&self.state, move |st| {
+            if st.layout_changed() {
+                let (pubs, errors, _) = st.load();
+                return (pubs, errors);
+            }
             let Some(text) = st.text_of(&path) else {
                 return (Vec::new(), Vec::new());
             };
@@ -618,19 +726,11 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
-        let closed = {
-            let mut st = lock(&self.state);
-            st.docs.remove(&path);
-            st.diags.remove(&path);
-            Publish {
-                seq: st.stamp(&path),
-                path,
-                uri: params.text_document.uri,
-                diagnostics: Vec::new(),
-                version: None,
-            }
-        };
-        Self::send(&work, &self.client, &self.state, vec![closed], Vec::new()).await;
+        let closed = lock(&self.state).docs.remove(&path).map(|d| d.text);
+        let uri = params.text_document.uri;
+        let (pubs, errors) =
+            Self::blocking(&self.state, move |st| st.closed(&path, uri, closed)).await;
+        Self::send(&work, &self.client, &self.state, pubs, errors).await;
     }
 
     async fn code_action(&self, params: CodeActionParams) -> RpcResult<Option<CodeActionResponse>> {
@@ -638,37 +738,82 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
         let st = lock(&self.state);
-        let (Some(doc), Some(diags)) = (st.docs.get(&path), st.diags.get(&path)) else {
+        let (Some(doc), Some(published)) = (st.docs.get(&path), st.diags.get(&path)) else {
             return Ok(None);
         };
-        let lsp: Vec<_> = diags
+        // Edits computed on another version of the document (an edit is waiting for its
+        // debounced analysis) would land on the wrong text.
+        if published.version != Some(doc.version) {
+            return Ok(None);
+        }
+        let lsp: Vec<_> = published
+            .diags
             .iter()
             .map(|d| convert::diagnostic(d, &doc.text, &|p| st.text_of(p)))
             .collect();
+        let target = convert::EditTarget {
+            uri: &doc.uri,
+            version: st.versioned_edits.then_some(doc.version),
+        };
         Ok(Some(convert::code_actions(
-            &doc.uri,
+            &target,
             &doc.text,
-            diags,
+            &published.diags,
             &lsp,
             &params.range,
         )))
     }
 }
 
-/// Serve LSP over stdin / stdout until `exit`.
-pub fn run_stdio() -> std::io::Result<()> {
+/// The service, ending the session at the `exit` notification: tower-lsp stops serving only at
+/// the next message or the end of stdin, and a client may keep stdin open after `exit`.
+struct EndAtExit<S> {
+    inner: S,
+    exit: Arc<tokio::sync::Notify>,
+}
+
+impl<S: tower_service::Service<Request>> tower_service::Service<Request> for EndAtExit<S> {
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Request) -> Self::Future {
+        let exit = request.method() == "exit";
+        let handled = self.inner.call(request);
+        if exit {
+            self.exit.notify_one();
+        }
+        handled
+    }
+}
+
+/// Serve LSP over stdin / stdout until `exit` (or the end of stdin). Returns whether the
+/// session ended as the protocol asks, after `shutdown`: the exit code is then 0, else 1.
+pub fn run_stdio() -> std::io::Result<bool> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
+    let shut_down = runtime.block_on(async {
         let (service, socket) = LspService::build(Backend::new)
             .custom_method("heki/stats", Backend::stats)
             .finish();
-        Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
-            .serve(service)
-            .await;
+        let shut_down = Arc::clone(&service.inner().shut_down);
+        let exit = Arc::new(tokio::sync::Notify::new());
+        let service = EndAtExit {
+            inner: service,
+            exit: Arc::clone(&exit),
+        };
+        tokio::select! {
+            () = Server::new(tokio::io::stdin(), tokio::io::stdout(), socket).serve(service) => {}
+            () = exit.notified() => {}
+        }
+        shut_down.load(Ordering::SeqCst)
     });
     // `tokio::io::stdin` reads on a blocking thread; do not wait for it.
     runtime.shutdown_background();
-    Ok(())
+    Ok(shut_down)
 }

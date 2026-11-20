@@ -13,6 +13,7 @@ use crate::{CheckContext, RuleConfigError};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{CallHop, CallSite, FuncKey, SiteRole};
 use rustc_hash::FxHashSet;
+use std::collections::BTreeSet;
 
 /// One call target: a project function, a method (with its overrides in subclasses), or a class
 /// (constructing it).
@@ -34,7 +35,7 @@ impl CallTargetPattern {
     /// an override of it. A construction is matched by its class only: its `__init__` runs as
     /// part of it. Only the call itself calls (`SiteRole::Call`): the other sites of the object
     /// a call returns (where it is iterated, returned, or handed on) call nothing more.
-    pub(crate) fn hit(&self, site: &CallSite) -> bool {
+    fn hit(&self, site: &CallSite) -> bool {
         if site.role != SiteRole::Call {
             return false;
         }
@@ -46,6 +47,48 @@ impl CallTargetPattern {
             }
         }
     }
+}
+
+/// The targets of one contract that `site` calls, as the groups to report (indices into
+/// `targets`): each target every candidate matches, on its own; or, when no single target
+/// covers every candidate but each candidate is a target (`A.reset` and `B.reset` both named,
+/// `obj: Base` whose `reset` is one of the two), one group of the targets the candidates match.
+pub(crate) fn called_targets(targets: &[CallTargetPattern], site: &CallSite) -> Vec<Vec<usize>> {
+    let whole: Vec<Vec<usize>> = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.hit(site))
+        .map(|(i, _)| vec![i])
+        .collect();
+    let callees = site.project_callees();
+    if !whole.is_empty() || site.role != SiteRole::Call || site.constructs.is_some() {
+        return whole;
+    }
+    let mut union = BTreeSet::new();
+    for bc in callees {
+        let matching: Vec<usize> = targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.functions.matches(&bc.callee))
+            .map(|(i, _)| i)
+            .collect();
+        if matching.is_empty() {
+            return whole;
+        }
+        union.extend(matching);
+    }
+    if union.is_empty() {
+        return whole;
+    }
+    vec![union.into_iter().collect()]
+}
+
+/// The configured texts of a group of [`called_targets`]: the diagnostic target (`A.reset|B.reset`)
+/// and the message's name of what is called (``A.reset` or `B.reset``).
+pub(crate) fn group_texts(targets: &[CallTargetPattern], group: &[usize]) -> (String, String) {
+    let texts: Vec<&str> = group.iter().map(|&i| targets[i].text.as_str()).collect();
+    let named: Vec<String> = texts.iter().map(|t| format!("`{t}`")).collect();
+    (texts.join("|"), named.join(" or "))
 }
 
 /// Parse call targets (`call-owners.targets`, `effect-boundaries.call-targets`).
@@ -140,12 +183,17 @@ pub(crate) fn mut204(
     for key in callers {
         for &(path, site) in &sites[key] {
             for rule in &rules {
-                for t in rule.targets.iter().filter(|t| t.hit(site)) {
+                for group in called_targets(&rule.targets, site) {
+                    let (target, called) = group_texts(&rule.targets, &group);
+                    let family: FxHashSet<String> = group
+                        .iter()
+                        .flat_map(|&i| rule.targets[i].family.iter().cloned())
+                        .collect();
                     let found = delegated_reports(
                         cx,
                         &sites,
                         &rule.allowance,
-                        &t.family,
+                        &family,
                         key,
                         receiver_params(site),
                         site.span,
@@ -158,7 +206,7 @@ pub(crate) fn mut204(
                             unit,
                             &r.func,
                             r.span,
-                            &t.text,
+                            &target,
                             (key.fqn(), site.span),
                             || {
                                 let what = if site.constructs.is_some() {
@@ -173,9 +221,8 @@ pub(crate) fn mut204(
                                 };
                                 with_note(
                                     format!(
-                                        "`{}` {what} `{}`{via} {}",
+                                        "`{}` {what} {called}{via} {}",
                                         r.func.qualname,
-                                        t.text,
                                         rule.allowance.where_text(
                                             "call owners",
                                             "forbidden callers",

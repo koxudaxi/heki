@@ -296,3 +296,100 @@ fn snapshot_write_and_mut103_regressions() {
     p.write(".heki-summary-snapshot.json", "not json");
     assert_eq!(p.check(&["--extend-select", "MUT103"]).0, 2);
 }
+
+/// PEP 263: a declared Latin-1 source is checked like any other, and `--fix` writes it back in
+/// Latin-1 (the bytes outside the rewrite stay as they were); an encoding heki does not read is
+/// an error, not a UTF-8 failure.
+#[test]
+fn declared_source_encodings_are_read_and_fixes_keep_them() {
+    let p = Project::new("fix_latin1");
+    let latin1: &[u8] = b"# coding: latin-1\nimport time\n\n\nasync def caf\xe9():\n    time.sleep(1)  # pause \xe9\n\n\ndef build(items):\n    xs = []\n    for item in items:\n        xs = xs + [item]\n    return xs\n";
+    std::fs::write(p.dir.join("legacy.py"), latin1).unwrap();
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stdout.contains("legacy.py:6:5: EFF101 "), "{stdout}");
+    assert!(stdout.contains("legacy.py:12:9: OPT101 "), "{stdout}");
+    let (code, diff, _) = p.check(&["--diff"]);
+    assert_eq!(code, 1);
+    assert!(diff.contains("+        xs.append(item)"), "{diff}");
+    let (_, _, stderr) = p.check(&["--fix"]);
+    assert!(
+        stderr.contains("Fixed 1 issue(s) in 1 file(s)."),
+        "{stderr}"
+    );
+    let as_latin1 = |bytes: &[u8]| bytes.iter().copied().map(char::from).collect::<String>();
+    let expected = as_latin1(latin1).replace("xs = xs + [item]", "xs.append(item)");
+    let fixed = std::fs::read(p.dir.join("legacy.py")).unwrap();
+    assert_eq!(as_latin1(&fixed), expected, "still Latin-1");
+
+    std::fs::write(p.dir.join("legacy.py"), b"# coding: cp1252\nx = '\x80'\n").unwrap();
+    let (code, _, stderr) = p.check(&[]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("legacy.py: source declares encoding `cp1252`"),
+        "{stderr}"
+    );
+    std::fs::write(p.dir.join("legacy.py"), b"x = '\xe9'\n").unwrap();
+    let (code, _, stderr) = p.check(&[]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("stream did not contain valid UTF-8"),
+        "{stderr}"
+    );
+}
+
+/// A module with a hoisting rewrite (`OPT130`) and a deque rewrite that adds
+/// `import collections` below a `__future__` import (`OPT120`), and a call printing both.
+const LINE_BREAKS: &str = r#""""Doc."""
+from __future__ import annotations
+
+
+def f(n):
+    hits = 0
+    for i in range(n):
+        hits += "a" in set("abcdefghi")
+    return hits
+
+
+def g(items):
+    q = []
+    for x in items:
+        q.append(x)
+    out = []
+    while q:
+        out.append(q.pop(0))
+    return out
+
+
+print(f(3), g([1, 2, 3]))
+"#;
+
+#[test]
+fn files_with_cr_or_crlf_line_breaks_get_the_fixes_of_lf_files_in_their_own_line_breaks() {
+    let p = Project::new("fix_line_breaks");
+    for (file, br) in [("lf.py", "\n"), ("cr.py", "\r"), ("crlf.py", "\r\n")] {
+        p.write(file, &LINE_BREAKS.replace('\n', br));
+    }
+    let before = run_python(&p.dir, "cr.py");
+    let (code, _, stderr) = p.check(&["--fix", "--include-size-dependent"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Fixed 6 issue(s) in 3 file(s)."),
+        "{stderr}"
+    );
+    let lf = p.read("lf.py");
+    assert!(
+        lf.contains("    hoisted = set(\"abcdefghi\")\n    for i in range(n):\n")
+            && lf.contains("from __future__ import annotations\n\nimport collections\n"),
+        "{lf}"
+    );
+    for (file, br) in [("cr.py", "\r"), ("crlf.py", "\r\n")] {
+        let fixed = std::fs::read(p.dir.join(file)).unwrap();
+        assert_eq!(
+            String::from_utf8(fixed).unwrap(),
+            lf.replace('\n', br),
+            "{file}"
+        );
+        assert_eq!(run_python(&p.dir, file), before, "{file}");
+    }
+}

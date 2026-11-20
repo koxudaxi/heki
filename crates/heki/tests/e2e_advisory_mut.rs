@@ -305,6 +305,51 @@ def choose(a: Model, b: Model, flag):
     );
 }
 
+const BOTH: &str = r#"class Model:
+    def __init__(self, other: "Model") -> None:
+        self.items: list[int] = []
+        _both(self, other.items)
+
+
+def _both(m: Model, xs) -> None:
+    m.items = []
+    xs.append(1)
+
+
+def same(m: Model) -> None:
+    _both(m, m.items)
+"#;
+
+#[test]
+fn mut201_tells_apart_the_objects_a_helper_writes_through_its_arguments() {
+    let p = Project::new("mut201_written_objects");
+    p.write(
+        "pyproject.toml",
+        "[[tool.heki.write-owners]]\nname = \"store\"\ntargets = [\"Model.items\"]\nallowed-writers = [\"Store.*\"]\n",
+    )
+    .write("app.py", BOTH);
+    let diags = diagnostics(&p, &["--select", "MUT201"]);
+    // The initializer's own `self.items` is its construction; `other.items`, changed through
+    // the helper's untyped parameter, is another object's field. When both arguments are one
+    // object's (`same`), the helper's typed write of the field is that write: one site.
+    assert_eq!(
+        found(&diags),
+        vec![
+            d("app.py", 4, "MUT201", "Model.__init__"),
+            d("app.py", 13, "MUT201", "same"),
+        ],
+        "{diags:#?}"
+    );
+    assert!(
+        diags[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("(indirect_helper) via `app._both`"),
+        "{diags:#?}"
+    );
+    assert!(diags.iter().all(|x| x.get("sites").is_none()), "{diags:#?}");
+}
+
 #[test]
 fn mut201_forbids_cached_properties_on_guarded_classes_and_their_subclasses() {
     let p = Project::new("mut201_cached");

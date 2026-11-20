@@ -186,8 +186,12 @@ fn consumer_args(symbol: &str, args: &[VarId]) -> Vec<VarId> {
 }
 
 /// The arguments a call of the external `symbol` iterates when it runs: an eager constructor's
-/// (`itertools.product(a, b)`) or a full consumer's (`list(it)`, `xs.extend(it)`).
+/// (`itertools.product(a, b)`), a full consumer's (`list(it)`, `xs.extend(it)`), or the first
+/// one of a consumer that may stop early (`any(it)`: it steps it, without exhausting it).
 pub(crate) fn iterated_args(symbol: &str, args: &[VarId]) -> Vec<VarId> {
+    if STOPPING_CONSUMERS.contains(&symbol) {
+        return args[..args.len().min(1)].to_vec();
+    }
     match constructor_args(symbol, args) {
         Some(w) if w.eager => w.stepped,
         _ => consumer_args(symbol, args),
@@ -532,14 +536,8 @@ impl IterFlow {
                                 if STOPPING_CONSUMERS.contains(&symbol.as_str()) =>
                             {
                                 let first = &args[..args.len().min(1)];
-                                self.push(
-                                    bb.id,
-                                    index,
-                                    inst.span,
-                                    first,
-                                    false,
-                                    (bb.id, index + 1),
-                                );
+                                let done = (bb.id, index + 1);
+                                self.push(bb.id, index, inst.span, first, false, done);
                                 continue;
                             }
                             Callee::External(symbol) => iterated_args(symbol, args),

@@ -116,11 +116,15 @@ fn key_of(unit: &ModuleUnit<'_>, f: &IrFunction) -> String {
     format!("{}:{}", unit.input.module_name, func_qualname(f))
 }
 
-/// The public functions of `unit` by snapshot key with their summary key. A name defined more
-/// than once (`if sys.version_info ...: def f(a, b) else: def f(a)`) has one merged summary;
+/// The public functions `unit` defines by snapshot key with their summary key. A name defined
+/// more than once (`if sys.version_info ...: def f(a, b) else: def f(a)`) has one merged summary;
 /// its last definition names the parameters, both when the snapshot is written and when it is
-/// compared, so the two sides always agree.
-fn public_functions<'u>(unit: &'u ModuleUnit<'_>) -> BTreeMap<String, (FuncKey, &'u IrFunction)> {
+/// compared, so the two sides always agree. A module with a `.pyi` stub is defined by its `.py`
+/// file (`ProjectIndex::file_of`): the stub may name positional-only parameters differently.
+fn public_functions<'u>(
+    index: &ProjectIndex,
+    unit: &'u ModuleUnit<'_>,
+) -> BTreeMap<String, (FuncKey, &'u IrFunction)> {
     unit.input
         .ir
         .functions
@@ -133,6 +137,7 @@ fn public_functions<'u>(unit: &'u ModuleUnit<'_>) -> BTreeMap<String, (FuncKey, 
             };
             (key_of(unit, f), (key, f))
         })
+        .filter(|(_, (key, _))| index.file_of(key) == Some(unit.input.path.as_path()))
         .collect()
 }
 
@@ -140,7 +145,7 @@ impl SummarySnapshot {
     pub fn build(units: &[ModuleUnit<'_>], index: &ProjectIndex) -> Self {
         let mut functions = BTreeMap::new();
         for unit in units {
-            for (name, (key, f)) in public_functions(unit) {
+            for (name, (key, f)) in public_functions(index, unit) {
                 if let Some(s) = index.summary(&key) {
                     functions.insert(name, entry(s, f));
                 }
@@ -176,11 +181,21 @@ impl SummarySnapshot {
         Ok(snap)
     }
 
+    /// Replace the file at `path` in one step: a temporary file next to it is renamed over it,
+    /// so an interrupted write never leaves a partial snapshot.
     pub fn save(&self, path: &Path) -> Result<(), SnapshotError> {
-        std::fs::write(path, self.to_json()).map_err(|cause| SnapshotError::Write {
-            path: path.to_path_buf(),
-            cause,
-        })
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, self.to_json())
+            .and_then(|()| std::fs::rename(&tmp, path))
+            .map_err(|cause| {
+                let _ = std::fs::remove_file(&tmp);
+                SnapshotError::Write {
+                    path: path.to_path_buf(),
+                    cause,
+                }
+            })
     }
 }
 
@@ -194,7 +209,7 @@ pub(crate) fn mut103(cx: &CheckContext<'_>, snapshot: &SummarySnapshot, out: &mu
         if !cx.enabled("MUT103", unit) {
             continue;
         }
-        for (name, (key, f)) in public_functions(unit) {
+        for (name, (key, f)) in public_functions(cx.index, unit) {
             let (Some(before), Some(now)) = (snapshot.functions.get(&name), cx.index.summary(&key))
             else {
                 continue;

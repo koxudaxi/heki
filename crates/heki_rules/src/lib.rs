@@ -18,7 +18,7 @@ pub mod selection;
 pub mod snapshot;
 
 pub use contracts::{MAX_INVALIDATIONS, summary_contracts, typed_writes};
-pub use eff_rules::forbids_execution_effects;
+pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use mut_rules::{CHAIN_RULES, ChainFacts, chain_facts, family_readers};
 pub use selection::{RuleSelection, SelectionError};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
@@ -525,7 +525,7 @@ pub fn check_project(
         project_patches_builtins: extras.project_patches_builtins.unwrap_or_else(|| {
             units
                 .iter()
-                .any(|u| heki_soundness::module_patches_builtins(u.input.ir))
+                .any(|u| project::runtime_patches_builtins(&u.input))
         }),
         disabled_obligations: Vec::new(),
     };
@@ -690,17 +690,25 @@ impl<'a> CheckContext<'a> {
             related: self.related(chain),
             fix: None,
             sites: 1,
+            fold_key: None,
         });
         out.last_mut()
     }
 }
 
-/// Dotted-name pattern: a glob (`pkg.*.Model`, `*Store.*`) that also matches when it equals a
-/// dot-separated suffix of the name (`Model.fields` matches `pkg.model.Model.fields`).
+/// Whether a configured name uses glob syntax (`*`, `?`, `[...]`, `{a,b}`) rather than naming
+/// one thing literally.
+pub(crate) fn has_glob_syntax(text: &str) -> bool {
+    text.contains(['*', '?', '[', '{'])
+}
+
+/// Dotted-name pattern: a glob (`pkg.*.Model`, `*Store.*`, `Mode?.fields`) that matches the name
+/// or one of its dot-separated suffixes (`Model.fields` matches `pkg.model.Model.fields`).
 #[derive(Debug)]
 pub(crate) struct DottedPattern {
     text: String,
-    glob: GlobMatcher,
+    /// `None` for a literal name, compared as a string.
+    glob: Option<GlobMatcher>,
 }
 
 impl DottedPattern {
@@ -714,20 +722,21 @@ impl DottedPattern {
             .compile_matcher();
         Ok(Self {
             text: text.to_owned(),
-            glob,
+            glob: has_glob_syntax(text).then_some(glob),
         })
     }
 
     pub fn matches(&self, name: &str) -> bool {
-        self.glob.is_match(name)
-            || name == self.text
+        let Some(glob) = &self.glob else {
+            return name == self.text
+                || name
+                    .strip_suffix(self.text.as_str())
+                    .is_some_and(|head| head.ends_with('.'));
+        };
+        glob.is_match(name)
             || name
-                .strip_suffix(self.text.as_str())
-                .is_some_and(|head| head.ends_with('.'))
-            || self.text.contains('*')
-                && name
-                    .match_indices('.')
-                    .any(|(i, _)| self.glob.is_match(&name[i + 1..]))
+                .match_indices('.')
+                .any(|(i, _)| glob.is_match(&name[i + 1..]))
     }
 }
 
@@ -748,6 +757,15 @@ mod registry_tests {
         assert!(g.matches("Store.add_field"));
         assert!(g.matches("pkg.store.Store.add_field"));
         assert!(!g.matches("pkg.parser.parse"));
+        for (pattern, name) in [
+            ("Mode?.fields", "pkg.models.Model.fields"),
+            ("Model.[fg]ields", "pkg.models.Model.fields"),
+            ("Model.{fields,items}", "pkg.models.Model.items"),
+        ] {
+            let p = DottedPattern::new(pattern, "test").unwrap();
+            assert!(p.matches(name), "{pattern} {name}");
+            assert!(!p.matches("pkg.models.Model.other"), "{pattern}");
+        }
     }
 
     #[test]

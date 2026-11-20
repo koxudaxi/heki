@@ -40,6 +40,7 @@ fn input(b: &Built) -> ModuleInput<'_> {
         path: b.path.clone(),
         module_name: b.module_name.clone(),
         is_package: b.is_package,
+        root_is_package: false,
         content_hash: b.hash.clone(),
         semantic: &b.semantic,
         ir: &b.ir,
@@ -290,39 +291,6 @@ fn gate_3_boundary_only_reports_first_sync_crossing() {
         !summary(&index, "flow", "d")
             .transitive_exec_effects
             .contains(&Sleep)
-    );
-}
-
-fn many_async_callers(n: usize) -> String {
-    let mut src = String::from("import time\n\ndef c():\n    time.sleep(1)\n");
-    for i in 0..n {
-        src.push_str(&format!("\nasync def caller_{i:02}():\n    c()\n"));
-    }
-    src
-}
-
-#[test]
-fn gate_3_root_cause_grouping_folds_beyond_threshold() {
-    let index = project(&[("many.py", &many_async_callers(12))]);
-    let reports = boundary_reports(&index);
-    assert_eq!(reports.len(), 12);
-    let groups = group_by_root_cause(&reports, ROOT_CAUSE_GROUP_THRESHOLD);
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].additional, 11);
-    assert_eq!(groups[0].representative.function, key("many", "caller_00"));
-    assert_eq!(
-        groups[0].message_suffix().as_deref(),
-        Some("(+11 more async call sites reaching the same blocking root cause)")
-    );
-
-    // Exactly at the threshold nothing is folded.
-    let index = project(&[("many.py", &many_async_callers(10))]);
-    let groups = group_by_root_cause(&boundary_reports(&index), ROOT_CAUSE_GROUP_THRESHOLD);
-    assert_eq!(groups.len(), 10);
-    assert!(
-        groups
-            .iter()
-            .all(|g| g.additional == 0 && g.message_suffix().is_none())
     );
 }
 
@@ -1090,22 +1058,42 @@ fn module_names_and_relative_imports() {
     // A root `__init__.py` names no module.
     assert_eq!(name("__init__.py", false), None);
 
-    let rel = resolve_relative_module;
+    let rel = |m: &str, pkg, level, module| resolve_relative_module(m, pkg, level, module, false);
     assert_eq!(rel("pkg.a", false, 1, Some("sub")), Some("pkg.sub".into()));
     assert_eq!(rel("pkg", true, 1, Some("sub")), Some("pkg.sub".into()));
     assert_eq!(rel("pkg", true, 1, None), Some("pkg".into()));
     assert_eq!(rel("pkg.sub.mod", false, 2, None), Some("pkg".into()));
     assert_eq!(rel("pkg.a", false, 3, Some("x")), None);
+    // Past the top-level package (`from ..time import sleep` in `pkg/mod.py`), or with no
+    // package at all: `ImportError`.
+    assert_eq!(rel("pkg.mod", false, 2, Some("time")), None);
+    assert_eq!(rel("pkg", true, 2, None), None);
+    assert_eq!(rel("mod", false, 1, Some("x")), None);
     assert_eq!(rel("pkg.a", false, 0, Some("os")), Some("os".into()));
+    // A project root that is a package: one more level reaches it (its modules are top-level).
+    let in_root =
+        |m: &str, pkg, level, module| resolve_relative_module(m, pkg, level, module, true);
+    assert_eq!(in_root("api", false, 1, Some("util")), Some("util".into()));
+    assert_eq!(in_root("api", false, 1, None), Some(String::new()));
+    assert_eq!(
+        in_root("pkg.mod", false, 2, Some("time")),
+        Some("time".into())
+    );
+    assert_eq!(in_root("pkg.mod", false, 3, Some("time")), None);
 }
 
 #[test]
 fn src_layout_detection() {
     let root = std::env::temp_dir().join(format!("heki_effect_src_layout_{}", std::process::id()));
-    std::fs::create_dir_all(root.join("src/pkg")).unwrap();
     assert!(!detect_src_layout(&root));
+    // A namespace package (no `__init__.py`) under `src/` is laid out like a regular one.
+    std::fs::create_dir_all(root.join("src/pkg")).unwrap();
+    assert!(detect_src_layout(&root));
     std::fs::write(root.join("src/pkg/__init__.py"), "").unwrap();
     assert!(detect_src_layout(&root));
+    // `src` itself a package: imported as `src.pkg`.
+    std::fs::write(root.join("src/__init__.py"), "").unwrap();
+    assert!(!detect_src_layout(&root));
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -1508,6 +1496,7 @@ fn py_implementation_takes_precedence_over_sibling_pyi_stub() {
         path: PathBuf::from("pkg/util.pyi"),
         module_name: "pkg.util".into(),
         is_package: false,
+        root_is_package: false,
         content_hash: String::new(),
         semantic: &stub_sem,
         ir: &stub_ir,
