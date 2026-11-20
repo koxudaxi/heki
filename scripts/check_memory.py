@@ -10,7 +10,10 @@ real code bases (measured on datamodel-code-generator, SQLAlchemy, and pydantic)
 - many small modules and classes: every file's check reads the declarations of the project,
   which the language-server engine remembers per file (`--watch` runs that engine).
 
-Each mode runs once; its peak resident set size comes from the operating system (`wait4`).
+Each mode runs three times and the lowest peak counts. The peak is the physical footprint on
+macOS (`/usr/bin/time -l`; unlike the resident set size it does not drop when the system
+compresses memory) and the resident set size on Linux (`wait4`). The allocators differ, so each
+platform has its own budgets.
 
 Usage:
     python3 scripts/check_memory.py --heki target/release/heki
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -31,13 +35,15 @@ LAYERS = 24
 STEPS = 6
 SHAPE_MODULES = 600
 
-# Peak RSS budgets in MiB per mode. Measured (macOS, 14 cores): `check` 175, `watch` 185; the
-# budgets leave about 30 % for other platforms and noise. Lower a budget when a change makes heki
-# smaller; raise one only with the measurement that justifies it.
+# Peak budgets in MiB per platform and mode: the lowest of three runs plus about 8 %. Lower a
+# budget when a change makes heki smaller; raise one only with the measurement that justifies it.
 BUDGETS_MIB = {
-    "check": 230,
-    "watch": 240,
+    # Peak footprint, measured on macOS (14 cores): `check` 163, `watch` 167.
+    "darwin": {"check": 176, "watch": 181},
+    # Peak resident set size; not measured yet: calibrate from the first CI run.
+    "linux": {"check": 230, "watch": 240},
 }
+RUNS = 3
 
 MODES = {
     "check": (["check", "--output-format", "json", "."], {}),
@@ -154,24 +160,31 @@ def generate(root: Path) -> int:
     return lines
 
 
-def peak_rss_mib(heki: str, mode: str, root: Path) -> float:
+def peak_mib(heki: str, mode: str, root: Path) -> float:
+    """The peak of one run (see the module documentation)."""
     args, extra_env = MODES[mode]
     env = {**os.environ, **extra_env}
+    darwin = sys.platform == "darwin"
+    cmd = ["/usr/bin/time", "-l", heki, *args] if darwin else [heki, *args]
     proc = subprocess.Popen(
-        [heki, *args], cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        cmd, cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
     assert proc.stderr is not None
-    stderr = proc.stderr.read()
+    stderr = proc.stderr.read().decode()
     proc.stderr.close()
     # `wait4` reaps the child and reports its own resource usage.
     _, status, usage = os.wait4(proc.pid, 0)
     proc.returncode = os.waitstatus_to_exitcode(status)
     # 0: clean, 1: diagnostics (the generated project has some); anything else is a failure.
     if proc.returncode not in (0, 1):
-        sys.exit(f"heki {' '.join(args)} exited with {proc.returncode}:\n{stderr.decode()}")
-    # `ru_maxrss` is in bytes on macOS and in KiB on Linux.
-    scale = 1 if sys.platform == "darwin" else 1024
-    return usage.ru_maxrss * scale / (1024 * 1024)
+        sys.exit(f"heki {' '.join(args)} exited with {proc.returncode}:\n{stderr}")
+    if darwin:
+        found = re.search(r"(\d+)\s+peak memory footprint", stderr)
+        if not found:
+            sys.exit(f"`/usr/bin/time -l` printed no peak memory footprint:\n{stderr}")
+        return int(found.group(1)) / (1024 * 1024)
+    # `ru_maxrss` is in KiB on Linux.
+    return usage.ru_maxrss / 1024
 
 
 def main() -> int:
@@ -180,16 +193,19 @@ def main() -> int:
     parser.add_argument("--report", action="store_true", help="print the peaks, never fail")
     args = parser.parse_args()
     heki = str(Path(args.heki).resolve())
+    budgets = BUDGETS_MIB["darwin" if sys.platform == "darwin" else "linux"]
+    what = "footprint" if sys.platform == "darwin" else "RSS"
     failed = []
     with tempfile.TemporaryDirectory(prefix="heki-memory-gate-") as tmp:
         root = Path(tmp)
         lines = generate(root)
         print(f"generated project: {lines} lines", flush=True)
-        for mode, budget in BUDGETS_MIB.items():
-            peak = peak_rss_mib(heki, mode, root)
+        for mode, budget in budgets.items():
+            peak = min(peak_mib(heki, mode, root) for _ in range(RUNS))
             verdict = "ok" if peak <= budget else "OVER BUDGET"
             print(
-                f"{mode:<6} peak RSS {peak:7.1f} MiB  budget {budget:4d} MiB  {verdict}", flush=True
+                f"{mode:<6} peak {what} {peak:7.1f} MiB  budget {budget:4d} MiB  {verdict}",
+                flush=True,
             )
             if peak > budget:
                 failed.append(mode)

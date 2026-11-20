@@ -1532,8 +1532,9 @@ $ cargo build --release
 $ python3 scripts/check_memory.py --heki target/release/heki
 ```
 
-CI fails when the peak RSS of `heki check` or of the `--watch` engine on a generated project
-exceeds its budget in the script. The project is shaped after what dominates heki's memory on
+CI fails when the peak memory of `heki check` or of the `--watch` engine on a generated project
+exceeds its budget in the script (the lowest of three runs: the resident set size on Linux, the
+physical footprint on macOS, each platform with its own budgets). The project is shaped after what dominates heki's memory on
 real code bases: typed field writes reached through long call chains (every caller keeps its
 callees' write sites with their chains), effect chains below `async def` entry points, and many
 modules and classes (every file's check reads the project's declarations). When a budget is
