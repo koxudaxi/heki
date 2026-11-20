@@ -15,14 +15,17 @@ allowed writers:
 - through a local alias (`fields = model.fields; fields.append(...)`);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
-  reported once at the outermost call site.
+  reported once at the outermost call site; a helper that only hands it on to an allowed writer
+  or an exempt method writes inside the owner.
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
 class family).
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call
-sites of the first non-private callers, with the chain of calls as related information. One
+sites of the first non-private callers, with the chain of calls as related information. A
+private function that only its own recursion calls (`_walk` calling itself, handed out as a
+callback) has no such caller and reports its writes itself. One
 report stands for every write behind that call (`sites` in JSON), so a Ratchet baseline counts a
 second write inside a recorded helper.
 Reading a `@property` or `functools.cached_property` attribute calls its getter, so a private

@@ -89,4 +89,6 @@ No automatic fix: where to announce the change is a design decision.
 
 ## Options
 - `[[tool.heki.invalidation]]`: `name`, `targets` (`Class.attr`, subclasses included),
-  `invalidators` (functions or methods), `exempt-writers`, `message`.
+  `invalidators` (functions or methods), `exempt-writers`, `message`. The diagnostic target is
+  `<name>:<target>` (`graph-index:DataModel.fields`): two contracts naming one write are two
+  reports.

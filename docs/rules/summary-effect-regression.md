@@ -40,6 +40,9 @@ def add(items: list[int], x: int) -> list[int]:
 ```
 
 If the new effect is intended, refresh the snapshot with `heki snapshot --write` and commit it.
+The refresh writes nothing while a file of the project cannot be read or parsed (it exits with
+2): the snapshot would lose that module's entries. A module with a `.pyi` stub is recorded and
+compared with the parameter names of its `.py` file.
 
 ## Fix safety
 No automatic fix.

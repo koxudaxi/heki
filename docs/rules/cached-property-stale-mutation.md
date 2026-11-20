@@ -8,7 +8,12 @@ Mutating an attribute read by `@cached_property` without invalidating the cache.
 
 ## What it does
 Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
-of the same class (or of a subclass) reads, without invalidating the cached value.
+of the same class (or of a subclass) reads, without invalidating the cached value. A method the
+class inherits from a project base class and does not override runs on its instances too, so it
+is checked against the class's cached properties (reported in the base class).
+A decorator is known by what its name is bound to in the module: an import alias counts
+(`from functools import cached_property as cached`), a decorator the module defines itself does
+not (a `def cache(fn)` of its own), and a name bound by neither counts by its spelling.
 
 ## Why is this bad?
 A `cached_property` computes its value once and stores it in the instance `__dict__`. Once the
@@ -25,9 +30,15 @@ It does not report:
   `__enter__`, `setup`, `_init_*` / `_configure_*` methods, and private helpers called from
   `__init__`;
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
-  `if key not in self._memo:` pattern);
+  `if key not in self._memo:` pattern): in-place changes of an attribute with a `cache` or
+  `memo` word in its name; rebinding it (`self.cache_size = n`) and names such as
+  `memory_limit` are no memo operation;
 - constant dictionary keys the property never reads (`self.params["proxy"]` while the property
   reads `self.params["outtmpl"]`);
+- writes after which every path invalidates the property (`del self.prop`,
+  `self.__dict__.pop("prop", None)`, a `self` method that does), or before which every path
+  already did and nothing read it since; an invalidation under a condition, such as
+  `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
 - changes made in place (`clear()`, `append()`, item assignment) to an attribute whose object
   the cached value holds itself, when the getter reads it for nothing else: it returns
