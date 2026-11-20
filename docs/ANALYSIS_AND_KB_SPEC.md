@@ -654,7 +654,11 @@ functions with none).
    `tuple`, `sorted`, `.copy()`) makes a snapshot. Each records whether a generator suspends
    inside it (a `yield` in a block of the loop from which its header is reachable without leaving
    the loop, on normal or exception edges, or the `yield from` itself) and the spans of the call
-   sites in such blocks (`iterations::BetweenSteps`).
+   sites in such blocks (`iterations::BetweenSteps`). The containers each value may iterate are a
+   fixpoint over copies, phis, views, and wrappers, with a pass limit (24) and a budget of
+   `(value, container)` facts (one per source byte, at least 4,096, at most 100,000): past either,
+   as for a loop rotating aliases of hundreds of containers, the method has no iterations, and no
+   report comes from them.
 3. Changes of such containers (`changes_self_containers`, propagated through the calls on
    `self`, `super()` included, the property reads, and the helpers changing the container of the
    parameter bound to `self.<attr>`, with the helper's own change of it): `Resizes` for the

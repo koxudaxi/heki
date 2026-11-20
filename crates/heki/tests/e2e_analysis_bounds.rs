@@ -1220,3 +1220,77 @@ fn strict_writes_of_one_name_in_a_helper_walk_its_callers_once() {
     );
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
 }
+
+/// `MUT113` selected (it reads the iterations of a method's own containers).
+const MUT113_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT113\"]\n";
+
+/// A class with `containers` dicts, a generator kept on the instance iterating one of them
+/// through `body`'s aliases, and a method changing the first.
+fn kept_generator_over(containers: usize, body: &[String]) -> String {
+    let mut lines = vec![
+        "class Holder:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+    ];
+    for i in 0..containers {
+        lines.push(format!("        self.d{i}: dict[str, int] = {{}}"));
+    }
+    lines.push("        self._cursor = self._walk(1)".to_owned());
+    lines.push(String::new());
+    lines.push("    def _walk(self, n):".to_owned());
+    lines.extend(body.iter().cloned());
+    lines.push("            yield k".to_owned());
+    lines.push(String::new());
+    lines.push("    def drop(self, k: str) -> None:".to_owned());
+    lines.push("        self.d0.pop(k, None)".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// `MUT113` reports of `heki check` over `src`.
+fn iterated_mutations(name: &str, src: &str) -> usize {
+    let p = Project::new(name);
+    p.write("pyproject.toml", MUT113_CONFIG).write("m.py", src);
+    check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT113")
+        .count()
+}
+
+/// A loop rotating aliases of `containers` dicts (`t = a0; a0 = a1; ...; a599 = t`): the
+/// containers a value may iterate reach each alias one pass after another, so finding them takes
+/// a pass per alias. Past the pass limit no value iterates a container: no report.
+#[test]
+fn iterated_containers_past_the_pass_limit_are_unknown() {
+    let rotating = |containers: usize| {
+        let mut body: Vec<String> = (0..containers)
+            .map(|i| format!("        a{i} = self.d{i}"))
+            .collect();
+        body.push("        while n:".to_owned());
+        body.push("            t = a0".to_owned());
+        body.extend((0..containers - 1).map(|i| format!("            a{i} = a{}", i + 1)));
+        body.push(format!("            a{} = t", containers - 1));
+        body.push("            n -= 1".to_owned());
+        body.push("        for k in a0:".to_owned());
+        kept_generator_over(containers, &body)
+    };
+    assert_eq!(iterated_mutations("bounds_rotation_3", &rotating(3)), 1);
+    assert_eq!(iterated_mutations("bounds_rotation_600", &rotating(600)), 0);
+}
+
+/// A chain of `containers` merges (`if n == i: x = self.di`): the merged value after the `i`-th
+/// may iterate any of `i` containers, so the facts grow with the square of the chain. Past their
+/// budget (proportional to the source) no value iterates a container: no report.
+#[test]
+fn iterated_containers_past_their_budget_are_unknown() {
+    let merging = |containers: usize| {
+        let mut body = vec!["        x = self.d0".to_owned()];
+        for i in 1..containers {
+            body.push(format!("        if n == {i}:"));
+            body.push(format!("            x = self.d{i}"));
+        }
+        body.push("        for k in x:".to_owned());
+        kept_generator_over(containers, &body)
+    };
+    assert_eq!(iterated_mutations("bounds_merges_3", &merging(3)), 1);
+    assert_eq!(iterated_mutations("bounds_merges_2000", &merging(2000)), 0);
+}
