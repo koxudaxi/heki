@@ -362,6 +362,11 @@ Two more cases stay quiet by design:
 - A client or query created only while an attribute is unset counts once per object, not once
   per loop iteration.
 
+A function whose model would pass its size budget (8 units per byte of its source, at most
+100,000; real code stays below one unit per byte) is left unmodeled: heki rewrites nothing in it
+and treats its body as one call it cannot resolve. `heki assumptions` lists it with the hazard
+`unmodeled`.
+
 Missed findings close as heki learns more:
 
 | heki lacks | Add |
@@ -1525,7 +1530,7 @@ Commands:
   server       Start the incremental Language Server Protocol (LSP) server [alias: lsp]
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
-  assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection) in a project
+  assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -1626,7 +1631,7 @@ Options:
 ## `heki assumptions`
 
 ```text
-List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection) in a project
+List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
 
 Usage: heki assumptions [OPTIONS] [PATHS]...
 

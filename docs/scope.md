@@ -172,6 +172,11 @@ Two more cases stay quiet by design:
 - A client or query created only while an attribute is unset counts once per object, not once
   per loop iteration.
 
+A function whose model would pass its size budget (8 units per byte of its source, at most
+100,000; real code stays below one unit per byte) is left unmodeled: heki rewrites nothing in it
+and treats its body as one call it cannot resolve. `heki assumptions` lists it with the hazard
+`unmodeled`.
+
 Missed findings close as heki learns more:
 
 | heki lacks | Add |
