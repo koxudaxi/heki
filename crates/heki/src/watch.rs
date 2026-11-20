@@ -258,7 +258,8 @@ impl Watcher<'_> {
                 &source_line
             )
         );
-        for e in report.failure.iter().chain(report.errors.values()) {
+        let errors = crate::check::shown_errors(report.errors.values());
+        for e in report.failure.iter().chain(&errors) {
             log!(self.args.output_format, "error: {e}");
         }
         if matches!(
@@ -277,7 +278,7 @@ impl Watcher<'_> {
 
 /// The error of each file that could not be read, parsed, or checked when it was last looked at:
 /// it is reported after every re-check until the file changes.
-type Errors = BTreeMap<PathBuf, String>;
+type Errors = BTreeMap<PathBuf, FileError>;
 
 /// What the watch reports after each re-check.
 #[derive(Default)]
@@ -298,7 +299,7 @@ impl Report {
             errors: errors
                 .into_iter()
                 .chain(more)
-                .map(|e| (e.path, e.message))
+                .map(|e| (e.path.clone(), e))
                 .collect(),
             failure: None,
         }
@@ -362,8 +363,7 @@ impl Report {
                     affected.remove(p);
                     affected.extend(ws.remove(p));
                     self.diags.remove(p);
-                    self.errors
-                        .insert(p.clone(), format!("{}: {e}", p.display()));
+                    self.errors.insert(p.clone(), FileError::unreadable(p, &e));
                 }
             }
         }

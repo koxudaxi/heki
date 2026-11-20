@@ -102,7 +102,7 @@ pub struct EditOutcome {
     pub affected: Vec<PathBuf>,
     /// Why the file has no diagnostics: a syntax error (the file then leaves the index, as a
     /// file `heki check` cannot parse is not part of the project).
-    pub error: Option<String>,
+    pub error: Option<FileError>,
 }
 
 /// Selection overrides (`--select` / `--extend-select` / `--ignore`).
@@ -446,7 +446,7 @@ impl Workspace {
                 .any(|dir| discovers(dir, &self.env.root, &self.exclude, path))
     }
 
-    fn parse(&self, path: &Path, text: &str) -> Result<ParsedFile, String> {
+    fn parse(&self, path: &Path, text: &str) -> Result<ParsedFile, FileError> {
         parse_source(
             path,
             &self.env.root,
@@ -505,7 +505,7 @@ impl Workspace {
     }
 
     /// Diagnostics of `text` as `path` against the current index (the summaries are unchanged).
-    pub fn diagnose(&mut self, path: &Path, text: &str) -> Result<Vec<Diagnostic>, String> {
+    pub fn diagnose(&mut self, path: &Path, text: &str) -> Result<Vec<Diagnostic>, FileError> {
         let parsed = self.parse(path, text)?;
         Ok(self.check(&parsed))
     }
@@ -1001,16 +1001,13 @@ impl Workspace {
         let paths: Vec<PathBuf> = self.files.keys().cloned().collect();
         for path in &paths {
             let diagnosed = heki_ast::read_source(path)
-                .map_err(|e| format!("{}: {e}", path.display()))
+                .map_err(|e| FileError::unreadable(path, &e))
                 .and_then(|text| self.diagnose(path, &text));
             match diagnosed {
                 Ok(d) => {
                     out.insert(path.clone(), d);
                 }
-                Err(message) => errors.push(FileError {
-                    path: path.clone(),
-                    message,
-                }),
+                Err(e) => errors.push(e),
             }
         }
         (out, errors)
@@ -1064,21 +1061,19 @@ mod tests {
             vec![dir.join("a.py")]
         );
         assert_eq!(errors.len(), 2, "{errors:?}");
-        assert!(
-            errors[0]
-                .message
-                .starts_with(&format!("{}: ", dir.join("b.py").display()))
-                && errors[0].message.contains("valid UTF-8"),
-            "{errors:?}"
+        assert_eq!(
+            (&errors[0].path, errors[0].position),
+            (&dir.join("b.py"), None)
+        );
+        assert!(errors[0].message.contains("valid UTF-8"), "{errors:?}");
+        assert_eq!(
+            (&errors[1].path, errors[1].position),
+            (&dir.join("c.py"), Some((1, 7)))
         );
         assert!(
-            errors[1]
-                .message
-                .starts_with(&format!("{}:1:", dir.join("c.py").display()))
-                && errors[1].message.contains("syntax error"),
+            errors[1].message.starts_with("syntax error: "),
             "{errors:?}"
         );
-        assert_eq!(errors[1].path, dir.join("c.py"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

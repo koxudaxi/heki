@@ -5,6 +5,24 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.1.1] - Unreleased
+
+### Fixed
+
+- The errors of files that cannot be read or parsed (and of files that changed on disk during
+  `--fix`) print the paths diagnostics print: relative to the working directory, without a
+  leading `./` (`error: pkg/broken.py:1:7: syntax error: ...`, was `./pkg/broken.py`), also
+  in `--watch` and `heki assumptions`.
+- On Windows, `json` output, errors, and `heki assumptions` write paths with `/` separators,
+  as the other output formats do (`pkg/a.py`, was `pkg\a.py`), and the paths heki resolves
+  (the project root and the files under it that messages name, such as a configured baseline,
+  and the language server's paths in its log) no longer start with `\\?\`.
+- On Windows, a checkout keeps the repository's LF line breaks (`.gitattributes`), so a heki
+  built there prints the rule documentation (`heki rule`) as written, without CR characters.
+- The language server, when the client names no workspace folder, indexes the working directory
+  in the form it compares document paths in; on Windows a document could otherwise be missed
+  as part of the project.
+
 ## [0.1.0] - 2026-11-21
 
 The first public preview.
@@ -81,4 +99,5 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.1.1]: https://github.com/koxudaxi/heki/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/koxudaxi/heki/releases/tag/v0.1.0

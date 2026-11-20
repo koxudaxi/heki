@@ -13,16 +13,16 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Paths are written as text; one that is not valid UTF-8 (possible on Linux) is written
-/// lossily instead of failing the whole report.
-fn lossy_path<S: serde::Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(&path.to_string_lossy())
+/// Paths are written as every report writes them ([`path_text`]): one that is not valid UTF-8
+/// (possible on Linux) is written lossily instead of failing the whole report.
+fn report_path<S: serde::Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path_text(path))
 }
 
 /// Related jump location (e.g., each hop in an `EFF101` or `MUT201` call chain for LSP).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelatedLocation {
-    #[serde(serialize_with = "lossy_path")]
+    #[serde(serialize_with = "report_path")]
     pub path: PathBuf,
     pub line: u32,
     pub column: u32,
@@ -40,7 +40,7 @@ pub struct TextEdit {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
-    #[serde(serialize_with = "lossy_path")]
+    #[serde(serialize_with = "report_path")]
     pub path: PathBuf,
     pub line: u32,
     pub column: u32,
@@ -158,7 +158,7 @@ pub fn render(
         OutputFormat::Full => render_full(diags, source_line),
         OutputFormat::Concise => render_concise(diags),
         OutputFormat::Json => {
-            // Diagnostics hold strings, numbers, and paths (written lossily by `lossy_path`).
+            // Diagnostics hold strings, numbers, and paths (written lossily by `report_path`).
             let mut s = serde_json::to_string_pretty(diags).expect("diagnostics serialize");
             s.push('\n');
             s

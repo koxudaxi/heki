@@ -547,7 +547,7 @@ fn watch_keeps_reporting_errors_of_unchanged_files_and_forgets_unreadable_ones()
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("pkg/bad.py:1:7: syntax error")),
+            .any(|l| l.starts_with("error: pkg/bad.py:1:7: syntax error")),
         "{lines:#?}"
     );
     // The helper can no longer be read: like `heki check`, the project goes on without it, and
@@ -561,7 +561,7 @@ fn watch_keeps_reporting_errors_of_unchanged_files_and_forgets_unreadable_ones()
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("pkg/bad.py:1:7: syntax error")),
+            .any(|l| l.starts_with("error: pkg/bad.py:1:7: syntax error")),
         "{lines:#?}"
     );
     let out = child.wait_with_output().unwrap();

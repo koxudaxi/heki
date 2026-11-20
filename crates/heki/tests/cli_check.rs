@@ -117,7 +117,8 @@ fn exit_codes_and_clean_runs() {
     p.write("pkg/broken.py", "def f(:\n");
     let (code, _, stderr) = p.heki(&[]);
     assert_eq!(code, 2);
-    assert!(stderr.contains("pkg/broken.py:1:"), "{stderr}");
+    // Errors print the paths diagnostics print.
+    assert!(stderr.contains("error: pkg/broken.py:1:7: "), "{stderr}");
 }
 
 #[test]

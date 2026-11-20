@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::Project;
+use common::{Project, report_path};
 use serde_json::Value;
 
 const BLOCKING: &str = "import time\n\n\nasync def handler():\n    time.sleep(1)\n";
@@ -316,13 +316,13 @@ fn discovery_of_explicit_files_outside_paths_and_excluded_directories() {
     let (_, stdout, _) = p.check(&["generated/g.py", "--output-format", "json"]);
     assert_eq!(hits(&stdout), vec![hit("generated/g.py", 5, "EFF101")]);
     // A second directory outside the project root keeps its own path.
-    let other = outside.dir.display().to_string();
-    let (_, stdout, _) = p.check(&[".", &other, "--output-format", "json"]);
+    let other = outside.dir.to_str().unwrap();
+    let (_, stdout, _) = p.check(&[".", other, "--output-format", "json"]);
     let paths: Vec<String> = hits(&stdout).into_iter().map(|h| h.0).collect();
     assert_eq!(
         paths,
         vec![
-            format!("{other}/x.py"),
+            report_path(&outside.dir.join("x.py")),
             "a.py".to_owned(),
             "b.py".to_owned()
         ]
@@ -357,7 +357,7 @@ fn a_source_that_is_not_utf8_is_a_read_error() {
     assert_eq!(code, 2, "{stderr}");
     assert_eq!(hits(&stdout), vec![hit("a.py", 5, "EFF101")]);
     assert!(
-        stderr.contains("error: ./latin1.py: stream did not contain valid UTF-8"),
+        stderr.contains("error: latin1.py: stream did not contain valid UTF-8"),
         "{stderr}"
     );
 }
@@ -422,9 +422,12 @@ fn ratchet_baseline_files_that_cannot_be_read_or_written() {
     );
     let (code, _, stderr) = p.check(&["--baseline", "no-dir/b.toml", "--update-baseline"]);
     assert_eq!(code, 2);
+    // The cause is the system's own text.
+    let missing_dir = std::fs::write(p.dir.join("no-dir/b.toml"), "").unwrap_err();
     assert!(
-        stderr.contains("failed to write baseline no-dir/b.toml")
-            && stderr.contains("No such file or directory"),
+        stderr.contains(&format!(
+            "failed to write baseline no-dir/b.toml: {missing_dir}"
+        )),
         "{stderr}"
     );
     // `baseline` in the configuration is used when `--baseline` is absent.

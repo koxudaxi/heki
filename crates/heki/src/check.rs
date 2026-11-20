@@ -11,7 +11,9 @@ use heki_diagnostics::{
 };
 use heki_effect::{ProjectIndex, analyze_project, analyze_project_for, func_qualname};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
-use heki_rules::project::{FileError, ParsedFile, Project, ProjectOptions, retain_unsuppressed};
+use heki_rules::project::{
+    FileError, ParsedFile, Project, ProjectOptions, canonical, retain_unsuppressed,
+};
 use heki_rules::{
     CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
     fold_root_causes,
@@ -162,9 +164,9 @@ struct FixedFile {
     fixes: usize,
 }
 
-/// How `heki check` prints a path, in every output format and in `--diff` headers (as Ruff
-/// does): relative to the working directory when it is inside it (also through a symbolic
-/// link), otherwise as given.
+/// How `heki check` prints the path of a checked file, in every output format, in `--diff`
+/// headers, and in its errors (as Ruff does): relative to the working directory when it is
+/// inside it (also through a symbolic link), otherwise as given.
 pub(crate) fn shown_path(p: &Path) -> PathBuf {
     if p.is_relative() {
         return p.to_path_buf();
@@ -174,16 +176,24 @@ pub(crate) fn shown_path(p: &Path) -> PathBuf {
         .ok()
         .map(Path::to_path_buf)
         .or_else(|| {
-            let abs = std::fs::canonicalize(p).ok()?;
-            let rel = abs.strip_prefix(std::fs::canonicalize(&cwd).ok()?).ok()?;
+            let abs = canonical(p).ok()?;
+            let rel = abs.strip_prefix(canonical(&cwd).ok()?).ok()?;
             Some(rel.to_path_buf())
         })
         .unwrap_or_else(|| p.to_path_buf())
 }
 
 /// [`shown_path`] as reports write it.
-fn shown_text(p: &Path) -> String {
+pub(crate) fn shown_text(p: &Path) -> String {
     path_text(&shown_path(p))
+}
+
+/// File errors as `heki check` prints them: with the paths it prints ([`shown_text`]).
+pub(crate) fn shown_errors<'a>(errors: impl IntoIterator<Item = &'a FileError>) -> Vec<String> {
+    errors
+        .into_iter()
+        .map(|e| e.report(&shown_text(&e.path)))
+        .collect()
 }
 
 /// What `--fix` / `--diff` would do.
@@ -287,12 +297,8 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         } else {
             ExitCode::from(1)
         };
-        let errors: Vec<String> = run
-            .errors
-            .iter()
-            .map(ToString::to_string)
-            .chain(run.refused)
-            .collect();
+        let mut errors = shown_errors(&run.errors);
+        errors.extend(run.refused);
         return finish(args.output_format, &errors, code);
     }
     let mut refused = Vec::new();
@@ -329,15 +335,13 @@ fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
         if heki_ast::read_source(&f.path).ok().as_ref() != Some(&f.original) {
             conflicts.push(FileError {
                 path: f.path.clone(),
-                message: format!(
-                    "{}: changed on disk while heki was fixing it; its fixes were not written (run `heki check --fix` again)",
-                    f.path.display()
-                ),
+                position: None,
+                message: "changed on disk while heki was fixing it; its fixes were not written (run `heki check --fix` again)".to_owned(),
             });
             continue;
         }
         heki_ast::write_source(&f.path, &f.fixed)
-            .with_context(|| format!("failed to write `{}`", f.path.display()))?;
+            .with_context(|| format!("failed to write `{}`", shown_text(&f.path)))?;
         fixes += f.fixes;
         written += 1;
     }
@@ -420,7 +424,7 @@ pub(crate) fn report(
     if let Some(bp) = baseline_path.as_ref().filter(|_| args.update_baseline) {
         if !project.errors.is_empty() {
             log!(fmt, "{}", not_written("baseline", bp, project.errors.len()));
-            return finish(fmt, &project.errors, ExitCode::SUCCESS);
+            return finish(fmt, &shown_errors(&project.errors), ExitCode::SUCCESS);
         }
         if regressions > 0 {
             log!(
@@ -437,7 +441,7 @@ pub(crate) fn report(
                 bp.display(),
                 baseline.counts.len(),
             );
-            return finish(fmt, &project.errors, ExitCode::SUCCESS);
+            return finish(fmt, &shown_errors(&project.errors), ExitCode::SUCCESS);
         }
     }
 
@@ -476,7 +480,7 @@ pub(crate) fn report(
     } else {
         ExitCode::from(1)
     };
-    finish(args.output_format, &project.errors, code)
+    finish(args.output_format, &shown_errors(&project.errors), code)
 }
 
 /// `heki snapshot [PATHS...] [--write]`: print or save the normalized summaries (`MUT103`).
@@ -506,7 +510,11 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
                 "{}",
                 not_written("summary snapshot", &path, project.errors.len())
             );
-            return finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS);
+            return finish(
+                OutputFormat::Full,
+                &shown_errors(&project.errors),
+                ExitCode::SUCCESS,
+            );
         }
         snap.save(&path)?;
         eprintln!(
@@ -517,7 +525,11 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     } else {
         print!("{}", snap.to_json());
     }
-    finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS)
+    finish(
+        OutputFormat::Full,
+        &shown_errors(&project.errors),
+        ExitCode::SUCCESS,
+    )
 }
 
 /// Why a run that could not analyze every file keeps the `what` at `path` as it is: written
@@ -556,11 +568,7 @@ pub(crate) fn log_line(format: OutputFormat, line: &str) {
 }
 
 /// Syntax / read errors make the run fail with exit code 2 after the report.
-pub(crate) fn finish(
-    format: OutputFormat,
-    errors: &[impl std::fmt::Display],
-    code: ExitCode,
-) -> Result<ExitCode> {
+pub(crate) fn finish(format: OutputFormat, errors: &[String], code: ExitCode) -> Result<ExitCode> {
     for e in errors {
         log!(format, "error: {e}");
     }
@@ -604,10 +612,9 @@ mod tests {
         let (fixes, written, conflicts) = write_fixed(&files).unwrap();
         assert_eq!((fixes, written), (1, 1));
         assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0].path, kept);
         assert!(
-            conflicts[0]
-                .message
-                .starts_with(&format!("{}: changed on disk", kept.display())),
+            conflicts[0].message.starts_with("changed on disk"),
             "{conflicts:?}"
         );
         assert_eq!(

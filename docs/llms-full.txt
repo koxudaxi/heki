@@ -761,6 +761,10 @@ $ heki check --output-format json
 | `github` | GitHub Actions annotations with the message ([CI](https://heki.koxudaxi.dev/adoption/#continuous-integration)) |
 | `sarif` | the message, the location, the call chain, and the help (`properties.help`), for code-scanning dashboards (no evidence or blocker) |
 
+Every format, `--diff`, and the errors of files that cannot be read or parsed print a file's
+path relative to the working directory when the file is inside it (otherwise as given), as Ruff
+does, and with `/` separators on every platform, Windows included.
+
 ## Exit codes
 
 | Code | Meaning |
