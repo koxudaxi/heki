@@ -1105,7 +1105,8 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
     for (name, bound) in expected {
         assert_eq!(loop_of(name)["bound"], bound, "{name}");
     }
-    // A starred target binds a name too; a target binding an attribute binds none.
+    // A starred target binds a name too; what the body does with an attribute target is not
+    // followed, so the loop steps through items.
     let unpacked = functions
         .iter()
         .find(|f| f["qualname"] == "unpacked_targets")
@@ -1116,10 +1117,7 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
         .iter()
         .map(|lp| &lp["bound"])
         .collect();
-    assert_eq!(
-        unpacked_bounds,
-        [&unbounded, &serde_json::json!("retry_pattern")]
-    );
+    assert_eq!(unpacked_bounds, [&unbounded, &unbounded]);
     // `10 > len(buf)` and `len(buf) <= 9` cap at 10; `!=`, `len(buf) > 0`, and a starred
     // `len(*parts)` cap nothing.
     for name in ["cap_gt", "cap_lte"] {

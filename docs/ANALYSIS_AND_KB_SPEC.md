@@ -156,8 +156,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
     handler) over a small constant range or a target named like `retry` / `attempt` (also one
     name of a tuple target), or a `while` loop with a retry body that sleeps; and a paced loop
-    other than `while True:`: a `while` loop, or a `for` loop whose body never reads its target,
-    in which every path from the header back to it runs a call that waits
+    other than `while True:`: a `while` loop, or a `for` loop whose body never reads the names
+    its target binds (a target binding an attribute or an item counts as read), in which every
+    path from the header back to it runs a call that waits
     (`facts::waits_every_iteration`): a sleep (a call or method named `sleep`) of a duration
     other than a literal zero, or a `wait` with a `timeout=` keyword that is not a literal zero
     or a positive constant (`stop.wait(1)`; `asyncio.wait(tasks)` may return at once), awaited

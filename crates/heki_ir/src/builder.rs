@@ -4022,7 +4022,8 @@ fn tested_event(test: &Expr) -> Option<&Expr> {
     }
 }
 
-/// Whether `body` reads a name the `for` target binds (also in a scope nested in it).
+/// Whether `body` reads a name the `for` target binds (also in a scope nested in it). A target
+/// that binds an attribute or an item counts as read: its reads are not followed.
 fn reads_target(body: &[Stmt], target: &Expr) -> bool {
     use heki_ast::raw_ast::visitor::{self, Visitor};
 
@@ -4043,7 +4044,9 @@ fn reads_target(body: &[Stmt], target: &Expr) -> bool {
     }
 
     let mut bound = Vec::new();
-    target_names(target, &mut bound);
+    if !target_names(target, &mut bound) {
+        return true;
+    }
     let mut v = Reads {
         bound,
         found: false,
@@ -4052,18 +4055,19 @@ fn reads_target(body: &[Stmt], target: &Expr) -> bool {
     v.found
 }
 
-/// The names a `for` target binds (`i` of `for i, (a, *b) in ...` and the others). A target
-/// that binds an attribute or an item binds no name.
-fn target_names<'t>(target: &'t Expr, out: &mut Vec<&'t str>) {
+/// The names a `for` target binds (`i` of `for i, (a, *b) in ...` and the others), and whether
+/// it binds nothing else (no attribute or item).
+fn target_names<'t>(target: &'t Expr, out: &mut Vec<&'t str>) -> bool {
     match target {
-        Expr::Name(n) => out.push(n.id.as_str()),
+        Expr::Name(n) => {
+            out.push(n.id.as_str());
+            true
+        }
         Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
-            for e in elts {
-                target_names(e, out);
-            }
+            elts.iter().all(|e| target_names(e, out))
         }
         Expr::Starred(s) => target_names(&s.value, out),
-        _ => {}
+        _ => false,
     }
 }
 
