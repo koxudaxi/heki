@@ -35,8 +35,10 @@ bindings = "bin"
 manifest-path = "crates/heki/Cargo.toml"
 module-name = "heki"
 # Files at the repository root that the source distribution must carry: `heki_kb` embeds the
-# catalogs with `include_str!`, and `cargo test --workspace` embeds or reads the test inputs.
+# catalogs with `include_str!`, and `cargo test --workspace` embeds or reads the test inputs,
+# among them `docs/index.md`, whose examples must equal README.md's.
 include = [
     { path = "kb/**/*.toml", format = "sdist" },
     { path = "tests/**/*", format = "sdist" },
+    { path = "docs/index.md", format = "sdist" },
 ]
