@@ -193,6 +193,80 @@ pub struct EcosystemEntry {
     /// `sqlalchemy.orm.Session.begin`) holds a lock or a transaction. Async locks are never
     /// flagged.
     pub sync_lock_or_tx: bool,
+    /// What the call does instead when an argument is known (the first case that holds).
+    pub cases: Vec<ArgCase>,
+}
+
+/// One case of an entry (`EcosystemEntry::cases`): when the argument at position `arg` (the
+/// receiver not counted), or passed by the keyword `param`, passes every test the case sets,
+/// the call has the case's `effects` and `return_type` (those it sets) instead of the entry's.
+/// An argument the call does not pass, or may pass through `*` / `**` unpacking, passes no
+/// test, so the entry's own facts are those of the unknown argument.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArgCase {
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    /// A literal equal to this one (`false`; `0`, which a float `0.0` equals too).
+    pub equals: Option<ArgLiteral>,
+    /// A string literal starting with one of these prefixes.
+    pub prefix: Vec<String>,
+    /// A string literal that is not empty.
+    pub nonempty: bool,
+    /// An instance of one of these classes.
+    pub instance_of: Vec<String>,
+    pub effects: Option<Vec<ExecEffectKind>>,
+    pub return_type: Option<String>,
+}
+
+/// A literal `ArgCase::equals` compares with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ArgLiteral {
+    Bool(bool),
+    Int(i64),
+}
+
+/// What the analysis knows of an argument a call passes ([`EcosystemEntry::case_for`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ArgFact {
+    pub literal: Option<LiteralValue>,
+    /// The class of the value, when it is an instance of a known one.
+    pub class: Option<String>,
+}
+
+/// A constant argument.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiteralValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
+impl ArgCase {
+    fn holds(&self, fact: &ArgFact) -> bool {
+        let literal = fact.literal.as_ref();
+        let text = match literal {
+            Some(LiteralValue::Str(s)) => Some(s.as_str()),
+            _ => None,
+        };
+        let equals = self.equals.is_none_or(|want| match (want, literal) {
+            (ArgLiteral::Bool(b), Some(LiteralValue::Bool(v))) => b == *v,
+            (ArgLiteral::Int(n), Some(LiteralValue::Int(v))) => n == *v,
+            (ArgLiteral::Int(n), Some(LiteralValue::Float(v))) => n as f64 == *v,
+            _ => false,
+        });
+        let prefix = self.prefix.is_empty()
+            || text.is_some_and(|t| self.prefix.iter().any(|p| t.starts_with(p.as_str())));
+        let nonempty = !self.nonempty || text.is_some_and(|t| !t.is_empty());
+        let instance = self.instance_of.is_empty()
+            || fact
+                .class
+                .as_ref()
+                .is_some_and(|c| self.instance_of.contains(c));
+        equals && prefix && nonempty && instance
+    }
 }
 
 impl EcosystemEntry {
@@ -201,8 +275,36 @@ impl EcosystemEntry {
     fn normalized(mut self) -> Self {
         if self.async_safe {
             self.effects.retain(|e| !e.blocks());
+            for case in &mut self.cases {
+                if let Some(effects) = &mut case.effects {
+                    effects.retain(|e| !e.blocks());
+                }
+            }
         }
         self
+    }
+
+    /// The first case the call's arguments select: `arg(position, keyword)` tells what the
+    /// call passes there (`None`: nothing known, or not passed).
+    pub fn case_for(
+        &self,
+        mut arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<&ArgCase> {
+        self.cases.iter().find(|case| {
+            arg(case.arg, case.param.as_deref()).is_some_and(|fact| case.holds(&fact))
+        })
+    }
+
+    /// The effects of a call selecting `case`.
+    pub fn effects_in<'e>(&'e self, case: Option<&'e ArgCase>) -> &'e [ExecEffectKind] {
+        case.and_then(|c| c.effects.as_deref())
+            .unwrap_or(&self.effects)
+    }
+
+    /// The class of the result of a call selecting `case`.
+    pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
+        case.and_then(|c| c.return_type.as_deref())
+            .or(self.return_type.as_deref())
     }
 }
 
@@ -723,22 +825,44 @@ mod tests {
     ];
     /// DynamoDB item reads and writes (client operations and `Table` actions).
     const DYNAMODB_ITEM_CALLS: &[&str] = &["get_item", "put_item", "update_item", "delete_item"];
-    const PANDAS_FILE_READERS: &[&str] = &[
-        "read_csv",
-        "read_table",
-        "read_fwf",
-        "read_excel",
-        "read_json",
-        "read_parquet",
-        "read_feather",
-        "read_orc",
-        "read_pickle",
-        "read_hdf",
-        "read_xml",
-        "read_stata",
-        "read_sas",
-        "read_spss",
+    /// pandas readers of a URL or a buffer, with the name of their source parameter.
+    const PANDAS_URL_READERS: &[(&str, &str)] = &[
+        ("read_csv", "filepath_or_buffer"),
+        ("read_table", "filepath_or_buffer"),
+        ("read_fwf", "filepath_or_buffer"),
+        ("read_excel", "io"),
+        ("read_json", "path_or_buf"),
+        ("read_parquet", "path"),
+        ("read_feather", "path"),
+        ("read_orc", "path"),
+        ("read_pickle", "filepath_or_buffer"),
+        ("read_xml", "path_or_buffer"),
+        ("read_stata", "filepath_or_buffer"),
     ];
+    const PANDAS_URL_SCHEMES: &[&str] = &[
+        "http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://",
+        "abfss://", "hdfs://", "sftp://",
+    ];
+
+    /// The source of a reader is a URL to download (`effects`) or a buffer to parse.
+    fn source_case(param: &str, url: bool) -> ArgCase {
+        ArgCase {
+            arg: Some(0),
+            param: Some(param.into()),
+            prefix: if url { s(PANDAS_URL_SCHEMES) } else { Vec::new() },
+            instance_of: if url {
+                Vec::new()
+            } else {
+                s(&["io.StringIO", "io.BytesIO"])
+            },
+            effects: Some(if url { vec![BlockingNet] } else { Vec::new() }),
+            ..ArgCase::default()
+        }
+    }
+
+    fn with_cases(cases: Vec<ArgCase>, e: EcosystemEntry) -> EcosystemEntry {
+        EcosystemEntry { cases, ..e }
+    }
 
     /// Every Layer 2 entry (docs/ANALYSIS_AND_KB_SPEC.md section 4.2), as `(symbols, expected
     /// entry without symbol)`.
@@ -758,7 +882,16 @@ mod tests {
         let qs = "django.db.models.query.QuerySet";
         let async_queryset_runs: Vec<String> =
             QUERYSET_RUNS.iter().map(|m| format!("{qs}.a{m}")).collect();
-        vec![
+        let pandas_url_readers = PANDAS_URL_READERS.iter().map(|&(reader, param)| {
+            (
+                vec![format!("pandas.{reader}")],
+                with_cases(
+                    vec![source_case(param, true), source_case(param, false)],
+                    entry(&[BlockingFs]),
+                ),
+            )
+        });
+        let mut required = vec![
             // ------------------------------------------------ standard library
             (s(&["time.sleep"]), entry(&[Sleep])),
             (
@@ -1290,8 +1423,16 @@ mod tests {
             ),
             // ------------------------------------------------ data
             (
-                with_prefix("pandas", PANDAS_FILE_READERS),
+                // Local paths only.
+                with_prefix("pandas", &["read_hdf", "read_spss"]),
                 entry(&[BlockingFs]),
+            ),
+            (
+                s(&["pandas.read_sas"]),
+                with_cases(
+                    vec![source_case("filepath_or_buffer", false)],
+                    entry(&[BlockingFs]),
+                ),
             ),
             (
                 [
@@ -1335,7 +1476,9 @@ mod tests {
                     ..entry(&[BlockingDb])
                 },
             ),
-        ]
+        ];
+        required.extend(pandas_url_readers);
+        required
     }
 
     /// `EFF106` synchronous locks (instances held by `with`).
@@ -1525,6 +1668,36 @@ mod tests {
         }
     }
 
+    /// Every case names its argument, tests it, and changes something; a case's return type
+    /// names a catalogued class, as an entry's does.
+    #[test]
+    fn layer2_cases_test_a_named_argument() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        for (symbol, e) in &kb.entries {
+            for case in &e.cases {
+                assert!(case.arg.is_some() || case.param.is_some(), "{symbol}");
+                assert!(
+                    case.equals.is_some()
+                        || !case.prefix.is_empty()
+                        || case.nonempty
+                        || !case.instance_of.is_empty(),
+                    "{symbol}"
+                );
+                assert!(
+                    case.effects.is_some() || case.return_type.is_some(),
+                    "{symbol}"
+                );
+                if let Some(class) = &case.return_type {
+                    let methods = format!("{class}.");
+                    assert!(
+                        kb.entries.keys().any(|k| k.starts_with(&methods)),
+                        "{symbol} -> {class}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn layer2_does_not_register_popen_spawn() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
@@ -1615,6 +1788,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A case holds when the argument passes every test it sets; the first case that holds
+    /// decides the effects and the return type, and an unknown argument selects none.
+    #[test]
+    fn argument_cases_select_by_literal_prefix_and_class() {
+        let lit = |v: LiteralValue| ArgFact {
+            literal: Some(v),
+            class: None,
+        };
+        let inst = |c: &str| ArgFact {
+            literal: None,
+            class: Some(c.into()),
+        };
+        let off = ArgCase {
+            arg: Some(0),
+            param: Some("timeout".into()),
+            equals: Some(ArgLiteral::Int(0)),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let no_wait = ArgCase {
+            param: Some("block".into()),
+            equals: Some(ArgLiteral::Bool(false)),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let url = ArgCase {
+            arg: Some(0),
+            prefix: s(&["https://"]),
+            effects: Some(vec![BlockingNet]),
+            ..ArgCase::default()
+        };
+        let named = ArgCase {
+            arg: Some(0),
+            nonempty: true,
+            return_type: Some("m.Named".into()),
+            ..ArgCase::default()
+        };
+        let buffer = ArgCase {
+            arg: Some(0),
+            instance_of: s(&["io.StringIO"]),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        for (case, fact, holds) in [
+            (&off, lit(LiteralValue::Int(0)), true),
+            (&off, lit(LiteralValue::Float(0.0)), true),
+            (&off, lit(LiteralValue::Int(1)), false),
+            (&off, lit(LiteralValue::Bool(false)), false),
+            (&off, inst("builtins.int"), false),
+            (&no_wait, lit(LiteralValue::Bool(false)), true),
+            (&no_wait, lit(LiteralValue::Int(0)), false),
+            (&url, lit(LiteralValue::Str("https://x".into())), true),
+            (&url, lit(LiteralValue::Str("rows.csv".into())), false),
+            (&url, inst("builtins.str"), false),
+            (&named, lit(LiteralValue::Str("export".into())), true),
+            (&named, lit(LiteralValue::Str(String::new())), false),
+            (&buffer, inst("io.StringIO"), true),
+            (&buffer, inst("io.BytesIO"), false),
+        ] {
+            assert_eq!(case.holds(&fact), holds, "{case:?} {fact:?}");
+        }
+        let e = EcosystemEntry {
+            cases: vec![off.clone(), url.clone()],
+            ..returning("m.Default", entry(&[BlockingSync]))
+        };
+        let pick = |facts: &[(Option<u8>, Option<&str>, ArgFact)]| {
+            e.case_for(|i, k| {
+                facts
+                    .iter()
+                    .find(|(fi, fk, _)| (fi.is_some() && *fi == i) || (fk.is_some() && *fk == k))
+                    .map(|(_, _, f)| f.clone())
+            })
+            .cloned()
+        };
+        assert_eq!(pick(&[]), None);
+        assert_eq!(
+            pick(&[(None, Some("timeout"), lit(LiteralValue::Int(0)))]),
+            Some(off.clone())
+        );
+        let chosen = pick(&[(Some(0), None, lit(LiteralValue::Str("https://x".into())))]);
+        assert_eq!(chosen, Some(url.clone()));
+        assert_eq!(e.effects_in(chosen.as_ref()), &[BlockingNet]);
+        assert_eq!(e.effects_in(None), &[BlockingSync]);
+        assert_eq!(e.return_type_in(chosen.as_ref()), Some("m.Default"));
+        let named_entry = EcosystemEntry {
+            cases: vec![named.clone()],
+            ..e.clone()
+        };
+        assert_eq!(
+            named_entry.return_type_in(Some(&named)),
+            Some("m.Named")
+        );
+        assert_eq!(named_entry.effects_in(Some(&named)), &[BlockingSync]);
     }
 
     #[test]

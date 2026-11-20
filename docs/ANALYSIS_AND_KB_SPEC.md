@@ -546,7 +546,12 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
-`opaque_to_layer3` (reserved for Layer 3). A file lists its `opaque_packages`. Projects add or
+`opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
+argument (by position, the receiver not counted, or by keyword) is a given literal, a string
+literal with a given prefix or not empty, or an instance of a given class (`pd.read_csv` of a
+`https://` URL is `blocking_net`, of an `io.StringIO` nothing); the first case that holds sets
+the call's `effects` and `return_type`, and an argument that is not passed, or may be passed
+through `*` / `**` unpacking, selects none. A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`): an
 override sets the keys it lists and keeps the built-in entry's others. An `async_safe` entry

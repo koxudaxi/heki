@@ -2788,51 +2788,91 @@ sync_lock_or_tx = true
 opaque_to_layer3 = true
 
 # --- Data: pandas I/O ---
-# Readers of files and buffers are `blocking_fs` (EFF105, opt-in); SQL readers run a query.
+# Readers of files are `blocking_fs` (EFF105, opt-in); SQL readers run a query. A reader's
+# source decides its I/O: a URL literal is downloaded (`urlopen` for `http(s)://` / `ftp://`,
+# fsspec for the object stores), an in-memory buffer (`io.StringIO` / `io.BytesIO`) is parsed
+# without I/O. `read_hdf` / `read_spss` take local paths only; `read_sas` is not listed as
+# reading URLs.
 
 [[entries]]
 symbol = "pandas.read_csv"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_table"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_fwf"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_excel"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "io", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "io", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_json"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path_or_buf", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path_or_buf", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_parquet"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_feather"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_orc"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_pickle"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2843,16 +2883,27 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pandas.read_xml"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "path_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "path_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_stata"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", prefix = ["http://", "https://", "ftp://", "s3://", "gs://", "gcs://", "az://", "abfs://", "abfss://", "hdfs://", "sftp://"], effects = ["blocking_net"] },
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pandas.read_sas"
 effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "filepath_or_buffer", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]

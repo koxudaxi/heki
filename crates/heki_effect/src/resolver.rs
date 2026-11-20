@@ -13,8 +13,10 @@
 
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
-use heki_ir::{FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId};
-use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
+use heki_ir::{
+    ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, SmallDisplay, VarId,
+};
+use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -2001,6 +2003,67 @@ pub fn aliases_of(f: &IrFunction, roots: impl IntoIterator<Item = VarId>) -> FxH
 
 // ------------------------------------------------------------------------------ type inference
 
+/// What a call passes at position `index` (the receiver not counted) or by `keyword`, for the
+/// catalog's argument cases (`heki_kb::EcosystemEntry::case_for`), as `fact` describes it.
+/// Nothing is known of an argument `*` / `**` unpacking may pass.
+pub(crate) fn passed_arg(
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    star_from: Option<u8>,
+    (index, keyword): (Option<u8>, Option<&str>),
+    fact: impl Fn(VarId) -> ArgFact,
+) -> Option<ArgFact> {
+    if let Some(k) = keyword
+        && let Some((_, v)) = kwargs.iter().find(|(name, _)| name.as_deref() == Some(k))
+    {
+        return Some(fact(*v));
+    }
+    let i = index?;
+    if star_from.is_some_and(|s| i >= s) {
+        return None;
+    }
+    args.get(usize::from(i)).map(|v| fact(*v))
+}
+
+/// The constant `var` holds (through copies), with `def` giving each variable's definition.
+pub(crate) fn literal<'i>(
+    def: impl Fn(VarId) -> Option<&'i Inst>,
+    var: VarId,
+) -> Option<LiteralValue> {
+    let mut cur = var;
+    // Copies of an SSA variable form a tree, so the walk ends.
+    loop {
+        match &def(cur)?.kind {
+            InstKind::Copy { src, .. } => cur = *src,
+            InstKind::Const { literal, .. } => {
+                return match literal {
+                    ConstLiteral::Bool(b) => Some(LiteralValue::Bool(*b)),
+                    ConstLiteral::Int(n) => Some(LiteralValue::Int(*n)),
+                    ConstLiteral::Float(f) => f.parse().ok().map(LiteralValue::Float),
+                    ConstLiteral::Str(s) => Some(LiteralValue::Str(s.clone())),
+                    _ => None,
+                };
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// [`ArgFact`] of `var`: its constant, and its class from the inferred `types`.
+pub(crate) fn arg_fact<'i>(
+    def: impl Fn(VarId) -> Option<&'i Inst>,
+    types: &FxHashMap<VarId, Val>,
+    var: VarId,
+) -> ArgFact {
+    ArgFact {
+        literal: literal(def, var),
+        class: match types.get(&var) {
+            Some(Val::Inst(class)) => Some(class.clone()),
+            _ => None,
+        },
+    }
+}
+
 /// Inferred value of an SSA variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Val {
@@ -2108,8 +2171,13 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// Instance produced by calling the object `fqn`, if known.
-    fn call_result(&self, fqn: &str) -> Option<Val> {
+    /// Instance produced by calling the object `fqn`, if known; `arg` tells what the call
+    /// passes (for the catalog's argument cases).
+    fn call_result(
+        &self,
+        fqn: &str,
+        arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<Val> {
         match self.project.symbol(fqn) {
             Symbol::Class(_) => return Some(Val::Inst(fqn.to_owned())),
             Symbol::Function(_, decl) => {
@@ -2132,8 +2200,8 @@ impl<'a> TypeCtx<'a> {
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
         let entry = self.kb.lookup(fqn)?;
-        if let Some(rt) = &entry.return_type {
-            return Some(Val::Inst(rt.clone()));
+        if let Some(rt) = entry.return_type_in(entry.case_for(arg)) {
+            return Some(Val::Inst(rt.to_owned()));
         }
         (entry.effects.contains(&ExecEffectKind::UnpooledClientAlloc)
             && !entry.effects.contains(&ExecEffectKind::BlockingNet))
@@ -2189,8 +2257,12 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// Value returned by a resolved call target.
-    fn callee_result(&self, callee: &Callee) -> Option<Val> {
+    /// Value returned by a resolved call target (`arg` as for [`Self::call_result`]).
+    fn callee_result(
+        &self,
+        callee: &Callee,
+        arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
+    ) -> Option<Val> {
         match callee {
             Callee::Project(keys, _) if keys.len() == 1 => {
                 let key = &keys[0];
@@ -2202,7 +2274,7 @@ impl<'a> TypeCtx<'a> {
                     .as_ref()
                     .map(|t| Val::Inst(self.project.canonical(t)))
             }
-            Callee::External(fqn) => self.call_result(fqn),
+            Callee::External(fqn) => self.call_result(fqn, arg),
             _ => None,
         }
     }
@@ -2264,7 +2336,7 @@ impl<'a> TypeCtx<'a> {
                     let Some(dst) = inst.kind.dst() else {
                         continue;
                     };
-                    let val = self.infer_inst(inst, &types, owner.as_deref());
+                    let val = self.infer_inst(f, inst, &types, owner.as_deref());
                     let val =
                         val.or_else(|| f.var_name(dst).and_then(|n| annotated.get(n).cloned()));
                     if let Some(v) = val {
@@ -2278,6 +2350,7 @@ impl<'a> TypeCtx<'a> {
 
     fn infer_inst(
         &self,
+        f: &IrFunction,
         inst: &Inst,
         types: &FxHashMap<VarId, Val>,
         owner: Option<&str>,
@@ -2307,23 +2380,45 @@ impl<'a> TypeCtx<'a> {
                 Some(Val::Ref(format!("{}.{}", self.module_name(), f.qualname)))
             }
             InstKind::Call {
-                callee_var, args, ..
+                callee_var,
+                args,
+                kwargs,
+                star_from,
+                ..
             } => {
+                let passed = |i: Option<u8>, k: Option<&str>| {
+                    passed_arg(args, kwargs, *star_from, (i, k), |v| {
+                        arg_fact(|d| f.def_inst(d).map(|(_, i)| i), types, v)
+                    })
+                };
                 let callee_val = callee_var.and_then(|v| types.get(&v));
                 match callee_val {
                     Some(Val::Ref(fqn)) if fqn == "builtins.super" && args.is_empty() => {
                         owner.map(|o| Val::Super(o.to_owned()))
                     }
-                    Some(Val::Ref(fqn)) => self.call_result(fqn),
-                    other => self.callee_result(&self.resolve_call(other)),
+                    Some(Val::Ref(fqn)) => self.call_result(fqn, passed),
+                    other => self.callee_result(&self.resolve_call(other), passed),
                 }
             }
-            InstKind::MethodCall { recv, method, .. } => match types.get(recv) {
-                Some(Val::Ref(fqn)) if !self.project.is_project_class(fqn) => {
-                    self.call_result(&self.project.canonical(&format!("{fqn}.{method}")))
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                star_from,
+                ..
+            } => {
+                let passed = |i: Option<u8>, k: Option<&str>| {
+                    passed_arg(args, kwargs, *star_from, (i, k), |v| {
+                        arg_fact(|d| f.def_inst(d).map(|(_, i)| i), types, v)
+                    })
+                };
+                match types.get(recv) {
+                    Some(Val::Ref(fqn)) if !self.project.is_project_class(fqn) => self
+                        .call_result(&self.project.canonical(&format!("{fqn}.{method}")), passed),
+                    other => self.callee_result(&self.resolve_method(other, method), passed),
                 }
-                other => self.callee_result(&self.resolve_method(other, method)),
-            },
+            }
             // `with C() as c` binds `C().__enter__()`; clients / sessions / files return self.
             InstKind::EnterWith { mgr, .. } | InstKind::Await { value: mgr, .. } => {
                 types.get(mgr).cloned()

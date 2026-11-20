@@ -1333,3 +1333,50 @@ fn model_copy_with_update_is_a_shallow_copy() {
         ]
     );
 }
+
+const PANDAS_SOURCES: &str = r#"import io
+from io import BytesIO
+
+import pandas as pd
+
+
+async def tp_downloads(url):
+    pd.read_csv("https://example.org/rows.csv")
+    pd.read_parquet(path="s3://bucket/rows.parquet")
+
+
+async def tp_local_files(path):
+    pd.read_csv("rows.csv")
+    pd.read_excel(path)
+
+
+async def tn_buffers(text, raw):
+    pd.read_csv(io.StringIO("x\n1\n"))
+    pd.read_json(path_or_buf=io.StringIO(text))
+    pd.read_parquet(BytesIO(raw))
+
+
+async def tp_unpacked_source(args):
+    pd.read_csv(*args)
+"#;
+
+/// A pandas reader's source decides its I/O: a URL is downloaded (`EFF101`), a path is read
+/// from the disk (`EFF105`), and an in-memory buffer is parsed without I/O.
+#[test]
+fn pandas_readers_do_the_io_of_their_source() {
+    assert_eq!(
+        check(
+            "catalog_pandas_sources",
+            "app/sources.py",
+            PANDAS_SOURCES,
+            "EFF101,EFF105"
+        ),
+        vec![
+            d(8, "EFF101", "tp_downloads", "pandas.read_csv"),
+            d(9, "EFF101", "tp_downloads", "pandas.read_parquet"),
+            d(13, "EFF105", "tp_local_files", "pandas.read_csv"),
+            d(14, "EFF105", "tp_local_files", "pandas.read_excel"),
+            d(24, "EFF105", "tp_unpacked_source", "pandas.read_csv"),
+        ]
+    );
+}

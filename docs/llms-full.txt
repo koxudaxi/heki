@@ -1554,7 +1554,8 @@ Direct or indirect blocking network/DB/subprocess/sleep call reachable from `asy
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
 synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), database drivers
 (`sqlite3`, `psycopg`, `pymongo`, ...), subprocesses waiting for completion, `time.sleep`, and
-other blocking synchronization.
+other blocking synchronization. Where an argument decides what a library call does, a literal
+one is followed: `pd.read_csv("https://...")` downloads the file.
 
 Reading a `@property` or `functools.cached_property` attribute of a project class runs its
 getter, so the read counts as a call of the getter (`self.client` whose getter opens a
@@ -1656,7 +1657,9 @@ Opt-in: blocking local filesystem I/O reachable from `async def`.
 ## What it does
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
 `pathlib.Path.read_text` / `write_text` / `read_bytes` / `write_bytes` / `open`, `os.listdir`,
-`os.scandir`, `os.walk`, and `shutil` copies and removals. It follows the same boundary,
+`os.scandir`, `os.walk`, `shutil` copies and removals, and the pandas file readers
+(`pd.read_csv(path)`; one given a URL literal downloads it and is `EFF101`, one given an
+`io.StringIO` / `io.BytesIO` buffer does no I/O). It follows the same boundary,
 offload, and guard rules as `EFF101`, generators and offloading decorators included: `await
 in_thread(self.open) if isinstance(self._input, PathLike) else self.open()` is not reported
 when `open` only opens a file under `isinstance(self._input, PathLike)`.

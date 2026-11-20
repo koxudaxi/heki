@@ -8,7 +8,7 @@ use crate::guards::{self, GuardInputs, LocalGuards};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
-    Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
+    self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
 };
 use crate::{
@@ -1342,7 +1342,7 @@ impl<'a> Extractor<'a> {
         }
         let symbol = format!("{class}.__iter__");
         if self.cx.kb.lookup(&symbol).is_some() {
-            self.external_call(bb, symbol, &[], false, span);
+            self.external_call(bb, symbol, Passed::NOTHING, false, span);
         }
     }
 
@@ -1730,7 +1730,7 @@ impl<'a> Extractor<'a> {
                         events.invalidators.push((self.pos.0, self.pos.1, mask));
                     }
                 }
-                self.external_call(bb, symbol.clone(), call.args, call.is_awaited, call.span);
+                self.external_call(bb, symbol.clone(), call.passed(), call.is_awaited, call.span);
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
                 if let Some(class) = &call.constructs {
@@ -1857,7 +1857,12 @@ impl<'a> Extractor<'a> {
                 // `@d def f` is `f = d(f)`: the call runs `d(f)`, which offloads `f`.
                 for symbol in offloaders {
                     let offloaded: Vec<VarId> = call.value.into_iter().collect();
-                    self.external_call(bb, symbol, &offloaded, call.is_awaited, call.span);
+                    let passed = Passed {
+                        args: &offloaded,
+                        kwargs: &[],
+                        star_from: None,
+                    };
+                    self.external_call(bb, symbol, passed, call.is_awaited, call.span);
                 }
                 if callees.is_empty() {
                     return None;
@@ -1921,10 +1926,11 @@ impl<'a> Extractor<'a> {
         &mut self,
         bb: BlockId,
         symbol: String,
-        args: &[VarId],
+        passed: Passed<'_>,
         is_awaited: bool,
         span: Span,
     ) {
+        let args = passed.args;
         if symbol == "builtins.setattr" || symbol == "builtins.object.__setattr__" {
             if let (Some(obj), Some(attr)) =
                 (args.first(), args.get(1).and_then(|a| self.const_str(*a)))
@@ -1948,10 +1954,15 @@ impl<'a> Extractor<'a> {
         if entry.excluded {
             return;
         }
+        let case = entry.case_for(|i, k| {
+            resolver::passed_arg(passed.args, passed.kwargs, passed.star_from, (i, k), |v| {
+                resolver::arg_fact(|d| self.defs.get(&d).copied(), &self.types, v)
+            })
+        });
         // Stage 0-A filter: an awaited call never blocks the loop itself; loop-sensitive
         // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103.
         let effects: std::collections::BTreeSet<ExecEffectKind> = entry
-            .effects
+            .effects_in(case)
             .iter()
             .copied()
             .filter(|e| !(is_awaited && BLOCKING_EFFECTS.contains(e)))
@@ -1997,6 +2008,23 @@ impl<'a> Extractor<'a> {
     }
 }
 
+/// The arguments a call passes, as written.
+#[derive(Clone, Copy)]
+struct Passed<'c> {
+    args: &'c [VarId],
+    kwargs: &'c [(Option<String>, VarId)],
+    /// `InstKind::Call::star_from`.
+    star_from: Option<u8>,
+}
+
+impl Passed<'_> {
+    const NOTHING: Passed<'static> = Passed {
+        args: &[],
+        kwargs: &[],
+        star_from: None,
+    };
+}
+
 /// One call instruction as [`Extractor::call`] sees it.
 struct Call<'c> {
     /// The variable the call defines.
@@ -2014,6 +2042,16 @@ struct Call<'c> {
     /// The project class the call constructs (`CallSite::constructs`).
     constructs: Option<String>,
     span: Span,
+}
+
+impl<'c> Call<'c> {
+    fn passed(&self) -> Passed<'c> {
+        Passed {
+            args: self.args,
+            kwargs: self.kwargs,
+            star_from: self.star_from,
+        }
+    }
 }
 
 /// Another site of the callees of the call site `site`, for a use of the object the call
