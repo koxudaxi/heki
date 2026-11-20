@@ -435,6 +435,43 @@ def old_function_kept_by_map(items):
     return m.__reduce__()[1][0]
 
 
+# ------------------------------------------------------------------------------
+# OPT110: a loop over an iterator that keeps a list yields what the iterator computes
+# ------------------------------------------------------------------------------
+def cx_map_over_ints(n):
+    keys = list(range(9))
+    out = []
+    for p in map(lambda _: [], range(n)):
+        out.append(p in keys)
+    return out
+
+
+def old_map_over_ints(n):
+    keys = list(range(9))
+    out = []
+    keys_set = set(keys)
+    for p in map(lambda _: [], range(n)):
+        out.append(p in keys_set)
+    return out
+
+
+def cx_generator_over_ints(n):
+    keys = list(range(9))
+    out = []
+    for p in ([] for _ in range(n)):
+        out.append(p in keys)
+    return out
+
+
+def old_generator_over_ints(n):
+    keys = list(range(9))
+    out = []
+    keys_set = set(keys)
+    for p in ([] for _ in range(n)):
+        out.append(p in keys_set)
+    return out
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -474,6 +511,8 @@ def main() -> int:
         (cx_kept_by_pop_default, old_kept_by_pop_default, lambda f: f([1, 2])),
         (cx_compared_by_remove, old_compared_by_remove, lambda f: f([1, 2])),
         (cx_function_kept_by_map, old_function_kept_by_map, lambda f: f([1, 2])),
+        (cx_map_over_ints, old_map_over_ints, lambda f: f(2)),
+        (cx_generator_over_ints, old_generator_over_ints, lambda f: f(2)),
     ]
     lines = []
     for cx, old, call in pairs:

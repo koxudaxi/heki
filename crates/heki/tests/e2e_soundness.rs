@@ -682,6 +682,13 @@ const HOIST: &[Expect] = &[
     // A small display of `bytes`; elements no `set` can hold.
     ("bytes_display", &[]),
     ("unhashable_elements", &[]),
+    (
+        "probes_from_a_list",
+        &[(
+            "OPT110",
+            V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
+        )],
+    ),
 ];
 
 #[test]
@@ -966,6 +973,20 @@ const COUNTEREXAMPLES: &[Expect] = &[
         )],
     ),
     ("cx_function_kept_by_map", &[]),
+    (
+        "cx_map_over_ints",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
+    (
+        "cx_generator_over_ints",
+        &[(
+            "OPT110",
+            V::Blocked("HashConsistentProbe(p): `p` may have a custom `__eq__`"),
+        )],
+    ),
 ];
 
 #[test]
@@ -981,7 +1002,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 20/20"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 22/22"));
 }
 
 // ======================================================================== module-level facts

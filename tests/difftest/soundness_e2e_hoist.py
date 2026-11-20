@@ -514,6 +514,17 @@ def unhashable_elements(n):
     return hits
 
 
+def probes_from_a_list(n):
+    """Iterating a list of `int`s yields `int`s: hash-consistent probes."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    probes = list(range(n))
+    hits = []
+    for p in probes:
+        if p in allowed:
+            hits.append(p)
+    return hits
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -577,6 +588,7 @@ def main() -> int:
             run(rebuild_number, n),
             run(bytes_display, n),
             run(unhashable_elements, n),
+            run(probes_from_a_list, n),
         ]
     print("\n".join(lines))
     return 0

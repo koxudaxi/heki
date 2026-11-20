@@ -554,7 +554,7 @@ impl<'a> FnCtx<'a> {
         let (_, _, inst) = self.def_inst(v)?;
         match &inst.kind {
             InstKind::Copy { src, .. } => self.possible_kinds_depth(st, *src, depth + 1),
-            InstKind::IterNext { iter, .. } => self.elems_of_bases(st, st.derives_from.get(iter)?),
+            InstKind::IterNext { iter, .. } => self.yielded_kinds(st, *iter),
             InstKind::SubscriptLoad {
                 obj,
                 is_slice: false,
@@ -566,6 +566,19 @@ impl<'a> FnCtx<'a> {
             {
                 self.elems_of_bases(st, &st.allocs_of(*obj))
             }
+            _ => None,
+        }
+    }
+
+    /// What `next(it)` may produce. Only an iterator made from an object by `iter()` (a `for`
+    /// loop, a comprehension) yields that object's elements: an iterator *retaining* an object
+    /// (`map(f, xs)`, a generator expression over `xs`) yields whatever its code produces.
+    fn yielded_kinds(&self, st: &FrameState, it: VarId) -> Option<KindMask> {
+        match &self.def_inst(it)?.2.kind {
+            InstKind::MakeIter { iterable, .. } => match self.iterable_elems(st, *iterable) {
+                ElemKinds::Known(m) => Some(m),
+                ElemKinds::Unknown => None,
+            },
             _ => None,
         }
     }
@@ -1011,10 +1024,8 @@ impl<'a> FnCtx<'a> {
                 if st.derives_from.get(iter).is_none_or(|d| d.is_empty()) {
                     Self::escape_all(st, [*iter], span);
                 }
-                let single = st
-                    .derives_from
-                    .get(iter)
-                    .and_then(|d| self.elems_of_bases(st, d))
+                let single = self
+                    .yielded_kinds(st, *iter)
                     .and_then(KindMask::single)
                     .filter(|k| !is_mutable(*k));
                 st.define(
