@@ -305,17 +305,24 @@ fn apply_edge(
         }
         let mut indirect = Vec::new();
         if let Some((class, attr)) = &o.typed_field {
-            indirect.push((class.clone(), attr.clone()));
+            // `helper(obj.attr)`: the written object is `obj`, the caller's parameter `p` when
+            // the argument is `p.attr`.
+            let obj = match &o.param {
+                Some((p, Some(path))) if path == attr => 1u64 << p,
+                _ => 0,
+            };
+            indirect.push((class.clone(), attr.clone(), obj));
         }
         if let Some(class) = &o.typed_instance {
+            // `helper(obj)`: the written object is the argument itself.
             indirect.extend(
                 paths
                     .iter()
                     .filter(|p| !p.is_empty())
-                    .map(|p| (class.clone(), p.clone())),
+                    .map(|p| (class.clone(), p.clone(), o.may_params)),
             );
         }
-        for (class, attr) in indirect {
+        for (class, attr, obj_params) in indirect {
             // A callee that already records a typed site for this field passes it up below.
             let known = callee
                 .typed_field_write_sites
@@ -331,6 +338,7 @@ fn apply_edge(
                         kind: WriteKind::IndirectHelper,
                         span: site.span,
                         via_chain: vec![hop.clone()],
+                        obj_params,
                     },
                 );
             }
@@ -340,8 +348,16 @@ fn apply_edge(
     for t in &callee.typed_field_write_sites {
         let mut site = t.clone();
         site.via_chain.insert(0, hop.clone());
+        site.obj_params = bound_params(t.obj_params, bc);
         insert_site(s, caller, site);
     }
+}
+
+/// The caller parameters the objects bound to the callee parameters in `mask` may be.
+pub(crate) fn bound_params(mask: u64, bc: &BoundCallee) -> u64 {
+    bits(mask)
+        .filter_map(|k| bc.params.get(k))
+        .fold(0, |acc, o| acc | o.may_params)
 }
 
 /// Whether the callee's body runs at this call site. Calling an `async def` without awaiting
@@ -375,7 +391,8 @@ fn site_origin(site: &TypedFieldWriteSite) -> Option<&str> {
     site.via_chain.last().map(|h| h.callee.as_str())
 }
 
-/// Insert a typed write site, keeping one (shortest) chain per original write.
+/// Insert a typed write site, keeping one (shortest) chain per original write and written
+/// object (`obj_params`).
 fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite) {
     let origin = site_origin(&site).map(str::to_owned);
     if origin.as_deref() == Some(owner.fqn().as_str()) {
@@ -387,6 +404,7 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
             && t.attr == site.attr
             && t.kind == site.kind
             && t.span == site.span
+            && t.obj_params == site.obj_params
             && site_origin(t).map(str::to_owned) == origin
     };
     if let Some(existing) = s.typed_field_write_sites.iter().find(|t| same(t)).cloned() {
@@ -398,7 +416,8 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
     s.typed_field_write_sites.insert(site);
 }
 
-fn is_private_name(qualname: &str) -> bool {
+/// A private function name (`_name`, not a dunder) by its qualname's last component.
+pub fn is_private_name(qualname: &str) -> bool {
     let name = qualname.rsplit('.').next().unwrap_or(qualname);
     name.starts_with('_') && !(name.starts_with("__") && name.ends_with("__"))
 }

@@ -21,6 +21,7 @@ pub mod resolver;
 mod scc;
 mod summary;
 
+pub use callgraph::is_private_name;
 pub use report::{
     BoundaryReport, ROOT_CAUSE_GROUP_THRESHOLD, RootCauseGroup, boundary_reports,
     boundary_reports_in, group_by_root_cause,
@@ -92,6 +93,45 @@ pub struct TypedFieldWriteSite {
     /// last hop's callee.
     pub span: Span,
     pub via_chain: Vec<CallHop>,
+    /// Parameters of the summary owner the written object may be, as itself (bit 0: a
+    /// method's own `self`), mapped through every hop. Empty for an object that is no
+    /// parameter: a fresh instance, an attribute of one, a call result.
+    pub obj_params: u64,
+}
+
+/// Typed field read site for declarative Read Ownership (`MUT203`). A local fact: it is never
+/// propagated to callers (the rule walks the reverse call graph instead), so every final
+/// summary keeps exactly its own reads.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TypedFieldReadSite {
+    /// Fully qualified class name of the read object (`pkg.model.Reference`).
+    pub class_qualname: String,
+    pub attr: String,
+    pub kind: ReadKind,
+    /// Parameters of the reading function the read object may be, as itself (bit 0: `self`).
+    pub obj_params: u64,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadKind {
+    /// `obj.attr`.
+    DirectAttr,
+    /// `getattr(obj, "attr"[, default])` / `object.__getattribute__(obj, "attr")`.
+    GetAttr,
+    /// `obj.__dict__["attr"]` / `obj.__dict__.get("attr")`.
+    DictDirect,
+}
+
+impl ReadKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectAttr => "direct_attr",
+            Self::GetAttr => "getattr",
+            Self::DictDirect => "dict_direct",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -140,6 +180,8 @@ pub struct EffectSummary {
     pub invalidates_cached: BTreeSet<String>,
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
     pub typed_field_write_sites: BTreeSet<TypedFieldWriteSite>,
+    /// The function's own reads of project-class attributes (`MUT203`; never propagated).
+    pub typed_field_read_sites: BTreeSet<TypedFieldReadSite>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -178,6 +220,14 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.typed_field_read_sites = out
+            .typed_field_read_sites
+            .into_iter()
+            .map(|mut site| {
+                site.span = Span { start: 0, end: 0 };
+                site
+            })
+            .collect();
         out
     }
 
@@ -210,6 +260,8 @@ pub struct ArgOrigin {
     pub typed_field: Option<(String, String)>,
     /// An instance of project class `class_fqn`.
     pub typed_instance: Option<String>,
+    /// Caller parameters the argument may be, as itself (through copies and phis).
+    pub may_params: u64,
 }
 
 impl ArgOrigin {
@@ -224,6 +276,14 @@ pub struct BoundCallee {
     pub callee: FuncKey,
     /// Indexed by the callee's parameter position (receiver included for bound methods).
     pub params: Vec<ArgOrigin>,
+}
+
+impl BoundCallee {
+    /// The caller parameters the objects bound to the callee parameters in `mask` may be (the
+    /// mapping of `obj_params` across this call).
+    pub fn caller_params_of(&self, mask: u64) -> u64 {
+        callgraph::bound_params(mask, self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +322,12 @@ impl CallSite {
             CallTarget::Project(callees) => callees,
             CallTarget::Layer2 { .. } => &[],
         }
+    }
+
+    /// Whether the body of the project callee summarized by `callee` runs at this call:
+    /// calling an `async def` without awaiting or driving it only creates a coroutine.
+    pub fn runs_body_of(&self, callee: &EffectSummary) -> bool {
+        callgraph::runs_at_call(callee, self)
     }
 }
 

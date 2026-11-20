@@ -365,6 +365,9 @@ pub struct CheckExtras<'a> {
     pub decls: Option<&'a ProjectDecls>,
 }
 
+/// `caller -> [(defining file, call site)]` (see [`CheckContext::sites_by_caller`]).
+pub(crate) type SitesByCaller<'a> = FxHashMap<&'a FuncKey, Vec<(&'a Path, &'a CallSite)>>;
+
 /// Shared state of one `heki check` run.
 pub(crate) struct CheckContext<'a> {
     pub config: &'a HekiConfig,
@@ -481,6 +484,25 @@ impl<'a> CheckContext<'a> {
                     .or_default()
                     .push(site);
             }
+        }
+        out
+    }
+
+    /// Call sites of every summarized function with their file, keyed by caller, from its
+    /// defining file and in source order (the IR-free call graph the contract rules walk).
+    pub fn sites_by_caller(&self) -> SitesByCaller<'a> {
+        let mut out = SitesByCaller::default();
+        for (path, file) in &self.index.files {
+            for site in &file.call_sites {
+                if self.index.file_of(&site.caller) == Some(path.as_path()) {
+                    out.entry(&site.caller)
+                        .or_default()
+                        .push((path.as_path(), site));
+                }
+            }
+        }
+        for sites in out.values_mut() {
+            sites.sort_by_key(|(_, s)| s.span);
         }
         out
     }
