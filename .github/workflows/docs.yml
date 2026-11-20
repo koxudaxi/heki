@@ -61,11 +61,13 @@ jobs:
   preview:
     name: deploy preview
     needs: build
+    # Dependabot is recognized by the author, not by `github.actor`: a maintainer who reopens a
+    # Dependabot pull request is the actor of that run.
     if: >-
       github.repository == 'koxudaxi/heki'
       && github.event_name == 'pull_request'
       && github.event.pull_request.head.repo.full_name == github.repository
-      && github.actor != 'dependabot[bot]'
+      && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-24.04
     env:
       HAS_PREVIEW_TOKEN: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN != '' }}
