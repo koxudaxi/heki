@@ -503,3 +503,58 @@ fn unpacking_reads_every_item_before_it_writes_a_target() {
         "{insts:#?}"
     );
 }
+
+#[test]
+fn an_unpacking_comprehension_consumes_each_iterable() {
+    let src = "\
+import time
+
+
+def rows():
+    time.sleep(1)
+    yield 1
+
+
+async def flattened(items):
+    return [*rows() for _ in items]
+
+
+async def flattened_set(items):
+    return {*rows() for _ in items}
+
+
+async def yielded_from(items):
+    return list(*rows() for _ in items)
+
+
+async def appended(items):
+    return [rows() for _ in items]
+
+
+def merged(maps):
+    return {**m for m in maps}
+";
+    // PEP 798: `[*it for ...]` extends the list with each `it`, `(*it for ...)` yields from it;
+    // a plain element only holds the generator.
+    assert_eq!(
+        reports("ir_unpacking_comprehensions", src, "EFF101"),
+        pairs(&[
+            ("flattened", "EFF101"),
+            ("flattened_set", "EFF101"),
+            ("yielded_from", "EFF101"),
+        ])
+    );
+    let ir = dump_ir("ir_unpacking_comprehensions", src, "py315");
+    let methods: Vec<String> = function(&ir, "merged")["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .filter_map(|i| {
+            i["kind"]["MethodCall"]["method"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(methods, ["update"]);
+}

@@ -98,6 +98,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 - **Comprehensions and generator expressions**: when
   `RuntimeProfile.pep709_inlined_comprehensions` is true (3.12+), comprehensions are inlined into
   the enclosing frame; generator expressions are separate functions created by `MakeGenExpr`.
+  An element is `append` / `add` / an item store on the accumulator, or a `Yield`; an
+  unpacking element (3.15 PEP 798: `[*xs for ...]`, `{**m for ...}`, `(*xs for ...)`) is
+  `extend` / `update`, or a `YieldFrom`.
 - **A1 hazards** are references to a frame-introspection function, not only calls of it: a
   read of `eval` / `exec` / `locals` / `vars` (the builtin, or a name an import binds to one,
   in the scope the read resolves to), of `sys._getframe` and the like (through `import m as

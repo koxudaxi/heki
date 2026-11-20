@@ -393,15 +393,19 @@ impl<'a> ModuleLowerer<'a> {
                     Some(outer_param),
                     false,
                     &|b| {
-                        let v = b.lower_expr(&ge.elt);
                         let dst = b.fresh_var(None);
-                        b.emit(
-                            InstKind::Yield {
+                        // `(*xs for xs in rows)` yields from each `xs` (PEP 798).
+                        let kind = match ge.elt.as_ref() {
+                            Expr::Starred(st) => InstKind::YieldFrom {
                                 dst,
-                                value: Some(v),
+                                value: b.lower_expr(&st.value),
                             },
-                            Span::from(ge.elt.range()),
-                        );
+                            elt => InstKind::Yield {
+                                dst,
+                                value: Some(b.lower_expr(elt)),
+                            },
+                        };
+                        b.emit(kind, Span::from(ge.elt.range()));
                     },
                 );
                 builder.terminate(Terminator::Return(None));
@@ -428,7 +432,7 @@ impl<'a> ModuleLowerer<'a> {
                     Some(outer_param),
                     false,
                     &|b| {
-                        b.emit_comp_element(kind, acc, elt, key, spec.span);
+                        b.emit_comp_element(kind, acc, elt, key);
                     },
                 );
                 builder.terminate_at(Terminator::Return(Some(acc)), spec.span);
@@ -2990,53 +2994,54 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     }
 
     /// One element of a list / set / dict comprehension into its accumulator `acc`:
-    /// `acc.append(elt)`, `acc.add(elt)`, or `acc[key] = elt` (`{**d for d in ds}` has no key).
+    /// `acc.append(elt)`, `acc.add(elt)`, or `acc[key] = elt`; an unpacking element (PEP 798,
+    /// `[*xs for xs in rows]`, `{**m for m in maps}`) is `acc.extend(xs)` / `acc.update(...)`.
     fn emit_comp_element(
         &mut self,
         kind: CompKind,
         acc: VarId,
         elt: &'a Expr,
         key: Option<&'a Expr>,
-        span: Span,
     ) {
         let elt_span = Span::from(elt.range());
-        match kind {
-            CompKind::List | CompKind::Set => {
-                let v = self.lower_expr(elt);
-                let dst = self.fresh_var(None);
+        let (method, args) = match (kind, elt, key) {
+            (CompKind::List | CompKind::Set, Expr::Starred(st), _) => {
                 let method = match kind {
-                    CompKind::List => "append",
-                    _ => "add",
+                    CompKind::List => "extend",
+                    _ => "update",
                 };
-                self.emit(
-                    InstKind::MethodCall {
-                        dst,
-                        recv: acc,
-                        method: method.to_string(),
-                        args: vec![v],
-                        kwargs: Vec::new(),
-                        is_awaited: false,
-                    },
-                    elt_span,
-                );
+                (method, vec![self.lower_expr(&st.value)])
             }
-            CompKind::Dict => {
-                let k = key
-                    .map(|ke| self.lower_expr(ke))
-                    .unwrap_or_else(|| self.emit_const(ConstLiteral::None, span));
-                let key_const = key.and_then(extract_const_str);
-                let v = self.lower_expr(elt);
+            (CompKind::List, _, _) => ("append", vec![self.lower_expr(elt)]),
+            (CompKind::Set, _, _) => ("add", vec![self.lower_expr(elt)]),
+            (CompKind::Dict, _, None) => ("update", vec![self.lower_expr(elt)]),
+            (CompKind::Dict, _, Some(key)) => {
+                let index = self.lower_expr(key);
+                let value = self.lower_expr(elt);
                 self.emit(
                     InstKind::SubscriptStore {
                         obj: acc,
-                        index: k,
-                        key_const,
-                        value: v,
+                        index,
+                        key_const: extract_const_str(key),
+                        value,
                     },
                     elt_span,
                 );
+                return;
             }
-        }
+        };
+        let dst = self.fresh_var(None);
+        self.emit(
+            InstKind::MethodCall {
+                dst,
+                recv: acc,
+                method: method.to_string(),
+                args,
+                kwargs: Vec::new(),
+                is_awaited: false,
+            },
+            elt_span,
+        );
     }
 
     fn lower_comprehension(
@@ -3059,7 +3064,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 span,
             );
             self.lower_comprehension_generators(generators, None, true, &|b| {
-                b.emit_comp_element(kind, acc, elt, key, span);
+                b.emit_comp_element(kind, acc, elt, key);
             });
             acc
         } else {

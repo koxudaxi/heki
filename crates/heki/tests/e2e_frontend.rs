@@ -1360,14 +1360,19 @@ fn ir_newer_syntax() {
             ("os", false),
         ])
     );
-    // PEP 798 `{**group for group in groups}`: a dict comprehension element without a key,
-    // in place and as a 3.11-style comprehension function.
-    let merged = of_kind(f, "SubscriptStore");
-    assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0]["key_const"], Value::Null);
+    // PEP 798 unpacking elements extend the list (`[*row ...]`) and update the set and the
+    // dict (`{*row ...}`, `{**group ...}`), in place and as 3.11-style comprehension functions.
+    let calls = |f: &Value, method: &str| {
+        of_kind(f, "MethodCall")
+            .iter()
+            .filter(|m| m["method"] == method)
+            .count()
+    };
+    assert!(of_kind(f, "SubscriptStore").is_empty());
+    assert_eq!((calls(f, "extend"), calls(f, "update")), (1, 2));
     let ir311 = self::ir(TOUR_PEP810, "py311");
     let dictcomp = function(&ir311, "use_lazy.<locals>.<dictcomp>");
-    assert_eq!(of_kind(dictcomp, "SubscriptStore").len(), 1);
+    assert_eq!(calls(dictcomp, "update"), 1);
 
     // PEP 750 template strings and PEP 758 unparenthesized handlers.
     let ir = self::ir(TOUR_314, "py314");
