@@ -107,7 +107,9 @@ pub struct ParamInfo {
     pub name: String,
     pub var: VarId,
     pub has_default: bool,
-    /// The default when it is a literal (`None`, `False`, `0`, `""`, ...).
+    /// The default when it is a literal (`None`, `False`, `0`, `""`, ...): what the callee
+    /// binds when the caller passes nothing. The default's value, evaluated where the function
+    /// is defined, is an operand of the `MakeClosure` that builds the function object.
     pub default: Option<ConstLiteral>,
     /// Keyword-only (after `*` or `*args`): never bound by position.
     pub kw_only: bool,
@@ -359,8 +361,9 @@ pub enum InstKind {
     },
     /// A function, lambda, or class object, or a lazily evaluated scope without a lowered
     /// body (`func_id: None`: a `type` alias). `captured` is every value the object keeps or
-    /// hands to code that runs later: its closure cells, defaults, eagerly evaluated
-    /// annotations, and a class's bases and keywords.
+    /// hands to code that runs later: its closure cells, defaults (the literal ones are also
+    /// the parameters' `ParamInfo::default`), eagerly evaluated annotations, and a class's
+    /// bases and keywords.
     MakeClosure {
         dst: VarId,
         func_id: Option<FunctionId>,
