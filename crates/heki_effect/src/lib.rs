@@ -459,6 +459,12 @@ impl EffectSummary {
         }
     }
 
+    /// An `@abstractmethod`: a call never runs it (an override does), so it guarantees
+    /// nothing a call of one of its overrides lacks.
+    pub fn is_abstract(&self) -> bool {
+        is_abstract_method(&self.decorators)
+    }
+
     /// Which of the function's facts its own body is: a generator function's body runs when
     /// its result is iterated.
     pub fn body_facts(&self) -> Facts {
@@ -1186,6 +1192,14 @@ impl ProjectIndex {
             }
         }
     }
+}
+
+/// Whether `decorators` make a function an abstract method (`@abc.abstractmethod`).
+pub(crate) fn is_abstract_method(decorators: &[String]) -> bool {
+    decorators.iter().any(|d| {
+        let base = d.split('(').next().unwrap_or(d).trim();
+        base == "abstractmethod" || base.ends_with(".abstractmethod")
+    })
 }
 
 #[cfg(test)]

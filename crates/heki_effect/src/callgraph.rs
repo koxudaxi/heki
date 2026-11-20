@@ -225,21 +225,29 @@ fn recompute(
     let contracts = index.contracts.as_deref();
     for (site_path, i) in out.get(func).into_iter().flatten() {
         let site = &index.files[site_path].call_sites[*i];
+        // `MUT106`: the call consumes what every function it may run consumes.
+        let mut consumed: Option<u64> = None;
         for bc in site.project_callees() {
-            if let Some(callee) = index.summary(&bc.callee) {
-                apply_edge(
-                    index,
-                    &mut s,
-                    &local.mutated_param_paths,
-                    func,
-                    site,
-                    bc,
-                    callee,
-                    site_path,
-                );
-                return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
+            let Some(callee) = index.summary(&bc.callee) else {
+                consumed = Some(0);
+                continue;
+            };
+            let here = apply_edge(
+                index,
+                &mut s,
+                &local.mutated_param_paths,
+                func,
+                site,
+                bc,
+                callee,
+                site_path,
+            );
+            if !callee.is_abstract() {
+                consumed = Some(consumed.map_or(here, |c| c & here));
             }
+            return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
         }
+        s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
     // Returned objects that run nothing when iterated hand nothing out.
     if s.iterated
@@ -296,7 +304,9 @@ fn return_flow_edge(
 
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts
 /// the site runs ([`delivery`]), into the caller's body or into what iterating the caller's
-/// result runs. The caller's own writes through its parameters are `own_writes`.
+/// result runs. The caller's own writes through its parameters are `own_writes`. Returns the
+/// caller's parameters the callee consumes at the call (`MUT106`, a must-fact the caller
+/// takes only when every candidate of the call consumes them).
 #[allow(clippy::too_many_arguments)]
 fn apply_edge(
     index: &ProjectIndex,
@@ -307,21 +317,23 @@ fn apply_edge(
     bc: &BoundCallee,
     callee: &EffectSummary,
     path: &Path,
-) {
+) -> u64 {
     let Some(d) = delivery(|k| index.summary(k), site, callee) else {
-        return;
+        return 0;
     };
     let Some(facts) = callee.facts(d.from) else {
-        return;
+        return 0;
     };
     let lead = lead_hops(site, path, &bc.callee, d.via);
     let rewrite = rewrites(callee, d.from);
     // Single-pass consumption (`MUT106`): a callee iterating its parameter k to exhaustion
     // consumes the caller's parameter passed as argument k when the callee's body runs at the
     // call, provided every call receiving that parameter runs on each normal path of the caller.
-    if d.from == Facts::Body && d.into == Facts::Body {
-        s.consumes_params |= caller_params(facts.consumes_params, bc) & s.unconditional_forwards;
-    }
+    let consumed = if d.from == Facts::Body && d.into == Facts::Body {
+        caller_params(facts.consumes_params, bc)
+    } else {
+        0
+    };
     let target = match d.into {
         Facts::Body => s,
         Facts::Result => s.iterated.get_or_insert_with(Box::default),
@@ -329,6 +341,7 @@ fn apply_edge(
     transfer(
         target, own_writes, caller, site, bc, callee, facts, &lead, rewrite,
     );
+    consumed
 }
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`

@@ -98,6 +98,10 @@ fn add_callee_consumption(
             };
             let mut consumed: Option<FxHashSet<VarId>> = None;
             for key in keys {
+                // An abstract method never runs: an override does.
+                if cx.index.summary(key).is_some_and(|s| s.is_abstract()) {
+                    continue;
+                }
                 let summary = body_runs(cx, sites, qualname, inst.span, key);
                 let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
                 let mask = summary.map_or(0, |s| s.consumes_params);

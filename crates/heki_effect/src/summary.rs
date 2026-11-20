@@ -1859,8 +1859,9 @@ impl<'a> Extractor<'a> {
             Callee::Project(keys, binds_recv) => {
                 // A constructor call returns the new instance, not what `__init__` returns.
                 let constructor = call.constructs.is_some();
-                // The contracts the callees announce, of those whose body runs at the call.
-                let mut invalidates = 0u64;
+                // The contracts the call announces: those every callee whose body may run at
+                // the call is an invalidator of (an abstract method never runs).
+                let mut invalidates: Option<u64> = None;
                 let mut callees = Vec::new();
                 let mut bindings = Vec::new();
                 let mut offloaders: Vec<String> = Vec::new();
@@ -1874,13 +1875,20 @@ impl<'a> Extractor<'a> {
                         if !offloaders.contains(symbol) {
                             offloaders.push(symbol.clone());
                         }
+                        invalidates = Some(0);
                         continue;
                     }
                     any_async |= decl.is_async;
                     if let (Some(c), Some(_)) = (self.contracts, &self.events)
-                        && !decl.is_generator
+                        && !decl.is_abstract
                     {
-                        invalidates |= c.invalidator_of(&key.fqn(), &key.qualname);
+                        // A generator's body runs only where it is iterated.
+                        let here = if decl.is_generator {
+                            0
+                        } else {
+                            c.invalidator_of(&key.fqn(), &key.qualname)
+                        };
+                        invalidates = Some(invalidates.map_or(here, |i| i & here));
                     }
                     let offset = usize::from(*binds_recv && !decl.is_staticmethod);
                     let mut params: Vec<ArgOrigin> = Vec::new();
@@ -1976,6 +1984,7 @@ impl<'a> Extractor<'a> {
                         .push((self.pos.0, self.pos.1, self.sites.len()));
                     // An `async` invalidator only runs when it is awaited or driven, and a
                     // generator's body only where it is iterated.
+                    let invalidates = invalidates.unwrap_or(0);
                     if invalidates != 0 && (!any_async || call.is_awaited || drives) {
                         events
                             .invalidators

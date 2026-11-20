@@ -262,6 +262,8 @@ pub struct FunctionDecl {
     /// `@database_sync_to_async`, `@asyncify`). `@d def f` is `f = d(f)`: calling `f` calls
     /// `d(f)`, which offloads the body, so the body does not run at the call.
     pub offloaded_by: Option<String>,
+    /// An `@abstractmethod`: a call never runs it.
+    pub is_abstract: bool,
     /// The return annotation of the getter of a property (`@property` / `cached_property`,
     /// with or without a setter): the type reading the attribute gives.
     pub property_type: Option<Ty>,
@@ -2061,6 +2063,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             mutable_params,
             transform: transforms[f.qualname.as_str()],
             offloaded_by: None,
+            is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
         };
         decls.functions.insert(f.qualname.clone(), decl);
