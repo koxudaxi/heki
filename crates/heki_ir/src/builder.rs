@@ -68,6 +68,7 @@ pub fn build_module_ir(
         lazy_import_names,
         functions: Vec::new(),
         free_names: Vec::new(),
+        lowered_at: FxHashMap::default(),
         loop_hints: Vec::new(),
         next_comp_id: 0,
         has_star_import: false,
@@ -246,6 +247,8 @@ struct ModuleLowerer<'a> {
     functions: Vec<IrFunction>,
     /// The free variables of every lowered function, by `FunctionId` (sorted).
     free_names: Vec<Vec<String>>,
+    /// The function lowered from each definition, by its span.
+    lowered_at: FxHashMap<Span, FunctionId>,
     /// Syntax-level facts of every function's loops (in `IrFunction::loops` order), for the
     /// loop-bound pass that runs once the whole module is lowered.
     loop_hints: Vec<(FunctionId, Vec<LoopHint>)>,
@@ -284,6 +287,11 @@ impl<'a> ModuleLowerer<'a> {
     }
 
     fn lower_function_body(&mut self, spec: FunctionSpec<'a>) -> FunctionId {
+        // A `finally` body is lowered once per way out of its `try`; a definition in it is
+        // still one function.
+        if let Some(&id) = self.lowered_at.get(&spec.span) {
+            return id;
+        }
         let mut scope_info = ScopeBindings::default();
         if let Some(params) = spec.params {
             collect_params_into(params, &mut scope_info.locals);
@@ -353,6 +361,7 @@ impl<'a> ModuleLowerer<'a> {
             is_class_body: spec.is_class_body,
         };
         let fn_id = self.alloc_function_slot(placeholder);
+        self.lowered_at.insert(spec.span, fn_id);
 
         let mut builder = FnBuilder::new(
             self,
@@ -465,6 +474,23 @@ enum WalrusTarget {
     Module,
 }
 
+/// A statement a `return`, `break`, or `continue` leaves on its way out of the code around it.
+#[derive(Clone)]
+enum Unwind<'a> {
+    /// A loop's body: `break` and `continue` stop here.
+    Loop,
+    /// A `with` statement's managers, exited innermost first.
+    With {
+        managers: Vec<VarId>,
+        is_async: bool,
+        span: Span,
+        /// The exception targets outside the statement.
+        exc_depth: usize,
+    },
+    /// A `try` statement's `finally` body, which runs on every way out.
+    Finally { body: &'a [Stmt], exc_depth: usize },
+}
+
 /// A step of [`FnBuilder::resolve_ssa`].
 enum SsaTask {
     /// Find the name's value at the end of the block.
@@ -529,6 +555,8 @@ struct FnBuilder<'m, 'a> {
     var_replacements: FxHashMap<VarId, VarId>,
 
     exc_target_stack: Vec<BlockId>,
+    /// The statements around the current point that a jump out of them runs, innermost last.
+    unwind: Vec<Unwind<'a>>,
     loop_stack: Vec<ActiveLoop>,
     finished_loops: Vec<NaturalLoop>,
     /// `finished_loops[i]`'s syntax-level facts.
@@ -600,6 +628,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             incomplete_phis: FxHashMap::default(),
             var_replacements: FxHashMap::default(),
             exc_target_stack: Vec::new(),
+            unwind: Vec::new(),
             loop_stack: Vec::new(),
             finished_loops: Vec::new(),
             finished_hints: Vec::new(),
@@ -1060,7 +1089,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Stmt::ClassDef(cls) => self.lower_class_def(cls),
             Stmt::Return(r) => {
                 let val = r.value.as_ref().map(|e| self.lower_expr(e));
-                self.terminate_at(Terminator::Return(val), Span::from(r.range));
+                self.leave(false, |b| {
+                    b.terminate_at(Terminator::Return(val), Span::from(r.range));
+                });
             }
             Stmt::Delete(d) => {
                 for target in &d.targets {
@@ -1208,20 +1239,65 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Stmt::Break(_) => {
                 if let Some(exit_bb) = self.loop_stack.last().map(|l| l.exit) {
-                    self.terminate(Terminator::Jump(exit_bb));
+                    self.leave(true, |b| b.terminate(Terminator::Jump(exit_bb)));
                 }
             }
             Stmt::Continue(_) => {
                 if let Some(header_bb) = self.loop_stack.last().map(|l| l.header) {
-                    let cur = self.cur_bb;
-                    if let Some(top) = self.loop_stack.last_mut() {
-                        top.back_edges.push(cur);
-                    }
-                    self.terminate(Terminator::Jump(header_bb));
+                    self.leave(true, |b| {
+                        let cur = b.cur_bb;
+                        if let Some(top) = b.loop_stack.last_mut() {
+                            top.back_edges.push(cur);
+                        }
+                        b.terminate(Terminator::Jump(header_bb));
+                    });
                 }
             }
             Stmt::Global(_) | Stmt::Nonlocal(_) | Stmt::Pass(_) | Stmt::IpyEscapeCommand(_) => {}
         }
+    }
+
+    /// Jump out of the statements around the current point (to the innermost loop for
+    /// `break` / `continue`, else out of all of them): exit each `with` and run each
+    /// `finally` body on the way, innermost first, then `jump`. Each `finally` body is lowered
+    /// again here, as CPython compiles it once per way out of its `try`.
+    fn leave(&mut self, to_loop: bool, jump: impl FnOnce(&mut Self)) {
+        let saved_exc = self.exc_target_stack.clone();
+        let saved_unwind = self.unwind.clone();
+        while let Some(frame) = self.unwind.pop() {
+            match frame {
+                Unwind::Loop if to_loop => break,
+                Unwind::Loop => {}
+                Unwind::With {
+                    managers,
+                    is_async,
+                    span,
+                    exc_depth,
+                } => {
+                    self.enter_unwind_block(exc_depth);
+                    for mgr in managers.into_iter().rev() {
+                        self.emit(InstKind::ExitWith { mgr, is_async }, span);
+                    }
+                }
+                Unwind::Finally { body, exc_depth } => {
+                    self.enter_unwind_block(exc_depth);
+                    self.lower_suite(body);
+                }
+            }
+        }
+        jump(self);
+        self.exc_target_stack = saved_exc;
+        self.unwind = saved_unwind;
+    }
+
+    /// Continue in a new block whose exceptions go to the targets outside a statement being
+    /// left.
+    fn enter_unwind_block(&mut self, exc_depth: usize) {
+        self.exc_target_stack.truncate(exc_depth);
+        self.ensure_open_block();
+        let next = self.new_block(true);
+        self.terminate(Terminator::Jump(next));
+        self.switch_to(next);
     }
 
     fn lower_function_def(&mut self, func: &'a ast::StmtFunctionDef) {
@@ -1780,7 +1856,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         // Body (depth d + 1)
         self.switch_to(body_bb);
         self.lower_assign_target(&f.target, next_val, Span::from(f.target.range()));
+        self.unwind.push(Unwind::Loop);
         self.lower_suite(&f.body);
+        self.unwind.pop();
         if !self.is_terminated(self.cur_bb) {
             let tail = self.cur_bb;
             if let Some(top) = self.loop_stack.last_mut() {
@@ -1862,7 +1940,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         );
 
         self.switch_to(body_bb);
+        self.unwind.push(Unwind::Loop);
         self.lower_suite(&w.body);
+        self.unwind.pop();
         if !self.is_terminated(self.cur_bb) {
             let tail = self.cur_bb;
             if let Some(top) = self.loop_stack.last_mut() {
@@ -1967,6 +2047,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
 
         let exit_bb = self.new_block(false);
+        self.unwind.push(Unwind::With {
+            managers: entered.clone(),
+            is_async: w.is_async,
+            span,
+            exc_depth: self.exc_target_stack.len(),
+        });
         self.exc_target_stack.push(exit_bb);
         let body_bb = self.new_block(true);
         self.terminate(Terminator::Jump(body_bb));
@@ -1976,6 +2062,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.terminate(Terminator::Jump(exit_bb));
 
         self.exc_target_stack.pop();
+        self.unwind.pop();
         self.seal_block(exit_bb);
         self.switch_to(exit_bb);
         for mgr in entered.into_iter().rev() {
@@ -1992,44 +2079,43 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     fn lower_try(&mut self, t: &'a ast::StmtTry) {
         let has_handlers = !t.handlers.is_empty();
         let has_finally = !t.finalbody.is_empty();
-
-        let dispatch_bb = if has_handlers {
-            Some(self.new_block(false))
-        } else {
-            None
-        };
-        let finally_bb = if has_finally {
-            Some(self.new_block(false))
-        } else {
-            None
-        };
+        // The `finally` body runs on every way out of the `try`: after normal completion
+        // (`normal_finally_bb`), before an exception goes on (`raising_finally_bb`, which
+        // re-raises), and before a `return` / `break` / `continue` (inlined by `leave`).
+        let raising_finally_bb = has_finally.then(|| self.new_block(false));
+        let normal_finally_bb = has_finally.then(|| self.new_block(false));
+        let dispatch_bb = has_handlers.then(|| self.new_block(false));
         let after_bb = self.new_block(false);
+        let normal_next = normal_finally_bb.unwrap_or(after_bb);
+        if has_finally {
+            self.unwind.push(Unwind::Finally {
+                body: &t.finalbody,
+                exc_depth: self.exc_target_stack.len(),
+            });
+        }
 
-        let body_exc_target = dispatch_bb.or(finally_bb);
+        let body_exc_target = dispatch_bb.or(raising_finally_bb);
         if let Some(target) = body_exc_target {
             self.exc_target_stack.push(target);
         }
-
         let try_bb = self.new_block(true);
         self.terminate(Terminator::Jump(try_bb));
         self.switch_to(try_bb);
         self.lower_suite(&t.body);
-
         if body_exc_target.is_some() {
             self.exc_target_stack.pop();
         }
 
-        let normal_next = finally_bb.unwrap_or(after_bb);
         if !self.is_terminated(self.cur_bb) {
             if !t.orelse.is_empty() {
-                if let Some(fin) = finally_bb {
+                if let Some(fin) = raising_finally_bb {
                     self.exc_target_stack.push(fin);
                 }
                 let orelse_bb = self.new_block(true);
                 self.terminate(Terminator::Jump(orelse_bb));
                 self.switch_to(orelse_bb);
                 self.lower_suite(&t.orelse);
-                if finally_bb.is_some() {
+                if raising_finally_bb.is_some() {
                     self.exc_target_stack.pop();
                 }
             }
@@ -2038,65 +2124,25 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         if let Some(disp) = dispatch_bb {
             self.seal_block(disp);
-            if let Some(fin) = finally_bb {
+            if let Some(fin) = raising_finally_bb {
                 self.exc_target_stack.push(fin);
             }
-            let mut cur_disp = disp;
-            for (idx, h) in t.handlers.iter().enumerate() {
-                let ast::ExceptHandler::ExceptHandler(eh) = h;
-                self.switch_to(cur_disp);
-                let mut exc_types = Vec::new();
-                if let Some(ty) = &eh.type_ {
-                    exc_types.push(self.module.slice_text(Span::from(ty.range())));
-                    let _ = self.lower_expr(ty);
-                }
-                let handler_bb = self.new_block(true);
-                let fallthrough_bb = if idx + 1 < t.handlers.len() {
-                    self.new_block(true)
-                } else {
-                    finally_bb.unwrap_or(after_bb)
-                };
-                let cond = self.emit_const(ConstLiteral::Bool(true), Span::from(eh.range));
-                self.terminate_at(
-                    Terminator::Branch {
-                        cond,
-                        then_bb: handler_bb,
-                        else_bb: fallthrough_bb,
-                    },
-                    Span::from(eh.range),
-                );
-
-                self.switch_to(handler_bb);
-                let exc_var = eh
-                    .name
-                    .as_ref()
-                    .map(|n| self.fresh_var(Some(n.to_string())));
-                self.emit(
-                    InstKind::CatchException {
-                        dst: exc_var,
-                        exc_types,
-                    },
-                    Span::from(eh.range),
-                );
-                if let (Some(n), Some(v)) = (&eh.name, exc_var) {
-                    self.write_var(n.as_str(), v, Span::from(n.range));
-                }
-                self.lower_suite(&eh.body);
-                // `except E as e:` ends with `del e`.
-                if let Some(n) = &eh.name
-                    && !self.is_terminated(self.cur_bb)
-                {
-                    self.lower_name_delete(n.as_str(), Span::from(n.range));
-                }
-                self.terminate(Terminator::Jump(normal_next));
-                cur_disp = fallthrough_bb;
-            }
-            if finally_bb.is_some() {
+            self.lower_handlers(t, disp, normal_next);
+            if raising_finally_bb.is_some() {
                 self.exc_target_stack.pop();
             }
         }
+        if has_finally {
+            self.unwind.pop();
+        }
 
-        if let Some(fin) = finally_bb {
+        if let Some(fin) = raising_finally_bb {
+            self.seal_block(fin);
+            self.switch_to(fin);
+            self.lower_suite(&t.finalbody);
+            self.terminate(Terminator::Raise(None));
+        }
+        if let Some(fin) = normal_finally_bb {
             self.seal_block(fin);
             self.switch_to(fin);
             self.lower_suite(&t.finalbody);
@@ -2105,6 +2151,81 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         self.seal_block(after_bb);
         self.switch_to(after_bb);
+    }
+
+    /// The `except` clauses from the dispatch block `disp`: each tests whether it matches
+    /// (an opaque test, except a bare `except:`, which always does); a handler that
+    /// completes continues at `normal_next`. Every `except*` clause may run on part of the
+    /// exception group, so each continues to the next clause's test. An exception no clause
+    /// takes (all or, for `except*`, part of the group) is raised again.
+    fn lower_handlers(&mut self, t: &'a ast::StmtTry, disp: BlockId, normal_next: BlockId) {
+        let mut cur = disp;
+        for h in &t.handlers {
+            let ast::ExceptHandler::ExceptHandler(eh) = h;
+            self.switch_to(cur);
+            let mut exc_types = Vec::new();
+            let span = Span::from(eh.range);
+            let cond = match &eh.type_ {
+                Some(ty) => {
+                    exc_types.push(self.module.slice_text(Span::from(ty.range())));
+                    let _ = self.lower_expr(ty);
+                    self.emit_const(ConstLiteral::Other, span)
+                }
+                None => self.emit_const(ConstLiteral::Bool(true), span),
+            };
+            let handler_bb = self.new_block(true);
+            let next_bb = self.new_block(false);
+            self.terminate_at(
+                Terminator::Branch {
+                    cond,
+                    then_bb: handler_bb,
+                    else_bb: next_bb,
+                },
+                span,
+            );
+
+            self.switch_to(handler_bb);
+            let exc_var = eh
+                .name
+                .as_ref()
+                .map(|n| self.fresh_var(Some(n.to_string())));
+            self.emit(
+                InstKind::CatchException {
+                    dst: exc_var,
+                    exc_types,
+                },
+                span,
+            );
+            if let (Some(n), Some(v)) = (&eh.name, exc_var) {
+                self.write_var(n.as_str(), v, Span::from(n.range));
+            }
+            self.lower_suite(&eh.body);
+            // `except E as e:` ends with `del e`.
+            if let Some(n) = &eh.name
+                && !self.is_terminated(self.cur_bb)
+            {
+                self.lower_name_delete(n.as_str(), Span::from(n.range));
+            }
+            self.terminate(Terminator::Jump(if t.is_star {
+                next_bb
+            } else {
+                normal_next
+            }));
+            self.seal_block(next_bb);
+            cur = next_bb;
+        }
+        self.switch_to(cur);
+        if t.is_star {
+            let rest = self.emit_const(ConstLiteral::Other, Span::from(t.range));
+            let raise_bb = self.new_block(true);
+            self.terminate(Terminator::Branch {
+                cond: rest,
+                then_bb: normal_next,
+                else_bb: raise_bb,
+            });
+            self.switch_to(raise_bb);
+        }
+        self.terminate(Terminator::Raise(None));
     }
 
     fn lower_match(&mut self, m: &'a ast::StmtMatch) {

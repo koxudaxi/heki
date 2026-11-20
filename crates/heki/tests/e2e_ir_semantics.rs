@@ -649,3 +649,81 @@ async def created():
     // A coroutine only created and returned runs in the caller.
     assert_eq!(got, ["saved", "merged"]);
 }
+
+#[test]
+fn a_return_break_or_continue_runs_the_finally_body() {
+    let src = format!(
+        "{MODEL}\n\ndef returns(model: Model):\n    try:\n        model.value = 1\n        return\n    finally:\n        notify()\n\n\ndef breaks(model: Model, items):\n    for _ in items:\n        try:\n            model.value = 1\n            break\n        finally:\n            notify()\n\n\ndef continues(model: Model, items):\n    for _ in items:\n        try:\n            model.value = 1\n            continue\n        finally:\n            notify()\n\n\ndef forgets(model: Model):\n    try:\n        model.value = 1\n        return\n    finally:\n        pass\n"
+    );
+    let p = Project::new("ir_finally_paths");
+    p.write("pyproject.toml", INVALIDATION)
+        .write("case.py", &src);
+    let got: Vec<String> = diagnostics(&p, &["--select", "MUT109"])
+        .iter()
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(got, ["forgets"]);
+}
+
+#[test]
+fn a_jump_out_of_a_with_block_exits_it() {
+    let src = "\
+import asyncio
+import threading
+
+
+async def breaks(items):
+    for _ in items:
+        with threading.Lock():
+            break
+    else:
+        return
+    await asyncio.sleep(0)
+
+
+async def returns(flag):
+    with threading.Lock():
+        if flag:
+            return
+    await asyncio.sleep(0)
+
+
+async def holds(items):
+    for _ in items:
+        with threading.Lock():
+            await asyncio.sleep(0)
+";
+    assert_eq!(
+        reports("ir_with_exits", src, "EFF106"),
+        pairs(&[("holds", "EFF106")])
+    );
+}
+
+#[test]
+fn every_except_star_clause_may_run() {
+    let src = "\
+def star(it):
+    it = iter(it)
+    try:
+        raise ExceptionGroup(\"g\", [ValueError(), KeyError()])
+    except* ValueError:
+        list(it)
+    except* KeyError:
+        list(it)
+
+
+def plain(it):
+    it = iter(it)
+    try:
+        raise ValueError
+    except ValueError:
+        list(it)
+    except KeyError:
+        list(it)
+";
+    // An exception group can match both clauses; plain clauses are exclusive.
+    assert_eq!(
+        reports("ir_except_star", src, "MUT106"),
+        pairs(&[("star", "MUT106")])
+    );
+}

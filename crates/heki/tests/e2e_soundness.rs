@@ -311,13 +311,9 @@ const INTERP: &[Expect] = &[
             ("OPT101", V::Fix(&["x.append(-i)"])),
         ],
     ),
-    (
-        "returned_in_try",
-        &[(
-            "OPT101",
-            V::Blocked("Unique(x): it may be shared: it is returned or raised"),
-        )],
-    ),
+    // The `finally` loop runs after `return x` took the list: appending would change the
+    // returned list (disproved, not reported).
+    ("returned_in_try", &[]),
     (
         "stale_handler_alias",
         &[(
@@ -1323,6 +1319,23 @@ fn the_last_operand_of_a_chained_comparison_is_its_own() {
                 )],
             ),
         ],
+        true,
+    );
+}
+
+#[test]
+fn a_finally_body_is_rewritten_only_if_every_way_through_it_is_safe() {
+    // The `finally` loop runs after the early `return` with `acc` the caller's list, and after
+    // normal completion with a fresh one: rewriting it is unsafe. Without an alias on any path
+    // it is safe.
+    let src = "def finally_after_return(n, early, shared):\n    acc = []\n    try:\n        if early:\n            acc = shared\n            return None\n    finally:\n        for x in range(n):\n            acc = acc + [x]\n    return len(acc)\n\n\ndef finally_all_safe(n, early):\n    acc = []\n    try:\n        if early:\n            return None\n    finally:\n        for x in range(n):\n            acc = acc + [x]\n    return len(acc)\n\n\ns = []\nfinally_after_return(1, True, s)\nprint(s, finally_all_safe(2, True), finally_all_safe(2, False))\n";
+    check_module(
+        "sound_finally_copies",
+        &[("cases.py", src)],
+        &[(
+            "finally_all_safe",
+            &[("OPT101", V::Fix(&["acc.append(x)"]))],
+        )],
         true,
     );
 }

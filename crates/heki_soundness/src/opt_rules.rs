@@ -334,7 +334,17 @@ pub fn analyze_module(
             }
         }
     }
-    out.sort_by_key(|a| (a.span.start, a.rule));
+    // A `finally` body is lowered once per way out of its `try`: a statement in it has a
+    // candidate per copy, and is rewritten only if every copy is. Keep the least safe one.
+    let strength = |c: &OptCandidate| match c.verdict.tier {
+        _ if c.fix().is_some() => 4,
+        SafetyTier::Safe => 3,
+        SafetyTier::Conditional => 2,
+        SafetyTier::Blocked => 1,
+        SafetyTier::Disproved => 0,
+    };
+    out.sort_by_key(|a| (a.span.start, a.span.end, a.rule, strength(a)));
+    out.dedup_by(|later, kept| later.rule == kept.rule && later.span == kept.span);
     out
 }
 

@@ -749,17 +749,16 @@ fn ir_control_flow_statements() {
         })
         .map(|(b, _, _)| b)
         .unwrap();
+    // An exception leaving the `try` runs the `finally` body, then goes on.
     let finally = blocks[else_block as usize]["exc_target"].as_u64().unwrap();
     assert!(
         insts(t).iter().any(|(b, k, p)| *b == finally
             && *k == "Const"
             && p["literal"] == json!({"str": "done"}))
     );
-    assert!(
-        !blocks[finally as usize]["phis"]
-            .as_array()
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        blocks[finally as usize]["terminator"],
+        json!({"Raise": null})
     );
 
     // `with` items (several, tuple and list targets) enter in order and exit in reverse.

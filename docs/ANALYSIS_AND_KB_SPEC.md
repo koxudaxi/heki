@@ -85,6 +85,13 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   (depth `d + 1`) starts with `IterNext(it)` (this removed, by construction, the 7 Stage 0-A
   false positives of `EFF102` / `EFF103` that took the one-time `for.iter` call for a call in the
   loop).
+- **Leaving `with` and `try`**: a `return`, `break`, or `continue` exits each `with` it leaves
+  (`ExitWith`) and runs each `finally` body on the way, innermost first; a `finally` body is
+  lowered once per way out of its `try` (normal completion, an exception, which it re-raises
+  afterwards, and each jump), as CPython compiles it, and the Soundness lane rewrites a
+  statement in it only if every copy is proven safe. A typed `except` clause's test is opaque
+  (a bare `except:` always matches); every `except*` clause may run on part of the group;
+  an exception no clause takes is raised again.
 - **Unpacking** (`a, *rest, b = value`, also in `for` and `with` targets): every item is read
   (`SubscriptLoad` of a constant index at the target's position, negative after a star) before
   any target is written; `*rest` binds a new list.
