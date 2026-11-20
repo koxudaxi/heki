@@ -27,30 +27,26 @@ async def get_user(user_id: int) -> dict[str, str]:
     return load_user(user_id)  # blocks the event loop two calls down
 
 
-# app/settings.py
-from dataclasses import dataclass
+# app/stats.py
+from collections.abc import Sequence
 
 
-@dataclass(frozen=True)
-class Settings:
-    allowed_hosts: list[str]
+def sort_values(values):
+    values.sort()
 
 
-def add_host(hosts: list[str], host: str) -> None:
-    hosts.append(host)
-
-
-def for_tenant(settings: Settings, host: str) -> Settings:
-    add_host(settings.allowed_hosts, host)  # changes it for every holder
-    return settings
+def median(values: Sequence[float]) -> float:
+    sort_values(values)  # reorders the caller's list
+    return values[len(values) // 2]
 ```
 
-Ruff (every rule except the docstring rules), ty, Pyrefly, and pyright and mypy in strict mode
-report nothing for this code. heki reports both bugs, with the calls that lead to them (`MUT108`
-is opt-in):
+Ruff (every rule except the docstring and annotation rules), ty, Pyrefly, and pyright and mypy
+in their default modes report nothing for this code. The annotation rules and the strict modes
+ask for annotations on `sort_values`, but none of them sees that it reorders the caller's list.
+heki reports both bugs, with the calls that lead to them:
 
 ```console
-$ heki check --extend-select MUT108
+$ heki check
 app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls `app.users.load_user`, which reaches a blocking call `requests.get` (blocking_net) on the event loop; offload it (`asyncio.to_thread`) or use an async API
   |
 5 |     return load_user(user_id)  # blocks the event loop two calls down
@@ -59,11 +55,11 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `async def get_user` calls
   = related: app/users.py:9:41: `load_user` calls `app.users.fetch_name`
   = related: app/users.py:5:12: `fetch_name` calls `requests.get`
 
-app/settings.py:14:5: MUT108 (readonly-type-mutation) [error] `for_tenant` changes the field `Settings.allowed_hosts` of a frozen instance in place via `app.settings.add_host` (indirect_helper): the class promises immutable instances, so they get shared (module-level defaults, caches, the same value handed to several owners), and every holder sees the change and different `==` results; copy it first or store an immutable type such as `tuple` / `frozenset`
-   |
-14 |     add_host(settings.allowed_hosts, host)  # changes it for every holder
-   |     ^
-  = related: app/settings.py:14:5: `for_tenant` calls `app.settings.add_host`
+app/stats.py:9:5: MUT110 (readonly-param-mutation) [error] `median` passes `values` to `app.stats.sort_values`, which changes it in place: `values` is annotated read-only (`Sequence` / `Mapping`), so the caller was promised that its argument is only read, but the helper changes the caller's object; pass a copy (`list(values)` / `dict(values)`), or annotate the helper's parameter with a mutable type so that the type checker shows the mismatch
+  |
+9 |     sort_values(values)  # reorders the caller's list
+  |     ^
+  = related: app/stats.py:9:5: `median` calls `app.stats.sort_values`
 
 Found 2 diagnostic(s) in 4 file(s).
 ```
@@ -78,14 +74,15 @@ Found 2 diagnostic(s) in 4 file(s).
   `async def` ([`EFF101`](rules/async-blocking-call.md)), a database query or an HTTP client
   created on every iteration of a loop ([`EFF103`](rules/loop-db-query.md),
   [`EFF102`](rules/loop-unpooled-client.md)), a `@cached_property` left stale when another
-  method changes what it read ([`MUT101`](rules/cached-property-stale-mutation.md)), and an
+  method changes what it read ([`MUT101`](rules/cached-property-stale-mutation.md)), an
   attribute `__hash__` reads changing after the object went into a `set`
-  ([`MUT107`](rules/hash-attr-mutation.md)). Opt-in rules add frozen dataclasses, `ReadOnly`
-  fields, and `Sequence` / `Mapping` arguments changed in place through a helper
-  ([`MUT108`](rules/readonly-type-mutation.md)), I/O while a `threading` lock or a database
-  transaction is held ([`EFF106`](rules/lock-or-tx-held-across-io.md)), and generators consumed
-  twice ([`MUT106`](rules/iterator-double-consumption.md)). A report that crosses functions
-  shows its call chain.
+  ([`MUT107`](rules/hash-attr-mutation.md)), and a `Sequence` / `Mapping` argument changed in
+  place by a helper ([`MUT110`](rules/readonly-param-mutation.md)). Opt-in rules add frozen
+  dataclass and `ReadOnly` fields changed in place ([`MUT108`](rules/readonly-type-mutation.md)),
+  I/O while a `threading` lock or a database transaction is held
+  ([`EFF106`](rules/lock-or-tx-held-across-io.md)), and generators consumed twice
+  ([`MUT106`](rules/iterator-double-consumption.md)). A report that crosses functions shows its
+  call chain.
 - **Conventions turned into checks.** Rules a code base keeps by review, by its own AST scripts
   and allowlists, or by run-time guards in its tests ("only the store writes `Model.fields`",
   "rendering does no I/O") become a few lines of
@@ -127,7 +124,7 @@ CPython's `symtable` on 3.11 to 3.15, and adversarial programs on which a naive 
 the output are run on CPython and must all be blocked. When a proof fails, the diagnostic names
 the obligation instead of offering a fix. See [Fixes and safety](fixes.md).
 
-See the [rules reference](rules/index.md) for all 26 rules.
+See the [rules reference](rules/index.md) for all 27 rules.
 
 ## Next steps
 

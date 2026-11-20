@@ -17,9 +17,9 @@ The first public preview.
   `concise`, `json`, `github`, `sarif`), and exit codes `0` / `1` / `2`. The target Python
   version (`py311` to `py315`) comes from `requires-python` or `--target-version`, and `--watch`
   re-checks on every change.
-- 26 rules in four families:
-  - Mutation and state: `MUT101`, `MUT107`, `MUT201`, `MUT202`, `MUT203`, and the opt-in
-    `MUT103`, `MUT106`, and `MUT108`.
+- 27 rules in four families:
+  - Mutation and state: `MUT101`, `MUT107`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, and the
+    opt-in `MUT103`, `MUT106`, and `MUT108`.
   - Execution effects: `EFF101`, `EFF102`, `EFF103`, `EFF201`, and the opt-in `EFF105`,
     `EFF106`, and `EFF107`.
   - Data pipelines: `DATA101`.

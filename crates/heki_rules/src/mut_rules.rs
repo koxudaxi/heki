@@ -1,4 +1,4 @@
-//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT201`, `MUT202`, `MUT203`
+//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT110`, `MUT201`, `MUT202`, `MUT203`
 //! (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::{CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller};
@@ -1392,14 +1392,14 @@ fn dominates(f: &IrFunction, d: heki_ir::BlockId, b: heki_ir::BlockId) -> bool {
     true
 }
 
-// ==================================================================================== MUT108
+// ============================================================================ MUT108 / MUT110
 
 mod readonly_mutation;
 
-/// `MUT108`: in-place changes of frozen dataclass / `NamedTuple` fields, `Final` / `ReadOnly`
-/// attributes, `ReadOnly` `TypedDict` keys, and `Sequence` / `Mapping` parameters handed to
-/// functions that change them.
-pub(crate) fn mut108(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
+/// `MUT108` (in-place changes of frozen dataclass / `NamedTuple` / `dataclass_transform` fields,
+/// `Final` / `ReadOnly` attributes, and `ReadOnly` `TypedDict` keys) and `MUT110` (`Sequence` /
+/// `Mapping` parameters handed to functions that change them), through one analysis.
+pub(crate) fn mut108_mut110(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     readonly_mutation::run(cx, out);
 }
 
