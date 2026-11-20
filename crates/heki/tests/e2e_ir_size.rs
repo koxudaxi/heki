@@ -391,3 +391,19 @@ fn a_function_past_its_ir_budget_is_one_opaque_call() {
     let (code, _, stderr) = p.check(&[]);
     assert_eq!(code, 0, "{stderr}");
 }
+
+/// Each block a name's lookup passes takes a unit: a call reading parameters no statement read
+/// before walks back through every branch, and the walk itself ends past the budget.
+#[test]
+fn a_lookup_walk_past_the_ir_budget_leaves_the_function_unmodeled() {
+    let params: Vec<String> = (0..200).map(|i| format!("a{i}")).collect();
+    let params = params.join(", ");
+    let mut lines = vec![format!("def walks(c, {params}):")];
+    lines.extend(std::iter::repeat_n(
+        "    if c:\n        pass".to_owned(),
+        1000,
+    ));
+    lines.push(format!("    return f({params})"));
+    let ir = dump_ir("ir_size_budget_walk", &(lines.join("\n") + "\n"));
+    assert_eq!(hazards(function(&ir, "walks")), ["unmodeled"]);
+}
