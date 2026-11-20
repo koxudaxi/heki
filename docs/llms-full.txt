@@ -1426,7 +1426,9 @@ prints the full list of diagnostics after every change, compared with the Ratche
 (`--baseline` or `baseline`) as `heki check` compares them. A change to `pyproject.toml`,
 `heki.toml`, or the summary snapshot reloads everything, and so does the first package marker
 (`__init__.py`) under `src/` appearing or the last one disappearing (module names under `src/`
-change with the `src` layout); the server does the same.
+change with the `src` layout); the server does the same. What fails once the watch runs, a
+configuration that no longer parses or a watched path that disappears, is reported, and the watch
+goes on until it is fixed.
 
 
 ---
