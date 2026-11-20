@@ -12,7 +12,7 @@ import update_release_draft as update
 from helpers import outputs, run_script
 
 DATA = Path(__file__).parent / "data" / "update_release_draft"
-NOTICE_010 = (
+OLD_BUMP_NOTICE = (
     "Before publishing this draft, bump the version to 0.1.1 in a pull request and merge it: `pyproject.toml`, "
     "`Cargo.toml` (`workspace.package.version` and the internal crates under `workspace.dependencies`), and "
     "`Cargo.lock`."
@@ -81,15 +81,12 @@ def test_next_version(latest, breaking, manifest, expected) -> None:
     assert update.next_version(latest, breaking=breaking, manifest=manifest) == expected
 
 
-def test_the_notice_appears_while_a_manifest_names_another_version(tmp_path: Path) -> None:
+def test_the_manifests_name_a_version_only_when_they_agree(tmp_path: Path) -> None:
     declared = update.manifest_versions(write_manifests(tmp_path / "a", "0.1.0"))
     assert update.manifest_version(declared) == (0, 1, 0)
-    assert update.version_notice((0, 1, 1), declared) == NOTICE_010
-    assert update.version_notice((0, 1, 0), declared) is None
 
     mixed = update.manifest_versions(write_manifests(tmp_path / "b", "0.1.1", internal="0.1.0"))
     assert update.manifest_version(mixed) is None, "the manifests disagree"
-    assert update.version_notice((0, 1, 1), mixed) is not None
 
     assert update.manifest_version({"x": "0.2.0rc1"}) is None
 
@@ -116,7 +113,7 @@ def test_a_first_draft_lists_the_change_and_its_breaking_items() -> None:
         update.parse_body(""),
         [merged(5, title="Rename an option", content=BREAKING_CONTENT.format(n=5))],
     )
-    assert update.render_body(draft, None) == (
+    assert update.render_body(draft) == (
         "## Breaking Changes\n\n"
         "### Configuration and CLI Changes\n"
         "* Option renamed - The option `--a` is now `--b` (#5)\n\n"
@@ -127,9 +124,14 @@ def test_a_first_draft_lists_the_change_and_its_breaking_items() -> None:
 
 def test_a_draft_without_breaking_changes_has_no_breaking_section() -> None:
     draft = update.merge_pull_requests(update.parse_body(""), [merged(6, title="Faster checks")])
+    assert update.render_body(draft) == "## Changes\n\n* Faster checks (#6)\n"
+
+
+def test_a_line_asking_for_a_version_bump_is_dropped() -> None:
+    body = f"{OLD_BUMP_NOTICE}\n\nA note.\n\n## Changes\n\n* A change (#5)\n"
+    draft = update.merge_pull_requests(update.parse_body(body), [merged(6)])
     assert (
-        update.render_body(draft, NOTICE_010)
-        == f"{NOTICE_010}\n\n## Changes\n\n* Faster checks (#6)\n"
+        update.render_body(draft) == "A note.\n\n## Changes\n\n* A change (#5)\n* A change (#6)\n"
     )
 
 
@@ -142,12 +144,12 @@ def test_maintenance_and_dependency_updates_are_not_listed() -> None:
             merged(9, labels=("bug",)),
         ],
     )
-    assert update.render_body(draft, None) == "## Changes\n\n* A change (#9)\n"
+    assert update.render_body(draft) == "## Changes\n\n* A change (#9)\n"
 
 
 def test_a_draft_with_only_unlisted_changes_is_empty() -> None:
     draft = update.merge_pull_requests(update.parse_body(""), [merged(7, labels=("maintenance",))])
-    assert update.render_body(draft, None) == ""
+    assert update.render_body(draft) == ""
 
 
 def test_items_accumulate_across_pull_requests_in_heading_order() -> None:
@@ -155,11 +157,10 @@ def test_items_accumulate_across_pull_requests_in_heading_order() -> None:
         update.merge_pull_requests(
             update.parse_body(""), [merged(5, content=BREAKING_CONTENT.format(n=5))]
         ),
-        None,
     )
     later = "### Default Rule Changes\n* Rule reports more - `MUT101` reports setup methods (#6)\n"
     body = update.render_body(
-        update.merge_pull_requests(update.parse_body(body), [merged(6, content=later)]), None
+        update.merge_pull_requests(update.parse_body(body), [merged(6, content=later)])
     )
     assert body == (
         "## Breaking Changes\n\n"
@@ -179,10 +180,9 @@ def test_a_pull_request_analyzed_again_replaces_its_items() -> None:
             update.parse_body(""),
             [merged(5, title="Old title", content=BREAKING_CONTENT.format(n=5)), merged(6)],
         ),
-        None,
     )
     again = update.merge_pull_requests(update.parse_body(first), [merged(5, title="New title")])
-    assert update.render_body(again, None) == "## Changes\n\n* A change (#6)\n* New title (#5)\n"
+    assert update.render_body(again) == "## Changes\n\n* A change (#6)\n* New title (#5)\n"
 
 
 def test_changes_to_experimental_features_accumulate_in_their_own_section() -> None:
@@ -191,7 +191,6 @@ def test_changes_to_experimental_features_accumulate_in_their_own_section() -> N
             update.parse_body(""),
             [merged(5, experimental="* `EFF101` is new - A rule (#5)\n")],
         ),
-        None,
     )
     assert first == (
         "## Experimental\n\n* `EFF101` is new - A rule (#5)\n\n## Changes\n\n* A change (#5)\n"
@@ -206,7 +205,7 @@ def test_changes_to_experimental_features_accumulate_in_their_own_section() -> N
             )
         ],
     )
-    assert update.render_body(later, None) == (
+    assert update.render_body(later) == (
         "## Breaking Changes\n\n"
         "### Configuration and CLI Changes\n"
         "* Option renamed - The option `--a` is now `--b` (#6)\n\n"
@@ -218,7 +217,7 @@ def test_changes_to_experimental_features_accumulate_in_their_own_section() -> N
         "* A change (#6)\n"
     )
     again = update.merge_pull_requests(update.parse_body(first), [merged(5)])
-    assert update.render_body(again, None) == "## Changes\n\n* A change (#5)\n"
+    assert update.render_body(again) == "## Changes\n\n* A change (#5)\n"
 
 
 def test_experimental_changes_do_not_bump_the_minor_version(tmp_path: Path) -> None:
@@ -255,10 +254,7 @@ def test_the_body_merge_keeps_what_the_owner_wrote() -> None:
     draft = update.merge_pull_requests(
         update.parse_body((DATA / "draft-body.md").read_text(encoding="utf-8")), pulls
     )
-    notice = update.version_notice((0, 2, 0), {"x": "0.1.0"})
-    assert update.render_body(draft, notice) == (DATA / "expected-body.md").read_text(
-        encoding="utf-8"
-    )
+    assert update.render_body(draft) == (DATA / "expected-body.md").read_text(encoding="utf-8")
 
 
 def test_the_first_draft_is_created_from_main(tmp_path: Path) -> None:
@@ -269,7 +265,7 @@ def test_the_first_draft_is_created_from_main(tmp_path: Path) -> None:
     assert plan.release == {
         "tag_name": "v0.1.1",
         "name": "v0.1.1",
-        "body": f"{NOTICE_010}\n\n## Changes\n\n* A change (#5)\n",
+        "body": "## Changes\n\n* A change (#5)\n",
         "draft": True,
         "target_commitish": "main",
     }
@@ -290,8 +286,10 @@ def test_a_breaking_change_moves_the_draft_to_the_next_minor_version(tmp_path: P
     # An update that lands after the owner published the release must not unpublish it.
     assert "draft" not in plan.release
     assert "target_commitish" not in plan.release
-    assert plan.release["body"].startswith(
-        "Before publishing this draft, bump the version to 0.2.0 "
+    assert plan.release["body"] == (
+        "## Breaking Changes\n\n### Configuration and CLI Changes\n"
+        "* Option renamed - The option `--a` is now `--b` (#6)\n\n"
+        "## Changes\n\n* A change (#5)\n* Rename (#6)\n"
     )
     assert plan.breaking_prs == [6]
     assert plan.comments[6] == (
@@ -307,9 +305,11 @@ def test_a_breaking_change_moves_the_draft_to_the_next_minor_version(tmp_path: P
     )
 
 
-def test_bumped_manifests_drop_the_notice(tmp_path: Path) -> None:
-    declared = update.manifest_versions(write_manifests(tmp_path, "0.1.1"))
-    plan, _ = update.plan([merged(5)], [released("v0.1.0")], declared)
+def test_manifests_that_name_a_later_version_pick_the_draft_version(tmp_path: Path) -> None:
+    declared = update.manifest_versions(write_manifests(tmp_path, "0.3.0"))
+    plan, version = update.plan([merged(5)], [released("v0.1.0")], declared)
+    assert version == (0, 3, 0)
+    assert plan.release["tag_name"] == "v0.3.0"
     assert plan.release["body"] == "## Changes\n\n* A change (#5)\n"
 
 

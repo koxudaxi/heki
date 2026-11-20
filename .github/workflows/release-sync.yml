@@ -1,0 +1,157 @@
+name: Release Sync
+
+# The tag is the version: release.yml writes it into the manifests of the checkout it builds and
+# commits nothing. After a release is published, this workflow opens the pull request that brings
+# `main` to it, `chore: sync release metadata for <version>` from the branch
+# `release/sync-<version>`: the version in `pyproject.toml`, `Cargo.toml`, and `Cargo.lock`, and
+# the release's CHANGELOG section dated with the publish date (`scripts/set_release_versions.py`).
+# A pre-release leaves `main` as it is.
+#
+# - `workflow_dispatch` syncs `main` with a published release again, for example after the
+#   CHANGELOG was fixed for a run that failed. A run whose changes `main` already has opens
+#   nothing.
+#
+# The pull request is opened with `GITHUB_TOKEN`, so GitHub holds its CI runs until someone with
+# write access starts them (docs/development.md, "Publishing a release"). The job that runs the
+# script can only read; the job that pushes the branch and opens the pull request runs no code of
+# the repository. Every action is pinned by commit SHA.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag to sync main with (for example v0.1.2)"
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: release-sync-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  patch:
+    name: release metadata patch
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      base: ${{ steps.patch.outputs.base }}
+      changed: ${{ steps.patch.outputs.changed }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+      - name: Read the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          release="$(gh api "/repos/$GITHUB_REPOSITORY/releases/tags/$(jq -rn --arg tag "$TAG" '$tag | @uri')")"
+          if [ "$(jq -r '.draft or .prerelease' <<< "$release")" != false ]; then
+            echo "::error::$TAG is not a published final release; main is synced only with those."
+            exit 1
+          fi
+          published_at="$(jq -r .published_at <<< "$release")"
+          {
+            echo "version=${TAG#v}"
+            echo "date=${published_at:0:10}"
+          } >> "$GITHUB_OUTPUT"
+      - name: Write the release into the manifests and the CHANGELOG
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          DATE: ${{ steps.release.outputs.date }}
+        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$VERSION" --changelog "$DATE"
+      - name: Create the patch
+        id: patch
+        env:
+          PATCH_PATH: ${{ runner.temp }}/release-sync.patch
+        run: |
+          set -euo pipefail
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if git diff --quiet; then
+            echo "::notice::main already declares this release; there is nothing to sync."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --binary > "$PATCH_PATH"
+          git diff --stat
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      - if: steps.patch.outputs.changed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sync-patch
+          path: ${{ runner.temp }}/release-sync.patch
+          if-no-files-found: error
+
+  pull-request:
+    name: release metadata pull request
+    needs: patch
+    if: needs.patch.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # push the branch
+      pull-requests: write # open or update the pull request, and label it
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.patch.outputs.base }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-sync-patch
+          path: ${{ runner.temp }}
+      - name: Push the branch and open or update the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCH_PATH: ${{ runner.temp }}/release-sync.patch
+          VERSION: ${{ needs.patch.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="release/sync-$VERSION"
+          title="chore: sync release metadata for $VERSION"
+          git apply --index "$PATCH_PATH"
+          git -c user.name="Koudai Aono" -c user.email="630670+koxudaxi@users.noreply.github.com" \
+            commit --quiet --message "$title"
+
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_sha="$(git ls-remote --heads "$remote" "refs/heads/$branch" | cut -f1)"
+          if [ -n "$remote_sha" ]; then
+            git push --quiet --force-with-lease="refs/heads/$branch:$remote_sha" "$remote" "HEAD:refs/heads/$branch"
+          else
+            git push --quiet "$remote" "HEAD:refs/heads/$branch"
+          fi
+
+          body="$RUNNER_TEMP/release-sync-body.md"
+          cat > "$body" <<EOF
+          Brings \`main\` to the release v$VERSION: the version in \`pyproject.toml\`, \`Cargo.toml\`, and \`Cargo.lock\`, and the date of its CHANGELOG section (\`scripts/set_release_versions.py\`).
+
+          A workflow opened this pull request with \`GITHUB_TOKEN\`, so GitHub holds its CI runs: close and reopen it to start them, or select **Approve workflows to run** in the merge box.
+          EOF
+          number="$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file "$body"
+          else
+            url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "$title" --body-file "$body")"
+            number="${url##*/}"
+          fi
+
+          # Pull requests labeled `maintenance` stay out of the Release Draft's list of changes.
+          if ! gh api "/repos/$GITHUB_REPOSITORY/labels/maintenance" --silent 2> /dev/null; then
+            gh api --method POST "/repos/$GITHUB_REPOSITORY/labels" --silent \
+              -f name=maintenance -f color=ededed -f description="Left out of the release notes"
+          fi
+          gh api --method POST "/repos/$GITHUB_REPOSITORY/issues/$number/labels" \
+            -f 'labels[]=maintenance' --silent
+          echo "::notice::Pull request #$number: close and reopen it to start CI."

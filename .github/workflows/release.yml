@@ -4,6 +4,11 @@ name: Release
 # executable) for every platform, the source distribution, PyPI through trusted publishing, and
 # optionally the crates on crates.io. Its jobs restore no cache (`enable-cache: false` for uv):
 # what they build or check is published.
+#
+# The tag is the version (`v` + the version): every job that builds from the checkout first writes
+# it into the manifests and `Cargo.lock` (`scripts/set_release_versions.py`), and the checks
+# compare the distributions with it. Nothing is committed here; after the release, the Release
+# Sync workflow opens the pull request that brings `main` to it.
 
 on:
   release:
@@ -14,6 +19,10 @@ on:
         description: "Publish to PyPI from main (otherwise only build and check the distributions)"
         type: boolean
         default: false
+      version:
+        description: "Build and check this version (for example 0.1.2) without publishing; empty keeps the committed manifests' version"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -23,8 +32,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  version:
+    # The version the builds write and the checks expect: the release tag without its `v`, the
+    # `version` input of a manual run, or empty to keep the committed manifests' version. Only a
+    # release tag publishes a version the manifests do not declare.
+    name: release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          INPUT: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [ -n "$INPUT" ] && [ "$PUBLISH" = true ]; then
+            echo "::error::The version input builds and checks only: publish a release to publish a version."
+            exit 1
+          fi
+          version="${TAG:-$INPUT}"
+          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+
   wheels:
     name: wheel (${{ matrix.target }})
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -45,10 +77,19 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-2025
     runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+      - name: Write the release version into the manifests
+        if: env.RELEASE_VERSION != ''
+        shell: bash
+        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION"
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
         with:
           targets: ${{ matrix.target }}
@@ -68,9 +109,6 @@ jobs:
           # unless told otherwise) instead of the one set up above.
           rust-toolchain: 1.99.0
           args: --release --locked --out dist
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          enable-cache: false
       - name: Check metadata
         shell: bash
         run: uvx twine check dist/*
@@ -81,18 +119,24 @@ jobs:
 
   sdist:
     name: source distribution
+    needs: version
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+      - name: Write the release version into the manifests
+        if: env.RELEASE_VERSION != ''
+        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION"
       - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: sdist
           args: --out dist
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          enable-cache: false
       - run: uvx twine check dist/*
       # The tests in the unpacked source distribution run in ci.yml's `source distribution
       # tests` job, which the `ci` job below runs on the release commit.
@@ -112,7 +156,7 @@ jobs:
     # (exit 1) and pass a clean project (exit 0). Each wheel is installed on a runner of its
     # platform; the static musl binary runs, extracted from its wheel, on a glibc runner.
     name: wheel smoke test (${{ matrix.target }})
-    needs: wheels
+    needs: [version, wheels]
     strategy:
       fail-fast: false
       matrix:
@@ -154,14 +198,17 @@ jobs:
         shell: bash
         env:
           INSTALL: ${{ matrix.install }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
           if [ "$INSTALL" = true ]; then set -- --install; fi
+          if [ -n "$RELEASE_VERSION" ]; then set -- "$@" --version "$RELEASE_VERSION"; fi
           python scripts/release_check.py smoke dist/*.whl "$@"
 
   versions:
-    # A tag such as `v0.1.0rc1` must not publish distributions that declare `0.1.0`.
+    # Every distribution declares the version the builds wrote: a tag such as `v0.2.0-rc.1` must
+    # not publish distributions that declare `0.2.0`.
     name: versions match the tag
-    needs: [wheels, sdist]
+    needs: [version, wheels, sdist]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -175,11 +222,11 @@ jobs:
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: false
-      - name: The tag, the manifests, and every distribution declare one version
+      - name: Every distribution declares the release version
         env:
-          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: |
-          if [ -n "$TAG" ]; then set -- --tag "$TAG"; fi
+          if [ -n "$RELEASE_VERSION" ]; then set -- --version "$RELEASE_VERSION"; fi
           uv run --no-project --with "packaging==25.0" python scripts/release_check.py versions dist "$@"
 
   ci:
@@ -235,22 +282,31 @@ jobs:
     # every crate before it uploads the first one.
     name: publish to crates.io
     if: github.event_name == 'release' && vars.PUBLISH_CRATES == 'true'
-    needs: [pypi]
+    needs: [version, pypi]
     runs-on: ubuntu-24.04
     environment:
       name: crates-io
       url: https://crates.io/crates/heki
     permissions:
       id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+      - name: Write the release version into the manifests
+        if: env.RELEASE_VERSION != ''
+        run: uv run --no-project --python 3.14 scripts/set_release_versions.py "$RELEASE_VERSION"
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
       # Trusted publishing: a short-lived token from the repository's OIDC identity.
       - id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      # `--allow-dirty`: the version written above is the only change to the checkout.
       - name: Publish every crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish --locked --workspace
+        run: cargo publish --locked --allow-dirty --workspace

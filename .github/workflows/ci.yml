@@ -210,9 +210,10 @@ jobs:
           tar -xzf dist/*.tar.gz -C sdist-tree --strip-components 1
           cargo test --workspace --locked --manifest-path sdist-tree/Cargo.toml
 
-  release-draft-scripts:
-    # release-draft.yml runs only on main, so its scripts are tested here, on every pull request.
-    name: release draft scripts
+  release-scripts:
+    # The release workflows run only on main or for a release, so their scripts are tested here,
+    # on every pull request.
+    name: release scripts
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -8,8 +8,9 @@ again replace the earlier ones. Other text in the draft is kept.
 
 The next version follows 0.x semantics from the newest published release: a breaking change bumps
 the minor version (0.1.x -> 0.2.0) and anything else the patch. When the manifests already name a
-later version, the draft takes it. The draft's tag is ``v<version>``, and its body starts with a
-line asking for the manifests to be bumped to that version while they declare another.
+later version, the draft takes it. The draft's tag is ``v<version>``, and the tag is the release's
+version: the release workflow writes it into the manifests before it builds
+(`scripts/set_release_versions.py`).
 
 A pull request analyzed again keeps one analysis comment: the workflow's earlier comment, found
 by its first line, is updated instead of a new one being posted. A pull request labeled
@@ -32,7 +33,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from release_check import manifest_versions
 from release_draft_common import (
     BREAKING_CHANGE_HEADINGS,
     BREAKING_LABEL,
@@ -44,6 +44,7 @@ from release_draft_common import (
     parse_version,
     published_versions,
 )
+from set_release_versions import manifest_versions
 from validate_release_draft_analysis import (
     EM_DASH,
     Analysis,
@@ -59,7 +60,9 @@ CHANGES_SECTION = "## Changes"
 COMMENT_MARKER = "<!-- heki-release-draft: breaking-change-analysis -->"
 WORKFLOW_AUTHOR = "github-actions[bot]"
 """The author of what the workflow writes with `GITHUB_TOKEN`; no one else can post as it."""
-NOTICE_PREFIX = "Before publishing this draft, bump the version to "
+BUMP_NOTICE_PREFIX = "Before publishing this draft, bump the version to "
+"""The start of the line a draft began with while the manifests had to be bumped by hand; parsing
+a draft drops it."""
 MARKDOWN_PUNCTUATION = re.compile(r"([\\`*_\[\]<>|~@])")
 INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
@@ -137,7 +140,7 @@ def _ends_with_pr(line: str, number: int) -> bool:
 
 
 def parse_body(body: str) -> DraftBody:
-    """Split a draft body into its sections; the version notice is dropped, since it is written anew."""
+    """Split a draft body into its sections, without a line asking for a version bump."""
     draft = DraftBody()
     section: list[str] | None = draft.preamble
     breaking_heading: str | None = None
@@ -161,7 +164,7 @@ def parse_body(body: str) -> DraftBody:
             elif line.strip():
                 draft.breaking.setdefault(breaking_heading or "", []).append(line)
         elif section is draft.preamble:
-            if not line.startswith(NOTICE_PREFIX):
+            if not line.startswith(BUMP_NOTICE_PREFIX):
                 section.append(line)
         elif section is draft.changes or section is draft.experimental:
             if line.strip():
@@ -212,9 +215,9 @@ def _heading_order(heading: str, position: int) -> tuple[int, int]:
     return 1, position
 
 
-def render_body(draft: DraftBody, notice: str | None) -> str:
-    """Return the draft body: the notice, other leading text, the three sections, then any other section."""
-    parts = [notice] if notice else []
+def render_body(draft: DraftBody) -> str:
+    """Return the draft body: the leading text, the three sections, then any other section."""
+    parts: list[str] = []
     if preamble := "\n".join(draft.preamble).strip():
         parts.append(preamble)
     if draft.has_breaking_changes():
@@ -247,17 +250,6 @@ def manifest_version(declared: dict[str, str]) -> Version | None:
     """Return the version the manifests agree on, or None when they differ or name a pre-release."""
     values = set(declared.values())
     return parse_version(values.pop()) if len(values) == 1 else None
-
-
-def version_notice(version: Version, declared: dict[str, str]) -> str | None:
-    """Return the body's first line while a manifest declares another version than the draft's."""
-    if all(value == format_version(version) for value in declared.values()):
-        return None
-    return (
-        f"{NOTICE_PREFIX}{format_version(version)} in a pull request and merge it: "
-        "`pyproject.toml`, `Cargo.toml` (`workspace.package.version` and the internal crates under "
-        "`workspace.dependencies`), and `Cargo.lock`."
-    )
 
 
 def _validated_release(record: Any) -> dict[str, Any]:
@@ -333,7 +325,7 @@ def plan(
     release: dict[str, Any] = {
         "tag_name": tag,
         "name": tag,
-        "body": render_body(draft, version_notice(version, declared)),
+        "body": render_body(draft),
     }
     if existing is None:
         release |= {"draft": True, "target_commitish": "main"}

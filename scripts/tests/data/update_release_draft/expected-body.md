@@ -1,5 +1,3 @@
-Before publishing this draft, bump the version to 0.2.0 in a pull request and merge it: `pyproject.toml`, `Cargo.toml` (`workspace.package.version` and the internal crates under `workspace.dependencies`), and `Cargo.lock`.
-
 A note the owner wrote by hand.
 
 ## Breaking Changes

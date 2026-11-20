@@ -1,4 +1,4 @@
-"""Fixtures for the tests of the Release Draft workflow's scripts.
+"""Fixtures for the tests of the release workflows' scripts.
 
 Run them from the repository root with:
 
