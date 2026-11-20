@@ -103,7 +103,7 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pydantic.BaseModel.model_copy"
-copy_sanitizer = true
+copy_sanitizer = "shallow"
 opaque_to_layer3 = true
 
 # --- HTTP: requests ---

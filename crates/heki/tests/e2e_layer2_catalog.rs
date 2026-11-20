@@ -1224,3 +1224,55 @@ fn overrides_set_only_the_keys_they_list() {
         ]
     );
 }
+
+const SANITIZERS: &str = r#"
+[[tool.heki.ecosystem]]
+symbol = "vendor.detach"
+copy-sanitizer = "deep"
+
+[[tool.heki.ecosystem]]
+symbol = "vendor.shallow_deepcopy"
+copy-sanitizer = true
+"#;
+
+const SANITIZED: &str = r#"import functools
+
+import vendor
+
+
+@functools.cache
+def cached():
+    return {"items": []}
+
+
+def tn_deep_sanitizer():
+    vendor.detach(cached())["items"].append(1)
+
+
+def tp_shallow_sanitizer_keeps_the_items_shared():
+    vendor.shallow_deepcopy(cached())["items"].append(1)
+
+
+def tn_shallow_sanitizer_copies_the_top_level():
+    vendor.shallow_deepcopy(cached())["new"] = 1
+"#;
+
+/// A declared copy sanitizer copies as deeply as its entry says, whatever its name.
+#[test]
+fn copy_sanitizers_copy_as_deeply_as_declared() {
+    assert_eq!(
+        check_configured(
+            "catalog_sanitizers",
+            SANITIZERS,
+            "app/sanitized.py",
+            SANITIZED,
+            "MUT202"
+        ),
+        vec![d(
+            16,
+            "MUT202",
+            "tp_shallow_sanitizer_keeps_the_items_shared",
+            "app.sanitized.cached"
+        )]
+    );
+}

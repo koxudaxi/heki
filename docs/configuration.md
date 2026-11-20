@@ -270,7 +270,7 @@ excluded = true               # never reported
 | `async-safe` | Safe to call from `async def`: it never blocks the event loop, so blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread. |
 | `excluded` | Never reported (logging and similar). |
-| `copy-sanitizer` | Returns a copy (ends `MUT202` protection). |
+| `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too, `"shallow"` (or `true`) only the object itself, so the values below it stay protected. |
 | `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
 | `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 

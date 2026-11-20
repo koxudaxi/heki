@@ -866,7 +866,7 @@ excluded = true               # never reported
 | `async-safe` | Safe to call from `async def`: it never blocks the event loop, so blocking effects in `effects` are ignored (`db_query` and `unpooled_client_alloc` still count in loops). |
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread. |
 | `excluded` | Never reported (logging and similar). |
-| `copy-sanitizer` | Returns a copy (ends `MUT202` protection). |
+| `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too, `"shallow"` (or `true`) only the object itself, so the values below it stay protected. |
 | `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
 | `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 
@@ -3118,8 +3118,9 @@ Checks mutations of objects returned by a shared producer:
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
 that mutate their argument are followed, also on the call result itself
 (`schema_of(raw).items.append(x)`). Copies end the protection: `copy.deepcopy(...)`,
-`model.model_copy(deep=True)`, and the copy sanitizers of the ecosystem knowledge base clear it,
-shallow copies (`copy.copy`, `.copy()`) free the top level only: the values below stay shared.
+`model.model_copy(deep=True)`, and the deep copy sanitizers of the ecosystem knowledge base clear
+it, shallow copies (`copy.copy`, `.copy()`, a sanitizer declared `copy-sanitizer = "shallow"`)
+free the top level only: the values below stay shared.
 A wrapper that returns a copy on one path and the shared value on another still returns a
 shared value.
 

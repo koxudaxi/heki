@@ -12,7 +12,7 @@
 //! deserialize into uses `#[serde(deny_unknown_fields)]`, so an advisory field written into
 //! a Layer 1 file (or a Layer 1 field written into a Layer 2 file) fails to load.
 
-use heki_env::{EcosystemOverride, PythonVersion};
+use heki_env::{CopySanitizerSetting, EcosystemOverride, PythonVersion};
 use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -45,6 +45,8 @@ pub enum KbError {
     },
     #[error("invalid effect kind `{0}` in user ecosystem override")]
     InvalidEffect(String),
+    #[error("invalid copy-sanitizer `{0}` in user ecosystem override (`shallow` or `deep`)")]
+    InvalidCopyDepth(String),
 }
 
 /// Layer 1 parameter effect (Soundness lane ONLY — no advisory I/O effects).
@@ -163,6 +165,15 @@ impl ExecEffectKind {
     }
 }
 
+/// How much of its operand a copy sanitizer copies (`MUT202`): the object only, so the values
+/// below it stay shared (`copy.copy`), or everything below it too (`copy.deepcopy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyDepth {
+    Shallow,
+    Deep,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EcosystemEntry {
@@ -171,7 +182,8 @@ pub struct EcosystemEntry {
     pub async_safe: bool,
     pub offloads_blocking_arg: Option<u8>,
     pub excluded: bool,
-    pub copy_sanitizer: bool,
+    /// The call returns a copy of its operand (`MUT202`), this deep.
+    pub copy_sanitizer: Option<CopyDepth>,
     pub opaque_to_layer3: bool,
     /// Optional instance class returned by a factory function or method
     /// (e.g. `sqlite3.connect` -> `sqlite3.Connection`, `sqlite3.Connection.cursor` -> `sqlite3.Cursor`).
@@ -203,7 +215,8 @@ pub struct EcosystemPatch {
     pub async_safe: Option<bool>,
     pub offloads_blocking_arg: Option<u8>,
     pub excluded: Option<bool>,
-    pub copy_sanitizer: Option<bool>,
+    /// `Some(None)`: no copy sanitizer.
+    pub copy_sanitizer: Option<Option<CopyDepth>>,
     pub return_type: Option<String>,
     pub sync_lock_or_tx: Option<bool>,
 }
@@ -222,8 +235,8 @@ impl EcosystemPatch {
         if let Some(v) = self.excluded {
             entry.excluded = v;
         }
-        if let Some(v) = self.copy_sanitizer {
-            entry.copy_sanitizer = v;
+        if let Some(depth) = self.copy_sanitizer {
+            entry.copy_sanitizer = depth;
         }
         if let Some(t) = &self.return_type {
             entry.return_type = Some(t.clone());
@@ -249,13 +262,23 @@ impl TryFrom<&EcosystemOverride> for EcosystemPatch {
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
+        let copy_sanitizer = match &value.copy_sanitizer {
+            None => None,
+            Some(CopySanitizerSetting::Flag(false)) => Some(None),
+            Some(CopySanitizerSetting::Flag(true)) => Some(Some(CopyDepth::Shallow)),
+            Some(CopySanitizerSetting::Depth(depth)) => Some(Some(match depth.as_str() {
+                "shallow" => CopyDepth::Shallow,
+                "deep" => CopyDepth::Deep,
+                _ => return Err(KbError::InvalidCopyDepth(depth.clone())),
+            })),
+        };
         Ok(Self {
             symbol: value.symbol.clone(),
             effects,
             async_safe: value.async_safe,
             offloads_blocking_arg: value.offloads_blocking_arg,
             excluded: value.excluded,
-            copy_sanitizer: value.copy_sanitizer,
+            copy_sanitizer,
             return_type: value.return_type.clone(),
             sync_lock_or_tx: value.sync_lock_or_tx,
         })
@@ -728,8 +751,8 @@ mod tests {
             excluded: true,
             ..entry(&[])
         };
-        let copy_sanitizer = EcosystemEntry {
-            copy_sanitizer: true,
+        let copy_sanitizer = |depth| EcosystemEntry {
+            copy_sanitizer: Some(depth),
             ..entry(&[])
         };
         let qs = "django.db.models.query.QuerySet";
@@ -833,16 +856,17 @@ mod tests {
                 .concat(),
                 excluded,
             ),
+            (s(&["copy.deepcopy"]), copy_sanitizer(CopyDepth::Deep)),
             (
+                // `model_copy(deep=True)` copies deeply (`heki_effect::readonly`).
                 s(&[
-                    "copy.deepcopy",
                     "copy.copy",
                     "pydantic.BaseModel.model_copy",
                     "builtins.dict.copy",
                     "builtins.list.copy",
                     "builtins.set.copy",
                 ]),
-                copy_sanitizer,
+                copy_sanitizer(CopyDepth::Shallow),
             ),
             (
                 with_prefix(
@@ -1698,7 +1722,7 @@ mod tests {
             async_safe: Some(true),
             offloads_blocking_arg: Some(0),
             excluded: Some(false),
-            copy_sanitizer: Some(true),
+            copy_sanitizer: Some(CopySanitizerSetting::Depth("deep".into())),
             return_type: Some("mypkg.workers.Handle".into()),
             sync_lock_or_tx: Some(false),
         };
@@ -1710,11 +1734,39 @@ mod tests {
                 async_safe: Some(true),
                 offloads_blocking_arg: Some(0),
                 excluded: Some(false),
-                copy_sanitizer: Some(true),
+                copy_sanitizer: Some(Some(CopyDepth::Deep)),
                 return_type: Some("mypkg.workers.Handle".into()),
                 sync_lock_or_tx: Some(false),
             }
         );
+        // `true` is a shallow copy (the values below stay protected), `false` none.
+        for (setting, depth) in [
+            (CopySanitizerSetting::Flag(true), Some(CopyDepth::Shallow)),
+            (CopySanitizerSetting::Flag(false), None),
+            (
+                CopySanitizerSetting::Depth("shallow".into()),
+                Some(CopyDepth::Shallow),
+            ),
+        ] {
+            let cfg = EcosystemOverride {
+                symbol: "mypkg.f".into(),
+                copy_sanitizer: Some(setting),
+                ..EcosystemOverride::default()
+            };
+            assert_eq!(
+                EcosystemPatch::try_from(&cfg).unwrap().copy_sanitizer,
+                Some(depth)
+            );
+        }
+        let cfg = EcosystemOverride {
+            symbol: "mypkg.f".into(),
+            copy_sanitizer: Some(CopySanitizerSetting::Depth("full".into())),
+            ..EcosystemOverride::default()
+        };
+        assert!(matches!(
+            EcosystemPatch::try_from(&cfg),
+            Err(KbError::InvalidCopyDepth(d)) if d == "full"
+        ));
         // Keys left out stay unset.
         let bare = EcosystemOverride {
             symbol: "mypkg.f".into(),

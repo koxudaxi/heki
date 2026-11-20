@@ -10,7 +10,7 @@
 
 use crate::CallHop;
 use heki_ir::{Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
-use heki_kb::EffectiveEcosystemKb;
+use heki_kb::{CopyDepth, EffectiveEcosystemKb};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
@@ -122,20 +122,20 @@ pub enum Derivation {
 
 /// The derivation of a call's result from its receiver (`method` set: copy methods, element
 /// accessors) or from its first argument (`method` `None`), for the resolved external `symbol`
-/// (empty for any other callee): copy sanitizers of the catalog and copy methods copy, deeply for
-/// `deepcopy`, `__deepcopy__`, and `model_copy(deep=True)` (`deep_kwarg`).
+/// (empty for any other callee): copy sanitizers of the catalog copy as deeply as their entry
+/// says, and copy methods of any receiver copy, deeply for `__deepcopy__` and
+/// `model_copy(deep=True)` (`deep_kwarg`).
 pub fn call_derivation(
     method: Option<&str>,
     symbol: &str,
     kb: &EffectiveEcosystemKb,
     deep_kwarg: bool,
 ) -> Option<Derivation> {
-    let sanitizer = kb.lookup(symbol).is_some_and(|e| e.copy_sanitizer)
-        || method.is_some_and(|m| COPY_METHODS.contains(&m));
-    if sanitizer {
-        let deep_copy = symbol.ends_with("deepcopy")
+    let catalogued = kb.lookup(symbol).and_then(|e| e.copy_sanitizer);
+    if catalogued.is_some() || method.is_some_and(|m| COPY_METHODS.contains(&m)) {
+        let deep_copy = catalogued == Some(CopyDepth::Deep)
             || method == Some("__deepcopy__")
-            || (method == Some("model_copy") || symbol.ends_with(".model_copy")) && deep_kwarg;
+            || method == Some("model_copy") && deep_kwarg;
         return Some(if deep_copy {
             Derivation::DeepCopy
         } else {

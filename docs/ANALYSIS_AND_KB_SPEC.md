@@ -375,7 +375,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      function) gets a read-only origin tag.
   2. The tag flows within the function through `Copy`, attribute reads (with `deep = true`),
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
-     `model_copy(deep=True)`, and the Layer 2 `copy_sanitizer` entries).
+     `model_copy(deep=True)`, and the Layer 2 `copy_sanitizer` entries, as deep as each entry
+     says: a shallow copy ends it for the top level only).
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
      the call hop.
@@ -541,8 +542,9 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 (`blocking_net`, `blocking_db`, `blocking_subprocess`, `blocking_sync`, `sleep`, `blocking_fs`,
 `unpooled_client_alloc`, `db_query`, `quadratic_realloc`), `async_safe` (`asyncio.StreamWriter.write`),
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
-`asgiref.sync.sync_to_async`), `excluded` (`logging.Logger.*`), `copy_sanitizer`
-(`copy.deepcopy`, `BaseModel.model_copy`: `MUT202`), `return_type` (factories such as
+`asgiref.sync.sync_to_async`), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
+`copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
+deeply: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
 `opaque_to_layer3` (reserved for Layer 3). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,

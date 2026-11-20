@@ -216,12 +216,21 @@ pub struct EcosystemOverride {
     pub async_safe: Option<bool>,
     pub offloads_blocking_arg: Option<u8>,
     pub excluded: Option<bool>,
-    pub copy_sanitizer: Option<bool>,
+    pub copy_sanitizer: Option<CopySanitizerSetting>,
     /// The class of the instances the call returns (a factory).
     pub return_type: Option<String>,
     /// `EFF106`: a `with` over an instance of this class, or over the call's result, holds a
     /// synchronous lock or a database transaction.
     pub sync_lock_or_tx: Option<bool>,
+}
+
+/// `copy-sanitizer`: the depth of the copy the call returns (`"shallow"` / `"deep"`, validated
+/// by `heki_kb`), or `true` for a shallow copy and `false` for none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CopySanitizerSetting {
+    Flag(bool),
+    Depth(String),
 }
 
 /// Top-level `[tool.heki]` or `heki.toml` configuration.
@@ -586,6 +595,10 @@ symbol = "mypkg.model.Model.clone"
 copy-sanitizer = true
 
 [[tool.heki.ecosystem]]
+symbol = "mypkg.model.Model.detach"
+copy-sanitizer = "deep"
+
+[[tool.heki.ecosystem]]
 symbol = "mypkg.db.open"
 return-type = "sqlite3.Connection"
 
@@ -617,7 +630,12 @@ sync-lock-or-tx = true
                 },
                 EcosystemOverride {
                     symbol: "mypkg.model.Model.clone".into(),
-                    copy_sanitizer: Some(true),
+                    copy_sanitizer: Some(CopySanitizerSetting::Flag(true)),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.model.Model.detach".into(),
+                    copy_sanitizer: Some(CopySanitizerSetting::Depth("deep".into())),
                     ..EcosystemOverride::default()
                 },
                 EcosystemOverride {
