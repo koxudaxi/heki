@@ -2474,9 +2474,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     if let Pattern::MatchStar(st) = sub {
                         // `*rest` is a new list of the items between the fixed positions.
                         let rest = self.unpacked_list(subject, Span::from(st.range));
-                        if let Some(name) = &st.name {
-                            captures.push((name.as_str(), rest, Span::from(name.range)));
-                        }
+                        self.lower_pattern(sub, rest, fail, captures);
                         continue;
                     }
                     // Items after the star are counted from the end.
@@ -2549,8 +2547,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     self.lower_pattern(sub, value, fail, captures);
                 }
             }
-            // Only inside a sequence pattern (above).
-            Pattern::MatchStar(_) => {}
+            // Only inside a sequence pattern, which passes the new list of the items it takes.
+            Pattern::MatchStar(ms) => {
+                if let Some(name) = &ms.name {
+                    captures.push((name.as_str(), subject, Span::from(name.range)));
+                }
+            }
             Pattern::MatchAs(ma) => {
                 if let Some(p) = &ma.pattern {
                     self.lower_pattern(p, subject, fail, captures);
@@ -3069,8 +3071,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             // A template keeps the values of its replacement fields (`Template.values`, a tuple)
             // and is otherwise opaque; a format specification's fields become text.
-            Expr::TString(_) => {
-                let kept = heki_ast::replacement_fields(expr);
+            Expr::TString(ts) => {
+                let kept = heki_ast::template_values(ts);
                 let mut values = Vec::with_capacity(kept.len());
                 for field in heki_ast::interpolated_expressions(expr) {
                     let v = self.lower_expr(field);

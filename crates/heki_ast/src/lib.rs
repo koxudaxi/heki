@@ -240,46 +240,27 @@ pub fn interpolated_expressions(expr: &ruff_python_ast::Expr) -> Vec<&ruff_pytho
     }
 
     let mut out = Vec::new();
-    match expr {
-        Expr::FString(fs) => {
-            for part in fs.value.iter() {
-                if let FStringPartRef::FString(f) = part {
-                    push(&f.elements, &mut out);
-                }
+    if let Expr::FString(fs) = expr {
+        for part in fs.value.iter() {
+            if let FStringPartRef::FString(f) = part {
+                push(&f.elements, &mut out);
             }
         }
-        Expr::TString(ts) => {
-            for t in ts.value.iter() {
-                push(&t.elements, &mut out);
-            }
+    } else if let Expr::TString(ts) = expr {
+        for t in ts.value.iter() {
+            push(&t.elements, &mut out);
         }
-        _ => {}
     }
     out
 }
 
-/// The top-level replacement-field expressions of an f-string or a t-string (without the
-/// fields of their format specifications), in source order.
-pub fn replacement_fields(expr: &ruff_python_ast::Expr) -> Vec<&ruff_python_ast::Expr> {
-    use ruff_python_ast::{Expr, FStringPartRef};
-
-    let mut out = Vec::new();
-    match expr {
-        Expr::FString(fs) => {
-            for part in fs.value.iter() {
-                if let FStringPartRef::FString(f) = part {
-                    out.extend(f.elements.interpolations().map(|i| &*i.expression));
-                }
-            }
-        }
-        Expr::TString(ts) => {
-            for t in ts.value.iter() {
-                out.extend(t.elements.interpolations().map(|i| &*i.expression));
-            }
-        }
-        _ => {}
-    }
-    out
+/// The values a template string keeps (`Template.values`): its top-level replacement fields,
+/// in source order (a format specification's fields become text).
+pub fn template_values(ts: &ruff_python_ast::ExprTString) -> Vec<&ruff_python_ast::Expr> {
+    ts.value
+        .iter()
+        .flat_map(|t| t.elements.interpolations().map(|i| &*i.expression))
+        .collect()
 }
 
 /// Parse Python source text with Python 3.15 syntax enabled (including PEP 810 `lazy import`).
