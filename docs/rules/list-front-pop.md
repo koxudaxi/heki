@@ -66,3 +66,10 @@ stored, or passed to other code except read-only builtins such as `len`), and ev
 against lists. An annotation the rewrite cannot turn into a `deque` one (`Sequence[str]`, a
 union) or another annotated declaration of the variable blocks the fix, so that a type checker
 accepts the fixed file.
+
+A `deque` iterator raises `RuntimeError` when the deque changes under it and is another type
+than a list iterator: no iterator of the list may be live at a change, consumed by the changing
+call (`q.extend(reversed(q))`), or used for more than its elements (`type(iter(q))`). `list(xs)`
+of a value that is not a builtin container becomes `deque(list(xs))`, which keeps the length
+query `list` makes; `list(**kw)` and `list(*args)` block the fix (`deque` reads a second
+argument as `maxlen`). Only `q = q[1:]` is a front pop: `q[1:n]` and `q[1::2]` are not.

@@ -283,7 +283,9 @@ def long_copy_chain_mixed(n):
     """Past eight copies the element kinds of a mixed iterator are no longer followed."""
     allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, "a"]
     hits = []
-    for e in [1, "a", 3]:
+    mixed = list(range(n))
+    mixed.append("a")
+    for e in mixed:
         b1 = e
         b2 = b1
         b3 = b2
@@ -545,6 +547,17 @@ def many_sites(n, c):
     return x
 
 
+def slice_object_subscripts(n):
+    """`seq[s]` with a `slice` object is a new sequence, not an element."""
+    data = b"abcdef"
+    nums = [1, 2, 3]
+    s = slice(0, 2)
+    x = []
+    for i in range(n):
+        x = x + [data[s], nums[s]]
+    return x
+
+
 def run(fn, *args):
     try:
         out = fn(*args)
@@ -555,6 +568,17 @@ def run(fn, *args):
         return repr(out)
     except Exception as e:  # noqa: BLE001 - the transcript records every outcome
         return f"{type(e).__name__}"
+
+
+def consumed_before_the_loop(items):
+    """`pop`'s default, `map`'s iterable, and `remove`'s receiver are not live in the loop."""
+    x = [0]
+    {}.pop("missing", x)
+    names = list(map(str, x))
+    x.remove(0)
+    for i in items:
+        x = x + [i]
+    return x, names
 
 
 def main() -> int:
@@ -606,6 +630,8 @@ def main() -> int:
             run(returned_in_try, items),
             run(stale_handler_alias, items, int),
             run(many_sites, n, n % 5),
+            run(consumed_before_the_loop, items),
+            run(slice_object_subscripts, n),
         ]
     lines.append(f"CACHE = {CACHE}")
     print("\n".join(lines))

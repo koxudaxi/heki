@@ -308,6 +308,24 @@ def annotated_queue(items):
     return out
 
 
+def fill_front_with_comment(n):
+    q = list()
+    for i in range(n):
+        q.insert(0, i  # keep this comment
+                 )
+    return list(q)
+
+
+def drain_then_iterate(n, c):
+    """After draining, an iterator of the queue (through a conditional) is only consumed."""
+    q = list(range(n))
+    out = []
+    while q:
+        out.append(q.pop(0))
+    it = iter(q) if c else iter(out)
+    return out, list(it)
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -325,6 +343,8 @@ def main() -> int:
             run(drain_slice_after_change, items),
             run(drain_slice_for, items, n),
             run(fill_front, n),
+            run(fill_front_with_comment, n),
+            run(drain_then_iterate, n, n % 2),
             run(fill_front_parenthesized, n),
             run(pop_parenthesized, n),
             run(drain_then_alias, items),
