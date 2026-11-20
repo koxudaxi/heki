@@ -332,7 +332,7 @@ def test_the_registry_readers_parse_the_real_documentation() -> None:
     """The readers match the layout of the documentation this checkout generates."""
     root = Path(__file__).resolve().parents[2]
     rules = artifacts.rules((root / "docs/rules/index.md").read_text(encoding="utf-8"))
-    assert rules["MUT101"] == "cached-property-stale-mutation, enabled by default"
+    assert rules["EFF101"] == "async-blocking-call, enabled by default"
     assert rules["MUT103"] == "summary-effect-regression, opt-in"
     assert "--fix" in artifacts.options(
         (root / "docs/cli-reference.md").read_text(encoding="utf-8")
