@@ -262,12 +262,15 @@ pub fn resolve_inst(tcx: &TypeCtx<'_>, types: &FxHashMap<VarId, Val>, kind: &Ins
 }
 
 impl IterFlow {
-    /// Analyze `f`, resolving its calls.
+    /// Analyze `f`, resolving its calls: `recorded` gives the callee a call's site in the
+    /// index records (the summaries resolved it with the values `isinstance` tests narrow),
+    /// and any other call is resolved with `types`.
     pub fn new(
         f: &IrFunction,
         tcx: &TypeCtx<'_>,
         types: &FxHashMap<VarId, Val>,
         roots: Roots,
+        recorded: &dyn Fn(&Inst) -> Option<Callee>,
     ) -> Self {
         let mut callees = FxHashMap::default();
         for bb in &f.blocks {
@@ -276,7 +279,9 @@ impl IterFlow {
                     inst.kind,
                     InstKind::Call { .. } | InstKind::MethodCall { .. }
                 ) {
-                    callees.insert((bb.id, index), resolve_inst(tcx, types, &inst.kind));
+                    let callee =
+                        recorded(inst).unwrap_or_else(|| resolve_inst(tcx, types, &inst.kind));
+                    callees.insert((bb.id, index), callee);
                 }
             }
         }

@@ -704,5 +704,8 @@ class Cart:
 "#,
     );
     let diags = diagnostics(&p, &["--select", "MUT101"]);
-    assert_eq!(found(&diags), vec![d("cart.py", 21, "MUT101", "Cart.reset_other")]);
+    assert_eq!(
+        found(&diags),
+        vec![d("cart.py", 21, "MUT101", "Cart.reset_other")]
+    );
 }

@@ -23,16 +23,22 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
-    let mut sites = None;
+    let sites = cx.sites_by_span(unit);
     for f in unit.input.ir.functions.iter().filter(|f| !f.is_class_body) {
         let types = tcx.infer(f);
-        let mut flow = IterFlow::new(f, &tcx, &types, Roots::SinglePass);
+        let qualname = CheckContext::key(unit, f).qualname;
+        // The project callees the call sites record (`site_call`).
+        let recorded = |inst: &heki_ir::Inst| {
+            let at = sites
+                .get(&(qualname.clone(), inst.span))
+                .map_or(&[][..], Vec::as_slice);
+            Some(super::site_call(f, at, inst, false)?.callee)
+        };
+        let mut flow = IterFlow::new(f, &tcx, &types, Roots::SinglePass, &recorded);
         if flow.root_of.is_empty() {
             continue;
         }
-        let sites = sites.get_or_insert_with(|| cx.sites_by_span(unit));
-        let qualname = CheckContext::key(unit, f).qualname;
-        add_callee_consumption(cx, sites, &qualname, f, &mut flow);
+        add_callee_consumption(cx, &sites, &qualname, f, &mut flow);
         report(cx, unit, f, &flow, out);
     }
 }

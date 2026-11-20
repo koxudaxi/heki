@@ -971,6 +971,14 @@ pub struct CallSite {
     pub once_loops: u64,
     /// How the callees run when an API runs them for the caller (`Runner`).
     pub runner: Runner,
+    /// The callees bind the receiver of a method call (or the object a constructor makes) to
+    /// their first parameter (a static method's binding aside), as the resolution of the call
+    /// says (`Callee::Project`).
+    pub binds_recv: bool,
+    /// For a callable a library API runs (`Runner::Worker`, `Runner::SyncFacade`): its position
+    /// among the call's arguments. Run on a worker, the callees take the positional arguments
+    /// after it; through a sync facade, none of the call's.
+    pub handed_callable: Option<u8>,
     /// What the receiver tells about the implementations the callees run (`None`: nothing).
     pub dispatch: Option<Box<Dispatch>>,
 }

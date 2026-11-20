@@ -1,10 +1,10 @@
 //! Family 2 data rule: `DATA101` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::eff_rules::shortest;
-use crate::mut_rules::CallInst;
+use crate::mut_rules::{CallInst, site_call};
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
-use heki_effect::{Callee, SiteEffect, TypeCtx, Val};
+use heki_effect::{CallSite, Callee, SiteEffect};
 use heki_ir::{Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
@@ -21,7 +21,6 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
         return;
     }
     let sites = cx.sites_by_span(unit);
-    let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loop_carried.iter().all(|lc| !lc.self_accumulating) {
             continue;
@@ -33,8 +32,6 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 defs.insert(d, inst);
             }
         }
-        // Inferred only for an update through a project call.
-        let mut types: Option<FxHashMap<VarId, Val>> = None;
         for (lc, _) in accumulating_loops(f) {
             // The first update (in block order) that is a quadratic reallocation of the previous
             // value: the reallocating call itself, or a project call returning one of the
@@ -46,17 +43,16 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 if !combines(f, &defs, &call, lc.phi_var) {
                     return None;
                 }
-                let effects: Vec<SiteEffect> = sites
+                let at: &[&CallSite] = sites
                     .get(&(key.qualname.clone(), inst.span))
-                    .into_iter()
-                    .flatten()
+                    .map_or(&[], Vec::as_slice);
+                let effects: Vec<SiteEffect> = at
+                    .iter()
                     .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                     .collect();
                 let chain = shortest(&effects, ExecEffectKind::QuadraticRealloc)?;
-                let reallocates = chain.len() == 1 || {
-                    let types = types.get_or_insert_with(|| tcx.infer(f));
-                    reallocates_argument(cx, &tcx, types, f, &call, lc.phi_var)
-                };
+                let reallocates =
+                    chain.len() == 1 || reallocates_argument(cx, at, f, inst, lc.phi_var);
                 reallocates.then(|| (inst.span, chain.to_vec()))
             });
             let Some((span, chain)) = hit else {
@@ -85,23 +81,27 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
     }
 }
 
-/// Whether the project call `call` returns a quadratic reallocation of an argument that carries
-/// `previous` (as itself, through copies, or in a display): a callee's `reallocates_params`.
+/// Whether the project call the call instruction `inst` makes (its call site among `sites`)
+/// returns a quadratic
+/// reallocation of an argument that carries `previous` (as itself, through copies, or in a
+/// display): a callee's `reallocates_params`.
 fn reallocates_argument(
     cx: &CheckContext<'_>,
-    tcx: &TypeCtx<'_>,
-    types: &FxHashMap<VarId, Val>,
+    sites: &[&CallSite],
     f: &IrFunction,
-    call: &CallInst<'_>,
+    inst: &Inst,
     previous: VarId,
 ) -> bool {
-    let Callee::Project(keys, binds_recv) = call.callee(tcx, types) else {
+    let Some(call) = site_call(f, sites, inst, false) else {
+        return false;
+    };
+    let Callee::Project(keys, _) = &call.callee else {
         return false;
     };
     keys.iter().any(|key| {
         cx.index.summary(key).is_some_and(|summary| {
             let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
-            call.bind(&decl, binds_recv).into_iter().any(|(pos, v)| {
+            call.bind(&decl).into_iter().any(|(pos, v)| {
                 pos < 64
                     && summary.reallocates_params & (1u64 << pos) != 0
                     && carries(f, v, previous)

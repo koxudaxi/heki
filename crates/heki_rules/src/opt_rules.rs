@@ -9,11 +9,11 @@
 //! receiver types (`heki_effect::TypeCtx`, PEP 484 annotations included), which the Soundness
 //! lane never trusts.
 
-use crate::mut_rules::CallInst;
+use crate::mut_rules::site_call;
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
-use heki_effect::{CONTAINER_MUTATORS, Callee, TypeCtx, Val};
+use heki_effect::{CONTAINER_MUTATORS, CallSite, Callee, TypeCtx, Val};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, ModuleConstants, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
@@ -278,7 +278,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             // the end of the loop only when it reads the list nowhere else, and an index or a
             // count built before the loop stays right only while the loop does not change it.
             let use_of = ListUse::new(&defs, &hot, recv);
-            let changed = use_of.changed() || use_of.handed_to_mutator(cx, &tcx, &types);
+            let changed = use_of.changed() || use_of.handed_to_mutator(cx, unit, f);
             let advice = match method {
                 "index" if changed => {
                     "the loop changes the list, so keep a `dict` (value → index) up to date with each change".into()
@@ -374,24 +374,34 @@ impl<'d, 'a> ListUse<'d, 'a> {
     }
 
     /// Whether the loops hand the list to a project function that changes that parameter in
-    /// place (its summary's `mutates_params`), itself or through further calls.
+    /// place (its summary's `mutates_params`), itself or through further calls: the callees
+    /// the call site of `f` records ([`site_call`]).
     fn handed_to_mutator(
         &self,
         cx: &CheckContext<'_>,
-        tcx: &TypeCtx<'_>,
-        types: &FxHashMap<VarId, Val>,
+        unit: &ModuleUnit<'_>,
+        f: &IrFunction,
     ) -> bool {
+        let key = CheckContext::key(unit, f);
+        let sites: Vec<&CallSite> = cx
+            .index
+            .files
+            .get(&unit.input.path)
+            .into_iter()
+            .flat_map(|file| &file.call_sites)
+            .filter(|s| s.caller == key)
+            .collect();
         self.insts().any(|i| {
-            let Some(call) = CallInst::of(&i.kind) else {
+            let Some(call) = site_call(f, &sites, i, false) else {
                 return false;
             };
-            let Callee::Project(keys, binds_recv) = call.callee(tcx, types) else {
+            let Callee::Project(keys, _) = &call.callee else {
                 return false;
             };
             keys.iter().any(|key| {
                 cx.index.summary(key).is_some_and(|summary| {
                     let decl = cx.decls.function_decl(key).cloned().unwrap_or_default();
-                    call.bind(&decl, binds_recv).into_iter().any(|(pos, v)| {
+                    call.bind(&decl).into_iter().any(|(pos, v)| {
                         pos < 64 && summary.mutates_params & (1u64 << pos) != 0 && self.is_list(v)
                     })
                 })

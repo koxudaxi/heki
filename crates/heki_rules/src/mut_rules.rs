@@ -1350,21 +1350,6 @@ impl<'i> CallInst<'i> {
             None => tcx.resolve_call(self.callee_var.and_then(|v| types.get(&v))),
         }
     }
-
-    /// [`bind_arguments`] of this call.
-    pub(crate) fn bind(
-        &self,
-        decl: &heki_effect::FunctionDecl,
-        binds_recv: bool,
-    ) -> Vec<(usize, VarId)> {
-        bind_arguments(
-            decl,
-            binds_recv,
-            self.recv.map(|(v, _)| v),
-            self.args,
-            self.kwargs,
-        )
-    }
 }
 
 /// The arguments of a call of the project function `decl` by the callee's parameter positions:
@@ -1904,12 +1889,81 @@ impl Ro {
 }
 
 /// One call instruction with its resolved callee.
-struct CallParts<'i> {
+pub(crate) struct CallParts<'i> {
     /// `recv.method(...)`: the receiver and the method name.
-    recv: Option<(VarId, &'i str)>,
-    args: &'i [VarId],
-    kwargs: &'i [(Option<String>, VarId)],
-    callee: Callee,
+    pub(crate) recv: Option<(VarId, &'i str)>,
+    pub(crate) args: &'i [VarId],
+    pub(crate) kwargs: &'i [(Option<String>, VarId)],
+    pub(crate) callee: Callee,
+}
+
+impl CallParts<'_> {
+    /// [`bind_arguments`] of the call for its callee `decl` (`binds_recv` from the callee).
+    pub(crate) fn bind(&self, decl: &heki_effect::FunctionDecl) -> Vec<(usize, VarId)> {
+        let binds_recv = matches!(self.callee, Callee::Project(_, true));
+        bind_arguments(
+            decl,
+            binds_recv,
+            self.recv.map(|(v, _)| v),
+            self.args,
+            self.kwargs,
+        )
+    }
+}
+
+/// The project call the call instruction `inst` of `f` makes as its call site records it
+/// (among `f`'s `sites`): the callees the summaries resolved, with the values the
+/// `isinstance` tests around it narrow, which a resolution with `f`'s inferred values would
+/// not see. `worker`: instead the callable an offloading API runs on a worker thread
+/// (`asyncio.to_thread(grow, acc)` runs `grow(acc)`), which takes the positional arguments
+/// after it, keyword arguments left unbound.
+pub(crate) fn site_call<'i>(
+    f: &'i IrFunction,
+    sites: &[&CallSite],
+    inst: &'i Inst,
+    worker: bool,
+) -> Option<CallParts<'i>> {
+    let call = CallInst::of(&inst.kind)?;
+    let runner = if worker {
+        heki_effect::Runner::Worker
+    } else {
+        heki_effect::Runner::Caller
+    };
+    let site = sites.iter().find(|s| {
+        s.span == inst.span
+            && s.role == SiteRole::Call
+            && s.runner == runner
+            && !s.project_callees().is_empty()
+    })?;
+    let callee = Callee::Project(
+        site.project_callees()
+            .iter()
+            .map(|bc| bc.callee.clone())
+            .collect(),
+        site.binds_recv,
+    );
+    if !worker {
+        return Some(CallParts {
+            recv: call.recv,
+            args: call.args,
+            kwargs: call.kwargs,
+            callee,
+        });
+    }
+    let k = usize::from(site.handed_callable?);
+    let callable = *call.args.get(k)?;
+    let recv = match f.def_inst(callable).map(|(_, i)| &i.kind) {
+        Some(InstKind::AttrLoad { obj, attr, .. }) if site.binds_recv => {
+            Some((*obj, attr.as_str()))
+        }
+        _ => None,
+    };
+    Some(CallParts {
+        recv,
+        args: &call.args[k + 1..],
+        kwargs: &[],
+        callee,
+    })
 }
 
 const MUTABLE_BUILTINS: &[&str] = &[
@@ -1971,6 +2025,20 @@ impl<'a> Mut202Fn<'a> {
         }
     }
 
+    /// The function's call sites in the index, every role.
+    fn function_sites(&self) -> &[&'a CallSite] {
+        self.sites.get_or_init(|| {
+            self.cx
+                .index
+                .files
+                .get(&self.unit.input.path)
+                .into_iter()
+                .flat_map(|f| &f.call_sites)
+                .filter(|s| s.caller == self.key)
+                .collect()
+        })
+    }
+
     /// The facts of `callee` that the call at `span` runs in this function: at the call, and
     /// where the object it returns is iterated ([`facts_run_at`]); the summary itself when the
     /// index has no site for the call.
@@ -1980,16 +2048,7 @@ impl<'a> Mut202Fn<'a> {
         key: &FuncKey,
         callee: &'a EffectSummary,
     ) -> Vec<&'a EffectSummary> {
-        let sites = self.sites.get_or_init(|| {
-            self.cx
-                .index
-                .files
-                .get(&self.unit.input.path)
-                .into_iter()
-                .flat_map(|f| &f.call_sites)
-                .filter(|s| s.caller == self.key)
-                .collect()
-        });
+        let sites = self.function_sites();
         let calls_key = |s: &&&CallSite| s.project_callees().iter().any(|bc| bc.callee == *key);
         let Some(call) = sites
             .iter()
@@ -2008,53 +2067,20 @@ impl<'a> Mut202Fn<'a> {
     }
 
     /// The parts of a call instruction (`None` for any other instruction).
-    fn call_of<'i>(&self, kind: &'i InstKind) -> Option<CallParts<'i>> {
-        let call = CallInst::of(kind)?;
+    fn call_of<'i>(&self, inst: &'i Inst) -> Option<CallParts<'i>>
+    where
+        'a: 'i,
+    {
+        // A project call as the summaries resolved it; any other call by the inferred values.
+        if let Some(call) = site_call(self.f, self.function_sites(), inst, false) {
+            return Some(call);
+        }
+        let call = CallInst::of(&inst.kind)?;
         Some(CallParts {
             callee: call.callee(self.tcx, &self.types),
             recv: call.recv,
             args: call.args,
             kwargs: call.kwargs,
-        })
-    }
-
-    /// The call an offloading API makes on a worker thread (`asyncio.to_thread(clear, xs)` calls
-    /// `clear(xs)`; keyword arguments are left unbound), when its callable is a project one.
-    fn worker_call_of<'i>(&self, kind: &'i InstKind) -> Option<CallParts<'i>>
-    where
-        'a: 'i,
-    {
-        let (InstKind::Call {
-            args, star_from, ..
-        }
-        | InstKind::MethodCall {
-            args, star_from, ..
-        }) = kind
-        else {
-            return None;
-        };
-        let Callee::External(symbol) = self.call_of(kind)?.callee else {
-            return None;
-        };
-        let (callable, first) =
-            heki_effect::offloaded_callable(self.cx.kb, &symbol, args, *star_from)?;
-        let (recv, callee) = match self.f.def_inst(callable).map(|(_, i)| &i.kind) {
-            Some(InstKind::AttrLoad { obj, attr, .. })
-                if self
-                    .tcx
-                    .resolve_attr_load(self.types.get(obj), attr)
-                    .is_none() =>
-            {
-                let callee = self.tcx.resolve_method(self.types.get(obj), attr);
-                (Some((*obj, attr.as_str())), callee)
-            }
-            _ => (None, self.tcx.resolve_call(self.types.get(&callable))),
-        };
-        matches!(callee, Callee::Project(..)).then_some(CallParts {
-            recv,
-            args: &args[first..],
-            kwargs: &[],
-            callee,
         })
     }
 
@@ -2126,8 +2152,8 @@ impl<'a> Mut202Fn<'a> {
             }
             InstKind::MakeIter { iterable, .. } => self.ro.get(iterable).cloned(),
             InstKind::IterNext { iter, .. } => self.ro.get(iter)?.derive(ReturnStep::ELEMENT),
-            kind => {
-                let call = self.call_of(kind)?;
+            _ => {
+                let call = self.call_of(inst)?;
                 if let Some(r) = self.producer(&call.callee, inst.span) {
                     return Some(r);
                 }
@@ -2281,10 +2307,8 @@ impl<'a> Mut202Fn<'a> {
             args,
             kwargs,
             callee: Callee::Project(keys, binds_recv),
-        }) = self
-            .call_of(&inst.kind)
-            .filter(|c| matches!(c.callee, Callee::Project(..)))
-            .or_else(|| self.worker_call_of(&inst.kind))
+        }) = site_call(self.f, self.function_sites(), inst, false)
+            .or_else(|| site_call(self.f, self.function_sites(), inst, true))
         else {
             return (None, Vec::new());
         };

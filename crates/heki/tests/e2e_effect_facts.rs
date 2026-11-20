@@ -177,10 +177,30 @@ def counts(names: list[str], winners: list[str]) -> list[int]:
         look(names)
         out.append(names.count(winner))
     return out
+
+
+class Shuffler:
+    def change(self, xs):
+        xs.reverse()
+
+
+def narrowed(names: list[str], winners: list[str], s) -> list[int]:
+    out = []
+    for winner in winners:
+        if isinstance(s, Shuffler):
+            s.change(names)
+        out.append(names.index(winner))
+    return out
 "#,
     );
     let found = reports(&p, "OPT112");
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
+    // A helper method of the class an `isinstance` test narrows the receiver to.
+    assert_eq!(found[2].0, 35);
+    assert!(
+        found[2].1.ends_with("the loop changes the list, so keep a `dict` (value → index) up to date with each change"),
+        "{found:?}"
+    );
     assert_eq!(found[0].0, 13);
     assert!(
         found[0].1.ends_with("the loop changes the list, so keep a `dict` (value → index) up to date with each change"),

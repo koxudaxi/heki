@@ -2697,6 +2697,8 @@ impl<'a> Extractor<'a> {
                         once_per: None,
                         once_loops: 0,
                         runner: Runner::Caller,
+                        binds_recv: false,
+                        handed_callable: None,
                         dispatch: None,
                     });
                 }
@@ -2895,6 +2897,7 @@ impl<'a> Extractor<'a> {
                 self.sites.push(CallSite {
                     recv_is_self: call.recv_is_self,
                     drives_coroutine_manually: drives,
+                    binds_recv: *binds_recv,
                     dispatch: self.dispatch(call, site.project_callees()),
                     constructs: call.constructs.clone(),
                     returned: if constructor {
@@ -3030,6 +3033,11 @@ impl<'a> Extractor<'a> {
                     None => return,
                 },
             };
+        let position = call
+            .args
+            .iter()
+            .position(|a| *a == callable)
+            .and_then(|i| u8::try_from(i).ok());
         let (callee, recv, recv_var, recv_is_self) = match self.bound_method(callable) {
             Some((recv, method)) => {
                 let callee = self.cx.resolve_method(self.val(recv), &method);
@@ -3060,6 +3068,7 @@ impl<'a> Extractor<'a> {
         };
         if let Some((site, _)) = self.call(bb, &callee, &handed) {
             self.sites[site].runner = runner;
+            self.sites[site].handed_callable = position;
         }
     }
 
@@ -3082,6 +3091,8 @@ impl<'a> Extractor<'a> {
             once_per: self.guards.once_per_at(&cx, bb),
             once_loops: self.guards.once_loops_at(&cx, bb, self.loops_around(bb)),
             runner: Runner::Caller,
+            binds_recv: false,
+            handed_callable: None,
             dispatch: None,
         }
     }
@@ -3536,6 +3547,8 @@ fn role_site(
         once_per: site.once_per,
         once_loops: 0,
         runner: site.runner,
+        binds_recv: site.binds_recv,
+        handed_callable: site.handed_callable,
         dispatch: site.dispatch.clone(),
     }
 }
