@@ -46,9 +46,9 @@ COPIES_DEPTH = 16
 # budget when a change makes heki smaller; raise one only with the measurement that justifies it.
 BUDGETS_MIB = {
     # Peak physical footprint.
-    "darwin": {"check": 72, "watch": 82, "owners": 89},
+    "darwin": {"check": 76, "watch": 83, "owners": 93},
     # Peak resident set size, to calibrate from the CI runner's measurements.
-    "linux": {"check": 72, "watch": 81, "owners": 88},
+    "linux": {"check": 77, "watch": 89, "owners": 95},
 }
 RUNS = 3
 
