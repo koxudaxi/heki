@@ -1509,17 +1509,20 @@ impl<'a, 'c> Rules<'a, 'c> {
         let unhashable = KindMask::of(List)
             .union(KindMask::of(Dict))
             .union(KindMask::of(Set));
-        let not_profitable = self.small_note(&name, lst).or_else(|| {
-            self.cx()
-                .elems_of(&st, lst)
-                .filter(|m| *m != KindMask::EMPTY && m.is_subset_of(unhashable))
-                .map(|m| {
-                    format!(
-                        "its elements are unhashable ({}): no `set` can hold them",
-                        crate::obligations::describe_mask(m)
-                    )
-                })
-        });
+        let not_profitable = self
+            .small_note(&name, lst)
+            .or_else(|| {
+                self.cx()
+                    .elems_of(&st, lst)
+                    .filter(|m| *m != KindMask::EMPTY && m.is_subset_of(unhashable))
+                    .map(|m| {
+                        format!(
+                            "its elements are unhashable ({}): no `set` can hold them",
+                            crate::obligations::describe_mask(m)
+                        )
+                    })
+            })
+            .or_else(|| loop_bound_note(lp));
         let mut edits = Vec::new();
         if f.var_name(lst).is_some_and(is_identifier)
             && let Some(rspan) = self.container_name_span(cmp.span, &name)
@@ -1640,10 +1643,15 @@ impl<'a, 'c> Rules<'a, 'c> {
             },
         ));
         // These constructors take at most one argument (more always raise, blocked above).
-        let not_profitable = match args.first() {
-            Some(a) => self.small_note(&self.var(*a), *a),
-            None => Some("the container is empty".into()),
-        };
+        let not_profitable = match (callee, args.first()) {
+            ("tuple", Some(a)) if st.exact_type(*a) == Some(Tuple) => Some(format!(
+                "`tuple({})` returns the tuple itself: nothing is rebuilt",
+                self.var(*a)
+            )),
+            (_, Some(a)) => self.small_note(&self.var(*a), *a),
+            (_, None) => Some("the container is empty".into()),
+        }
+        .or_else(|| loop_bound_note(lp));
         let edits = self.m.text(call.span).map_or_else(Vec::new, |text| {
             let base = match args {
                 [a] => format!("{}_{callee}", self.var(*a)),

@@ -283,7 +283,9 @@ def long_copy_chain_mixed(n):
     """Past eight copies the element kinds of a mixed iterator are no longer followed."""
     allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, "a"]
     hits = []
-    for e in [1, "a", 3]:
+    mixed = list(range(n))
+    mixed.append("a")
+    for e in mixed:
         b1 = e
         b2 = b1
         b3 = b2

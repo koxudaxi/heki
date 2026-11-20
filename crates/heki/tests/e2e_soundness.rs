@@ -738,6 +738,10 @@ const HOIST: &[Expect] = &[
             V::Fix(&["    allowed_set = set(allowed)\n", "allowed_set"]),
         )],
     ),
+    // A bounded loop, or a constructor that returns its argument: nothing to gain.
+    ("lookup_in_a_bounded_loop", &[]),
+    ("rebuild_in_a_bounded_loop", &[]),
+    ("rebuild_tuple_of_a_tuple", &[]),
 ];
 
 #[test]

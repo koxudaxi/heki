@@ -184,7 +184,7 @@ def mixed_probe(n):
 def empty_probe():
     allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
     hits = []
-    for p in []:
+    for p in list():
         if p in allowed:
             hits.append(p)
     return hits
@@ -559,6 +559,35 @@ def probe_by_index(n):
     return hits
 
 
+def lookup_in_a_bounded_loop(n):
+    """One iteration: building a set costs more than the scan it saves."""
+    allowed = list(range(n + 100))
+    hits = []
+    for i in range(1):
+        if i in allowed:
+            hits.append(i)
+    return hits
+
+
+def rebuild_in_a_bounded_loop(n):
+    keys = list(range(n + 100))
+    hits = 0
+    for i in range(1):
+        if i in set(keys):
+            hits += 1
+    return hits
+
+
+def rebuild_tuple_of_a_tuple(n):
+    """`tuple(t)` of a tuple returns `t`: no container is built."""
+    keys = tuple(range(9))
+    hits = 0
+    for i in range(n):
+        if i in tuple(keys):
+            hits += 1
+    return hits
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -626,6 +655,9 @@ def main() -> int:
             run(probes_from_either_list, n, n % 2),
             run(probes_measured_first, n),
             run(probe_by_index, n),
+            run(lookup_in_a_bounded_loop, n),
+            run(rebuild_in_a_bounded_loop, n),
+            run(rebuild_tuple_of_a_tuple, n),
         ]
     print("\n".join(lines))
     return 0
