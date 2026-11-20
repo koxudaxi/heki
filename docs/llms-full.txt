@@ -2282,7 +2282,9 @@ $ gh workflow run release-draft.yml --ref <branch> -f pr_number=123 -f dry_run=t
 ```
 
 - A replay on `main` analyzes one merged pull request again, for example after a failed run. A
-  pull request labeled `breaking-change-analyzed` is skipped: remove the label first.
+  pull request labeled `breaking-change-analyzed` is skipped: remove the label first. One that a
+  published release already holds is skipped too, so that its changes are not listed again in
+  the next draft; a dry run still analyzes it.
 - Up to 100 runs wait for the one in progress, in order. GitHub cancels a run that arrives while
   100 are waiting, and a later run does not take over its pull requests. A canceled run shows in
   `gh run list --workflow release-draft.yml --status cancelled`. Its pull requests are among those

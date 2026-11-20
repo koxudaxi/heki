@@ -14,6 +14,15 @@ RELEASES = f"/repos/{REPOSITORY}/releases?per_page=100"
 PUBLISHED = [{"tag_name": "v0.1.0", "draft": False, "prerelease": False}]
 
 
+@pytest.fixture
+def repository(tmp_path: Path) -> Repository:
+    """A repository on `main` whose first commit is the release `v0.1.0` that PUBLISHED lists."""
+    repository = Repository(tmp_path / "repository")
+    repository.commit("release")
+    repository.git("tag", "v0.1.0")
+    return repository
+
+
 def commit_pulls(github: FakeGitHub, commit: str, *pulls: dict[str, Any]) -> None:
     github.respond(f"/repos/{REPOSITORY}/commits/{commit}/pulls?per_page=100", list(pulls))
 
@@ -454,6 +463,80 @@ def test_a_replay_of_an_analyzed_pull_request_does_nothing(
     assert result.returncode == 0, result.stderr
     assert values["prs"] == "[]"
     assert "remove the label to analyze it again" in result.stdout
+
+
+def replay(repository: Repository, github: FakeGitHub, tmp_path: Path, *args: str):
+    return resolve(repository, github, tmp_path, "replay", "--ref", "refs/heads/main", *args)
+
+
+def test_a_replay_of_a_released_pull_request_writes_nothing(
+    repository: Repository, github: FakeGitHub, tmp_path: Path
+) -> None:
+    """Its changes shipped: the next draft must not list them, nor bump the minor version for them."""
+    base = repository.commit("base")
+    merge = repository.commit("merge (#26)")
+    repository.git("tag", "v0.1.1")
+    head = repository.commit("later (#27)")
+    github.respond(
+        RELEASES, [{"tag_name": "v0.1.1", "draft": False, "prerelease": False}, *PUBLISHED]
+    )
+    pull(github, 26, merge)
+
+    result, values = replay(
+        repository, github, tmp_path, "--pr-number", "26", "--trusted-sha", head
+    )
+    assert result.returncode == 0, result.stderr
+    assert values["prs"] == "[]"
+    assert "Pull request #26 is already in release v0.1.1" in result.stdout
+
+    result, values = replay(
+        repository, github, tmp_path, "--pr-number", "26", "--trusted-sha", head, "--dry-run"
+    )
+    assert result.returncode == 0, result.stderr
+    assert resolved(values) == [{"number": 26, "merge_sha": merge, "base_sha": base}]
+
+
+def test_a_released_pull_request_is_skipped_on_push(
+    repository: Repository, github: FakeGitHub, tmp_path: Path
+) -> None:
+    """A release published from a branch that main merges later already holds its pull requests."""
+    before = repository.commit("before")
+    shipped = repository.commit("shipped (#28)")
+    repository.git("tag", "v0.1.1")
+    new = repository.commit("new (#29)")
+    github.respond(
+        RELEASES, [{"tag_name": "v0.1.1", "draft": False, "prerelease": False}, *PUBLISHED]
+    )
+    commit_pulls(github, shipped, linked(28, shipped))
+    commit_pulls(github, new, linked(29, new))
+    pull(github, 28, shipped)
+    pull(github, 29, new)
+
+    result, values = resolve(
+        repository, github, tmp_path, "push", "--before", before, "--after", new
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert resolved(values) == [{"number": 29, "merge_sha": new, "base_sha": shipped}]
+    assert "Pull request #28 is already in release v0.1.1; skipping it." in result.stdout
+
+
+def test_a_release_tag_missing_from_the_checkout_stops_the_run(
+    repository: Repository, github: FakeGitHub, tmp_path: Path
+) -> None:
+    merge = repository.commit("merge (#30)")
+    github.respond(
+        RELEASES, [{"tag_name": "v0.2.0", "draft": False, "prerelease": False}, *PUBLISHED]
+    )
+    pull(github, 30, merge)
+
+    result, values = replay(
+        repository, github, tmp_path, "--pr-number", "30", "--trusted-sha", merge
+    )
+
+    assert result.returncode == 1
+    assert "The tag of a published release is missing from the checkout." in result.stderr
+    assert values == {}
 
 
 @pytest.mark.parametrize("number", ["0", "01", "-1", "1e3", "12 ", "\u0661", "", "1; rm -rf ~"])

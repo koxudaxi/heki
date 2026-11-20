@@ -9,7 +9,9 @@ the trusted history.
 The diff of a pull request starts at the first parent of its merge commit. A rebase merge puts
 several commits on `main`, and GitHub links each of them to the pull request: the base is then
 the commit before that run. A pull request already labeled `breaking-change-analyzed` is
-skipped, except by a dry run.
+skipped, except by a dry run, and so is one whose merge commit a published release's tag already
+holds: the draft lists what the next version adds, and the changes of a shipped pull request
+would be listed again, a breaking one with another minor bump. A dry run still analyzes it.
 
 Nothing is resolved while the repository has no published release: there is no release to
 compare with, and the first release's notes come from `CHANGELOG.md`.
@@ -203,6 +205,17 @@ def diff_base(repository: str, pull: PullRequest) -> str:
     return base
 
 
+def released_in(merge_sha: str, release_tags: list[str]) -> str | None:
+    """Return the tag of a published release whose history holds a merge commit, or None."""
+    for tag in release_tags:
+        result = _git("merge-base", "--is-ancestor", merge_sha, f"refs/tags/{tag}")
+        if result.returncode == 0:
+            return tag
+        if result.returncode != 1:
+            fail("The tag of a published release is missing from the checkout.")
+    return None
+
+
 def _merged_pull_request(repository: str, pull: PullRequest) -> MergedPullRequest:
     return MergedPullRequest(pull.number, pull.merge_sha, diff_base(repository, pull))
 
@@ -213,7 +226,8 @@ def _fetch_pull_request(repository: str, number: int) -> PullRequest:
     )
 
 
-def _has_published_release(repository: str) -> bool:
+def _published_tags(repository: str) -> list[str]:
+    """Return the version tags of the published releases; each is checked to name a version."""
     releases = json_lines(
         gh_api(
             f"/repos/{repository}/releases?per_page=100",
@@ -221,11 +235,18 @@ def _has_published_release(repository: str) -> bool:
             jq=".[] | {tag_name, draft, prerelease}",
         )
     )
-    return bool(published_versions(release for release in releases if isinstance(release, dict)))
+    return [
+        tag
+        for _, tag in published_versions(
+            release for release in releases if isinstance(release, dict)
+        )
+    ]
 
 
-def resolve_push(repository: str, before: str, after: str) -> list[MergedPullRequest]:
-    """Return the pull requests a push merged, in merge order, without those already analyzed."""
+def resolve_push(
+    repository: str, before: str, after: str, release_tags: list[str]
+) -> list[MergedPullRequest]:
+    """Return the pull requests a push merged, in merge order, without those analyzed or released."""
     resolved = []
     for commit in _pushed_commits(before, after):
         if (number := pull_merged_at(commit, _commit_pulls(repository, commit))) is None:
@@ -235,6 +256,9 @@ def resolve_push(repository: str, before: str, after: str) -> list[MergedPullReq
             fail(f"Pull request #{number} names another merge commit than the one it was found at.")
         if pull.analyzed:
             print(f"Pull request #{number} is labeled {ANALYZED_LABEL}; skipping it.")
+            continue
+        if tag := released_in(pull.merge_sha, release_tags):
+            print(f"Pull request #{number} is already in release {tag}; skipping it.")
             continue
         resolved.append(_merged_pull_request(repository, pull))
     return resolved
@@ -255,7 +279,13 @@ def _history_sha(ref: str, trusted_sha: str, *, dry_run: bool) -> str:
 
 
 def resolve_replay(
-    repository: str, number: int, ref: str, trusted_sha: str, *, dry_run: bool
+    repository: str,
+    number: int,
+    ref: str,
+    trusted_sha: str,
+    release_tags: list[str],
+    *,
+    dry_run: bool,
 ) -> list[MergedPullRequest]:
     """Return the requested pull request when its merge commit is in the trusted history."""
     history_sha = _history_sha(ref, trusted_sha, dry_run=dry_run)
@@ -265,6 +295,12 @@ def resolve_replay(
     if pull.analyzed and not dry_run:
         print(
             f"Pull request #{number} is labeled {ANALYZED_LABEL}; remove the label to analyze it again."
+        )
+        return []
+    if not dry_run and (tag := released_in(pull.merge_sha, release_tags)):
+        print(
+            f"Pull request #{number} is already in release {tag}, so the draft of the next version "
+            "does not list it; set dry_run to analyze it."
         )
         return []
     return [_merged_pull_request(repository, pull)]
@@ -280,17 +316,22 @@ def _write_outputs(path: Path, resolved: list[MergedPullRequest]) -> None:
 def main(argv: list[str] | None = None) -> None:
     """Validate every input before writing the workflow outputs."""
     args = _parse_args(argv)
-    if not _has_published_release(args.repository):
+    if not (release_tags := _published_tags(args.repository)):
         print(
             "::notice title=Release Draft::No release is published yet, so there is nothing to compare "
             "with; the first release's notes come from CHANGELOG.md. Skipping the analysis and the draft."
         )
         resolved = []
     elif args.mode == "push":
-        resolved = resolve_push(args.repository, args.before, args.after)
+        resolved = resolve_push(args.repository, args.before, args.after, release_tags)
     else:
         resolved = resolve_replay(
-            args.repository, args.pr_number, args.ref, args.trusted_sha, dry_run=args.dry_run
+            args.repository,
+            args.pr_number,
+            args.ref,
+            args.trusted_sha,
+            release_tags,
+            dry_run=args.dry_run,
         )
     for pull in resolved:
         print(
