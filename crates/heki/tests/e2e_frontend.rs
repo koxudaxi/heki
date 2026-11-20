@@ -1997,10 +1997,10 @@ fn dump_commands_report_read_and_syntax_errors() {
         let (code, _, stderr) = p.heki(&[cmd, "latin1.py"]);
         assert_eq!(code, 2);
         assert!(stderr.contains("valid UTF-8"), "{stderr}");
-        // A PEP 263 declaration selects the encoding: `é` is an identifier.
+        // A PEP 263 declaration selects the encoding: byte 0xE9 is the identifier `\u{e9}`.
         let (code, stdout, stderr) = p.heki(&[cmd, "declared.py"]);
         assert_eq!(code, 0, "{stderr}");
-        assert!(stdout.contains("\"é\""), "{stdout}");
+        assert!(stdout.contains("\"\u{e9}\""), "{stdout}");
         let (code, _, stderr) = p.heki(&[cmd, "broken.py"]);
         assert_eq!(code, 2);
         assert!(stderr.starts_with("heki error: parse errors: "), "{stderr}");

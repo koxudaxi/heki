@@ -218,7 +218,7 @@ mod tests {
     fn sources_round_trip_in_their_declared_encoding() {
         let latin1 = b"# coding: latin-1\n# caf\xE9\nx = '\xFF'\n".to_vec();
         let text = decode_source(latin1.clone()).unwrap();
-        assert!(text.contains("café") && text.contains('\u{FF}'));
+        assert!(text.contains("caf\u{e9}") && text.contains('\u{FF}'));
         assert_eq!(encode_source(&text).unwrap(), latin1);
         assert!(matches!(
             encode_source(&format!("{text}y = '\u{20AC}'\n")),
@@ -240,7 +240,7 @@ mod tests {
         ));
         let ascii = "# coding: ascii\nx = 1\n";
         assert_eq!(decode_source(ascii.into()).unwrap(), ascii);
-        assert!(encode_source(&format!("{ascii}y = 'é'\n")).is_err());
+        assert!(encode_source(&format!("{ascii}y = '\u{e9}'\n")).is_err());
         assert!(decode_source(b"# coding: cp1252\n".to_vec()).is_err());
     }
 }
