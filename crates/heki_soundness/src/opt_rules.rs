@@ -23,6 +23,7 @@ use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::cmp::Reverse;
 
 use BuiltinKind::{Bytes, Dict, List, Set, Str, Tuple};
 use ObligationKind as K;
@@ -373,13 +374,7 @@ pub fn analyze_module(
     }
     // A `finally` body is lowered once per way out of its `try`: a statement in it has a
     // candidate per copy, and is rewritten only if every copy is. Keep the least safe one.
-    let strength = |c: &OptCandidate| match c.verdict.tier {
-        _ if c.fix().is_some() => 4,
-        SafetyTier::Safe => 3,
-        SafetyTier::Conditional => 2,
-        SafetyTier::Blocked => 1,
-        SafetyTier::Disproved => 0,
-    };
+    let strength = |c: &OptCandidate| (Reverse(c.verdict.tier), c.fix().is_some());
     out.sort_by_key(|a| (a.span.start, a.span.end, a.rule, strength(a)));
     out.dedup_by(|later, kept| later.rule == kept.rule && later.span == kept.span);
     out
