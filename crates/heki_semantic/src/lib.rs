@@ -6,7 +6,7 @@
 use heki_ast::raw_ast::{self as ast, Expr, ExprContext, Pattern, Stmt, TypeParam};
 use heki_ast::{LineIndex, ParsedModule, Ranged, Span};
 use heki_env::RuntimeProfile;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -125,7 +125,13 @@ struct ScopeBuilder {
     bound_names: FxHashSet<String>,
     /// Names bound exclusively as PEP 709 inlined comprehension targets (lexically isolated).
     comp_target_bindings: Vec<(String, Span)>,
-    comp_target_names: FxHashSet<String>,
+    /// The PEP 709 inlined comprehensions open at the current point of this scope's body
+    /// (indices into `Analyzer::comp_regions`), innermost last.
+    open_comp_regions: Vec<usize>,
+    /// The inlined comprehensions of the parent scope that lexically enclose this scope: their
+    /// targets are cells this scope can capture (`[lambda: i for i in r]`), unlike every other
+    /// comprehension target of the parent.
+    enclosing_comp_regions: Vec<usize>,
     /// Names assigned via walrus (`:=`) inside a module-level inlined comprehension.
     module_walrus_globals: FxHashSet<String>,
     global_decls: FxHashSet<String>,
@@ -162,7 +168,8 @@ impl ScopeBuilder {
             bindings: Vec::new(),
             bound_names: FxHashSet::default(),
             comp_target_bindings: Vec::new(),
-            comp_target_names: FxHashSet::default(),
+            open_comp_regions: Vec::new(),
+            enclosing_comp_regions: Vec::new(),
             module_walrus_globals: FxHashSet::default(),
             global_decls: FxHashSet::default(),
             nonlocal_decls: FxHashSet::default(),
@@ -222,11 +229,14 @@ impl ScopeBuilder {
         self.global_decls.contains(name) || self.nonlocal_decls.contains(name)
     }
 
-    fn add_comp_target_binding(&mut self, raw_name: &str, span: Span) {
-        let name = self.mangle(raw_name);
-        if self.comp_target_names.insert(name.clone()) {
+    fn add_comp_target_binding(&mut self, name: String, span: Span) {
+        if !self.comp_target_bindings.iter().any(|(n, _)| *n == name) {
             self.comp_target_bindings.push((name, span));
         }
+    }
+
+    fn in_inlined_comp(&self) -> bool {
+        !self.open_comp_regions.is_empty()
     }
 
     fn add_read(&mut self, raw_name: &str, in_inlined_comp: bool, in_class_comp: bool) {
@@ -258,8 +268,8 @@ struct Analyzer<'a> {
     in_type_checking: bool,
     /// `from m import *` (only allowed at module level).
     has_star_import: bool,
-    inlined_comp_depth: u32,
-    in_inlined_class_comp: bool,
+    /// Target names of every PEP 709 inlined comprehension, by region index.
+    comp_regions: Vec<FxHashSet<String>>,
     source: &'a str,
 }
 
@@ -285,8 +295,7 @@ impl<'a> Analyzer<'a> {
             classes: Vec::new(),
             in_type_checking: false,
             has_star_import: false,
-            inlined_comp_depth: 0,
-            in_inlined_class_comp: false,
+            comp_regions: Vec::new(),
             source,
         }
     }
@@ -308,8 +317,9 @@ impl<'a> Analyzer<'a> {
         let id = ScopeId(self.scopes.len() as u32);
         let parent = Some(self.cur_scope_id());
         let cls_name = self.cur_enclosing_class_name();
-        self.scopes
-            .push(ScopeBuilder::new(id, parent, kind, name, line, cls_name));
+        let mut scope = ScopeBuilder::new(id, parent, kind, name, line, cls_name);
+        scope.enclosing_comp_regions = self.cur_scope_mut().open_comp_regions.clone();
+        self.scopes.push(scope);
         self.scope_stack.push(id);
         id
     }
@@ -334,7 +344,7 @@ impl<'a> Analyzer<'a> {
         let cur_sid = self.cur_scope_id();
         let target_sid = self.walrus_target_scope();
         if self.scopes[target_sid.0 as usize].kind == ScopeKind::Module
-            && (cur_sid != target_sid || self.inlined_comp_depth > 0)
+            && (cur_sid != target_sid || self.scopes[cur_sid.0 as usize].in_inlined_comp())
         {
             // PEP 572 + PEP 709: walrus inside a module-level generator or inlined
             // comprehension writes a global dynamically without binding a static module local.
@@ -890,11 +900,9 @@ impl<'a> Analyzer<'a> {
             self.visit_expr(&first.iter);
         }
         if inlined {
-            let prev_in_cc = self.in_inlined_class_comp;
-            if self.scopes[self.cur_scope_id().0 as usize].kind == ScopeKind::Class {
-                self.in_inlined_class_comp = true;
-            }
-            self.inlined_comp_depth += 1;
+            let region = self.comp_regions.len();
+            self.comp_regions.push(FxHashSet::default());
+            self.cur_scope_mut().open_comp_regions.push(region);
             for (idx, g) in generators.iter().enumerate() {
                 if idx > 0 {
                     self.visit_expr(&g.iter);
@@ -905,8 +913,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             visit_elts(self);
-            self.inlined_comp_depth -= 1;
-            self.in_inlined_class_comp = prev_in_cc;
+            self.cur_scope_mut().open_comp_regions.pop();
         } else {
             let line = self.lines.line(range.start().to_u32());
             self.push_scope(ScopeKind::Comprehension, name.to_string(), line);
@@ -993,23 +1000,25 @@ impl<'a> Analyzer<'a> {
         match expr {
             Expr::Name(n) => match n.ctx {
                 ExprContext::Store | ExprContext::Del => {
-                    let in_ic = self.inlined_comp_depth > 0;
-                    let in_cc = self.in_inlined_class_comp;
-                    let sc = self.cur_scope_mut();
-                    if in_ic {
-                        sc.add_comp_target_binding(n.id.as_str(), Span::from(n.range));
-                    } else {
-                        sc.add_binding(n.id.as_str(), Span::from(n.range), false, false);
-                    }
-                    if in_cc {
-                        let mangled = sc.mangle(n.id.as_str());
-                        sc.class_comp_bindings.insert(mangled);
+                    let sid = self.cur_scope_id().0 as usize;
+                    let sc = &mut self.scopes[sid];
+                    match sc.open_comp_regions.last() {
+                        Some(&region) => {
+                            let name = sc.mangle(n.id.as_str());
+                            if sc.kind == ScopeKind::Class {
+                                sc.class_comp_bindings.insert(name.clone());
+                            }
+                            self.comp_regions[region].insert(name.clone());
+                            sc.add_comp_target_binding(name, Span::from(n.range));
+                        }
+                        None => sc.add_binding(n.id.as_str(), Span::from(n.range), false, false),
                     }
                 }
                 ExprContext::Load | ExprContext::Invalid => {
-                    let in_ic = self.inlined_comp_depth > 0;
-                    let in_cc = self.in_inlined_class_comp;
-                    self.cur_scope_mut().add_read(n.id.as_str(), in_ic, in_cc);
+                    let sc = self.cur_scope_mut();
+                    let in_ic = sc.in_inlined_comp();
+                    let in_cc = in_ic && sc.kind == ScopeKind::Class;
+                    sc.add_read(n.id.as_str(), in_ic, in_cc);
                 }
             },
             Expr::Named(named) => {
@@ -1188,8 +1197,11 @@ impl<'a> Analyzer<'a> {
 
     fn resolve_all(self) -> SemanticModel {
         let module_globals = ModuleGlobals::of(&self.scopes, self.has_star_import);
-        let parent_map: FxHashMap<ScopeId, Option<ScopeId>> =
-            self.scopes.iter().map(|s| (s.id, s.parent)).collect();
+        let resolver = Resolver {
+            scopes: &self.scopes,
+            comp_regions: &self.comp_regions,
+            module_globals,
+        };
 
         let scopes = self
             .scopes
@@ -1238,7 +1250,7 @@ impl<'a> Analyzer<'a> {
                             NameResolution::Local
                         }
                     } else {
-                        resolve_name(sc.id, name, &self.scopes, &parent_map, &module_globals)
+                        resolver.resolve(sc.id, name)
                     };
                     if comp_only {
                         inlined_comp_only_reads.push(name.clone());
@@ -1308,53 +1320,66 @@ impl ModuleGlobals {
     }
 }
 
-fn resolve_name(
-    scope_id: ScopeId,
-    name: &str,
-    scopes: &[ScopeBuilder],
-    parent_map: &FxHashMap<ScopeId, Option<ScopeId>>,
-    module_globals: &ModuleGlobals,
-) -> NameResolution {
-    let sc = &scopes[scope_id.0 as usize];
-    if sc.global_decls.contains(name) {
-        return module_globals.resolve(name);
-    }
-    if sc.nonlocal_decls.contains(name) {
-        return NameResolution::Enclosing;
-    }
-    if sc.kind == ScopeKind::Module {
-        return module_globals.resolve(name);
-    }
-    if sc.bound_names.contains(name) {
-        return NameResolution::Local;
+/// LEGB resolution of a name read over the finished scope tree.
+struct Resolver<'s> {
+    scopes: &'s [ScopeBuilder],
+    comp_regions: &'s [FxHashSet<String>],
+    module_globals: ModuleGlobals,
+}
+
+impl Resolver<'_> {
+    fn scope(&self, id: ScopeId) -> &ScopeBuilder {
+        &self.scopes[id.0 as usize]
     }
 
-    // Walk enclosing scopes (Python LEGB rule: skip Class scopes!).
-    let mut cursor = parent_map.get(&scope_id).copied().flatten();
-    while let Some(pid) = cursor {
-        let p = &scopes[pid.0 as usize];
-        match p.kind {
-            ScopeKind::Module => break,
-            ScopeKind::Class => {}
-            ScopeKind::Function
-            | ScopeKind::Comprehension
-            | ScopeKind::TypeParameters
-            | ScopeKind::Annotation => {
-                if p.global_decls.contains(name) {
-                    return module_globals.resolve(name);
-                }
-                if p.nonlocal_decls.contains(name)
-                    || p.bound_names.contains(name)
-                    || p.comp_target_names.contains(name)
-                {
-                    return NameResolution::Enclosing;
+    fn resolve(&self, scope_id: ScopeId, name: &str) -> NameResolution {
+        let sc = self.scope(scope_id);
+        if sc.global_decls.contains(name) {
+            return self.module_globals.resolve(name);
+        }
+        if sc.nonlocal_decls.contains(name) {
+            return NameResolution::Enclosing;
+        }
+        if sc.kind == ScopeKind::Module {
+            return self.module_globals.resolve(name);
+        }
+        if sc.bound_names.contains(name) {
+            return NameResolution::Local;
+        }
+
+        // Walk enclosing scopes (Python LEGB rule: skip Class scopes!).
+        let mut child = sc;
+        while let Some(pid) = child.parent {
+            let p = self.scope(pid);
+            // A target of an inlined comprehension of `p` around `child` is that
+            // comprehension's cell, whatever kind of scope `p` is.
+            if child
+                .enclosing_comp_regions
+                .iter()
+                .any(|r| self.comp_regions[*r].contains(name))
+            {
+                return NameResolution::Enclosing;
+            }
+            match p.kind {
+                ScopeKind::Module => break,
+                ScopeKind::Class => {}
+                ScopeKind::Function
+                | ScopeKind::Comprehension
+                | ScopeKind::TypeParameters
+                | ScopeKind::Annotation => {
+                    if p.global_decls.contains(name) {
+                        return self.module_globals.resolve(name);
+                    }
+                    if p.nonlocal_decls.contains(name) || p.bound_names.contains(name) {
+                        return NameResolution::Enclosing;
+                    }
                 }
             }
+            child = p;
         }
-        cursor = parent_map.get(&pid).copied().flatten();
-    }
 
-    module_globals.resolve(name)
+        self.module_globals.resolve(name)
+    }
 }
 
 fn sorted(names: &FxHashSet<String>) -> Vec<String> {

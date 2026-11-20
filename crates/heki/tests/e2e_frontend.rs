@@ -487,6 +487,24 @@ def assigned():
 }
 
 #[test]
+fn semantic_inlined_comprehension_targets_are_cells_only_inside_it() {
+    let source = "\
+x = 7
+def f():
+    [x for x in ()]
+    return lambda: x
+fs = [lambda: i for i in range(2)]
+";
+    let m = dump_source("dump-semantic", "fe_comp_cells", source, "py312");
+    // The sibling lambda reads the module `x`, not the comprehension's.
+    let sibling = scope(&m, &["function f", "function <lambda>"]);
+    assert_eq!(reads(sibling)["x"], "global");
+    // A lambda inside a module-level comprehension captures its target.
+    let inside = scope(&m, &["function <lambda>"]);
+    assert_eq!(reads(inside)["i"], "enclosing");
+}
+
+#[test]
 fn semantic_generator_walrus_writes_the_declared_global() {
     let source = "\
 def f():
