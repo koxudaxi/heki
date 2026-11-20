@@ -15,7 +15,8 @@ attribute: an index, a cache, a revision counter).
 A write is followed through local aliases, container methods (`.append()`, `[k] = v`),
 `setattr` / `__dict__`, and helpers: a private helper that writes without announcing the change
 passes the obligation to its callers, and the call of such a helper must be announced like a
-direct write. An invalidator counts when it is called directly, in each branch, or through
+direct write (one report at the call stands for every write behind it, and a Ratchet baseline
+counts each of them: `sites` in JSON output). An invalidator counts when it is called directly, in each branch, or through
 calls (a helper that calls an invalidator on every path to its own return), also behind a
 boolean flag set after the write (`changed = True ... if changed: notify()`); one called before
 the write does not count, nor an `async` invalidator that is not awaited.
