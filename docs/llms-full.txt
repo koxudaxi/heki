@@ -1329,9 +1329,12 @@ disk again (or leaves the project when it was never saved), and so is everything
 
 Files created, changed, or deleted outside the editor (`git checkout`, code generators) are
 picked up when the client supports watching files: the server registers for
-`workspace/didChangeWatchedFiles` on Python files (`**/*.{py,pyi}`) and on the configuration
-(`pyproject.toml`, `heki.toml`, `.heki.toml`, and the summary snapshot of `MUT103`). A change to
-the configuration indexes the workspace again, like `heki check --watch` does. A file that does
+`workspace/didChangeWatchedFiles` on Python files (`**/*.{py,pyi}`), on the configuration
+(`pyproject.toml`, `heki.toml`, `.heki.toml`, and the summary snapshot of `MUT103`), and on the
+ignore files (`.gitignore`, `.ignore`, `.hekiignore`). A change to the configuration or to an
+ignore file indexes the workspace again, like `heki check --watch` does. A file belongs to the
+project when `heki check` would find it: a file an ignore file, a hidden directory, or `exclude`
+leaves out is not analyzed, also when it is created or opened. A file that does
 not parse is left out of the project until it parses again, like `heki check` does.
 
 The server provides:

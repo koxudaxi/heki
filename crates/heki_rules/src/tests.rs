@@ -956,3 +956,63 @@ fn data101_skips_loop_facts_without_their_loop() {
     let indexed = [build("app.py", src)];
     assert!(check_against(&[b], &indexed, &["DATA101"]).is_empty());
 }
+
+// ============================================================================ discovery
+
+#[test]
+fn discovery_of_single_files_matches_the_walk() {
+    let dir = std::env::temp_dir().join(format!("heki_discovers_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, text) in [
+        ("pyproject.toml", ""),
+        (".hekiignore", "skipped.py\n"),
+        ("kept.py", ""),
+        ("skipped.py", ""),
+        (".hidden/inner.py", ""),
+        ("build/out.py", ""),
+        ("pkg/mod.py", ""),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let exclude = project::exclude_set(&HekiConfig::default()).unwrap();
+    let walked: BTreeSet<PathBuf> =
+        project::collect_files(std::slice::from_ref(&dir), &dir, &exclude)
+            .unwrap()
+            .into_iter()
+            .collect();
+    let found = |rel: &str| project::discovers(&dir, &dir, &exclude, &dir.join(rel));
+    // Files on the disk: exactly what the walk finds.
+    for rel in [
+        "kept.py",
+        "skipped.py",
+        ".hidden/inner.py",
+        "build/out.py",
+        "pkg/mod.py",
+    ] {
+        assert_eq!(found(rel), walked.contains(&dir.join(rel)), "{rel}");
+    }
+    // Unsaved files: judged by the directories on the disk and the names of the rest.
+    assert!(found("new.py"));
+    assert!(found("pkg/new.py"));
+    assert!(found("pkg/sub/new.py"));
+    assert!(!found(".hidden/new.py"));
+    assert!(!found("pkg/.cache/new.py"));
+    assert!(!found("build/new.py"));
+    assert!(!found("pkg/notes.txt"));
+    assert!(!project::discovers(
+        &dir.join("pkg"),
+        &dir,
+        &exclude,
+        &dir.join("kept.py")
+    ));
+    assert!(!project::discovers(
+        &dir.join("gone"),
+        &dir,
+        &exclude,
+        &dir.join("gone/new.py")
+    ));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

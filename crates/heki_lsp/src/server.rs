@@ -11,7 +11,8 @@
 //! - `didSave`: re-analyze the document, then every queued file and, in turn, what those
 //!   affect (`Workspace::refresh_all`), and publish their diagnostics.
 //! - `workspace/didChangeWatchedFiles`: files changed on the disk are re-analyzed like saved
-//!   documents, deleted ones leave the project, and a configuration change re-indexes it.
+//!   documents, deleted ones leave the project, and a change of the configuration or of an
+//!   ignore file re-indexes it.
 //! - `codeAction`: `OPT` fixes and `# heki: ignore[CODE]` insertions.
 //! - `heki/stats`: engine counters (`EngineStats`), used to verify Early Cutoff, the number of
 //!   open documents, and the work still in flight (`Activity`), which lets a client wait until
@@ -24,7 +25,7 @@
 use crate::convert;
 use crate::engine::{CONFIG_FILES, Selectors, Workspace};
 use heki_diagnostics::Diagnostic;
-use heki_rules::project::{ProjectOptions, find_root};
+use heki_rules::project::{IGNORE_FILES, ProjectOptions, find_root};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -195,9 +196,11 @@ impl State {
         })
     }
 
-    /// Index the workspace (again, when the configuration changed), then publish the
-    /// diagnostics of every open document and of every file published before. Returns the
-    /// number of indexed files (`None`: the configuration is invalid; nothing is analyzed).
+    /// Index the workspace (again, when the configuration or an ignore file changed), then
+    /// publish the diagnostics of every open document, of every file published before, and,
+    /// when it is indexed again, of every file that entered the project (as a created file's
+    /// are). Returns the number of indexed files (`None`: the configuration is invalid; nothing
+    /// is analyzed).
     fn load(&mut self) -> (Vec<Publish>, Vec<String>, Option<usize>) {
         let root = self.root.clone().unwrap_or_else(|| PathBuf::from("."));
         let texts: FxHashMap<PathBuf, String> = self
@@ -215,7 +218,12 @@ impl State {
             &Selectors::default(),
         );
         self.pending.clear();
-        let files: BTreeSet<PathBuf> = self.docs.keys().chain(self.diags.keys()).cloned().collect();
+        let mut files: BTreeSet<PathBuf> =
+            self.docs.keys().chain(self.diags.keys()).cloned().collect();
+        let indexed_before: Option<BTreeSet<PathBuf>> = self
+            .workspace
+            .as_ref()
+            .map(|ws| ws.indexed().cloned().collect());
         let (mut ws, errors) = match loaded {
             Ok(loaded) => loaded,
             Err(e) => {
@@ -225,6 +233,9 @@ impl State {
             }
         };
         let n = ws.stats().indexed_files;
+        if let Some(before) = &indexed_before {
+            files.extend(ws.indexed().filter(|p| !before.contains(*p)).cloned());
+        }
         let checked: Vec<(PathBuf, Vec<Diagnostic>)> = files
             .into_iter()
             .map(|p| {
@@ -300,12 +311,19 @@ impl State {
     /// file is re-analyzed like a saved document (an open document with its own text), a
     /// deleted one leaves the project; then everything they affect is re-analyzed.
     fn files_changed(&mut self, changes: Vec<FileEvent>) -> (Vec<Publish>, Vec<String>) {
-        // The configuration (or the summary snapshot) changed: everything is analyzed again,
-        // as `heki check --watch` does.
+        // The configuration, the summary snapshot, or an ignore file changed: everything is
+        // analyzed again (an ignore file changes which files belong to the project), as
+        // `heki check --watch` does.
         let config_root = find_root(self.root.as_deref().unwrap_or(Path::new(".")));
-        if changes.iter().any(|c| {
-            path_of(&c.uri).is_some_and(|p| CONFIG_FILES.iter().any(|n| config_root.join(n) == p))
-        }) {
+        let reloads = |p: &Path| {
+            CONFIG_FILES.iter().any(|n| config_root.join(n) == p)
+                || p.file_name()
+                    .is_some_and(|n| IGNORE_FILES.iter().any(|i| n == *i))
+        };
+        if changes
+            .iter()
+            .any(|c| path_of(&c.uri).is_some_and(|p| reloads(&p)))
+        {
             let (pubs, errors, _) = self.load();
             return (pubs, errors);
         }
@@ -394,6 +412,7 @@ fn watched_files_registration() -> Registration {
         watchers: vec![
             watcher("**/*.{py,pyi}".into()),
             watcher(format!("**/{{{}}}", CONFIG_FILES.join(","))),
+            watcher(format!("**/{{{}}}", IGNORE_FILES.join(","))),
         ],
     };
     Registration {

@@ -371,6 +371,8 @@ enum Action {
     Configure(String),
     /// Close the document without saving it: its unsaved text is discarded.
     Close(&'static str),
+    /// Write a file that is not open (created or changed outside the editor) and announce it.
+    Write(&'static str, String),
 }
 
 struct Step {
@@ -1459,6 +1461,11 @@ impl Session {
                     .notify("textDocument/didClose", json!({"textDocument": {"uri": u}}));
                 self.versions.remove(rel);
             }
+            Action::Write(rel, text) => {
+                let created = !self.p.dir.join(rel).exists();
+                self.p.write(rel, text);
+                self.watched(rel, if created { 1 } else { 2 });
+            }
         }
     }
 
@@ -1502,7 +1509,8 @@ impl Session {
                     | Action::Change(rel, _)
                     | Action::Create(rel, _)
                     | Action::Delete(rel)
-                    | Action::Close(rel) => self.uri(rel),
+                    | Action::Close(rel)
+                    | Action::Write(rel, _) => self.uri(rel),
                     Action::Configure(_) => self.uri("pyproject.toml"),
                 })
                 .collect();
@@ -1568,6 +1576,7 @@ const DUP_USER: &str = "from app.dup import two\n\n\nasync def use():\n    two()
 // A helper under `src/` without package markers, imported by its `src`-layout name.
 const SRC_UTIL: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
 const SRC_CALLER: &str = "from pkg.util import wait\n\n\nasync def call():\n    wait()\n";
+const GENERATED: &str = "import time\n\n\nasync def tick():\n    time.sleep(1)\n";
 
 fn edge_files() -> Vec<(&'static str, String)> {
     [
@@ -1600,6 +1609,7 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_recursive_snapshot());
     steps.extend(steps_moved_lines());
     steps.extend(steps_discarded_buffer());
+    steps.extend(steps_ignore_files());
     steps
 }
 
@@ -1709,6 +1719,37 @@ fn steps_discarded_buffer() -> Vec<Step> {
             ],
         )
         .present(&[("app/handler.py", "EFF101")]),
+    ]
+}
+
+/// Ignore files decide which files belong to the project.
+fn steps_ignore_files() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an ignore file lists a module",
+            vec![Action::Write(
+                ".hekiignore",
+                "app/generated.py\n".to_owned(),
+            )],
+        ),
+        Step::new(
+            "the ignored module is created",
+            vec![Action::Write("app/generated.py", GENERATED.to_owned())],
+        )
+        .absent(&[("app/generated.py", "EFF101")]),
+        Step::new(
+            "the ignore file lists a module that has diagnostics",
+            vec![Action::Write(
+                ".hekiignore",
+                "app/generated.py\napp/handler.py\n".to_owned(),
+            )],
+        )
+        .absent(&[("app/handler.py", "EFF101")]),
+        Step::new(
+            "the ignore file is emptied",
+            vec![Action::Write(".hekiignore", String::new())],
+        )
+        .present(&[("app/generated.py", "EFF101"), ("app/handler.py", "EFF101")]),
     ]
 }
 

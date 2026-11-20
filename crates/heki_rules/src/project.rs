@@ -179,6 +179,24 @@ pub fn exclude_set(cfg: &HekiConfig) -> Result<GlobSet, ProjectError> {
     glob_set(&exclude, "exclude")
 }
 
+/// The files whose changes change which files discovery finds (`.hekiignore` and the ignore
+/// files the walk reads besides it).
+pub const IGNORE_FILES: &[&str] = &[".gitignore", ".ignore", ".hekiignore"];
+
+/// The walk of a directory `collect_files` makes: hidden files and directories, `.gitignore`
+/// (inside a Git repository), `.ignore`, and `.hekiignore` files leave entries out.
+fn walk(dir: &Path) -> ignore::WalkBuilder {
+    let mut builder = ignore::WalkBuilder::new(dir);
+    builder.add_custom_ignore_filename(".hekiignore");
+    builder
+}
+
+/// A file the walk keeps when no ignore file or `exclude` leaves it out.
+fn walked_python(path: &Path, root: &Path, exclude: &GlobSet) -> bool {
+    path.extension().is_some_and(|e| e == "py" || e == "pyi")
+        && !is_excluded(&rel_posix(path, root), exclude)
+}
+
 /// Python files under `paths` (explicitly named files are always included, Ruff semantics).
 pub fn collect_files(
     paths: &[PathBuf],
@@ -194,18 +212,13 @@ pub fn collect_files(
             files.push(p.clone());
             continue;
         }
-        let mut builder = ignore::WalkBuilder::new(p);
-        builder.add_custom_ignore_filename(".hekiignore");
-        for entry in builder.build() {
+        for entry in walk(p).build() {
             let entry = entry.map_err(|cause| ProjectError::Walk {
                 path: p.clone(),
                 cause,
             })?;
             let ep = entry.path();
-            if ep.is_file()
-                && ep.extension().is_some_and(|e| e == "py" || e == "pyi")
-                && !is_excluded(&rel_posix(ep, root), exclude)
-            {
+            if ep.is_file() && walked_python(ep, root, exclude) {
                 files.push(ep.to_path_buf());
             }
         }
@@ -214,6 +227,42 @@ pub fn collect_files(
     files.retain(|f| seen.insert(canonical_or_given(f)));
     files.sort();
     Ok(files)
+}
+
+/// Whether [`collect_files`] over the directory `dir` finds `file` (both absolute): the same
+/// walk, entering only the directories on the way to `file`. Of a file that does not exist (an
+/// unsaved document, maybe in a directory that does not exist either), the walk judges the part
+/// of the path on the disk; the rest only by its names (hidden ones are skipped) and `exclude`:
+/// the ignore patterns naming it apply once it is on the disk.
+pub fn discovers(dir: &Path, root: &Path, exclude: &GlobSet, file: &Path) -> bool {
+    if !file.starts_with(dir) || !walked_python(file, root, exclude) {
+        return false;
+    }
+    let Some(on_disk) = file
+        .ancestors()
+        .take_while(|a| a.starts_with(dir))
+        .find(|a| a.exists())
+        .map(Path::to_path_buf)
+    else {
+        return false;
+    };
+    let unsaved_hidden = file.strip_prefix(&on_disk).is_ok_and(|rest| {
+        rest.components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    });
+    if unsaved_hidden {
+        return false;
+    }
+    if on_disk == dir {
+        return true;
+    }
+    let target = on_disk.clone();
+    let mut builder = walk(dir);
+    builder.filter_entry(move |e| target.starts_with(e.path()));
+    builder
+        .build()
+        .flatten()
+        .any(|e| e.path() == on_disk && e.depth() > 0)
 }
 
 /// Parse `source` as the module at `path` (`Err`: a `path:line:col: syntax error` message).

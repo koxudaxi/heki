@@ -10,8 +10,8 @@ use heki_effect::{
     CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, analyze_project_with_reads,
 };
 use heki_rules::project::{
-    ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, exclude_set, parse_source,
-    rel_posix, retain_unsuppressed,
+    ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, discovers, exclude_set,
+    parse_source, retain_unsuppressed,
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
@@ -118,6 +118,8 @@ pub struct Workspace {
     pub env: ProjectEnv,
     selection: RuleSelection,
     snapshot: Option<SummarySnapshot>,
+    /// The directories discovery walks (`ProjectOptions::paths`).
+    walked: Vec<PathBuf>,
     exclude: GlobSet,
     files: BTreeMap<PathBuf, FileMeta>,
     index: ProjectIndex,
@@ -244,6 +246,7 @@ impl Workspace {
                 env,
                 selection,
                 snapshot,
+                walked: opts.paths.to_vec(),
                 exclude,
                 files,
                 index,
@@ -263,14 +266,19 @@ impl Workspace {
         &self.stats
     }
 
-    /// A Python file the project would index (inside the root, not excluded).
+    /// The files in the index.
+    pub fn indexed(&self) -> impl Iterator<Item = &PathBuf> {
+        self.files.keys()
+    }
+
+    /// A Python file the project indexes: one that discovery finds (`collect_files`: ignore
+    /// files, hidden directories, and `exclude` leave files out), as `heki check` does.
     pub fn accepts(&self, path: &Path) -> bool {
-        path.extension().is_some_and(|e| e == "py" || e == "pyi")
-            && path.starts_with(&self.env.root)
-            && {
-                let rel = rel_posix(path, &self.env.root);
-                !self.exclude.is_match(&rel) && !rel.split('/').any(|c| self.exclude.is_match(c))
-            }
+        self.files.contains_key(path)
+            || self
+                .walked
+                .iter()
+                .any(|dir| discovers(dir, &self.env.root, &self.exclude, path))
     }
 
     fn parse(&self, path: &Path, text: &str) -> Result<ParsedFile, String> {
