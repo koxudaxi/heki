@@ -404,7 +404,10 @@ per item (`consumption::per_item_callable`: the function handed to `map`, `filte
 builtin's call: every fact of its body runs there, on the caller's thread (the lazy builtins run
 it where their result is consumed, almost always where they are written, as for a generator
 expression). Its parameters after the arguments a partial holds take the items, which are no
-value of the caller; what the builtin returns is never what the callable returns.
+value of the caller, and the ones after the items get their literal defaults when the builtin
+fixes how many it passes (one item, one per iterable of `map`, or the accumulated value and an
+item for `reduce`; not the elements of a `starmap` item); what the builtin returns is never what
+the callable returns.
 `CallSite::per_item` names the builtin and the arguments it takes the items from, and `EFF102` /
 `EFF103` count the site as inside one more loop, as long as the items, which they size as a
 `for` loop's iterable (`Sizes::items_data_sized`); the receiver, the arguments a partial holds,

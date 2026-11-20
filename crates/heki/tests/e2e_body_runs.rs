@@ -1386,8 +1386,10 @@ def every_outer_iteration(batches):
         max(1, 2, key=lambda u: name(batch))  # EFF103
 "#;
 
-/// Clients made once per item, and clients a pool or the receiver holds.
-const PER_ITEM_CLIENTS: &str = r#"import time
+/// Clients made once per item, and clients a pool or the receiver holds, or that the omitted
+/// arguments' defaults switch off.
+const PER_ITEM_CLIENTS: &str = r#"import functools
+import time
 
 import requests
 
@@ -1453,6 +1455,28 @@ def two_hosts():
 
 async def on_the_event_loop(delays):
     list(map(pause, delays))  # EFF101
+
+
+def fetch_if(url, enabled=False):
+    if enabled:
+        return requests.get(url)
+    return None
+
+
+def fetch_if_asked(url, *, enabled=False):
+    if enabled:
+        return requests.get(url)
+    return None
+
+
+def defaults_switch_it_off(urls):
+    list(map(fetch_if, urls))
+    list(map(fetch_if_asked, urls))
+    sorted(urls, key=fetch_if)
+
+
+def a_keyword_switches_it_on(urls):
+    return list(map(functools.partial(fetch_if, enabled=True), urls))  # EFF102
 "#;
 
 #[test]
@@ -1520,7 +1544,15 @@ fn builtins_call_a_callable_once_per_item() {
         "batch the queries, or load the data once before the loop"
     );
     assert_eq!(
-        message(&diags, "pkg/clients.py", 38),
+        message(
+            &diags,
+            "pkg/clients.py",
+            PER_ITEM_CLIENTS
+                .lines()
+                .position(|l| l.contains("list(map(fetch, urls))"))
+                .unwrap() as u64
+                + 1
+        ),
         "`pkg.clients.fetch` allocates an unpooled client (`requests.get`) for every item `map` \
          calls it with"
     );
