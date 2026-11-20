@@ -321,7 +321,7 @@ def write_moved(field: DataModelFieldBase) -> None:
     field.__dict__[MOVED] = True
 "#;
 
-const ONCE_USE: &str = r#"from typing import ClassVar, Final
+const ONCE_USE: &str = r#"from typing import ClassVar, Final, Protocol
 
 from pkg import once
 from pkg.model import DataModelFieldBase
@@ -450,6 +450,41 @@ class Untouched(Base):
 
 
 Inheriting.KEY = "_other"
+
+
+class KeyProto(Protocol):
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def label(self) -> str: ...
+
+
+class SecretKeys:
+    KEY: ClassVar[str] = "_other"
+
+    def label(self) -> str:
+        return "secret"
+
+
+def write_through_protocol(keys: KeyProto, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+
+
+class SameProto(Protocol):
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def tag(self) -> str: ...
+
+
+class SameKeys:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def tag(self) -> str:
+        return "same"
+
+
+def write_through_same(keys: SameProto, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+
 "#;
 
 #[test]
@@ -530,6 +565,10 @@ unresolved = "report"
             d(u, 116, "MUT205", "Inheriting.write_own", class),
             d(u, 121, "MUT205", "ForeignInheriting.write_own", class),
             d(u, 126, "MUT201", "Untouched.write_own", forced),
+            // An instance of a protocol is one of its implementations: the constant holds only
+            // when each of them holds the same one.
+            d(u, 146, "MUT205", "write_through_protocol", class),
+            d(u, 163, "MUT201", "write_through_same", forced),
         ]
     );
 }

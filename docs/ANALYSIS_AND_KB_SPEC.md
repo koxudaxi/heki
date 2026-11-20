@@ -346,7 +346,8 @@ read), and class-body names declared `ClassVar` or `Final` and bound once, store
 an instance by no other code of their module (and, without `Final`, by no other module), read
 through the MRO when no subclass defines the name again; a class that code stores the name on
 (`ClassDecl::rebound_attrs` in its module, `ProjectDecls::rebound_elsewhere` from another)
-defines it too (`ProjectDecls::class_str_constant`). Contract-only facts
+defines it too, and on an instance of a protocol every structural implementation must hold the
+same constant (`ProjectDecls::class_str_constant`). Contract-only facts
 (container entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or

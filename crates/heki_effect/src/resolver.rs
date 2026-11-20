@@ -1471,7 +1471,8 @@ impl ProjectDecls {
     /// definition of `attr` the MRO finds first must be a constant. With `subclasses`, the
     /// object may be of a subclass, and none may define `attr` again. A class that code stores
     /// `attr` on (`Child.KEY = "x"`, in its module or another) defines it too: its own value
-    /// then hides the inherited constant.
+    /// then hides the inherited constant. An instance of a protocol is one of its structural
+    /// implementations, which define the name themselves: each must hold the same constant.
     pub fn class_str_constant(&self, class: &str, attr: &str, subclasses: bool) -> Option<&str> {
         let defines = |c: &str| {
             self.class(c)
@@ -1483,7 +1484,14 @@ impl ProjectDecls {
             return None;
         }
         let owner = self.mro(&class).into_iter().find(|c| defines(c))?;
-        self.str_constant(&format!("{owner}.{attr}"))
+        let value = self.str_constant(&format!("{owner}.{attr}"))?;
+        if subclasses && let Some(implementers) = self.protocol(&class) {
+            let same = |i: &String| self.class_str_constant(i, attr, true) == Some(value);
+            if !implementers?.iter().all(same) {
+                return None;
+            }
+        }
+        Some(value)
     }
 
     pub(crate) fn symbol(&self, fqn: &str) -> Symbol<'_> {
