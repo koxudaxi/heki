@@ -41,7 +41,9 @@ $ heki snapshot --write                        # writes .heki-summary-snapshot.j
 $ heki check --extend-select MUT103            # reports functions that gained effects
 ```
 
-Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
+A run that cannot analyze every file (a syntax error, an unreadable file) writes neither a
+snapshot nor a baseline: it reports the errors and exits with 2, so the entries of those files are
+not lost. Commit `.heki-summary-snapshot.json`. When a new effect is intended, refresh the snapshot in the
 same pull request; the diff of the JSON file shows reviewers what changed.
 
 ## pre-commit

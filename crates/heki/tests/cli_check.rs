@@ -392,3 +392,41 @@ fn update_baseline_only_shrinks_an_existing_baseline() {
             .contains("version = 9")
     );
 }
+
+#[test]
+fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
+    let p = Project::new("keep_on_errors");
+    p.write("a.py", BLOCKING)
+        .write("b.py", "def f(x):\n    x.append(1)\n");
+    let update = ["--baseline", "b.toml", "--update-baseline"];
+    assert_eq!(p.heki(&update).0, 0);
+    let snapshot = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_heki"))
+            .arg("snapshot")
+            .args(args)
+            .current_dir(&p.dir)
+            .output()
+            .unwrap()
+    };
+    assert!(snapshot(&["--write"]).status.success());
+    let read = |f: &str| std::fs::read_to_string(p.dir.join(f)).unwrap();
+    let (baseline, snap) = (read("b.toml"), read(".heki-summary-snapshot.json"));
+    // A syntax error drops both files from the run: writing the rest would forget them.
+    p.write("a.py", "def f(:\n").write("b.py", "def f(:\n");
+    let (code, _, stderr) = p.heki(&update);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("error: baseline b.toml not written: 2 file(s) could not be analyzed"),
+        "{stderr}"
+    );
+    let out = snapshot(&["--write"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("not written: 2 file(s) could not be analyzed")
+    );
+    assert_eq!(
+        (read("b.toml"), read(".heki-summary-snapshot.json")),
+        (baseline, snap)
+    );
+}

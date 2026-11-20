@@ -325,6 +325,10 @@ pub(crate) fn report(
         diags.retain(|d| regressed.contains(&baseline_key(d, key_path(&d.path))));
     }
     if let Some(bp) = baseline_path.as_ref().filter(|_| args.update_baseline) {
+        if !project.errors.is_empty() {
+            log!(fmt, "{}", not_written("baseline", bp, project.errors.len()));
+            return finish(fmt, &project.errors, ExitCode::SUCCESS);
+        }
         if regressions > 0 {
             log!(
                 fmt,
@@ -402,6 +406,13 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     let snap = SummarySnapshot::build(&units, &index);
     if args.write {
         let path = project.env.root.join(SNAPSHOT_FILE);
+        if !project.errors.is_empty() {
+            eprintln!(
+                "{}",
+                not_written("summary snapshot", &path, project.errors.len())
+            );
+            return finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS);
+        }
         snap.save(&path)?;
         eprintln!(
             "Wrote summary snapshot {} ({} function(s)).",
@@ -412,6 +423,16 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
         print!("{}", snap.to_json());
     }
     finish(OutputFormat::Full, &project.errors, ExitCode::SUCCESS)
+}
+
+/// Why a run that could not analyze every file keeps the `what` at `path` as it is: written
+/// from the other files, it would drop the entries of the failed ones, and a later run would
+/// compare them against nothing.
+fn not_written(what: &str, path: &Path, failed: usize) -> String {
+    format!(
+        "error: {what} {} not written: {failed} file(s) could not be analyzed",
+        path.display()
+    )
 }
 
 fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
