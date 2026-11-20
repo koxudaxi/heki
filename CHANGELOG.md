@@ -17,9 +17,9 @@ The first public preview.
   `concise`, `json`, `github`, `sarif`; paths relative to the working directory, as in Ruff),
   and exit codes `0` / `1` / `2`. The target Python version (`py311` to `py315`) comes from
   `requires-python` or `--target-version`, and `--watch` re-checks on every change.
-- 28 rules in four families:
-  - Mutation and state: `MUT101`, `MUT107`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`,
-    and the opt-in `MUT103`, `MUT106`, and `MUT108`.
+- 29 rules in four families:
+  - Mutation and state: `MUT101`, `MUT107`, `MUT109`, `MUT110`, `MUT201`, `MUT202`, `MUT203`,
+    `MUT204`, and the opt-in `MUT103`, `MUT106`, and `MUT108`.
   - Execution effects: `EFF101`, `EFF102`, `EFF103`, `EFF201`, and the opt-in `EFF105`,
     `EFF106`, and `EFF107`.
   - Data pipelines: `DATA101`.
@@ -31,7 +31,8 @@ The first public preview.
   them. A fix that turns a list into a `collections.deque` also rewrites its `list` annotation
   and adds the import in sorted order to the standard-library imports.
 - Contracts in `[tool.heki]`: `write-owners` (`MUT201`), `read-owners` (`MUT203`),
-  `call-owners` (`MUT204`), `readonly-returns` (`MUT202`), and `effect-boundaries` (`EFF201`, with
+  `call-owners` (`MUT204`), `readonly-returns` (`MUT202`, followed through the functions that
+  return a producer's result), `invalidation` (`MUT109`), and `effect-boundaries` (`EFF201`, with
   `reads-targets`, `calls`, and `allow-writes` / `write-universe`); `forbidden-writers` /
   `forbidden-readers` / `forbidden-callers` restrict an owner contract to a layer.
 - A catalog of library behavior (blocking network, database, and file calls, their async

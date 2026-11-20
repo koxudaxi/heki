@@ -51,6 +51,9 @@ $ uvx --from "zensical==0.1.2" zensical serve
 
 Rule documentation lives in `crates/heki_rules/rule-docs/<CODE>.md`; `heki rule <CODE>` prints it
 and the generator copies it into `docs/rules/`. CI fails when the generated pages are stale.
+The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) when a release is
+published or the workflow is run by hand, so the site documents the released version; a pull
+request from this repository gets a preview deployment.
 
 ## Architecture
 
@@ -64,7 +67,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_kb` | the knowledge bases: Layer 1 (builtins semantics for the soundness lane) and Layer 2 (ecosystem effects) |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
-| `heki_rules` | the 25 rules, rule selection, project discovery |
+| `heki_rules` | the rules, rule selection, project discovery |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
 | `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |

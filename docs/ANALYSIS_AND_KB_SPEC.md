@@ -166,6 +166,12 @@ EffectSummary(f) = {
                                                            // parameters the written object may be (MUT201, EFF201)
     typed_field_read_sites:   Set<TypedFieldReadSite>,     // own reads of (class, attr): attribute, getattr,
                                                            // __dict__; never propagated (MUT203)
+    returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
+                                                           // call chain (MUT202)
+    must_invalidate:          Bitset,                      // invalidation contracts announced on every
+                                                           // normal path (MUT109)
+    unmet_invalidation:       Set<UnmetWrite>,             // target writes, own or passed up by private
+                                                           // helpers, some normal path leaves unannounced
 
     // Offloading and the sync-driven context
     offloads_blocking_params: Bitset,                      // wrapper running the callable in parameter i on a thread
@@ -179,6 +185,11 @@ EffectSummary(f) = {
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
 ```
+
+`CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
+invalidation contracts announced after the call on every normal path, and the next call; set on
+`Iterate` / `Through` sites too), with `FileSummary.flows`, are computed at extraction from the
+CFG and its post-dominator tree, only when a contract is configured; `ProjectIndex` keeps no IR.
 
 **Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
 `ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs
@@ -232,7 +243,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT201` / `MUT202` / `MUT203`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -346,6 +357,27 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
      the call hop.
+  4. **Return flow**: a backward walk from the returns marks each call whose result may be
+     returned (as itself, as an element, or as an item of target unpacking; a copy ends it). A
+     callee that is a producer, an `@lru_cache` function, or `returns_protected` makes the caller
+     `returns_protected`, so a wrapper returning a producer's result is a producer itself, across
+     modules. The join is "protected if any path returns it", and the shortest chain is kept.
+     Only plain functions are followed: a generator's `return` value is not what calling it
+     returns.
+
+#### `MUT109`: announced changes
+- `[[tool.heki.invalidation]]` (`targets`, `invalidators`, `exempt-writers`, `message`):
+  extraction records the target writes whose object is reached from parameters or globals, and
+  the direct invalidator calls. A greatest-fixpoint coverage dataflow over normal edges (raising
+  paths count as covered), with constant and boolean-flag folding, gives each write whether every
+  normal path from it reaches an invalidator.
+- Propagation gives `must_invalidate` and `unmet_invalidation` through the `next_call` chains and
+  the callees' `must_invalidate`. A callee's writes and announcements are taken where its body
+  runs (`ProjectIndex::delivery`): a plain function at its call, a generator where it is iterated
+  or inside the function it is handed to; only bodies run at their call count as announcing.
+- Reporting: private helpers never report and pass the obligation to their callers; a public
+  function is relieved when every caller path announces the change after the call (a
+  breadth-first walk over the callers; exempt callers count).
 
 #### `MUT203`: declared read ownership
 - `[[tool.heki.read-owners]]` (`targets`, `allowed-readers`, `exempt-methods`, `message`): reads of
