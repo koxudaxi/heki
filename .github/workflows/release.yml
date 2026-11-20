@@ -79,6 +79,15 @@ jobs:
           args: --out dist
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       - run: uvx twine check dist/*
+      # Platforms without a wheel build from the source distribution: it must carry every file
+      # the build embeds (such as `kb/`).
+      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+      - name: heki builds and runs from the source distribution
+        run: |
+          uv venv .sdist-smoke
+          uv pip install --python .sdist-smoke dist/*.tar.gz
+          .sdist-smoke/bin/heki --version
+          .sdist-smoke/bin/heki rule --all > /dev/null
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sdist

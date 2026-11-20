@@ -441,23 +441,180 @@ mod tests {
         }
     }
 
+    /// `e` typing its result as an instance of `class` (factories).
+    fn returning(class: &str, e: EcosystemEntry) -> EcosystemEntry {
+        EcosystemEntry {
+            return_type: Some(class.into()),
+            ..e
+        }
+    }
+
+    fn async_safe(e: EcosystemEntry) -> EcosystemEntry {
+        EcosystemEntry {
+            async_safe: true,
+            ..e
+        }
+    }
+
     fn with_prefix(prefix: &str, names: &[&str]) -> Vec<String> {
         names.iter().map(|n| format!("{prefix}.{n}")).collect()
     }
 
-    /// docs/ANALYSIS_AND_KB_SPEC.md section 4.2, as `(symbols, expected entry without symbol)`.
+    fn s(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    /// The effects `EFF101` / `EFF105` report (`heki_effect::BLOCKING_EFFECTS`).
+    const BLOCKING: &[ExecEffectKind] = &[
+        BlockingNet,
+        BlockingDb,
+        BlockingSubprocess,
+        BlockingSync,
+        Sleep,
+        BlockingFs,
+    ];
+
+    const VERBS8: &[&str] = &[
+        "get", "post", "put", "delete", "patch", "head", "options", "request",
+    ];
+    /// Request methods of `httpx.Client` / `httpx.AsyncClient`.
+    const HTTPX_CLIENT_VERBS: &[&str] = &[
+        "get", "post", "put", "delete", "patch", "head", "options", "request", "send", "stream",
+    ];
+    const SQLITE3_EXECUTES: &[&str] = &["execute", "executemany", "executescript"];
+    /// DB-API cursor methods that send a statement.
+    const DBAPI_EXECUTES: &[&str] = &["execute", "executemany", "callproc"];
+    const COMMIT_ROLLBACK: &[&str] = &["commit", "rollback"];
+    const SA_CONNECTION_QUERIES: &[&str] = &["execute", "exec_driver_sql", "scalar", "scalars"];
+    const SA_SESSION_QUERIES: &[&str] = &[
+        "execute", "query", "scalars", "scalar", "get", "get_one", "refresh", "commit", "flush",
+    ];
+    const SA_ASYNC_SESSION_QUERIES: &[&str] = &[
+        "execute",
+        "scalars",
+        "scalar",
+        "get",
+        "get_one",
+        "refresh",
+        "commit",
+        "flush",
+        "stream",
+        "stream_scalars",
+    ];
+    const SQLMODEL_SESSION_QUERIES: &[&str] = &[
+        "exec", "execute", "scalars", "scalar", "get", "get_one", "refresh", "commit", "flush",
+    ];
+    /// Django `QuerySet` methods that run the query (their `a*` variants are coroutines).
+    const QUERYSET_RUNS: &[&str] = &[
+        "get",
+        "first",
+        "last",
+        "exists",
+        "count",
+        "create",
+        "update",
+        "delete",
+        "get_or_create",
+        "update_or_create",
+        "bulk_create",
+        "in_bulk",
+        "aggregate",
+    ];
+    const REDIS_COMMANDS: &[&str] = &[
+        "get", "set", "setex", "mget", "mset", "delete", "exists", "expire", "ttl", "incr", "decr",
+        "hget", "hset", "hmget", "hgetall", "hdel", "lpush", "rpush", "lpop", "rpop", "lrange",
+        "sadd", "srem", "smembers", "zadd", "zrange", "publish", "keys", "eval",
+    ];
+    const MONGO_COLLECTION_OPS: &[&str] = &[
+        "find",
+        "find_one",
+        "insert_one",
+        "insert_many",
+        "update_one",
+        "update_many",
+        "replace_one",
+        "delete_one",
+        "delete_many",
+        "count_documents",
+        "estimated_document_count",
+        "distinct",
+        "aggregate",
+        "bulk_write",
+        "find_one_and_update",
+        "find_one_and_replace",
+        "find_one_and_delete",
+    ];
+    /// `boto3.client` operations that are network calls only.
+    const BOTO3_CLIENT_CALLS: &[&str] = &[
+        "get_object",
+        "put_object",
+        "delete_object",
+        "delete_objects",
+        "head_object",
+        "copy_object",
+        "list_objects",
+        "list_objects_v2",
+        "list_buckets",
+        "upload_file",
+        "download_file",
+        "upload_fileobj",
+        "download_fileobj",
+        "create_multipart_upload",
+        "upload_part",
+        "complete_multipart_upload",
+        "batch_get_item",
+        "batch_write_item",
+        "transact_get_items",
+        "transact_write_items",
+        "send_message",
+        "send_message_batch",
+        "receive_message",
+        "delete_message",
+        "delete_message_batch",
+        "publish",
+        "invoke",
+        "assume_role",
+        "get_caller_identity",
+        "get_secret_value",
+        "get_parameter",
+        "get_parameters",
+        "get_parameters_by_path",
+        "encrypt",
+        "decrypt",
+        "put_record",
+        "put_records",
+        "put_record_batch",
+        "put_events",
+        "send_email",
+        // DynamoDB reads that page through results in loops by design.
+        "query",
+        "scan",
+    ];
+    /// DynamoDB item reads and writes (client operations and `Table` actions).
+    const DYNAMODB_ITEM_CALLS: &[&str] = &["get_item", "put_item", "update_item", "delete_item"];
+    const PANDAS_FILE_READERS: &[&str] = &[
+        "read_csv",
+        "read_table",
+        "read_fwf",
+        "read_excel",
+        "read_json",
+        "read_parquet",
+        "read_feather",
+        "read_orc",
+        "read_pickle",
+        "read_hdf",
+        "read_xml",
+        "read_stata",
+        "read_sas",
+        "read_spss",
+    ];
+
+    /// Every Layer 2 entry (docs/ANALYSIS_AND_KB_SPEC.md section 4.2), as `(symbols, expected
+    /// entry without symbol)`.
     fn layer2_required() -> Vec<(Vec<String>, EcosystemEntry)> {
-        let verbs8 = &[
-            "get", "post", "put", "delete", "patch", "head", "options", "request",
-        ];
-        let async_safe = EcosystemEntry {
-            async_safe: true,
-            ..entry(&[])
-        };
         let offload = |arg| EcosystemEntry {
             offloads_blocking_arg: Some(arg),
-            async_safe: true,
-            ..entry(&[])
+            ..async_safe(entry(&[]))
         };
         let excluded = EcosystemEntry {
             excluded: true,
@@ -467,8 +624,11 @@ mod tests {
             copy_sanitizer: true,
             ..entry(&[])
         };
-        let s = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        let qs = "django.db.models.query.QuerySet";
+        let async_queryset_runs: Vec<String> =
+            QUERYSET_RUNS.iter().map(|m| format!("{qs}.a{m}")).collect();
         vec![
+            // ------------------------------------------------ standard library
             (s(&["time.sleep"]), entry(&[Sleep])),
             (
                 with_prefix(
@@ -508,12 +668,15 @@ mod tests {
                     "asyncio",
                     &["StreamWriter.write", "sleep", "gather", "wait_for"],
                 ),
-                async_safe.clone(),
+                async_safe(entry(&[])),
             ),
             (
                 s(&[
                     "asyncio.to_thread",
                     "anyio.to_thread.run_sync",
+                    "anyio.to_process.run_sync",
+                    "anyio.to_interpreter.run_sync",
+                    "trio.to_thread.run_sync",
                     "starlette.concurrency.run_in_threadpool",
                     "fastapi.concurrency.run_in_threadpool",
                 ]),
@@ -530,22 +693,33 @@ mod tests {
                 offload(1),
             ),
             (
-                with_prefix(
-                    "logging.Logger",
-                    &[
-                        "debug",
-                        "info",
-                        "warning",
-                        "error",
-                        "critical",
-                        "exception",
-                        "log",
-                    ],
-                ),
-                excluded.clone(),
-            ),
-            (
-                with_prefix("logging", &["debug", "info", "warning", "error"]),
+                [
+                    with_prefix(
+                        "logging.Logger",
+                        &[
+                            "debug",
+                            "info",
+                            "warning",
+                            "error",
+                            "critical",
+                            "exception",
+                            "log",
+                        ],
+                    ),
+                    with_prefix(
+                        "logging",
+                        &[
+                            "debug",
+                            "info",
+                            "warning",
+                            "error",
+                            "critical",
+                            "exception",
+                            "log",
+                        ],
+                    ),
+                ]
+                .concat(),
                 excluded,
             ),
             (
@@ -560,201 +734,411 @@ mod tests {
                 copy_sanitizer,
             ),
             (
-                with_prefix("requests", verbs8),
+                with_prefix(
+                    "asyncio",
+                    &["get_running_loop", "get_event_loop", "new_event_loop"],
+                ),
+                returning("asyncio.AbstractEventLoop", entry(&[])),
+            ),
+            (
+                s(&["sqlite3.connect"]),
+                returning(
+                    "sqlite3.Connection",
+                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                ),
+            ),
+            (
+                s(&["sqlite3.Connection.cursor"]),
+                returning("sqlite3.Cursor", entry(&[])),
+            ),
+            (
+                [
+                    with_prefix("sqlite3.Connection", SQLITE3_EXECUTES),
+                    with_prefix("sqlite3.Cursor", SQLITE3_EXECUTES),
+                ]
+                .concat(),
+                returning("sqlite3.Cursor", entry(&[BlockingDb, DbQuery])),
+            ),
+            (
+                // Reading further rows of an executed statement is not a new query.
+                [
+                    with_prefix("sqlite3.Connection", COMMIT_ROLLBACK),
+                    with_prefix("sqlite3.Cursor", &["fetchone", "fetchmany", "fetchall"]),
+                ]
+                .concat(),
+                entry(&[BlockingDb]),
+            ),
+            // ------------------------------------------------ HTTP clients
+            (
+                [
+                    s(&["urllib.request.urlopen", "httpx.stream"]),
+                    with_prefix("requests", VERBS8),
+                    with_prefix("httpx", VERBS8),
+                ]
+                .concat(),
                 entry(&[BlockingNet, UnpooledClientAlloc]),
             ),
-            (s(&["requests.Session"]), entry(&[UnpooledClientAlloc])),
             (
-                with_prefix(
-                    "requests.Session",
-                    &["get", "post", "put", "delete", "patch", "request"],
-                ),
+                [
+                    with_prefix("requests.Session", VERBS8),
+                    s(&["requests.Session.send", "urllib3.request"]),
+                    with_prefix("httpx.Client", HTTPX_CLIENT_VERBS),
+                    with_prefix("urllib3.PoolManager", &["request", "urlopen"]),
+                    with_prefix("urllib3.ProxyManager", &["request", "urlopen"]),
+                    with_prefix("urllib3.HTTPConnectionPool", &["request", "urlopen"]),
+                    with_prefix("urllib3.HTTPSConnectionPool", &["request", "urlopen"]),
+                ]
+                .concat(),
                 entry(&[BlockingNet]),
             ),
             (
-                with_prefix("httpx", verbs8),
-                entry(&[BlockingNet, UnpooledClientAlloc]),
-            ),
-            (
+                // Constructors that do no I/O until the client is used.
                 s(&[
+                    "requests.Session",
                     "httpx.Client",
-                    "httpx.AsyncClient",
-                    "aiohttp.ClientSession",
                     "urllib3.PoolManager",
+                    "urllib3.ProxyManager",
+                    "urllib3.HTTPConnectionPool",
+                    "urllib3.HTTPSConnectionPool",
                     "boto3.client",
                     "boto3.resource",
                     "boto3.Session",
+                    "redis.Redis",
+                    "redis.StrictRedis",
+                    "pymongo.MongoClient",
                 ]),
                 entry(&[UnpooledClientAlloc]),
             ),
             (
-                with_prefix(
-                    "httpx.Client",
-                    &["get", "post", "put", "delete", "patch", "send", "request"],
-                ),
-                entry(&[BlockingNet]),
+                s(&["requests.session"]),
+                returning("requests.Session", entry(&[UnpooledClientAlloc])),
             ),
             (
-                with_prefix(
+                s(&["urllib3.connection_from_url"]),
+                returning("urllib3.HTTPConnectionPool", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&[
                     "httpx.AsyncClient",
-                    &["get", "post", "put", "delete", "patch", "send", "request"],
-                ),
-                async_safe.clone(),
-            ),
-            (
-                with_prefix(
                     "aiohttp.ClientSession",
-                    &["get", "post", "put", "delete", "patch", "request"],
-                ),
-                async_safe,
-            ),
-            (
-                s(&["urllib.request.urlopen"]),
-                entry(&[BlockingNet, UnpooledClientAlloc]),
-            ),
-            (
-                s(&["sqlite3.connect"]),
-                EcosystemEntry {
-                    return_type: Some("sqlite3.Connection".into()),
-                    ..entry(&[BlockingDb, UnpooledClientAlloc])
-                },
-            ),
-            (
-                s(&["sqlite3.Connection.cursor"]),
-                EcosystemEntry {
-                    return_type: Some("sqlite3.Cursor".into()),
-                    ..entry(&[])
-                },
-            ),
-            (
-                s(&["psycopg.connect"]),
-                EcosystemEntry {
-                    return_type: Some("psycopg.Connection".into()),
-                    ..entry(&[BlockingDb, UnpooledClientAlloc])
-                },
-            ),
-            (
-                s(&["psycopg.Connection.cursor"]),
-                EcosystemEntry {
-                    return_type: Some("psycopg.Cursor".into()),
-                    ..entry(&[])
-                },
-            ),
-            (
-                s(&["psycopg.Connection.execute"]),
-                entry(&[BlockingDb, DbQuery]),
-            ),
-            (
-                s(&["psycopg2.connect"]),
-                EcosystemEntry {
-                    return_type: Some("psycopg2.extensions.connection".into()),
-                    ..entry(&[BlockingDb, UnpooledClientAlloc])
-                },
-            ),
-            (
-                s(&["psycopg2.extensions.connection.cursor"]),
-                EcosystemEntry {
-                    return_type: Some("psycopg2.extensions.cursor".into()),
-                    ..entry(&[])
-                },
-            ),
-            (
-                s(&["pymysql.connect"]),
-                EcosystemEntry {
-                    return_type: Some("pymysql.connections.Connection".into()),
-                    ..entry(&[BlockingDb, UnpooledClientAlloc])
-                },
-            ),
-            (
-                s(&["sqlalchemy.create_engine"]),
-                EcosystemEntry {
-                    return_type: Some("sqlalchemy.engine.Engine".into()),
-                    ..entry(&[BlockingDb, UnpooledClientAlloc])
-                },
-            ),
-            (
-                s(&["sqlalchemy.engine.Engine.connect"]),
-                EcosystemEntry {
-                    return_type: Some("sqlalchemy.engine.Connection".into()),
-                    ..entry(&[BlockingDb])
-                },
-            ),
-            (
-                s(&["redis.Redis", "redis.StrictRedis", "pymongo.MongoClient"]),
-                entry(&[BlockingDb, UnpooledClientAlloc]),
+                    "aiohttp.request",
+                    "redis.asyncio.Redis",
+                    "pymongo.AsyncMongoClient",
+                ]),
+                async_safe(entry(&[UnpooledClientAlloc])),
             ),
             (
                 [
-                    with_prefix("sqlite3.Connection", &["execute", "executemany"]),
-                    with_prefix(
-                        "sqlite3.Cursor",
-                        &["execute", "executemany", "fetchall", "fetchone"],
-                    ),
+                    with_prefix("httpx.AsyncClient", HTTPX_CLIENT_VERBS),
+                    with_prefix("aiohttp.ClientSession", VERBS8),
                     s(&[
-                        "psycopg.Cursor.execute",
-                        "psycopg2.extensions.cursor.execute",
-                        "sqlalchemy.engine.Connection.execute",
+                        "aiohttp.ClientSession.ws_connect",
+                        "redis.asyncio.Redis.scan",
                     ]),
+                ]
+                .concat(),
+                async_safe(entry(&[])),
+            ),
+            // ------------------------------------------------ boto3
+            (
+                s(&["boto3.Session.client"]),
+                returning("boto3.client", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&["boto3.Session.resource"]),
+                returning("boto3.resource", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                [
+                    with_prefix("boto3.client", BOTO3_CLIENT_CALLS),
                     with_prefix(
-                        "sqlalchemy.orm.Session",
+                        "boto3.resource.Bucket",
                         &[
-                            "execute", "query", "scalars", "scalar", "get", "commit", "flush",
+                            "put_object",
+                            "upload_file",
+                            "download_file",
+                            "upload_fileobj",
+                            "download_fileobj",
                         ],
                     ),
-                    with_prefix("sqlmodel.Session", &["exec", "execute", "get", "commit"]),
                     with_prefix(
-                        "django.db.models.query.QuerySet",
+                        "boto3.resource.Object",
                         &[
-                            "get", "filter", "all", "first", "exists", "count", "create", "update",
+                            "get",
+                            "put",
                             "delete",
+                            "load",
+                            "upload_file",
+                            "download_file",
                         ],
                     ),
-                    with_prefix(
-                        "redis.Redis",
-                        &["get", "set", "hget", "hset", "delete", "pipeline"],
-                    ),
-                    with_prefix(
-                        "pymongo.collection.Collection",
-                        &["find", "find_one", "insert_one", "update_one", "delete_one"],
-                    ),
+                    with_prefix("boto3.resource.Table", &["query", "scan"]),
+                ]
+                .concat(),
+                entry(&[BlockingNet]),
+            ),
+            (
+                [
+                    with_prefix("boto3.client", DYNAMODB_ITEM_CALLS),
+                    with_prefix("boto3.resource.Table", DYNAMODB_ITEM_CALLS),
+                ]
+                .concat(),
+                entry(&[BlockingNet, DbQuery]),
+            ),
+            // ------------------------------------------------ databases (sync)
+            (
+                [
+                    with_prefix("sqlalchemy.engine.Connection", SA_CONNECTION_QUERIES),
+                    with_prefix("sqlalchemy.orm.Session", SA_SESSION_QUERIES),
+                    with_prefix("sqlmodel.Session", SQLMODEL_SESSION_QUERIES),
+                    s(&["psycopg.Connection.execute"]),
+                    with_prefix("psycopg.Cursor", &["execute", "executemany"]),
+                    with_prefix("psycopg2.extensions.cursor", DBAPI_EXECUTES),
+                    with_prefix("pymysql.cursors.Cursor", DBAPI_EXECUTES),
+                    with_prefix("django.db.backends.utils.CursorWrapper", DBAPI_EXECUTES),
+                    with_prefix(qs, QUERYSET_RUNS),
+                    s(&["redis.client.Pipeline.execute"]),
+                    with_prefix("redis.Redis", REDIS_COMMANDS),
+                    s(&["pymongo.database.Database.command"]),
+                    with_prefix("pymongo.collection.Collection", MONGO_COLLECTION_OPS),
+                    with_prefix("pandas", &["read_sql", "read_sql_query", "read_sql_table"]),
                 ]
                 .concat(),
                 entry(&[BlockingDb, DbQuery]),
             ),
             (
-                with_prefix(
-                    "sqlalchemy.ext.asyncio.AsyncSession",
-                    &["execute", "scalars", "scalar", "get", "commit"],
-                ),
+                [
+                    with_prefix("sqlalchemy.engine.Connection", COMMIT_ROLLBACK),
+                    with_prefix("psycopg.Connection", COMMIT_ROLLBACK),
+                    with_prefix("psycopg2.extensions.connection", COMMIT_ROLLBACK),
+                    with_prefix("pymysql.connections.Connection", COMMIT_ROLLBACK),
+                    // A cursor loop by design: blocking, but no N+1 query.
+                    s(&["redis.Redis.scan", "pandas.DataFrame.to_sql"]),
+                ]
+                .concat(),
+                entry(&[BlockingDb]),
+            ),
+            (
+                s(&["sqlalchemy.create_engine", "sqlmodel.create_engine"]),
+                returning("sqlalchemy.engine.Engine", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&["sqlalchemy.engine.Engine.connect"]),
+                returning("sqlalchemy.engine.Connection", entry(&[BlockingDb])),
+            ),
+            (
+                s(&["sqlalchemy.engine.Engine.begin"]),
                 EcosystemEntry {
-                    async_safe: true,
-                    ..entry(&[DbQuery])
+                    sync_lock_or_tx: true,
+                    ..returning("sqlalchemy.engine.Connection", entry(&[BlockingDb]))
                 },
             ),
             (
-                s(&[
-                    "pandas.concat",
-                    "numpy.vstack",
-                    "numpy.hstack",
-                    "numpy.concatenate",
-                    "numpy.append",
-                ]),
+                // Its sessions stay untyped: `class_=AsyncSession` would make them async.
+                s(&["sqlalchemy.orm.sessionmaker"]),
+                returning("sqlalchemy.orm.sessionmaker", entry(&[])),
+            ),
+            (
+                s(&["psycopg.connect", "psycopg.Connection.connect"]),
+                returning(
+                    "psycopg.Connection",
+                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                ),
+            ),
+            (
+                s(&["psycopg.Connection.cursor"]),
+                returning("psycopg.Cursor", entry(&[])),
+            ),
+            (
+                s(&["psycopg_pool.ConnectionPool.connection"]),
+                returning("psycopg.Connection", entry(&[BlockingDb])),
+            ),
+            (
+                s(&["psycopg2.connect"]),
+                returning(
+                    "psycopg2.extensions.connection",
+                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                ),
+            ),
+            (
+                s(&["psycopg2.extensions.connection.cursor"]),
+                returning("psycopg2.extensions.cursor", entry(&[])),
+            ),
+            (
+                s(&["pymysql.connect"]),
+                returning(
+                    "pymysql.connections.Connection",
+                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                ),
+            ),
+            (
+                s(&["pymysql.connections.Connection.cursor"]),
+                returning("pymysql.cursors.Cursor", entry(&[])),
+            ),
+            (
+                s(&["django.db.connection.cursor"]),
+                returning(
+                    "django.db.backends.utils.CursorWrapper",
+                    entry(&[BlockingDb]),
+                ),
+            ),
+            (
+                // Lazy: they only build another QuerySet.
+                with_prefix(qs, &["filter", "exclude", "all", "order_by"]),
+                returning(qs, entry(&[])),
+            ),
+            (
+                s(&["redis.from_url", "redis.Redis.from_url"]),
+                returning("redis.Redis", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                // Only buffers commands until `execute()`.
+                s(&["redis.Redis.pipeline"]),
+                returning("redis.client.Pipeline", entry(&[])),
+            ),
+            (
+                with_prefix(
+                    "pymongo.MongoClient",
+                    &["get_database", "get_default_database"],
+                ),
+                returning("pymongo.database.Database", entry(&[])),
+            ),
+            (
+                s(&["pymongo.database.Database.get_collection"]),
+                returning("pymongo.collection.Collection", entry(&[])),
+            ),
+            // ------------------------------------------------ databases (asyncio)
+            (
+                [
+                    with_prefix(
+                        "sqlalchemy.ext.asyncio.AsyncConnection",
+                        SA_CONNECTION_QUERIES,
+                    ),
+                    s(&["sqlalchemy.ext.asyncio.AsyncConnection.stream"]),
+                    with_prefix(
+                        "sqlalchemy.ext.asyncio.AsyncSession",
+                        SA_ASYNC_SESSION_QUERIES,
+                    ),
+                    with_prefix(
+                        "sqlmodel.ext.asyncio.session.AsyncSession",
+                        SQLMODEL_SESSION_QUERIES,
+                    ),
+                    s(&["psycopg.AsyncConnection.execute"]),
+                    with_prefix("psycopg.AsyncCursor", &["execute", "executemany"]),
+                    async_queryset_runs,
+                    s(&["redis.asyncio.client.Pipeline.execute"]),
+                    with_prefix("redis.asyncio.Redis", REDIS_COMMANDS),
+                    s(&["pymongo.asynchronous.database.AsyncDatabase.command"]),
+                    with_prefix(
+                        "pymongo.asynchronous.collection.AsyncCollection",
+                        MONGO_COLLECTION_OPS,
+                    ),
+                ]
+                .concat(),
+                async_safe(entry(&[DbQuery])),
+            ),
+            (
+                s(&["sqlalchemy.ext.asyncio.create_async_engine"]),
+                async_safe(returning(
+                    "sqlalchemy.ext.asyncio.AsyncEngine",
+                    entry(&[UnpooledClientAlloc]),
+                )),
+            ),
+            (
+                with_prefix("sqlalchemy.ext.asyncio.AsyncEngine", &["connect", "begin"]),
+                async_safe(returning(
+                    "sqlalchemy.ext.asyncio.AsyncConnection",
+                    entry(&[]),
+                )),
+            ),
+            (
+                s(&["sqlalchemy.ext.asyncio.async_sessionmaker"]),
+                async_safe(returning(
+                    "sqlalchemy.ext.asyncio.async_sessionmaker",
+                    entry(&[]),
+                )),
+            ),
+            (
+                with_prefix(
+                    "sqlalchemy.ext.asyncio.async_sessionmaker",
+                    &["__call__", "begin"],
+                ),
+                async_safe(returning("sqlalchemy.ext.asyncio.AsyncSession", entry(&[]))),
+            ),
+            (
+                s(&["psycopg.AsyncConnection.connect"]),
+                async_safe(returning(
+                    "psycopg.AsyncConnection",
+                    entry(&[UnpooledClientAlloc]),
+                )),
+            ),
+            (
+                s(&["psycopg.AsyncConnection.cursor"]),
+                async_safe(returning("psycopg.AsyncCursor", entry(&[]))),
+            ),
+            (
+                s(&["psycopg_pool.AsyncConnectionPool.connection"]),
+                async_safe(returning("psycopg.AsyncConnection", entry(&[]))),
+            ),
+            (
+                s(&["redis.asyncio.from_url", "redis.asyncio.Redis.from_url"]),
+                async_safe(returning(
+                    "redis.asyncio.Redis",
+                    entry(&[UnpooledClientAlloc]),
+                )),
+            ),
+            (
+                s(&["redis.asyncio.Redis.pipeline"]),
+                async_safe(returning("redis.asyncio.client.Pipeline", entry(&[]))),
+            ),
+            (
+                with_prefix(
+                    "pymongo.AsyncMongoClient",
+                    &["get_database", "get_default_database"],
+                ),
+                async_safe(returning(
+                    "pymongo.asynchronous.database.AsyncDatabase",
+                    entry(&[]),
+                )),
+            ),
+            (
+                s(&["pymongo.asynchronous.database.AsyncDatabase.get_collection"]),
+                async_safe(returning(
+                    "pymongo.asynchronous.collection.AsyncCollection",
+                    entry(&[]),
+                )),
+            ),
+            // ------------------------------------------------ data
+            (
+                with_prefix("pandas", PANDAS_FILE_READERS),
+                entry(&[BlockingFs]),
+            ),
+            (
+                [
+                    s(&["pandas.concat"]),
+                    with_prefix(
+                        "numpy",
+                        &[
+                            "vstack",
+                            "hstack",
+                            "dstack",
+                            "column_stack",
+                            "concatenate",
+                            "append",
+                            "insert",
+                        ],
+                    ),
+                ]
+                .concat(),
                 entry(&[QuadraticRealloc]),
             ),
+            // ------------------------------------------------ locks and transactions
             (
-                with_prefix(
-                    "asyncio",
-                    &["get_running_loop", "get_event_loop", "new_event_loop"],
-                ),
-                EcosystemEntry {
-                    return_type: Some("asyncio.AbstractEventLoop".into()),
-                    ..entry(&[])
-                },
-            ),
-            (
+                // `sqlalchemy.engine.Engine.begin` (above) also connects and types its result.
                 [LOCK_CLASSES, TRANSACTION_STARTERS]
                     .concat()
                     .iter()
+                    .filter(|n| **n != "sqlalchemy.engine.Engine.begin")
                     .map(|n| (*n).to_owned())
                     .collect(),
                 EcosystemEntry {
@@ -777,6 +1161,7 @@ mod tests {
     const TRANSACTION_STARTERS: &[&str] = &[
         "sqlalchemy.orm.Session.begin",
         "sqlalchemy.orm.Session.begin_nested",
+        "sqlalchemy.orm.sessionmaker.begin",
         "sqlalchemy.engine.Connection.begin",
         "sqlalchemy.engine.Connection.begin_nested",
         "sqlalchemy.engine.Engine.begin",
@@ -800,7 +1185,8 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(flagged, expected);
-        // Async locks never hold the event loop's thread: they are not registered at all.
+        // Async locks never hold the event loop's thread: they are not registered at all
+        // (async transaction starters such as `AsyncEngine.begin` only type their results).
         for symbol in [
             "asyncio.Lock",
             "asyncio.Semaphore",
@@ -809,6 +1195,7 @@ mod tests {
             "anyio.Lock",
             "anyio.Semaphore",
             "sqlalchemy.ext.asyncio.AsyncSession.begin",
+            "psycopg.AsyncConnection.transaction",
         ] {
             assert_eq!(kb.lookup(symbol), None, "{symbol}");
         }
@@ -843,6 +1230,7 @@ mod tests {
         "sqlmodel",
         "django",
         "psycopg",
+        "psycopg_pool",
         "psycopg2",
         "pymysql",
         "redis",
@@ -860,8 +1248,9 @@ mod tests {
     ];
 
     #[test]
-    fn layer2_load_builtin_contains_every_required_entry() {
+    fn layer2_load_builtin_contains_exactly_the_required_entries() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let mut required = BTreeSet::new();
         for (symbols, expected) in layer2_required() {
             for symbol in symbols {
                 let expected = EcosystemEntry {
@@ -869,9 +1258,73 @@ mod tests {
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
+                required.insert(symbol);
             }
         }
+        // Every entry is pinned: the catalog is the only source of library effects.
+        let unpinned: Vec<&String> = kb
+            .entries
+            .keys()
+            .filter(|k| !required.contains(*k))
+            .collect();
+        assert!(unpinned.is_empty(), "{unpinned:?}");
         assert_eq!(kb.digest.len(), 64);
+    }
+
+    /// No async API can fire `EFF101`: async APIs are often called without a direct `await`
+    /// (`async with`, `asyncio.gather(...)`, `asyncio.wait_for(...)`), where the `is_awaited`
+    /// filter does not apply, so an `async_safe` entry never carries a blocking effect and every
+    /// entry of an async namespace is `async_safe`.
+    #[test]
+    fn layer2_async_apis_carry_no_blocking_effect() {
+        const ASYNC_NAMESPACES: &[&str] = &[
+            "httpx.AsyncClient",
+            "aiohttp.",
+            "redis.asyncio.",
+            "sqlalchemy.ext.asyncio.",
+            "sqlmodel.ext.asyncio.",
+            "psycopg.Async",
+            "psycopg_pool.Async",
+            "pymongo.Async",
+            "pymongo.asynchronous.",
+        ];
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let mut seen = BTreeSet::new();
+        for (symbol, e) in &kb.entries {
+            if e.async_safe {
+                assert!(
+                    !e.effects.iter().any(|x| BLOCKING.contains(x)),
+                    "{symbol}: {:?}",
+                    e.effects
+                );
+            }
+            if let Some(ns) = ASYNC_NAMESPACES.iter().find(|ns| symbol.starts_with(**ns)) {
+                assert!(e.async_safe, "{symbol}");
+                seen.insert(*ns);
+            }
+        }
+        assert_eq!(seen.len(), ASYNC_NAMESPACES.len(), "{seen:?}");
+    }
+
+    /// A `return_type` naming a class without catalogued methods would leave the factory's
+    /// result unresolved without any sign (a typo, or a class spelled another way). A call of a
+    /// capitalized name is typed as an instance of that name (`TypeCtx::call_result`), so a
+    /// `return_type` there would be ignored: aliases such as `redis.StrictRedis` cannot be
+    /// declared this way.
+    #[test]
+    fn layer2_return_types_name_catalogued_classes() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        for (symbol, e) in &kb.entries {
+            if let Some(class) = &e.return_type {
+                let methods = format!("{class}.");
+                assert!(
+                    kb.entries.keys().any(|k| k.starts_with(&methods)),
+                    "{symbol} -> {class}"
+                );
+                let name = symbol.rsplit('.').next().unwrap_or(symbol);
+                assert!(!name.starts_with(char::is_uppercase), "{symbol}");
+            }
+        }
     }
 
     #[test]
@@ -879,6 +1332,33 @@ mod tests {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         assert_eq!(kb.lookup("subprocess.Popen"), None);
         assert!(kb.lookup("subprocess.Popen.wait").is_some());
+    }
+
+    /// Calls that do no I/O, or whose effect depends on what the catalog cannot see, are left
+    /// out: client-side cursors already hold their rows, boto3 signs URLs locally, pipelines
+    /// buffer commands, `to_csv()` without a path returns a string, `read_html` parses text as
+    /// often as it fetches, and `sessionmaker()` builds `AsyncSession`s with `class_=AsyncSession`.
+    #[test]
+    fn layer2_leaves_local_and_undecidable_calls_unregistered() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        for symbol in [
+            "psycopg.Cursor.fetchone",
+            "psycopg.Cursor.fetchall",
+            "psycopg.AsyncCursor.fetchall",
+            "psycopg2.extensions.cursor.fetchall",
+            "pymysql.cursors.Cursor.fetchall",
+            "boto3.client.generate_presigned_url",
+            "boto3.client.get_paginator",
+            "httpx.Client.build_request",
+            "httpx.AsyncClient.build_request",
+            "redis.client.Pipeline.set",
+            "redis.asyncio.client.Pipeline.set",
+            "pandas.DataFrame.to_csv",
+            "pandas.read_html",
+            "sqlalchemy.orm.sessionmaker.__call__",
+        ] {
+            assert_eq!(kb.lookup(symbol), None, "{symbol}");
+        }
     }
 
     #[test]

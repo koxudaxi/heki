@@ -23,8 +23,14 @@ the same blocking call are grouped once ten or more of them exist.
 It does not report:
 
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
-  `anyio.to_thread.run_sync`, and project wrappers that forward their callable to them);
-- `async` APIs (`await client.get(...)` on `httpx.AsyncClient`, `aiohttp`, ...);
+  `anyio.to_thread.run_sync`, `run_in_threadpool`, and project wrappers that forward their
+  callable to them);
+- `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
+  `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
+  `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
+- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`,
+  `sqlalchemy.create_engine(...)`) and calls that only build an object (`Redis.pipeline()`, a
+  lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
 - spawning a process without waiting (`subprocess.Popen(...)`);
 - coroutine functions that only run through a synchronous driver (`asyncio.run`, ...);
 - CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests

@@ -9,8 +9,9 @@ Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
 ## What it does
 Checks loops that allocate a network or database client on every iteration: module-level
 request helpers that open a new connection per call (`requests.get`, `httpx.get`), client
-constructors (`requests.Session()`, `httpx.Client()`, `boto3.client(...)`), and connection
-factories (`sqlite3.connect`, `redis.Redis`, ...), directly or through project functions,
+constructors, sync and async (`requests.Session()`, `httpx.AsyncClient()`,
+`aiohttp.ClientSession()`, `boto3.client(...)`), and connection factories (`sqlite3.connect`,
+`redis.Redis`, `create_async_engine`, ...), directly or through project functions,
 including the getter of a property read in the loop (`self.client.get(url)` where the `client`
 getter builds a new client).
 

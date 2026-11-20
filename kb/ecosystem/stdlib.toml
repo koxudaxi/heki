@@ -316,7 +316,9 @@ symbol = "urllib.request.urlopen"
 effects = ["blocking_net", "unpooled_client_alloc"]
 opaque_to_layer3 = true
 
-# --- DB ---
+# --- DB (sqlite3) ---
+# The `execute*` methods return the cursor. `fetch*` step the statement already executed: they
+# read the database file (blocking) but send no new query, so a fetch loop is not `EFF103`.
 
 [[entries]]
 symbol = "sqlite3.connect"
@@ -332,29 +334,60 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlite3.Connection.execute"
 effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Connection.executemany"
 effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.executescript"
+effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.commit"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Connection.rollback"
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.execute"
 effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.executemany"
 effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "sqlite3.Cursor.fetchall"
+symbol = "sqlite3.Cursor.executescript"
 effects = ["blocking_db", "db_query"]
+return_type = "sqlite3.Cursor"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.fetchone"
-effects = ["blocking_db", "db_query"]
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Cursor.fetchmany"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlite3.Cursor.fetchall"
+effects = ["blocking_db"]
 opaque_to_layer3 = true

@@ -2,17 +2,51 @@
 # Every package listed here (and every package an entry belongs to) is opaque_to_layer3: Layer 3 never
 # descends into it (prevents A.7 false positive: asyncio.StreamWriter.write -> non-blocking socket.send).
 # This file: registered third-party packages (web / RPC / DB / data).
+#
+# Conventions (checked against the public API of each package):
+# - An async API (a coroutine function, or a method returning an awaitable or an async context
+#   manager) is `async_safe` and never carries a blocking effect: it is often called without a
+#   direct `await` (`async with`, `asyncio.gather`, `asyncio.wait_for`), where the `is_awaited`
+#   filter does not apply. Its loop-sensitive effects (`db_query`, `unpooled_client_alloc`) stay
+#   for `EFF102` / `EFF103`.
+# - A constructor or factory that does no I/O until the client is used (`redis.Redis`,
+#   `pymongo.MongoClient`, `sqlalchemy.create_engine`) carries only `unpooled_client_alloc`; the
+#   calls that do the I/O carry the blocking effects. Methods that only build an object
+#   (`Redis.pipeline`, lazy `QuerySet.filter`) carry no effect, only a `return_type`.
+# - `db_query` marks one statement sent to the database and waited for (what `EFF103` counts).
+#   Reading the rows of an executed statement is not a new query, nor is a driver's `commit()`;
+#   an ORM `Session.commit()` / `flush()` sends the pending writes and is one.
+# - Lookups are exact, without inheritance or aliases: an entry names the class that a factory's
+#   `return_type`, an annotation, or a constructor call produces.
 
 opaque_packages = [
     "requests", "httpx", "aiohttp", "urllib3", "sqlalchemy", "sqlmodel", "django", "psycopg",
-    "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc", "pandas",
-    "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi",
+    "psycopg_pool", "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc",
+    "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi",
 ]
 
-# --- Offloads blocking work ---
+# --- Offloads blocking work (argument index of the offloaded callable) ---
 
 [[entries]]
 symbol = "anyio.to_thread.run_sync"
+async_safe = true
+offloads_blocking_arg = 0
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.to_process.run_sync"
+async_safe = true
+offloads_blocking_arg = 0
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.to_interpreter.run_sync"
+async_safe = true
+offloads_blocking_arg = 0
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "trio.to_thread.run_sync"
 async_safe = true
 offloads_blocking_arg = 0
 opaque_to_layer3 = true
@@ -36,7 +70,8 @@ symbol = "pydantic.BaseModel.model_copy"
 copy_sanitizer = true
 opaque_to_layer3 = true
 
-# --- HTTP / RPC ---
+# --- HTTP: requests ---
+# The module functions open a new connection pool per call; `Session` methods reuse one.
 
 [[entries]]
 symbol = "requests.get"
@@ -84,6 +119,12 @@ effects = ["unpooled_client_alloc"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "requests.session"
+effects = ["unpooled_client_alloc"]
+return_type = "requests.Session"
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "requests.Session.get"
 effects = ["blocking_net"]
 opaque_to_layer3 = true
@@ -109,9 +150,27 @@ effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "requests.Session.head"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "requests.Session.options"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "requests.Session.request"
 effects = ["blocking_net"]
 opaque_to_layer3 = true
+
+[[entries]]
+symbol = "requests.Session.send"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+# --- HTTP: httpx ---
+# `stream` returns a context manager that sends the request when it is entered.
 
 [[entries]]
 symbol = "httpx.get"
@@ -154,6 +213,11 @@ effects = ["blocking_net", "unpooled_client_alloc"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "httpx.stream"
+effects = ["blocking_net", "unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "httpx.Client"
 effects = ["unpooled_client_alloc"]
 opaque_to_layer3 = true
@@ -184,7 +248,12 @@ effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "httpx.Client.send"
+symbol = "httpx.Client.head"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "httpx.Client.options"
 effects = ["blocking_net"]
 opaque_to_layer3 = true
 
@@ -194,8 +263,19 @@ effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "httpx.Client.send"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "httpx.Client.stream"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "httpx.AsyncClient"
 effects = ["unpooled_client_alloc"]
+async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
@@ -224,7 +304,12 @@ async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "httpx.AsyncClient.send"
+symbol = "httpx.AsyncClient.head"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "httpx.AsyncClient.options"
 async_safe = true
 opaque_to_layer3 = true
 
@@ -234,8 +319,29 @@ async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "httpx.AsyncClient.send"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "httpx.AsyncClient.stream"
+async_safe = true
+opaque_to_layer3 = true
+
+# --- HTTP: aiohttp ---
+# Request methods return async context managers (`async with session.get(url) as r`);
+# `aiohttp.request` builds a `ClientSession` per call.
+
+[[entries]]
 symbol = "aiohttp.ClientSession"
 effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.request"
+effects = ["unpooled_client_alloc"]
+async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
@@ -264,14 +370,106 @@ async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "aiohttp.ClientSession.head"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.ClientSession.options"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "aiohttp.ClientSession.request"
 async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.ClientSession.ws_connect"
+async_safe = true
+opaque_to_layer3 = true
+
+# --- HTTP: urllib3 ---
+# `urllib3.request` uses the module's shared `PoolManager`, so it allocates nothing.
+
+[[entries]]
+symbol = "urllib3.request"
+effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "urllib3.PoolManager"
 effects = ["unpooled_client_alloc"]
 opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.PoolManager.request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.PoolManager.urlopen"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.ProxyManager"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.ProxyManager.request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.ProxyManager.urlopen"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.HTTPConnectionPool"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.HTTPConnectionPool.request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.HTTPConnectionPool.urlopen"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.HTTPSConnectionPool"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.HTTPSConnectionPool.request"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.HTTPSConnectionPool.urlopen"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "urllib3.connection_from_url"
+effects = ["unpooled_client_alloc"]
+return_type = "urllib3.HTTPConnectionPool"
+opaque_to_layer3 = true
+
+# --- AWS: boto3 ---
+# boto3 builds its client and resource classes at run time, so the instance class of
+# `boto3.client(...)` is `boto3.client` itself and its operations are `boto3.client.<operation>`
+# (likewise `boto3.resource.<Resource>.<action>`). Every listed operation is a network call;
+# DynamoDB item reads and writes are database queries too (`query` / `scan` page through
+# results in loops by design, so they are not). Local helpers (`generate_presigned_url`,
+# `get_paginator`) are not listed.
 
 [[entries]]
 symbol = "boto3.client"
@@ -288,44 +486,341 @@ symbol = "boto3.Session"
 effects = ["unpooled_client_alloc"]
 opaque_to_layer3 = true
 
-# --- DB ---
-
 [[entries]]
-symbol = "psycopg.connect"
-effects = ["blocking_db", "unpooled_client_alloc"]
-return_type = "psycopg.Connection"
+symbol = "boto3.Session.client"
+effects = ["unpooled_client_alloc"]
+return_type = "boto3.client"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "psycopg.Connection.cursor"
-return_type = "psycopg.Cursor"
+symbol = "boto3.Session.resource"
+effects = ["unpooled_client_alloc"]
+return_type = "boto3.resource"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "psycopg.Connection.execute"
-effects = ["blocking_db", "db_query"]
+symbol = "boto3.client.get_object"
+effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "psycopg2.connect"
-effects = ["blocking_db", "unpooled_client_alloc"]
-return_type = "psycopg2.extensions.connection"
+symbol = "boto3.client.put_object"
+effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "psycopg2.extensions.connection.cursor"
-return_type = "psycopg2.extensions.cursor"
+symbol = "boto3.client.delete_object"
+effects = ["blocking_net"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "pymysql.connect"
-effects = ["blocking_db", "unpooled_client_alloc"]
-return_type = "pymysql.connections.Connection"
+symbol = "boto3.client.delete_objects"
+effects = ["blocking_net"]
 opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.head_object"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.copy_object"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.list_objects"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.list_objects_v2"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.list_buckets"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.upload_file"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.download_file"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.upload_fileobj"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.download_fileobj"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.create_multipart_upload"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.upload_part"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.complete_multipart_upload"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.batch_get_item"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.batch_write_item"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.transact_get_items"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.transact_write_items"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.send_message"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.send_message_batch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.receive_message"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.delete_message"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.delete_message_batch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.publish"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.invoke"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.assume_role"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.get_caller_identity"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.get_secret_value"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.get_parameter"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.get_parameters"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.get_parameters_by_path"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.encrypt"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.decrypt"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.put_record"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.put_records"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.put_record_batch"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.put_events"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.send_email"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.query"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.scan"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.get_item"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.put_item"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.update_item"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.client.delete_item"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Table.get_item"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Table.put_item"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Table.update_item"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Table.delete_item"
+effects = ["blocking_net", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Table.query"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Table.scan"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Bucket.put_object"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Bucket.upload_file"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Bucket.download_file"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Bucket.upload_fileobj"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Bucket.download_fileobj"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Object.get"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Object.put"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Object.delete"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Object.load"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Object.upload_file"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "boto3.resource.Object.download_file"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+# --- DB: SQLAlchemy (sync) ---
+# `create_engine` connects lazily, on the first `connect()` / `begin()`.
+# `sessionmaker()` sessions are not typed: its `class_` argument may make them `AsyncSession`
+# (SQLAlchemy 1.4 style), whose coroutines would then look blocking when not awaited directly.
 
 [[entries]]
 symbol = "sqlalchemy.create_engine"
-effects = ["blocking_db", "unpooled_client_alloc"]
+effects = ["unpooled_client_alloc"]
 return_type = "sqlalchemy.engine.Engine"
 opaque_to_layer3 = true
 
@@ -336,28 +831,33 @@ return_type = "sqlalchemy.engine.Connection"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "redis.Redis"
-effects = ["blocking_db", "unpooled_client_alloc"]
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "redis.StrictRedis"
-effects = ["blocking_db", "unpooled_client_alloc"]
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "pymongo.MongoClient"
-effects = ["blocking_db", "unpooled_client_alloc"]
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "psycopg.Cursor.execute"
+symbol = "sqlalchemy.engine.Connection.execute"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "psycopg2.extensions.cursor.execute"
+symbol = "sqlalchemy.engine.Connection.exec_driver_sql"
 effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.engine.Connection.scalar"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.engine.Connection.scalars"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.engine.Connection.commit"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.engine.Connection.rollback"
+effects = ["blocking_db"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -386,6 +886,16 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "sqlalchemy.orm.Session.get_one"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.orm.Session.refresh"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "sqlalchemy.orm.Session.commit"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
@@ -396,8 +906,149 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "sqlalchemy.engine.Connection.execute"
-effects = ["blocking_db", "db_query"]
+symbol = "sqlalchemy.orm.sessionmaker"
+return_type = "sqlalchemy.orm.sessionmaker"
+opaque_to_layer3 = true
+
+# --- DB: SQLAlchemy (asyncio) ---
+# `create_async_engine`, `AsyncEngine.connect()` / `begin()`, and `async_sessionmaker` are plain
+# functions returning objects or async context managers.
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.create_async_engine"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+return_type = "sqlalchemy.ext.asyncio.AsyncEngine"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncEngine.connect"
+async_safe = true
+return_type = "sqlalchemy.ext.asyncio.AsyncConnection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncEngine.begin"
+async_safe = true
+return_type = "sqlalchemy.ext.asyncio.AsyncConnection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncConnection.execute"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncConnection.exec_driver_sql"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncConnection.scalar"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncConnection.scalars"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncConnection.stream"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.execute"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.scalars"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.scalar"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.get"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.get_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.refresh"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.commit"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.flush"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.stream"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.stream_scalars"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.async_sessionmaker"
+async_safe = true
+return_type = "sqlalchemy.ext.asyncio.async_sessionmaker"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.async_sessionmaker.__call__"
+async_safe = true
+return_type = "sqlalchemy.ext.asyncio.AsyncSession"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.async_sessionmaker.begin"
+async_safe = true
+return_type = "sqlalchemy.ext.asyncio.AsyncSession"
+opaque_to_layer3 = true
+
+# --- DB: SQLModel ---
+# `sqlmodel.create_engine` is SQLAlchemy's `create_engine`; `sqlmodel.Session` subclasses
+# `sqlalchemy.orm.Session` (exact lookups need its own entries).
+
+[[entries]]
+symbol = "sqlmodel.create_engine"
+effects = ["unpooled_client_alloc"]
+return_type = "sqlalchemy.engine.Engine"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -411,7 +1062,27 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "sqlmodel.Session.scalars"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.Session.scalar"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "sqlmodel.Session.get"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.Session.get_one"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.Session.refresh"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
@@ -421,22 +1092,288 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "django.db.models.query.QuerySet.get"
+symbol = "sqlmodel.Session.flush"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.exec"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.execute"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.scalars"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.scalar"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.get"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.get_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.refresh"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.commit"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.flush"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+# --- DB: psycopg (3) and psycopg_pool ---
+# `psycopg.connect` is `Connection.connect`. A client-side cursor receives the whole result in
+# `execute`, so its `fetch*` methods do no I/O and are not listed.
+
+[[entries]]
+symbol = "psycopg.connect"
+effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "psycopg.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Connection.connect"
+effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "psycopg.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Connection.cursor"
+return_type = "psycopg.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Connection.execute"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Connection.commit"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Connection.rollback"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Cursor.execute"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.Cursor.executemany"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncConnection.connect"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+return_type = "psycopg.AsyncConnection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncConnection.cursor"
+async_safe = true
+return_type = "psycopg.AsyncCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncConnection.execute"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncCursor.execute"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg.AsyncCursor.executemany"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg_pool.ConnectionPool.connection"
+effects = ["blocking_db"]
+return_type = "psycopg.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg_pool.AsyncConnectionPool.connection"
+async_safe = true
+return_type = "psycopg.AsyncConnection"
+opaque_to_layer3 = true
+
+# --- DB: psycopg2 ---
+
+[[entries]]
+symbol = "psycopg2.connect"
+effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "psycopg2.extensions.connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg2.extensions.connection.cursor"
+return_type = "psycopg2.extensions.cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg2.extensions.connection.commit"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg2.extensions.connection.rollback"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg2.extensions.cursor.execute"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg2.extensions.cursor.executemany"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "psycopg2.extensions.cursor.callproc"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+# --- DB: PyMySQL ---
+# `pymysql.connect` is the `Connection` class, which connects in its constructor.
+
+[[entries]]
+symbol = "pymysql.connect"
+effects = ["blocking_db", "unpooled_client_alloc"]
+return_type = "pymysql.connections.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymysql.connections.Connection.cursor"
+return_type = "pymysql.cursors.Cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymysql.connections.Connection.commit"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymysql.connections.Connection.rollback"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymysql.cursors.Cursor.execute"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymysql.cursors.Cursor.executemany"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymysql.cursors.Cursor.callproc"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+# --- DB: Django ---
+# `connection.cursor()` opens the connection when needed. QuerySet methods that only build
+# another QuerySet are lazy (no effect); the ones that run the query block, and their `a*`
+# variants are coroutines. Model managers (`Model.objects`) are not resolved.
+
+[[entries]]
+symbol = "django.db.connection.cursor"
+effects = ["blocking_db"]
+return_type = "django.db.backends.utils.CursorWrapper"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.backends.utils.CursorWrapper.execute"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.backends.utils.CursorWrapper.executemany"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.backends.utils.CursorWrapper.callproc"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.filter"
-effects = ["blocking_db", "db_query"]
+return_type = "django.db.models.query.QuerySet"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.exclude"
+return_type = "django.db.models.query.QuerySet"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.all"
+return_type = "django.db.models.query.QuerySet"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.order_by"
+return_type = "django.db.models.query.QuerySet"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.get"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.first"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.last"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
@@ -466,33 +1403,143 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "sqlalchemy.ext.asyncio.AsyncSession.execute"
+symbol = "django.db.models.query.QuerySet.get_or_create"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.update_or_create"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.bulk_create"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.in_bulk"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.aggregate"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.aget"
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "sqlalchemy.ext.asyncio.AsyncSession.scalars"
+symbol = "django.db.models.query.QuerySet.afirst"
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "sqlalchemy.ext.asyncio.AsyncSession.scalar"
+symbol = "django.db.models.query.QuerySet.alast"
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "sqlalchemy.ext.asyncio.AsyncSession.get"
+symbol = "django.db.models.query.QuerySet.aexists"
 effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "sqlalchemy.ext.asyncio.AsyncSession.commit"
+symbol = "django.db.models.query.QuerySet.acount"
 effects = ["db_query"]
 async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.acreate"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.aupdate"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.adelete"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.aget_or_create"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.aupdate_or_create"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.abulk_create"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.ain_bulk"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "django.db.models.query.QuerySet.aaggregate"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+# --- Key-value: redis (sync) ---
+# Clients connect lazily, on the first command. `pipeline()` only buffers commands until
+# `execute()`. `scan` is called in a cursor loop by design, so it is no `db_query`.
+# `redis.StrictRedis` is an alias of `redis.Redis`.
+
+[[entries]]
+symbol = "redis.Redis"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.StrictRedis"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.from_url"
+effects = ["unpooled_client_alloc"]
+return_type = "redis.Redis"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.from_url"
+effects = ["unpooled_client_alloc"]
+return_type = "redis.Redis"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.pipeline"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.execute"
+effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -502,6 +1549,51 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "redis.Redis.set"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.setex"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.mget"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.mset"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.delete"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.exists"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.expire"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.ttl"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.incr"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.decr"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
@@ -516,12 +1608,331 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "redis.Redis.delete"
+symbol = "redis.Redis.hmget"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = "redis.Redis.pipeline"
+symbol = "redis.Redis.hgetall"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.hdel"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.lpush"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.rpush"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.lpop"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.rpop"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.lrange"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.sadd"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.srem"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.smembers"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zadd"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zrange"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.publish"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.keys"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.eval"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.scan"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+# --- Key-value: redis.asyncio ---
+# Commands return awaitables; `pipeline()` is a plain method returning an async pipeline.
+
+[[entries]]
+symbol = "redis.asyncio.Redis"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.from_url"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+return_type = "redis.asyncio.Redis"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.from_url"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+return_type = "redis.asyncio.Redis"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.pipeline"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.execute"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.get"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.set"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.setex"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.mget"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.mset"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.delete"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.exists"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.expire"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.ttl"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.incr"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.decr"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hget"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hset"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hmget"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hgetall"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hdel"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.lpush"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.rpush"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.lpop"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.rpop"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.lrange"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.sadd"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.srem"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.smembers"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zadd"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zrange"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.publish"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.keys"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.eval"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.scan"
+async_safe = true
+opaque_to_layer3 = true
+
+# --- Document DB: pymongo (sync) ---
+# `MongoClient(...)` returns at once and connects on background threads (a `mongodb+srv://`
+# URI also resolves DNS records in the constructor). `find()` returns a cursor that queries
+# on its first iteration; it is listed as the query.
+
+[[entries]]
+symbol = "pymongo.MongoClient"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.MongoClient.get_database"
+return_type = "pymongo.database.Database"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.MongoClient.get_default_database"
+return_type = "pymongo.database.Database"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.database.Database.get_collection"
+return_type = "pymongo.collection.Collection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.database.Database.command"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
@@ -541,13 +1952,207 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "pymongo.collection.Collection.insert_many"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "pymongo.collection.Collection.update_one"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.update_many"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.replace_one"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.collection.Collection.delete_one"
 effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.delete_many"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.count_documents"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.estimated_document_count"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.distinct"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.aggregate"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.bulk_write"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.find_one_and_update"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.find_one_and_replace"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.collection.Collection.find_one_and_delete"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+# --- Document DB: pymongo (asyncio) ---
+
+[[entries]]
+symbol = "pymongo.AsyncMongoClient"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.AsyncMongoClient.get_database"
+async_safe = true
+return_type = "pymongo.asynchronous.database.AsyncDatabase"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.AsyncMongoClient.get_default_database"
+async_safe = true
+return_type = "pymongo.asynchronous.database.AsyncDatabase"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.database.AsyncDatabase.get_collection"
+async_safe = true
+return_type = "pymongo.asynchronous.collection.AsyncCollection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.database.AsyncDatabase.command"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.find"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.find_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.insert_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.insert_many"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.update_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.update_many"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.replace_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.delete_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.delete_many"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.count_documents"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.estimated_document_count"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.distinct"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.aggregate"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.bulk_write"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.find_one_and_update"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.find_one_and_replace"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pymongo.asynchronous.collection.AsyncCollection.find_one_and_delete"
+effects = ["db_query"]
+async_safe = true
 opaque_to_layer3 = true
 
 # --- DB transaction starters (EFF106, opt-in) ---
@@ -564,6 +2169,11 @@ sync_lock_or_tx = true
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "sqlalchemy.orm.sessionmaker.begin"
+sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "sqlalchemy.engine.Connection.begin"
 sync_lock_or_tx = true
 opaque_to_layer3 = true
@@ -575,6 +2185,8 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.engine.Engine.begin"
+effects = ["blocking_db"]
+return_type = "sqlalchemy.engine.Connection"
 sync_lock_or_tx = true
 opaque_to_layer3 = true
 
@@ -598,7 +2210,100 @@ symbol = "psycopg.Connection.transaction"
 sync_lock_or_tx = true
 opaque_to_layer3 = true
 
-# --- Data (DATA101) ---
+# --- Data: pandas I/O ---
+# Readers of files and buffers are `blocking_fs` (EFF105, opt-in); SQL readers run a query.
+
+[[entries]]
+symbol = "pandas.read_csv"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_table"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_fwf"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_excel"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_json"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_parquet"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_feather"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_orc"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_pickle"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_hdf"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_xml"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_stata"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_sas"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_spss"
+effects = ["blocking_fs"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_sql"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_sql_query"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.read_sql_table"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pandas.DataFrame.to_sql"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+# --- Data: quadratic re-concatenation (DATA101) ---
 
 [[entries]]
 symbol = "pandas.concat"
@@ -616,11 +2321,26 @@ effects = ["quadratic_realloc"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "numpy.dstack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "numpy.column_stack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "numpy.concatenate"
 effects = ["quadratic_realloc"]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "numpy.append"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "numpy.insert"
 effects = ["quadratic_realloc"]
 opaque_to_layer3 = true
