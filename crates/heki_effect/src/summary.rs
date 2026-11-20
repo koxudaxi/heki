@@ -623,6 +623,9 @@ struct ProjectCall {
     dst: VarId,
     /// Each callee with the parameter each argument variable binds.
     params: Vec<(FuncKey, Vec<(u8, VarId)>)>,
+    /// The receiver its callees bind to their first parameter (a method's `self`, a property's
+    /// object), which `params` leaves out.
+    recv: Option<VarId>,
 }
 
 /// Whether a decorator of `f` is one of `names` ([`ModuleDecls::decorator_is`]).
@@ -1356,19 +1359,99 @@ impl<'a> Extractor<'a> {
             return;
         }
         let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
+        let mut found = Vec::new();
         for (call, uses) in self.project_calls.iter().zip(iterated) {
             for &(_, _, (block, index)) in uses {
                 let inst = &self.f.block(block).insts[index];
                 if let Some(between) =
                     BetweenSteps::of(self.f, inst, &site_spans, self.summary.is_generator)
                 {
-                    let call = self.sites[call.site].span;
-                    self.summary
-                        .iteration_facts_mut()
-                        .result_iterations
-                        .push(ResultIteration { call, between });
+                    let on_arguments = self.on_arguments(call, &between.calls);
+                    found.push(ResultIteration {
+                        call: self.sites[call.site].span,
+                        between,
+                        on_arguments,
+                    });
                 }
             }
+        }
+        self.summary
+            .iteration_facts_mut()
+            .result_iterations
+            .extend(found);
+    }
+
+    /// `ResultIteration::on_arguments`: for each call site at `calls`, the parameters (bit `p`)
+    /// that `iterated` binds to the object the site's call binds to its callees' first parameter.
+    fn on_arguments(&self, iterated: &ProjectCall, calls: &[Span]) -> Vec<u64> {
+        let arguments: Vec<(u8, (VarId, Option<&str>))> = iterated
+            .recv
+            .map(|r| (0, r))
+            .into_iter()
+            .chain(
+                iterated
+                    .params
+                    .iter()
+                    .flat_map(|(_, bound)| bound.iter().copied()),
+            )
+            .filter(|(p, _)| *p < 64)
+            .map(|(p, v)| (p, self.object_of(v)))
+            .collect();
+        let on: Vec<u64> = calls
+            .iter()
+            .map(|span| {
+                let firsts = self
+                    .project_calls
+                    .iter()
+                    .filter(|c| self.sites[c.site].span == *span)
+                    .filter_map(|c| {
+                        c.recv.or_else(|| {
+                            c.params
+                                .iter()
+                                .flat_map(|(_, bound)| bound)
+                                .find(|(p, _)| *p == 0)
+                                .map(|(_, v)| *v)
+                        })
+                    });
+                firsts.fold(0, |bits, first| {
+                    let object = self.object_of(first);
+                    arguments
+                        .iter()
+                        .filter(|(_, o)| *o == object)
+                        .fold(bits, |bits, (p, _)| bits | 1u64 << p)
+                })
+            })
+            .collect();
+        if on.iter().all(|bits| *bits == 0) {
+            Vec::new()
+        } else {
+            on
+        }
+    }
+
+    /// The object `var` holds, as far as the function's code tells: the value it copies, or an
+    /// attribute read of one that runs no property getter (`self.registry` read twice is one
+    /// object, as the containers `MUT113` checks are attributes of `self`).
+    fn object_of(&self, var: VarId) -> (VarId, Option<&str>) {
+        let value = self.copied_value(var);
+        let getter_runs = |v: VarId| self.project_calls.iter().any(|c| c.dst == v);
+        match self.defs.get(&value).map(|inst| &inst.kind) {
+            Some(InstKind::AttrLoad { obj, attr, .. }) if !getter_runs(value) => {
+                (self.copied_value(*obj), Some(attr.as_str()))
+            }
+            _ => (value, None),
+        }
+    }
+
+    /// The value `var` copies, through `Copy`; `super()` is the method's own `self`. A phi merges
+    /// different values.
+    fn copied_value(&self, mut var: VarId) -> VarId {
+        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&var).map(|inst| &inst.kind) {
+            var = *src;
+        }
+        match (self.types.get(&var), self.f.params.first()) {
+            (Some(Val::Super(_)), Some(first)) => first.var,
+            _ => var,
         }
     }
 
@@ -3049,11 +3132,13 @@ impl<'a> Extractor<'a> {
     /// object it returns.
     fn call_inst(&mut self, bb: BlockId, index: usize, callee: Callee, call: &Call<'_>) {
         if let Some((site, params)) = self.call(bb, &callee, call) {
+            let binds_recv = self.sites[site].binds_recv && call.constructs.is_none();
             self.project_calls.push(ProjectCall {
                 site,
                 at: (bb, index),
                 dst: call.dst,
                 params,
+                recv: call.recv_var.or(call.value).filter(|_| binds_recv),
             });
         }
         self.callees.insert((bb, index), callee);

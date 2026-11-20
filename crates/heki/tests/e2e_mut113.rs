@@ -561,6 +561,206 @@ fn mut113_reports_a_generator_that_outlives_one_use_of_it() {
     assert_eq!(output.lines().collect::<Vec<_>>(), expected);
 }
 
+/// A loop over a generator calls a method that changes the container: on the generator's own
+/// instance (the same `self`, parameter, local through a copy, attribute, or `super()`), or on
+/// another object (another instance, another parameter, a new object, another attribute, a
+/// property's new object at each read).
+const RECEIVERS: &str = r#"class Registry:
+    def __init__(self) -> None:
+        self.entries: dict[str, int] = {}
+
+    def remove(self, k: str) -> None:
+        del self.entries[k]
+
+    def _own(self):
+        for k in self.entries:
+            yield k
+
+    def prune(self):
+        for k in self._own():
+            self.remove(k)
+
+    def _given(self):
+        for k in self.entries:
+            yield k
+
+    def move_into(self, other: "Registry"):
+        for k in self._given():
+            other.remove(k)
+
+    def _param(self):
+        for k in self.entries:
+            yield k
+
+    def _pair(self):
+        for k in self.entries:
+            yield k
+
+    def _local(self):
+        for k in self.entries:
+            yield k
+
+    def _fresh(self):
+        for k in self.entries:
+            yield k
+
+    def _held(self):
+        for k in self.entries:
+            yield k
+
+    def _spared(self):
+        for k in self.entries:
+            yield k
+
+    def _inherited(self):
+        for k in self.entries:
+            yield k
+
+    def _copied(self):
+        for k in self.entries:
+            yield k
+
+
+class Journal(Registry):
+    def remove(self, k: str) -> None:
+        super().remove(k)
+
+    def compact(self):
+        for k in super()._inherited():
+            self.remove(k)
+
+
+def drop_all(r: Registry):
+    for k in r._param():
+        r.remove(k)
+
+
+def copy_over(source: Registry, destination: Registry):
+    for k in source._pair():
+        destination.remove(k)
+
+
+def rebuild():
+    r = Registry()
+    r.entries.update(a=1, b=2)
+    alias = r
+    for k in r._local():
+        alias.remove(k)
+
+
+def fresh_copy(source: Registry):
+    destination = Registry()
+    destination.entries.update(source.entries)
+    for k in source._fresh():
+        destination.remove(k)
+
+
+class Owner:
+    def __init__(self) -> None:
+        self.registry = Registry()
+        self.spare = Registry()
+
+    def purge(self):
+        for k in self.registry._held():
+            self.registry.remove(k)
+
+    def swap(self):
+        for k in self.registry._spared():
+            self.spare.remove(k)
+
+    @property
+    def snapshot(self) -> Registry:
+        copy = Registry()
+        copy.entries.update(self.registry.entries)
+        return copy
+
+    def trim_snapshot(self):
+        for k in self.snapshot._copied():
+            self.snapshot.remove(k)
+"#;
+
+const RECEIVERS_RUN: &str = r#"from pkg.registry import Journal, Owner, Registry, copy_over, drop_all, fresh_copy, rebuild
+
+
+def filled(cls=Registry):
+    r = cls()
+    r.entries.update(a=1, b=2)
+    return r
+
+
+def attempt(name, fn):
+    try:
+        fn()
+        print(name, "ok")
+    except RuntimeError as e:
+        print(name, e)
+
+
+def owner():
+    o = Owner()
+    o.registry.entries.update(a=1, b=2)
+    o.spare.entries.update(a=1, b=2)
+    return o
+
+
+attempt("prune", lambda: filled().prune())
+attempt("move_into", lambda: filled().move_into(filled()))
+attempt("drop_all", lambda: drop_all(filled()))
+attempt("copy_over", lambda: copy_over(filled(), filled()))
+attempt("rebuild", rebuild)
+attempt("fresh_copy", lambda: fresh_copy(filled()))
+attempt("purge", lambda: owner().purge())
+attempt("swap", lambda: owner().swap())
+attempt("trim_snapshot", lambda: owner().trim_snapshot())
+attempt("compact", lambda: filled(Journal).compact())
+"#;
+
+#[test]
+fn mut113_counts_loop_calls_on_the_generators_own_instance_only() {
+    let p = Project::new("mut113_receivers");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/registry.py", RECEIVERS)
+        .write("run.py", RECEIVERS_RUN);
+    let diags = diagnostics(&p, &["--extend-select", "MUT113"]);
+    let own = |line, generator| d("pkg/registry.py", line, generator, "Registry.entries");
+    assert_eq!(
+        reports(&diags),
+        vec![
+            own(9, "Registry._own"),
+            own(25, "Registry._param"),
+            own(33, "Registry._local"),
+            own(41, "Registry._held"),
+            own(49, "Registry._inherited"),
+        ]
+    );
+    assert_eq!(
+        related(&diags, "pkg/registry.py", 49),
+        vec![(
+            63,
+            "`Journal.compact` calls `Journal.remove` while iterating `Registry._inherited`"
+                .to_owned()
+        )]
+    );
+    let raised = "dictionary changed size during iteration";
+    let expected: Vec<String> = [
+        ("prune", raised),
+        ("move_into", "ok"),
+        ("drop_all", raised),
+        ("copy_over", "ok"),
+        ("rebuild", raised),
+        ("fresh_copy", "ok"),
+        ("purge", raised),
+        ("swap", "ok"),
+        ("trim_snapshot", "ok"),
+        ("compact", raised),
+    ]
+    .iter()
+    .map(|(name, outcome)| format!("{name} {outcome}"))
+    .collect();
+    let output = run_python(&p.dir, "run.py");
+    assert_eq!(output.lines().collect::<Vec<_>>(), expected);
+}
+
 /// The container classes whose iterators check for changes, and the changes each checks.
 const CONTAINERS: &str = r#"import collections
 from collections import OrderedDict, deque

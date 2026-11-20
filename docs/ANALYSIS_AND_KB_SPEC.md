@@ -686,7 +686,13 @@ functions with none).
    - offered: property getters and the read dunders (`__getitem__`, `__len__`, `__contains__`,
      ...) count: a public generator and the public methods changing the container are the
      class's interface, as `dict.items()` and `dict.pop()` are;
-   - the family methods the project's loops over `g` call count.
+   - the family methods the project's loops over `g` call on `g`'s instance count: a call whose
+     first argument (a method's `self`) is the object the loop's call binds to the parameter
+     holding the instance (`ResultIteration::on_arguments`: the same value through copies,
+     `super()` being `self`, or the same attribute of one that runs no property getter). The
+     instance is followed through the functions returning `g` or suspending in it as the
+     caller's parameter their call binds to it, and is unknown otherwise. A call on another
+     object, another parameter included, does not count.
    A method counts when its final `changes_self_containers` holds a change that breaks the
    container's iterators. One report per iteration, at the iteration, naming the first method
    (the class's own first), with each method's first change (its own, else its first call that

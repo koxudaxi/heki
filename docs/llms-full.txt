@@ -3350,9 +3350,11 @@ Rebinding the attribute (`self.items = {}`) changes no container.
 What runs while a generator is suspended depends on where its generator object goes:
 
 - A private generator (`_name`) runs only where the project iterates it. Between its steps, the
-  body of the loop iterating it runs: the methods of the class that this body calls count. A
-  call that consumes it (`list(...)`, `sorted(...)`) runs nothing in between, and a generator
-  that suspends inside such a loop is followed in turn.
+  body of the loop iterating it runs: the methods of the class that this body calls on the
+  generator's instance count, on the same `self`, variable, or attribute (`self.registry`) the
+  generator was called on, also through the functions that hand the generator on. A call that
+  consumes it (`list(...)`, `sorted(...)`) runs nothing in between, and a generator that
+  suspends inside such a loop is followed in turn.
 - When the generator object outlives one use of it, any public method of the class, its project
   subclasses, and the bases it inherits from can run in between: it is stored (on the instance,
   in a list), yielded, or handed to code heki does not follow, or a step that leaves it suspended
@@ -3420,6 +3422,9 @@ what the code wants.
   know does not count. A `deque()` or `defaultdict(...)` assigned without an annotation has no
   class for heki: annotate the attribute (`self.queue: deque[int] = deque()`).
 - An `await` inside a loop, and threads, are not suspensions the rule follows.
+- A loop's call on another object than the generator's instance does not count, even on another
+  parameter that may be the same object at run time (`for k in source._walk():
+  destination.remove(k)` called as `copy_over(r, r)`).
 - A method returning an iterator or a view instead of being a generator
   (`return iter(self.items)`) is not followed, and neither is a generator passed to a project
   function that iterates it.

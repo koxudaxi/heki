@@ -498,11 +498,11 @@ const OWN_SUB_SORTING: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):
 // Containers changed while iterated (`MUT113`): a generator kept on the instance iterates a dict
 // that a subclass in another module starts changing (the change then moves a line down, the
 // generator takes a snapshot and stops, the subclass hands the dict to a helper of a third module
-// that changes it, and the helper stops changing it), and a private
-// generator whose consumer in another module starts changing the dict in its loop, then keeps the
-// generator, then only counts again, then steps it by hand before counting the rest, then
-// counts again; then a helper there iterating the generator, whose result a function keeps,
-// starts suspending inside its loop (its calls stay the same).
+// that changes it, and the helper stops changing it), and a private generator whose consumer in
+// another module starts changing the dict in its loop, then changes another instance's dict
+// instead, then keeps the generator, then only counts again, then steps it by hand before
+// counting the rest, then counts again; then a helper there iterating the generator, whose
+// result a function keeps, starts suspending inside its loop (its calls stay the same).
 const SUBSCRIPTIONS: &str = "class Subscriptions:\n    def __init__(self):\n        self.by_node = {}\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.by_node.values()\n\n    def next_subscriber(self):\n        return next(self._cursor)\n";
 const SUB_DROP: &str = "from pkg.subscriptions import Subscriptions\n\n\nclass Dropping(Subscriptions):\n    def size(self):\n        return len(self.by_node)\n";
 const SUB_DROP_CHANGING: &str = "from pkg.subscriptions import Subscriptions\n\n\nclass Dropping(Subscriptions):\n    def drop(self, node):\n        self.by_node.pop(node, None)\n";
@@ -1859,6 +1859,9 @@ fn steps_mut113() -> Vec<Step> {
     );
     let reading = SUB_OPS.replace("    table.pop(node, None)", "    return table.get(node)");
     let pruning = TALLY_USE.replace("        n += 1\n", "        t.remove(k)\n");
+    let pruning_another = TALLY_USE
+        .replace("def total(t: Tally):", "def total(t: Tally, other: Tally):")
+        .replace("        n += 1\n", "        other.remove(k)\n");
     let suspending =
         TALLY_COUNTING.replace("        n += 1\n", "        n += 1\n        yield n\n");
     let keeping = TALLY_USE.replace(
@@ -1905,6 +1908,11 @@ fn steps_mut113() -> Vec<Step> {
             vec![Action::Save("pkg/tally_use.py", pruning)],
         )
         .present(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the loop removes the keys from another tally instead",
+            vec![Action::Save("pkg/tally_use.py", pruning_another)],
+        )
+        .absent(&[("pkg/tally.py", "MUT113")]),
         Step::new(
             "the other module keeps the generator instead",
             vec![Action::Save("pkg/tally_use.py", keeping)],
