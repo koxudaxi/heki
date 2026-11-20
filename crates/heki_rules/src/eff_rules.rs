@@ -2,8 +2,9 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargetPattern, ContractTarget, SiteId, helper_changes_field, initializes_itself,
-    parse_call_targets, parse_targets, patterns, project_classes, site_callee, with_note,
+    CallTargetPattern, ContractTarget, SiteId, called_targets, group_texts, helper_changes_field,
+    initializes_itself, parse_call_targets, parse_targets, patterns, project_classes, site_callee,
+    with_note,
 };
 use crate::opt_rules::Sizes;
 use crate::{
@@ -592,8 +593,8 @@ struct Reach<'a> {
     writes: BTreeMap<WriteBucket, Found>,
     /// By `read-targets` index.
     reads: BTreeMap<usize, Found>,
-    /// By `call-targets` index.
-    calls: BTreeMap<usize, Found>,
+    /// By the `call-targets` indices a call matches ([`called_targets`]).
+    calls: BTreeMap<Vec<usize>, Found>,
 }
 
 impl<'a> Reach<'a> {
@@ -646,14 +647,9 @@ impl<'a> Reach<'a> {
                     path: path.to_path_buf(),
                 };
                 if b.calls && runs_body && !b.allows_call(site) {
-                    for (ti, _) in b
-                        .call_targets
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, t)| t.hit(site))
-                    {
+                    for group in called_targets(&b.call_targets, site) {
                         let nodes = &reach.nodes;
-                        note(&mut reach.calls, ti, (func.fqn(), site.span), || {
+                        note(&mut reach.calls, group, (func.fqn(), site.span), || {
                             let mut chain = chain_to(nodes, i);
                             chain.push(hop(&func, site_callee(site)));
                             let kind = if site.constructs.is_some() {
@@ -929,13 +925,13 @@ impl<'a> Reach<'a> {
             ));
             emit(found, format!("reads:{target}"), message);
         }
-        for (ti, found) in &self.calls {
-            let target = &b.call_targets[*ti].text;
+        for (group, found) in &self.calls {
+            let (target, called) = group_texts(&b.call_targets, group);
             let via = match found.chain.as_slice() {
                 [first, _, ..] => format!(" (via `{}`)", first.callee),
                 _ => String::new(),
             };
-            let message = forbids(format!("`{}` {} `{target}`{via}", key.qualname, found.kind));
+            let message = forbids(format!("`{}` {} {called}{via}", key.qualname, found.kind));
             emit(found, format!("calls:{target}"), message);
         }
         if b.mutates_params {

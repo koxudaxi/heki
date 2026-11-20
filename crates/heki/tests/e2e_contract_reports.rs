@@ -197,3 +197,68 @@ fn a_helper_handed_a_field_writes_it_only_where_no_allowed_writer_does() {
         vec![(40, target(), 1), (44, target(), 1), (52, target(), 1)]
     );
 }
+
+const RESETS: &str = r#"class Base:
+    pass
+
+
+class A(Base):
+    def reset(self) -> None: ...
+
+
+class B(Base):
+    def reset(self) -> None: ...
+
+
+class C(Base):
+    def reset(self) -> None: ...
+
+
+def on_base(obj: Base) -> None:
+    obj.reset()
+
+
+def on_a(obj: A) -> None:
+    obj.reset()
+"#;
+
+#[test]
+fn a_call_whose_candidates_are_all_targets_of_one_contract_is_reported_once() {
+    let owners = |targets: &str| {
+        format!(
+            "[[tool.heki.call-owners]]\nname = \"resets\"\ntargets = [{targets}]\nallowed-callers = [\"app.owner\"]\n"
+        )
+    };
+    // `C.reset` is a candidate too, so `on_base` may call a function no entry names.
+    let p = project("call_union_partial", &owners("\"A.reset\", \"B.reset\""));
+    p.write("app.py", RESETS);
+    assert_eq!(reports(&p, "MUT204"), vec![(22, "A.reset".to_owned(), 1)]);
+    // Every candidate is named by some entry: one report for the entries the candidates match.
+    let p = project(
+        "call_union_whole",
+        &owners("\"A.reset\", \"B.reset\", \"C.reset\""),
+    );
+    p.write("app.py", RESETS);
+    assert_eq!(
+        reports(&p, "MUT204"),
+        vec![
+            (18, "A.reset|B.reset|C.reset".to_owned(), 1),
+            (22, "A.reset".to_owned(), 1),
+        ]
+    );
+    let (_, stdout, _) = p.check(&["--select", "MUT204", "--output-format", "concise"]);
+    assert!(
+        stdout.contains("`on_base` calls `A.reset` or `B.reset` or `C.reset` outside the call owners of `resets`"),
+        "{stdout}"
+    );
+    // The `calls` form of an effect boundary shares the matcher.
+    let p = project(
+        "boundary_call_union",
+        "[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"app.on_base\"]\nforbid = [\"calls\"]\ncall-targets = [\"A.reset\", \"B.reset\", \"C.reset\"]\n",
+    );
+    p.write("app.py", RESETS);
+    assert_eq!(
+        reports(&p, "EFF201"),
+        vec![(18, "pure:calls:A.reset|B.reset|C.reset".to_owned(), 1)]
+    );
+}

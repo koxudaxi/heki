@@ -2201,4 +2201,6 @@ pub(crate) fn delegated_reports(
 
 mod call_owners;
 
-pub(crate) use call_owners::{CallTargetPattern, mut204, parse_call_targets, site_callee};
+pub(crate) use call_owners::{
+    CallTargetPattern, called_targets, group_texts, mut204, parse_call_targets, site_callee,
+};
