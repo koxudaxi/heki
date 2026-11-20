@@ -41,12 +41,14 @@ What runs while a generator is suspended depends on where its generator object g
   body of the loop iterating it runs: the methods of the class that this body calls count. A
   call that consumes it (`list(...)`, `sorted(...)`) runs nothing in between, and a generator
   that suspends inside such a loop is followed in turn.
-- When the generator object outlives the call making it (it is stored on the instance, stepped
-  with `next()`, or handed to code heki does not follow), any public method of the class, its
-  project subclasses, and the bases it inherits from can run in between. Initialization does
-  not count: `__init__`, `__post_init__`, `__new__`, `__setstate__`, `__enter__`, `setup`, and
-  the other two-phase initialization methods `MUT101` names run before any iteration. A private
-  method counts through the methods calling it.
+- When the generator object outlives one use of it, any public method of the class, its project
+  subclasses, and the bases it inherits from can run in between: it is stored (on the instance,
+  in a list), yielded, or handed to code heki does not follow, or a step that leaves it suspended
+  (`next()`, `send()`, a loop that leaves early or over a wrapper that stops first, `any()`,
+  `islice()`) is followed by another use of it. Initialization does not count: `__init__`,
+  `__post_init__`, `__new__`, `__setstate__`, `__enter__`, `setup`, and the other two-phase
+  initialization methods `MUT101` names run before any iteration. A private method counts
+  through the methods calling it.
 - A public generator, `__iter__` included, is an iteration the class offers its callers, as
   `dict.items()` is: its public methods that change the container are the rest of that
   interface, and changing a container while iterating it is the caller's mistake, as for a

@@ -685,10 +685,14 @@ functions with none).
    objects go, from the uses its callers record (`result_iterations`: for each
    project call whose result a function iterates, what runs between its steps). At each call of
    `g`, its result is returned (follow the returning function), iterated (the calls in the loop's
-   body run; a generator suspending inside the loop is followed), passed to a project function
-   that iterates it (not followed), or else **held**: stored, stepped with `next()`, or handed to
-   code heki does not follow. A public function followed is **offered**: callers outside the
-   project can iterate it.
+   body run; a generator suspending inside the loop is followed), or passed to a project function
+   (not followed); whatever else its caller does, it is **held** when it outlives one of these
+   uses (`CallSite::result_held`, `iterations::held_results`): it escapes (stored, yielded,
+   captured, handed to code heki does not follow, returned by a generator or a coroutine), or a
+   step that may leave it suspended (`next()`, a method of it, a `for` loop that leaves its body
+   other than through its header or over a wrapper that may stop first, `any()`, a consuming
+   call over `islice()`) reaches another use on normal or exception edges. A public function
+   followed is **offered**: callers outside the project can iterate it.
    - held: every public method of the class family (its own, its subclasses', the inherited
      ones) counts, except `MUT101`'s two-phase initialization methods;
    - offered: property getters and the read dunders (`__getitem__`, `__len__`, `__contains__`,

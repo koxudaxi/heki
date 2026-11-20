@@ -11,11 +11,11 @@
 //! What runs while a generator is suspended depends on where its generator object goes. A
 //! private generator runs only where the project iterates it: a loop's body runs between its
 //! steps, a consuming call (`list(...)`) runs nothing, and a generator suspending inside such a
-//! loop is suspended with it. Once its object outlives the call making it (stored, stepped with
-//! `next()`, handed to code heki does not follow), any method of the class family can run in
-//! between, apart from initialization (`MUT101`'s two-phase initialization methods run before
-//! any iteration) and private methods (they run for the methods calling them, which count). A
-//! public generator is an iteration the class offers its callers, as `dict.items()` is: its
+//! loop is suspended with it. Once its object outlives one use of it (stored, handed to code heki
+//! does not follow, or stepped by `next()` or a loop that leaves early and used again), any
+//! method of the class family can run in between, apart from initialization (`MUT101`'s
+//! two-phase initialization methods run before any iteration) and private methods (they run for
+//! the methods calling them, which count). A public generator is an iteration the class offers its callers, as `dict.items()` is: its
 //! public methods changing the container are the rest of that interface, and changing it while
 //! iterating is the caller's mistake, as for a builtin container. Only the changes made by reads
 //! count there: property getters and the dunder methods of the read protocols (`__getitem__`,
@@ -105,8 +105,8 @@ pub(super) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
 /// What can run while a generator method is suspended, from where its generator objects go.
 #[derive(Default)]
 struct Exposure<'a> {
-    /// A generator object outlives the call making it (stored, stepped with `next()`, handed to
-    /// code heki does not follow): any method of the class family can run.
+    /// A generator object outlives one of its caller's uses (`CallSite::result_held`): any
+    /// method of the class family can run.
     held: bool,
     /// Callers outside the project can iterate it: it is public, or a public function hands it on
     /// or iterates it while suspending. The reads of the class family can run.
@@ -123,9 +123,9 @@ impl<'a> Exposure<'a> {
     }
 
     /// Add where the object `func` returns (a generator, or one it hands on) goes at each call of
-    /// it, by the uses its caller records (`IterationFacts::result_iterations`): returned, iterated
-    /// (by a generator suspending inside the iteration, too), passed to a project function that
-    /// iterates it (not followed), or none of these.
+    /// it, by the uses its caller records: returned, iterated (`IterationFacts::result_iterations`;
+    /// by a generator suspending inside the iteration, too), and whether it outlives one of these
+    /// uses (`CallSite::result_held`). A project function it is passed to is not followed.
     fn follow(&mut self, cx: &CheckContext<'a>, func: &FuncKey, visited: &mut FxHashSet<FuncKey>) {
         if visited.insert(func.clone()) {
             self.offered |= !is_private(&func.qualname);
@@ -152,9 +152,6 @@ impl<'a> Exposure<'a> {
             s.caller == *caller && s.project_callees().iter().any(|bc| bc.callee == *func)
         };
         let sites: Vec<&CallSite> = file.call_sites.iter().filter(calling).collect();
-        let passed = sites
-            .iter()
-            .any(|s| matches!(s.role, SiteRole::Through { .. }));
         let result_iterations = file.local_functions.get(caller).map_or(&[][..], |s| {
             s.iteration_facts().result_iterations.as_slice()
         });
@@ -162,16 +159,11 @@ impl<'a> Exposure<'a> {
             let returned = sites
                 .iter()
                 .any(|s| s.role == SiteRole::Return && s.span == call.span);
-            let uses: Vec<_> = result_iterations
-                .iter()
-                .filter(|u| u.call == call.span)
-                .collect();
             if returned {
                 self.follow(cx, caller, visited);
-            } else if uses.is_empty() && !passed {
-                self.held = true;
             }
-            for used in uses {
+            self.held |= call.result_held;
+            for used in result_iterations.iter().filter(|u| u.call == call.span) {
                 if used.between.suspends {
                     self.follow(cx, caller, visited);
                 }

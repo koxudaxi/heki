@@ -1193,6 +1193,13 @@ pub struct CallSite {
     /// [`EffectSummary::returns_self_attrs`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_discarded: bool,
+    /// The object the call returns outlives one of the caller's uses of it
+    /// ([`iterations::held_results`]): it escapes (stored, yielded, captured, handed to code heki
+    /// does not follow), or a step that may leave a generator suspended (`next()`, a loop that
+    /// leaves early) is followed by another use. Any code may run while the generator is
+    /// suspended (`MUT113`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub result_held: bool,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).

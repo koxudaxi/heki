@@ -1475,7 +1475,8 @@ impl<'a> Extractor<'a> {
     /// `unconditional_forwards`, `iterates_params`), and one more site of a call's callees
     /// wherever the object it returns is iterated, returned by this (plain) function, or passed
     /// to a project call (`SiteRole`). Any other use (stored, passed to an external or
-    /// unresolved call, yielded, stepped with `next()`) runs nothing here.
+    /// unresolved call, yielded, stepped with `next()`) runs nothing here; a result that outlives
+    /// one of its uses is `CallSite::result_held`.
     fn iterations(&mut self) {
         let f = self.f;
         if f.params.is_empty() && self.project_calls.is_empty() {
@@ -1518,13 +1519,21 @@ impl<'a> Extractor<'a> {
         // Which call results a plain function returns (a generator's `return` value ends its
         // iteration and is no iterator handed out).
         let mut returned = vec![false; self.project_calls.len()];
-        if f.kind == FunctionKind::Sync && !f.is_module_body {
+        let plain = f.kind == FunctionKind::Sync && !f.is_module_body;
+        if plain {
             for bb in &f.blocks {
                 if let Terminator::Return(Some(v)) = bb.terminator {
                     for c in calls_in(&flow.expand_steps(&[v])) {
                         returned[c] = true;
                     }
                 }
+            }
+        }
+        let results: FxHashSet<VarId> = by_dst.keys().copied().collect();
+        let held = iterations::held_results(f, &flow, &results, plain);
+        for call in &self.project_calls {
+            if held.contains(&call.dst) {
+                self.sites[call.site].result_held = true;
             }
         }
         // Each site with the position where the callee's body runs into this function's body
@@ -3309,6 +3318,7 @@ impl<'a> Extractor<'a> {
                         per_item: None,
                         dispatch: None,
                         result_discarded: false,
+                        result_held: false,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -3963,6 +3973,7 @@ impl<'a> Extractor<'a> {
             per_item: None,
             dispatch: None,
             result_discarded: false,
+            result_held: false,
         }
     }
 
@@ -4495,6 +4506,7 @@ fn role_site(
         per_item: site.per_item.clone(),
         dispatch: site.dispatch.clone(),
         result_discarded: false,
+        result_held: false,
     }
 }
 
