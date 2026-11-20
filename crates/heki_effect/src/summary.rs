@@ -482,6 +482,8 @@ struct Extractor<'a> {
     isinstance_classes: FxHashMap<VarId, Vec<String>>,
     /// Defining instruction of each variable.
     defs: FxHashMap<VarId, &'a Inst>,
+    /// The blocks a run can reach and the edges it can take.
+    live: ownership::Live,
     /// Instructions using each variable as an operand.
     uses: FxHashMap<VarId, Vec<&'a InstKind>>,
     /// The variables a phi or a block's terminator reads (`return v`, a branch on `v`).
@@ -621,6 +623,7 @@ impl<'a> Extractor<'a> {
             decorators: f.decorators.clone(),
             ..EffectSummary::default()
         };
+        let live = ownership::Live::of(f, &defs);
         let mut ex = Self {
             f,
             key,
@@ -630,6 +633,7 @@ impl<'a> Extractor<'a> {
             narrowed,
             isinstance_classes,
             defs,
+            live,
             uses,
             flow_uses: OnceCell::new(),
             self_vars,
@@ -680,6 +684,7 @@ impl<'a> Extractor<'a> {
         let returned = readonly::returned_values(
             f,
             &ex.defs,
+            &ex.live,
             |kind| ex.derivations(kind),
             |v| match ex.types.get(&v) {
                 Some(Val::Inst(class)) => Some(class.as_str()),
@@ -1615,9 +1620,11 @@ impl<'a> Extractor<'a> {
             };
             return;
         }
+        let live = &self.live;
         let returned: Vec<VarId> = f
             .blocks
             .iter()
+            .filter(|b| live.block(b.id))
             .filter_map(|b| match b.terminator {
                 Terminator::Return(Some(v)) => Some(v),
                 _ => None,
@@ -1639,7 +1646,6 @@ impl<'a> Extractor<'a> {
             .iter()
             .flat_map(|b| b.phis.iter().map(move |p| (p.dst, (b.id, p))))
             .collect();
-        let dead = ownership::dead_edges(f, &self.defs);
         let params: FxHashMap<VarId, ParamRole> = f
             .params
             .iter()
@@ -1672,7 +1678,12 @@ impl<'a> Extractor<'a> {
         };
         // The objects the function stores somewhere, and where, through copies and phis.
         let mut kept: FxHashMap<VarId, Vec<ownership::Place<'_>>> = FxHashMap::default();
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        for inst in f
+            .blocks
+            .iter()
+            .filter(|b| live.block(b.id))
+            .flat_map(|b| &b.insts)
+        {
             for (value, place) in ownership::stores(&inst.kind) {
                 let mut work = vec![value];
                 let mut seen: FxHashSet<VarId> = FxHashSet::default();
@@ -1695,7 +1706,7 @@ impl<'a> Extractor<'a> {
             ownership::origins_of(
                 &self.defs,
                 &phis,
-                &dead,
+                live,
                 roots.iter().copied(),
                 source_of,
                 |v| params.get(&v).copied(),

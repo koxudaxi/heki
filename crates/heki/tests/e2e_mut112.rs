@@ -812,6 +812,88 @@ fn mut112_exclusions() {
     assert_eq!(found(&diags), vec![], "{diags:#?}");
 }
 
+/// Callees that return borrowed state only where no run gets: after a `while True:` loop that
+/// no `break` leaves, or under `if False:`. Their callers' values are new on every path; a
+/// `break` makes the return after the loop reachable.
+const UNREACHED_RETURNS: &str = r#"import functools
+
+
+@functools.lru_cache
+def cached():
+    return []
+
+
+def ready():
+    return True
+
+
+def new_unless_never(shared):
+    if False:
+        return shared
+    return []
+
+
+def new_until_ready(shared):
+    while True:
+        if ready():
+            return []
+    return shared
+
+
+def new_until_ready_cached():
+    while True:
+        if ready():
+            return []
+    return cached()
+
+
+def shared_after_break(shared):
+    while True:
+        if ready():
+            break
+        return []
+    return shared
+
+
+def use_never(shared):
+    x = new_unless_never(shared)
+    x.append(1)
+
+
+def use_until_ready(shared):
+    x = new_until_ready(shared)
+    x.append(1)
+
+
+def use_until_ready_cached():
+    x = new_until_ready_cached()
+    x.append(1)
+
+
+def use_after_break(shared):
+    x = shared_after_break(shared)
+    x.append(1)
+"#;
+
+#[test]
+fn mut112_follows_only_the_returns_a_run_reaches() {
+    let p = Project::new("mut112_unreached_returns");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/returns.py", UNREACHED_RETURNS);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let r = "pkg/returns.py";
+    assert_eq!(
+        found(&diags),
+        vec![d(r, 58, "use_after_break", "x")],
+        "{diags:#?}"
+    );
+    assert!(
+        message(&diags[0]).ends_with("the parameter `shared` on another"),
+        "{}",
+        message(&diags[0])
+    );
+}
+
 /// A `MUT112` report, a suppression, and the `heki rule` page.
 const ONE: &str = "def collect(name, scopes=None):\n    use = scopes or []\n    use.append(name)  # heki: ignore[MUT112]\n    return use\n\n\ndef collect_all(name, scopes=None):\n    use = scopes or []\n    use.append(name)\n    return use\n";
 

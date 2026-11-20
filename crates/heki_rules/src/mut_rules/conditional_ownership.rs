@@ -325,9 +325,8 @@ struct FnCheck<'a, 'u> {
     own: FxHashMap<VarId, Own>,
     /// The method's `self` and its aliases.
     self_vars: FxHashSet<VarId>,
-    /// The blocks a run can reach: a branch on a constant takes one side ([`ownership::dead_edges`]).
-    live: Vec<bool>,
-    dead: FxHashSet<(BlockId, BlockId)>,
+    /// The blocks a run can reach and the edges it can take.
+    live: ownership::Live,
     preds: Vec<Vec<BlockId>>,
     /// Where the new objects the function stores in another object, a global, or a closure
     /// cell are made, and where they are stored: they are part of that state from then on, on
@@ -378,8 +377,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 own.insert(p.var, Own::borrowing(Borrow::Param(p.name.clone())));
             }
         }
-        let dead = ownership::dead_edges(f, &defs);
-        let live = live_blocks(f, &dead);
+        let live = ownership::Live::of(f, &defs);
         let key = CheckContext::key(u.unit, f);
         Self {
             sites: u.sites.get(key.qualname.as_str()),
@@ -392,7 +390,6 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             own,
             self_vars,
             live,
-            dead,
             preds: f.predecessors(),
             kept: FxHashMap::default(),
         }
@@ -615,7 +612,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             .f
             .rpo_blocks()
             .into_iter()
-            .filter(|b| self.live[b.0 as usize])
+            .filter(|b| self.live.block(*b))
             .collect();
         loop {
             let mut changed = false;
@@ -624,10 +621,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 for phi in &block.phis {
                     let mut joined: Option<Own> = None;
                     for &(from, v) in &phi.incoming {
-                        if v == phi.dst
-                            || !self.live[from.0 as usize]
-                            || self.dead.contains(&(from, bb))
-                        {
+                        if v == phi.dst || !self.live.edge(from, bb) {
                             continue;
                         }
                         joined = join_opt(joined, self.incoming(from, bb, v));
@@ -746,7 +740,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         self.f
             .blocks
             .iter()
-            .filter(|b| self.live[b.id.0 as usize])
+            .filter(|b| self.live.block(b.id))
             .flat_map(|b| &b.insts)
     }
 
@@ -1071,30 +1065,6 @@ fn identity_tested_params(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>) -> FxH
         }
     }
     out
-}
-
-/// The blocks of `f` reachable from its entry without the `dead` edges (exception edges
-/// included).
-fn live_blocks(f: &IrFunction, dead: &FxHashSet<(BlockId, BlockId)>) -> Vec<bool> {
-    let mut live = vec![false; f.blocks.len()];
-    let mut stack: Vec<BlockId> = f.blocks.first().map(|b| b.id).into_iter().collect();
-    while let Some(b) = stack.pop() {
-        let i = b.0 as usize;
-        if i >= live.len() || live[i] {
-            continue;
-        }
-        live[i] = true;
-        let block = f.block(b);
-        stack.extend(
-            block
-                .terminator
-                .successors()
-                .into_iter()
-                .filter(|to| !dead.contains(&(b, *to)))
-                .chain(block.exc_target),
-        );
-    }
-    live
 }
 
 /// Whether the new object `kind` makes starts empty: an empty display, or a container
