@@ -28,7 +28,7 @@
 
 ## Docs
 
-- [Development](https://heki.koxudaxi.dev/development/): This page covers building and testing heki, its checks against CPython, the memory budget, the documentation, and the crates
+- [Development](https://heki.koxudaxi.dev/development/): This page covers building and testing heki, its checks against CPython, the memory budget, the documentation, releases, and the crates
 
 ## Rules
 

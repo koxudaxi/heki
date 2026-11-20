@@ -1,0 +1,1 @@
+{"has_breaking_changes": true, "breaking_changes_content": "### Default Rule Changes\n* `MUT101` reports setup methods - Classes whose `setup_*` methods write cached attributes get new reports (#31)\n", "reasoning": "MUT101 is enabled by default and reports more code."}

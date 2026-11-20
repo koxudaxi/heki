@@ -1,7 +1,7 @@
 # Development
 
 This page covers building and testing heki, its checks against CPython, the memory budget, the
-documentation, and the crates. [`AGENTS.md`](https://github.com/koxudaxi/heki/blob/main/AGENTS.md)
+documentation, releases, and the crates. [`AGENTS.md`](https://github.com/koxudaxi/heki/blob/main/AGENTS.md)
 lists the invariants every change must keep and the checks to run.
 
 ## Build and test
@@ -94,6 +94,67 @@ $ uvx --from "zensical==0.1.2" zensical serve
 - A pull request from this repository gets a preview deployment of the same Pages project, on the
   branch `pr-<number>`. Both use the repository secrets `CLOUDFLARE_API_TOKEN` and
   `CLOUDFLARE_ACCOUNT_ID`.
+
+## Releases
+
+The Release Draft workflow (`.github/workflows/release-draft.yml`) keeps a draft GitHub release
+of the next version. Publishing the draft runs `release.yml`, which builds and publishes heki.
+
+### How a draft accumulates
+
+After each push to `main`, the workflow takes the pull requests merged at the commits the push
+added (several when a stack merges at once). For each one, Claude reads the merged diff and
+decides whether it breaks something the newest published release has: which rules are enabled
+by default, a rule's default severity or what a default rule reports, rule codes or names,
+configuration keys, command-line options, exit codes, the JSON or SARIF output, language server
+behavior, the format of `--fix` rewrites, or the supported Python versions and platforms. New
+opt-in rules and new optional keys are not breaking. The workflow then:
+
+- adds the breaking changes to the draft's `## Breaking Changes` section, under one heading per
+  kind, and a line `* <title> (#<number>)` to `## Changes`, except for pull requests labeled
+  `maintenance` or `dependencies`;
+- labels a breaking pull request `breaking-change`, comments the result on every pull request,
+  and labels each `breaking-change-analyzed`, so that a re-run skips it.
+
+The draft's tag is the version after the newest published release: a breaking change bumps the
+minor version (0.1.x to 0.2.0), anything else the patch, and manifests that already name a
+later version win. Text added to the draft by hand is kept. Pull requests that change only
+tests, documentation, development scripts, or the CI workflows skip Claude and count as not
+breaking. While no release is published, the workflow does nothing: the notes of the first
+release come from `CHANGELOG.md`.
+
+### Publishing a release
+
+1. While the manifests declare another version, the draft's first line asks for a bump. Set the
+   draft's version in a pull request: `pyproject.toml`, `Cargo.toml` (`workspace.package.version`
+   and the internal crates under `workspace.dependencies`), and `Cargo.lock`. Label it
+   `maintenance` to keep it out of the list of changes. `release.yml` fails when the tag and the
+   manifests differ.
+2. Merge it; the workflow removes the first line from the draft.
+3. Publish the draft on GitHub.
+
+### Replays and dry runs
+
+```console
+$ gh workflow run release-draft.yml --ref main -f pr_number=123
+$ gh workflow run release-draft.yml --ref <branch> -f pr_number=123 -f dry_run=true
+```
+
+- A replay on `main` analyzes one merged pull request again, for example after a failed run. A
+  pull request labeled `breaking-change-analyzed` is skipped: remove the label first.
+- A dry run works from any branch, so a change to the workflow can be tried before it is on
+  `main`. It prints the analysis, the planned draft, and the comments in the run's log, and
+  changes no label, comment, or release. The pull request must be merged into `main`, and a
+  release must be published.
+
+The Claude step authenticates with the repository secret `CLAUDE_CODE_OAUTH_TOKEN`, an OAuth
+token of a Claude subscription (`claude setup-token` creates one). No other step receives it.
+
+The scripts of the workflow have tests, which CI runs on every pull request:
+
+```console
+$ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
+```
 
 ## Architecture
 
