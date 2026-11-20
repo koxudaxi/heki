@@ -523,6 +523,8 @@ struct Extractor<'a> {
     pos: (BlockId, usize),
     /// The class line of the method's own class (`Self::own_line`).
     own_line: OnceCell<Option<SharedLine>>,
+    /// How many lambdas the function makes (`Self::shares_its_name`).
+    lambdas: OnceCell<usize>,
     /// The points `MUT109` describes (`Some` when an `invalidation` contract is configured).
     events: Option<Events>,
     /// Contracts naming this function an exempt writer (`MUT109`), matched at its first write
@@ -639,6 +641,7 @@ impl<'a> Extractor<'a> {
             callees: FxHashMap::default(),
             project_calls: Vec::new(),
             own_line: OnceCell::new(),
+            lambdas: OnceCell::new(),
             contracts,
             returned: FxHashMap::default(),
             pos: (BlockId(0), 0),
@@ -3078,8 +3081,11 @@ impl<'a> Extractor<'a> {
         let partial = self.partial(callable);
         let target = partial.as_ref().map_or(callable, |p| p.callable);
         // A class a builtin is handed is constructed once per item: what the builtin returns
-        // is not the new object, and that construction is not modeled.
-        if runner == Runner::PerItem && self.class_called(target).is_some() {
+        // is not the new object, and that construction is not modeled. The facts of a lambda
+        // that shares its name are those of every lambda of the name.
+        if runner == Runner::PerItem
+            && (self.class_called(target).is_some() || self.shares_its_name(target))
+        {
             return;
         }
         let (callee, recv, recv_var, recv_is_self) = match self.bound_method(target) {
@@ -3214,6 +3220,43 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// `var` is a lambda this function makes next to another one: every lambda of a function
+    /// is `<function>.<locals>.<lambda>`, one key whose summary holds the facts of all of
+    /// them.
+    fn shares_its_name(&self, var: VarId) -> bool {
+        let ir = self.cx.ir();
+        let lambda = |kind: &InstKind| {
+            matches!(kind, InstKind::MakeClosure { func_id: Some(id), .. }
+                if ir.function(*id).name == "<lambda>")
+        };
+        let made = || {
+            *self.lambdas.get_or_init(|| {
+                self.f
+                    .blocks
+                    .iter()
+                    .flat_map(|b| &b.insts)
+                    .filter(|i| lambda(&i.kind))
+                    .count()
+            })
+        };
+        self.defs
+            .get(&self.copied(var))
+            .is_some_and(|i| lambda(&i.kind) && made() > 1)
+    }
+
+    /// The value `var` holds a copy of, through at most 16 copies (dead code can close a cycle
+    /// of them).
+    fn copied(&self, var: VarId) -> VarId {
+        let mut cur = var;
+        for _ in 0..16 {
+            match self.defs.get(&cur).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => cur = *src,
+                _ => break,
+            }
+        }
+        cur
+    }
+
     /// What calling `var` calls when it holds a `functools.partial` object (`partial(f, a,
     /// k=b)` calls `f(a, ..., k=b)`), through copies and nested partials (the inner one's
     /// arguments go first).
@@ -3221,12 +3264,11 @@ impl<'a> Extractor<'a> {
         let mut found: Option<Partial> = None;
         let mut cur = var;
         for _ in 0..16 {
-            let kind = self.defs.get(&cur).map(|i| &i.kind);
-            if let Some(InstKind::Copy { src, .. }) = kind {
-                cur = *src;
-                continue;
-            }
-            let Some((inner, held, kwargs, open)) = kind.and_then(|k| self.partial_call(k)) else {
+            let Some((inner, held, kwargs, open)) = self
+                .defs
+                .get(&self.copied(cur))
+                .and_then(|i| self.partial_call(&i.kind))
+            else {
                 break;
             };
             let p = found.get_or_insert_with(|| Partial {

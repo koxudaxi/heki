@@ -410,7 +410,9 @@ value of the caller; what the builtin returns is never what the callable returns
 `for` loop's iterable (`Sizes::items_data_sized`); the receiver, the arguments a partial holds,
 and the items stay the same objects through that loop (`ArgBinding::stays_in_loops`), so a lazy
 initialization on them runs once per object. A class handed to such a builtin is constructed per
-item, which is not modeled. Every API handing a
+item, which is not modeled, and a lambda the function makes next to another lambda is not
+followed: every lambda of a function is `<function>.<locals>.<lambda>`, one key whose summary
+holds the facts of all of them. Every API handing a
 callable resolves a `functools.partial` object to the function it calls, the arguments it holds
 binding the leading parameters (`partial(f, a)` handed to `map` calls `f(a, item)`).
 

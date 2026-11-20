@@ -1258,7 +1258,8 @@ class Users:
 "#;
 
 /// Each builtin calling a callable once per item, with a lambda, a project function from
-/// another module, a bound method, and a `functools.partial`: a loop as long as the items.
+/// another module, a bound method, and a `functools.partial`: a loop as long as the items. A
+/// lambda next to another one of its function is not followed: they share one summary.
 const PER_ITEM: &str = r#"import functools
 import itertools
 import sqlite3
@@ -1267,17 +1268,53 @@ from functools import partial
 from pkg.queries import Users, add_name, name, name_of_pair, score
 
 
-def lambdas(ids, pairs, rows: list[int]):
-    list(map(lambda u: name(u), ids))  # EFF103
-    list(filter(lambda u: name(u), ids))  # EFF103
-    list(itertools.filterfalse(lambda u: name(u), ids))  # EFF103
-    list(itertools.starmap(lambda u, v: name(u), pairs))  # EFF103
-    functools.reduce(lambda t, u: t + name(u), ids, 0)  # EFF103
-    sorted(ids, key=lambda u: name(u))  # EFF103
-    min(ids, key=lambda u: name(u))  # EFF103
-    max(ids, key=lambda u: name(u))  # EFF103
+def lambda_map(ids):
+    return list(map(lambda u: name(u), ids))  # EFF103
+
+
+def lambda_filter(ids):
+    return list(filter(lambda u: name(u), ids))  # EFF103
+
+
+def lambda_filterfalse(ids):
+    return list(itertools.filterfalse(lambda u: name(u), ids))  # EFF103
+
+
+def lambda_starmap(pairs):
+    return list(itertools.starmap(lambda u, v: name(u), pairs))  # EFF103
+
+
+def lambda_reduce(ids):
+    return functools.reduce(lambda t, u: t + name(u), ids, 0)  # EFF103
+
+
+def lambda_sorted(ids):
+    return sorted(ids, key=lambda u: name(u))  # EFF103
+
+
+def lambda_min(ids):
+    return min(ids, key=lambda u: name(u))  # EFF103
+
+
+def lambda_max(ids):
+    return max(ids, key=lambda u: name(u))  # EFF103
+
+
+def lambda_sort(rows: list[int]):
     rows.sort(key=lambda u: name(u))  # EFF103
-    itertools.groupby(ids, lambda u: name(u))  # EFF103
+
+
+def lambda_groupby(ids):
+    key = lambda u: name(u)
+    return itertools.groupby(ids, key)  # EFF103
+
+
+def lambdas_of_one_name(ids, on_done):
+    # Both lambdas are `lambdas_of_one_name.<locals>.<lambda>`: one summary holds the query of
+    # the second.
+    ordered = sorted(ids, key=lambda u: u)
+    on_done(lambda: name(0))
+    return ordered
 
 
 def functions(ids, pairs, rows: list[int]):
@@ -1455,7 +1492,7 @@ fn builtins_call_a_callable_once_per_item() {
     let sorted = at("sorted(ids, key=lambda u: name(u))");
     assert_eq!(
         message(&diags, "pkg/per_item.py", sorted),
-        "`pkg.per_item.lambdas.<locals>.<lambda>` runs a database query \
+        "`pkg.per_item.lambda_sorted.<locals>.<lambda>` runs a database query \
          (`sqlite3.Connection.execute`) for every item `sorted` calls it with (N+1)"
     );
     assert_eq!(
@@ -1464,11 +1501,11 @@ fn builtins_call_a_callable_once_per_item() {
     );
     assert_eq!(
         first_hop(&diags, "pkg/per_item.py", sorted),
-        "`lambdas` calls `pkg.per_item.lambdas.<locals>.<lambda>`"
+        "`lambda_sorted` calls `pkg.per_item.lambda_sorted.<locals>.<lambda>`"
     );
     assert_eq!(
         message(&diags, "pkg/per_item.py", at("rows.sort(key=lambda")),
-        "`pkg.per_item.lambdas.<locals>.<lambda>` runs a database query \
+        "`pkg.per_item.lambda_sort.<locals>.<lambda>` runs a database query \
          (`sqlite3.Connection.execute`) for every item `list.sort` calls it with (N+1)"
     );
     // A fixed number of items inside a data-sized loop: the loop repeats the query.
