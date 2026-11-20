@@ -505,7 +505,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -564,6 +564,46 @@ which module imports which.
    `Class.p` of the property, the message names the first write that runs on an instance of `K`
    itself (else the first), and every reaching write is a related location. A getter or helper
    that reads `p` is reported itself; its callers are not.
+
+#### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
+1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the
+   object it defines is: new (a display, a comprehension, a copy, a container constructor, a
+   project class constructed, an operator's result), held state (an attribute, a global, a
+   closure cell), the operand's object (a copy of the reference, `typing.cast`, an in-place
+   operator), an element of the operand (an item, `get` / `pop` / `setdefault`, an iteration
+   step), an element or the default (`d.get(k, default)`, `getattr(o, n, default)`), or what the
+   project callees return. A parameter is borrowed, `*args` / `**kwargs` are new with borrowed
+   elements, and a method's `self` is its own object.
+2. **The summary fact**: `returns_origins` walks back from the function's returns (plain sync
+   functions; a memoizing decorator makes the result held, another decorator unknown): new,
+   held, parameter `i`, or an element of parameter `i`. An object the function stores in another
+   object (an attribute, an item, a display, `setattr`, a container method) is an element of that
+   object; one stored in a global or a closure cell is held. Propagation (`returned_origins_edge`)
+   adds what a callee returns at a call whose result the caller returns as itself
+   (`CallSite.returned`), mapping the callee's parameters through `ArgOrigin::origins` (recorded
+   for those calls only). The fact takes part in Early Cutoff like every summary field.
+3. **The forward analysis** (`heki_rules`, per function, to a fixpoint) joins the kinds of a
+   value at phis, maps a project call's result through its callees' `returns_origins` and the
+   bound arguments, and takes a closure's variable from what the enclosing function bound to it
+   (`MakeClosure` captures; functions are analyzed enclosing first). It does not follow the
+   edges a branch on a constant never takes, nor, on the edge where an `is` test of a value
+   against another fails, the object it is tested against (`if result is shared: result =
+   shared.copy()`). A new object the function stores somewhere is part of where it is stored.
+   A parameter that an `is` test against a constant, a global, or an attribute decides a branch
+   on (through copies and phis) is *defaulted*: the accumulator idiom.
+4. **Reports**: a change of a container (an item stored or deleted, a container method, an
+   in-place operator on a builtin container, a project callee changing the container it is
+   handed, `mutated_param_paths` entry `""`) of a value that may be new and borrowed, once per
+   value at its first change. A defaulted parameter counts only when the value is also stored on
+   `self`. Not reported: a removal when every new object the value may be starts empty, a
+   conditional expression changed in place without a name, a value stored back where it borrows
+   from (`self.a = self.a or []`, `d[k] = d.get(k) or []`), and memo / cache attributes (as for
+   `MUT101`).
+5. **Stored on `self`**: a store of such a value in `self.<attr>` is reported at the store when a
+   method of the class family (`ClassMethods::family`) changes that attribute in place
+   (`typed_field_writes` with `ContainerMut`, `AliasContainerMut`, or `IndirectHelper` on a class
+   of the family); with `MUT112` selected, propagation carries typed writes, and the language
+   server re-checks the family of every changed method (`family_readers`).
 
 #### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
 - The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,
