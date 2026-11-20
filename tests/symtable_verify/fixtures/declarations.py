@@ -38,3 +38,13 @@ def comprehension_target_under_nonlocal(items):
         return target
 
     return inner
+
+
+def generator_walrus_under_global():
+    global walrus_global
+    return (((walrus_global := i), walrus_global) for i in range(2))
+
+
+def inlined_walrus_under_global():
+    global inlined_walrus
+    return [((inlined_walrus := i), inlined_walrus) for i in range(2)]

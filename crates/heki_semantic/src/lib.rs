@@ -353,15 +353,18 @@ impl<'a> Analyzer<'a> {
                 false,
             );
         } else {
-            self.scopes[target_sid.0 as usize].add_binding(
-                n.id.as_str(),
-                Span::from(n.range),
-                false,
-                false,
-            );
+            let target = &mut self.scopes[target_sid.0 as usize];
+            target.add_binding(n.id.as_str(), Span::from(n.range), false, false);
+            // The comprehension declares the target as the receiving function does: `global`
+            // there writes the module global, otherwise the function's local.
+            let target_is_global = target.global_decls.contains(&target.mangle(n.id.as_str()));
             let cur = &mut self.scopes[cur_sid.0 as usize];
             cur.add_binding(n.id.as_str(), Span::from(n.range), false, false);
-            cur.add_nonlocal(n.id.as_str());
+            if target_is_global {
+                cur.add_global(n.id.as_str());
+            } else {
+                cur.add_nonlocal(n.id.as_str());
+            }
         }
     }
 

@@ -442,6 +442,21 @@ def comprehension_target_under_global(items):
 }
 
 #[test]
+fn semantic_generator_walrus_writes_the_declared_global() {
+    let source = "\
+def f():
+    global x
+    return (((x := i), x) for i in range(2))
+";
+    let m = dump_source("dump-semantic", "fe_walrus_global", source, "py312");
+    let genexpr = scope(&m, &["function f", "comprehension <genexpr>"]);
+    assert!(bindings(genexpr).contains("x"));
+    assert_eq!(declared(genexpr, "global_decls"), ["x"]);
+    assert!(declared(genexpr, "nonlocal_decls").is_empty());
+    assert_ne!(reads(genexpr)["x"], "enclosing");
+}
+
+#[test]
 fn semantic_comprehension_scopes_follow_pep709() {
     // Python 3.11: every comprehension is its own scope.
     let m311 = semantic(TOUR, "py311");
