@@ -77,11 +77,17 @@ pub struct ParsedFile {
     pub comments: Vec<Span>,
 }
 
+/// The module imports `builtins` or touches `__builtins__` when it runs: it may patch builtin
+/// names, and then no module of the project can trust them (Assumption A1(b)). A typing stub
+/// never runs (`import builtins` there only spells annotations).
+pub fn runtime_patches_builtins(input: &ModuleInput<'_>) -> bool {
+    !heki_effect::is_stub(&input.path) && heki_soundness::module_patches_builtins(input.ir)
+}
+
 impl ParsedFile {
-    /// The module imports `builtins` or touches `__builtins__`: it may patch builtin names, and
-    /// then no module of the project can trust them (Assumption A1(b)).
+    /// [`runtime_patches_builtins`] of this module.
     pub fn patches_builtins(&self) -> bool {
-        heki_soundness::module_patches_builtins(&self.ir)
+        runtime_patches_builtins(&self.input())
     }
 
     pub fn input(&self) -> ModuleInput<'_> {

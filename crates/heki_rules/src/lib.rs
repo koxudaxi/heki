@@ -497,7 +497,7 @@ pub fn check_project(
         project_patches_builtins: extras.project_patches_builtins.unwrap_or_else(|| {
             units
                 .iter()
-                .any(|u| heki_soundness::module_patches_builtins(u.input.ir))
+                .any(|u| project::runtime_patches_builtins(&u.input))
         }),
         disabled_obligations: Vec::new(),
     };

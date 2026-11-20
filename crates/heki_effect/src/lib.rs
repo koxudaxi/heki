@@ -708,7 +708,7 @@ pub struct ProjectIndex {
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
-pub(crate) fn is_stub(path: &Path) -> bool {
+pub fn is_stub(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "pyi")
 }
 

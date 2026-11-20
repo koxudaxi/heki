@@ -73,3 +73,17 @@ fn a_package_owns_its_name_over_a_module_of_the_same_name() {
     p.write("pkg/__init__.pyi", "def wait() -> None: ...\n");
     assert!(concise(&p).1.contains("app.py:5:5: EFF101 "));
 }
+
+#[test]
+fn a_typing_stub_importing_builtins_patches_nothing() {
+    let p = Project::new("disc_stub_builtins");
+    p.write(
+        "a.py",
+        "def build(items):\n    xs = list()\n    for item in items:\n        xs = xs + [item]\n    return xs\n",
+    )
+    .write("m.pyi", "import builtins\n\n\ndef f(x: builtins.str) -> None: ...\n");
+    assert!(concise(&p).1.contains("a.py:4:9: OPT101 "));
+    // The same import in a module that runs may rebind `list`.
+    p.write("m.py", "import builtins\n");
+    assert!(!concise(&p).1.contains("OPT101"));
+}

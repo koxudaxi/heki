@@ -42,7 +42,8 @@ deliberately conservative:
 - The evaluation order and exception behavior must be preserved: `{**d, f(): g()}` becomes
   `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first.
 - Builtin names are trusted only while they are not rebound in the module (an assignment, a
-  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`).
+  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`; a `.pyi`
+  stub never runs, so its `import builtins` does not count).
 - Functions using `eval`, `exec`, `locals()`, `sys._getframe`, or frame attributes can change
   locals behind any analysis: their candidates are always blocked. `heki assumptions` lists such
   places in a project.

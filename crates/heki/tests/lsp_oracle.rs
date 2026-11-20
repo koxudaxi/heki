@@ -230,6 +230,8 @@ const PLANTER_SILENT: &str = "from pkg.nodes import Index, Node\nfrom pkg.relay 
 // size-dependent rewrites that rely on them (`OPT110` builds a `set(...)`) are not proven.
 const LOOPS: &str = "def member(n):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in range(n):\n        if p in allowed:\n            hits.append(p)\n    return hits\n";
 const COMPAT: &str = "import builtins\n\nbuiltins.len = len\n";
+// A stub never runs: its `import builtins` patches nothing.
+const SPELLED_STUB: &str = "import builtins\n\n\ndef name(x: builtins.str) -> None: ...\n";
 
 // Small displays other files read (`OPT112`): a module-level list another module scans in a
 // loop, and an instance attribute whose class family (a subclass in a third module) may grow it.
@@ -1106,6 +1108,11 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the module patching builtins is deleted",
             vec![Action::Delete("pkg/compat.py")],
+        )
+        .present(&[("pkg/loops.py", "OPT110")]),
+        Step::new(
+            "a typing stub imports builtins for its annotations",
+            vec![Action::Create("pkg/spelled.pyi", SPELLED_STUB.to_owned())],
         )
         .present(&[("pkg/loops.py", "OPT110")]),
         Step::new(
