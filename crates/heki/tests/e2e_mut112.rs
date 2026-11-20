@@ -437,6 +437,42 @@ def from_duplicate(rows):
 def from_comprehension(given, copy):
     rows = [r for r in given] if copy else given
     rows.append(1)
+
+
+def defaulted_tags(obj):
+    return getattr(obj, "tags", [])
+
+
+def from_defaulted_tags(obj):
+    x = defaulted_tags(obj)
+    x.append(1)
+
+
+DEFAULT_ROWS = []
+
+
+def head_of(*rows):
+    return rows[0]
+
+
+def head_default():
+    return head_of(DEFAULT_ROWS)
+
+
+def from_head_default(flag):
+    x = head_default() if flag else []
+    x.append(1)
+
+
+def unnamed_default(options, x):
+    options.get("tags", []).append(x)
+
+
+def unrelated_identity(shared, a, b):
+    x = shared
+    if a is b:
+        x = []
+    x.append(1)
 "#;
 
 #[test]
@@ -461,8 +497,17 @@ fn mut112_more_sources_and_returns() {
         d(m, 121, "unseeded.<locals>.inner", "x"),
         d(m, 138, "from_duplicate", "x"),
         d(m, 143, "from_comprehension", "rows"),
+        d(m, 152, "from_defaulted_tags", "x"),
+        d(m, 168, "from_head_default", "x"),
+        d(m, 172, "unnamed_default", "a value"),
+        d(m, 179, "unrelated_identity", "x"),
     ];
     assert_eq!(found(&diags), expected, "{diags:#?}");
+    // A change of a value without a name (a call's result) names no variable.
+    assert_eq!(
+        message(at(&diags, m, 172)),
+        "`unnamed_default` changes a value in place, which is a new object on one path and an element of the parameter `options` on another"
+    );
     for (line, borrow) in [
         (18, "the attribute `options`"),
         (29, "the parameter `arr`"),
@@ -476,6 +521,12 @@ fn mut112_more_sources_and_returns() {
         (100, "the global `LAST`"),
         (111, "the enclosing function's `acc`"),
         (121, "the enclosing function's `data`"),
+        // A callee returning an attribute or its default.
+        (152, "what `defaulted_tags` returns"),
+        // A callee returning what its `*args` holds: the caller's global.
+        (168, "what `head_default` returns"),
+        // An `is` test of two other values leaves the borrowed path.
+        (179, "the parameter `shared`"),
     ] {
         assert!(
             message(at(&diags, m, line)).ends_with(&format!("{borrow} on another")),
@@ -732,6 +783,24 @@ def find_or_add(branch, key):
     new = []
     branch.append({key: new})
     return new
+
+
+def copy_on_write_swapped(child, drop):
+    result = child
+    for field in drop:
+        if child is result:
+            result = child.copy()
+        result.pop(field)
+    return result
+
+
+def tail(rows):
+    return rows[1:]
+
+
+def from_tail(rows, flag):
+    x = tail(rows) if flag else []
+    x.append(1)
 "#;
 
 #[test]
