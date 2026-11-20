@@ -621,7 +621,7 @@ OPT103 = "warning"
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes its oldest admitted version, clamped to 3.11–3.15 (`>=3.9` → `py311`). `--target-version` overrides both. |
+| `target-version` | the lower bound of `project.requires-python`, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). Without it, heki reads `requires-python` from the `pyproject.toml` that holds the configuration, or the one next to `heki.toml` / the `--config` file, and takes the oldest supported version it admits, every clause counted (`>=3.11, !=3.11.*` → `py312`); a specifier admitting only older or newer versions selects `py311` or `py315` (`>=3.9, <3.11` → `py311`), and one without a lower bound that admits 3.12 (`<4`) keeps `py312`. `--target-version` overrides both. Syntax newer than the target (`lazy import` before `py315`, `type` statements before `py312`, ...) is a syntax error in `.py` files; `.pyi` stubs never run and may use it. |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths (globs, matched against paths and path components). |
 | `extend-exclude` | `[]` | Adds excluded paths. |
 | `baseline` | none | Ratchet baseline file used when `--baseline` is not given. |
@@ -931,7 +931,8 @@ deliberately conservative:
 - The evaluation order and exception behavior must be preserved: `{**d, f(): g()}` becomes
   `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first.
 - Builtin names are trusted only while they are not rebound in the module (an assignment, a
-  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`).
+  `global` store, `from m import *`, `globals()`, or a module that patches `builtins`; a `.pyi`
+  stub never runs, so its `import builtins` does not count).
 - Functions using `eval`, `exec`, `locals()`, `sys._getframe`, or frame attributes can change
   locals behind any analysis: their candidates are always blocked. `heki assumptions` lists such
   places in a project.
@@ -972,7 +973,12 @@ A fix keeps the file acceptable to a type checker and to isort:
   stacks.txt app.py`, or `--gecko -o profile.json`);
 - py-spy (`py-spy record --format raw -o stacks.txt -- python app.py`).
 
-A function on the stack in at least 1 % of the samples is hot. The profile is used to promote
+A function on the stack in at least 1 % of the samples is hot. A frame counts for a function when
+its name names the function on a dotted boundary (`run` or `A.run` for `A.run`, never for
+`BA.run`), its file is the function's file (a basename, a relative, or an absolute path), and its
+line, when the profiler recorded one, lies inside the function. A frame that fits several
+functions (a plain `run` without a line in a file with two `run` methods, a `models.py` two
+packages have) counts for none. `--watch` matches frames by their names only. The profile is used to promote
 size-dependent fixes in hot functions and adds the sample share to the diagnostics' evidence; it
 never makes an unsafe rewrite safe.
 
@@ -1490,7 +1496,11 @@ $ python3 tests/sentinel/verify_soundness_kb.py
 $ python3 tests/difftest/counterexamples.py
 ```
 
-- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15).
+- `verify_symtable.py` compares heki's scope analysis with CPython's `symtable` (3.11 – 3.15):
+  the scope tree (kind, name, definition line, parent), bindings, parameters, `global` /
+  `nonlocal` declarations, and every read. Every target must exist and every file must parse on
+  the running CPython, except fixtures marked for a newer one in their name (`312_315`,
+  `313_315`, `_314`, `pep810`); a run that compares no file fails.
 - `verify_soundness_kb.py` checks every claim of the Layer 1 knowledge base
   (`kb/soundness/builtins.toml`) on the running interpreter.
 - `counterexamples.py` shows that the naive rewrites heki refuses really change behavior.
