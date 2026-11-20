@@ -11,13 +11,14 @@
 
 use super::call_owners::CallOwnerRule;
 use super::{
-    Allowance, MergedReports, OwnerRule, ReadOwnerRule, initializes_itself, runs_inside_allowed,
+    Allowance, ContractTarget, MergedReports, OwnerRule, ReadOwnerRule, initializes_itself,
+    runs_inside_allowed,
 };
 use crate::{CheckContext, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{Access, Construction, FuncKey, Unresolved};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 
 pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut Vec<Diagnostic>) {
@@ -95,6 +96,9 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
     reports.emit(cx, "MUT205", out);
 }
 
+/// The targets of a rule that an attribute name matches, and the classes they cover.
+type MatchedTargets<'r> = (Vec<&'r ContractTarget>, FxHashSet<&'r str>);
+
 /// `MUT206`: reads of an attribute named like a target of a strict `read-owners` contract on
 /// an object of unknown class.
 pub(super) fn mut206(
@@ -109,22 +113,28 @@ pub(super) fn mut206(
     let sites = cx.sites_by_caller();
     // An object of unknown class is no class's own `self`.
     let no_class = FxHashSet::default();
+    // The targets of each rule an attribute name matches, and the classes they cover, found once
+    // per rule and name rather than once per read.
+    let mut matched: FxHashMap<(usize, &str), MatchedTargets<'_>> = FxHashMap::default();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
         for a in &s.unresolved_access_sites {
             let Access::Read(kind) = a.access else {
                 continue;
             };
-            for rule in &strict {
-                let hits: Vec<_> = rule
-                    .targets
-                    .iter()
-                    .filter(|t| t.matches_attr(&a.name))
-                    .collect();
-                let family: FxHashSet<String> = hits
-                    .iter()
-                    .flat_map(|t| t.classes.iter().cloned())
-                    .collect();
+            for (r, rule) in strict.iter().enumerate() {
+                let (hits, family) = matched.entry((r, a.name.as_str())).or_insert_with(|| {
+                    let hits: Vec<&ContractTarget> = rule
+                        .targets
+                        .iter()
+                        .filter(|t| t.matches_attr(&a.name))
+                        .collect();
+                    let family = hits
+                        .iter()
+                        .flat_map(|t| t.classes.iter().map(String::as_str))
+                        .collect();
+                    (hits, family)
+                });
                 let reads_target = |class: &str| family.contains(class);
                 let access = Unseen {
                     func: key,

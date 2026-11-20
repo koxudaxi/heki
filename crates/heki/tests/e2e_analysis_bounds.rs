@@ -665,6 +665,53 @@ fn stores_through_a_long_alias_chain_resolve_each_copy_once() {
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
 }
 
+/// A strict `read-owners` target on a class with thousands of subclasses and as many functions
+/// reading the attribute on an object of unknown class: the classes the target covers are found
+/// once per rule and name, not once per read. Every read but one is in an allowed reader.
+#[test]
+fn strict_reads_of_a_target_with_many_subclasses_find_its_classes_once() {
+    let classes = 3_000;
+    let mut lines = vec![
+        "class Base:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.secret = 0".to_owned(),
+    ];
+    for i in 0..classes {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Sub{i}(Base):"),
+            "    pass".to_owned(),
+        ]);
+    }
+    for i in 0..=classes {
+        let name = if i == classes {
+            "peek".to_owned()
+        } else {
+            format!("allowed{i}")
+        };
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def {name}(obj):"),
+            "    return obj.secret".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_strict_reads");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.read-owners]]\nname = \"m\"\ntargets = [\"Base.secret\"]\nallowed-readers = [\"m.allowed*\", \"m.Base.*\"]\nunresolved = \"report\"\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT206")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["peek"]);
+}
+
 /// A class with thousands of subclasses and as many functions reading its class constant on an
 /// instance (`field.__dict__[keys.KEY]`): whether the constant holds on every class the instance
 /// may be is decided once per class and name, not once per read. The contract allows every
