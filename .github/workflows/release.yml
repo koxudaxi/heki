@@ -56,6 +56,9 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
+          # The Linux builds run in a container, which installs its own toolchain (`stable`
+          # unless told otherwise) instead of the one set up above.
+          rust-toolchain: 1.99.0
           args: --release --locked --out dist
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
       - name: Check metadata
