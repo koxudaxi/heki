@@ -313,6 +313,12 @@ ALIASED = ONCE
 TWICE = "_forced_field_assignment"
 TWICE = "_forced_field_assignment"
 MOVED = "_forced_field_assignment"
+
+from pkg.model import DataModelFieldBase
+
+
+def write_moved(field: DataModelFieldBase) -> None:
+    field.__dict__[MOVED] = True
 "#;
 
 const ONCE_USE: &str = r#"from typing import ClassVar, Final
@@ -372,6 +378,14 @@ class Overridden:
 
 class Override(Overridden):
     KEY: ClassVar[str] = "_other"
+
+
+class Deleted:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+    del KEY
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[Deleted.KEY] = True
 "#;
 
 #[test]
@@ -407,6 +421,8 @@ unresolved = "report"
     assert_eq!(
         found(&diagnostics(&p, &[])),
         vec![
+            // Rebound by another module: the name is computed in its own module too.
+            d("pkg/once.py", 11, "MUT205", "write_moved", class),
             // A module-level name bound once, also through another such name, a module
             // attribute, and in the module itself.
             d(u, 11, "MUT201", "module_constants", forced),
@@ -430,6 +446,8 @@ unresolved = "report"
             // A subclass defines the name again: `self` may be one, the class itself is not.
             d(u, 52, "MUT205", "Overridden.write", class),
             d(u, 53, "MUT201", "Overridden.write", forced),
+            // A class constant the class body deletes is no constant.
+            d(u, 65, "MUT205", "Deleted.write", class),
         ]
     );
 }
@@ -1906,6 +1924,13 @@ def call_unknown(callback) -> None:
 def narrowed(obj: object, ref: Reference) -> None:
     if isinstance(obj, DataType):
         obj.replace_reference(ref)
+
+
+def kids_of_each(refs):
+    out = []
+    for ref in refs:
+        out.append(ref.children)
+    return out
 "#;
 
 const STRICT_ACCESS_STORE: &str = r#"class GenerationStore:
@@ -1979,6 +2004,8 @@ fn strict_modes_report_the_reads_and_calls_heki_cannot_tie_to_a_class() {
             d(u, 52, "MUT207", "swap_getattr", "replace_reference"),
             typed[1].clone(),
             typed[2].clone(),
+            // A loop variable, which no caller binds.
+            d(u, 75, "MUT206", "kids_of_each", "children"),
         ]
     );
     assert_eq!(
@@ -1989,10 +2016,18 @@ fn strict_modes_report_the_reads_and_calls_heki_cannot_tie_to_a_class() {
         message_at(&diags, u, 43),
         "`swap` calls `replace_reference` on an object of unknown class outside the call owners of `mutators`: heki cannot tell whether it calls `DataType.replace_reference`"
     );
-    // The rules can be ignored like any other.
+    // The rules can be ignored like any other, and run without the typed rules.
     assert_eq!(
         found(&diagnostics(&p, &["--ignore", "MUT206,MUT207"])),
         typed
+    );
+    let strict: Vec<_> = found(&diags)
+        .into_iter()
+        .filter(|x| x.2 == "MUT206" || x.2 == "MUT207")
+        .collect();
+    assert_eq!(
+        found(&diagnostics(&p, &["--ignore", "MUT203,MUT204"])),
+        strict
     );
 }
 
