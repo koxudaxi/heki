@@ -20,7 +20,9 @@ call of a target is reported at the callers of the private helper making it, and
 functions reaching it); with an effect boundary, a function that changes its calls of library APIs
 re-analyzes every function above it too (a boundary may allow one API and forbid another of the
 same effect, and counts every call it reaches). Edits that change none of these, such as most comments, stop at the
-edited file. The diagnostics are the ones `heki check` reports for the saved files.
+edited file. The diagnostics are the ones `heki check` reports for the saved files. Closing a
+document with unsaved changes discards them for the analysis too: the file is analyzed from the
+disk again (or leaves the project when it was never saved), and so is everything that affects.
 
 Files created, changed, or deleted outside the editor (`git checkout`, code generators) are
 picked up when the client supports watching files: the server registers for

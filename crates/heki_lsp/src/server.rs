@@ -4,7 +4,8 @@
 //! - `initialized`: index the workspace in the background, then publish diagnostics of every
 //!   open document; register file watchers when the client supports them.
 //! - `didOpen` / `didChange` / `didSave` / `didClose` change the documents in message order;
-//!   the analyses run after, on the documents as they are then.
+//!   the analyses run after, on the documents as they are then. Closing a document with
+//!   unsaved changes re-analyzes the file from the disk.
 //! - `didChange`: after a 250 ms debounce, re-analyze only the edited document (its summary
 //!   update uses Early Cutoff); files it affects are queued.
 //! - `didSave`: re-analyze the document, then every queued file and, in turn, what those
@@ -331,6 +332,48 @@ impl State {
         errors.extend(more_errors);
         (pubs, errors)
     }
+
+    /// A document was closed (`text`: what it held): the file on the disk is its text again.
+    /// When they differ (an unsaved edit was discarded), the index forgets the editor's text: the
+    /// file is re-analyzed from the disk, or leaves the project when it is not on the disk, and
+    /// so is everything that affects. The document's diagnostics leave with it.
+    fn closed(
+        &mut self,
+        path: &Path,
+        uri: Url,
+        text: Option<String>,
+    ) -> (Vec<Publish>, Vec<String>) {
+        let (mut pubs, mut errors) = (Vec::new(), Vec::new());
+        let disk = std::fs::read_to_string(path).ok();
+        let indexed = self.workspace.as_ref().is_some_and(|ws| ws.accepts(path));
+        if text.is_some() && text != disk && indexed {
+            let ws = self.workspace.as_mut().expect("checked above");
+            match &disk {
+                Some(on_disk) => {
+                    let outcome = ws.edit(path, on_disk);
+                    self.pending.remove(path);
+                    self.pending.extend(outcome.affected);
+                    errors.extend(outcome.error);
+                }
+                None => {
+                    let affected = ws.remove(path);
+                    self.pending.extend(affected);
+                }
+            }
+            let (more, more_errors) = self.flush_pending();
+            pubs.extend(more);
+            errors.extend(more_errors);
+        }
+        self.diags.remove(path);
+        pubs.push(Publish {
+            seq: self.stamp(path),
+            path: path.to_path_buf(),
+            uri,
+            diagnostics: Vec::new(),
+            version: None,
+        });
+        (pubs, errors)
+    }
 }
 
 /// An open document's text, else the file on the disk.
@@ -635,19 +678,11 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
-        let closed = {
-            let mut st = lock(&self.state);
-            st.docs.remove(&path);
-            st.diags.remove(&path);
-            Publish {
-                seq: st.stamp(&path),
-                path,
-                uri: params.text_document.uri,
-                diagnostics: Vec::new(),
-                version: None,
-            }
-        };
-        Self::send(&work, &self.client, &self.state, vec![closed], Vec::new()).await;
+        let closed = lock(&self.state).docs.remove(&path).map(|d| d.text);
+        let uri = params.text_document.uri;
+        let (pubs, errors) =
+            Self::blocking(&self.state, move |st| st.closed(&path, uri, closed)).await;
+        Self::send(&work, &self.client, &self.state, pubs, errors).await;
     }
 
     async fn code_action(&self, params: CodeActionParams) -> RpcResult<Option<CodeActionResponse>> {

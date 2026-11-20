@@ -369,6 +369,8 @@ enum Action {
     Delete(&'static str),
     /// Replace the configuration (`pyproject.toml`) and announce the change.
     Configure(String),
+    /// Close the document without saving it: its unsaved text is discarded.
+    Close(&'static str),
 }
 
 struct Step {
@@ -1451,6 +1453,12 @@ impl Session {
                 self.p.write("pyproject.toml", text);
                 self.watched("pyproject.toml", 2);
             }
+            Action::Close(rel) => {
+                let u = self.uri(rel);
+                self.lsp
+                    .notify("textDocument/didClose", json!({"textDocument": {"uri": u}}));
+                self.versions.remove(rel);
+            }
         }
     }
 
@@ -1493,7 +1501,8 @@ impl Session {
                     Action::Save(rel, _)
                     | Action::Change(rel, _)
                     | Action::Create(rel, _)
-                    | Action::Delete(rel) => self.uri(rel),
+                    | Action::Delete(rel)
+                    | Action::Close(rel) => self.uri(rel),
                     Action::Configure(_) => self.uri("pyproject.toml"),
                 })
                 .collect();
@@ -1590,6 +1599,7 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_boundary_calls());
     steps.extend(steps_recursive_snapshot());
     steps.extend(steps_moved_lines());
+    steps.extend(steps_discarded_buffer());
     steps
 }
 
@@ -1675,6 +1685,28 @@ fn steps_moved_lines() -> Vec<Step> {
         Step::new(
             "a comment above a blocking call becomes a blank line",
             vec![save("app/slow.py", &SLOW.replace("    #x\n", "    #\n\n"))],
+        )
+        .present(&[("app/handler.py", "EFF101")]),
+    ]
+}
+
+/// An unsaved edit discarded by closing the document: the disk counts again.
+fn steps_discarded_buffer() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an unsaved edit stops the helper blocking",
+            vec![Action::Change(
+                "app/slow.py",
+                "def wait():\n    pass\n".to_owned(),
+            )],
+        )
+        .present(&[("app/handler.py", "EFF101")]),
+        Step::new(
+            "the edit is discarded and the caller saved",
+            vec![
+                Action::Close("app/slow.py"),
+                save("app/handler.py", &format!("# saved\n{HANDLER}")),
+            ],
         )
         .present(&[("app/handler.py", "EFF101")]),
     ]
