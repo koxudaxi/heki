@@ -133,6 +133,8 @@ struct FixedFile {
     path: PathBuf,
     original: String,
     fixed: String,
+    /// The fixes applied to it.
+    fixes: usize,
 }
 
 /// How `heki check` prints a path, in every output format and in `--diff` headers (as Ruff
@@ -167,6 +169,7 @@ fn fix_in_memory(
 ) -> Result<(usize, Vec<FixedFile>, Vec<String>)> {
     let mut overrides: FxHashMap<PathBuf, String> = FxHashMap::default();
     let mut originals: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let mut applied_to: FxHashMap<PathBuf, usize> = FxHashMap::default();
     let mut total = 0;
     let mut errors;
     let mut passes = 0;
@@ -188,6 +191,7 @@ fn fix_in_memory(
             };
             let (new, applied) = apply_fixes(&file.source, groups);
             pass += applied.len();
+            *applied_to.entry(file.path.clone()).or_default() += applied.len();
             originals
                 .entry(file.path.clone())
                 .or_insert_with(|| file.source.clone());
@@ -203,10 +207,12 @@ fn fix_in_memory(
         .into_iter()
         .filter_map(|(path, original)| {
             let fixed = overrides.remove(&path)?;
+            let fixes = applied_to.get(&path).copied().unwrap_or_default();
             (fixed != original).then_some(FixedFile {
                 path,
                 original,
                 fixed,
+                fixes,
             })
         })
         .collect();
@@ -238,16 +244,38 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         };
         return finish(args.output_format, &errors, code);
     }
+    let mut conflicts = Vec::new();
     if args.fix {
-        let (fixes, files, _) = fix_in_memory(args, hot.as_ref())?;
-        for f in &files {
-            std::fs::write(&f.path, &f.fixed)
-                .with_context(|| format!("failed to write `{}`", f.path.display()))?;
-        }
-        eprintln!("Fixed {fixes} issue(s) in {} file(s).", files.len());
+        let (_, files, _) = fix_in_memory(args, hot.as_ref())?;
+        let (fixes, written);
+        (fixes, written, conflicts) = write_fixed(&files)?;
+        eprintln!("Fixed {fixes} issue(s) in {written} file(s).");
     }
-    let Analyzed { project, diags } = analyze(args, hot.as_ref(), None)?;
+    let Analyzed { mut project, diags } = analyze(args, hot.as_ref(), None)?;
+    project.errors.extend(conflicts);
     report(args, &project, diags)
+}
+
+/// Write the fixed files whose disk text is still the text the fixes were proven on. A file
+/// that changed meanwhile (an editor saved it during the analysis) is left as it is: writing
+/// the fixed text would replace that save. Returns the fixes and files written and an error
+/// for each file left.
+fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<String>)> {
+    let (mut fixes, mut written, mut conflicts) = (0, 0, Vec::new());
+    for f in files {
+        if std::fs::read_to_string(&f.path).ok().as_ref() != Some(&f.original) {
+            conflicts.push(format!(
+                "{}: changed on disk while heki was fixing it; its fixes were not written (run `heki check --fix` again)",
+                f.path.display()
+            ));
+            continue;
+        }
+        std::fs::write(&f.path, &f.fixed)
+            .with_context(|| format!("failed to write `{}`", f.path.display()))?;
+        fixes += f.fixes;
+        written += 1;
+    }
+    Ok((fixes, written, conflicts))
 }
 
 /// Baseline handling, rendering, summary, and exit code of one analyzed run.
@@ -482,5 +510,41 @@ pub(crate) fn format_of(f: OutputFormat) -> heki_diagnostics::OutputFormat {
         OutputFormat::Json => heki_diagnostics::OutputFormat::Json,
         OutputFormat::Github => heki_diagnostics::OutputFormat::Github,
         OutputFormat::Sarif => heki_diagnostics::OutputFormat::Sarif,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixes_are_not_written_over_a_save_made_while_fixing() {
+        let dir = std::env::temp_dir().join(format!("heki_write_fixed_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kept, fixed) = (dir.join("kept.py"), dir.join("fixed.py"));
+        let file = |path: &Path, original: &str| FixedFile {
+            path: path.to_path_buf(),
+            original: original.to_owned(),
+            fixed: "x.append(i)\n".to_owned(),
+            fixes: 1,
+        };
+        // After the fixes were proven on `x = x + [i]`, an editor saved `kept.py` (a race a
+        // process cannot set up portably).
+        std::fs::write(&kept, "x = x + [i]  # saved\n").unwrap();
+        std::fs::write(&fixed, "x = x + [i]\n").unwrap();
+        let files = [file(&kept, "x = x + [i]\n"), file(&fixed, "x = x + [i]\n")];
+        let (fixes, written, conflicts) = write_fixed(&files).unwrap();
+        assert_eq!((fixes, written), (1, 1));
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert!(
+            conflicts[0].starts_with(&format!("{}: changed on disk", kept.display())),
+            "{conflicts:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&kept).unwrap(),
+            "x = x + [i]  # saved\n"
+        );
+        assert_eq!(std::fs::read_to_string(&fixed).unwrap(), "x.append(i)\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
