@@ -1,6 +1,8 @@
 //! What a call guarantees, end to end through the real binary: a fact that must hold on every
 //! path (an announcement of `MUT109`, a consumption of `MUT106`) holds at a call only when
-//! every implementation the call may run guarantees it (an abstract method never runs).
+//! every implementation the call may run guarantees it (an abstract method never runs). And
+//! which written objects existed before a call (`MUT109`): a value merged from a new object and
+//! an existing one may be the existing one.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# MUT109`); every other line must not be.
@@ -193,5 +195,29 @@ fn a_consumption_through_a_call_needs_every_implementation_to_consume() {
         "consuming_implementations",
         &[("pkg/takers.py", TAKERS)],
         &["MUT106"],
+    );
+}
+
+/// A field alias merged from a new object's field and an existing object's field may be the
+/// existing one's.
+const MERGED: &str = r#"from pkg.model import Model
+
+
+def either(existing: Model, flag):
+    xs = Model().items if flag else existing.items
+    xs.append(1)  # MUT109
+
+
+def both_new(flag):
+    xs = Model().items if flag else Model().items
+    xs.append(1)
+"#;
+
+#[test]
+fn a_merged_field_alias_may_be_an_existing_objects_field() {
+    check_marks(
+        "merged_field_aliases",
+        &[("pkg/model.py", MODEL), ("pkg/merged.py", MERGED)],
+        &["MUT109"],
     );
 }

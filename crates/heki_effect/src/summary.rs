@@ -2245,7 +2245,7 @@ fn merge_phi<T: Clone + PartialEq>(
 }
 
 /// [`merge_phi`] for `obj.<attr>` aliases: the inputs must name one class attribute; the
-/// objects' parameters are united (the merged object may be any of them). Inputs are inserted
+/// objects' parameters and origins (`Reach`) are united (the merged object may be any of them). Inputs are inserted
 /// with their final parameters (`may_params` is complete before the alias pass), so the first
 /// insertion is final too.
 fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &[VarId]) {
@@ -2270,6 +2270,7 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
                 }
                 f.obj_params |= a.obj_params;
                 f.fresh &= a.fresh;
+                f.reach = f.reach.join(a.reach);
             }
         }
     }
