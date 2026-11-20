@@ -303,6 +303,11 @@ fn transfer(
 
     // c. Mutation & state effects.
     if site.recv_is_self && callee.owner_class_qualname.is_some() {
+        // A `self` method or property reading an attribute reads it for more than its object.
+        if !t.returns_self_attrs.is_empty() {
+            t.returns_self_attrs
+                .retain(|a| !facts.reads_self_attrs.iter().any(|r| r.attr == *a));
+        }
         t.reads_self_attrs
             .extend(facts.reads_self_attrs.iter().cloned());
         t.mutates_self_attrs

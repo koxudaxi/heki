@@ -130,6 +130,13 @@ const GARAGE: &str =
 const BASE: &str = "from functools import cached_property\n\n\nclass Base:\n    def __init__(self):\n        self.items = []\n\n    @cached_property\n    def count(self):\n        return len(self.items)\n";
 const BASE_CONSTANT: &str = "from functools import cached_property\n\n\nclass Base:\n    def __init__(self):\n        self.items = []\n\n    @cached_property\n    def count(self):\n        return 0\n";
 const DERIVED: &str = "from pkg.base import Base\n\n\nclass Derived(Base):\n    def push(self, x):\n        self.items.append(x)\n";
+// `MUT101` on a value the cache holds by reference: a cached property returns a tuple holding
+// `self.items` and a mixin helper's result; a subclass in a third module changes `items` in
+// place. The cache is stale once the helper reads `items`.
+const MIXIN: &str = "class Mixin:\n    def _extra(self):\n        return 0\n";
+const MIXIN_READING: &str = "class Mixin:\n    def _extra(self):\n        return len(self.items)\n";
+const HOLDER_BASE: &str = "from functools import cached_property\n\nfrom pkg.mixin import Mixin\n\n\nclass Holding(Mixin):\n    def __init__(self):\n        self.items = []\n\n    @cached_property\n    def pair(self):\n        return (self.items, self._extra())\n";
+const HOLDER_SUB: &str = "from pkg.holding import Holding\n\n\nclass Sub(Holding):\n    def push(self, x):\n        self.items.append(x)\n";
 const SHAPE: &str = "class Shape:\n    def area(self):\n        return 0\n";
 const SQUARE: &str = "import time\n\nfrom pkg.shape import Shape\n\n\nclass Square(Shape):\n    def side(self):\n        time.sleep(1)\n";
 const DRAW: &str =
@@ -212,6 +219,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/garage.py", GARAGE),
         ("pkg/base.py", BASE),
         ("pkg/derived.py", DERIVED),
+        ("pkg/mixin.py", MIXIN),
+        ("pkg/holding.py", HOLDER_BASE),
+        ("pkg/sub.py", HOLDER_SUB),
         ("pkg/shape.py", SHAPE),
         ("pkg/square.py", SQUARE),
         ("pkg/draw.py", DRAW),
@@ -742,6 +752,32 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/base.py", BASE)],
         )
         .present(&[("pkg/derived.py", "MUT101")]),
+        Step::new(
+            "the base class's cached property returns the object the subclass changes in place",
+            vec![save(
+                "pkg/base.py",
+                &BASE.replace("return len(self.items)", "return self.items"),
+            )],
+        )
+        .absent(&[("pkg/derived.py", "MUT101")]),
+        Step::new(
+            "the getter returns a copy of it instead",
+            vec![save(
+                "pkg/base.py",
+                &BASE.replace("return len(self.items)", "return list(self.items)"),
+            )],
+        )
+        .present(&[("pkg/derived.py", "MUT101")]),
+        Step::new(
+            "a mixin helper of a cached property holding the object starts reading it",
+            vec![save("pkg/mixin.py", MIXIN_READING)],
+        )
+        .present(&[("pkg/sub.py", "MUT101")]),
+        Step::new(
+            "the helper stops reading it",
+            vec![save("pkg/mixin.py", MIXIN)],
+        )
+        .absent(&[("pkg/sub.py", "MUT101")]),
         Step::new(
             "a subclass module starts overriding the method an async def calls",
             vec![save(

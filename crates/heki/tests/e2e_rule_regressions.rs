@@ -211,3 +211,167 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
         "{found:#?}"
     );
 }
+
+// ================================================================ MUT101: held by reference
+
+/// R13 (datamodel-code-generator `parser/jsonschema.py:9270` / `:9286`): a cached value that
+/// holds an attribute's object itself sees the changes made to it in place; only rebinding the
+/// attribute leaves the cache behind. A copy of the attribute, a value computed from it, a
+/// `self` method or property that reads it, and `self` handed to other code all can go stale.
+const HELD: &str = r#"from functools import cached_property
+
+
+def summarize(obj):
+    return len(obj.items)
+
+
+class Parser:
+    def __init__(self) -> None:
+        self._empty: set[str] = set()
+        self._patterns: dict[str, str] = {}
+        self._engines = ()
+        self.items: list[str] = []
+        self.other: list[str] = []
+
+    @cached_property
+    def context(self) -> dict[str, object]:
+        ctx: dict[str, object] = {"empty": self._empty}
+        if engines := self._engines:
+            ctx["patterns"] = (engines, self._patterns)
+        return ctx
+
+    @cached_property
+    def view(self) -> list[str]:
+        return self.items
+
+    @cached_property
+    def collected(self) -> list[object]:
+        out = []
+        out.append(self.items)
+        return out
+
+    @cached_property
+    def either(self) -> list[str]:
+        return self.items if self.other else []
+
+    def report(self) -> None:
+        for where in sorted(self._empty):
+            print(where)
+        self._empty.clear()
+        self._patterns.clear()
+        self.items.append("x")
+        self.items[0] = "y"
+
+    def reset(self) -> None:
+        self._empty = set()
+        self.items = []
+
+
+class Copies:
+    def __init__(self) -> None:
+        self.items: list[str] = []
+
+    def _count(self) -> int:
+        return len(self.items)
+
+    @property
+    def size(self) -> int:
+        return len(self.items)
+
+    @cached_property
+    def unpacked(self) -> tuple[str, ...]:
+        return (*self.items,)
+
+    @cached_property
+    def with_length(self) -> dict[str, object]:
+        return {"items": self.items, "n": len(self.items)}
+
+    @cached_property
+    def with_helper(self) -> tuple[object, int]:
+        return (self.items, self._count())
+
+    @cached_property
+    def with_property(self) -> list[object]:
+        return [self.items, self.size]
+
+    @cached_property
+    def with_self(self) -> tuple[object, int]:
+        return (self.items, summarize(self))
+
+    @cached_property
+    def unknown_method(self) -> tuple[object, object]:
+        return (self.items, self.missing())
+
+    @cached_property
+    def tested(self) -> list[str]:
+        return self.items if self.items else []
+
+    @cached_property
+    def as_key(self) -> dict[object, int]:
+        return {self.items: 1}
+
+    def add(self, x: str) -> None:
+        self.items.append(x)
+"#;
+
+#[test]
+fn mut101_reports_in_place_changes_only_of_attributes_the_cache_derives_from() {
+    let p = Project::new("regr_mut101_held");
+    p.write("held.py", HELD);
+    let found = reports(&p, "MUT101");
+    let got: Vec<(u64, &str, &str)> = found
+        .iter()
+        .map(|(line, qualname, message)| {
+            let property = message.rsplit_once("`@cached_property` `").unwrap().1;
+            (
+                *line,
+                qualname.as_str(),
+                property.split('`').next().unwrap(),
+            )
+        })
+        .collect();
+    // Not reported: the in-place changes of `_empty`, `_patterns`, and `items` in
+    // `Parser.report` (a dict display and an item assignment of a tuple holding them, the
+    // attribute itself, a list it is appended to, a conditional expression). Reported: their
+    // rebindings, and every in-place change a copy, a computed value, a helper, a property, a
+    // call with `self`, an unknown method, a truthiness test, or a dict key derives from.
+    assert_eq!(
+        got,
+        vec![
+            (46, "Parser.reset", "context"),
+            (47, "Parser.reset", "collected"),
+            (47, "Parser.reset", "either"),
+            (47, "Parser.reset", "view"),
+            (94, "Copies.add", "as_key"),
+            (94, "Copies.add", "tested"),
+            (94, "Copies.add", "unknown_method"),
+            (94, "Copies.add", "unpacked"),
+            (94, "Copies.add", "with_helper"),
+            (94, "Copies.add", "with_length"),
+            (94, "Copies.add", "with_property"),
+            (94, "Copies.add", "with_self"),
+        ],
+        "{found:#?}"
+    );
+}
+
+/// A cached property in one module, the in-place change in a subclass in another: the
+/// getter's alias fact travels in its summary.
+#[test]
+fn mut101_held_attributes_cross_modules() {
+    let p = Project::new("regr_mut101_modules");
+    let base = |body: &str| {
+        format!(
+            "from functools import cached_property\n\n\nclass Base:\n    def __init__(self):\n        self.items = []\n\n    @cached_property\n    def view(self):\n        return {body}\n"
+        )
+    };
+    p.write("pkg/__init__.py", "")
+        .write("pkg/base.py", &base("self.items"))
+        .write(
+            "pkg/derived.py",
+            "from pkg.base import Base\n\n\nclass Derived(Base):\n    def push(self, x):\n        self.items.append(x)\n",
+        );
+    assert_eq!(lines(&p, "MUT101"), vec![]);
+    p.write("pkg/base.py", &base("list(self.items)"));
+    assert_eq!(lines(&p, "MUT101"), vec![at(6, "Derived.push")]);
+}

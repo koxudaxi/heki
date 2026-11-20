@@ -1893,6 +1893,23 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     // -------------------------------------------------------------------------
     // Expressions (strict left-to-right evaluation order)
     // -------------------------------------------------------------------------
+
+    /// The elements of a list, tuple, or set display. A starred element (`*xs`) is a copy of
+    /// `xs` named [`crate::UNPACKED`]: the display holds the elements of `xs`, not `xs` itself.
+    fn lower_display_elems(&mut self, elts: &'a [Expr]) -> Vec<VarId> {
+        elts.iter()
+            .map(|e| match e {
+                Expr::Starred(s) => {
+                    let src = self.lower_expr(&s.value);
+                    let dst = self.fresh_var(Some(crate::UNPACKED.to_owned()));
+                    self.emit(InstKind::Copy { dst, src }, Span::from(s.range));
+                    dst
+                }
+                _ => self.lower_expr(e),
+            })
+            .collect()
+    }
+
     fn lower_expr(&mut self, expr: &'a Expr) -> VarId {
         let span = Span::from(expr.range());
         match expr {
@@ -1930,7 +1947,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             Expr::EllipsisLiteral(_) => self.emit_const(ConstLiteral::Ellipsis, span),
             Expr::List(l) => {
-                let elems = l.elts.iter().map(|e| self.lower_expr(e)).collect();
+                let elems = self.lower_display_elems(&l.elts);
                 let dst = self.fresh_var(None);
                 self.record_starred(dst, &l.elts);
                 self.emit(
@@ -1944,7 +1961,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 dst
             }
             Expr::Tuple(t) => {
-                let elems = t.elts.iter().map(|e| self.lower_expr(e)).collect();
+                let elems = self.lower_display_elems(&t.elts);
                 let dst = self.fresh_var(None);
                 self.record_starred(dst, &t.elts);
                 self.emit(
@@ -1958,7 +1975,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 dst
             }
             Expr::Set(s) => {
-                let elems = s.elts.iter().map(|e| self.lower_expr(e)).collect();
+                let elems = self.lower_display_elems(&s.elts);
                 let dst = self.fresh_var(None);
                 self.record_starred(dst, &s.elts);
                 self.emit(
