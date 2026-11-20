@@ -230,6 +230,23 @@ const SNIFF_MORE: &str = "from pkg.sniff import Sniffer\n\n\nclass Wider(Sniffer
 const SNIFF_MORE_GROWING: &str = "from pkg.sniff import Sniffer\n\n\nclass Wider(Sniffer):\n    def widen(self, d):\n        self.preferred.append(d)\n";
 const SNIFF_USER: &str = "from pkg.sniff import Sniffer\n\n\ndef guess(s: Sniffer, rows):\n    for row in rows:\n        s.preferred.index(row)\n";
 
+// `MUT110` (default on): read-only parameters handed to helpers in other modules. Helpers start
+// and stop changing their parameter in place (`append`, item assignment, `sort`, `reverse`), one
+// call below the caller and two (a chain over three modules, whose end moves between functions),
+// and a package re-exports a helper.
+const RO_HELPERS: &str =
+    "def push(items, x):\n    return x\n\n\ndef put(table, key):\n    return key\n";
+const RO_HELPERS_MUTATING: &str =
+    "def push(items, x):\n    items.append(x)\n\n\ndef put(table, key):\n    table[key] = 1\n";
+const RO_CALLERS: &str = "from collections.abc import Mapping, Sequence\n\nfrom pkg.ro.helpers import push, put\n\n\ndef add(items: Sequence[int]) -> None:\n    push(items, 1)\n\n\ndef store(table: Mapping[str, int]) -> None:\n    put(table, \"k\")\n";
+const RO_LOW: &str = "def sort_values(values):\n    return sorted(values)\n\n\ndef _reset(values):\n    values[0] = 0\n";
+const RO_MID: &str =
+    "from pkg.ro.low import sort_values\n\n\ndef relay(values):\n    sort_values(values)\n";
+const RO_STATS: &str = "from collections.abc import Sequence\n\nfrom pkg.ro.mid import relay\n\n\ndef median(values: Sequence[float]) -> float:\n    relay(values)\n    return values[len(values) // 2]\n";
+const RO_INIT: &str = "from pkg.ro.impl import scale\n";
+const RO_IMPL: &str = "def scale(values):\n    return [v * 2 for v in values]\n\n\ndef scale_in_place(values):\n    values[0] = 0\n";
+const RO_PLOT: &str = "from collections.abc import Sequence\n\nfrom pkg.ro import scale\n\n\ndef plot(values: Sequence[float]) -> None:\n    scale(values)\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -270,6 +287,14 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/frozen/model.py", FROZEN_MODEL),
         ("pkg/frozen/helpers.py", FROZEN_HELPERS),
         ("pkg/frozen/configure.py", CONFIGURE),
+        ("pkg/ro/__init__.py", RO_INIT),
+        ("pkg/ro/helpers.py", RO_HELPERS),
+        ("pkg/ro/callers.py", RO_CALLERS),
+        ("pkg/ro/low.py", RO_LOW),
+        ("pkg/ro/mid.py", RO_MID),
+        ("pkg/ro/stats.py", RO_STATS),
+        ("pkg/ro/impl.py", RO_IMPL),
+        ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
         ("pkg/ledger.py", LEDGER),
@@ -373,16 +398,47 @@ fn save(rel: &'static str, text: &str) -> Action {
 
 /// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
 /// comes from a decorator in another module, and the in-place change from a helper in a third.
+/// The helper then moves the change of the field to a function of its own and back while its
+/// summary stays the same: the call chain of the report ends at the first function whose body
+/// changes the field (`heki_rules::ChainFacts`, as in [`steps_mut110`], for a slot of the
+/// argument).
 fn steps_mut108() -> Vec<Step> {
     let transform = RECORDS.replace(
         "@dataclass_transform()",
         "@dataclass_transform(frozen_default=True)",
     );
     let frozen = FROZEN_MODEL.replace("@dataclass\n", "@dataclass(frozen=True)\n");
+    let trimming = |body: &str| {
+        format!(
+            "{}\n\ndef _trim(entry):\n    entry.names[1:] = []\n",
+            FROZEN_HELPERS.replace("    entry.names.clear()\n", body)
+        )
+    };
     vec![
         Step::new(
             "a decorator in another module becomes a frozen dataclass transform",
             vec![Action::Save("pkg/frozen/records.py", transform)],
+        )
+        .present(&[("pkg/frozen/configure.py", "MUT108")]),
+        Step::new(
+            "the helper also changes the field through a function of its own",
+            vec![Action::Save(
+                "pkg/frozen/helpers.py",
+                trimming("    _trim(entry)\n    entry.names[0] = \"\"\n"),
+            )],
+        )
+        .present(&[("pkg/frozen/configure.py", "MUT108")]),
+        Step::new(
+            "the helper changes the field only through that function: a second hop",
+            vec![Action::Save(
+                "pkg/frozen/helpers.py",
+                trimming("    _trim(entry)\n"),
+            )],
+        )
+        .present(&[("pkg/frozen/configure.py", "MUT108")]),
+        Step::new(
+            "the helper clears the field itself again",
+            vec![save("pkg/frozen/helpers.py", FROZEN_HELPERS)],
         )
         .present(&[("pkg/frozen/configure.py", "MUT108")]),
         Step::new(
@@ -575,10 +631,159 @@ fn steps_small_displays() -> Vec<Step> {
     ]
 }
 
-/// Reserved for `MUT110` (`Sequence` / `Mapping` / `ReadOnly` parameters changed in place by
-/// helpers, default-on), which lands next; its steps go here.
+/// `MUT110` (default on): a `Sequence` / `Mapping` parameter handed to a helper in another
+/// module that changes it in place. What the helper changes is in its summary, how its
+/// parameter is annotated in its declarations (`FunctionDecl::readonly_params` /
+/// `mutable_params`), and the call chain of a report walks the own summaries and calls of the
+/// functions in other modules down to the first one whose body makes the change
+/// (`heki_rules::ChainFacts`): a helper that moves the change to or from a function it calls
+/// keeps its summary but changes the chain. The callers' annotations change in their own file
+/// only (Early Cutoff); a helper is also reached through a package re-export.
 fn steps_mut110() -> Vec<Step> {
-    Vec::new()
+    let callers_mutable = RO_CALLERS
+        .replace("items: Sequence[int]", "items: list[int]")
+        .replace("table: Mapping[str, int]", "table: dict[str, int]");
+    let helpers_mutable = RO_HELPERS_MUTATING
+        .replace(
+            "def push(items, x):",
+            "def push(items: list[int], x: int) -> None:",
+        )
+        .replace(
+            "def put(table, key):",
+            "def put(table: dict[str, int], key: str) -> None:",
+        );
+    let low = |body: &str| RO_LOW.replace("    return sorted(values)\n", body);
+    let low_resetting = low("    _reset(values)\n    values[-1] = 0\n");
+    let mid_readonly = format!(
+        "from collections.abc import Sequence\n\n{}",
+        RO_MID.replace("def relay(values):", "def relay(values: Sequence[float]):")
+    );
+    let mid_commented = format!("# relays\n{RO_MID}");
+    let impl_changing = RO_IMPL.replace(
+        "    return [v * 2 for v in values]\n",
+        "    values.reverse()\n",
+    );
+    vec![
+        Step::new(
+            "a helper in another module starts changing its parameters in place",
+            vec![save("pkg/ro/helpers.py", RO_HELPERS_MUTATING)],
+        )
+        .present(&[("pkg/ro/callers.py", "MUT110")]),
+        Step::new(
+            "the callers' parameters are annotated mutable",
+            vec![Action::Save("pkg/ro/callers.py", callers_mutable)],
+        )
+        .absent(&[("pkg/ro/callers.py", "MUT110")])
+        .cutoff(),
+        Step::new(
+            "the callers' parameters are read-only again",
+            vec![save("pkg/ro/callers.py", RO_CALLERS)],
+        )
+        .present(&[("pkg/ro/callers.py", "MUT110")])
+        .cutoff(),
+        Step::new(
+            "the helper's parameters are annotated mutable: the type checker reports the arguments",
+            vec![Action::Save("pkg/ro/helpers.py", helpers_mutable)],
+        )
+        .absent(&[("pkg/ro/callers.py", "MUT110")]),
+        Step::new(
+            "the helper's parameters are unannotated again",
+            vec![save("pkg/ro/helpers.py", RO_HELPERS_MUTATING)],
+        )
+        .present(&[("pkg/ro/callers.py", "MUT110")]),
+        Step::new(
+            "the helper stops changing its parameters",
+            vec![save("pkg/ro/helpers.py", RO_HELPERS)],
+        )
+        .absent(&[("pkg/ro/callers.py", "MUT110")]),
+        Step::new(
+            "a helper two modules below the caller starts sorting its parameter in place",
+            vec![Action::Save("pkg/ro/low.py", low("    values.sort()\n"))],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "a comment above the call in the middle module moves the chain's second hop",
+            vec![Action::Save("pkg/ro/mid.py", mid_commented.clone())],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "the middle helper also changes the parameter itself: the chain ends there",
+            vec![save(
+                "pkg/ro/mid.py",
+                &format!("{mid_commented}    values[0] = 0\n"),
+            )],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "the middle helper only hands the parameter on again",
+            vec![Action::Save("pkg/ro/mid.py", mid_commented)],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "the helper two modules below also hands the parameter to a function of its own",
+            vec![Action::Save("pkg/ro/low.py", low_resetting.clone())],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "the helper two modules below changes it only through that function: a third hop",
+            vec![Action::Save("pkg/ro/low.py", low("    _reset(values)\n"))],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "the helper two modules below changes the parameter itself again",
+            vec![Action::Save("pkg/ro/low.py", low_resetting.clone())],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "a comment above the helper two modules below, whose positions no chain shows",
+            vec![save(
+                "pkg/ro/low.py",
+                &format!("# helpers\n{low_resetting}"),
+            )],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")])
+        .cutoff(),
+        Step::new(
+            "the middle helper's parameter is annotated read-only: the report moves there",
+            vec![Action::Save("pkg/ro/mid.py", mid_readonly)],
+        )
+        .present(&[("pkg/ro/mid.py", "MUT110")])
+        .absent(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "the middle helper's parameter is unannotated again",
+            vec![save("pkg/ro/mid.py", RO_MID)],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")])
+        .absent(&[("pkg/ro/mid.py", "MUT110")]),
+        Step::new(
+            "the helper two modules below stops changing the parameter",
+            vec![save("pkg/ro/low.py", RO_LOW)],
+        )
+        .absent(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "a function a package re-exports starts changing its parameter in place",
+            vec![Action::Save("pkg/ro/impl.py", impl_changing)],
+        )
+        .present(&[("pkg/plot.py", "MUT110")]),
+        Step::new(
+            "the re-exported function copies again",
+            vec![save("pkg/ro/impl.py", RO_IMPL)],
+        )
+        .absent(&[("pkg/plot.py", "MUT110")]),
+        Step::new(
+            "the package re-exports a function that changes its parameter under the same name",
+            vec![save(
+                "pkg/ro/__init__.py",
+                "from pkg.ro.impl import scale_in_place as scale\n",
+            )],
+        )
+        .present(&[("pkg/plot.py", "MUT110")]),
+        Step::new(
+            "the package re-exports the copying function again",
+            vec![save("pkg/ro/__init__.py", RO_INIT)],
+        )
+        .absent(&[("pkg/plot.py", "MUT110")]),
+    ]
 }
 
 /// `MUT202` return flow and `MUT109`: facts of a function in another module that a caller's
@@ -729,7 +934,7 @@ fn steps() -> Vec<Step> {
         )
         .absent(&[("pkg/reader.py", "EFF101")]),
     ];
-    // 4. `MUT108`, then the place reserved for `MUT110`, then where bodies run.
+    // 4. `MUT108`, `MUT110`, then where bodies run.
     steps.extend(steps_mut108());
     steps.extend(steps_mut110());
     steps.extend(steps_body_runs());
