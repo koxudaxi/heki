@@ -7,8 +7,8 @@
 //! Edits are offered for `Safe` candidates only ([`OptCandidate::fix`]).
 
 use crate::edits::{
-    ends_statement, indentation, is_identifier, is_plain_assign, line_start, slice, squash,
-    starts_statement, strip_token, trim_element,
+    ends_statement, header_colon_follows, indentation, is_identifier, is_plain_assign, line_start,
+    slice, squash, starts_statement, strip_token, trim_element,
 };
 use crate::interpreter::{Analysis, BuiltinScope, FnCtx, UseSite};
 use crate::liveness::Liveness;
@@ -22,6 +22,7 @@ use heki_ir::{
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 
 use BuiltinKind::{Bytes, Dict, List, Set, Str, Tuple};
 use ObligationKind as K;
@@ -286,15 +287,16 @@ impl<'a> ModuleCtx<'a> {
         slice(self.source, span.start, span.end)
     }
 
-    /// A name not used anywhere in the module.
-    fn fresh_name(&self, base: &str) -> String {
+    /// A name not used anywhere in the module nor `taken` by another edit of the function.
+    fn fresh_name(&self, base: &str, taken: &FxHashSet<String>) -> String {
         let base = if is_identifier(base) { base } else { "hoisted" };
-        if !self.used_names.contains(base) {
+        let free = |n: &str| !self.used_names.contains(n) && !taken.contains(n);
+        if free(base) {
             return base.to_owned();
         }
         (1u64..)
             .map(|i| format!("{base}_{i}"))
-            .find(|n| !self.used_names.contains(n))
+            .find(|n| free(n))
             .expect("a module uses finitely many names")
     }
 }
@@ -334,6 +336,7 @@ pub fn analyze_module(
             m: &m,
             ck: &ck,
             ix: &ix,
+            hoisted_names: RefCell::new(FxHashSet::default()),
         };
         for site in &sites {
             if let Some(c) = rules.evaluate(site) {
@@ -684,6 +687,9 @@ struct Rules<'a, 'c> {
     ck: &'c Checker<'a, 'c>,
     /// The shared size and lifetime facts (`heki_ir::FnIndex`): profitability only.
     ix: &'c FnIndex<'a>,
+    /// Names the function's proven hoists bind: two fixes applied in one pass must not bind
+    /// the same name.
+    hoisted_names: RefCell<FxHashSet<String>>,
 }
 
 fn established(evidence: &str) -> ObligationStatus {
@@ -756,6 +762,23 @@ impl<'a, 'c> Rules<'a, 'c> {
         vec![self.ck.a1_hazard_free(), self.ck.converged()]
     }
 
+    fn a1_blocks(&self) -> bool {
+        !self.f().a1_hazards.is_empty() && !self.ck.disabled.contains(&K::A1HazardFree)
+    }
+
+    /// Every obligation is established: the candidate's edits will be offered.
+    fn proven(&self, obs: &[ProofObligation]) -> bool {
+        SafetyVerdict::evaluate(obs.to_vec(), self.a1_blocks()).tier == SafetyTier::Safe
+    }
+
+    /// A fresh name for a value a proven hoist binds, distinct from the function's other ones.
+    fn hoisted_name(&self, base: &str) -> String {
+        let mut taken = self.hoisted_names.borrow_mut();
+        let name = self.m.fresh_name(base, &taken);
+        taken.insert(name.clone());
+        name
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn candidate(
         &self,
@@ -768,7 +791,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         cost_evidence: Option<String>,
         edits: Vec<TextEdit>,
     ) -> OptCandidate {
-        let a1 = !self.f().a1_hazards.is_empty() && !self.ck.disabled.contains(&K::A1HazardFree);
+        let a1 = self.a1_blocks();
         OptCandidate {
             rule,
             function: self.f().qualname.clone(),
@@ -1429,10 +1452,20 @@ impl<'a, 'c> Rules<'a, 'c> {
             .map(|(_, _, make_iter)| make_iter.span)
     }
 
-    /// Line start and indentation of the `for` statement of `lp`.
+    /// Line start and indentation of the `for` statement of `lp`. A comprehension's `for`
+    /// clause is not a statement: a generator expression, a lambda, and (before 3.12) a
+    /// comprehension are scopes named `<...>`, and an inlined comprehension's iterable is
+    /// followed by `if`, `for`, or a closing bracket where a statement's header ends with `:`.
     fn for_stmt(&self, lp: &NaturalLoop) -> Option<(u32, String)> {
+        if !is_identifier(&self.f().name) {
+            return None;
+        }
         let first = self.f().block(lp.header).insts.first()?;
-        if !matches!(first.kind, InstKind::IterNext { .. }) {
+        let InstKind::IterNext { iter, .. } = first.kind else {
+            return None;
+        };
+        let (_, _, make_iter) = self.cx().def_inst(iter)?;
+        if !header_colon_follows(self.m.source, make_iter.span.end) {
             return None;
         }
         let ls = line_start(self.m.source, first.span.start);
@@ -1445,26 +1478,28 @@ impl<'a, 'c> Rules<'a, 'c> {
     }
 
     /// Hoist `<name> = <expr>` before the loop and replace `replace` with `<name>`.
+    /// The name is fresh (`base`, or `base_1`, ...): `None` when the loop is no `for`
+    /// statement.
     fn hoist_edits(
         &self,
         lp: &NaturalLoop,
-        name: &str,
+        base: &str,
         expr: &str,
         replace: Span,
-    ) -> Vec<TextEdit> {
-        let Some((ls, indent)) = self.for_stmt(lp) else {
-            return Vec::new();
-        };
-        vec![
+    ) -> Option<(String, Vec<TextEdit>)> {
+        let (ls, indent) = self.for_stmt(lp)?;
+        let name = self.hoisted_name(base);
+        let edits = vec![
             TextEdit {
                 span: Span { start: ls, end: ls },
                 replacement: format!("{indent}{name} = {expr}\n"),
             },
             TextEdit {
                 span: replace,
-                replacement: name.to_owned(),
+                replacement: name.clone(),
             },
-        ]
+        ];
+        Some((name, edits))
     }
 
     /// `e in <name>` with `<name>` as the last token of the compare: its span. A comparison
@@ -1543,11 +1578,13 @@ impl<'a, 'c> Rules<'a, 'c> {
             })
             .or_else(|| loop_bound_note(lp));
         let mut edits = Vec::new();
-        if f.var_name(lst).is_some_and(is_identifier)
+        if self.proven(&obs)
+            && f.var_name(lst).is_some_and(is_identifier)
             && let Some(rspan) = self.container_name_span(cmp.span, &name)
+            && let Some((_, e)) =
+                self.hoist_edits(lp, &format!("{name}_set"), &format!("set({name})"), rspan)
         {
-            let h = self.m.fresh_name(&format!("{name}_set"));
-            edits = self.hoist_edits(lp, &h, &format!("set({name})"), rspan);
+            edits = e;
         }
         Some(self.candidate(
             OptRule::Opt110,
@@ -1692,14 +1729,17 @@ impl<'a, 'c> Rules<'a, 'c> {
             (_, None) => Some("the container is empty".into()),
         }
         .or_else(|| loop_bound_note(lp));
-        let edits = self.m.text(call.span).map_or_else(Vec::new, |text| {
-            let base = match args {
-                [a] => format!("{}_{callee}", self.var(*a)),
-                _ => format!("hoisted_{callee}"),
-            };
-            let h = self.m.fresh_name(&base);
-            self.hoist_edits(lp, &h, text, call.span)
-        });
+        let mut edits = Vec::new();
+        let base = match args {
+            [a] => format!("{}_{callee}", self.var(*a)),
+            _ => format!("hoisted_{callee}"),
+        };
+        if self.proven(&obs)
+            && let Some(text) = self.m.text(call.span)
+            && let Some((_, e)) = self.hoist_edits(lp, &base, text, call.span)
+        {
+            edits = e;
+        }
         Some(self.candidate(
             OptRule::Opt130,
             cmp.span,
@@ -1821,6 +1861,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let mut edits = Vec::new();
         let probe_name = f.var_name(probe).filter(|n| is_identifier(n));
         if let (Some(pn), Some(rspan)) = (probe_name, self.container_name_span(cmp.span, &name))
+            && self.proven(&obs)
             && f.var_name(seen).is_some_and(is_identifier)
             && self.cx().uses(app.kind.dst()?).is_empty()
             && ends_statement(self.m.source, app.span.end)
@@ -1828,19 +1869,17 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .m
                 .text(app.span)
                 .is_some_and(|t| squash(t) == format!("{name}.append({pn})"))
+            && let Some((h, mut e)) =
+                self.hoist_edits(lp, &format!("{name}_set"), &format!("set({name})"), rspan)
         {
-            let h = self.m.fresh_name(&format!("{name}_set"));
-            let mut e = self.hoist_edits(lp, &h, &format!("set({name})"), rspan);
-            if !e.is_empty() {
-                e.push(TextEdit {
-                    span: Span {
-                        start: app.span.end,
-                        end: app.span.end,
-                    },
-                    replacement: format!("; {h}.add({pn})"),
-                });
-                edits = e;
-            }
+            e.push(TextEdit {
+                span: Span {
+                    start: app.span.end,
+                    end: app.span.end,
+                },
+                replacement: format!("; {h}.add({pn})"),
+            });
+            edits = e;
         }
         Some(self.candidate(
             OptRule::Opt111,

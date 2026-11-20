@@ -597,6 +597,32 @@ def chained_membership(n):
     return out
 
 
+def comprehension_clause_on_its_own_line(n):
+    """The `for` clause starts a line, but it is inside the brackets: no statement to hoist
+    before."""
+    allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    return [p
+            for p in range(n) if p in allowed]
+
+
+def generator_clause_on_its_own_line(n):
+    return sum(1
+               for p in "abcdefghijkl"[:n]
+               if p in set("abcdefghi"))
+
+
+def two_hoists_in_nested_loops(n):
+    """Both rebuilds are hoisted; the inner set must not take the outer one's name."""
+    outer = inner = 0
+    for i in range(n):
+        if "a" in set("abcdefghi"):
+            outer += 1
+        for j in range(n):
+            if "a" in set("jklmnopqr"):
+                inner += 1
+    return outer, inner
+
+
 def run(fn, *args):
     try:
         return repr(fn(*args))
@@ -668,6 +694,9 @@ def main() -> int:
             run(rebuild_in_a_bounded_loop, n),
             run(rebuild_tuple_of_a_tuple, n),
             run(chained_membership, n),
+            run(comprehension_clause_on_its_own_line, n),
+            run(generator_clause_on_its_own_line, n),
+            run(two_hoists_in_nested_loops, n),
         ]
     print("\n".join(lines))
     return 0

@@ -744,6 +744,28 @@ const HOIST: &[Expect] = &[
     ("rebuild_tuple_of_a_tuple", &[]),
     // A comparison chain shares one span: no edit can name the right operand.
     ("chained_membership", &[("OPT110", V::Hand)]),
+    // A comprehension's or generator expression's `for` clause is no statement to hoist before.
+    (
+        "comprehension_clause_on_its_own_line",
+        &[("OPT110", V::Hand)],
+    ),
+    (
+        "generator_clause_on_its_own_line.<locals>.<genexpr>",
+        &[("OPT130", V::Hand)],
+    ),
+    (
+        "two_hoists_in_nested_loops",
+        &[
+            (
+                "OPT130",
+                V::Fix(&["    hoisted = set(\"abcdefghi\")\n", "hoisted"]),
+            ),
+            (
+                "OPT130",
+                V::Fix(&["        hoisted_1 = set(\"jklmnopqr\")\n", "hoisted_1"]),
+            ),
+        ],
+    ),
 ];
 
 #[test]

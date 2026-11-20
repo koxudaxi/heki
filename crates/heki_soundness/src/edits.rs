@@ -74,6 +74,21 @@ pub(crate) fn trim_element(text: &str) -> &str {
     e.strip_suffix(',').map_or(e, str::trim_end)
 }
 
+/// Only blanks, comments, line continuations, and closing parentheses separate `pos` from a
+/// `:`: `pos` ends the expression of a compound statement's header (`for x in (xs):`).
+pub(crate) fn header_colon_follows(source: &str, pos: u32) -> bool {
+    let Some(mut rest) = source.get(pos as usize..) else {
+        return false;
+    };
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '\\' || c == ')');
+        match rest.strip_prefix('#') {
+            Some(comment) => rest = comment.split_once('\n').map_or("", |(_, after)| after),
+            None => return rest.starts_with(':'),
+        }
+    }
+}
+
 /// `name = ` exactly: the text between an assignment target and its value.
 pub(crate) fn is_plain_assign(between: &str) -> bool {
     between.trim() == "="
@@ -107,6 +122,10 @@ mod tests {
         assert_eq!(indentation(src, line_start(src, x)), "    ");
         assert!(is_identifier("acc_1") && !is_identifier("1x") && !is_identifier("a.b"));
         assert_eq!(squash("{ k : v ,\n }"), "{k:v,}");
+        assert!(header_colon_follows("for x in (xs  # c\n    ) :", 12));
+        assert!(!header_colon_follows("[x for x in xs if x]", 14));
+        assert!(!header_colon_follows("[x for x in xs  # c\n]", 14));
+        assert!(!header_colon_follows("x", 5));
         assert_eq!(trim_element(" v, "), "v");
         assert_eq!(trim_element("\n  v  # c\n    "), "v  # c\n    ");
         assert_eq!(trim_element("v \\\n"), "v \\\n");
