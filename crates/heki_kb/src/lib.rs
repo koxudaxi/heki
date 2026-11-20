@@ -200,6 +200,13 @@ pub struct EcosystemEntry {
     /// (SQLAlchemy's `AsyncSession.run_sync(fn)`): the database I/O through the facade is
     /// awaited for it, its other blocking calls block.
     pub sync_facade_arg: Option<u8>,
+    /// The call waits until its receiver, a future, is done: on one known to be done (under
+    /// `if f.done():`, or after `await asyncio.wrap_future(f)`), it returns at once and does
+    /// not block (`concurrent.futures.Future.result`).
+    pub waits_until_done: bool,
+    /// Awaiting the object the call returns completes only once the future passed at this
+    /// position is done (`asyncio.wrap_future(f)`).
+    pub done_when_awaited: Option<u8>,
 }
 
 /// One case of an entry (`EcosystemEntry::cases`): when the argument at position `arg` (the
@@ -1779,10 +1786,25 @@ mod tests {
                     "threading.Event.wait",
                     "threading.Barrier.wait",
                     "threading.Thread.join",
+                ]),
+                waits(vec![zero(0, "timeout")]),
+            ),
+            (
+                s(&[
                     "concurrent.futures.Future.result",
                     "concurrent.futures.Future.exception",
                 ]),
-                waits(vec![zero(0, "timeout")]),
+                EcosystemEntry {
+                    waits_until_done: true,
+                    ..waits(vec![zero(0, "timeout")])
+                },
+            ),
+            (
+                s(&["asyncio.wrap_future"]),
+                EcosystemEntry {
+                    done_when_awaited: Some(0),
+                    ..entry(&[])
+                },
             ),
             (
                 s(&["threading.Condition.wait_for", "concurrent.futures.wait"]),

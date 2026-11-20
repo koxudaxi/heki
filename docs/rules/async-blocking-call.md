@@ -18,7 +18,10 @@ waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.jo
 `queue.Queue.get()` / `put()`, `Future.result()`, `concurrent.futures.wait()`; a zero timeout or
 `blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
 on its own flag parameter and its caller passes `False`: `close(wait=False)` over
-`shutdown(wait=wait)`). A function SQLAlchemy's
+`shutdown(wait=wait)`; so does `result()` / `exception()` of a `concurrent.futures.Future` known
+to be done: under `if f.done():` (also after `if not f.done(): return`, a `while not f.done():`
+poll, or with `and`), or once `await asyncio.wrap_future(f)` has returned, on every path to the
+call). A function SQLAlchemy's
 `AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
 its database I/O through the session or connection it receives is awaited for it, its other
 blocking calls are reported. Where an argument decides what a library call does, a literal

@@ -600,10 +600,11 @@ pub struct InputGuard {
 pub struct EffectGuards {
     /// Tests of the function's inputs that every occurrence needs.
     pub inputs: BTreeSet<InputGuard>,
-    /// Lazy initialization: every occurrence runs only while an attribute of an object is
-    /// unset, and the function then sets it, so it runs at most once per object. The objects
-    /// come from the parameters in this mask (`0`: from none, such as a pooled connection or a
-    /// module global). `None`: some occurrence runs on every call.
+    /// Lazy initialization: every occurrence runs only while an attribute of an object (or a
+    /// module global) is unset, and the function then sets it, or in a
+    /// `functools.cached_property` getter, so it runs at most once per object. The objects come
+    /// from the parameters in this mask (`0`: from none, such as a pooled connection or a module
+    /// global). `None`: some occurrence runs on every call.
     pub once_per: Option<u64>,
 }
 
@@ -998,9 +999,10 @@ pub struct CallSite {
     pub guards: Vec<InputGuard>,
     /// The call runs inside a lazy initialization of the caller (`EffectGuards::once_per`).
     pub once_per: Option<u64>,
-    /// The loops around the call (bit `d - 1`: the one at depth `d`) in each iteration of which
-    /// a lazy initialization of the caller around the call is tested, on an object the loop does
-    /// not construct: across them, its effects run at most once (`EFF102` / `EFF103`).
+    /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations it
+    /// runs at most once (`EFF102` / `EFF103`): every way on from it leaves the loop, or a lazy
+    /// initialization of the caller around it is tested in each iteration, on an object the loop
+    /// does not construct, a module global, or a local variable the loop carries.
     pub once_loops: u64,
     /// How the callees run when an API runs them for the caller (`Runner`).
     pub runner: Runner,
@@ -1168,9 +1170,9 @@ pub struct SiteEffect {
     pub callee: Option<FuncKey>,
     /// The effect comes from an awaited / driven `async def` callee (its own body).
     pub callee_is_async: bool,
-    /// Lazy initialization: the loops around the call (bit `d - 1`: the one at depth `d`)
-    /// across whose iterations the effect runs at most once per object, and the objects stay
-    /// the same (`EFF102` / `EFF103`).
+    /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations the
+    /// effect runs at most once (`CallSite::once_loops`), also once per object where the objects
+    /// stay the same (`EFF102` / `EFF103`).
     pub once_loops: u64,
 }
 
