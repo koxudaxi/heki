@@ -860,8 +860,9 @@ pub struct FileSummary {
     /// Local (one-function) summaries before propagation.
     pub local_functions: FxHashMap<FuncKey, EffectSummary>,
     pub call_sites: Vec<CallSite>,
-    /// Declarations other modules need for name and receiver resolution.
-    pub decls: ModuleDecls,
+    /// Declarations other modules need for name and receiver resolution (shared with the
+    /// project declarations built from the index).
+    pub decls: Arc<ModuleDecls>,
     /// What summarizing the file read of the project declarations (completing its own
     /// declarations included): a change of any of these keys can change the summary. Recorded
     /// for the language server's index only (`summarize_project_with_reads`, the incremental
@@ -1094,24 +1095,24 @@ impl ProjectIndex {
 
     /// Every module's declarations, `.pyi` stubs first (a later `.py` sharing the module name
     /// replaces them).
-    fn preferred_decls(&self) -> Vec<ModuleDecls> {
-        let mut entries: Vec<(bool, ModuleDecls)> = self
+    fn preferred_decls(&self) -> Vec<Arc<ModuleDecls>> {
+        let mut entries: Vec<(bool, Arc<ModuleDecls>)> = self
             .files
             .values()
-            .map(|f| (is_stub(&f.path), f.decls.clone()))
+            .map(|f| (is_stub(&f.path), Arc::clone(&f.decls)))
             .collect();
         entries.sort_by_key(|(stub, _)| !*stub);
         entries.into_iter().map(|(_, d)| d).collect()
     }
 
     /// Preferred declarations currently indexed for `module_name` (`.py` over `.pyi`).
-    pub fn module_decls(&self, module_name: &str) -> Option<ModuleDecls> {
+    pub fn module_decls(&self, module_name: &str) -> Option<Arc<ModuleDecls>> {
         let mut stub = None;
         for f in self.files.values().filter(|f| f.module_name == module_name) {
             if !is_stub(&f.path) {
-                return Some(f.decls.clone());
+                return Some(Arc::clone(&f.decls));
             }
-            stub = Some(f.decls.clone());
+            stub = Some(Arc::clone(&f.decls));
         }
         stub
     }
@@ -1122,11 +1123,11 @@ impl ProjectIndex {
         input: &ModuleInput<'_>,
         kb: &EffectiveEcosystemKb,
     ) -> IncrementalUpdate {
-        let others: Vec<(bool, ModuleDecls)> = self
+        let others: Vec<(bool, Arc<ModuleDecls>)> = self
             .files
             .values()
             .filter(|f| f.path != input.path)
-            .map(|f| (is_stub(&f.path), f.decls.clone()))
+            .map(|f| (is_stub(&f.path), Arc::clone(&f.decls)))
             .collect();
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);

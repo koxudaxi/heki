@@ -28,6 +28,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Methods that mutate their receiver in place (section 2.4; shared by MUT101/201/202).
 pub const CONTAINER_MUTATORS: &[&str] = &[
@@ -69,7 +70,7 @@ pub(crate) fn summarize_module(
     input: &ModuleInput<'_>,
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
-    own: (ModuleDecls, DeclKeys),
+    own: (Arc<ModuleDecls>, DeclKeys),
     track: bool,
     contracts: Option<&dyn Contracts>,
 ) -> FileSummary {
