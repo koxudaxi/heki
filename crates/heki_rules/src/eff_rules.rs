@@ -18,7 +18,7 @@ use heki_effect::{
     Facts, FuncKey, ROOT_CAUSE_GROUP_THRESHOLD, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
     boundary_reports_in, group_by_root_cause,
 };
-use heki_ir::{InstKind, IrFunction, VarId};
+use heki_ir::{InstKind, IrFunction};
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,7 +27,6 @@ use std::sync::LazyLock;
 
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
-const DDL_PREFIXES: &[&str] = &["CREATE", "ALTER", "DROP", "PRAGMA"];
 /// `boundary_reports_in` only reports call sites of the files it is given.
 const REPORTS_OF_UNITS: &str = "boundary reports come from the checked files";
 
@@ -200,10 +199,6 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if !iteration && !anchors_call_site(&inst.kind) {
                     continue;
                 }
-                let args: &[VarId] = match &inst.kind {
-                    InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => args,
-                    _ => &[],
-                };
                 let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {
                     continue;
                 };
@@ -245,18 +240,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                             chain,
                         );
                 }
-                // Compared as bytes: the prefixes are ASCII, and slicing the constant could
-                // split a multi-byte character.
-                let ddl = args.first().and_then(|a| f.const_str(*a)).is_some_and(|q| {
-                    let q = q.trim_start().as_bytes();
-                    DDL_PREFIXES.iter().any(|p| {
-                        q.get(..p.len())
-                            .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
-                    })
-                });
                 if want103
                     && !migration_fn
-                    && !ddl
                     && let Some(chain) = per_iteration(ExecEffectKind::DbQuery)
                 {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();

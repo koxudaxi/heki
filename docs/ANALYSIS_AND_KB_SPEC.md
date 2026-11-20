@@ -443,9 +443,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
    - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
      dict named `requests` is not mistaken for the package (type and name resolution).
-   - **`EFF103`**: `for.iter` headers excluded; SQL literals that are DDL (`CREATE` / `ALTER` /
-     `DROP` / `PRAGMA`) and queries in migration functions excluded; the internals of ORM
-     libraries excluded.
+   - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
+     `executescript` call whose literal statement is DDL (`CREATE` / `ALTER` / `DROP` /
+     `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so helpers running DDL run
+     no query either; queries in migration functions excluded; the internals of ORM libraries
+     excluded.
    - **`DATA101`**: only `df = pd.concat([df, ...])` / `arr = np.vstack([arr, ...])` whose SSA
      `PhiNode` accumulates across the back edge (`LoopCarried`); one-off concatenation and padding
      in a loop are excluded.

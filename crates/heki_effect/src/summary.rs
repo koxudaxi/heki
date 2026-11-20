@@ -1970,13 +1970,16 @@ impl<'a> Extractor<'a> {
         if entry.excluded {
             return;
         }
-        // Stage 0-A filter: an awaited call never blocks the loop itself; loop-sensitive
-        // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103.
+        // Stage 0-A filters: an awaited call never blocks the loop itself; loop-sensitive
+        // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103. A schema
+        // or setting statement is no data query, though running it still blocks.
+        let ddl = runs_ddl(&symbol, args.first().and_then(|a| self.const_str(*a)));
         let effects: std::collections::BTreeSet<ExecEffectKind> = entry
             .effects
             .iter()
             .copied()
             .filter(|e| !(is_awaited && BLOCKING_EFFECTS.contains(e)))
+            .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
             .collect();
         if let Some(k) = entry.offloads_blocking_arg
             && let Some((p, None)) = args
@@ -2017,6 +2020,29 @@ impl<'a> Extractor<'a> {
             chain,
         );
     }
+}
+
+/// DB-API (PEP 249) methods whose first argument is the statement they run.
+const SQL_EXECUTORS: &[&str] = &["execute", "executemany", "executescript"];
+
+/// Leading keywords of statements that change a schema or a connection setting.
+const DDL_KEYWORDS: &[&str] = &["CREATE", "ALTER", "DROP", "PRAGMA"];
+
+/// Whether the call of `symbol` runs the literal SQL `statement` and that statement is DDL or a
+/// setting (`cur.execute("CREATE TABLE IF NOT EXISTS ...")`): its first word is a
+/// [`DDL_KEYWORDS`] keyword. Other calls' first arguments are no statements (a Redis key named
+/// `created_at`).
+fn runs_ddl(symbol: &str, statement: Option<String>) -> bool {
+    let executes = SQL_EXECUTORS.contains(&symbol.rsplit('.').next().unwrap_or(symbol));
+    executes
+        && statement.is_some_and(|q| {
+            let first = q
+                .trim_start()
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .next()
+                .unwrap_or_default();
+            DDL_KEYWORDS.iter().any(|k| first.eq_ignore_ascii_case(k))
+        })
 }
 
 /// One call instruction as [`Extractor::call`] sees it.
