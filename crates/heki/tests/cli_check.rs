@@ -274,3 +274,40 @@ fn sarif_columns_and_carets_after_non_ascii_text() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn file_names_with_backslashes_and_uri_delimiters_are_reported_as_they_are() {
+    let p = Project::new("odd_names");
+    let quadratic = "import time\n\n\nasync def h():\n    time.sleep(1)\n\n\ndef f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+    p.write("a\\b.py", quadratic).write("c#d.py", quadratic);
+    let (_, concise, _) = p.heki(&["--output-format", "concise"]);
+    let paths: Vec<&str> = concise
+        .lines()
+        .map(|l| l.split(':').next().unwrap())
+        .collect();
+    // On POSIX `\` is part of the name, not a separator.
+    assert_eq!(
+        paths,
+        ["a\\b.py", "a\\b.py", "c#d.py", "c#d.py"],
+        "{concise}"
+    );
+    let (_, sarif, _) = p.heki(&["--output-format", "sarif"]);
+    let v: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+    let uris: Vec<&str> = v["runs"][0]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(uris, ["a%5Cb.py", "a%5Cb.py", "c%23d.py", "c%23d.py"]);
+    let (_, diff, _) = p.heki(&["--diff", "a\\b.py"]);
+    assert!(
+        diff.starts_with("--- \"a/a\\\\b.py\"\n+++ \"b/a\\\\b.py\"\n"),
+        "{diff}"
+    );
+}

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
     BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, apply_fixes, baseline_counts,
-    baseline_key, render, unified_diff,
+    baseline_key, path_text, render, unified_diff,
 };
 use heki_effect::{analyze_project, analyze_project_with};
 use heki_profile::ProfileData;
@@ -151,9 +151,9 @@ pub(crate) fn shown_path(p: &Path) -> PathBuf {
         .unwrap_or_else(|| p.to_path_buf())
 }
 
-/// [`shown_path`] in `/` form.
+/// [`shown_path`] as reports write it.
 fn shown_text(p: &Path) -> String {
-    shown_path(p).to_string_lossy().replace('\\', "/")
+    path_text(&shown_path(p))
 }
 
 /// Apply fixes in memory until nothing more applies. Returns the number of applied fixes,

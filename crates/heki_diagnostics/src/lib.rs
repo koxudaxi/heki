@@ -111,8 +111,30 @@ fn severity_word(s: Severity) -> &'static str {
     }
 }
 
-fn display_path(p: &Path) -> String {
-    p.to_string_lossy().replace('\\', "/")
+/// How reports write a path: with `/` separators on every platform. Only Windows separates
+/// with `\\`; elsewhere it is a character of the file name and stays.
+pub fn path_text(p: &Path) -> String {
+    let text = p.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '\\' {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
+    }
+}
+
+/// `path` as a relative URI reference (SARIF `artifactLocation.uri`): every byte but the
+/// unreserved characters and `/` percent-encoded, so `#`, `?`, `%`, and spaces stay part of
+/// the path.
+fn path_uri(path: &Path) -> String {
+    let mut out = String::new();
+    for b in path_text(path).bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
 }
 
 /// Render diagnostics. `source_line(path, line)` returns the 1-based source line for `full`.
@@ -146,7 +168,7 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
         let _ = writeln!(
             out,
             "{}:{}:{}: {} ({}) [{}] {}",
-            display_path(&d.path),
+            path_text(&d.path),
             d.line,
             d.column,
             d.rule_code,
@@ -164,7 +186,7 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
             let _ = writeln!(
                 out,
                 "  = related: {}:{}:{}: {}",
-                display_path(&r.path),
+                path_text(&r.path),
                 r.line,
                 r.column,
                 r.message
@@ -251,7 +273,7 @@ fn render_concise(diags: &[Diagnostic]) -> String {
         let _ = writeln!(
             out,
             "{}:{}:{}: {} {}",
-            display_path(&d.path),
+            path_text(&d.path),
             d.line,
             d.column,
             d.rule_code,
@@ -280,7 +302,7 @@ fn render_github(diags: &[Diagnostic]) -> String {
             out,
             "::{} file={},line={},col={},title={}::{}",
             severity_word(d.severity),
-            gh_escape(&display_path(&d.path), true),
+            gh_escape(&path_text(&d.path), true),
             d.line,
             d.column,
             gh_escape(&format!("heki {}", d.rule_code), true),
@@ -308,7 +330,7 @@ pub fn sarif(
         });
         json!({
             "physicalLocation": {
-                "artifactLocation": { "uri": display_path(path) },
+                "artifactLocation": { "uri": path_uri(path) },
                 "region": { "startLine": line, "startColumn": column }
             }
         })
@@ -334,7 +356,7 @@ pub fn sarif(
                 "locations": [location(&d.path, d.line, d.column)],
                 "relatedLocations": related,
                 "partialFingerprints": {
-                    "hekiBaselineKey/v1": format!("{}|{}|{}|{}", display_path(&d.path), d.qualname, d.rule_code, d.target)
+                    "hekiBaselineKey/v1": format!("{}|{}|{}|{}", path_text(&d.path), d.qualname, d.rule_code, d.target)
                 }
             })
         })
@@ -735,7 +757,7 @@ mod tests {
         two_sites.sites = 2;
         let diags = [d.clone(), d, two_sites];
         let counts = |unit| {
-            baseline_counts(&diags, &|p| display_path(p), unit)
+            baseline_counts(&diags, &|p| path_text(p), unit)
                 .values()
                 .copied()
                 .collect::<Vec<_>>()

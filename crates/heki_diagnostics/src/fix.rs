@@ -131,6 +131,38 @@ fn push_line(out: &mut String, sign: char, line: &str) {
     }
 }
 
+/// `prefix` + `path` as a diff header names a file: quoted with C escapes, as `git diff`
+/// writes it, when the name holds a `"`, a `\\`, or a control character, so a patch tool reads
+/// the name it holds.
+fn header_path(prefix: &str, path: &str) -> String {
+    let name = format!("{prefix}{path}");
+    if !name
+        .chars()
+        .any(|c| c == '"' || c == '\\' || c.is_control())
+    {
+        return name;
+    }
+    let mut out = String::from('"');
+    for c in name.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => {
+                let mut buf = [0; 4];
+                for b in c.encode_utf8(&mut buf).bytes() {
+                    let _ = write!(out, "\\{b:03o}");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Unified diff (`--- a/<path>` / `+++ b/<path>`, 3 lines of context); empty if equal.
 pub fn unified_diff(path: &str, old: &str, new: &str) -> String {
     if old == new {
@@ -146,7 +178,11 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> String {
         .filter(|(_, o)| !matches!(o, Op::Equal(..)))
         .map(|(i, _)| i)
         .collect();
-    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+    let mut out = format!(
+        "--- {}\n+++ {}\n",
+        header_path("a/", path),
+        header_path("b/", path)
+    );
     let mut i = 0;
     while i < changed.len() {
         let start = changed[i].saturating_sub(CONTEXT);
@@ -239,5 +275,13 @@ mod tests {
         assert_eq!(ins, "--- a/m.py\n+++ b/m.py\n@@ -1,1 +1,2 @@\n+y\n x\n");
         let all = unified_diff("m.py", "", "z\n");
         assert_eq!(all, "--- a/m.py\n+++ b/m.py\n@@ -0,0 +1,1 @@\n+z\n");
+        // Names a patch tool would misread are quoted the way `git diff` quotes them.
+        let quoted = unified_diff("x\\\"y\tz\u{1}.py", "a\n", "b\n");
+        assert!(
+            quoted.starts_with(
+                "--- \"a/x\\\\\\\"y\\tz\\001.py\"\n+++ \"b/x\\\\\\\"y\\tz\\001.py\"\n"
+            ),
+            "{quoted}"
+        );
     }
 }
