@@ -1568,6 +1568,7 @@ fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             continue;
         };
         let ix = FnIndex::new(f, &input.ir.constants);
+        let grown = ix.grown_vars();
         let map = &mut class.attr_displays;
         for bb in &f.blocks {
             for (i, inst) in bb.insts.iter().enumerate() {
@@ -1585,7 +1586,7 @@ fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                         note_attr(map, attr, None);
                     }
                     InstKind::AttrLoad { dst, obj, attr }
-                        if selfs.contains(obj) && !ix.load_unchanged(*dst) =>
+                        if selfs.contains(obj) && grown.contains(dst) =>
                     {
                         note_attr(map, attr, None);
                     }
