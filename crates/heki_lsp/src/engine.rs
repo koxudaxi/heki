@@ -122,14 +122,17 @@ struct CheckReads {
 }
 
 impl CheckReads {
+    /// Every field of `keys` (destructured without `..`: a new kind of key does not compile
+    /// until it is kept here too).
     fn fields(keys: &DeclKeys) -> [&BTreeSet<String>; 5] {
-        [
-            &keys.modules,
-            &keys.subclasses,
-            &keys.property_names,
-            &keys.class_facts,
-            &keys.protocols,
-        ]
+        let DeclKeys {
+            modules,
+            subclasses,
+            property_names,
+            class_facts,
+            protocols,
+        } = keys;
+        [modules, subclasses, property_names, class_facts, protocols]
     }
 
     fn insert(&mut self, path: PathBuf, keys: &DeclKeys) {
