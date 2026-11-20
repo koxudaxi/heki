@@ -398,3 +398,10 @@ fn many_sequential_branches_do_not_exhaust_the_stack() {
     let (code, _, stderr) = p.check(&[]);
     assert_eq!(code, 0, "{stderr}");
 }
+
+#[test]
+fn a_length_cap_beyond_i64_is_no_cap() {
+    let src = "def f(xs):\n    while len(xs) <= 9223372036854775807:\n        break\n";
+    let ir = dump_ir("ir_huge_len_cap", src, "py315");
+    assert!(function(&ir, "f")["loops"][0].get("len_caps").is_none());
+}

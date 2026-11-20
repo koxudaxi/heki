@@ -801,7 +801,7 @@ impl<'a> FnIndex<'a> {
             }
             _ => return None,
         };
-        let n = self.const_int(bound)? + i64::from(inclusive);
+        let n = self.const_int(bound)?.checked_add(i64::from(inclusive))?;
         let limit = u32::try_from(n).ok().filter(|n| *n <= LEN_CAP_MAX)?;
         Some(LenCap { var, limit })
     }
