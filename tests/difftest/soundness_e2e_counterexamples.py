@@ -778,6 +778,28 @@ def old_rebuild_copy_with_argument(n):
     return hit
 
 
+# ------------------------------------------------------------------------------
+# OPT110: a bare annotation makes `set` a local name of the function
+# ------------------------------------------------------------------------------
+def cx_set_declared_without_value(n):
+    set: object
+    keys = list(range(9))
+    hit = None
+    for i in range(n):
+        hit = i in keys
+    return hit
+
+
+def old_set_declared_without_value(n):
+    set: object
+    keys = list(range(9))
+    hit = None
+    keys_set = set(keys)
+    for i in range(n):
+        hit = i in keys_set
+    return hit
+
+
 def run(fn, *args):
     del CALLS[:]
     try:
@@ -840,6 +862,7 @@ def main() -> int:
             lambda f: f((iter([1]),), [1, 1]),
         ),
         (cx_rebuild_copy_with_argument, old_rebuild_copy_with_argument, lambda f: f(0)),
+        (cx_set_declared_without_value, old_set_declared_without_value, lambda f: f(3)),
     ]
     lines = []
     for cx, old, call in pairs:

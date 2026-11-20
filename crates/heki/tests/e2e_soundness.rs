@@ -1137,6 +1137,15 @@ const COUNTEREXAMPLES: &[Expect] = &[
             ),
         )],
     ),
+    (
+        "cx_set_declared_without_value",
+        &[(
+            "OPT110",
+            V::Blocked(
+                "SideEffectFree(set): `set` is a local name of this function or an enclosing one",
+            ),
+        )],
+    ),
 ];
 
 #[test]
@@ -1152,7 +1161,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 35/35"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 36/36"));
 }
 
 // ======================================================================== module-level facts

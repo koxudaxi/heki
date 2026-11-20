@@ -271,7 +271,14 @@ impl<'a> ModuleCtx<'a> {
     /// not always name the functions around a class).
     fn binds_locally(&self, f: &IrFunction, name: &str) -> bool {
         self.local_names.iter().any(|(span, names)| {
-            span.start <= f.span.start && f.span.end <= span.end && names.contains(name)
+            let encloses = span.start <= f.span.start && f.span.end <= span.end;
+            // A bare annotation (`set: object`) makes the name local without a value the IR
+            // records.
+            encloses
+                && (names.contains(name)
+                    || self
+                        .text(*span)
+                        .is_some_and(|t| annotated_declarations(t, name).next().is_some()))
         })
     }
 
