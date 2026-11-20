@@ -659,13 +659,34 @@ impl Allowance {
 /// A private helper delegates responsibility to its project callers: the call sites that run
 /// its own body (`EffectSummary::body_facts`) and so receive its writes and reads. A private
 /// `async def` only scheduled (never awaited) or a private generator whose generators all
-/// escape keeps its reports.
+/// escape keeps its reports. So does a private function that only private functions of its own
+/// recursion call (`_walk` calling itself, exposed as a callback): going up through private
+/// callers never reaches a function that reports, so the access would be reported nowhere.
 fn delegates(cx: &CheckContext<'_>, sites: &SitesByCaller<'_>, key: &FuncKey) -> bool {
-    is_private(&key.qualname)
-        && cx
-            .index
-            .summary(key)
-            .is_some_and(|s| !callers_of(cx, sites, key, s.body_facts()).is_empty())
+    if !is_private(&key.qualname) {
+        return false;
+    }
+    let callers_running = |func: &FuncKey| {
+        cx.index
+            .summary(func)
+            .map_or_else(Vec::new, |s| callers_of(cx, sites, func, s.body_facts()))
+    };
+    let mut queue = vec![key.clone()];
+    let mut seen: FxHashSet<FuncKey> = FxHashSet::from_iter([key.clone()]);
+    while let Some(func) = queue.pop() {
+        for c in callers_running(&func) {
+            let leaves_the_recursion = !is_private(&c.caller.qualname)
+                || c.into != Facts::Body
+                || callers_running(c.caller).is_empty();
+            if leaves_the_recursion {
+                return true;
+            }
+            if seen.insert(c.caller.clone()) {
+                queue.push(c.caller.clone());
+            }
+        }
+    }
+    false
 }
 
 /// One project call site that runs the facts `facts` of a function: the caller, the site and
@@ -1146,16 +1167,17 @@ pub(crate) fn mut201(
                         } else {
                             chain.len() - 1
                         };
-                        // Report at the outermost function: helpers in between must be private
-                        // (they delegate) unless they do not hold the write themselves (a function
-                        // iterating a generator it is handed runs the generator's writes without
-                        // knowing them), and a delegating function leaves it to its callers.
+                        // Report at the outermost function: helpers in between must delegate
+                        // (private, with callers outside their own recursion) unless they do not
+                        // hold the write themselves (a function iterating a generator it is
+                        // handed runs the generator's writes without knowing them), and a
+                        // delegating function leaves it to its callers.
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
                         let last = chain.len() - 1;
                         if !chain[1..=origin].iter().enumerate().all(|(i, k)| {
-                            is_private(&k.qualname) || !holds_write(cx, k, site, i + 1 == last)
+                            delegates(cx, sites, k) || !holds_write(cx, k, site, i + 1 == last)
                         }) || delegates(cx, sites, key)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
                         {

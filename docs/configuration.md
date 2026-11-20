@@ -79,7 +79,8 @@ starts in an allowed writer, an exempt method, or such an initialization.
 
 A write in a private helper (`_name`) with project callers is reported at the call sites of its
 first non-private callers; one report stands for every write behind its call, and a Ratchet
-baseline counts each of them (`sites` in JSON output).
+baseline counts each of them (`sites` in JSON output). A private function called only by its own
+recursion reports its writes itself.
 
 ## Read contracts: `[[tool.heki.read-owners]]` (`MUT203`)
 

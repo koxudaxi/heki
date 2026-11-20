@@ -262,3 +262,56 @@ fn a_call_whose_candidates_are_all_targets_of_one_contract_is_reported_once() {
         vec![(18, "pure:calls:A.reset|B.reset|C.reset".to_owned(), 1)]
     );
 }
+
+const RECURSIVE_WRITERS: &str = r#"class Model:
+    def __init__(self) -> None:
+        self.value = 0
+
+    def touch(self) -> None:
+        pass
+
+
+def _walk(m: Model, n: int) -> None:
+    m.value = n
+    m.touch()
+    if n > 0:
+        _walk(m, n - 1)
+
+
+callback = _walk
+
+
+def _ping(m: Model, n: int) -> None:
+    m.value = n
+    if n > 0:
+        _pong(m, n - 1)
+
+
+def _pong(m: Model, n: int) -> None:
+    if n > 0:
+        _ping(m, n - 1)
+
+
+def _step(m: Model, n: int) -> None:
+    m.value = n
+    if n > 0:
+        _step(m, n - 1)
+
+
+def run(m: Model) -> None:
+    _step(m, 3)
+"#;
+
+#[test]
+fn a_private_recursion_no_other_function_calls_reports_its_own_accesses() {
+    let config = "[[tool.heki.write-owners]]\nname = \"owner\"\ntargets = [\"Model.value\"]\nallowed-writers = [\"app.Store.*\"]\n\n[[tool.heki.read-owners]]\nname = \"readers\"\ntargets = [\"Model.value\"]\nallowed-readers = [\"app.Store.*\"]\n\n[[tool.heki.call-owners]]\nname = \"touch\"\ntargets = [\"Model.touch\"]\nallowed-callers = [\"app.Store.*\"]\n";
+    let p = project("private_recursion", config);
+    p.write("app.py", RECURSIVE_WRITERS);
+    // `_walk` and `_ping` are called only from their own recursion: they report; `_step` hands
+    // its write to `run`, at the call.
+    let lines = |rule: &str| -> Vec<u64> { reports(&p, rule).iter().map(|r| r.0).collect() };
+    assert_eq!(lines("MUT201"), vec![10, 20, 37]);
+    assert_eq!(lines("MUT204"), vec![11]);
+    // A recursion without reads reports none.
+    assert_eq!(lines("MUT203"), Vec::<u64>::new());
+}
