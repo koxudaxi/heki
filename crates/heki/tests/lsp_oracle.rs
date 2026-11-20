@@ -122,6 +122,7 @@ const GUARD_DEFAULT_USE: &str =
     "from pkg.guard_net import fetch\n\n\ndef sync(urls):\n    for u in urls:\n        fetch(u)\n";
 const GUARD_CONN: &str = "from urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    def send(self):\n        self._sock = urlopen(\"https://example.com\")\n";
 const GUARD_CONN_USE: &str = "from pkg.guard_conn import Conn\n\n\ndef run(c: Conn, xs):\n    for x in xs:\n        c.send()\n";
+const GUARD_CONN_CACHED: &str = "from functools import cached_property\nfrom urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    @cached_property\n    def sock(self):\n        return urlopen(\"https://example.com\")\n\n    def send(self):\n        return self.sock\n";
 
 // Contracts: private helpers writing / reading guarded attributes report themselves without
 // callers, nothing when only allowed functions call them, and at a non-allowed caller.
@@ -1529,6 +1530,19 @@ fn steps() -> Vec<Step> {
             )],
         )
         .absent(&[("pkg/guard_conn_use.py", "EFF102")]),
+        Step::new(
+            "the connection class connects in a cached property",
+            vec![save("pkg/guard_conn.py", GUARD_CONN_CACHED)],
+        )
+        .absent(&[("pkg/guard_conn_use.py", "EFF102")]),
+        Step::new(
+            "the cached property becomes a plain property",
+            vec![save(
+                "pkg/guard_conn.py",
+                &GUARD_CONN_CACHED.replace("@cached_property", "@property"),
+            )],
+        )
+        .present(&[("pkg/guard_conn_use.py", "EFF102")]),
         Step::new(
             "the connection class connects on every call again",
             vec![save("pkg/guard_conn.py", GUARD_CONN)],

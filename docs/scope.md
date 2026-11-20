@@ -170,7 +170,11 @@ Two more cases stay quiet by design:
 - A branch the caller's arguments switch off is not followed: `load(name, cache=False)` does not
   reach the request under `if cache:`.
 - A client or query created only while an attribute is unset counts once per object, not once
-  per loop iteration.
+  per loop iteration, and so does a `functools.cached_property` getter; one created only while
+  a module global or a local variable the loop carries is unset (or a first-iteration flag
+  holds), or right before the loop ends (`break`, `return`, `raise`), counts once per loop.
+- A blocking wait on a `concurrent.futures.Future` known to be done (`if f.done():`, after
+  `await asyncio.wrap_future(f)`) returns at once.
 
 A function whose model would pass its size budget (4 units per byte of its source, at most
 50,000; real code stays below one unit per byte) is left unmodeled: heki rewrites nothing in it
@@ -266,7 +270,11 @@ A generator's body runs where it is iterated:
   builtin classes.
 - **Not followed:** `a or b` (no guard on either value), and `isinstance` with project classes or
   annotated types.
-- A lazy initialization needs a direct test and the store in the function itself.
+- A lazy initialization needs a direct test and the store in the function itself: a test in a
+  caller of the method that stores, a test combined with `or` / `and`, and memos keyed by an
+  argument (`@lru_cache`, a dict) are not followed.
+- A future is known to be done only through `f.done()` and `await asyncio.wrap_future(f)`, not
+  through an event or another future its done callback sets.
 - `EFF201` does not use guards.
 - An object a factory function returns counts as obtained once, like a pooled connection.
 

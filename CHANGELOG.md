@@ -13,6 +13,21 @@ release can change rules, configuration keys, diagnostics, and output formats.
   not wrong code. The exit code does not change (a warning still makes `heki check` exit 1),
   only the output label and the SARIF level. `[tool.heki.lint.severity]` still overrides it.
 
+### Fixed
+
+- `EFF102` and `EFF103` no longer count a `functools.cached_property` getter as running on
+  every read: it runs once per instance, like a lazy initialization of `self`, also when
+  `cached_property` comes from a module that re-exports it (`kombu.utils.cached_property`). A
+  loop reading it on an instance the loop does not construct is not reported.
+- `EFF102` and `EFF103` no longer report a client or query created only while a local variable
+  the loop carries is unset (`if conn is None: conn = connect()`), only while a first-iteration
+  flag holds (`if first: ...; first = False`), or only while a module global is unset
+  (`global _session`).
+- `EFF102` and `EFF103` no longer report a client or query that every way on from leaves the
+  loop (followed by `return`, `break`, or `raise`): it runs once per run of the loop.
+- `EFF101` no longer reports `result()` or `exception()` of a `concurrent.futures.Future` known
+  to be done: under `if f.done():`, or once `await asyncio.wrap_future(f)` has returned.
+
 ## [0.1.2] - 2026-11-21
 
 ### Fixed

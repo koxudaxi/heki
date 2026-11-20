@@ -318,13 +318,28 @@ index alone, for a method of any indexed file.
 `if x is None:`, `isinstance(x, T)`, also through `and` / `or` / `not`, early returns, and
 conditional expressions; on a parameter, or an attribute of one the function never assigns)
 records that test. An effect inside a lazy initialization (`MUT107`'s branch, when every way out
-of it sets the attribute) runs once per object. At each call the callee's guards are mapped to
+of it sets the attribute) runs once per object, as does every effect of a
+`functools.cached_property` getter, through any callee (its result is kept in the instance's
+`__dict__`); one under the same test of a module global the function assigns (`global _client`)
+runs once per process. At each call the callee's guards are mapped to
 the caller (`through_call`, wherever a callee's facts reach a caller): a constant argument, the
 literal default of an omitted parameter, or a test the caller has made on the same value that
 decides a guard against the effect prunes it there; an undecided test of a caller input becomes
 the caller's guard. A generator's guards are decided at the call that creates it. `EFF102` /
 `EFF103` do not count a lazily initialized effect per iteration unless a data-sized loop around
-the call constructs the object. Anything not recognized keeps the effect.
+the call constructs the object. Within one function, a call also runs at most once per run of a
+loop (`CallSite::once_loops`) when every way on from it leaves the loop (`break`, `return`,
+`raise`; a handler that goes on with the loop is a way back), and when a test of a local
+variable the loop carries lets it run only until the variable changes: every path from the
+branch back to the test assigns the variable, and every value it can have there after an
+iteration takes the test's other branch (`if conn is None: conn = connect()`; a first-iteration
+flag `if first: ...; first = False`; a constant decides by its value, and another value counts
+as set only when the branch computes it, as for an attribute). A blocking wait on a future known to be done returns at once: the catalog marks the
+waits (`waits_until_done`: `concurrent.futures.Future.result` / `exception`) and the calls
+whose awaited result finishes a future (`done_when_awaited`: `asyncio.wrap_future`), and a
+forward must-analysis with the input tests' (one atom per future, which only ever holds) knows
+a future done after `if f.done():` and after such an `await`. Anything not recognized keeps the
+effect.
 
 **Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
 `ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs
