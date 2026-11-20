@@ -3,7 +3,8 @@
 //! subclass's) and calling a method through it, class methods called through their class,
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
 //! statements, module-level names bound twice, the parameters `*` arguments bind, project
-//! methods named like container mutators, and augmented assignments.
+//! methods named like container mutators, augmented assignments, and what calling and awaiting
+//! an `async def` give.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -939,4 +940,45 @@ fn a_class_derives_from_the_import_its_own_name_shadows() {
         ],
         &["EFF101"],
     );
+}
+
+/// Calling an `async def` gives a coroutine, and awaiting it gives what the function's
+/// annotation says it returns: the awaited store's method runs, a coroutine has no `save`.
+const AWAITED: &str = r#"import time
+
+
+class Store:
+    def save(self):
+        time.sleep(1)
+
+
+async def open_store() -> Store:
+    return Store()
+
+
+class Pool:
+    async def acquire(self) -> Store:
+        return Store()
+
+
+async def awaited(pool: Pool):
+    store = await open_store()
+    store.save()  # EFF101
+    other = await pool.acquire()
+    other.save()  # EFF101
+    pending = open_store()
+    ready = await pending
+    ready.save()  # EFF101
+
+
+async def never_awaited(pool: Pool):
+    store = open_store()
+    store.save()
+    other = pool.acquire()
+    other.save()
+"#;
+
+#[test]
+fn a_call_of_an_async_def_is_a_coroutine_of_what_awaiting_it_gives() {
+    check_marks("awaited", &[("pkg/awaited.py", AWAITED)], &["EFF101"]);
 }

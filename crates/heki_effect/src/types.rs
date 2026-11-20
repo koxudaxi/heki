@@ -30,6 +30,9 @@ pub enum Ty {
     SelfType,
     /// A `functools.partial(f, ...)` object: calling it calls `f`.
     Partial(Box<Ty>),
+    /// The coroutine a call of an `async def` returns: awaiting it gives the inner type, what
+    /// the function's declaration says it returns.
+    Coroutine(Box<Ty>),
     /// An instance of one of two or three classes (sorted by class, one entry per class).
     Union(Vec<Obj>),
 }
@@ -176,6 +179,7 @@ impl Ty {
             | Ty::Super(_)
             | Ty::SelfType
             | Ty::Partial(_)
+            | Ty::Coroutine(_)
             | Ty::Union(_) => None,
         }
     }
@@ -185,7 +189,12 @@ impl Ty {
         match self {
             Ty::Inst(o) => std::slice::from_ref(o),
             Ty::Union(os) => os,
-            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => &[],
+            Ty::Ref(_)
+            | Ty::Class(_)
+            | Ty::Super(_)
+            | Ty::SelfType
+            | Ty::Partial(_)
+            | Ty::Coroutine(_) => &[],
         }
     }
 
@@ -211,9 +220,12 @@ impl Ty {
         match self {
             Ty::Inst(o) => f(o).map(Ty::Inst),
             Ty::Union(os) => Ty::of_members(os.iter().map(f).collect::<Option<Vec<_>>>()?),
-            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => {
-                Some(self.clone())
-            }
+            Ty::Ref(_)
+            | Ty::Class(_)
+            | Ty::Super(_)
+            | Ty::SelfType
+            | Ty::Partial(_)
+            | Ty::Coroutine(_) => Some(self.clone()),
         }
     }
 
@@ -258,7 +270,7 @@ impl Ty {
         match self {
             Ty::Inst(o) => 1 + o.args.depth(),
             Ty::Union(os) => 1 + os.iter().map(|o| o.args.depth()).max().unwrap_or(0),
-            Ty::Partial(t) => 1 + t.depth(),
+            Ty::Partial(t) | Ty::Coroutine(t) => 1 + t.depth(),
             Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType => 1,
         }
     }

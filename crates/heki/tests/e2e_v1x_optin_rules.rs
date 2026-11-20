@@ -1232,6 +1232,19 @@ async def may_make_a_task(
     h = asyncio.create_task(*coros)
     i = asyncio.create_task(coros[0])
     await asyncio.sleep(0)
+
+
+async def make_future() -> asyncio.Future[None]:
+    return asyncio.get_running_loop().create_future()
+
+
+async def awaited_futures(fut: asyncio.Future[Any]):
+    a = asyncio.create_task(make_future())
+    done = await make_future()
+    b = asyncio.ensure_future(done)
+    value = await fut
+    c = asyncio.ensure_future(value)
+    await asyncio.sleep(0)
 "##;
 
 #[test]
@@ -1246,7 +1259,9 @@ fn eff107_reports_only_arguments_that_may_be_coroutines() {
     // function), nor from a value typed as a future (catalog return types, annotations,
     // `Executor.submit`). `may_make_a_task`: each one may, from a coroutine, a parameter, an
     // awaitable, an annotated callable's result, a decorated function's result, a constructed
-    // object, an item of a parameter, or a `*` argument.
+    // object, an item of a parameter, or a `*` argument. `awaited_futures`: calling an
+    // `async def` annotated with a future returns a coroutine, awaiting it gives the future,
+    // and awaiting a future gives what it holds.
     assert_eq!(
         found(&diags),
         vec![
@@ -1259,6 +1274,8 @@ fn eff107_reports_only_arguments_that_may_be_coroutines() {
             d(t, 94, "EFF107", "asyncio.ensure_future->g"),
             d(t, 95, "EFF107", "asyncio.create_task->h"),
             d(t, 96, "EFF107", "asyncio.create_task->i"),
+            d(t, 105, "EFF107", "asyncio.create_task->a"),
+            d(t, 109, "EFF107", "asyncio.ensure_future->c"),
         ]
     );
 }

@@ -200,6 +200,10 @@ class sharing it; an execution effect reached only through the override of a sub
 that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
 only when that class and the receiver's derive one from the other (an unknown receiver runs them
 all). An async client sharing a command mixin with a sync one runs the async implementation.
+Calling an `async def` that no decorator replaces gives a coroutine (`Ty::Coroutine`): its return
+annotation is what awaiting it gives (`await`, and the target of `async with`), and awaiting a
+future or a task gives an untracked result. The catalog types an external awaitable by what
+awaiting it gives.
 
 Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
 `pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:

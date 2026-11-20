@@ -317,6 +317,16 @@ pub struct FunctionDecl {
 }
 
 impl FunctionDecl {
+    /// What calling it gives when its declaration says it returns `returned`: for an
+    /// `async def` that no decorator replaces, the coroutine that awaiting gives `returned`.
+    pub(crate) fn call_type(&self, returned: Ty) -> Ty {
+        if self.called_as_defined && self.is_async && !self.is_generator {
+            Ty::Coroutine(Box::new(returned))
+        } else {
+            returned
+        }
+    }
+
     /// Calling it creates no coroutine: it is a plain `def` or a generator function that no
     /// decorator replaces (`EFF107`: no new task). A plain `def` may still return a coroutine
     /// another call created; that is not followed.
@@ -3060,7 +3070,7 @@ impl Ty {
             Ty::Inst(o) => Some(Val::Inst(o.class.clone())),
             Ty::Super(c) => Some(Val::Super(c.clone())),
             Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
-            Ty::SelfType | Ty::Partial(_) => None,
+            Ty::SelfType | Ty::Partial(_) | Ty::Coroutine(_) => None,
         }
     }
 }
@@ -3204,12 +3214,15 @@ impl<'a> TypeCtx<'a> {
         match self.project.symbol(fqn) {
             Symbol::Class(_) => return Some(Ty::inst(fqn)),
             Symbol::Function(_, decl) => {
-                return self.declared_result(fqn, arg).or_else(|| {
-                    decl.return_type
-                        .as_ref()
-                        .and_then(|t| self.project.declared_ty(t))
-                        .and_then(|t| t.bind_self(None))
-                });
+                return self
+                    .declared_result(fqn, arg)
+                    .or_else(|| {
+                        decl.return_type
+                            .as_ref()
+                            .and_then(|t| self.project.declared_ty(t))
+                            .and_then(|t| t.bind_self(None))
+                    })
+                    .map(|t| decl.call_type(t));
             }
             Symbol::Module | Symbol::Global(_) => return None,
             Symbol::External => {}
@@ -3355,12 +3368,14 @@ impl<'a> TypeCtx<'a> {
         match callee {
             Callee::Project(keys, _) if keys.len() == 1 => {
                 let decl = self.project.function_decl(&keys[0])?;
-                self.declared_result(&keys[0].fqn(), arg).or_else(|| {
-                    decl.return_type
-                        .as_ref()
-                        .and_then(|t| self.project.declared_ty(t))
-                        .and_then(|t| t.bind_self(None))
-                })
+                self.declared_result(&keys[0].fqn(), arg)
+                    .or_else(|| {
+                        decl.return_type
+                            .as_ref()
+                            .and_then(|t| self.project.declared_ty(t))
+                            .and_then(|t| t.bind_self(None))
+                    })
+                    .map(|t| decl.call_type(t))
             }
             Callee::External(fqn) => self.call_result(fqn, arg),
             _ => None,
