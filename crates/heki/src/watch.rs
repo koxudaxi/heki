@@ -15,7 +15,7 @@ use heki_profile::ProfileData;
 use heki_rules::project::{
     FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -197,7 +197,10 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
             dirty = w.print(&diags, &errors);
             continue;
         } else if now_files != files {
-            let mut affected: Vec<PathBuf> = Vec::new();
+            // Files to re-analyze once the batch is in the index. A file of the batch is
+            // analyzed against the index as the files before it left it: what a later one
+            // changes for it queues it again.
+            let mut affected: BTreeSet<PathBuf> = BTreeSet::new();
             for gone in files.keys().filter(|p| !now_files.contains_key(*p)) {
                 affected.extend(ws.remove(gone));
                 diags.remove(gone);
@@ -212,6 +215,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                 match std::fs::read_to_string(p) {
                     Ok(text) => {
                         let out = ws.edit(p, &text);
+                        affected.remove(*p);
                         affected.extend(out.affected.iter().cloned());
                         record(&mut diags, &mut errors, p, Some(out));
                     }
@@ -219,13 +223,13 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                     // `heki check`: its facts leave the index, and what they affected is
                     // re-analyzed.
                     Err(e) => {
+                        affected.remove(*p);
                         affected.extend(ws.remove(p));
                         diags.remove(*p);
                         errors.insert((*p).clone(), format!("{}: {e}", p.display()));
                     }
                 }
             }
-            affected.retain(|p| !changed.contains(&p));
             let read = |p: &Path| std::fs::read_to_string(p).ok();
             for (p, out) in ws.refresh_all(affected, &read) {
                 record(&mut diags, &mut errors, &p, out);

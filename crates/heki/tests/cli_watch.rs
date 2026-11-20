@@ -561,3 +561,19 @@ fn watch_keeps_reporting_errors_of_unchanged_files_and_forgets_unreadable_ones()
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(p.check(&["--output-format", "concise"]).1, "");
 }
+
+#[test]
+fn watch_rechecks_a_caller_saved_in_the_same_poll_as_its_callee() {
+    let p = Project::new("watch_one_poll");
+    let caller = "from z import wait\n\n\nasync def handler():\n    wait()\n";
+    p.write("a.py", caller)
+        .write("z.py", "def wait():\n    return 1\n");
+    let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "1");
+    wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
+    // Both saved between two polls: `a.py` is analyzed first, against the old `wait`.
+    p.write("a.py", &format!("# edited\n{caller}"))
+        .write("z.py", "import time\n\n\ndef wait():\n    time.sleep(1)\n");
+    wait_for(&rx, "[heki watch] 1 diagnostic(s) in 2 file(s)");
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}
