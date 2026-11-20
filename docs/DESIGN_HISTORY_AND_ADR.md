@@ -176,6 +176,8 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   - `heki_effect`: light receiver type resolution (name resolution, PEP 484, `self` attributes,
     CHA / RTA) computing one `EffectSummary` (execution effects, mutation and state effects, and
     write ownership). It continues on functions that violate A1.
+  - A fix's text may rewrite an annotation (`list[int]` to `deque[int]` for a `deque` fix):
+    the Soundness lane rewrites the annotation's text and never trusts it as a type.
 
 <a id="adr-005"></a>
 ### ADR-005: The three-layer knowledge model (a pure Layer 1, one Layer 2, no Layer 3 dives, a full dependency cache)

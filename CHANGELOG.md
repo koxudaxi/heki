@@ -14,9 +14,9 @@ The first public preview.
 - `heki check` checks a project, or the files and directories given, with Ruff-style rule
   selection (`select`, `extend-select`, `ignore`, `per-file-ignores`), suppression comments
   (`# heki: ignore[CODE]`, and `# noqa: CODE` for compatibility), output formats (`full`,
-  `concise`, `json`, `github`, `sarif`), and exit codes `0` / `1` / `2`. The target Python
-  version (`py311` to `py315`) comes from `requires-python` or `--target-version`, and `--watch`
-  re-checks on every change.
+  `concise`, `json`, `github`, `sarif`; paths relative to the working directory, as in Ruff),
+  and exit codes `0` / `1` / `2`. The target Python version (`py311` to `py315`) comes from
+  `requires-python` or `--target-version`, and `--watch` re-checks on every change.
 - 28 rules in four families:
   - Mutation and state: `MUT101`, `MUT107`, `MUT110`, `MUT201`, `MUT202`, `MUT203`, `MUT204`,
     and the opt-in `MUT103`, `MUT106`, and `MUT108`.
@@ -28,7 +28,8 @@ The first public preview.
 - Proven-safe rewrites: `heki check --fix` applies the unconditional `OPT101` / `OPT102` fixes,
   `--include-size-dependent` adds the size-dependent ones, `--profile` limits those to the hot
   functions of a sampling profile (CPython 3.15's profiler or py-spy), and `--diff` previews
-  them.
+  them. A fix that turns a list into a `collections.deque` also rewrites its `list` annotation
+  and adds the import in sorted order to the standard-library imports.
 - Contracts in `[tool.heki]`: `write-owners` (`MUT201`), `read-owners` (`MUT203`),
   `call-owners` (`MUT204`), `readonly-returns` (`MUT202`), and `effect-boundaries` (`EFF201`, with
   `reads-targets`, `calls`, and `allow-writes` / `write-universe`); `forbidden-writers` /

@@ -91,14 +91,30 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 - **A1 fallback**: a function with `a1_hazards` is excluded **from `heki_soundness` only**;
   **`heki_effect` (family 1 `MUT`, family 2 `EFF` / `DATA`) continues**.
 - **`LoopBound`** (never a Soundness premise; used for profitability and Advisory noise only):
-  - `ConstSmall(k)`: a `for` over a literal tuple, list, or set of at most 8 elements, or over
-    `range(k)` / `range(a, b)` spanning at most 8.
+  - `ConstSmall(k)`: a `for` over a small display (below) or `range(k)` / `range(a, b)`
+    spanning at most 8, also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
+    `filter`, and `.items()` / `.keys()` / `.values()`, and with range bounds that are constant
+    integer expressions (`+`, `-`, `*`, module constants included).
   - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
     handler) over a small constant range or a target named like `retry` / `attempt`, or a
     `while` loop with a retry body that sleeps.
   - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops, and
     `while True:` with a retry body that sleeps (resident workers and reconnect loops).
   - `Unbounded`: everything else.
+- **Size facts** (`heki_ir::facts`, the one home of size and trip-count facts; profitability and
+  Advisory noise only, never Soundness premises):
+  - A **small display** (`SmallDisplay`) is a list, tuple, set, or dict display of at most 8
+    items (`SMALL_MAX`) without `*` / `**` unpacking that nothing grows or lets escape.
+    Shrinking it and passing it to read-only builtins are fine; a store at an unknown index
+    (`xs[k] = v`, possibly a slice) counts as growth.
+  - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
+    (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
+  - `IrFunction.starred` marks starred display elements, `BasicBlock.term_span` the source of a
+    block's terminator (blocker lines point at it), and `ModuleIr.constants`
+    (`ModuleConstants`) the module's constant integers and displays.
+  - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
+    read other modules' small displays through the declarations (`ModuleDecls.small_globals`,
+    `ClassDecl.attr_displays`), so the language server re-checks their users when they change.
 
 ---
 
