@@ -339,8 +339,8 @@ impl<'a> Derivations<'a> {
             return None;
         };
         let i = usize::try_from(*i).ok()?;
-        let starred = (0..=i).any(|k| self.f.is_starred(*dst, k));
-        elems.get(i).copied().filter(|_| !starred)
+        let item = *elems.get(i)?;
+        (!(0..=i).any(|k| self.f.is_starred(*dst, k))).then_some(item)
     }
 }
 

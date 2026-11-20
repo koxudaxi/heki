@@ -855,13 +855,18 @@ def known_bases(node):
     if node.bases_known is None:
         node.bases_known = all(node.bases)
     return node.bases_known
+
+
+def copy_runtime(source, target):
+    if source._runtime is None:
+        target._runtime = object()
 "#,
         )
         .write(
             "pkg/render.py",
             r#"from functools import lru_cache
 
-from pkg.strip import Strip, known_bases
+from pkg.strip import Strip, copy_runtime, known_bases
 
 
 @lru_cache(maxsize=None)
@@ -884,6 +889,10 @@ def render(width, style):
 def render_logged(width):
     line = blank(width)
     line.count("a")
+    copy_runtime(Strip([]), line)
+    other = blank(width + 1)
+    if other._runtime is None:
+        line._runtime = 1
     line.record("render")
     line.reset_styles()
     line.history.append("direct")
@@ -892,14 +901,17 @@ def render_logged(width):
     // A memo (by name, also a cache object whose methods change it, or filled under `not in`)
     // and a lazy initialization (also through a local copy of the attribute, also by a function
     // taking the object) only cache what the object computes; counting into an object of the
-    // same class not named as a memo, appending to its history, or replacing a memo changes it.
+    // same class not named as a memo, setting an attribute that a test of another object found
+    // unset, appending to its history, or replacing a memo changes it.
     assert_eq!(
         reports(&p, "MUT202"),
         vec![
             at("pkg/render.py", 25, "render_logged"),
             at("pkg/render.py", 26, "render_logged"),
-            at("pkg/render.py", 27, "render_logged"),
-            at("pkg/render.py", 28, "render_logged"),
+            at("pkg/render.py", 29, "render_logged"),
+            at("pkg/render.py", 30, "render_logged"),
+            at("pkg/render.py", 31, "render_logged"),
+            at("pkg/render.py", 32, "render_logged"),
         ]
     );
 }

@@ -1203,23 +1203,19 @@ impl<'a> Extractor<'a> {
             .str_constant_with(var, &|v| self.defs.get(&v).copied(), &self.types)
     }
 
-    /// [`Self::memo_fills`]: the writes of the parameters' (and their shallow copies') own
-    /// attributes that fill a memo or initialize lazily ([`cache_flow::attr_writes`]).
+    /// [`Self::memo_fills`]: the writes of the parameters' own attributes that fill a memo or
+    /// initialize lazily ([`cache_flow::attr_writes`]), read for each parameter on its own:
+    /// a test of one object's attribute says nothing of another's.
     fn memo_fills(&self) -> FxHashSet<(BlockId, usize)> {
-        let objs: FxHashSet<VarId> = self
-            .param_alias
-            .iter()
-            .filter(|(_, (_, path))| path.is_none())
-            .map(|(v, _)| *v)
-            .chain(
-                self.param_copy_alias
-                    .iter()
-                    .filter(|(_, (_, path))| path.is_none())
-                    .map(|(v, _)| *v),
-            )
-            .collect();
-        cache_flow::attr_writes(self.f, &objs)
-            .into_iter()
+        let mut objects: FxHashMap<u8, FxHashSet<VarId>> = FxHashMap::default();
+        for (v, (i, path)) in &self.param_alias {
+            if path.is_none() {
+                objects.entry(*i).or_default().insert(*v);
+            }
+        }
+        objects
+            .values()
+            .flat_map(|vars| cache_flow::attr_writes(self.f, vars))
             .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
             .map(|(_, w)| (w.block, w.index as usize))
             .collect()

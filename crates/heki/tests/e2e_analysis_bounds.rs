@@ -402,3 +402,21 @@ fn operators_sharing_operands_decide_each_derivation_once() {
         .collect();
     assert_eq!(reported, vec!["grown"], "{found:#?}");
 }
+
+/// An item of a display taken at a constant index far past its end (`[acc][10**12]`): the
+/// display's own length bounds the look for starred elements before the index.
+#[test]
+fn an_index_past_a_display_is_read_without_counting_up_to_it() {
+    let p = Project::new("bounds_display_index");
+    p.write(
+        "m.py",
+        "import numpy as np\n\n\ndef grown(rows):\n    acc = np.empty(0)\n    for row in rows:\n        acc = np.concatenate(([acc][1000000000000] + [row],))\n    return acc\n",
+    );
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "DATA101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["grown"], "{found:#?}");
+}

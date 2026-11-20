@@ -2306,6 +2306,25 @@ impl<'a> Mut202Fn<'a> {
         grew
     }
 
+    /// The value `var` copies, through any number of copies (itself when it is no copy). Copies
+    /// in dead code can close a cycle, which ends the walk.
+    fn copied_from(&self, var: VarId) -> VarId {
+        let mut seen: FxHashSet<VarId> = FxHashSet::default();
+        let mut cur = var;
+        while seen.insert(cur)
+            && let Some((
+                _,
+                Inst {
+                    kind: InstKind::Copy { src, .. },
+                    ..
+                },
+            )) = self.f.def_inst(cur)
+        {
+            cur = *src;
+        }
+        cur
+    }
+
     /// Read-only origin of `var` when mutating its own top level is a violation.
     fn guarded(&self, var: VarId) -> Option<&Ro> {
         self.ro.get(&var).filter(|r| !r.shallow_copy)
@@ -2317,15 +2336,15 @@ impl<'a> Mut202Fn<'a> {
             return;
         }
         // Filling a memo of a shared object, or initializing one of its attributes lazily,
-        // leaves what it computes as it was (as for the helpers, `memo_param_paths`).
-        let shared: FxHashSet<VarId> = self
-            .ro
-            .iter()
-            .filter(|(_, r)| !r.shallow_copy)
-            .map(|(v, _)| *v)
-            .collect();
-        let memo_fills: FxHashSet<(BlockId, u32)> = attr_writes(self.f, &shared)
-            .into_iter()
+        // leaves what it computes as it was (as for the helpers, `memo_param_paths`). Each
+        // object is read on its own: a test of one object's attribute says nothing of another's.
+        let mut objects: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
+        for (v, _) in self.ro.iter().filter(|(_, r)| !r.shallow_copy) {
+            objects.entry(self.copied_from(*v)).or_default().insert(*v);
+        }
+        let memo_fills: FxHashSet<(BlockId, u32)> = objects
+            .values()
+            .flat_map(|vars| attr_writes(self.f, vars))
             .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
             .map(|(_, w)| (w.block, w.index))
             .collect();
