@@ -179,10 +179,18 @@ jobs:
           if [ -n "$TAG" ]; then set -- --tag "$TAG"; fi
           uv run --no-project --with "packaging==25.0" python scripts/release_check.py versions dist "$@"
 
+  ci:
+    # The correctness gates (tests, LSP oracle, rewrite differential tests, CPython checks) on
+    # the exact commit being published: CI on pull requests and on main does not cover a tag.
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   pypi:
     name: publish to PyPI
     if: github.event_name == 'release' || inputs.publish
-    needs: [wheels, sdist, smoke, versions]
+    needs: [ci, wheels, sdist, smoke, versions]
     runs-on: ubuntu-24.04
     environment:
       name: pypi

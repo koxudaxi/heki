@@ -5,12 +5,16 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # release.yml runs every job on the release commit before it publishes.
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Called from release.yml, `github.workflow` is the caller's: a push to main does not cancel
+  # a release's checks.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
