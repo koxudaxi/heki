@@ -913,6 +913,7 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
         ("zip_strict", small(2)),
         ("negative", small(3)),
         ("added", small(8)),
+        ("unary_plus", small(3)),
         ("floor_division", unbounded.clone()),
         ("local_constant", small(3)),
         ("deleted", unbounded.clone()),
@@ -1019,12 +1020,49 @@ def scan(p: Picks, rows) -> None:
         p.order.index(r)
 
 
+class Mixed:
+    def __init__(self) -> None:
+        self.pair = ["a"]
+
+    def flip(self) -> None:
+        self.pair = ("b",)
+
+
+def counter():
+    count = 0
+
+    class Local:
+        def bump(self) -> None:
+            nonlocal count
+            count = 1
+
+    return Local
+
+
 def captured(xs) -> list:
     names = ["a", "b"]
 
     def show():
         return names
 
+    out = []
+    for x in xs:
+        out.append(names.index(x))
+    return out
+
+
+def item_store(xs) -> list:
+    names = ["a", "b"]
+    names[0] = "c"
+    out = []
+    for x in xs:
+        out.append(names.index(x))
+    return out
+
+
+def index_store(xs, k) -> list:
+    names = ["a", "b"]
+    names[k] = ["c", "d", "e"]
     out = []
     for x in xs:
         out.append(names.index(x))
@@ -1052,7 +1090,8 @@ fn sizes_of_other_modules_attributes_and_escaping_displays() {
     // Imported and `module.NAME` displays that nothing grows bound their loops; one another
     // function grows does not. A class attribute stored twice with small displays stays
     // small; `super().names` is not resolved. A display a closure captures or the function
-    // returns may grow; one the loop only slices stays small.
+    // returns may grow, and so may a list stored at an unknown index (`names[k]` may be a
+    // slice); one the loop only slices or stores at `names[0]` stays small.
     let p = Project::new("reg_cross_sizes");
     p.write("pkg/__init__.py", "")
         .write("pkg/consts.py", CONSTS)
@@ -1064,6 +1103,7 @@ fn sizes_of_other_modules_attributes_and_escaping_displays() {
         pairs(&[
             ("Child.scan", "OPT112"),
             ("captured", "OPT112"),
+            ("index_store", "OPT112"),
             ("returned", "OPT112"),
             ("each_grown", "EFF102"),
             ("via_call", "EFF102"),

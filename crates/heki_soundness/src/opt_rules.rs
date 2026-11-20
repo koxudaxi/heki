@@ -1567,10 +1567,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                 None => established("the constructor cannot raise for these arguments"),
             },
         ));
-        let not_profitable = match args {
-            [a] => self.small_note(&self.var(*a), *a),
-            [] => Some("the container is empty".into()),
-            _ => None,
+        // These constructors take at most one argument (more always raise, blocked above).
+        let not_profitable = match args.first() {
+            Some(a) => self.small_note(&self.var(*a), *a),
+            None => Some("the container is empty".into()),
         };
         let edits = self.m.text(call.span).map_or_else(Vec::new, |text| {
             let base = match args {
