@@ -16,7 +16,15 @@
 //!   attribute, runs at most once per object. `EffectGuards::once_per` records where the objects
 //!   come from; a loop calling it on objects it does not construct does not run it per
 //!   iteration. The recognition of the branch is shared with `MUT107`
-//!   ([`lazy_init_branches`]).
+//!   ([`lazy_init_branches`]). A `functools.cached_property` getter is one as a whole
+//!   ([`cached_per_instance`]), a module global set the same way is set once per process, and a
+//!   local variable a loop carries (`if conn is None: conn = connect()`, or a first-iteration
+//!   flag) once per run of the loop.
+//! - **Loop exits**: a call every way on from which leaves the loop (`break`, `return`,
+//!   `raise`) runs at most once per run of it.
+//! - **Finished futures**: waiting on a future known to be done returns at once
+//!   ([`LocalGuards::finished_at`]): under `if f.done():`, or once `await asyncio.wrap_future(f)`
+//!   has returned; the catalog says which calls wait and which awaits finish a future.
 //!
 //! The local facts are computed here (`LocalGuards`), and one transfer ([`through_call`]) maps
 //! a callee's guards across a call site for both the fixpoint and the rules. Anything not
@@ -24,14 +32,14 @@
 
 use crate::resolver::{Val, aliases_of};
 use crate::{
-    ArgBinding, BoundCallee, CallSite, ConstArg, ConstClass, EffectGuards, GuardSubject, GuardTest,
-    InputGuard, SiteRole, Slot,
+    ArgBinding, BoundCallee, CallSite, ConstArg, ConstClass, EffectGuards, EffectSummary,
+    GuardSubject, GuardTest, InputGuard, SiteRole, Slot,
 };
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind, IrFunction,
     NaturalLoop, PhiNode, Terminator, UnaryOpKind, VarId,
 };
-use heki_kb::ExecEffectKind;
+use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
@@ -49,6 +57,24 @@ impl EffectGuards {
     fn join(&mut self, other: &Self) {
         self.inputs.retain(|g| other.inputs.contains(g));
         self.once_per = self.once_per.zip(other.once_per).map(|(a, b)| a | b);
+    }
+}
+
+/// A `functools.cached_property` getter (`EffectSummary::is_cached_property`) runs at most
+/// once per instance: the first read stores its result in the instance's `__dict__`, which the
+/// later reads return. Every effect it reaches, through any callee, is then a lazy
+/// initialization of its `self` (parameter 0), unless its own guards bound it further.
+pub(crate) fn cached_per_instance(s: &mut EffectSummary) {
+    let effects: Vec<ExecEffectKind> = s
+        .direct_exec_effects
+        .iter()
+        .chain(&s.transitive_exec_effects)
+        .copied()
+        .collect();
+    for e in effects {
+        let g = s.exec_guards.entry(e).or_default();
+        // `Some(0)`: at most once whatever the objects, a tighter bound.
+        g.once_per = Some(g.once_per.filter(|m| *m == 0).unwrap_or(1));
     }
 }
 
@@ -400,18 +426,94 @@ pub fn lazy_init_branches(f: &IrFunction) -> Vec<LazyInitBranch> {
 
 type DefOf<'d, 'a> = &'d dyn Fn(&VarId) -> Option<&'a InstKind>;
 
+/// The value `v` copies, through any number of copies.
+fn through_copies(def: DefOf<'_, '_>, mut v: VarId) -> VarId {
+    while let Some(InstKind::Copy { src, .. }) = def(&v) {
+        v = *src;
+    }
+    v
+}
+
 /// [`lazy_init_branches`] with the defining instruction of every variable.
 fn branches(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
-    let loads_attr = |v: &VarId| {
-        let mut v = *v;
-        while let Some(InstKind::Copy { src, .. }) = def(&v) {
-            v = *src;
-        }
-        match def(&v) {
-            Some(InstKind::AttrLoad { obj, attr, .. }) => Some((*obj, attr.clone())),
-            _ => None,
-        }
+    attr_tests(f, def)
+        .into_iter()
+        .map(|t| LazyInitBranch {
+            test: t.test,
+            init: t.init,
+            obj: t.subject.0,
+            attr: t.subject.1,
+        })
+        .collect()
+}
+
+/// The branches that find an attribute unset (`obj`, `attr`).
+fn attr_tests(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<StateTest<(VarId, String)>> {
+    let loads_attr = |v: &VarId| match def(&through_copies(def, *v)) {
+        Some(InstKind::AttrLoad { obj, attr, .. }) => Some((*obj, attr.clone())),
+        _ => None,
     };
+    state_tests(f, def, loads_attr)
+        .into_iter()
+        .filter(|t| t.found.unset())
+        .collect()
+}
+
+/// What a branch of a `None` or truthiness test finds the tested value to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Found {
+    /// The `then` block of `is None` / `== None`, the `else` block of `is not None` / `!= None`.
+    None,
+    /// The `then` block of `if not x:`, the `else` block of `if x:`.
+    Falsy,
+    /// The other blocks of these tests.
+    NotNone,
+    Truthy,
+}
+
+impl Found {
+    /// Not set yet: what a lazy initialization runs on.
+    fn unset(self) -> bool {
+        matches!(self, Self::None | Self::Falsy)
+    }
+
+    /// Whether the constant `c` takes this branch of the test.
+    fn takes(self, c: ConstArg) -> bool {
+        match self {
+            Self::None | Self::NotNone => (c.class == ConstClass::None) == (self == Self::None),
+            Self::Falsy | Self::Truthy => c.truthy == Some(self == Self::Truthy),
+        }
+    }
+
+    /// Whether the constant `c` takes the test's other branch.
+    fn excluded_by(self, c: ConstArg) -> bool {
+        match self {
+            Self::None => c.class != ConstClass::None,
+            Self::NotNone => c.class == ConstClass::None,
+            Self::Falsy => c.truthy == Some(true),
+            Self::Truthy => c.truthy == Some(false),
+        }
+    }
+}
+
+/// One branch of a `None` or truthiness test of what `subject` takes from the tested value.
+struct StateTest<S> {
+    /// The block ending in the test.
+    test: BlockId,
+    /// A block only this branch of the test leads to.
+    init: BlockId,
+    subject: S,
+    found: Found,
+}
+
+/// The branches of the `None` and truthiness tests of what `subject` takes from the tested
+/// value, each with the block only it leads to: an `if` without `else` falls through to a
+/// block the other branch reaches too, which does not count.
+fn state_tests<S: Clone>(
+    f: &IrFunction,
+    def: DefOf<'_, '_>,
+    subject: impl Fn(&VarId) -> Option<S>,
+) -> Vec<StateTest<S>> {
     let is_none = |v: &VarId| {
         matches!(
             def(v),
@@ -423,9 +525,9 @@ fn branches(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
     };
     let none_test = |l: &VarId, r: &VarId| {
         if is_none(r) {
-            loads_attr(l)
+            subject(l)
         } else if is_none(l) {
-            loads_attr(r)
+            subject(r)
         } else {
             None
         }
@@ -440,54 +542,114 @@ fn branches(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
         else {
             continue;
         };
+        // The subject, with what the `then` and the `else` branch find.
         let test = match def(cond) {
             Some(InstKind::Compare {
                 op: CompareOpKind::Is | CompareOpKind::Eq,
                 lhs,
                 rhs,
                 ..
-            }) => none_test(lhs, rhs).map(|t| (t, *then_bb)),
+            }) => none_test(lhs, rhs).map(|t| (t, Found::None, Found::NotNone)),
             Some(InstKind::Compare {
                 op: CompareOpKind::IsNot | CompareOpKind::NotEq,
                 lhs,
                 rhs,
                 ..
-            }) => none_test(lhs, rhs).map(|t| (t, *else_bb)),
+            }) => none_test(lhs, rhs).map(|t| (t, Found::NotNone, Found::None)),
             Some(InstKind::UnaryOp {
                 op: UnaryOpKind::Not,
                 operand,
                 ..
-            }) => loads_attr(operand).map(|t| (t, *then_bb)),
+            }) => subject(operand).map(|t| (t, Found::Falsy, Found::Truthy)),
             _ => None,
         }
-        .or_else(|| loads_attr(cond).map(|t| (t, *else_bb)));
-        if let Some(((obj, attr), init)) = test {
-            found.push(LazyInitBranch {
-                test: bb.id,
-                init,
-                obj,
-                attr,
-            });
+        .or_else(|| subject(cond).map(|t| (t, Found::Truthy, Found::Falsy)));
+        if let Some((s, on_then, on_else)) = test {
+            for (init, found_there) in [(*then_bb, on_then), (*else_bb, on_else)] {
+                found.push(StateTest {
+                    test: bb.id,
+                    init,
+                    subject: s.clone(),
+                    found: found_there,
+                });
+            }
         }
     }
     if found.is_empty() {
         return found;
     }
     let preds = f.predecessors();
-    found.retain(|b| preds[b.init.0 as usize] == [b.test]);
+    found.retain(|t| preds[t.init.0 as usize] == [t.test]);
     found
 }
 
 /// A lazy initialization region of an effect site: the blocks `init` dominates, when every path
-/// from it to a normal return, or back to the test, assigns the attribute.
+/// from it back to the test sets what the test reads (and, for an attribute, every path to a
+/// normal return).
 struct LazyRegion {
     test: BlockId,
-    obj: VarId,
+    initialized: Initialized,
     /// Parameters the object comes from; `None` when it may be one the function constructs
-    /// (initialized on every call).
+    /// (initialized on every call), or for a local variable.
     root: Option<u64>,
     /// Membership by block id.
     blocks: Vec<bool>,
+}
+
+/// What a lazy initialization leaves set.
+enum Initialized {
+    /// An attribute of this object: set once per object, across the loops that do not
+    /// construct it.
+    Attr(VarId),
+    /// A module global (`global _client`): set once per process.
+    Global,
+    /// A local variable: set once per run of each of these loops ([`loop_bit`]), which carry
+    /// it from one iteration to the next.
+    Local(u64),
+}
+
+/// The cells the lazy initializations of one function may take: a block of a region's
+/// membership, a block or a value the walks that recognize them pass. A multiple of the
+/// function's source size, as the Soundness lane's proof state; past it, none of the function's
+/// lazy initializations is recognized, so its effects count as unguarded by them.
+const REGION_CELLS_PER_SOURCE_BYTE: usize = 8;
+const MIN_REGION_CELLS: usize = 4096;
+const MAX_REGION_CELLS: usize = 250_000;
+
+/// The cells left of a function's budget ([`REGION_CELLS_PER_SOURCE_BYTE`]); `None` once a
+/// walk needed more.
+struct Cells(Option<usize>);
+
+impl Cells {
+    fn of(f: &IrFunction) -> Self {
+        let source_bytes = f.span.end.saturating_sub(f.span.start) as usize;
+        Self(Some(
+            (source_bytes * REGION_CELLS_PER_SOURCE_BYTE).clamp(MIN_REGION_CELLS, MAX_REGION_CELLS),
+        ))
+    }
+
+    /// Take `n` cells; `false` once the budget is spent.
+    fn take(&mut self, n: usize) -> bool {
+        self.0 = self.0.and_then(|left| left.checked_sub(n));
+        self.0.is_some()
+    }
+
+    fn spent(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+/// The blocks and values of every assignment of each module global in the function.
+fn global_stores(f: &IrFunction) -> FxHashMap<&str, Vec<(BlockId, VarId)>> {
+    let mut out: FxHashMap<&str, Vec<(BlockId, VarId)>> = FxHashMap::default();
+    for bb in &f.blocks {
+        for inst in &bb.insts {
+            if let InstKind::StoreGlobal { name, value } = &inst.kind {
+                out.entry(name.as_str()).or_default().push((bb.id, *value));
+            }
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------------- the local facts
@@ -538,6 +700,8 @@ pub(crate) struct GuardInputs<'f, 'a> {
     pub phis: &'f OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
     /// Buffers of the backward walks.
     pub scratch: &'f RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
+    /// The catalog, for the awaits that finish a future (`EcosystemEntry::done_when_awaited`).
+    pub kb: &'a EffectiveEcosystemKb,
 }
 
 /// The guards of one function's own effect sites and call sites, computed on first use.
@@ -546,6 +710,9 @@ pub(crate) struct LocalGuards {
     facts: OnceCell<LocalFacts>,
     regions: OnceCell<Vec<LazyRegion>>,
     classes: OnceCell<Classes>,
+    /// The blocks of each loop (by header) from which a path comes back to the header without
+    /// leaving the loop, along normal and exception edges.
+    repeating: OnceCell<FxHashMap<BlockId, FxHashSet<BlockId>>>,
 }
 
 /// The input tests of a function and the ones holding at the entry of each block (they hold
@@ -554,6 +721,12 @@ pub(crate) struct LocalGuards {
 struct LocalFacts {
     tests: Vec<(GuardSubject, GuardTest)>,
     entry: Vec<Vec<(u32, bool)>>,
+    /// The atom of each future a done fact is about.
+    futures: FxHashMap<FutureKey, u32>,
+    /// Where each future is first seen finish in a block: the position of the first `await`.
+    awaited: FxHashMap<(FutureKey, BlockId), usize>,
+    /// The facts at the entry of each block, for the futures (empty without any).
+    finished: Vec<FactSet>,
 }
 
 impl LocalGuards {
@@ -563,20 +736,39 @@ impl LocalGuards {
 
     fn regions(&self, cx: &GuardInputs<'_, '_>) -> &[LazyRegion] {
         self.regions.get_or_init(|| {
-            let f = cx.f;
-            let def = |v: &VarId| cx.def(*v);
-            let mut values: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
-            branches(f, &def)
-                .into_iter()
-                .filter(|b| initializes(f, &def, &mut values, b))
-                .map(|b| {
-                    let d = derived(cx, b.obj);
-                    LazyRegion {
-                        test: b.test,
-                        obj: b.obj,
-                        root: (!d.fresh).then_some(d.params),
-                        blocks: dominated(f, b.init),
+            let mut cells = Cells::of(cx.f);
+            let classes = self.classes(cx);
+            let mut regions = attr_regions(cx, &mut cells);
+            regions.extend(global_regions(cx, classes, &mut cells));
+            regions.extend(local_regions(cx, classes, &mut cells));
+            // Which ones would fit depends on the order of the blocks: none is kept.
+            if cells.spent() {
+                regions.clear();
+            }
+            regions
+        })
+    }
+
+    /// The repeating blocks of every loop, computed on first use.
+    fn repeating(&self, f: &IrFunction) -> &FxHashMap<BlockId, FxHashSet<BlockId>> {
+        self.repeating.get_or_init(|| {
+            let preds = f.predecessors();
+            f.loops
+                .iter()
+                .map(|lp| {
+                    let inside: FxHashSet<BlockId> = lp.body.iter().copied().collect();
+                    let mut back = FxHashSet::default();
+                    let mut stack: Vec<BlockId> = preds[lp.header.0 as usize]
+                        .iter()
+                        .copied()
+                        .filter(|b| inside.contains(b))
+                        .collect();
+                    while let Some(b) = stack.pop() {
+                        if inside.contains(&b) && back.insert(b) {
+                            stack.extend(preds[b.0 as usize].iter().copied());
+                        }
                     }
+                    (lp.header, back)
                 })
                 .collect()
         })
@@ -601,6 +793,30 @@ impl LocalGuards {
             .collect()
     }
 
+    /// Whether the future `recv` is known done before instruction `index` of block `bb`: on
+    /// every path there, `f.done()` was true or `await asyncio.wrap_future(f)` returned.
+    pub(crate) fn finished_at(
+        &self,
+        cx: &GuardInputs<'_, '_>,
+        bb: BlockId,
+        index: usize,
+        recv: VarId,
+    ) -> bool {
+        let key = future_key(cx, recv);
+        let facts = self.facts.get_or_init(|| Facts::run(cx, self.classes(cx)));
+        let earlier_here = facts
+            .awaited
+            .get(&(key.clone(), bb))
+            .is_some_and(|&first| first < index);
+        earlier_here
+            || facts.futures.get(&key).is_some_and(|&atom| {
+                facts
+                    .finished
+                    .get(bb.0 as usize)
+                    .is_some_and(|set| set & fact(atom, true) != 0)
+            })
+    }
+
     /// The lazy initialization `bb` runs in (`EffectGuards::once_per`), preferring objects that
     /// come from fewer parameters.
     pub(crate) fn once_per_at(&self, cx: &GuardInputs<'_, '_>, bb: BlockId) -> Option<u64> {
@@ -622,9 +838,21 @@ impl LocalGuards {
             return 0;
         }
         let mut out = 0;
+        // Every way on from the site leaves the loop (`break`, `return`, `raise`).
+        let repeating = self.repeating(cx.f);
+        for lp in loops {
+            if !repeating[&lp.header].contains(&bb) {
+                out |= loop_bit(lp);
+            }
+        }
         for r in self.regions(cx).iter().filter(|r| r.blocks[bb.0 as usize]) {
-            for lp in loops {
-                if lp.body.contains(&r.test) && !fresh_in_loop(cx, r.obj, lp) {
+            for lp in loops.iter().filter(|lp| lp.body.contains(&r.test)) {
+                let once = match r.initialized {
+                    Initialized::Attr(obj) => !fresh_in_loop(cx, obj, lp),
+                    Initialized::Global => true,
+                    Initialized::Local(carried) => carried & loop_bit(lp) != 0,
+                };
+                if once {
                     out |= loop_bit(lp);
                 }
             }
@@ -792,58 +1020,292 @@ fn derived(cx: &GuardInputs<'_, '_>, var: VarId) -> Derived {
     out
 }
 
-/// Every path from `b.init` to a normal return, or back to the test, assigns `b.obj.attr`
+/// The lazy initializations of attributes: [`attr_tests`] branches that [`initializes`].
+fn attr_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion> {
+    let f = cx.f;
+    let def = |v: &VarId| cx.def(*v);
+    let mut values: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
+    let mut out = Vec::new();
+    for t in attr_tests(f, &def) {
+        if !initializes(cx, &mut values, &t, cells) {
+            continue;
+        }
+        let d = derived(cx, t.subject.0);
+        out.push(LazyRegion {
+            test: t.test,
+            initialized: Initialized::Attr(t.subject.0),
+            root: (!d.fresh).then_some(d.params),
+            blocks: dominated(f, t.init, cells),
+        });
+    }
+    out
+}
+
+/// Every path from `t.init` to a normal return, or back to the test, assigns `obj.attr`
 /// (stores in a block end the path; exceptions leave without a return).
 fn initializes(
-    f: &IrFunction,
-    def: DefOf<'_, '_>,
+    cx: &GuardInputs<'_, '_>,
     values: &mut FxHashMap<VarId, FxHashSet<VarId>>,
-    b: &LazyInitBranch,
+    t: &StateTest<(VarId, String)>,
+    cells: &mut Cells,
 ) -> bool {
+    let f = cx.f;
+    let def = |v: &VarId| cx.def(*v);
+    let (tested, attr) = (t.subject.0, t.subject.1.as_str());
     // The same object: an alias, or the same attribute of an alias of the same base
     // (`self.conn._sock` tested and assigned through two loads of `self.conn`).
     let base_of = |v: &VarId| match def(v) {
         Some(InstKind::AttrLoad { obj, attr, .. }) => Some((*obj, attr.as_str())),
         _ => None,
     };
-    let tested_base = base_of(&b.obj);
-    for v in [Some(b.obj), tested_base.map(|(o, _)| o)]
+    let tested_base = base_of(&tested);
+    for v in [Some(tested), tested_base.map(|(o, _)| o)]
         .into_iter()
         .flatten()
     {
         values.entry(v).or_insert_with(|| same_values(f, v));
     }
-    let aliases = &values[&b.obj];
+    let aliases = &values[&tested];
     let same = |v: &VarId| {
         aliases.contains(v)
             || matches!(
                 (tested_base, base_of(v)),
-                (Some((base, attr)), Some((o, a))) if attr == a && values[&base].contains(&o)
+                (Some((base, a)), Some((o, b))) if a == b && values[&base].contains(&o)
             )
     };
+    sets_on_every_way(
+        f,
+        t.test,
+        t.init,
+        true,
+        |i| matches!(&i.kind, InstKind::AttrStore { obj, attr: a, .. } if a == attr && same(obj)),
+        cells,
+    )
+}
+
+/// Every path from `init` back to `test`, and also every path to a normal return when
+/// `by_return` (for what outlives the call), runs an instruction where `sets` holds: such a
+/// block ends the path, and exceptions leave without a return.
+fn sets_on_every_way(
+    f: &IrFunction,
+    test: BlockId,
+    init: BlockId,
+    by_return: bool,
+    sets: impl Fn(&Inst) -> bool,
+    cells: &mut Cells,
+) -> bool {
     let mut seen = FxHashSet::default();
-    let mut stack = vec![b.init];
+    let mut stack = vec![init];
     while let Some(cur) = stack.pop() {
         if !seen.insert(cur) {
             continue;
         }
-        if cur == b.test {
+        if cur == test || !cells.take(1) {
             return false;
         }
         let block = f.block(cur);
-        let stores = block.insts.iter().any(|i| {
-            matches!(&i.kind, InstKind::AttrStore { obj, attr, .. } if *attr == b.attr && same(obj))
-        });
-        if stores {
+        if block.insts.iter().any(&sets) {
             continue;
         }
-        if matches!(block.terminator, Terminator::Return(_)) {
+        if by_return && matches!(block.terminator, Terminator::Return(_)) {
             return false;
         }
         stack.extend(block.terminator.successors());
         stack.extend(block.exc_target);
     }
     true
+}
+
+/// The lazy initializations of module globals (`global _client` and `if _client is None:
+/// _client = connect()`), when every path from the branch to a normal return, or back to the
+/// test, assigns the global, and no assignment of a constant the test finds unset is followed
+/// by a normal return or the test (`_client = None` before the test, or after the
+/// initialization; one before a `raise` only undoes a failed one): once per process.
+fn global_regions(
+    cx: &GuardInputs<'_, '_>,
+    classes: &Classes,
+    cells: &mut Cells,
+) -> Vec<LazyRegion> {
+    let f = cx.f;
+    let def = |v: &VarId| cx.def(*v);
+    let loads_global = |v: &VarId| match def(&through_copies(&def, *v)) {
+        Some(InstKind::LoadGlobal { name, .. }) => Some(name.clone()),
+        _ => None,
+    };
+    let tests: Vec<StateTest<String>> = state_tests(f, &def, loads_global)
+        .into_iter()
+        .filter(|t| t.found.unset())
+        .collect();
+    if tests.is_empty() {
+        return Vec::new();
+    }
+    let stores = global_stores(f);
+    let mut out = Vec::new();
+    for t in tests {
+        let assigned = stores
+            .get(t.subject.as_str())
+            .map_or(&[][..], Vec::as_slice);
+        let resets = assigned.iter().any(|&(bb, v)| {
+            const_arg(cx, classes, v).is_some_and(|c| t.found.takes(c))
+                && returns_or_retests(f, bb, t.test, cells)
+        });
+        let sets =
+            |i: &Inst| matches!(&i.kind, InstKind::StoreGlobal { name, .. } if *name == t.subject);
+        if !resets && sets_on_every_way(f, t.test, t.init, true, sets, cells) {
+            out.push(LazyRegion {
+                test: t.test,
+                initialized: Initialized::Global,
+                root: Some(0),
+                blocks: dominated(f, t.init, cells),
+            });
+        }
+    }
+    out
+}
+
+/// Whether a path from block `from` (itself included) reaches a normal return or `test`, along
+/// normal and exception edges.
+fn returns_or_retests(f: &IrFunction, from: BlockId, test: BlockId, cells: &mut Cells) -> bool {
+    let mut seen: FxHashSet<BlockId> = std::iter::once(from).collect();
+    let mut stack = vec![from];
+    while let Some(cur) = stack.pop() {
+        let block = f.block(cur);
+        if cur == test || matches!(block.terminator, Terminator::Return(_)) || !cells.take(1) {
+            return true;
+        }
+        for next in block
+            .terminator
+            .successors()
+            .into_iter()
+            .chain(block.exc_target)
+        {
+            if seen.insert(next) {
+                stack.push(next);
+            }
+        }
+    }
+    false
+}
+
+/// The lazy initializations of local variables: a branch of a test of a value merging paths,
+/// such as the one a loop carries, that every path from it back to the test leaves taking the
+/// other branch: `if conn is None: conn = connect()`, or a first-iteration flag (`if first:
+/// ...; first = False`). They count for the loops that carry what the branch set ([`stays_set`]);
+/// never per call, as each call starts without it.
+fn local_regions(
+    cx: &GuardInputs<'_, '_>,
+    classes: &Classes,
+    cells: &mut Cells,
+) -> Vec<LazyRegion> {
+    let f = cx.f;
+    if f.loops.is_empty() {
+        return Vec::new();
+    }
+    let def = |v: &VarId| cx.def(*v);
+    let merging = |v: &VarId| {
+        let p = through_copies(&def, *v);
+        cx.phi(p)?;
+        Some((p, f.var_name(p)?))
+    };
+    let tests: Vec<StateTest<(VarId, &str)>> = state_tests(f, &def, merging)
+        .into_iter()
+        .filter(|t| f.block_loop_depth(t.test) > 0)
+        .collect();
+    if tests.is_empty() {
+        return Vec::new();
+    }
+    let def_block: FxHashMap<VarId, BlockId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter().filter_map(|i| Some((i.kind.dst()?, b.id))))
+        .collect();
+    let mut out = Vec::new();
+    for t in tests {
+        let name = t.subject.1;
+        // An assignment ends the path; a re-read of the name in an exception block is none.
+        let assigns = |i: &Inst| {
+            !matches!(i.kind, InstKind::LoadName { .. })
+                && i.kind.dst().is_some_and(|d| f.var_name(d) == Some(name))
+        };
+        if !sets_on_every_way(f, t.test, t.init, false, assigns, cells) {
+            continue;
+        }
+        let blocks = dominated(f, t.init, cells);
+        let set_here = |v: VarId| def_block.get(&v).is_some_and(|b| blocks[b.0 as usize]);
+        let mut carried = 0;
+        for lp in f.loops.iter().filter(|lp| lp.body.contains(&t.test)) {
+            if stays_set(cx, classes, &t, lp, &set_here, cells) {
+                carried |= loop_bit(lp);
+            }
+        }
+        if carried != 0 {
+            out.push(LazyRegion {
+                test: t.test,
+                initialized: Initialized::Local(carried),
+                root: None,
+                blocks,
+            });
+        }
+    }
+    out
+}
+
+/// Whether the tested local takes the other branch of `t` in every iteration of `lp` after the
+/// one that ran `t.init`: every value it can have at the test then comes, through copies and
+/// the phis inside the loop, from a constant (or display) the test decides against the
+/// branch, or, for a branch on an unset value, from another value the branch's region
+/// computes (`set_here`; a client is taken as set, as for an attribute). A value computed
+/// elsewhere in the loop may be unset again. A phi of the loop's header passes on its values
+/// from the back edges only; the one from before the loop is that of the first iteration.
+fn stays_set(
+    cx: &GuardInputs<'_, '_>,
+    classes: &Classes,
+    t: &StateTest<(VarId, &str)>,
+    lp: &NaturalLoop,
+    set_here: &dyn Fn(VarId) -> bool,
+    cells: &mut Cells,
+) -> bool {
+    let inside: FxHashSet<BlockId> = lp.body.iter().copied().collect();
+    let mut seen = FxHashSet::default();
+    let mut stack = vec![t.subject.0];
+    let kept = 'walk: {
+        while let Some(v) = stack.pop() {
+            if !seen.insert(v) {
+                continue;
+            }
+            if let Some((bb, phi)) = cx.phi(v) {
+                if !inside.contains(&bb) {
+                    break 'walk false;
+                }
+                let header = bb == lp.header;
+                stack.extend(
+                    phi.incoming
+                        .iter()
+                        .filter(|(pred, _)| !header || inside.contains(pred))
+                        .map(|(_, w)| *w),
+                );
+                continue;
+            }
+            let keeps_off = match cx.def(v) {
+                Some(InstKind::Copy { src, .. }) => {
+                    stack.push(*src);
+                    continue;
+                }
+                Some(InstKind::LoadName { .. }) | None => false,
+                Some(kind) => match const_arg(cx, classes, v) {
+                    Some(c) => t.found.excluded_by(c),
+                    None => {
+                        t.found.unset() && !matches!(kind, InstKind::Const { .. }) && set_here(v)
+                    }
+                },
+            };
+            if !keeps_off {
+                break 'walk false;
+            }
+        }
+        true
+    };
+    cells.take(inside.len() + seen.len()) && kept
 }
 
 /// `root`, its copies and phis, and the builder's re-reads of its variable in blocks only an
@@ -862,8 +1324,10 @@ fn same_values(f: &IrFunction, root: VarId) -> FxHashSet<VarId> {
 }
 
 /// Membership (by block id) of the blocks every path from the entry to which runs through `d`
-/// (normal and exception edges).
-fn dominated(f: &IrFunction, d: BlockId) -> Vec<bool> {
+/// (normal and exception edges); it takes two cells per block of the function, for its walks
+/// and the membership kept.
+fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
+    cells.take(2 * f.blocks.len());
     let reach = |start: BlockId, avoid: Option<BlockId>| {
         let mut seen = vec![false; f.blocks.len()];
         let mut stack = vec![start];
@@ -1050,6 +1514,61 @@ fn constructed_class(cx: &GuardInputs<'_, '_>, v: VarId, kind: &InstKind) -> Opt
     None
 }
 
+// ------------------------------------------------------------------------ finished futures
+
+/// What a done fact is about: a value (through copies), or an attribute of one that the
+/// function never assigns (`self._future`, read again for every use).
+type FutureKey = (VarId, Option<String>);
+
+fn future_key(cx: &GuardInputs<'_, '_>, v: VarId) -> FutureKey {
+    let def = |v: &VarId| cx.def(*v);
+    let v = through_copies(&def, v);
+    match cx.def(v) {
+        Some(InstKind::AttrLoad { obj, attr, .. }) if !cx.stored_attrs.contains(&attr.as_str()) => {
+            (through_copies(&def, *obj), Some(attr.clone()))
+        }
+        _ => (v, None),
+    }
+}
+
+/// The future an `await` sees finish: awaiting the result of a catalog call that completes
+/// only once the future it is handed is done (`EcosystemEntry::done_when_awaited`,
+/// `await asyncio.wrap_future(f)`), through copies.
+fn finished_by(cx: &GuardInputs<'_, '_>, kind: &InstKind) -> Option<FutureKey> {
+    let InstKind::Await { value, .. } = kind else {
+        return None;
+    };
+    let def = |v: &VarId| cx.def(*v);
+    // `wrap_future(f)`, or `asyncio.wrap_future(f)` on the module.
+    let (symbol, args, star_from) = match cx.def(through_copies(&def, *value))? {
+        InstKind::Call {
+            callee_var: Some(callee),
+            args,
+            star_from,
+            ..
+        } => match cx.types.get(callee)? {
+            Val::Ref(symbol) => (symbol.clone(), args, star_from),
+            _ => return None,
+        },
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            star_from,
+            ..
+        } => match cx.types.get(recv)? {
+            Val::Ref(module) => (format!("{module}.{method}"), args, star_from),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let k = cx.kb.lookup(&symbol)?.done_when_awaited?;
+    if star_from.is_some_and(|s| s <= k) {
+        return None;
+    }
+    Some(future_key(cx, *args.get(usize::from(k))?))
+}
+
 // ------------------------------------------------------------------ the input facts dataflow
 
 fn is_none(cx: &GuardInputs<'_, '_>, v: &VarId) -> bool {
@@ -1134,13 +1653,25 @@ struct Facts<'c, 'f, 'a> {
     /// The values whose truthiness tells which edge into an `and` / `or` merge was taken, with
     /// their atoms (after the tests).
     merged: FxHashMap<VarId, u32>,
+    /// The futures known done ([`finished_by`], `f.done()`), with their atoms: they follow the
+    /// merges' and only ever hold, as a future not done yet may finish at any time.
+    futures: FxHashMap<FutureKey, u32>,
+    /// The atom of the first future.
+    first_future: u32,
+    /// Where each future is first seen finish in a block: the position of the first `await`.
+    awaited: FxHashMap<(FutureKey, BlockId), usize>,
+    /// The `f.done()` values, with the atom of `f`.
+    done_of: FxHashMap<VarId, u32>,
+    /// By block: the futures its `await`s see finish, which hold on its normal edges out.
+    finishing: Vec<FactSet>,
     /// What holds on the edges out of each block, by target, once the block is done; `None`:
     /// the edge is infeasible.
     edges: Vec<Option<OutEdges>>,
 }
 
 impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
-    /// The input tests of the function and the ones at the entry of every block.
+    /// The input tests and the futures known done of the function, and the ones at the entry
+    /// of every block.
     fn run(cx: &'c GuardInputs<'f, 'a>, classes: &'c Classes) -> LocalFacts {
         let mut facts = Self {
             cx,
@@ -1149,30 +1680,46 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
             test_of: FxHashMap::default(),
             phi_tests: FxHashMap::default(),
             merged: FxHashMap::default(),
+            futures: FxHashMap::default(),
+            first_future: 0,
+            awaited: FxHashMap::default(),
+            done_of: FxHashMap::default(),
+            finishing: Vec::new(),
             edges: Vec::new(),
         };
         facts.find_tests();
-        if facts.tests.is_empty() {
+        if facts.tests.is_empty() && facts.futures.is_empty() {
             return LocalFacts::default();
         }
         facts.edges = vec![None; cx.f.blocks.len()];
         let tests = u32::try_from(facts.tests.len())
             .unwrap_or(u32::MAX)
             .min(ATOMS);
-        let entry = facts
+        let solved: Vec<FactSet> = facts
             .solve()
             .into_iter()
+            .map(|set| set.unwrap_or(0))
+            .collect();
+        let entry = solved
+            .iter()
             .map(|set| {
-                let set = set.unwrap_or(0);
                 (0..tests)
                     .flat_map(|i| [(i, true), (i, false)])
                     .filter(|&(i, holds)| set & fact(i, holds) != 0)
                     .collect()
             })
             .collect();
+        let finished = if facts.futures.is_empty() {
+            Vec::new()
+        } else {
+            solved
+        };
         LocalFacts {
             tests: facts.tests,
             entry,
+            futures: facts.futures,
+            awaited: facts.awaited,
+            finished,
         }
     }
 
@@ -1189,9 +1736,13 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 .collect();
         let mut seen = FxHashSet::default();
         let mut merged = Vec::new();
+        let mut done_tests = Vec::new();
         while let Some(v) = stack.pop() {
             if !seen.insert(v) {
                 continue;
+            }
+            if let Some(future) = self.done_test(v) {
+                done_tests.push((v, future));
             }
             if let Some((subject, test, polarity)) = self.test(v) {
                 let atom = self.intern(subject, test);
@@ -1220,6 +1771,48 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
         for w in merged {
             let next = first.saturating_add(u32::try_from(self.merged.len()).unwrap_or(u32::MAX));
             self.merged.entry(w).or_insert(next);
+        }
+        self.first_future =
+            first.saturating_add(u32::try_from(self.merged.len()).unwrap_or(u32::MAX));
+        for (v, future) in done_tests {
+            let a = self.future_atom(future);
+            self.done_of.insert(v, a);
+        }
+        for (i, bb) in cx.f.blocks.iter().enumerate() {
+            for (at, inst) in bb.insts.iter().enumerate() {
+                if let Some(future) = finished_by(cx, &inst.kind) {
+                    let a = self.future_atom(future.clone());
+                    self.awaited.entry((future, bb.id)).or_insert(at);
+                    if self.finishing.is_empty() {
+                        self.finishing = vec![0; cx.f.blocks.len()];
+                    }
+                    self.finishing[i] |= fact(a, true);
+                }
+            }
+        }
+    }
+
+    /// The atom of `future`, interned.
+    fn future_atom(&mut self, future: FutureKey) -> u32 {
+        let next = self
+            .first_future
+            .saturating_add(u32::try_from(self.futures.len()).unwrap_or(u32::MAX));
+        *self.futures.entry(future).or_insert(next)
+    }
+
+    /// The future `v` asks about: `f.done()`.
+    fn done_test(&self, v: VarId) -> Option<FutureKey> {
+        match self.cx.def(v)? {
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            } if method == "done" && args.is_empty() && kwargs.is_empty() => {
+                Some(future_key(self.cx, *recv))
+            }
+            _ => None,
         }
     }
 
@@ -1361,6 +1954,9 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
         if let Some(&(t, polarity)) = self.test_of.get(&v) {
             out |= fact(t, holds == polarity);
         }
+        if holds && let Some(&a) = self.done_of.get(&v) {
+            out |= fact(a, true);
+        }
         if let Some(at) = walk.stack.iter().position(|w| *w == v) {
             return (out, at);
         }
@@ -1442,9 +2038,10 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 continue;
             };
             let block = f.block(b);
+            let past = cur | self.finishing.get(b.0 as usize).copied().unwrap_or(0);
             let mut out: OutEdges = Vec::new();
             match &block.terminator {
-                Terminator::Jump(t) => out.push((*t, Some(cur))),
+                Terminator::Jump(t) => out.push((*t, Some(past))),
                 Terminator::Branch {
                     cond,
                     then_bb,
@@ -1452,7 +2049,7 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 } => {
                     let mut walk = Decomposing::default();
                     for (t, holds) in [(*then_bb, true), (*else_bb, false)] {
-                        let e = cur | self.decompose(*cond, holds, &mut walk);
+                        let e = past | self.decompose(*cond, holds, &mut walk);
                         out.push((t, (!contradictory(e)).then_some(e)));
                     }
                 }

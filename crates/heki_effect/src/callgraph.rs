@@ -284,6 +284,9 @@ fn recompute(
     let hidden = std::mem::take(&mut s.declared_hidden);
     s.hide_exec_effects(&hidden);
     s.declared_hidden = hidden;
+    if s.is_cached_property {
+        guards::cached_per_instance(&mut s);
+    }
     // Returned objects that run nothing when iterated hand nothing out.
     if s.iterated
         .as_deref()

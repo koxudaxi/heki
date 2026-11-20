@@ -708,6 +708,7 @@ impl<'a> Extractor<'a> {
             fresh: &self.fresh,
             phis: &self.phis,
             scratch: &self.scratch,
+            kb: self.cx.kb,
         }
     }
 
@@ -3066,6 +3067,7 @@ impl<'a> Extractor<'a> {
                         args: &offloaded,
                         kwargs: &[],
                         star_from: None,
+                        recv: None,
                     };
                     self.external_call(bb, symbol, passed, call.is_awaited, call.span);
                 }
@@ -3521,11 +3523,17 @@ impl<'a> Extractor<'a> {
         // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103. A schema
         // or setting statement is no data query, though running it still blocks.
         let ddl = runs_ddl(&symbol, args.first().and_then(|a| self.const_str(*a)));
+        // A wait on a future known to be done returns at once.
+        let finished = entry.waits_until_done
+            && passed.recv.is_some_and(|r| {
+                self.guards
+                    .finished_at(&self.guard_inputs(), bb, self.pos.1, r)
+            });
         let effects: std::collections::BTreeSet<ExecEffectKind> = entry
             .effects_in(case)
             .iter()
             .copied()
-            .filter(|e| !(is_awaited && BLOCKING_EFFECTS.contains(e)))
+            .filter(|e| !((is_awaited || finished) && BLOCKING_EFFECTS.contains(e)))
             .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
             .collect();
         if let Some(k) = entry.offloads_blocking_arg
@@ -3686,6 +3694,8 @@ struct Passed<'c> {
     kwargs: &'c [(Option<String>, VarId)],
     /// `InstKind::Call::star_from`.
     star_from: Option<u8>,
+    /// The bound receiver of a method call.
+    recv: Option<VarId>,
 }
 
 impl Passed<'_> {
@@ -3693,6 +3703,7 @@ impl Passed<'_> {
         args: &[],
         kwargs: &[],
         star_from: None,
+        recv: None,
     };
 }
 
@@ -3723,6 +3734,7 @@ impl<'c> Call<'c> {
             args: self.args,
             kwargs: self.kwargs,
             star_from: self.star_from,
+            recv: self.recv_var,
         }
     }
 }

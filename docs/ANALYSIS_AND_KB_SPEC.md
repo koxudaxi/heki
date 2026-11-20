@@ -323,20 +323,39 @@ the value the edge brings decides the test, or is an input whose test it becomes
 on that edge holds with it (facts are never killed); an edge whose value decides against the
 outcome drops out, so `open` above needs `buf is not None` and `isinstance(buf, str)`. An effect
 inside a lazy initialization (`MUT107`'s branch, when every way out of it sets the attribute)
-runs once per object. At each call the callee's guards are mapped to the caller
-(`through_call`, wherever a callee's facts reach a caller): a constant argument, a value whose
-exact class the caller knows (`ConstArg`: a display or comprehension, an `io.StringIO` /
-`io.BytesIO` it constructs, or a phi of values of one such class), the literal default of an
-omitted parameter, or a test the caller has made on the same value that decides a guard against
-the effect prunes it there; an undecided test of a caller input becomes the caller's guard. A
-known class decides `is None`; `isinstance`, true when a tested class is in its MRO and false
-when every tested class is a builtin type, one of the `io` classes, or `os.PathLike` outside it;
-and `hasattr` for the attributes of the file protocol (`read`, `write`, `close`, ...), which the
-buffers have and the builtin values lack (a buffer may gain attributes of its own, so a name
-outside the protocol, or one a buffer lacks, stays undecided). A generator's guards are decided
-at the call that creates it. `EFF201` does not read guards. `EFF102` /
+runs once per object, as does every effect of a `functools.cached_property` getter, through any
+callee (its result is kept in the instance's `__dict__`); one under the same test of a module
+global the function assigns (`global _client`) runs once per process, unless the function also
+assigns it a constant the test finds unset on a way to a normal return or back to the test
+(`_client = None`; one before a `raise` only undoes a failed initialization). At each call the
+callee's guards are mapped to the caller (`through_call`, wherever a callee's facts reach a
+caller): a constant argument, a value whose exact class the caller knows (`ConstArg`: a display
+or comprehension, an `io.StringIO` / `io.BytesIO` it constructs, or a phi of values of one such
+class), the literal default of an omitted parameter, or a test the caller has made on the same
+value that decides a guard against the effect prunes it there; an undecided test of a caller
+input becomes the caller's guard. A known class decides `is None`; `isinstance`, true when a
+tested class is in its MRO and false when every tested class is a builtin type, one of the `io`
+classes, or `os.PathLike` outside it; and `hasattr` for the attributes of the file protocol
+(`read`, `write`, `close`, ...), which the buffers have and the builtin values lack (a buffer may
+gain attributes of its own, so a name outside the protocol, or one a buffer lacks, stays
+undecided). A generator's guards are decided at the call that creates it. `EFF201` does not read
+guards. `EFF102` /
 `EFF103` do not count a lazily initialized effect per iteration unless a data-sized loop around
-the call constructs the object. Anything not recognized keeps the effect.
+the call constructs the object. Within one function, a call also runs at most once per run of a
+loop (`CallSite::once_loops`) when every way on from it leaves the loop (`break`, `return`,
+`raise`; a handler that goes on with the loop is a way back), and when a test of a local
+variable the loop carries lets it run only until the variable changes: every path from the
+branch back to the test assigns the variable, and every value it can have there after an
+iteration takes the test's other branch (`if conn is None: conn = connect()`; a first-iteration
+flag `if first: ...; first = False`; a constant decides by its value, and another value counts
+as set only when the branch computes it, as for an attribute). The regions and the walks that
+find them take at most 8 cells per byte of the function's source (at most 250,000); past that
+none of the function's lazy initializations is recognized. A blocking wait on a future known to be done returns at once: the catalog marks the
+waits (`waits_until_done`: `concurrent.futures.Future.result` / `exception`) and the calls
+whose awaited result finishes a future (`done_when_awaited`: `asyncio.wrap_future`), and a
+forward must-analysis with the input tests' (one atom per future, which only ever holds) knows
+a future done after `if f.done():` and after such an `await`. Anything not recognized keeps the
+effect.
 
 **Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
 `ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs
