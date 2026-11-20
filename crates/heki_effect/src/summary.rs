@@ -2217,7 +2217,7 @@ impl<'a> Extractor<'a> {
                     && matches!(self.val(*obj), Some(Val::Inst(c)) if c == "collections.defaultdict")
                     && !self.reads_present_key(bb, *obj, *index)
                 {
-                    self.self_container_change(*obj, ContainerChange::Resizes, span);
+                    self.container_change(*obj, ContainerChange::Resizes, span);
                 }
             }
             InstKind::BinOp {
@@ -2231,7 +2231,7 @@ impl<'a> Extractor<'a> {
                     self.container_mut(*lhs, None, None, span);
                 }
                 // `self.items |= other` changes the container before storing it back.
-                self.self_container_change(*lhs, ContainerChange::Resizes, span);
+                self.container_change(*lhs, ContainerChange::Resizes, span);
             }
             // A value stored in a module global or a closure variable outlives the call.
             InstKind::StoreGlobal { value, .. } | InstKind::StoreDeref { value, .. } => {
@@ -2254,7 +2254,7 @@ impl<'a> Extractor<'a> {
                 value,
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, false, span);
-                self.self_container_change(*obj, ContainerChange::StoresItems, span);
+                self.container_change(*obj, ContainerChange::StoresItems, span);
                 self.note_escape(*value);
             }
             InstKind::SubscriptDelete {
@@ -2263,7 +2263,7 @@ impl<'a> Extractor<'a> {
                 key_const,
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, true, span);
-                self.self_container_change(*obj, ContainerChange::Resizes, span);
+                self.container_change(*obj, ContainerChange::Resizes, span);
             }
             InstKind::MethodCall {
                 dst,
@@ -2295,7 +2295,7 @@ impl<'a> Extractor<'a> {
                 if !matches!(callee, Callee::Project(..))
                     && let Some(change) = iterations::method_change(method)
                 {
-                    self.self_container_change(*recv, change, span);
+                    self.container_change(*recv, change, span);
                 }
                 // `obj.__dict__.get("attr"[, default])`.
                 if method == "get"
@@ -2914,9 +2914,13 @@ impl<'a> Extractor<'a> {
         })
     }
 
-    /// An in-place change of the container `var` holds, when it is `self.<attr>` of a class whose
-    /// iterators check for changes (`MUT113`).
-    fn self_container_change(&mut self, var: VarId, change: ContainerChange, span: Span) {
+    /// An in-place change of the container `var` holds (`MUT113`): of a parameter itself, and of
+    /// `self.<attr>` of a class whose iterators check for changes.
+    fn container_change(&mut self, var: VarId, change: ContainerChange, span: Span) {
+        if let Some((i, None)) = self.param_alias.get(&var).cloned() {
+            let facts = self.summary.iteration_facts_mut();
+            iterations::merge_changes(&mut facts.changes_param_containers, [(i, change)]);
+        }
         let checked = self.val(var).and_then(IteratedContainer::of_val).is_some();
         let Some(attr) = self.self_attr_alias.get(&var).filter(|_| checked) else {
             return;

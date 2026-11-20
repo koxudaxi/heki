@@ -656,15 +656,18 @@ functions with none).
    the loop, on normal or exception edges, or the `yield from` itself) and the spans of the call
    sites in such blocks (`iterations::BetweenSteps`).
 3. Changes of such containers (`changes_self_containers`, propagated through the calls on
-   `self`, `super()` included, the property reads, and the helpers changing the parameter bound
-   to `self.<attr>` in place): `Resizes` for the insertion, removal, and reordering methods
-   (`append`, `appendleft`, `extend`, `extendleft`, `insert`, `add`, `update`, `setdefault`,
-   `pop`, `popleft`, `popitem`, `remove`, `discard`, `clear`, the `*_update` methods, `rotate`,
-   `move_to_end`, `__delitem__`), `del x[k]`, the in-place operators (also stored back,
-   `self.s |= t`), a helper's change, and reading a missing key of a `defaultdict` (a read in the
-   block that `if k in self.<attr>:` enters inserts nothing); `StoresItems` for an item store
-   (`x[k] = v`, `__setitem__`), which breaks only a mapping's iterators. Rebinding the attribute
-   is no change. The function's own change sites are in `self_container_change_sites`.
+   `self`, `super()` included, the property reads, and the helpers changing the container of the
+   parameter bound to `self.<attr>`, with the helper's own change of it): `Resizes` for the
+   insertion, removal, and reordering methods (`append`, `appendleft`, `extend`, `extendleft`,
+   `insert`, `add`, `update`, `setdefault`, `pop`, `popleft`, `popitem`, `remove`, `discard`,
+   `clear`, the `*_update` methods, `rotate`, `move_to_end`, `__delitem__`), `del x[k]`, the
+   in-place operators (also stored back, `self.s |= t`), and reading a missing key of a
+   `defaultdict` (a read in the block that `if k in self.<attr>:` enters inserts nothing);
+   `StoresItems` for an item store (`x[k] = v`, `__setitem__`), which breaks only a mapping's
+   iterators. Rebinding the attribute is no change. The function's own change sites are in
+   `self_container_change_sites`. A function's changes of its parameters' own containers, of any
+   class, are counted the same way (`changes_param_containers`, propagated through the helpers it
+   hands them to): a helper storing an item of a deque it is handed breaks no iterator of it.
 4. Calls in a loop's body: a call site among an iteration's calls whose project callees change
    the container while their body runs there (`iterations::changed_at`, through
    `ProjectIndex::delivery`) is reported at the call, with the iteration as a related location.

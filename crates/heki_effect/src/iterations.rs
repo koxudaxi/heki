@@ -27,9 +27,15 @@ pub struct IterationFacts {
     /// The `self` attributes holding a container of a class [`IteratedContainer`] names that the
     /// function changes in place (rebinding one changes no container), directly, through local
     /// copies, through the methods and properties it calls on `self`, and through the helpers it
-    /// hands them to, with the strongest change. The only fact propagated to callers.
+    /// hands them to, with the strongest change. Propagated to callers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub changes_self_containers: BTreeMap<String, ContainerChange>,
+    /// The parameters (by position) whose own container the function changes in place, with the
+    /// strongest change, counted as for `changes_self_containers` (whatever the parameter's
+    /// class: its callers' arguments decide whether their iterators check): directly, through
+    /// local copies, and through the helpers it hands them to. Propagated to callers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub changes_param_containers: BTreeMap<u8, ContainerChange>,
     /// The spans of the function's own changes of the containers in `changes_self_containers`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub self_container_change_sites: BTreeMap<String, BTreeSet<Span>>,
@@ -47,6 +53,7 @@ pub struct IterationFacts {
 /// The facts of a function with none.
 pub(crate) static NO_ITERATION_FACTS: IterationFacts = IterationFacts {
     changes_self_containers: BTreeMap::new(),
+    changes_param_containers: BTreeMap::new(),
     self_container_change_sites: BTreeMap::new(),
     container_iterations: Vec::new(),
     result_iterations: Vec::new(),
@@ -71,11 +78,15 @@ impl IterationFacts {
         out
     }
 
-    /// The facts callers copy (`changes_self_containers`), `None` without any.
+    /// The facts callers copy (`changes_self_containers`, `changes_param_containers`), `None`
+    /// without any.
     pub(crate) fn propagated(&self) -> Option<Box<Self>> {
-        (!self.changes_self_containers.is_empty()).then(|| {
+        let none =
+            self.changes_self_containers.is_empty() && self.changes_param_containers.is_empty();
+        (!none).then(|| {
             Box::new(Self {
                 changes_self_containers: self.changes_self_containers.clone(),
+                changes_param_containers: self.changes_param_containers.clone(),
                 ..Self::default()
             })
         })
@@ -86,6 +97,10 @@ impl IterationFacts {
         merge_changes(
             &mut self.changes_self_containers,
             other.changes_self_containers,
+        );
+        merge_changes(
+            &mut self.changes_param_containers,
+            other.changes_param_containers,
         );
         for (attr, spans) in other.self_container_change_sites {
             self.self_container_change_sites
@@ -166,18 +181,17 @@ pub enum ContainerChange {
     /// is new.
     StoresItems,
     /// Items inserted, removed, or moved (`append`, `add`, `update`, `setdefault`, `pop`,
-    /// `del x[k]`, `clear`, `rotate`, `move_to_end`, the in-place operators), or any change a
-    /// helper the container is handed to makes.
+    /// `del x[k]`, `clear`, `rotate`, `move_to_end`, the in-place operators).
     Resizes,
 }
 
-/// Merge the changes `from` into `into`, keeping the stronger one per attribute.
-pub(crate) fn merge_changes(
-    into: &mut BTreeMap<String, ContainerChange>,
-    from: impl IntoIterator<Item = (String, ContainerChange)>,
+/// Merge the changes `from` into `into`, keeping the stronger one per container.
+pub(crate) fn merge_changes<K: Ord>(
+    into: &mut BTreeMap<K, ContainerChange>,
+    from: impl IntoIterator<Item = (K, ContainerChange)>,
 ) {
-    for (attr, change) in from {
-        let slot = into.entry(attr).or_insert(change);
+    for (container, change) in from {
+        let slot = into.entry(container).or_insert(change);
         *slot = (*slot).max(change);
     }
 }
@@ -185,7 +199,8 @@ pub(crate) fn merge_changes(
 /// The containers of the calling method's own instance that the project callee `bc` (summarized
 /// by `callee`) changes in place when `facts` run at `site`: those it changes on its own `self`
 /// when the call is on the caller's `self` (`self.helper()`, `super().m()`, a property read), and
-/// the caller's `self.<attr>` handed to a parameter it changes in place.
+/// the caller's `self.<attr>` handed to a parameter whose container it changes, with that change
+/// (a helper storing an item of a deque changes no more than the store would here).
 pub(crate) fn call_changes(
     site: &CallSite,
     bc: &BoundCallee,
@@ -202,14 +217,13 @@ pub(crate) fn call_changes(
                 .map(|(attr, change)| (attr.clone(), *change)),
         );
     }
-    for (&i, paths) in &facts.mutated_param_paths {
-        if paths.contains("")
-            && let Some(attr) = bc
-                .params
-                .get(usize::from(i))
-                .and_then(|o| o.self_attr.as_ref())
+    for (&i, &change) in &facts.iteration_facts().changes_param_containers {
+        if let Some(attr) = bc
+            .params
+            .get(usize::from(i))
+            .and_then(|o| o.self_attr.as_ref())
         {
-            out.push((attr.clone(), ContainerChange::Resizes));
+            out.push((attr.clone(), change));
         }
     }
     out
