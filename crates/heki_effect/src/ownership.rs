@@ -4,14 +4,15 @@
 //!
 //! [`source`] tells what the instruction defining a value makes of it. `heki_rules` applies it
 //! forward over a function's values; the extractor applies it backward, from the values a
-//! function returns ([`origins_of`]), into [`EffectSummary::returns_origins`], which
-//! propagation carries across the calls whose results are returned: a call's result is
-//! classified across functions, through any number of wrappers.
+//! function returns ([`origins_of`]), into [`EffectSummary::returns_origins`] and the calls whose
+//! results they may be, which propagation resolves with what those calls return: a call's
+//! result is classified across functions, through any number of wrappers and nested calls.
 //!
 //! [`EffectSummary::returns_origins`]: crate::EffectSummary::returns_origins
 
 use crate::readonly::{COPY_METHODS, SLICE_COPYING_TYPES};
 use crate::resolver::Callee;
+use heki_ast::Span;
 use heki_ir::{Inst, InstKind, PhiNode, VarId};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -57,6 +58,29 @@ impl Origins {
     }
 }
 
+/// A project call of the same function whose result an object may be (`MUT112`), by the span
+/// of the call site: the result itself, or an element of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResultOf {
+    pub span: Span,
+    pub element: bool,
+}
+
+/// What an object may be as the function holding it sees it (`MUT112`): the origins it knows,
+/// and the project calls whose results it may be, which propagation resolves with what their
+/// callees return.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LocalOrigins {
+    pub known: Origins,
+    pub results: Vec<ResultOf>,
+}
+
+impl LocalOrigins {
+    pub fn is_empty(&self) -> bool {
+        self.known.is_empty() && self.results.is_empty()
+    }
+}
+
 /// State outliving a call that an instruction reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Holder<'i> {
@@ -89,7 +113,7 @@ pub enum Source<'i> {
     /// A slice of the operand: a new sequence for the builtin sequences (and a value of unknown
     /// class, far more often a list), possibly a view of it for another class (`numpy`).
     Slice(VarId),
-    /// What the project callees return: their summaries say.
+    /// What the project callees return: their summaries say, in propagation.
     Project,
     Unknown,
 }
@@ -345,8 +369,8 @@ enum Part {
 /// ([`source`] by `source_of`) or parameter (`param_of`) makes of it. An element of a new object
 /// is of unknown origin, one of a parameter is the caller's, and one of held state is held; an
 /// object the function stores in another (`kept`, through copies and phis) is an element of that
-/// one, and one stored in a global or a closure cell is held. A project call adds nothing:
-/// propagation adds what its callees return.
+/// one, and one stored in a global or a closure cell is held. A project call's result is one of
+/// the `results`, which propagation resolves with what its callees return.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn origins_of<'i>(
     defs: &FxHashMap<VarId, &'i Inst>,
@@ -357,8 +381,8 @@ pub(crate) fn origins_of<'i>(
     param_of: impl Fn(VarId) -> Option<ParamRole>,
     slice_copies: impl Fn(VarId) -> bool,
     kept: &FxHashMap<VarId, Vec<Place<'_>>>,
-) -> Origins {
-    let mut out = Origins::default();
+) -> LocalOrigins {
+    let mut out = LocalOrigins::default();
     let mut seen: FxHashSet<(VarId, Part)> = FxHashSet::default();
     let mut work: Vec<(VarId, Part)> = roots.into_iter().map(|v| (v, Part::Object)).collect();
     while let Some((var, part)) = work.pop() {
@@ -367,10 +391,12 @@ pub(crate) fn origins_of<'i>(
         }
         if let Some(role) = param_of(var) {
             match (role, part) {
-                (ParamRole::Plain(i), Part::Object) if i < 64 => out.params |= 1u64 << i,
-                (ParamRole::Plain(i), Part::Element) if i < 64 => out.elements |= 1u64 << i,
-                (ParamRole::Packed, Part::Object) => out.new = true,
-                _ => out.held = true,
+                (ParamRole::Plain(i), Part::Object) if i < 64 => out.known.params |= 1u64 << i,
+                (ParamRole::Plain(i), Part::Element) if i < 64 => {
+                    out.known.elements |= 1u64 << i;
+                }
+                (ParamRole::Packed, Part::Object) => out.known.new = true,
+                _ => out.known.held = true,
             }
             continue;
         }
@@ -378,7 +404,7 @@ pub(crate) fn origins_of<'i>(
             for place in into {
                 match place {
                     Place::Object(c) => work.push((*c, Part::Element)),
-                    Place::Global(_) | Place::Cell(_) => out.held = true,
+                    Place::Global(_) | Place::Cell(_) => out.known.held = true,
                 }
             }
             continue;
@@ -394,8 +420,8 @@ pub(crate) fn origins_of<'i>(
         }
         let source = defs.get(&var).map_or(Source::Unknown, |i| source_of(i));
         match source {
-            Source::New => out.new |= part == Part::Object,
-            Source::Held(_) => out.held = true,
+            Source::New => out.known.new |= part == Part::Object,
+            Source::Held(_) => out.known.held = true,
             Source::Same(v) => work.push((v, part)),
             Source::Element(v) => work.push((v, Part::Element)),
             Source::ElementOr(v, default) => {
@@ -403,12 +429,16 @@ pub(crate) fn origins_of<'i>(
                 work.push((default, part));
             }
             Source::HeldOr(_, default) => {
-                out.held = true;
+                out.known.held = true;
                 work.push((default, part));
             }
-            Source::Slice(v) if slice_copies(v) => out.new |= part == Part::Object,
+            Source::Slice(v) if slice_copies(v) => out.known.new |= part == Part::Object,
             Source::Slice(v) => work.push((v, part)),
-            Source::Project | Source::Unknown => {}
+            Source::Project => out.results.push(ResultOf {
+                span: defs[&var].span,
+                element: part == Part::Element,
+            }),
+            Source::Unknown => {}
         }
     }
     out

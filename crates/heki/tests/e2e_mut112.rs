@@ -1043,6 +1043,100 @@ fn mut112_follows_only_the_returns_a_run_reaches() {
     );
 }
 
+/// Callees in another module return what other calls return: an argument that is itself a
+/// call's result, through any number of nested calls, an element of a call's result, and a call
+/// whose result feeds its own argument in a loop. A nested call of a new object is new.
+const NESTED_CALLEES: &str = r#"def identity(x):
+    return x
+
+
+def first(rows):
+    return rows[0]
+
+
+def nested(shared, flag):
+    return identity(identity(shared)) if flag else []
+
+
+def nested_element(rows, flag):
+    return first(identity(rows)) if flag else []
+
+
+def element_of_call(rows, flag):
+    return identity(rows)[0] if flag else []
+
+
+def looped(shared, times):
+    x = shared
+    for _ in range(times):
+        x = identity(x)
+    return x if times else []
+
+
+def fresh_nested(flag):
+    return identity(identity([])) if flag else []
+"#;
+
+const NESTED_CALLERS: &str = r#"from pkg.nested import element_of_call, fresh_nested, looped, nested, nested_element
+
+
+def use_nested(shared, flag):
+    x = nested(shared, flag)
+    x.append(1)
+
+
+def use_nested_element(rows, flag):
+    x = nested_element(rows, flag)
+    x.append(1)
+
+
+def use_element_of_call(rows, flag):
+    x = element_of_call(rows, flag)
+    x.append(1)
+
+
+def use_looped(shared, times):
+    x = looped(shared, times)
+    x.append(1)
+
+
+def use_fresh_nested(flag):
+    x = fresh_nested(flag)
+    x.append(1)
+"#;
+
+#[test]
+fn mut112_follows_returned_calls_through_nested_calls() {
+    let p = Project::new("mut112_nested_calls");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/nested.py", NESTED_CALLEES)
+        .write("pkg/callers.py", NESTED_CALLERS);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let c = "pkg/callers.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(c, 6, "use_nested", "x"),
+            d(c, 11, "use_nested_element", "x"),
+            d(c, 16, "use_element_of_call", "x"),
+            d(c, 21, "use_looped", "x"),
+        ],
+        "{diags:#?}"
+    );
+    for (line, borrow) in [
+        (6, "the parameter `shared`"),
+        (11, "an element of the parameter `rows`"),
+        (16, "an element of the parameter `rows`"),
+        (21, "the parameter `shared`"),
+    ] {
+        assert!(
+            message(at(&diags, c, line)).ends_with(&format!("{borrow} on another")),
+            "{line}: {}",
+            message(at(&diags, c, line))
+        );
+    }
+}
+
 /// A `MUT112` report, a suppression, and the `heki rule` page.
 const ONE: &str = "def collect(name, scopes=None):\n    use = scopes or []\n    use.append(name)  # heki: ignore[MUT112]\n    return use\n\n\ndef collect_all(name, scopes=None):\n    use = scopes or []\n    use.append(name)\n    return use\n";
 

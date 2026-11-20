@@ -39,7 +39,7 @@ pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
-pub use ownership::Origins;
+pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -556,9 +556,14 @@ pub struct EffectSummary {
     pub returns_new: ReturnsNew,
     /// What the object the function returns may be, path by path: a new one, state that
     /// outlives the call, one of its parameters, or an element of one (`MUT112`; propagated from
-    /// the project callees whose result it returns).
+    /// the project callees whose result it returns, [`Self::returns_results`]).
     #[serde(default, skip_serializing_if = "Origins::is_empty")]
     pub returns_origins: Origins,
+    /// The project calls of the function whose results it may return (`MUT112`): propagation
+    /// adds what they return to `returns_origins`, through the calls whose results their
+    /// arguments may be ([`ArgOrigin::origins`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returns_results: Vec<ResultOf>,
     /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
     pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
@@ -937,10 +942,11 @@ pub struct ArgOrigin {
     /// caller, or its parameter, that nothing kept before this call (`fresh-objects`).
     pub new_object: NewArg,
     /// What the argument may be, path by path, when the caller may return the call's result as
-    /// itself (`MUT112`: a callee returning its parameter returns the argument); `None` for any
-    /// other call (boxed: few arguments have one).
+    /// itself (`MUT112`: a callee returning its parameter returns the argument), also as the
+    /// result of another project call of the caller; `None` for any other call (boxed: few
+    /// arguments have one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub origins: Option<Box<Origins>>,
+    pub origins: Option<Box<LocalOrigins>>,
 }
 
 /// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`

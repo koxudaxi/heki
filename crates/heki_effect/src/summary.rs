@@ -8,7 +8,7 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
-use crate::ownership::{self, Origins, ParamRole, Source};
+use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
@@ -359,6 +359,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         _ => ReturnsNew::No,
     };
     into.returns_origins.join(other.returns_origins);
+    into.returns_results.extend(other.returns_results);
     into.unresolved_write_sites
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
@@ -1605,9 +1606,11 @@ impl<'a> Extractor<'a> {
     }
 
     /// `MUT112`: what the object the function returns may be ([`EffectSummary::returns_origins`]),
-    /// and what each argument of a project call whose result it may return as itself may be
-    /// ([`ArgOrigin::origins`]: a callee returning its parameter returns the argument). A
-    /// memoizing decorator returns state it keeps; another decorator may return anything.
+    /// the project calls whose results it may be ([`EffectSummary::returns_results`]), and what
+    /// each argument of those calls may be, in turn through the calls whose results the
+    /// arguments may be ([`ArgOrigin::origins`]: a callee returning its parameter returns the
+    /// argument). A memoizing decorator returns state it keeps; another decorator may return
+    /// anything.
     fn returned_origins(&mut self) {
         let f = self.f;
         if f.kind != FunctionKind::Sync || f.is_module_body {
@@ -1714,22 +1717,37 @@ impl<'a> Extractor<'a> {
                 &kept,
             )
         };
-        let returns_origins = origins(&returned);
-        let mut args: Vec<(usize, usize, usize, Origins)> = Vec::new();
+        let returns = origins(&returned);
+        // The arguments of the project calls whose results the function may return, and in
+        // turn of the calls whose results those arguments may be.
+        let mut calls_at: FxHashMap<Span, Vec<&ProjectCall>> = FxHashMap::default();
         for call in &self.project_calls {
-            if !self.returned.get(&call.dst).is_some_and(|s| s.from_object) {
+            calls_at
+                .entry(self.sites[call.site].span)
+                .or_default()
+                .push(call);
+        }
+        let mut queue: Vec<Span> = returns.results.iter().map(|r| r.span).collect();
+        let mut done: FxHashSet<Span> = FxHashSet::default();
+        let mut args: Vec<(usize, usize, usize, LocalOrigins)> = Vec::new();
+        while let Some(span) = queue.pop() {
+            if !done.insert(span) {
                 continue;
             }
-            for (ci, (_, bound)) in call.params.iter().enumerate() {
-                for (slot, var) in bound {
-                    let o = origins(&[*var]);
-                    if !o.is_empty() {
-                        args.push((call.site, ci, usize::from(*slot), o));
+            for call in calls_at.get(&span).into_iter().flatten() {
+                for (ci, (_, bound)) in call.params.iter().enumerate() {
+                    for (slot, var) in bound {
+                        let o = origins(&[*var]);
+                        queue.extend(o.results.iter().map(|r| r.span));
+                        if !o.is_empty() {
+                            args.push((call.site, ci, usize::from(*slot), o));
+                        }
                     }
                 }
             }
         }
-        self.summary.returns_origins = returns_origins;
+        self.summary.returns_origins = returns.known;
+        self.summary.returns_results = returns.results;
         for (site, ci, slot, o) in args {
             let callees = self.sites[site]
                 .project_callees_mut()

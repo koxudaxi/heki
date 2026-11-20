@@ -2946,8 +2946,9 @@ such state. The paths meet in a conditional expression or an `if`:
 
 What a project function returns is part of its summary, through any number of wrappers: a
 function that returns its argument on one path and a new object on another makes its call's
-result both when the caller passes borrowed state, and one returning an attribute it caches
-makes its call's result borrowed. Only the returns a run can reach count: a `return` after a
+result both when the caller passes borrowed state, also when that state is what another call
+returns (`identity(identity(shared))`), and one returning an attribute it caches makes its
+call's result borrowed. Only the returns a run can reach count: a `return` after a
 `while True:` loop that no `break` leaves, or under `if False:`, returns nothing.
 
 A change is an item assignment or deletion, a container method (`append`, `extend`, `update`,

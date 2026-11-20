@@ -10,9 +10,11 @@ use crate::guards;
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
-    Facts, FuncKey, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn, ReturnsNew,
-    Shared, SharedChain, SharedLine, SiteRole, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind,
+    Facts, FuncKey, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn, ResultOf,
+    ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, TypedFieldWriteSite,
+    UnresolvedWriteSite, WriteKind,
 };
+use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -274,10 +276,14 @@ fn recompute(
                 consumed = Some(consumed.map_or(here, |c| c & here));
             }
             return_flow_edge(&mut s, contracts, func, site, bc, callee, site_path);
-            returned_origins_edge(&mut s, site, bc, callee);
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
+    returned_results(
+        index,
+        out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+        &mut s,
+    );
     if !s.returns_self_attrs.is_empty() {
         drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }
@@ -503,41 +509,73 @@ fn return_flow_edge(
     ProtectedReturn::add(&mut s.returns_protected, producer, produced, step, chain);
 }
 
-/// `MUT112` return flow across one call whose result the caller may return as itself: what the
-/// callee returns is what the caller returns there, with the argument bound to a parameter the
-/// callee returns in its place. A caller whose decorators may return something else, or that
-/// memoizes its result, keeps its own facts (`summary::keeps_returned_value`).
-fn returned_origins_edge(
-    s: &mut EffectSummary,
-    site: &CallSite,
-    bc: &BoundCallee,
-    callee: &EffectSummary,
-) {
-    let returned = callee.returns_origins;
-    if returned.is_empty()
-        || !site.returned.is_some_and(|step| step.from_object)
-        || !runs_at_call(callee, site)
-        || s.is_lru_cache
-        || !crate::summary::keeps_returned_value(&s.decorators)
+/// `MUT112` return flow: what the project calls whose results the function may return
+/// (`EffectSummary::returns_results`) return, with the arguments bound to the parameters each
+/// callee returns in their place, through the calls whose results those arguments may be in
+/// turn. `sites` are the function's call sites.
+fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut EffectSummary) {
+    let at: FxHashMap<Span, &CallSite> = sites
+        .iter()
+        .map(|(path, i)| &index.files[path].call_sites[*i])
+        .filter(|site| site.role == SiteRole::Call && site.runner == Runner::Caller)
+        .filter(|site| !site.project_callees().is_empty())
+        .map(|site| (site.span, site))
+        .collect();
+    let mut resolving: FxHashSet<Span> = FxHashSet::default();
+    for result in s.returns_results.clone() {
+        let o = result_origins(index, &at, result, &mut resolving);
+        s.returns_origins.join(o);
+    }
+}
+
+/// What the call `result` names returns (or an element of it), as [`returned_results`]
+/// resolves it. A call whose result its own argument may be (in a loop) adds nothing more
+/// while it is `resolving`.
+fn result_origins(
+    index: &ProjectIndex,
+    at: &FxHashMap<Span, &CallSite>,
+    result: ResultOf,
+    resolving: &mut FxHashSet<Span>,
+) -> Origins {
+    let mut out = Origins::default();
+    if let Some(site) = at.get(&result.span)
+        && resolving.insert(result.span)
     {
-        return;
-    }
-    s.returns_origins.join(Origins {
-        params: 0,
-        elements: 0,
-        ..returned
-    });
-    for (j, arg) in bc.params.iter().enumerate().take(64) {
-        let Some(origins) = arg.origins.as_deref() else {
-            continue;
-        };
-        if returned.params & (1u64 << j) != 0 {
-            s.returns_origins.join(*origins);
+        let callees = site
+            .project_callees()
+            .iter()
+            .filter_map(|bc| Some((bc, index.summary(&bc.callee)?)))
+            .filter(|(_, callee)| runs_at_call(callee, site));
+        for (bc, callee) in callees {
+            let returned = callee.returns_origins;
+            out.join(Origins {
+                params: 0,
+                elements: 0,
+                ..returned
+            });
+            for (j, arg) in bc.params.iter().enumerate().take(64) {
+                let (itself, element) = (
+                    returned.params & (1u64 << j) != 0,
+                    returned.elements & (1u64 << j) != 0,
+                );
+                let Some(local) = arg.origins.as_deref().filter(|_| itself || element) else {
+                    continue;
+                };
+                let mut origins = local.known;
+                for inner in &local.results {
+                    origins.join(result_origins(index, at, *inner, resolving));
+                }
+                if itself {
+                    out.join(origins);
+                }
+                if element {
+                    out.join(origins.element());
+                }
+            }
         }
-        if returned.elements & (1u64 << j) != 0 {
-            s.returns_origins.join(origins.element());
-        }
+        resolving.remove(&result.span);
     }
+    if result.element { out.element() } else { out }
 }
 
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts

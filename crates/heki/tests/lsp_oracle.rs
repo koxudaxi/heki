@@ -489,6 +489,7 @@ const OWN_PREPARE: &str =
 const OWN_PREPARE_SAME: &str =
     "def prepare(config):\n    if config is None:\n        return {}\n    return config\n";
 const OWN_WRAP: &str = "from pkg.own_prepare import prepare\n\n\ndef prepare_twice(config):\n    return prepare(config)\n";
+const OWN_WRAP_NESTED: &str = "from pkg.own_prepare import prepare\n\n\ndef prepare_twice(config):\n    return prepare(prepare(config))\n";
 const OWN_USE: &str = "from pkg.own_wrap import prepare_twice\n\n\ndef configure(config):\n    cfg = prepare_twice(config)\n    cfg[\"debug\"] = True\n    return cfg\n";
 const OWN_BASE: &str =
     "class Box:\n    def __init__(self, items=None):\n        self.items = items or []\n";
@@ -1738,7 +1739,8 @@ fn steps_inherited_writers() -> Vec<Step> {
 }
 
 /// `MUT112`: what a function returns reaches its callers through a wrapper in another module
-/// (`EffectSummary::returns_origins`), and a store in `self.<attr>` follows the in-place changes
+/// (`EffectSummary::returns_origins`), also when the wrapper hands it a call's result
+/// (`EffectSummary::returns_results`), and a store in `self.<attr>` follows the in-place changes
 /// that the methods of its class family make in other modules (`heki_rules::family_readers`).
 fn steps_mut112() -> Vec<Step> {
     vec![
@@ -1750,6 +1752,24 @@ fn steps_mut112() -> Vec<Step> {
         Step::new(
             "the function copies its argument again",
             vec![save("pkg/own_prepare.py", OWN_PREPARE)],
+        )
+        .absent(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "the wrapper hands the function the result of another call of it",
+            vec![save("pkg/own_wrap.py", OWN_WRAP_NESTED)],
+        )
+        .absent(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "the function under the nested call stops copying its argument",
+            vec![save("pkg/own_prepare.py", OWN_PREPARE_SAME)],
+        )
+        .present(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "the function copies its argument again, and the wrapper calls it once",
+            vec![
+                save("pkg/own_prepare.py", OWN_PREPARE),
+                save("pkg/own_wrap.py", OWN_WRAP),
+            ],
         )
         .absent(&[("pkg/own_use.py", "MUT112")]),
         Step::new(
