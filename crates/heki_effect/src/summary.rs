@@ -275,8 +275,9 @@ struct Extractor<'a> {
     pos: (BlockId, usize),
     /// The points `MUT109` describes (`Some` when an `invalidation` contract is configured).
     events: Option<Events>,
-    /// Contracts naming this function an exempt writer (`MUT109`).
-    exempt: u64,
+    /// Contracts naming this function an exempt writer (`MUT109`), matched at its first write
+    /// to a contract target.
+    exempt: Option<u64>,
     /// Where each variable's object comes from among the objects that existed before the call
     /// (`MUT109`; empty unless an `invalidation` contract is configured).
     reach: FxHashMap<VarId, Reach>,
@@ -354,7 +355,7 @@ impl<'a> Extractor<'a> {
             events: contracts
                 .filter(|c| c.invalidations() > 0)
                 .map(|_| Events::default()),
-            exempt: contracts.map_or(0, |c| c.exempt_writer(&key.fqn(), &key.qualname)),
+            exempt: None,
             reach: FxHashMap::default(),
         };
         ex.build_may_params();
@@ -1425,7 +1426,13 @@ impl<'a> Extractor<'a> {
             // The class and its project bases: a target class covers its subclasses.
             let mut classes = vec![class.clone()];
             classes.extend(self.cx.project.ancestors_of(&class));
-            let mask = c.target_of(&classes, attr) & !self.exempt;
+            let mut mask = c.target_of(&classes, attr);
+            if mask != 0 {
+                let key = self.key;
+                mask &= !*self
+                    .exempt
+                    .get_or_insert_with(|| c.exempt_writer(&key.fqn(), &key.qualname));
+            }
             if mask != 0 && !own_init {
                 events.writes.push((
                     self.pos.0,
