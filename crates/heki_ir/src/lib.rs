@@ -368,6 +368,8 @@ pub enum InstKind {
         callee: String,
         args: Vec<VarId>,
         kwargs: Vec<(Option<String>, VarId)>,
+        /// An `await` in this frame waits for the result, directly (`await f()`) or through
+        /// copies and merges (`pending = f()` ... `await pending`).
         is_awaited: bool,
     },
     MethodCall {
@@ -376,6 +378,7 @@ pub enum InstKind {
         method: String,
         args: Vec<VarId>,
         kwargs: Vec<(Option<String>, VarId)>,
+        /// As for `Call`.
         is_awaited: bool,
     },
     Await {

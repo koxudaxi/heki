@@ -3353,6 +3353,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
         }
 
+        mark_awaited_calls(&mut self.blocks);
         let loop_carried =
             compute_loop_carried(&self.blocks, &self.finished_loops, &self.var_names);
 
@@ -3387,6 +3388,47 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             span: self.span,
             is_module_body: self.is_module_body,
             is_class_body: self.is_class_body,
+        }
+    }
+}
+
+/// A call whose result an `await` of the same frame waits for, through copies and merges
+/// (`pending = fetch()` ... `await pending`), runs its coroutine there: it is awaited.
+fn mark_awaited_calls(blocks: &mut [BasicBlock]) {
+    let mut defs: FxHashMap<VarId, (usize, usize)> = FxHashMap::default();
+    let mut phis: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+    let mut work: Vec<VarId> = Vec::new();
+    for (b, bb) in blocks.iter().enumerate() {
+        for phi in &bb.phis {
+            phis.insert(phi.dst, phi.incoming.iter().map(|(_, v)| *v).collect());
+        }
+        for (i, inst) in bb.insts.iter().enumerate() {
+            if let Some(dst) = inst.kind.dst() {
+                defs.insert(dst, (b, i));
+            }
+            if let InstKind::Await { value, .. } = inst.kind {
+                work.push(value);
+            }
+        }
+    }
+    let mut seen: FxHashSet<VarId> = FxHashSet::default();
+    while let Some(v) = work.pop() {
+        if !seen.insert(v) {
+            continue;
+        }
+        if let Some(incoming) = phis.get(&v) {
+            work.extend(incoming);
+            continue;
+        }
+        let Some(&(b, i)) = defs.get(&v) else {
+            continue;
+        };
+        match &mut blocks[b].insts[i].kind {
+            InstKind::Copy { src, .. } => work.push(*src),
+            InstKind::Call { is_awaited, .. } | InstKind::MethodCall { is_awaited, .. } => {
+                *is_awaited = true;
+            }
+            _ => {}
         }
     }
 }

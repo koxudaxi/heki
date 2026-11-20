@@ -606,3 +606,46 @@ async def async_lock(stream):
         ])
     );
 }
+
+#[test]
+fn a_saved_coroutine_runs_where_it_is_awaited() {
+    let src = "\
+import asyncio
+import time
+
+
+async def child():
+    time.sleep(1)
+
+
+async def saved():
+    pending = child()
+    await pending
+
+
+async def merged(flag):
+    pending = child() if flag else asyncio.sleep(0)
+    await pending
+
+
+async def scheduled():
+    task = asyncio.ensure_future(child())
+    return task
+
+
+async def created():
+    return child()
+";
+    let p = Project::new("ir_saved_coroutine");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"b\"\nscopes = [\"case.saved\", \"case.merged\", \"case.created\"]\nforbid = [\"sleep\"]\n",
+    )
+    .write("case.py", src);
+    let got: Vec<String> = diagnostics(&p, &["--select", "EFF201"])
+        .iter()
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    // A coroutine only created and returned runs in the caller.
+    assert_eq!(got, ["saved", "merged"]);
+}
