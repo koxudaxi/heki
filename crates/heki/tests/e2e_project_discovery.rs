@@ -237,3 +237,27 @@ fn a_later_definition_replaces_an_imported_name() {
         .collect();
     assert_eq!(reported, ["fallback.py", "imported_last.py"], "{stdout}");
 }
+
+#[test]
+fn a_relative_import_past_the_top_level_package_binds_nothing() {
+    let p = Project::new("disc_relative_beyond");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/mod.py",
+            "def helper():\n    try:\n        from ..time import sleep\n    except ImportError:\n        return\n    sleep(1)\n\n\nasync def go():\n    helper()\n",
+        )
+        .write(
+            "pkg/sub/__init__.py",
+            "",
+        )
+        .write(
+            "pkg/sub/inner.py",
+            "from ..blocking import wait\n\n\nasync def go():\n    wait()\n",
+        )
+        .write("pkg/blocking.py", BLOCKING_WAIT);
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    // `from ..blocking` in `pkg.sub.inner` is `pkg.blocking`; `..time` in `pkg.mod` raises.
+    assert!(stdout.contains("pkg/sub/inner.py:5:5: EFF101 "), "{stdout}");
+    assert!(!stdout.contains("pkg/mod.py"), "{stdout}");
+}

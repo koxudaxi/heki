@@ -104,7 +104,8 @@ pub fn module_name_for_path(rel: &Path, src_layout: bool) -> Option<(String, boo
 }
 
 /// Resolve the module part of `from <level dots><module> import ...` inside `current`.
-/// A package `__init__` is its own base; a plain module's base is its parent package.
+/// A package `__init__` is its own base; a plain module's base is its parent package. `None`
+/// when the level climbs past the top-level package, where Python raises `ImportError`.
 pub fn resolve_relative_module(
     current: &str,
     current_is_package: bool,
@@ -114,20 +115,21 @@ pub fn resolve_relative_module(
     if level == 0 {
         return module.map(str::to_owned);
     }
-    let mut parts: Vec<&str> = current.split('.').collect();
+    let mut package: Vec<&str> = current.split('.').collect();
     if !current_is_package {
-        parts.pop();
+        package.pop();
     }
-    for _ in 1..level {
-        parts.pop()?;
+    // Each dot after the first climbs one package; at least the top-level one must remain.
+    let keep = (package.len() + 1).checked_sub(usize::try_from(level).ok()?)?;
+    if keep == 0 {
+        return None;
     }
-    let base = parts.join(".");
-    match (base.is_empty(), module) {
-        (true, None) => None,
-        (true, Some(m)) => Some(m.to_owned()),
-        (false, None) => Some(base),
-        (false, Some(m)) => Some(format!("{base}.{m}")),
-    }
+    package.truncate(keep);
+    let base = package.join(".");
+    Some(match module {
+        None => base,
+        Some(m) => format!("{base}.{m}"),
+    })
 }
 
 /// Fully qualified symbol bound by one import.

@@ -962,6 +962,11 @@ fn module_names_and_relative_imports() {
     assert_eq!(rel("pkg", true, 1, None), Some("pkg".into()));
     assert_eq!(rel("pkg.sub.mod", false, 2, None), Some("pkg".into()));
     assert_eq!(rel("pkg.a", false, 3, Some("x")), None);
+    // Past the top-level package (`from ..time import sleep` in `pkg/mod.py`), or with no
+    // package at all: `ImportError`.
+    assert_eq!(rel("pkg.mod", false, 2, Some("time")), None);
+    assert_eq!(rel("pkg", true, 2, None), None);
+    assert_eq!(rel("mod", false, 1, Some("x")), None);
     assert_eq!(rel("pkg.a", false, 0, Some("os")), Some("os".into()));
 }
 
