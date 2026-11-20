@@ -1190,7 +1190,9 @@ fn ir_comprehensions_follow_pep709() {
         gens.iter()
             .all(|g| var_name(c, &g["outer_iter"]) == Some("rows"))
     );
-    assert_eq!(strs(&c["captured_vars"]), ["cols"]);
+    // The cells CPython's `symtable` gives the function: `cols`, read by the first generator
+    // expression, and `hit`, bound by the assignment expressions of the second (PEP 572).
+    assert_eq!(strs(&c["captured_vars"]), ["cols", "hit"]);
     assert!(
         !qualnames(&ir315)
             .iter()

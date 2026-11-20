@@ -87,3 +87,26 @@ async def iterates():
         pairs(&[("iterates", "EFF101")])
     );
 }
+
+// ======================================================================== scopes and frames
+
+#[test]
+fn a_yield_in_a_definition_header_makes_the_enclosing_function_a_generator() {
+    let src = "\
+import time
+
+
+def rows():
+    def unused(x=(yield)):
+        pass
+    time.sleep(1)
+
+
+async def creates():
+    rows()
+";
+    let ir = dump_ir("ir_header_yield", src, "py315");
+    assert_eq!(function(&ir, "rows")["kind"], "generator");
+    assert_eq!(function(&ir, "rows.<locals>.unused")["kind"], "sync");
+    assert!(reports("ir_header_yield", src, "EFF101").is_empty());
+}

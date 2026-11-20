@@ -59,6 +59,7 @@ pub fn build_module_ir(
         is_module_body: true,
         is_class_body: false,
         outer_locals: FxHashSet::default(),
+        walrus_target: WalrusTarget::OwnScope,
         body: FunctionBody::Suite(parsed.suite()),
     });
 
@@ -121,6 +122,7 @@ struct FunctionSpec<'a> {
     is_module_body: bool,
     is_class_body: bool,
     outer_locals: FxHashSet<String>,
+    walrus_target: WalrusTarget,
     body: FunctionBody<'a>,
 }
 
@@ -167,16 +169,7 @@ impl<'a> ModuleLowerer<'a> {
             FunctionBody::Expr(expr) => collect_expr_bindings(expr, &mut scope_info),
             FunctionBody::GenExpr(ge) => {
                 scope_info.has_yield = true;
-                for (idx, g) in ge.generators.iter().enumerate() {
-                    if idx > 0 {
-                        collect_expr_bindings(&g.iter, &mut scope_info);
-                    }
-                    collect_target_bindings(&g.target, &mut scope_info.locals);
-                    for cond in &g.ifs {
-                        collect_expr_bindings(cond, &mut scope_info);
-                    }
-                }
-                collect_expr_bindings(&ge.elt, &mut scope_info);
+                collect_comprehension_bindings(&ge.generators, &[&ge.elt], &mut scope_info);
             }
             FunctionBody::Comp {
                 generators,
@@ -184,20 +177,17 @@ impl<'a> ModuleLowerer<'a> {
                 key,
                 ..
             } => {
-                for (idx, g) in generators.iter().enumerate() {
-                    if idx > 0 {
-                        collect_expr_bindings(&g.iter, &mut scope_info);
-                    }
-                    collect_target_bindings(&g.target, &mut scope_info.locals);
-                    for cond in &g.ifs {
-                        collect_expr_bindings(cond, &mut scope_info);
-                    }
-                }
-                if let Some(k) = key {
-                    collect_expr_bindings(k, &mut scope_info);
-                }
-                collect_expr_bindings(elt, &mut scope_info);
+                let elts: Vec<&Expr> = key.into_iter().chain([elt]).collect();
+                collect_comprehension_bindings(generators, &elts, &mut scope_info);
             }
+        }
+        // PEP 572: an assignment expression in a comprehension's own scope binds the name in
+        // the nearest enclosing function (a cell) or module scope.
+        let walrus_targets = std::mem::take(&mut scope_info.assignment_expression_targets);
+        match spec.walrus_target {
+            WalrusTarget::OwnScope => {}
+            WalrusTarget::EnclosingFunction => scope_info.nonlocals.extend(walrus_targets),
+            WalrusTarget::Module => scope_info.globals.extend(walrus_targets),
         }
         // `global` and `nonlocal` remove names from true function locals.
         for g in &scope_info.globals {
@@ -255,6 +245,7 @@ impl<'a> ModuleLowerer<'a> {
             spec.is_class_body,
             scope_info,
             &spec.outer_locals,
+            spec.walrus_target,
         );
 
         if let Some(params) = spec.params {
@@ -331,7 +322,19 @@ struct ScopeBindings {
     locals: FxHashSet<String>,
     globals: FxHashSet<String>,
     nonlocals: FxHashSet<String>,
+    /// Names bound by `:=`, which a comprehension's own scope does not keep.
+    assignment_expression_targets: FxHashSet<String>,
     has_yield: bool,
+}
+
+/// The scope an assignment expression (`:=`) of a scope binds its name in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalrusTarget {
+    OwnScope,
+    /// A comprehension scope nested (at any depth of comprehensions) in a function.
+    EnclosingFunction,
+    /// A comprehension scope nested in the module body.
+    Module,
 }
 
 struct ActiveLoop {
@@ -364,6 +367,7 @@ struct FnBuilder<'m, 'a> {
     scope: ScopeBindings,
     /// Union of outer function locals (to recognize closure captures).
     outer_locals: FxHashSet<String>,
+    walrus_target: WalrusTarget,
     /// Variables in THIS function captured by nested functions/lambdas/genexprs.
     captured_by_children: FxHashSet<String>,
     /// Free variables read by THIS function from outer scopes.
@@ -410,6 +414,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         is_class_body: bool,
         scope: ScopeBindings,
         outer_locals: &FxHashSet<String>,
+        walrus_target: WalrusTarget,
     ) -> Self {
         let entry = BasicBlock {
             id: BlockId(0),
@@ -436,6 +441,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_class_body,
             scope,
             outer_locals: outer_locals.clone(),
+            walrus_target,
             captured_by_children: FxHashSet::default(),
             free_reads: FxHashSet::default(),
             blocks: vec![entry],
@@ -1031,10 +1037,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             .as_ref()
             .map(|r| self.module.slice_text(Span::from(r.range())));
 
-        let mut child_outer = self.outer_locals.clone();
-        if !self.is_module_body && !self.is_class_body {
-            child_outer.extend(self.scope.locals.iter().cloned());
-        }
+        let child_outer = self.child_outer_locals();
 
         let child_id = self.module.lower_function_body(FunctionSpec {
             name: func.name.to_string(),
@@ -1049,6 +1052,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body: false,
             is_class_body: false,
             outer_locals: child_outer,
+            walrus_target: WalrusTarget::OwnScope,
             body: FunctionBody::Suite(&func.body),
         });
 
@@ -1086,10 +1090,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         // and qualname are always there.
         let (class_id, class_qualname) = self.module.class_by_span[&span].clone();
 
-        let mut child_outer = self.outer_locals.clone();
-        if !self.is_module_body && !self.is_class_body {
-            child_outer.extend(self.scope.locals.iter().cloned());
-        }
+        let child_outer = self.child_outer_locals();
 
         let child_id = self.module.lower_function_body(FunctionSpec {
             name: cls.name.to_string(),
@@ -1104,6 +1105,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body: false,
             is_class_body: true,
             outer_locals: child_outer,
+            walrus_target: WalrusTarget::OwnScope,
             body: FunctionBody::Suite(&cls.body),
         });
 
@@ -1119,6 +1121,25 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             span,
         );
         self.write_var(cls.name.as_str(), dst, span);
+    }
+
+    /// The names a scope nested here may read from enclosing function scopes: the enclosing
+    /// functions' locals and this function's own.
+    fn child_outer_locals(&self) -> FxHashSet<String> {
+        let mut out = self.outer_locals.clone();
+        if !self.is_module_body && !self.is_class_body {
+            out.extend(self.scope.locals.iter().cloned());
+        }
+        out
+    }
+
+    /// Where an assignment expression of a comprehension scope nested here binds its name.
+    fn comprehension_walrus_target(&self) -> WalrusTarget {
+        match self.walrus_target {
+            WalrusTarget::OwnScope if self.is_module_body => WalrusTarget::Module,
+            WalrusTarget::OwnScope => WalrusTarget::EnclosingFunction,
+            nested => nested,
+        }
     }
 
     fn collect_child_captures(&mut self, child_id: FunctionId) -> Vec<String> {
@@ -2208,10 +2229,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                         }
                     }
                 }
-                let mut child_outer = self.outer_locals.clone();
-                if !self.is_module_body && !self.is_class_body {
-                    child_outer.extend(self.scope.locals.iter().cloned());
-                }
+                let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<lambda>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
                     name: "<lambda>".to_string(),
@@ -2226,6 +2244,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     is_module_body: false,
                     is_class_body: false,
                     outer_locals: child_outer,
+                    walrus_target: WalrusTarget::OwnScope,
                     body: FunctionBody::Expr(&lam.body),
                 });
                 let captured_names = self.collect_child_captures(child_id);
@@ -2246,10 +2265,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 // requires at least one `for` clause.)
                 let outer_iter = self.lower_expr(&ge.generators[0].iter);
 
-                let mut child_outer = self.outer_locals.clone();
-                if !self.is_module_body && !self.is_class_body {
-                    child_outer.extend(self.scope.locals.iter().cloned());
-                }
+                let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<genexpr>", self.qualname);
                 let child_id = self.module.lower_function_body(FunctionSpec {
                     name: "<genexpr>".to_string(),
@@ -2264,6 +2280,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     is_module_body: false,
                     is_class_body: false,
                     outer_locals: child_outer,
+                    walrus_target: self.comprehension_walrus_target(),
                     body: FunctionBody::GenExpr(ge),
                 });
                 let captured_names = self.collect_child_captures(child_id);
@@ -2492,10 +2509,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             // Python 3.11: non-inlined comprehension frame with eager outer iter (the grammar
             // requires at least one `for` clause).
             let outer_iter = self.lower_expr(&generators[0].iter);
-            let mut child_outer = self.outer_locals.clone();
-            if !self.is_module_body && !self.is_class_body {
-                child_outer.extend(self.scope.locals.iter().cloned());
-            }
+            let child_outer = self.child_outer_locals();
             let qualname = format!("{}.<locals>.{comp_name}", self.qualname);
             let child_id = self.module.lower_function_body(FunctionSpec {
                 name: comp_name.to_string(),
@@ -2510,6 +2524,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 is_module_body: false,
                 is_class_body: false,
                 outer_locals: child_outer,
+                walrus_target: self.comprehension_walrus_target(),
                 body: FunctionBody::Comp {
                     generators,
                     elt,
@@ -2608,7 +2623,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             let comp_id = self.module.next_comp_id;
             self.module.next_comp_id += 1;
             let mut raw_targets = FxHashSet::default();
-            collect_target_bindings(&g.target, &mut raw_targets);
+            collect_target_names(&g.target, &mut raw_targets);
             let mut rename_map = FxHashMap::default();
             for name in raw_targets {
                 rename_map.insert(name.clone(), format!(".comp{comp_id}_{name}"));
@@ -3149,29 +3164,58 @@ fn collect_params_into(params: &ast::Parameters, locals: &mut FxHashSet<String>)
     }
 }
 
+/// The default values of a parameter list, in the order the definition evaluates them
+/// (positional ones, then keyword-only ones).
+fn parameter_defaults(params: &ast::Parameters) -> impl Iterator<Item = &Expr> {
+    params
+        .posonlyargs
+        .iter()
+        .chain(&params.args)
+        .chain(&params.kwonlyargs)
+        .filter_map(|p| p.default.as_deref())
+}
+
 fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
     for stmt in stmts {
         match stmt {
+            // Decorators, defaults, and class arguments run in this scope at the definition.
             Stmt::FunctionDef(f) => {
+                for dec in &f.decorator_list {
+                    collect_expr_bindings(&dec.expression, out);
+                }
+                for default in parameter_defaults(&f.parameters) {
+                    collect_expr_bindings(default, out);
+                }
                 out.locals.insert(f.name.to_string());
             }
             Stmt::ClassDef(c) => {
+                for dec in &c.decorator_list {
+                    collect_expr_bindings(&dec.expression, out);
+                }
+                if let Some(args) = &c.arguments {
+                    for arg in &args.args {
+                        collect_expr_bindings(arg, out);
+                    }
+                    for kw in &args.keywords {
+                        collect_expr_bindings(&kw.value, out);
+                    }
+                }
                 out.locals.insert(c.name.to_string());
             }
-            Stmt::TypeAlias(ta) => collect_target_bindings(&ta.name, &mut out.locals),
+            Stmt::TypeAlias(ta) => collect_target_bindings(&ta.name, out),
             Stmt::Assign(a) => {
                 for t in &a.targets {
-                    collect_target_bindings(t, &mut out.locals);
+                    collect_target_bindings(t, out);
                 }
                 collect_expr_bindings(&a.value, out);
             }
             Stmt::AugAssign(aa) => {
-                collect_target_bindings(&aa.target, &mut out.locals);
+                collect_target_bindings(&aa.target, out);
                 collect_expr_bindings(&aa.value, out);
             }
             Stmt::AnnAssign(aa) => {
                 if aa.simple || aa.value.is_some() {
-                    collect_target_bindings(&aa.target, &mut out.locals);
+                    collect_target_bindings(&aa.target, out);
                 }
                 if let Some(v) = &aa.value {
                     collect_expr_bindings(v, out);
@@ -3179,12 +3223,12 @@ fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
             }
             Stmt::Delete(d) => {
                 for t in &d.targets {
-                    collect_target_bindings(t, &mut out.locals);
+                    collect_target_bindings(t, out);
                 }
             }
             Stmt::For(f) => {
                 collect_expr_bindings(&f.iter, out);
-                collect_target_bindings(&f.target, &mut out.locals);
+                collect_target_bindings(&f.target, out);
                 collect_suite_bindings(&f.body, out);
                 collect_suite_bindings(&f.orelse, out);
             }
@@ -3207,7 +3251,7 @@ fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
                 for item in &w.items {
                     collect_expr_bindings(&item.context_expr, out);
                     if let Some(opt) = &item.optional_vars {
-                        collect_target_bindings(opt, &mut out.locals);
+                        collect_target_bindings(opt, out);
                     }
                 }
                 collect_suite_bindings(&w.body, out);
@@ -3216,6 +3260,9 @@ fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
                 collect_suite_bindings(&t.body, out);
                 for h in &t.handlers {
                     let ast::ExceptHandler::ExceptHandler(eh) = h;
+                    if let Some(ty) = &eh.type_ {
+                        collect_expr_bindings(ty, out);
+                    }
                     if let Some(name) = &eh.name {
                         out.locals.insert(name.to_string());
                     }
@@ -3292,22 +3339,35 @@ fn collect_suite_bindings(stmts: &[Stmt], out: &mut ScopeBindings) {
     }
 }
 
-fn collect_target_bindings(expr: &Expr, locals: &mut FxHashSet<String>) {
+/// The names an assignment target binds, and the bindings of the expressions it evaluates
+/// (`d[(k := key)] = v` binds `k`).
+fn collect_target_bindings(expr: &Expr, out: &mut ScopeBindings) {
     match expr {
         Expr::Name(n) => {
-            locals.insert(n.id.to_string());
+            out.locals.insert(n.id.to_string());
         }
-        Expr::Tuple(t) => {
-            for e in &t.elts {
-                collect_target_bindings(e, locals);
+        Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+            for e in elts {
+                collect_target_bindings(e, out);
             }
         }
-        Expr::List(l) => {
-            for e in &l.elts {
-                collect_target_bindings(e, locals);
+        Expr::Starred(s) => collect_target_bindings(&s.value, out),
+        other => collect_expr_bindings(other, out),
+    }
+}
+
+/// The names an assignment target binds, without the expressions it evaluates.
+fn collect_target_names(expr: &Expr, names: &mut FxHashSet<String>) {
+    match expr {
+        Expr::Name(n) => {
+            names.insert(n.id.to_string());
+        }
+        Expr::Tuple(ast::ExprTuple { elts, .. }) | Expr::List(ast::ExprList { elts, .. }) => {
+            for e in elts {
+                collect_target_names(e, names);
             }
         }
-        Expr::Starred(s) => collect_target_bindings(&s.value, locals),
+        Expr::Starred(s) => collect_target_names(&s.value, names),
         _ => {}
     }
 }
@@ -3357,10 +3417,33 @@ fn collect_pattern_bindings(pat: &Pattern, locals: &mut FxHashSet<String>) {
     }
 }
 
+/// The bindings of the parts of a comprehension that run in its own scope: every `for` clause
+/// but the first one's iterable (which runs in the enclosing scope), the conditions, and the
+/// elements.
+fn collect_comprehension_bindings(
+    generators: &[ast::Comprehension],
+    elts: &[&Expr],
+    out: &mut ScopeBindings,
+) {
+    for (idx, g) in generators.iter().enumerate() {
+        if idx > 0 {
+            collect_expr_bindings(&g.iter, out);
+        }
+        collect_target_bindings(&g.target, out);
+        for cond in &g.ifs {
+            collect_expr_bindings(cond, out);
+        }
+    }
+    for elt in elts {
+        collect_expr_bindings(elt, out);
+    }
+}
+
 fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
     match expr {
         Expr::Named(n) => {
-            collect_target_bindings(&n.target, &mut out.locals);
+            collect_target_bindings(&n.target, out);
+            collect_target_names(&n.target, &mut out.assignment_expression_targets);
             collect_expr_bindings(&n.value, out);
         }
         Expr::Yield(y) => {
@@ -3373,38 +3456,32 @@ fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
             out.has_yield = true;
             collect_expr_bindings(&yf.value, out);
         }
-        Expr::Lambda(_) | Expr::Generator(_) => {
-            // Do NOT cross nested function / generator expression boundaries.
-        }
-        Expr::ListComp(lc) => {
-            for g in &lc.generators {
-                collect_expr_bindings(&g.iter, out);
-                for c in &g.ifs {
-                    collect_expr_bindings(c, out);
+        // A lambda's body is a scope of its own; its defaults run here.
+        Expr::Lambda(lam) => {
+            if let Some(params) = &lam.parameters {
+                for default in parameter_defaults(params) {
+                    collect_expr_bindings(default, out);
                 }
             }
-            collect_expr_bindings(&lc.elt, out);
         }
-        Expr::SetComp(sc) => {
-            for g in &sc.generators {
-                collect_expr_bindings(&g.iter, out);
-                for c in &g.ifs {
-                    collect_expr_bindings(c, out);
-                }
+        // A generator expression's outermost iterable runs here, and an assignment expression
+        // anywhere else in it binds here too (PEP 572); its other names are its own.
+        Expr::Generator(ge) => {
+            collect_expr_bindings(&ge.generators[0].iter, out);
+            let mut own = ScopeBindings::default();
+            collect_comprehension_bindings(&ge.generators, &[&ge.elt], &mut own);
+            for name in own.assignment_expression_targets {
+                out.locals.insert(name.clone());
+                out.assignment_expression_targets.insert(name);
             }
-            collect_expr_bindings(&sc.elt, out);
         }
+        // Inlined into this scope (PEP 709) apart from their iteration variables, which stay
+        // isolated; before 3.12 an assignment expression in one binds here all the same.
+        Expr::ListComp(lc) => collect_inlined_comprehension(&lc.generators, &[&lc.elt], out),
+        Expr::SetComp(sc) => collect_inlined_comprehension(&sc.generators, &[&sc.elt], out),
         Expr::DictComp(dc) => {
-            for g in &dc.generators {
-                collect_expr_bindings(&g.iter, out);
-                for c in &g.ifs {
-                    collect_expr_bindings(c, out);
-                }
-            }
-            if let Some(k) = &dc.key {
-                collect_expr_bindings(k, out);
-            }
-            collect_expr_bindings(&dc.value, out);
+            let elts: Vec<&Expr> = dc.key.as_deref().into_iter().chain([&*dc.value]).collect();
+            collect_inlined_comprehension(&dc.generators, &elts, out);
         }
         Expr::BoolOp(b) => {
             for v in &b.values {
@@ -3429,18 +3506,10 @@ fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
                 collect_expr_bindings(&item.value, out);
             }
         }
-        Expr::Set(s) => {
-            for e in &s.elts {
-                collect_expr_bindings(e, out);
-            }
-        }
-        Expr::List(l) => {
-            for e in &l.elts {
-                collect_expr_bindings(e, out);
-            }
-        }
-        Expr::Tuple(t) => {
-            for e in &t.elts {
+        Expr::Set(ast::ExprSet { elts, .. })
+        | Expr::List(ast::ExprList { elts, .. })
+        | Expr::Tuple(ast::ExprTuple { elts, .. }) => {
+            for e in elts {
                 collect_expr_bindings(e, out);
             }
         }
@@ -3471,18 +3540,42 @@ fn collect_expr_bindings(expr: &Expr, out: &mut ScopeBindings) {
             }
         }
         Expr::Slice(s) => {
-            if let Some(l) = &s.lower {
-                collect_expr_bindings(l, out);
-            }
-            if let Some(u) = &s.upper {
-                collect_expr_bindings(u, out);
-            }
-            if let Some(st) = &s.step {
-                collect_expr_bindings(st, out);
+            for part in [&s.lower, &s.upper, &s.step].into_iter().flatten() {
+                collect_expr_bindings(part, out);
             }
         }
-        _ => {}
+        Expr::Name(_)
+        | Expr::StringLiteral(_)
+        | Expr::BytesLiteral(_)
+        | Expr::NumberLiteral(_)
+        | Expr::BooleanLiteral(_)
+        | Expr::NoneLiteral(_)
+        | Expr::EllipsisLiteral(_)
+        | Expr::IpyEscapeCommand(_) => {}
     }
+}
+
+/// The bindings of a list, set, or dict comprehension lowered into this scope: everything but
+/// its iteration variables (isolated per PEP 709, a scope of their own before 3.12).
+fn collect_inlined_comprehension(
+    generators: &[ast::Comprehension],
+    elts: &[&Expr],
+    out: &mut ScopeBindings,
+) {
+    collect_expr_bindings(&generators[0].iter, out);
+    let mut own = ScopeBindings::default();
+    collect_comprehension_bindings(generators, elts, &mut own);
+    let mut targets = FxHashSet::default();
+    for g in generators {
+        collect_target_names(&g.target, &mut targets);
+    }
+    own.locals.retain(|n| !targets.contains(n));
+    out.locals.extend(own.locals);
+    out.globals.extend(own.globals);
+    out.nonlocals.extend(own.nonlocals);
+    out.assignment_expression_targets
+        .extend(own.assignment_expression_targets);
+    out.has_yield |= own.has_yield;
 }
 
 // =============================================================================

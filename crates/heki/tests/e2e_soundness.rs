@@ -1182,7 +1182,22 @@ const IR_COUNTEREXAMPLES: &[Expect] = &[
     // A replacement field may rebind a builtin name or store the accumulator.
     ("cx_walrus_in_fstring", &[]),
     ("cx_nested_format_spec", &[("OPT101", V::Blocked(STORED))]),
+    // A definition's header, a handler's type, and a target's subscript bind in the function:
+    // `list` is a local name there, not the builtin.
+    ("cx_walrus_in_default", &[]),
+    ("cx_walrus_in_lambda_default", &[]),
+    ("cx_walrus_in_decorator", &[]),
+    ("cx_walrus_in_class_base", &[]),
+    ("cx_walrus_in_handler_type", &[]),
+    ("cx_walrus_in_subscript_target", &[]),
+    // An assignment expression in a generator expression rebinds the function's cell.
+    ("cx_walrus_in_generator_expression", CAPTURED),
 ];
+
+const CAPTURED: &[(&str, V)] = &[(
+    "OPT101",
+    V::Blocked("Unique(acc): it may be shared: its name is captured by a nested function"),
+)];
 
 #[test]
 fn ir_counterexamples_stay_unrewritten() {
