@@ -84,6 +84,7 @@ Findings (exit code `1`) become code-scanning alerts and keep the step green. A 
 read, or syntax error (exit code `2`) still fails it: heki then writes SARIF for the files it
 could analyze, which would hide the others.
 
+SARIF results carry the message, the location, and the call chain (`relatedLocations`).
 `--output-format json` gives every field (evidence, blocker, related call chain, fix edits) for
 custom tooling.
 

@@ -101,7 +101,7 @@ $ heki check --output-format json    # also: full (default), concise, github, sa
 
 `json` includes the evidence behind each diagnostic, the blocker that stops a fix, the call chain,
 and the fix edits. `github` prints GitHub Actions annotations; `sarif` feeds code-scanning
-dashboards.
+dashboards with the message, the location, and the call chain (no evidence or blocker).
 
 ## Exit codes
 
