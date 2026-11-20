@@ -155,7 +155,12 @@ def outputs(heki: Path) -> dict[Path, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--heki", type=Path, default=ROOT / "target" / "release" / "heki")
+    # Resolved: `subprocess` looks a bare `heki` (what `Path("./heki")` prints) up on `PATH`.
+    parser.add_argument(
+        "--heki",
+        type=lambda p: Path(p).resolve(),
+        default=ROOT / "target" / "release" / "heki",
+    )
     parser.add_argument("--check", action="store_true", help="fail if a generated page is stale")
     args = parser.parse_args()
     files = outputs(args.heki)
