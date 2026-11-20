@@ -2158,11 +2158,9 @@ impl<'a, 'c> Rules<'a, 'c> {
             }
         };
         collect(st);
-        for &b in &cx.rpo {
-            if let Some(entry) = self.an().block_in[b.0 as usize].clone() {
-                let (out, _) = cx.transfer_block(b, entry, |_, before, _| collect(before));
-                collect(&out);
-            }
+        for (b, entry) in cx.entered_blocks(self.an()) {
+            let (out, _) = cx.transfer_block(b, entry, |_, before, _| collect(before));
+            collect(&out);
         }
         // A phi passes it on (the phi's own uses are checked too); a terminator returns,
         // raises, or tests it.

@@ -948,6 +948,13 @@ const DEQUE: &[Expect] = &[
         "drain_then_iterate",
         &[("OPT120", V::Fix(&["deque(range(n))", "q.popleft()"]))],
     ),
+    (
+        "drain_then_sum_reversed",
+        &[(
+            "OPT120",
+            V::Blocked("DequeEquivalentOps(q): the result of `reversed(...)` (line"),
+        )],
+    ),
 ];
 
 #[test]
