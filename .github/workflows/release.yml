@@ -197,6 +197,10 @@ jobs:
       contents: read
 
   pypi:
+    # A partial upload is resumed with "Re-run failed jobs": the rerun uploads this run's
+    # artifacts again, and PyPI accepts a file it already holds when the contents are the same.
+    # "Re-run all jobs" rebuilds the distributions, and PyPI refuses changed files under a name
+    # it already has.
     name: publish to PyPI
     if: github.event_name == 'release' || inputs.publish
     needs: [ci, wheels, sdist, smoke, versions]
