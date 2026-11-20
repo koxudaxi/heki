@@ -1384,6 +1384,19 @@ async def aname(uid):
 def every_outer_iteration(batches):
     for batch in batches:
         max(1, 2, key=lambda u: name(batch))  # EFF103
+
+
+def items_of_the_first_batch(batches):
+    # The loop runs the call once (every way on breaks out), the builtin once per item.
+    for batch in batches:
+        sorted(batch, key=lambda u: name(u))  # EFF103
+        break
+
+
+def fixed_items_of_the_first_batch(batches):
+    for batch in batches:
+        max(1, 2, key=lambda u: name(batch))
+        break
 "#;
 
 /// Clients made once per item, and clients a pool or the receiver holds, or that the omitted
@@ -1554,6 +1567,11 @@ fn builtins_call_a_callable_once_per_item() {
     assert_eq!(
         help(outer),
         "batch the queries, or load the data once before the loop"
+    );
+    assert_eq!(
+        message(&diags, "pkg/per_item.py", at("sorted(batch, key=lambda")),
+        "`pkg.per_item.items_of_the_first_batch.<locals>.<lambda>` runs a database query \
+         (`sqlite3.Connection.execute`) for every item `sorted` calls it with (N+1)"
     );
     assert_eq!(
         message(
