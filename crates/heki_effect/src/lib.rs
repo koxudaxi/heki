@@ -908,8 +908,9 @@ pub struct ArgOrigin {
     pub typed_field: Option<(String, String)>,
     /// An instance of project class `class_fqn`.
     pub typed_instance: Option<String>,
-    /// When `typed_instance` is a project protocol: the classes the argument is an instance of
-    /// ([`ArgOrigin::instance_classes`]). Only computed when a contract is declared.
+    /// When `typed_instance` is a project protocol: the classes implementing it, which the
+    /// argument is an instance of too ([`ArgOrigin::instance_classes`]). Only computed when a
+    /// contract is declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implementers: Option<Implementers>,
     /// Caller parameters the argument may be, as itself (through copies and phis).
@@ -948,14 +949,15 @@ impl ArgOrigin {
         *self == Self::default()
     }
 
-    /// The project classes the ownership rules tie the argument to: `typed_instance`, or the
-    /// implementations of the protocol it is typed with.
-    pub fn instance_classes(&self) -> &[String] {
-        match &self.implementers {
-            Some(Implementers::Listed(classes)) => classes,
-            Some(Implementers::Unlisted) => &[],
-            None => self.typed_instance.as_slice(),
-        }
+    /// The project classes the ownership rules tie the argument to: `typed_instance`, and the
+    /// implementations of the protocol it is typed with, as for a write through the object
+    /// itself (a target on the protocol and one on an implementation both cover it).
+    pub fn instance_classes(&self) -> impl Iterator<Item = &String> {
+        let implementers = match &self.implementers {
+            Some(Implementers::Listed(classes)) => classes.as_slice(),
+            _ => &[],
+        };
+        self.typed_instance.iter().chain(implementers)
     }
 
     /// Whether the argument is typed with a protocol whose implementations heki cannot list:

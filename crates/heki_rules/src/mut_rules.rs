@@ -1234,7 +1234,7 @@ pub(crate) fn helper_changes_field<'s>(
             .is_some_and(|(class, attr)| *class == w.class_qualname && *attr == w.attr)
         {
             ParamChange::Itself
-        } else if o.instance_classes().contains(&w.class_qualname) {
+        } else if o.instance_classes().any(|c| *c == w.class_qualname) {
             ParamChange::Attr(&w.attr)
         } else {
             return false;

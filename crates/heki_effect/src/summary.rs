@@ -1143,16 +1143,11 @@ impl<'a> Extractor<'a> {
                 Some(classes) => Implementers::Listed(classes.to_vec()),
                 None => Implementers::Unlisted,
             });
-        let instances = match &implementers {
-            Some(Implementers::Listed(classes)) => classes.as_slice(),
-            Some(Implementers::Unlisted) => &[],
-            None => typed_instance.as_slice(),
-        };
-        ArgOrigin {
+        let mut origin = ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
-            targets: self.arg_targets(typed_field.as_ref(), instances),
+            targets: None,
             typed_field,
             typed_instance,
             implementers,
@@ -1161,7 +1156,10 @@ impl<'a> Extractor<'a> {
             reach: self.reach_of(var),
             binding: None,
             new_object: NewArg::Old,
-        }
+        };
+        let instances: Vec<&String> = origin.instance_classes().collect();
+        origin.targets = self.arg_targets(origin.typed_field.as_ref(), &instances);
+        origin
     }
 
     /// [`ArgOrigin::targets`] of an argument that is the field `field` and an instance of one
@@ -1169,7 +1167,7 @@ impl<'a> Extractor<'a> {
     fn arg_targets(
         &self,
         field: Option<&(String, String)>,
-        instances: &[String],
+        instances: &[&String],
     ) -> Option<Box<ArgTargets>> {
         let c = self.contracts.filter(|_| self.events.is_some())?;
         let with_bases = |class: &str| {

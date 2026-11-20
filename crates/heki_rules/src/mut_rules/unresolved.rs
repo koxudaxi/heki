@@ -340,8 +340,7 @@ fn unknown_above(
                             return true;
                         }
                         if o.typed_instance.is_some() {
-                            let classes = o.instance_classes();
-                            if leave.is_some_and(|l| classes.iter().any(|c| l.contains(c))) {
+                            if leave.is_some_and(|l| o.instance_classes().any(|c| l.contains(c))) {
                                 return true;
                             }
                             continue;

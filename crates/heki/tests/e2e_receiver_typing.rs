@@ -1128,3 +1128,68 @@ fn a_protocol_typed_argument_ties_a_helper_write_to_the_implementations() {
     .collect();
     assert_eq!(reported(&p, &[], "pkg/views.py"), views);
 }
+
+/// Helpers that do not type their parameter, handed objects typed with a protocol (whose
+/// implementations heki lists or not) and with one of its implementations.
+const PROTOCOL_TARGET_HANDED: &str = r#"from __future__ import annotations
+
+from pkg.impls import Field
+from pkg.views import FieldView, Named
+
+
+def retype(obj) -> None:
+    obj.data_type = "w"
+
+
+def rename(obj) -> None:
+    obj.name = "m"
+
+
+def through_view(view: FieldView) -> None:
+    retype(view)
+
+
+def through_named(named: Named) -> None:
+    rename(named)
+
+
+def through_field(field: Field) -> None:
+    retype(field)
+"#;
+
+/// A target on a protocol covers the writes through an object typed with it, made directly or
+/// by a helper the object is handed to: the object is an instance of the protocol as well as
+/// of its implementations. An object typed with an implementation is no instance of the
+/// protocol's class family.
+#[test]
+fn a_protocol_target_covers_the_writes_of_helpers_handed_a_protocol_typed_object() {
+    let p = Project::new("protocol_targets_handed");
+    p.write(
+        "pyproject.toml",
+        &PROTOCOL_CONFIG
+            .replace("select = [\"MUT201\", \"EFF101\"]", "select = [\"MUT201\"]")
+            .replace(
+                "targets = [\"Field.data_type\", \"Field.name\"]",
+                "targets = [\"FieldView.data_type\", \"Named.name\"]",
+            ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/views.py", PROTOCOL_VIEWS)
+    .write("pkg/impls.py", PROTOCOL_IMPLS)
+    .write("pkg/named.py", &many_named())
+    .write("pkg/handed.py", PROTOCOL_TARGET_HANDED);
+    let mut expected: BTreeSet<(String, String)> = [
+        ("write_view", "MUT201"),
+        ("extend_view", "MUT201"),
+        ("rename_named", "MUT201"),
+    ]
+    .iter()
+    .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
+    .collect();
+    assert_eq!(reported(&p, &[], "pkg/views.py"), expected);
+    expected = [("through_view", "MUT201"), ("through_named", "MUT201")]
+        .iter()
+        .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
+        .collect();
+    assert_eq!(reported(&p, &[], "pkg/handed.py"), expected);
+}
