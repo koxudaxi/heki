@@ -27,7 +27,16 @@ enum V {
 type Expect = (&'static str, &'static [(&'static str, V)]);
 
 fn opt_json(p: &Project, args: &[&str]) -> Vec<Value> {
-    let mut all = vec!["--select", "OPT", "--output-format", "json"];
+    // The Soundness lane's rules: `OPT112` / `OPT113` are Advisory-lane reports (no rewrite,
+    // tested in `e2e_v1x_default_rules.rs`) that some fixtures here also trigger.
+    let mut all = vec![
+        "--select",
+        "OPT",
+        "--ignore",
+        "OPT112,OPT113",
+        "--output-format",
+        "json",
+    ];
     all.extend_from_slice(args);
     let (code, stdout, stderr) = p.check(&all);
     assert!(code == 0 || code == 1, "exit {code}: {stderr}");
