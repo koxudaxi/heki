@@ -334,6 +334,11 @@ impl State {
             .filter(|(path, _)| self.workspace.as_ref().is_some_and(|ws| ws.accepts(path)))
             .collect();
         for (path, typ) in changes {
+            // An open document's text is the file's until it is closed (`State::closed`), also
+            // when the file leaves the disk.
+            if typ == FileChangeType::DELETED && self.docs.contains_key(&path) {
+                continue;
+            }
             if typ == FileChangeType::DELETED {
                 let ws = self.workspace.as_mut().expect("checked above");
                 let affected = ws.remove(&path);

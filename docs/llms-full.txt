@@ -1334,7 +1334,10 @@ picked up when the client supports watching files: the server registers for
 ignore files (`.gitignore`, `.ignore`, `.hekiignore`). A change to the configuration or to an
 ignore file indexes the workspace again, like `heki check --watch` does. A file belongs to the
 project when `heki check` would find it: a file an ignore file, a hidden directory, or `exclude`
-leaves out is not analyzed, also when it is created or opened. A file that does
+leaves out is not analyzed, also when it is created or opened. An open document stays the file's
+text until it is closed: indexing the workspace again keeps documents that were never saved, and
+a file deleted on the disk while its document is open stays in the project until the document
+closes. A file that does
 not parse is left out of the project until it parses again, like `heki check` does.
 
 The server provides:

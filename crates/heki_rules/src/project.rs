@@ -313,7 +313,8 @@ pub struct ProjectOptions<'a> {
     pub paths: &'a [PathBuf],
     pub config: Option<&'a Path>,
     pub target_version: Option<&'a str>,
-    /// In-memory sources replacing files on disk (keyed like [`ParsedFile::path`]).
+    /// In-memory sources replacing files on disk (keyed like [`ParsedFile::path`]); one that is
+    /// not on the disk is a file of the project when discovery would find it there.
     pub overrides: Option<&'a FxHashMap<PathBuf, String>>,
 }
 
@@ -381,7 +382,16 @@ impl Project {
         } else {
             opts.paths.to_vec()
         };
-        let found = collect_files(&paths, &env.root, &exclude)?;
+        let mut found = collect_files(&paths, &env.root, &exclude)?;
+        // An open document that is not on the disk yet belongs to the project as it will once
+        // saved (`discovers`); its text is in `overrides`.
+        if let Some(overrides) = opts.overrides {
+            let unsaved = overrides.keys().filter(|p| {
+                !p.exists() && paths.iter().any(|d| discovers(d, &env.root, &exclude, p))
+            });
+            found.extend(unsaved.cloned());
+            found.sort();
+        }
         let results: Vec<Result<ParsedFile, String>> = found
             .par_iter()
             .map(|p| {

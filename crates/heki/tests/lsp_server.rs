@@ -204,19 +204,21 @@ fn lsp_unsaved_and_outside_documents_and_stats_before_indexing() {
         "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n",
     );
     lsp.notify("initialized", json!({}));
-    // The unsaved file is checked against an index that does not know it yet: its local
-    // rules run (`OPT101`), its interprocedural facts wait for the first edit.
+    // The unsaved files are indexed with the project, as they will be once saved: their
+    // interprocedural facts (`MUT101`) are there from the start.
     let diags = lsp.diagnostics(&unsaved, |d| !d.is_empty());
-    assert_eq!(codes(&diags), vec!["OPT101"]);
+    assert_eq!(codes(&diags), vec!["MUT101", "OPT101"]);
     assert_eq!(
-        diags[0]["range"]["start"],
+        diags[1]["range"]["start"],
         json!({"line": 22, "character": 8})
     );
     lsp.diagnostics(&other, <[Value]>::is_empty);
     let diags = lsp.diagnostics(&lost, |d| !d.is_empty());
     assert_eq!(codes(&diags), vec!["OPT101"]);
     lsp.ready();
-    // Once indexed: the first edit summarizes the new file (`MUT101` needs its summaries).
+    // Whether the documents opened before indexing are analyzed again once the index is ready
+    // depends on which of their analyses ran first; count the edits from here.
+    let edits_before = lsp.settle()["edited_reanalyses"].as_u64().unwrap();
     lsp.change(&unsaved, 2, UNSAVED);
     let diags = lsp.diagnostics(&unsaved, |d| d.len() == 2);
     assert_eq!(codes(&diags), vec!["MUT101", "OPT101"]);
@@ -229,8 +231,8 @@ fn lsp_unsaved_and_outside_documents_and_stats_before_indexing() {
         "textDocument/didSave",
         json!({"textDocument": {"uri": uri_in(&p.dir, "pkg/ghost.py")}}),
     );
-    let stats = lsp.request("heki/stats", Value::Null);
-    assert_eq!(stats["edited_reanalyses"], 1, "{stats}");
+    let stats = lsp.settle();
+    assert_eq!(stats["edited_reanalyses"], edits_before + 1, "{stats}");
     lsp.stop(true);
 }
 
@@ -253,13 +255,13 @@ fn lsp_unsaved_module_next_to_its_indexed_stub() {
     lsp.open(&module, BOX);
     lsp.opened(1);
     lsp.notify("initialized", json!({}));
-    // The stub's summaries do not stand in for the document's own methods (the index knows
-    // `Box.add` from the stub only, and `Box.drop` not at all): no `MUT101` before the
-    // document is summarized.
-    lsp.diagnostics(&module, <[Value]>::is_empty);
+    // The document is indexed with the project and outranks the stub: its own methods are
+    // summarized (`Box.add`, and `Box.drop`, which the stub does not declare).
+    let diags = lsp.diagnostics(&module, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["MUT101", "MUT101"]);
     lsp.ready();
     lsp.change(&module, 2, BOX);
-    let diags = lsp.diagnostics(&module, |d| !d.is_empty());
+    let diags = lsp.diagnostics(&module, |d| d.len() == 2);
     assert_eq!(codes(&diags), vec!["MUT101", "MUT101"]);
     assert_eq!(
         diags[1]["range"]["start"],
@@ -587,5 +589,54 @@ fn lsp_code_actions_only_edit_the_analyzed_version() {
         actions[1]["edit"]["documentChanges"][0]["textDocument"]["version"],
         2
     );
+    lsp.stop(true);
+}
+
+#[test]
+fn lsp_keeps_open_documents_through_reloads_and_deletions_until_they_close() {
+    let p = Project::new("lsp_unsaved_reload");
+    let caller = "from helper import wait\n\n\nasync def handler():\n    wait()\n";
+    p.write("caller.py", caller);
+    let (helper, handler) = (uri_in(&p.dir, "helper.py"), uri(&p.dir.join("caller.py")));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}),
+    );
+    // A new module, never saved, that the caller already imports.
+    lsp.open(&helper, "import time\n\n\ndef wait():\n    time.sleep(1)\n");
+    lsp.open(&handler, caller);
+    let eff101 = |lsp: &mut Lsp| {
+        lsp.settle();
+        codes(&lsp.latest[&handler]) == ["EFF101"]
+    };
+    assert!(eff101(&mut lsp));
+    // A configuration change indexes the workspace again, with the open documents.
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n\n[tool.heki]\n");
+    let config = uri(&p.dir.join("pyproject.toml"));
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes": [{"uri": config, "type": 2}]}),
+    );
+    assert!(eff101(&mut lsp), "{:?}", lsp.latest[&handler]);
+    // The caller's file is deleted on the disk while its document stays open.
+    std::fs::remove_file(p.dir.join("caller.py")).unwrap();
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes": [{"uri": handler, "type": 3}]}),
+    );
+    assert!(eff101(&mut lsp), "{:?}", lsp.latest[&handler]);
+    // Closed, the never-saved helper leaves the project.
+    lsp.notify(
+        "textDocument/didClose",
+        json!({"textDocument": {"uri": helper}}),
+    );
+    lsp.notify(
+        "textDocument/didSave",
+        json!({"textDocument": {"uri": handler}, "text": caller}),
+    );
+    lsp.settle();
+    assert_eq!(lsp.latest[&handler], Vec::<Value>::new());
+    let stats = lsp.request("heki/stats", Value::Null);
+    assert_eq!(stats["indexed_files"], 1, "{stats}");
     lsp.stop(true);
 }
