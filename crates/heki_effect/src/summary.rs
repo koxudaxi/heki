@@ -1076,6 +1076,25 @@ impl<'a> Extractor<'a> {
                 ));
             }
         }
+        // Coroutines awaited after they are made (`pending = work(); ...; await pending`): the
+        // body runs at the `await`, as for `await work()`.
+        for bb in &f.blocks {
+            for (index, inst) in bb.insts.iter().enumerate() {
+                let InstKind::Await { value, .. } = &inst.kind else {
+                    continue;
+                };
+                for c in calls_in(&flow.expand_steps(&[*value])) {
+                    let site = &self.sites[self.project_calls[c].site];
+                    if !site.is_awaited {
+                        let depth = f.block_loop_depth(bb.id);
+                        extra.push((
+                            role_site(site, SiteRole::Call, inst.span, depth, Some((true, false))),
+                            Some((bb.id, index)),
+                        ));
+                    }
+                }
+            }
+        }
         // Results passed to a project call (`consume(rows())`, `chunked(rows(), 100)`).
         for (x, call) in self.project_calls.iter().enumerate() {
             let mut via_by_arg: Vec<(VarId, Vec<(FuncKey, u8)>)> = Vec::new();

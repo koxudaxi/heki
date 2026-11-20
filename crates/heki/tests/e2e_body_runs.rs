@@ -1063,6 +1063,7 @@ type Marks = Vec<(String, u64, String)>;
 /// line ending in `# <RULE>`.
 fn reported_and_marked(name: &str, files: &[(&str, &str)], rules: &[&str]) -> (Marks, Marks) {
     let p = Project::new(name);
+    p.write("pyproject.toml", DEFERRED_CONFIG);
     p.write("pkg/__init__.py", "");
     for (path, text) in files {
         p.write(path, text);
@@ -1087,10 +1088,20 @@ fn reported_and_marked(name: &str, files: &[(&str, &str)], rules: &[&str]) -> (M
     (reported, marked)
 }
 
+const DEFERRED_CONFIG: &str = r#"[project]
+name = "t"
+
+[[tool.heki.effect-boundaries]]
+name = "render"
+scopes = ["pkg.deferred.render_*"]
+forbid = ["sleep"]
+"#;
+
 /// What runs where a function is called, a generator is made and iterated, and a class is
 /// defined: the implementation behind `typing.overload` signatures, stepping by `any` / `all`,
-/// a generator a property returns, one of several generators a branch chooses, and the body of
-/// a class a function defines (its methods run only when called).
+/// a generator a property returns, one of several generators a branch chooses, the body of a
+/// class a function defines (its methods run only when called), and a coroutine awaited after
+/// it is made.
 const DEFERRED: &str = r#"import time
 import typing
 
@@ -1162,6 +1173,20 @@ async def local_class():
             time.sleep(3)
 
     return Local
+
+
+async def _work():
+    time.sleep(4)  # EFF101
+
+
+async def render_awaited_later():
+    pending = _work()
+    await pending  # EFF201
+
+
+async def render_never_awaited():
+    pending = _work()
+    return pending
 "#;
 
 #[test]
@@ -1169,7 +1194,7 @@ fn bodies_run_where_python_runs_them() {
     let (reported, marked) = reported_and_marked(
         "deferred_bodies",
         &[("pkg/deferred.py", DEFERRED)],
-        &["EFF101"],
+        &["EFF101", "EFF201"],
     );
     assert_eq!(reported, marked);
 }
