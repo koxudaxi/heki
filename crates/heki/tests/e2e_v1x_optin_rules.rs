@@ -1122,6 +1122,132 @@ fn eff107_bound_methods_of_the_task_keep_it_where_they_are_kept() {
     );
 }
 
+const ARGUMENTS: &str = r##"import asyncio
+import concurrent.futures
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any
+
+
+def retry(fn):
+    return fn
+
+
+class Event:
+    def __init__(self):
+        self.waiters = set()
+
+    def wait(self):
+        fut = asyncio.get_running_loop().create_future()
+        self.waiters.add(fut)
+        return fut
+
+    @staticmethod
+    def make():
+        return None
+
+
+class Job:
+    def __init__(self):
+        self.done = False
+
+    def __await__(self):
+        return asyncio.sleep(0).__await__()
+
+
+async def work():
+    await asyncio.sleep(0)
+
+
+def plain():
+    pass
+
+
+def gen():
+    yield 1
+
+
+async def agen():
+    yield 1
+
+
+@retry
+def wrapped():
+    return work()
+
+
+async def no_new_task(e: Event, fut: asyncio.Future[None], task: asyncio.Task[None]):
+    loop = asyncio.get_running_loop()
+    pool = concurrent.futures.ThreadPoolExecutor()
+    a = asyncio.ensure_future(e.wait())
+    pending = e.wait()
+    b = asyncio.ensure_future(pending)
+    c = asyncio.create_task(plain())
+    d = asyncio.create_task(coro=plain())
+    g = asyncio.ensure_future(coro_or_future=e.wait())
+    h = loop.create_task(Event.make())
+    i = asyncio.create_task(gen())
+    j = asyncio.ensure_future(agen())
+    k = asyncio.ensure_future(loop.run_in_executor(None, plain))
+    m = asyncio.ensure_future(loop.create_future())
+    n = asyncio.ensure_future(asyncio.gather(work()))
+    o = asyncio.ensure_future(asyncio.wrap_future(pool.submit(plain)))
+    p = asyncio.ensure_future(fut)
+    q = asyncio.ensure_future(task)
+    r = asyncio.ensure_future(pool.submit(plain))
+
+    def remove_victim():
+        pass
+
+    s = asyncio.create_task(remove_victim())
+    await asyncio.sleep(0)
+
+
+async def may_make_a_task(
+    coro,
+    callback: Callable[[], Awaitable[None] | None],
+    factory: Callable[..., Coroutine[Any, Any, Any]],
+    coros,
+):
+    a = asyncio.ensure_future(work())
+    b = asyncio.create_task(coro=work())
+    c = asyncio.create_task(coro)
+    result = callback()
+    d = asyncio.ensure_future(result)
+    e = asyncio.ensure_future(factory())
+    f = asyncio.ensure_future(wrapped())
+    g = asyncio.ensure_future(Job())
+    h = asyncio.create_task(*coros)
+    await asyncio.sleep(0)
+"##;
+
+#[test]
+fn eff107_reports_only_arguments_that_may_be_coroutines() {
+    let p = Project::new("v1x_eff107_arguments");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/args.py", ARGUMENTS);
+    let diags = diagnostics(&p, &["--select", "EFF107"]);
+    let t = "pkg/args.py";
+    // `no_new_task`: no call makes a task from the result of a plain `def`, a static method, a
+    // generator or an async generator function (through a copy, by keyword, or in a nested
+    // function), nor from a value typed as a future (catalog return types, annotations,
+    // `Executor.submit`). `may_make_a_task`: each one may, from a coroutine, a parameter, an
+    // awaitable, an annotated callable's result, a decorated function's result, a constructed
+    // object, or a `*` argument.
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(t, 87, "EFF107", "asyncio.ensure_future->a"),
+            d(t, 88, "EFF107", "asyncio.create_task->b"),
+            d(t, 89, "EFF107", "asyncio.create_task->c"),
+            d(t, 91, "EFF107", "asyncio.ensure_future->d"),
+            d(t, 92, "EFF107", "asyncio.ensure_future->e"),
+            d(t, 93, "EFF107", "asyncio.ensure_future->f"),
+            d(t, 94, "EFF107", "asyncio.ensure_future->g"),
+            d(t, 95, "EFF107", "asyncio.create_task->h"),
+        ]
+    );
+}
+
 // ======================================================================== selection & CLI
 
 const ONE_OF_EACH: &str = r##"import asyncio

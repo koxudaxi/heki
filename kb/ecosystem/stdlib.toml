@@ -216,6 +216,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "asyncio.gather"
 async_safe = true
+return_type = "asyncio.Future"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -238,6 +239,24 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "asyncio.new_event_loop"
 return_type = "asyncio.AbstractEventLoop"
+opaque_to_layer3 = true
+
+# --- Futures (EFF107: `ensure_future` returns a future unchanged, so no new task) ---
+# `asyncio.gather` and `loop.run_in_executor` return one too (their entries above and below).
+
+[[entries]]
+symbol = "asyncio.wrap_future"
+return_type = "asyncio.Future"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.AbstractEventLoop.create_future"
+return_type = "asyncio.Future"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.BaseEventLoop.create_future"
+return_type = "asyncio.Future"
 opaque_to_layer3 = true
 
 # --- Synchronous locks (EFF106, opt-in) ---
@@ -500,12 +519,14 @@ opaque_to_layer3 = true
 symbol = "asyncio.AbstractEventLoop.run_in_executor"
 async_safe = true
 offloads_blocking_arg = 1
+return_type = "asyncio.Future"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "asyncio.BaseEventLoop.run_in_executor"
 async_safe = true
 offloads_blocking_arg = 1
+return_type = "asyncio.Future"
 opaque_to_layer3 = true
 
 # --- Excluded (logging) ---

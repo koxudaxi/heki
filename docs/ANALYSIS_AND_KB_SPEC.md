@@ -637,7 +637,12 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    reported when no alias of it, nor a method bound to one (`task.cancel`, which holds the task),
    is awaited, returned, yielded, stored, put in a container, passed to a call, or captured;
    being only the receiver of `add_done_callback` / `set_name` does not keep it, `cancel()` /
-   `result()` / `exception()` do.
+   `result()` / `exception()` do. A call whose argument (`coro` / `coro_or_future`) is known not
+   to be a coroutine makes no new task and is skipped: the result of project functions that
+   all create none (`FunctionDecl::makes_no_coroutine`: a plain `def` or a generator function
+   that no decorator replaces, `FunctionDecl::called_as_defined`; never a class's `__init__`),
+   or a value typed as one of `heki_kb::FUTURE_CLASSES` (an annotation, or a Layer 2
+   `return_type` such as `loop.run_in_executor` / `asyncio.gather` → `asyncio.Future`).
 8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`

@@ -58,8 +58,9 @@ pub const CHA_CANDIDATE_LIMIT: usize = 8;
 /// Upper bound on re-export alias chasing (`pkg.__init__` re-exporting `pkg.sub.Foo`).
 const MAX_ALIAS_CHASE: usize = 8;
 
-/// Decorators that leave a generator function's call result a generator.
-const GENERATOR_KEEPING_DECORATORS: &[&str] =
+/// Decorators that leave calling a function what its definition makes it: a generator function
+/// returns a generator, an `async def` a coroutine, a plain `def` what its body returns.
+const CALL_KEEPING_DECORATORS: &[&str] =
     &["staticmethod", "classmethod", "abstractmethod", "override"];
 
 /// Decorators (by their last dotted component) that make a method a getter: reading the
@@ -280,6 +281,10 @@ pub struct FunctionDecl {
     /// other than `staticmethod` / `classmethod` / `abstractmethod` / `override` (a
     /// `@contextmanager` generator returns a context manager). `MUT106` single-pass sources.
     pub is_generator: bool,
+    /// No decorator replaces it: it has none other than `staticmethod` / `classmethod` /
+    /// `abstractmethod` / `override`, so calling it does what its definition says (see
+    /// [`FunctionDecl::makes_no_coroutine`]).
+    pub called_as_defined: bool,
     /// A property getter that reading the attribute on an instance runs: a method decorated
     /// with `property` / `cached_property` (any decorator whose last dotted component is one of
     /// them) whose every definition is such a getter. A property with a setter or deleter is
@@ -309,6 +314,15 @@ pub struct FunctionDecl {
     /// The return annotation of the getter of a property (`@property` / `cached_property`,
     /// with or without a setter): the type reading the attribute gives.
     pub property_type: Option<Ty>,
+}
+
+impl FunctionDecl {
+    /// Calling it creates no coroutine: it is a plain `def` or a generator function that no
+    /// decorator replaces (`EFF107`: no new task). A plain `def` may still return a coroutine
+    /// another call created; that is not followed.
+    pub fn makes_no_coroutine(&self) -> bool {
+        self.called_as_defined && (!self.is_async || self.is_generator)
+    }
 }
 
 /// Per-module declarations other modules need (stored in `FileSummary`, IR-free).
@@ -2266,6 +2280,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 })
                 .collect(),
             is_generator: is_generator_function(f),
+            called_as_defined: is_called_as_defined(f),
             is_property: getters_only[f.qualname.as_str()],
             readonly_params,
             mutable_params,
@@ -2700,11 +2715,16 @@ pub(crate) fn is_generator_function(f: &IrFunction) -> bool {
             f.kind,
             FunctionKind::Generator | FunctionKind::AsyncGenerator
         )
-        && f.decorators.iter().all(|d| {
-            let base = d.split('(').next().unwrap_or(d).trim();
-            let last = base.rsplit('.').next().unwrap_or(base);
-            GENERATOR_KEEPING_DECORATORS.contains(&last)
-        })
+        && is_called_as_defined(f)
+}
+
+/// Every decorator of `f` is one of [`CALL_KEEPING_DECORATORS`] (by its last dotted component).
+fn is_called_as_defined(f: &IrFunction) -> bool {
+    f.decorators.iter().all(|d| {
+        let base = d.split('(').next().unwrap_or(d).trim();
+        let last = base.rsplit('.').next().unwrap_or(base);
+        CALL_KEEPING_DECORATORS.contains(&last)
+    })
 }
 
 /// The catalog symbol of a decorator of `f` that offloads the function it decorates

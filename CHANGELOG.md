@@ -26,6 +26,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.
+- `EFF107` no longer reports a call that makes no new task because its argument is known not
+  to be a coroutine: the result of a plain `def` or a generator function, such as a method
+  returning a future (`asyncio.ensure_future(event.wait())`), or a future from
+  `loop.run_in_executor`, `loop.create_future`, `asyncio.gather`, `asyncio.wrap_future`, or an
+  annotation. The `coro=` and `coro_or_future=` keyword forms are checked the same way.
 
 ## [0.1.0] - 2026-11-21
 
