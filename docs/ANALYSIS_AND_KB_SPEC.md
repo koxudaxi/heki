@@ -60,7 +60,8 @@ BasicBlock {
     id, phis: Vec<PhiNode>,
     insts:      Vec<Inst>,               // every instruction keeps its byte span in the source
     terminator: Jump | Branch | Return | Raise | Unreachable,
-    exc_target: Option<BlockId>,         // where an exception raised in this block goes
+    exc_target: Option<BlockId>,         // where an exception raised in this block goes (set by
+                                         // its first instruction that may raise, or its `raise`)
 }
 ```
 
@@ -85,6 +86,12 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   (depth `d + 1`) starts with `IterNext(it)` (this removed, by construction, the 7 Stage 0-A
   false positives of `EFF102` / `EFF103` that took the one-time `for.iter` call for a call in the
   loop).
+- **Exception edges carry the bindings of the point that raised**: inside a `try` or `with`
+  body a name is never rebound after an instruction that may raise in the same block
+  (`InstKind::may_raise`; the binding starts a new block), so a handler's phi merges the
+  bindings each raising point had; the Soundness lane's liveness takes a handler's needs as
+  live before each such instruction. A module-level read of a `lazy import`ed name loads the
+  global, since it may import the module there and raise (PEP 810).
 - **Leaving `with` and `try`**: a `return`, `break`, or `continue` exits each `with` it leaves
   (`ExitWith`) and runs each `finally` body on the way, innermost first; a `finally` body is
   lowered once per way out of its `try` (normal completion, an exception, which it re-raises

@@ -453,6 +453,22 @@ impl InstKind {
         }
     }
 
+    /// Whether the instruction may raise an exception: everything but constants, copies, and
+    /// stores of names (a class statement's `MakeClosure` runs the metaclass and
+    /// `__init_subclass__`). A block has its `exc_target` edge only from such an instruction
+    /// or a `raise`, and a name is never rebound after one in the same block, so a handler
+    /// sees the bindings of the point that raised.
+    pub fn may_raise(&self) -> bool {
+        !matches!(
+            self,
+            Self::Const { .. }
+                | Self::Copy { .. }
+                | Self::StoreGlobal { .. }
+                | Self::StoreDeref { .. }
+                | Self::CatchException { .. }
+        )
+    }
+
     /// Whether the instruction suspends a coroutine until what it awaits completes: an `await`,
     /// and the implicit awaits of `async for` (`__anext__`) and `async with` (`__aenter__`,
     /// `__aexit__`). Other tasks run meanwhile.

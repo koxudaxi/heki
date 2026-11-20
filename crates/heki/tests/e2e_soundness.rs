@@ -315,13 +315,10 @@ const INTERP: &[Expect] = &[
     // returned list (disproved, not reported).
     ("returned_in_try", &[]),
     (
+        // `check(i)` may raise after the append with `z` still the old list, which the
+        // handler returns: appending would change it (disproved, not reported).
         "stale_handler_alias",
-        &[(
-            "OPT101",
-            V::Blocked(
-                "ExceptionStateSafe(x): an exception handler may still see `z` bound to the old object",
-            ),
-        )],
+        &[],
     ),
     (
         "many_sites",

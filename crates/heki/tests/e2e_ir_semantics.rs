@@ -650,6 +650,100 @@ async def created():
     assert_eq!(got, ["saved", "merged"]);
 }
 
+// ============================================================================ exceptions
+
+/// The instructions of `f` with the phi (if any) defining `var`'s incoming values.
+fn phi_inputs(f: &Value, var: &Value) -> Option<Vec<Value>> {
+    f["blocks"].as_array().unwrap().iter().find_map(|b| {
+        b["phis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["dst"] == *var)
+            .map(|p| {
+                p["incoming"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i[1].clone())
+                    .collect()
+            })
+    })
+}
+
+#[test]
+fn a_handler_sees_the_bindings_of_every_point_that_may_raise() {
+    let src = "\
+import time
+
+
+async def rebound_after(check):
+    action = time.sleep
+    try:
+        1 // 0
+        action = abs
+    except ZeroDivisionError:
+        action(1)
+
+
+async def raises_after_rebinding(check):
+    action = time.sleep
+    try:
+        1 // 0
+        action = abs
+        check()
+    except ZeroDivisionError:
+        action(1)
+";
+    // Only `1 // 0` raises in `rebound_after`: its handler sees `time.sleep`.
+    let got = reports("ir_handler_bindings", src, "EFF101");
+    assert!(
+        got.contains(&("rebound_after".to_owned(), "EFF101".to_owned())),
+        "{got:?}"
+    );
+    // `check()` raises after the rebinding too: the handler merges both bindings.
+    let ir = dump_ir("ir_handler_bindings", src, "py315");
+    let f = function(&ir, "raises_after_rebinding");
+    let call = f["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .find(|i| i["kind"]["Call"]["callee"] == "action")
+        .unwrap();
+    let inputs = phi_inputs(f, &call["kind"]["Call"]["callee_var"]).expect("a phi");
+    let names: Vec<&str> = inputs
+        .iter()
+        .map(|v| {
+            f["var_names"][v.as_u64().unwrap() as usize]
+                .as_str()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(names, ["action", "action"]);
+    assert_ne!(inputs[0], inputs[1]);
+}
+
+#[test]
+fn reading_a_lazy_import_at_module_level_may_raise() {
+    let src = "lazy import optional_backend\n\ntry:\n    optional_backend\nexcept ImportError:\n    optional_backend = None\n";
+    let ir = dump_ir("ir_lazy_first_use", src, "py315");
+    let module = &ir["functions"][0];
+    let load = module["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| {
+            b["insts"].as_array().unwrap().iter().any(|i| {
+                i["kind"]["LoadGlobal"]["name"] == "optional_backend"
+                    && i["kind"]["LoadGlobal"]["is_lazy_import"] == true
+            })
+        })
+        .expect("the read loads the lazy global");
+    // PEP 810: the module is imported at the first use, which raises into the handler.
+    assert!(load["exc_target"].is_u64(), "{load:#}");
+}
+
 #[test]
 fn a_return_break_or_continue_runs_the_finally_body() {
     let src = format!(

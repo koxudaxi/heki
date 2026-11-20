@@ -545,6 +545,8 @@ struct FnBuilder<'m, 'a> {
 
     blocks: Vec<BasicBlock>,
     terminated: Vec<bool>,
+    /// The block holds an instruction that may raise into its exception target.
+    may_raise: Vec<bool>,
     preds: Vec<Vec<BlockId>>,
     sealed: Vec<bool>,
     cur_bb: BlockId,
@@ -620,6 +622,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             free_reads: FxHashSet::default(),
             blocks: vec![entry],
             terminated: vec![false],
+            may_raise: vec![false],
             preds: vec![Vec::new()],
             sealed: vec![true], // entry block has no predecessors
             cur_bb: BlockId(0),
@@ -647,16 +650,17 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     fn new_block(&mut self, sealed: bool) -> BlockId {
         let id = BlockId(self.blocks.len() as u32);
-        let exc_target = self.exc_target_stack.last().copied();
+        // A block gets its exception edge with its first instruction that may raise.
         self.blocks.push(BasicBlock {
             id,
             phis: Vec::new(),
             insts: Vec::new(),
             terminator: Terminator::Unreachable,
-            exc_target,
+            exc_target: None,
             term_span: None,
         });
         self.terminated.push(false);
+        self.may_raise.push(false);
         self.preds.push(Vec::new());
         self.sealed.push(sealed);
         // Any block allocated while inside active loops belongs to those loop bodies.
@@ -691,11 +695,34 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     fn emit(&mut self, kind: InstKind, span: Span) {
         self.ensure_open_block();
         let bb = self.cur_bb;
+        if kind.may_raise() {
+            self.raise_edge(bb);
+        }
+        self.blocks[bb.0 as usize].insts.push(Inst { kind, span });
+    }
+
+    /// `bb` may raise into the innermost exception target: the edge to it.
+    fn raise_edge(&mut self, bb: BlockId) {
         if let Some(exc) = self.exc_target_stack.last().copied() {
             self.blocks[bb.0 as usize].exc_target = Some(exc);
             self.add_edge(bb, exc);
+            self.may_raise[bb.0 as usize] = true;
         }
-        self.blocks[bb.0 as usize].insts.push(Inst { kind, span });
+    }
+
+    /// Before a new binding of a source name inside a `try` or `with` body: an exception
+    /// raised earlier in the block must reach the handler with the old binding, so the
+    /// binding starts a new block (the handler's phi merges the binding of every block).
+    fn begin_binding(&mut self) {
+        let bb = self.cur_bb;
+        if !self.exc_target_stack.is_empty()
+            && self.may_raise[bb.0 as usize]
+            && !self.is_terminated(bb)
+        {
+            let next = self.new_block(true);
+            self.terminate(Terminator::Jump(next));
+            self.switch_to(next);
+        }
     }
 
     fn emit_const(&mut self, literal: ConstLiteral, span: Span) -> VarId {
@@ -711,6 +738,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let bb = self.cur_bb;
         if self.terminated[bb.0 as usize] {
             return;
+        }
+        if matches!(term, Terminator::Raise(_)) {
+            self.raise_edge(bb);
         }
         for succ in term.successors() {
             self.add_edge(bb, succ);
@@ -792,6 +822,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             );
             return;
         }
+        self.begin_binding();
         if self.is_module_body {
             self.emit(
                 InstKind::StoreGlobal {
@@ -843,6 +874,20 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             return dst;
         }
         if self.is_true_local(raw_name) {
+            // A module-level read of a lazily imported name (PEP 810) may import the module
+            // there, and raise: it loads the global.
+            if self.is_module_body && self.module.lazy_import_names.contains(raw_name) {
+                let dst = self.fresh_var(Some(raw_name.to_string()));
+                self.emit(
+                    InstKind::LoadGlobal {
+                        dst,
+                        name: raw_name.to_string(),
+                        is_lazy_import: true,
+                    },
+                    span,
+                );
+                return dst;
+            }
             return self.read_local_ssa(raw_name, self.cur_bb, span);
         }
         if self.outer_locals.contains(raw_name) {
@@ -1682,6 +1727,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         );
         // Reading it now raises (in a module or class body it falls back to the builtins).
         if !self.scope.globals.contains(name) && !self.scope.nonlocals.contains(name) {
+            self.begin_binding();
             let unbound = self.fresh_var(Some(name.to_owned()));
             self.emit(
                 InstKind::LoadName {
