@@ -275,15 +275,14 @@ fn enclosing_first(functions: &[IrFunction]) -> Vec<usize> {
             }
         }
     }
+    // Only the function a definition is nested in makes its function: the walk ends at the
+    // module body.
     let depth = |id: FunctionId| {
         let mut d = 0;
         let mut cur = id;
         while let Some(p) = parent.get(&cur) {
             d += 1;
             cur = *p;
-            if d > functions.len() {
-                break;
-            }
         }
         d
     };
@@ -485,15 +484,13 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         let mut out: Option<Own> = None;
         let mut add = |o: &Own| out = Some(out.as_ref().map_or_else(|| o.clone(), |a| a.join(o)));
         for bc in site.project_callees() {
-            let Some(r) = self
+            let r = self
                 .u
                 .cx
                 .index
                 .summary(&bc.callee)
                 .map(|s| s.returns_origins)
-            else {
-                continue;
-            };
+                .unwrap_or_default();
             if r.new {
                 add(&Own::new_at(inst.span, false));
             }
@@ -529,8 +526,8 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             for place in places {
                 let part = match place {
                     Place::Object(c) => self.own.get(c).and_then(Own::element),
-                    Place::Global(g) => Some(Own::borrowing(Borrow::Global((*g).to_owned()))),
-                    Place::Cell(c) => Some(Own::borrowing(Borrow::Cell((*c).to_owned()))),
+                    Place::Global(g) => Some(Own::borrowing(self.holder(Holder::Global(g)))),
+                    Place::Cell(c) => Some(Own::borrowing(self.holder(Holder::Cell(c)))),
                 };
                 out = part.map_or(out.clone(), |p| out.join(&p));
             }
@@ -577,7 +574,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             .and_then(|s| s.get(name))
             .filter(|o| **o != Own::default())
             .cloned()
-            .unwrap_or_else(|| Own::borrowing(Borrow::Cell(name.to_owned())))
+            .unwrap_or_else(|| Own::borrowing(self.holder(Holder::Cell(name))))
     }
 
     /// The values of the function's variables ([`Self::fixpoint`]), once more without the new
@@ -813,9 +810,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 _ => Vec::new(),
             };
         };
-        let Some(site) = call.site else {
-            return Vec::new();
-        };
+        let site = call.site.expect("`site_call` names the call site");
         let mut out = Vec::new();
         for (key, callee, pos, var) in call.bound_arguments(self.u.cx) {
             let changes = facts_run_at(self.u.cx.index, site, callee)
