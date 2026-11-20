@@ -71,10 +71,12 @@ fn is_private(name: &str) -> bool {
 }
 
 /// Visit every project class whose family has checked methods with its own methods, its
-/// family (its methods plus those of every project subclass), and the private methods its
-/// family's `__init__`s call on `self`. Classes are keyed by owner class fqn, so nested classes
-/// stay separate. A family spans modules: what a checked method is reported for does not depend
-/// on which other files are checked with it (the language server checks one).
+/// family (its methods, those of every project subclass, and the methods it inherits from its
+/// project ancestors that no class before them in the MRO overrides: they run on its instances
+/// too), and the private methods its family's `__init__`s call on `self`. Classes are keyed by
+/// owner class fqn, so nested classes stay separate. A family spans modules: what a checked
+/// method is reported for does not depend on which other files are checked with it (the
+/// language server checks one).
 fn for_each_class_family<'a>(
     cx: &CheckContext<'a>,
     mut visit: impl FnMut(&[Method<'a>], &[&Method<'a>], &FxHashSet<FuncKey>),
@@ -123,6 +125,12 @@ fn for_each_class_family<'a>(
         let mut family: Vec<&Method<'a>> = methods.iter().collect();
         for sub in cx.decls.subclasses_of(class) {
             family.extend(by_class.get(&sub).into_iter().flatten());
+        }
+        let mut defined: FxHashSet<&str> = methods.iter().map(Method::name).collect();
+        for ancestor in cx.decls.ancestors_of(class) {
+            let inherited = by_class.get(&ancestor).into_iter().flatten();
+            family.extend(inherited.clone().filter(|m| !defined.contains(m.name())));
+            defined.extend(inherited.map(Method::name));
         }
         if family.iter().all(|m| m.checked.is_none()) {
             continue;
@@ -299,8 +307,9 @@ fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
 /// The project classes whose methods' `MUT101` / `MUT107` reports read the summaries of the
 /// methods `changed` (a class family spans modules, see [`for_each_class_family`]): a changed
 /// `@cached_property` or `__hash__` (or a removed method) is read for its own family, a changed
-/// initialization method for the families of its ancestors that have either. A changed writer
-/// is reported in its own file only.
+/// initialization method for the families of its ancestors and subclasses that have either, and
+/// a method overriding an inherited one for its own family. A family's classes include the
+/// ancestors whose methods it inherits. A changed writer is reported in its own file only.
 pub fn family_readers(
     index: &ProjectIndex,
     decls: &ProjectDecls,
@@ -322,11 +331,23 @@ pub fn family_readers(
         if name == "__hash__" || index.summary(key).is_none_or(|s| s.is_cached_property) {
             roots.insert(class.clone());
         }
+        // A method that overrides an inherited one (or stops doing so) changes which of the
+        // ancestors' methods the class family inherits.
+        let overrides = decls.ancestors_of(&class).iter().any(|a| {
+            decls
+                .methods_of(a)
+                .iter()
+                .any(|k| k.qualname.rsplit('.').next() == Some(name))
+        });
+        if overrides {
+            roots.insert(class.clone());
+        }
         if INIT_METHODS.contains(&name) {
             roots.extend(
                 decls
                     .ancestors_of(&class)
                     .into_iter()
+                    .chain(decls.subclasses_of(&class))
                     .chain([class])
                     .filter(has_reported_reads),
             );
@@ -335,6 +356,10 @@ pub fn family_readers(
     let mut out = BTreeSet::new();
     for root in roots {
         out.extend(decls.subclasses_of(&root));
+        // The methods a family inherits are reported in their ancestors' files.
+        for class in std::iter::once(root.clone()).chain(decls.subclasses_of(&root)) {
+            out.extend(decls.ancestors_of(&class));
+        }
         out.insert(root);
     }
     out

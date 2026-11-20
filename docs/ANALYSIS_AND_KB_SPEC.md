@@ -277,7 +277,9 @@ which module imports which.
    a class of its own), take `reads_self_attrs(p)`: the `self.<attr>` and constant-key
    `self.<dict>["k"]` reads of `p`, directly and through `self.helper()` calls, without `p`
    itself.
-2. For every method `m` of `C` and its subclasses, take the writes in `m`'s own body, **except**:
+2. For every method `m` of `C` and its subclasses, and every method `C` inherits from a project
+   ancestor that no class before it in the MRO overrides, take the writes in `m`'s own body,
+   **except**:
    - **initialization and two-phase initialization hooks**: `__init__`, `__post_init__`,
      `model_post_init`, `__setstate__`, `__enter__`, `__new__`, `setup`, `setUp`, `postinit`,
      `_open`, `_setup`, `_init_*`, `_configure_*`, and private helpers that an initializer calls;

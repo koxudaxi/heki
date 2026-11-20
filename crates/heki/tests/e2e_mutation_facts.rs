@@ -133,7 +133,61 @@ class C:
     );
     // Rebinding a scalar whose name mentions `memory` or `cache` changes what the cache and the
     // hash were computed from; filling a memo dictionary in place does not count.
-    let expected = vec![at("app.py", 16, "C.set_limit"), at("app.py", 19, "C.resize")];
+    let expected = vec![
+        at("app.py", 16, "C.set_limit"),
+        at("app.py", 19, "C.resize"),
+    ];
     assert_eq!(reports(&p, "MUT101"), expected);
     assert_eq!(reports(&p, "MUT107"), expected);
+}
+
+const BASE: &str = r#"class Base:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def rename(self, name: str) -> None:
+        self.name = name
+
+    def retitle(self, name: str) -> None:
+        self.name = name
+"#;
+
+#[test]
+fn methods_a_class_inherits_write_what_its_caches_and_hash_read() {
+    let p = project("inherited_writers", "");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/base.py", BASE)
+        .write(
+            "pkg/child.py",
+            r#"from functools import cached_property
+
+from pkg.base import Base
+
+
+class Child(Base):
+    @cached_property
+    def label(self) -> str:
+        return self.name.upper()
+
+    def retitle(self, name: str) -> None:
+        self.name = name
+        del self.label
+
+    def __hash__(self) -> int:
+        return hash(self.name)
+"#,
+        );
+    // `Base.rename` runs on `Child` instances; `Base.retitle` does not (`Child` overrides it,
+    // and its override invalidates the cache).
+    assert_eq!(
+        reports(&p, "MUT101"),
+        vec![at("pkg/base.py", 6, "Base.rename")]
+    );
+    assert_eq!(
+        reports(&p, "MUT107"),
+        vec![
+            at("pkg/base.py", 6, "Base.rename"),
+            at("pkg/child.py", 12, "Child.retitle"),
+        ]
+    );
 }
