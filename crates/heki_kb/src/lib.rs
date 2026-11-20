@@ -300,13 +300,11 @@ impl EcosystemEntry {
             .find(|case| arg(case.arg, case.param.as_deref()).is_some_and(|fact| case.holds(&fact)))
     }
 
-    /// The effects of a call selecting `case`.
     pub fn effects_in<'e>(&'e self, case: Option<&'e ArgCase>) -> &'e [ExecEffectKind] {
         case.and_then(|c| c.effects.as_deref())
             .unwrap_or(&self.effects)
     }
 
-    /// The class of the result of a call selecting `case`.
     pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
         case.and_then(|c| c.return_type.as_deref())
             .or(self.return_type.as_deref())
@@ -533,8 +531,6 @@ mod tests {
         assert!(!kb.entries.contains_key("builtins.old_only"));
     }
 
-    // ---------------------------------------------------------------- Layer 1
-
     /// docs/ANALYSIS_AND_KB_SPEC.md section 4.1. `builtins.str` / `builtins.bytes` carry no
     /// `return_exact_type`: `__str__` / `__bytes__` may return a subclass that CPython passes
     /// through (witnessed by `tests/sentinel/verify_soundness_kb.py`).
@@ -663,8 +659,6 @@ mod tests {
         assert!(parse_soundness_file("test.toml", text).is_err());
     }
 
-    // ---------------------------------------------------------------- Layer 2
-
     fn entry(effects: &[ExecEffectKind]) -> EcosystemEntry {
         EcosystemEntry {
             effects: effects.to_vec(),
@@ -771,6 +765,7 @@ mod tests {
     const SQLMODEL_SESSION_QUERIES: &[&str] = &[
         "exec", "execute", "scalars", "scalar", "get", "get_one", "refresh", "commit", "flush",
     ];
+    const DJANGO_QUERYSET: &str = "django.db.models.query.QuerySet";
     /// Django `QuerySet` methods that run the query (their `a*` variants are coroutines).
     const QUERYSET_RUNS: &[&str] = &[
         "get",
@@ -914,6 +909,24 @@ mod tests {
     /// Every Layer 2 entry (docs/ANALYSIS_AND_KB_SPEC.md section 4.2), as `(symbols, expected
     /// entry without symbol)`.
     fn layer2_required() -> Vec<(Vec<String>, EcosystemEntry)> {
+        [
+            standard_library(),
+            http_clients(),
+            boto3_clients(),
+            sync_databases(),
+            async_databases(),
+            data_libraries(),
+            locks_and_transactions(),
+            pandas_url_readers(),
+            synchronous_waits(),
+            lazy_iterators(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    fn standard_library() -> Vec<(Vec<String>, EcosystemEntry)> {
         let offload = |arg| EcosystemEntry {
             offloads_blocking_arg: Some(arg),
             ..async_safe(entry(&[]))
@@ -926,20 +939,7 @@ mod tests {
             copy_sanitizer: Some(depth),
             ..entry(&[])
         };
-        let qs = "django.db.models.query.QuerySet";
-        let async_queryset_runs: Vec<String> =
-            QUERYSET_RUNS.iter().map(|m| format!("{qs}.a{m}")).collect();
-        let pandas_url_readers = PANDAS_URL_READERS.iter().map(|&(reader, param)| {
-            (
-                vec![format!("pandas.{reader}")],
-                with_cases(
-                    vec![source_case(param, true), source_case(param, false)],
-                    entry(&[BlockingFs]),
-                ),
-            )
-        });
-        let mut required = vec![
-            // ------------------------------------------------ standard library
+        vec![
             (s(&["time.sleep"]), entry(&[Sleep])),
             (
                 with_prefix(
@@ -1085,7 +1085,11 @@ mod tests {
                 .concat(),
                 entry(&[BlockingDb]),
             ),
-            // ------------------------------------------------ HTTP clients
+        ]
+    }
+
+    fn http_clients() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![
             (
                 [
                     s(&["urllib.request.urlopen", "httpx.stream"]),
@@ -1179,7 +1183,11 @@ mod tests {
                 .concat(),
                 async_safe(entry(&[])),
             ),
-            // ------------------------------------------------ boto3
+        ]
+    }
+
+    fn boto3_clients() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![
             (
                 s(&["boto3.Session.client"]),
                 returning("boto3.client", entry(&[UnpooledClientAlloc])),
@@ -1225,7 +1233,11 @@ mod tests {
                 .concat(),
                 entry(&[BlockingNet, DbQuery]),
             ),
-            // ------------------------------------------------ databases (sync)
+        ]
+    }
+
+    fn sync_databases() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![
             (
                 [
                     with_prefix("sqlalchemy.engine.Connection", SA_CONNECTION_QUERIES),
@@ -1236,7 +1248,7 @@ mod tests {
                     with_prefix("psycopg2.extensions.cursor", DBAPI_EXECUTES),
                     with_prefix("pymysql.cursors.Cursor", DBAPI_EXECUTES),
                     with_prefix("django.db.backends.utils.CursorWrapper", DBAPI_EXECUTES),
-                    with_prefix(qs, QUERYSET_RUNS),
+                    with_prefix(DJANGO_QUERYSET, QUERYSET_RUNS),
                     s(&[
                         "redis.client.Pipeline.execute",
                         "redis.client.Pipeline.watch",
@@ -1259,7 +1271,7 @@ mod tests {
                     s(&["pymysql.connections.Connection.connect"]),
                     // A cursor loop or a bulk API by design: blocking, but no N+1 query.
                     s(&["redis.Redis.scan", "pandas.DataFrame.to_sql"]),
-                    with_prefix(qs, QUERYSET_BULK),
+                    with_prefix(DJANGO_QUERYSET, QUERYSET_BULK),
                     with_prefix("pymongo.collection.Collection", MONGO_BULK),
                 ]
                 .concat(),
@@ -1372,8 +1384,8 @@ mod tests {
             ),
             (
                 // Lazy: they only build another QuerySet.
-                with_prefix(qs, &["filter", "exclude", "all", "order_by"]),
-                returning(qs, entry(&[])),
+                with_prefix(DJANGO_QUERYSET, &["filter", "exclude", "all", "order_by"]),
+                returning(DJANGO_QUERYSET, entry(&[])),
             ),
             (
                 s(&["redis.from_url", "redis.Redis.from_url"]),
@@ -1399,7 +1411,15 @@ mod tests {
                 s(&["pymongo.database.Database.get_collection"]),
                 returning("pymongo.collection.Collection", entry(&[])),
             ),
-            // ------------------------------------------------ databases (asyncio)
+        ]
+    }
+
+    fn async_databases() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let async_queryset_runs: Vec<String> = QUERYSET_RUNS
+            .iter()
+            .map(|m| format!("{DJANGO_QUERYSET}.a{m}"))
+            .collect();
+        vec![
             (
                 [
                     with_prefix(
@@ -1433,7 +1453,10 @@ mod tests {
             ),
             (
                 [
-                    QUERYSET_BULK.iter().map(|m| format!("{qs}.a{m}")).collect(),
+                    QUERYSET_BULK
+                        .iter()
+                        .map(|m| format!("{DJANGO_QUERYSET}.a{m}"))
+                        .collect(),
                     with_prefix(
                         "pymongo.asynchronous.collection.AsyncCollection",
                         MONGO_BULK,
@@ -1547,7 +1570,11 @@ mod tests {
                     entry(&[]),
                 )),
             ),
-            // ------------------------------------------------ data
+        ]
+    }
+
+    fn data_libraries() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![
             (
                 // Local paths only.
                 with_prefix("pandas", &["read_hdf", "read_spss"]),
@@ -1579,9 +1606,13 @@ mod tests {
                 .concat(),
                 entry(&[QuadraticRealloc]),
             ),
-            // ------------------------------------------------ locks and transactions
+        ]
+    }
+
+    fn locks_and_transactions() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![
             (
-                // `sqlalchemy.engine.Engine.begin` (above) also connects and types its result.
+                // `sqlalchemy.engine.Engine.begin` (`sync_databases`) also connects and types its result.
                 [LOCK_CLASSES, TRANSACTION_STARTERS]
                     .concat()
                     .iter()
@@ -1600,11 +1631,22 @@ mod tests {
                     ..entry(&[BlockingDb])
                 },
             ),
-        ];
-        required.extend(pandas_url_readers);
-        required.extend(synchronous_waits());
-        required.extend(lazy_iterators());
-        required
+        ]
+    }
+
+    fn pandas_url_readers() -> Vec<(Vec<String>, EcosystemEntry)> {
+        PANDAS_URL_READERS
+            .iter()
+            .map(|&(reader, param)| {
+                (
+                    vec![format!("pandas.{reader}")],
+                    with_cases(
+                        vec![source_case(param, true), source_case(param, false)],
+                        entry(&[BlockingFs]),
+                    ),
+                )
+            })
+            .collect()
     }
 
     /// Calls returning an iterator that does the I/O while it is iterated.
