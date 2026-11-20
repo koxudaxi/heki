@@ -134,6 +134,17 @@ the targets of write and read boundaries.
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
+A method called on an instance is the definition the class's MRO (Python's C3 linearization of
+its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
+named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
+`Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
+`cls()` and `cls.method()` dispatch like a call on an instance. A method's calls on its own
+`self` run the overrides of every subclass, so a mixin's summary holds the effects of every
+class sharing it; an execution effect reached only through the override of a subclass records
+that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
+only when that class and the receiver's derive one from the other (an unknown receiver runs them
+all). An async client sharing a command mixin with a sync one runs the async implementation.
+
 Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
 `pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
 `src/acme/io.py` is `acme.io`, for regular and namespace packages and for modules directly under
@@ -169,7 +180,7 @@ EffectSummary(f) = {
                                                            // not just rebound: what a shallow copy shares (MUT202)
     param_change_sites:       Map<ParamIdx, Set<Span>>,    // own changes of parameter i only, never propagated
                                                            // (EFF201 mutates-params counts them)
-    escapes_params:           Bitset,                      // stored in an attribute / container / global, or returned
+    escapes_params:           Bitset,                      // stored in an attribute / container / global / closure variable
     reallocates_params:       Bitset,                      // parameter i comes back as a quadratic reallocation
                                                            // of it (DATA101 through helpers)
     consumes_params:          Bitset,                      // iterated to exhaustion on every normal path (MUT106)
@@ -265,7 +276,8 @@ table (`consumption`):
 - `Return`: a plain function returns it, directly or through lazy wrappers: its `Result` goes into
   the function's own `iterated`;
 - `Through`: it is passed to a project call whose body iterates that parameter (`iterates_params`)
-  at the call, or whose result is iterated there: its `Result` runs inside that call.
+  at the call, or whose result is iterated there or returned by a plain caller (`return
+  relay(rows())`): its `Result` runs inside that call, or goes into the caller's `iterated`.
 
 Any other use runs nothing in the caller: a generator stored, yielded, returned from an
 `async def`, handed to an external or unresolved call (`StreamingResponse(rows())`), or only
@@ -363,7 +375,7 @@ which module imports which.
   `max` / `sorted` / `str.join`, `list.extend`, `set.update`, `collections.deque`,
   `heapq.nlargest`, `functools.reduce`, ...: one table, `consumption::FULL_CONSUMERS`, which also
   decides where a generator's body runs), also through wrappers over one iterable; `any` / `all`
-  step it but may stop early (`SHORT_CIRCUIT_CONSUMERS`: a generator's body runs, the iterator is
+  step it but may stop early (`STOPPING_CONSUMERS`: a generator's body runs, the iterator is
   not exhausted); `next()` is
   stepping, not consumption. A project function consumes its argument when `consumes_params` says
   so, and its body runs at the call.

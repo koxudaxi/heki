@@ -31,7 +31,8 @@ A value is consumed by a `for` loop or comprehension over it, unpacking (`a, *re
 `heapq.nlargest` / `nsmallest`, `functools.reduce`, `math.prod` / `fsum`), a wrapper that is
 itself consumed (`enumerate(it)`, `map(f, it)`, `chain(it, other)`, `heapq.merge(it, other)`,
 `zip(it, it)`, a generator expression over it, ...), or a project function that iterates the
-parameter it is passed to exhaustion. `next(it)` and `len` are not consumptions, and neither are
+parameter it is passed to exhaustion (for a method, every implementation the call may run must;
+an `@abstractmethod` never runs). `next(it)` and `len` are not consumptions, and neither are
 `zip` / `map` over several iterables, `islice`, or `takewhile`: they stop at the shortest one or
 early (`zip(range(n), it)` takes `n` items). The same table decides where a generator's body
 runs for the effect and contract rules.

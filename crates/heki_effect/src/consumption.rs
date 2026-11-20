@@ -231,6 +231,9 @@ pub struct IterFlow {
     /// Tracked value -> its root (a root maps to itself): parameters and single-pass sources,
     /// followed through `Copy` and phis whose other inputs share one root.
     pub root_of: FxHashMap<VarId, VarId>,
+    /// Values merged from different roots (`rows() if flag else other()`, through copies): the
+    /// roots each may be. Iterating one steps them all; it exhausts none (it is one of them).
+    pub may_roots: FxHashMap<VarId, Vec<VarId>>,
     /// Lazy wrappers: root -> the values it exhausts when it is consumed.
     pub wraps: FxHashMap<VarId, Vec<VarId>>,
     /// Lazy wrappers: root -> every value it steps when it is iterated (`wraps` and the values
@@ -317,6 +320,19 @@ impl IterFlow {
                     InstKind::Call { dst, args, .. } | InstKind::MethodCall { dst, args, .. } => {
                         (dst, args)
                     }
+                    // A read running property getters is a call of them (`EffectSummary`
+                    // flows record it with the getters as its callee).
+                    InstKind::AttrLoad { dst, .. } => {
+                        if roots == Roots::Summary
+                            && matches!(
+                                flow.callees.get(&(bb.id, index)),
+                                Some(Callee::Project(..))
+                            )
+                        {
+                            flow.add_root(*dst, (bb.id, index), Vec::new(), Vec::new());
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 let callee = &flow.callees[&(bb.id, index)];
@@ -368,7 +384,10 @@ impl IterFlow {
     /// `Copy` and agreeing-phi aliases of the roots, to a fixpoint.
     fn alias(&mut self, f: &IrFunction) {
         loop {
-            let before = self.root_of.len();
+            let before = (
+                self.root_of.len(),
+                self.may_roots.values().map(Vec::len).sum::<usize>(),
+            );
             for bb in &f.blocks {
                 for phi in &bb.phis {
                     let mut inputs = phi
@@ -381,19 +400,48 @@ impl IterFlow {
                         && inputs.all(|v| self.root_of.get(&v) == Some(&r))
                     {
                         self.root_of.entry(phi.dst).or_insert(r);
+                        continue;
+                    }
+                    if self.root_of.contains_key(&phi.dst) {
+                        continue;
+                    }
+                    let mut may: Vec<VarId> = phi
+                        .incoming
+                        .iter()
+                        .filter(|(_, v)| *v != phi.dst)
+                        .flat_map(|(_, v)| self.possible_roots(*v))
+                        .collect();
+                    may.sort();
+                    may.dedup();
+                    if !may.is_empty() {
+                        self.may_roots.insert(phi.dst, may);
                     }
                 }
                 for inst in &bb.insts {
-                    if let InstKind::Copy { dst, src } = &inst.kind
-                        && let Some(&r) = self.root_of.get(src)
-                    {
-                        self.root_of.entry(*dst).or_insert(r);
+                    if let InstKind::Copy { dst, src } = &inst.kind {
+                        if let Some(&r) = self.root_of.get(src) {
+                            self.root_of.entry(*dst).or_insert(r);
+                        } else if let Some(may) = self.may_roots.get(src).cloned() {
+                            self.may_roots.insert(*dst, may);
+                        }
                     }
                 }
             }
-            if self.root_of.len() == before {
+            let after = (
+                self.root_of.len(),
+                self.may_roots.values().map(Vec::len).sum::<usize>(),
+            );
+            if after == before {
                 return;
             }
+        }
+    }
+
+    /// The roots `v` is or may be.
+    fn possible_roots(&self, v: VarId) -> Vec<VarId> {
+        match self.root_of.get(&v) {
+            Some(r) => vec![*r],
+            None => self.may_roots.get(&v).cloned().unwrap_or_default(),
         }
     }
 
@@ -403,10 +451,17 @@ impl IterFlow {
         expand_through(&self.root_of, &self.wraps, values)
     }
 
-    /// Roots an iteration of `values` steps: each value's root, then (pre-order) every value
-    /// its wrappers step.
+    /// Roots an iteration of `values` steps: each value's root (the roots a merged value may
+    /// be), then (pre-order) every value its wrappers step.
     pub fn expand_steps(&self, values: &[VarId]) -> Vec<VarId> {
-        expand_through(&self.root_of, &self.steps, values)
+        let values: Vec<VarId> = values
+            .iter()
+            .flat_map(|v| match self.may_roots.get(v) {
+                Some(roots) if !self.root_of.contains_key(v) => roots.clone(),
+                _ => vec![*v],
+            })
+            .collect();
+        expand_through(&self.root_of, &self.steps, &values)
     }
 
     /// Record that the instruction at `(block, index)` iterates `values` to exhaustion.

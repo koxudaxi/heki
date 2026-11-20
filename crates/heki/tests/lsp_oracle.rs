@@ -60,6 +60,12 @@ name = "pass"
 scopes = ["pkg.pure.tidy"]
 allow-writes = ["Ledger.rows"]
 write-universe = ["Ledger.*"]
+
+[[tool.heki.effect-boundaries]]
+name = "render"
+scopes = ["pkg.gate.render", "pkg.walk_b.walk"]
+forbid = ["blocking-net", "sleep"]
+allowed-callees = ["requests.get"]
 [[tool.heki.readonly-returns]]
 name = "catalog"
 producers = ["pkg.catalog.Catalog.entry"]
@@ -142,6 +148,29 @@ const OUTSIDE_VIEW: &str = "from pkg.layer_ops import _bal\nfrom pkg.ledger impo
 const CHAIN_LOW: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Registry, Vault\n\n\ndef stamp(r: Registry):\n    r.entries.append(1)\n\n\ndef peek(v: Vault):\n    return v.secret\n\n\ndef book(l: Ledger):\n    return l.post(1)\n";
 const CHAIN_MID: &str = "from pkg.chain_low import book, peek, stamp\n\n\ndef relay(r, v, l):\n    stamp(r)\n    peek(v)\n    return book(l)\n";
 const CHAIN_TOP: &str = "from pkg.chain_mid import relay\n\n\nclass Store:\n    def run(self, r, v, l):\n        return relay(r, v, l)\n\n\ndef outside(r, v, l):\n    return None\n";
+
+// The index across files: two modules drive each other's private coroutine by hand
+// (`sync_driven_only`), a coroutine a sync function drives calls a blocking helper in another
+// module, two functions in two modules call each other (one is a boundary's scope function),
+// and a boundary allowing `requests.get` reaches a helper making two calls of it.
+const DRIVE_A: &str = "from pkg.drive_b import _cb\n\n\nasync def _ca():\n    return 1\n\n\ndef drive_b():\n    _cb().send(None)\n";
+const DRIVE_B: &str = "from pkg.drive_a import _ca\n\n\nasync def _cb():\n    return 1\n\n\ndef drive_a():\n    _ca().send(None)\n";
+const SLOW_LEAF: &str = "import time\n\n\ndef block():\n    time.sleep(1)\n";
+const WORKER: &str = "from pkg.slow_leaf import block\n\n\nasync def _work():\n    block()\n";
+const WORKER_DRIVER: &str =
+    "from pkg.worker import _work\n\n\ndef drive():\n    _work().send(None)\n";
+const WALK_A: &str = "import time\n\nfrom pkg import walk_b\n\n\ndef walk(n):\n    if n > 0:\n        walk_b.walk(n - 1)\n";
+const WALK_B: &str =
+    "from pkg import walk_a\n\n\ndef walk(n):\n    if n > 0:\n        walk_a.walk(n - 1)\n";
+const GATE_NET: &str =
+    "import requests\n\n\ndef fetch(url):\n    requests.get(url)\n    requests.get(url)\n";
+const GATE: &str = "from pkg.gate_net import fetch\n\n\ndef render(url):\n    fetch(url)\n";
+// A mixin shared by a sync and an async client in other modules, called on an async client.
+const MIXIN_COMMANDS: &str =
+    "class Commands:\n    def masters(self):\n        return self.execute_command(\"MASTERS\")\n";
+const SYNC_CLIENT: &str = "from pkg.mixin_commands import Commands\n\n\nclass SyncClient(Commands):\n    def execute_command(self, *args):\n        return args\n";
+const ASYNC_CLIENT: &str = "from pkg.mixin_commands import Commands\n\n\nclass AsyncClient(Commands):\n    async def execute_command(self, *args):\n        return args\n";
+const ASYNC_USER: &str = "from pkg.async_client import AsyncClient\n\n\nasync def poll(c: AsyncClient):\n    await c.masters()\n";
 
 // Constant keys, objects under construction, and the strict mode: a `__dict__` key names the
 // guarded attribute through a `Final` constant of another module; a private helper fills a new
@@ -435,6 +464,19 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/fill_main.py", FILL_MAIN),
         ("pkg/views.py", VIEWS),
         ("pkg/tagged.py", TAGGED),
+        ("pkg/drive_a.py", DRIVE_A),
+        ("pkg/drive_b.py", DRIVE_B),
+        ("pkg/slow_leaf.py", SLOW_LEAF),
+        ("pkg/worker.py", WORKER),
+        ("pkg/worker_driver.py", WORKER_DRIVER),
+        ("pkg/walk_a.py", WALK_A),
+        ("pkg/walk_b.py", WALK_B),
+        ("pkg/gate_net.py", GATE_NET),
+        ("pkg/gate.py", GATE),
+        ("pkg/mixin_commands.py", MIXIN_COMMANDS),
+        ("pkg/sync_client.py", SYNC_CLIENT),
+        ("pkg/async_client.py", ASYNC_CLIENT),
+        ("pkg/async_user.py", ASYNC_USER),
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
         ("pkg/fresh_ops.py", FRESH_OPS),
@@ -622,6 +664,88 @@ fn steps_receiver_typing() -> Vec<Step> {
             vec![save("pkg/tagged.py", TAGGED)],
         )
         .present(&[("pkg/views.py", "MUT201")]),
+    ]
+}
+
+/// The index across files: facts its callers decide (`sync_driven_only`), members of a call
+/// cycle in other files, the catalog calls below an effect boundary, and the implementations a
+/// mixin's method runs for a receiver of known class.
+fn steps_effect_index() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a comment in a module whose coroutine another module drives by hand",
+            vec![save("pkg/drive_a.py", &format!("# drivers\n{DRIVE_A}"))],
+        )
+        .absent(&[("pkg/drive_a.py", "EFF101"), ("pkg/drive_b.py", "EFF101")])
+        .cutoff(),
+        Step::new(
+            "a blank line above the blocking call below a hand-driven coroutine",
+            vec![save(
+                "pkg/slow_leaf.py",
+                &SLOW_LEAF.replace("    time.sleep", "\n    time.sleep"),
+            )],
+        )
+        .absent(&[("pkg/worker.py", "EFF101")]),
+        Step::new(
+            "the coroutine's module is edited after its callee moved",
+            vec![save("pkg/worker.py", &format!("{WORKER}# done\n"))],
+        )
+        .absent(&[("pkg/worker.py", "EFF101")]),
+        Step::new(
+            "a function calling a boundary's scope function in another module starts sleeping",
+            vec![save(
+                "pkg/walk_a.py",
+                &WALK_A.replace("    if n > 0:", "    time.sleep(1)\n    if n > 0:"),
+            )],
+        )
+        .present(&[("pkg/walk_b.py", "EFF201")]),
+        Step::new(
+            "the function stops sleeping",
+            vec![save("pkg/walk_a.py", WALK_A)],
+        )
+        .absent(&[("pkg/walk_b.py", "EFF201")]),
+        Step::new(
+            "the first of two allowed catalog calls below a boundary becomes a forbidden one",
+            vec![save(
+                "pkg/gate_net.py",
+                &GATE_NET.replacen("requests.get", "requests.put", 1),
+            )],
+        )
+        .present(&[("pkg/gate.py", "EFF201")]),
+        Step::new(
+            "both calls are allowed again",
+            vec![save("pkg/gate_net.py", GATE_NET)],
+        )
+        .absent(&[("pkg/gate.py", "EFF201")]),
+        Step::new(
+            "the sync client sharing a mixin with the async one starts blocking",
+            vec![save(
+                "pkg/sync_client.py",
+                &format!(
+                    "import time\n\n{}",
+                    SYNC_CLIENT.replace("return args", "time.sleep(1)")
+                ),
+            )],
+        )
+        .absent(&[("pkg/async_user.py", "EFF101")]),
+        Step::new(
+            "the async client's implementation becomes a blocking sync one",
+            vec![save(
+                "pkg/async_client.py",
+                &format!(
+                    "import time\n\n{}",
+                    ASYNC_CLIENT
+                        .replace("async def", "def")
+                        .replace("return args", "time.sleep(1)")
+                ),
+            )],
+        )
+        .present(&[("pkg/async_user.py", "EFF101")]),
+        Step::new(
+            "the async client is async again",
+            vec![save("pkg/async_client.py", ASYNC_CLIENT)],
+        )
+        .absent(&[("pkg/async_user.py", "EFF101")]),
     ]
 }
 
@@ -1280,6 +1404,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());
     steps.extend(steps_receiver_typing());
+    steps.extend(steps_effect_index());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(

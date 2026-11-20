@@ -19,6 +19,9 @@ pub(crate) const MAX_UNION: usize = 3;
 pub enum Ty {
     /// A named object: a module, class, function, or external symbol (by fqn).
     Ref(String),
+    /// A class object that is the class `fqn` or one of its subclasses (`cls` in a class
+    /// method): what it constructs and calls dispatches along the class hierarchy.
+    Class(String),
     /// `super()` inside a method of the class `fqn`.
     Super(String),
     /// An instance of one class.
@@ -168,7 +171,12 @@ impl Ty {
     pub fn obj(&self) -> Option<&Obj> {
         match self {
             Ty::Inst(o) => Some(o),
-            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
+            Ty::Ref(_)
+            | Ty::Class(_)
+            | Ty::Super(_)
+            | Ty::SelfType
+            | Ty::Partial(_)
+            | Ty::Union(_) => None,
         }
     }
 
@@ -177,7 +185,7 @@ impl Ty {
         match self {
             Ty::Inst(o) => std::slice::from_ref(o),
             Ty::Union(os) => os,
-            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => &[],
+            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => &[],
         }
     }
 
@@ -203,7 +211,9 @@ impl Ty {
         match self {
             Ty::Inst(o) => f(o).map(Ty::Inst),
             Ty::Union(os) => Ty::of_members(os.iter().map(f).collect::<Option<Vec<_>>>()?),
-            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => Some(self.clone()),
+            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType | Ty::Partial(_) => {
+                Some(self.clone())
+            }
         }
     }
 
@@ -232,6 +242,9 @@ impl Ty {
                 class: a.class.clone(),
                 args: a.args.join(&b.args),
             })),
+            (Ty::Ref(a), Ty::Class(b)) | (Ty::Class(b), Ty::Ref(a)) if a == b => {
+                Some(Ty::Class(b.clone()))
+            }
             _ => match (self.members(), other.members()) {
                 (a, b) if !a.is_empty() && !b.is_empty() => {
                     Ty::of_members(a.iter().chain(b).cloned())
@@ -246,7 +259,7 @@ impl Ty {
             Ty::Inst(o) => 1 + o.args.depth(),
             Ty::Union(os) => 1 + os.iter().map(|o| o.args.depth()).max().unwrap_or(0),
             Ty::Partial(t) => 1 + t.depth(),
-            Ty::Ref(_) | Ty::Super(_) | Ty::SelfType => 1,
+            Ty::Ref(_) | Ty::Class(_) | Ty::Super(_) | Ty::SelfType => 1,
         }
     }
 }

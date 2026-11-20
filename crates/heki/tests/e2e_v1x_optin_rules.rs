@@ -340,6 +340,23 @@ def stepping(lines):
     return head, second, list(it)
 
 
+def deciding_item(flags):
+    it = iter(flags)
+    found = any(it)
+    rest = all(it)
+    return found, rest, list(it)
+
+
+def drain_second(first, second):
+    return first, list(second)
+
+
+def unknown_parameter(lines, pair):
+    it = iter(lines)
+    drain_second(*pair, it)
+    return list(it)
+
+
 def rebinding(lines):
     it = iter(lines)
     a = list(it)

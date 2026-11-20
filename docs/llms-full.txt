@@ -1753,7 +1753,9 @@ It does not report:
   only build an object (`Redis.pipeline()`, a
   lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
 - spawning a process without waiting (`subprocess.Popen(...)`);
-- coroutine functions that only run through a synchronous driver (`asyncio.run`, ...);
+- private coroutine functions that only run through a synchronous driver without an event loop
+  (`.send(None)`, a `run_sync` function); `asyncio.run(...)` runs its coroutine on an event loop,
+  where blocking stops the tasks it starts;
 - CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests
   (`test_*` functions and files under `tests/`, see the option below).
 
@@ -2344,7 +2346,8 @@ A value is consumed by a `for` loop or comprehension over it, unpacking (`a, *re
 `heapq.nlargest` / `nsmallest`, `functools.reduce`, `math.prod` / `fsum`), a wrapper that is
 itself consumed (`enumerate(it)`, `map(f, it)`, `chain(it, other)`, `heapq.merge(it, other)`,
 `zip(it, it)`, a generator expression over it, ...), or a project function that iterates the
-parameter it is passed to exhaustion. `next(it)` and `len` are not consumptions, and neither are
+parameter it is passed to exhaustion (for a method, every implementation the call may run must;
+an `@abstractmethod` never runs). `next(it)` and `len` are not consumptions, and neither are
 `zip` / `map` over several iterables, `islice`, or `takewhile`: they stop at the shortest one or
 early (`zip(range(n), it)` takes `n` items). The same table decides where a generator's body
 runs for the effect and contract rules.
@@ -3631,7 +3634,8 @@ saved by `heki snapshot --write` (`.heki-summary-snapshot.json` at the project r
 functions that gained one of:
 
 - a mutated parameter (the function now changes an argument it receives);
-- an escaping parameter (an argument is now stored in an attribute, a container, or a global);
+- an escaping parameter (an argument is now stored in an attribute, a container, a global, or a
+  variable of an enclosing function);
 - a mutated `self` attribute;
 - an execution effect (blocking network / database / subprocess / filesystem I/O, sleeping,
   client allocation, database queries), including effects reached through callees.
@@ -3886,7 +3890,9 @@ sites of the first non-private callers, with the chain of calls as related infor
 private function that only its own recursion calls (`_walk` calling itself, handed out as a
 callback) has no such caller and reports its writes itself. One
 report stands for every write behind that call (`sites` in JSON), so a Ratchet baseline counts a
-second write inside a recorded helper.
+second write inside a recorded helper. A write reached through an allowed writer on one path and
+around it on another (or through a forbidden writer on one path only) is reported for the path
+the contract does not allow.
 Reading a `@property` or `functools.cached_property` attribute calls its getter, so a private
 getter hands its writes to the functions reading it; a read never calls a property's setter.
 
@@ -4022,7 +4028,11 @@ helper changing an argument it does not type (`_add(xs): xs.append(1)` called as
 the caller binds to it: the caller's call is the write. An invalidator counts when it is called directly, in each branch, or through
 calls (a helper that calls an invalidator on every path to its own return), also behind a
 boolean flag set after the write (`changed = True ... if changed: notify()`); one called before
-the write does not count, nor an `async` invalidator that is not awaited.
+the write does not count, nor an `async` invalidator that is not awaited. A call of a method
+announces the change when every implementation it may run does (the definition the receiver's
+class finds and the overrides of its subclasses; an `@abstractmethod` never runs): calling
+`hook.done()` on a `Hook` whose own `done` does nothing announces nothing, whatever a subclass
+does.
 
 It does not report:
 

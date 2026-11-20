@@ -3,7 +3,7 @@
 //! (`MUT109`), and whether any ownership contract is declared. `heki check` and the LSP engine hand them to the analysis, so a wrapper of a
 //! producer and an invalidator reached through calls are known across files without IR.
 
-use crate::mut_rules::ReadOnlyProducers;
+use crate::mut_rules::{Allowance, AllowanceKeys, ReadOnlyProducers};
 use crate::{DottedPattern, RuleConfigError, RuleSelection};
 use heki_effect::{Contracts, TypedWrites};
 use heki_env::HekiConfig;
@@ -56,6 +56,10 @@ pub(crate) struct ConfigContracts {
     pub(crate) invalidations: Vec<InvalidationNames>,
     /// The masks of [`Contracts::invalidator_of`] by name.
     invalidators: NameMasks,
+    /// What each `write-owners` contract allows and forbids, in configuration order.
+    writers: Vec<Allowance>,
+    /// The masks of [`Contracts::writer_contexts`] by name.
+    writer_contexts: NameMasks,
 }
 
 /// Contract masks memoized by `(fqn, qualname)`: a mask depends on the name alone, and the
@@ -120,11 +124,24 @@ impl ConfigContracts {
                 )?,
             });
         }
+        let writers = config
+            .write_owners
+            .iter()
+            .map(|rule| {
+                Allowance::new(&AllowanceKeys {
+                    allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+                    forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+                    exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+                })
+            })
+            .collect::<Result<_, _>>()?;
         Ok(Self {
             ownership: declares_ownership(config),
             producers: ReadOnlyProducers::new(config)?,
             invalidations,
             invalidators: NameMasks::default(),
+            writers,
+            writer_contexts: NameMasks::default(),
         })
     }
 }
@@ -145,6 +162,28 @@ impl Contracts for ConfigContracts {
     fn invalidator_of(&self, fqn: &str, qualname: &str) -> u64 {
         self.invalidators.get(fqn, qualname, || {
             mask(&self.invalidations, |c| c.names_invalidator(fqn, qualname))
+        })
+    }
+
+    fn writer_contexts(&self, fqn: &str, qualname: &str) -> u64 {
+        self.writer_contexts.get(fqn, qualname, || {
+            let Some((module, _)) = fqn
+                .strip_suffix(qualname)
+                .and_then(|m| m.strip_suffix('.'))
+                .map(|m| (m, ()))
+            else {
+                return 0;
+            };
+            let key = heki_effect::FuncKey {
+                module: module.to_owned(),
+                qualname: qualname.to_owned(),
+            };
+            self.writers.iter().enumerate().fold(0, |acc, (k, a)| {
+                let bit = 2 * (k % 32);
+                let allowed = u64::from(a.allows(&key)) << bit;
+                let forbidden = u64::from(a.has_forbidden() && a.in_scope(&key)) << (bit + 1);
+                acc | allowed | forbidden
+            })
         })
     }
 
