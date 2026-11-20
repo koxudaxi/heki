@@ -627,6 +627,45 @@ def f(y: [n for n in ()]): pass
 }
 
 #[test]
+fn semantic_class_qualnames_and_methods_follow_python() {
+    let source = "\
+class Outer:
+    class Inner:
+        def method(self):
+            class InMethod:
+                pass
+            def helper():
+                pass
+    def outer_method(self):
+        pass
+def factory():
+    class Local:
+        def run(self):
+            pass
+";
+    let m = dump_source("dump-semantic", "fe_class_qualnames", source, "py312");
+    let named = |name: &str| {
+        m["classes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap()
+    };
+    assert_eq!(named("Inner")["qualname"], "Outer.Inner");
+    assert_eq!(
+        named("InMethod")["qualname"],
+        "Outer.Inner.method.<locals>.InMethod"
+    );
+    assert_eq!(named("Local")["qualname"], "factory.<locals>.Local");
+    // Methods and nesting come from the class body itself, not from functions inside it.
+    assert_eq!(strs(&named("Inner")["methods"]), ["method"]);
+    assert_eq!(strs(&named("Outer")["methods"]), ["outer_method"]);
+    assert_eq!(named("InMethod")["parent_class"], Value::Null);
+    assert_eq!(named("Inner")["parent_class"], named("Outer")["id"]);
+}
+
+#[test]
 fn semantic_generator_walrus_writes_the_declared_global() {
     let source = "\
 def f():

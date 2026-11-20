@@ -295,8 +295,7 @@ def old_local_collections(n, collections=None):
 
 
 def cx_class_in_function_collections(n, collections=None):
-    # The method sees the enclosing function's `collections` (not the module's) although its
-    # qualname, `LocalCx.drain`, does not name that function.
+    # The method sees the enclosing function's `collections` (not the module's).
     class LocalCx:
         def drain(self):
             q = [1, 2, 3, *range(n)]

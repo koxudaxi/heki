@@ -37,7 +37,9 @@ resolution are heki's own (`heki_semantic`).
 One `IrFunction` is built per function (`def`, `async def`, lambda, generator expression, a
 comprehension before 3.12), per class body, and for the module's top level. The methods of a
 nested class (its `__init__` in particular) are kept apart from the methods of the outer class
-(against the `MUT101` false positives found in Stage 0-A).
+(against the `MUT101` false positives found in Stage 0-A). Qualnames are Python's
+`__qualname__`: a class defined in a function is `factory.<locals>.Worker`, so its methods never
+share a summary with a module-level `Worker`.
 
 ```text
 IrFunction {

@@ -76,12 +76,15 @@ pub struct ClassInfo {
     pub id: ClassId,
     pub scope: ScopeId,
     pub name: String,
+    /// Python's `__qualname__`: `Outer.Inner`, `factory.<locals>.Local`.
     pub qualname: String,
+    /// The class whose body holds this class statement directly.
     pub parent_class: Option<ClassId>,
     pub bases: Vec<String>,
     /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
     /// `**kwargs` is left out.
     pub keywords: Vec<(String, String)>,
+    /// The functions defined directly in the class body.
     pub methods: Vec<String>,
     pub span: Span,
 }
@@ -279,6 +282,9 @@ struct Analyzer<'a> {
     scopes: Vec<ScopeBuilder>,
     scope_stack: Vec<ScopeId>,
     class_stack: Vec<(ClassId, String)>,
+    /// Python `__qualname__` of each enclosing `def` / `class`, and whether it is a function
+    /// (whose nested definitions are `<locals>`).
+    qualnames: Vec<(String, bool)>,
     imports: Vec<ModuleImport>,
     classes: Vec<ClassInfo>,
     in_type_checking: bool,
@@ -307,6 +313,7 @@ impl<'a> Analyzer<'a> {
             scopes: vec![root],
             scope_stack: vec![ScopeId(0)],
             class_stack: Vec::new(),
+            qualnames: Vec::new(),
             imports: Vec::new(),
             classes: Vec::new(),
             in_type_checking: false,
@@ -345,6 +352,22 @@ impl<'a> Analyzer<'a> {
     fn cur_scope_mut(&mut self) -> &mut ScopeBuilder {
         let id = self.cur_scope_id().0 as usize;
         &mut self.scopes[id]
+    }
+
+    /// `__qualname__` of a definition named `name` in the current block: `f.<locals>.C` in a
+    /// function, `C.m` in a class body.
+    fn child_qualname(&self, name: &str) -> String {
+        match self.qualnames.last() {
+            None => name.to_owned(),
+            Some((outer, true)) => format!("{outer}.<locals>.{name}"),
+            Some((outer, false)) => format!("{outer}.{name}"),
+        }
+    }
+
+    /// The class whose body the current statement is directly in (not in one of its methods).
+    fn cur_class_body(&self) -> Option<ClassId> {
+        let (cid, _) = self.class_stack.last()?;
+        (self.classes[cid.0 as usize].scope == self.cur_scope_id()).then_some(*cid)
     }
 
     fn cur_enclosing_class_name(&self) -> Option<String> {
@@ -701,11 +724,12 @@ impl<'a> Analyzer<'a> {
             false,
             false,
         );
-        if let Some((cid, _)) = self.class_stack.last()
-            && let Some(ci) = self.classes.get_mut(cid.0 as usize)
-        {
-            ci.methods.push(func.name.to_string());
+        if let Some(cid) = self.cur_class_body() {
+            self.classes[cid.0 as usize]
+                .methods
+                .push(func.name.to_string());
         }
+        let qualname = self.child_qualname(func.name.as_str());
 
         // Optional PEP 695 type parameters scope.
         let has_type_params = func
@@ -740,7 +764,9 @@ impl<'a> Analyzer<'a> {
         // Function body scope.
         self.push_scope(ScopeKind::Function, func.name.to_string(), line);
         self.bind_parameters(&func.parameters);
+        self.qualnames.push((qualname, true));
         self.visit_suite(&func.body);
+        self.qualnames.pop();
         self.pop_scope();
 
         if has_type_params {
@@ -750,6 +776,8 @@ impl<'a> Analyzer<'a> {
 
     fn visit_class_def(&mut self, cls: &ast::StmtClassDef) {
         let line = self.definition_line(cls.range, &cls.decorator_list);
+        let parent_class = self.cur_class_body();
+        let qualname = self.child_qualname(cls.name.as_str());
         for dec in &cls.decorator_list {
             self.visit_expr(&dec.expression);
         }
@@ -789,17 +817,11 @@ impl<'a> Analyzer<'a> {
             }
         }
 
-        let parent_class = self.class_stack.last().map(|(cid, _)| *cid);
-        let qualname = if self.class_stack.is_empty() {
-            cls.name.to_string()
-        } else {
-            let prefix: Vec<&str> = self.class_stack.iter().map(|(_, n)| n.as_str()).collect();
-            format!("{}.{}", prefix.join("."), cls.name)
-        };
         let class_id = ClassId(self.classes.len() as u32);
 
         self.class_stack.push((class_id, cls.name.to_string()));
         let scope = self.push_scope(ScopeKind::Class, cls.name.to_string(), line);
+        self.qualnames.push((qualname.clone(), false));
         self.classes.push(ClassInfo {
             id: class_id,
             scope,
@@ -812,6 +834,7 @@ impl<'a> Analyzer<'a> {
             span: Span::from(cls.range),
         });
         self.visit_suite(&cls.body);
+        self.qualnames.pop();
         self.pop_scope();
         self.class_stack.pop();
 

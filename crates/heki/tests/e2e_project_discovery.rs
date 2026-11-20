@@ -135,3 +135,18 @@ fn requires_python_exclusions_move_the_target_version() {
     assert!(runs_as_py311("<3.12"));
     assert!(runs_as_py311(">=3.9, <3.11"));
 }
+
+#[test]
+fn a_function_local_class_does_not_merge_with_a_module_class_of_its_name() {
+    let p = Project::new("disc_local_class");
+    p.write(
+        "a.py",
+        "import time\n\n\nclass Worker:\n    def run(self):\n        pass\n\n\ndef factory():\n    class Worker:\n        def run(self):\n            time.sleep(1)\n\n    return Worker\n\n\nasync def go():\n    Worker().run()\n",
+    );
+    assert_eq!(concise(&p), (0, String::new()));
+    let (_, stdout, _) = p.heki(&["dump-ir", "a.py"]);
+    assert!(
+        stdout.contains("\"factory.<locals>.Worker.run\""),
+        "{stdout}"
+    );
+}
