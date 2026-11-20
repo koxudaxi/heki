@@ -2,12 +2,12 @@
 //!
 //! - `Diagnostic.related` → `DiagnosticRelatedInformation` (every call-chain hop).
 //! - `Diagnostic.fix` of `safe` + `unconditional` rules → `quickfix`; size-dependent `OPT`
-//!   suggestions → `refactor.rewrite.heki`.
+//!   suggestions → `refactor.rewrite.heki`; a fix whose result would not parse is withheld.
 //! - Every diagnostic → a `quickfix` appending `# heki: ignore[CODE]` to its line, unless no
 //!   comment fits there (the line ends inside a string or with a `\` continuation).
 
 use heki_ast::{LineIndex, Span};
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Diagnostic, fix_python_source};
 use heki_env::Severity;
 use heki_rules::find_rule;
 use std::collections::HashMap;
@@ -137,6 +137,14 @@ impl EditTarget<'_> {
     }
 }
 
+/// Whether the client may apply `fix` to `text` as it is: its edits apply and the result
+/// parses, as `heki check --fix` requires of a pass (`fix_python_source`). A fix that would
+/// leave the file invalid Python is a heki bug; its action is withheld.
+fn applies_cleanly(text: &str, fix: &[heki_diagnostics::TextEdit]) -> bool {
+    let pass = fix_python_source("", text, &[fix]);
+    pass.refused.is_none() && !pass.applied.is_empty()
+}
+
 /// Code actions for the diagnostics of the document touching `range`.
 pub fn code_actions(
     target: &EditTarget<'_>,
@@ -152,7 +160,7 @@ pub fn code_actions(
         if !touches(&ld.range, request) {
             continue;
         }
-        if let Some(fix) = &d.fix {
+        if let Some(fix) = d.fix.as_ref().filter(|fix| applies_cleanly(text, fix)) {
             let unconditional = find_rule(&d.rule_code).is_some_and(|m| m.auto_fix_default);
             let edits = fix
                 .iter()
@@ -220,6 +228,72 @@ mod tests {
         let e = text.find('£').unwrap() as u32 + 1;
         assert_eq!(position(text, e).character, 5);
         assert_eq!(position(text, 10_000).line, 2);
+    }
+
+    #[test]
+    fn fixes_whose_result_would_not_parse_are_withheld() {
+        let text =
+            "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+        let at = |s: &str| u32::try_from(text.find(s).unwrap()).unwrap();
+        let span = Span {
+            start: at("x = x"),
+            end: at("x = x") + 11,
+        };
+        let diag = |replacement: &str| Diagnostic {
+            path: "a.py".into(),
+            line: 4,
+            column: 9,
+            span,
+            qualname: "f".into(),
+            rule_code: "OPT101".into(),
+            rule_slug: "loop-list-concat".into(),
+            target: "x".into(),
+            severity: Severity::Error,
+            message: "m".into(),
+            evidence: None,
+            blocker: None,
+            related: Vec::new(),
+            fix: Some(vec![heki_diagnostics::TextEdit {
+                span,
+                replacement: replacement.into(),
+            }]),
+            sites: 1,
+            fold_key: None,
+        };
+        let uri = Url::parse("file:///a.py").unwrap();
+        let target = EditTarget {
+            uri: &uri,
+            version: None,
+        };
+        let actions = |d: &Diagnostic| {
+            let lsp = diagnostic(d, text, &|_| None);
+            let titles: Vec<String> = code_actions(
+                &target,
+                text,
+                std::slice::from_ref(d),
+                std::slice::from_ref(&lsp),
+                &lsp.range,
+            )
+            .into_iter()
+            .map(|a| match a {
+                CodeActionOrCommand::CodeAction(a) => a.title,
+                CodeActionOrCommand::Command(c) => c.title,
+            })
+            .collect();
+            titles
+        };
+        assert_eq!(
+            actions(&diag("x.append(i)")),
+            [
+                "Apply the safe OPT101 fix",
+                "Suppress OPT101 with `# heki: ignore[OPT101]`"
+            ]
+        );
+        // Only the suppression is left for a fix that would break the file.
+        assert_eq!(
+            actions(&diag("x.append(i")),
+            ["Suppress OPT101 with `# heki: ignore[OPT101]`"]
+        );
     }
 
     #[test]

@@ -42,7 +42,8 @@ The server provides:
 - diagnostics for open files, with every hop of a call chain (for example the path from an
   `async def` to `time.sleep`) as related information you can jump to;
 - quick fixes for the safe `OPT101` / `OPT102` rewrites;
-- `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites;
+- `refactor.rewrite.heki` code actions for proven-safe size-dependent rewrites (a fix whose result
+  would not parse is never offered, as `heki check --fix` refuses it);
 - a quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a
   comment cannot go there (the line ends inside a string or with a `\` continuation).
 
