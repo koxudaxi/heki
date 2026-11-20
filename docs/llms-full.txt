@@ -143,6 +143,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: a generator consumed twice | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) |
 | Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) |
+| Opt-in: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) |
 
 ### A safety net for reviews and coding agents
 
@@ -204,7 +205,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [33 rules](https://heki.koxudaxi.dev/rules/).
+- 📏 Browse the [34 rules](https://heki.koxudaxi.dev/rules/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
@@ -584,10 +585,10 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT201`–`MUT204` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `EFF107`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT201`–`MUT204` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `EFF107`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT201`–`MUT204` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT201`–`MUT204` |
 
 
 ---
@@ -915,8 +916,8 @@ supported version that every clause admits:
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
 - A prefix or `ALL` enables only the default rules. The opt-in rules (`EFF105`, `EFF106`,
-  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`) need their exact code or name. In `ignore`, a
-  prefix covers every rule it matches.
+  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`) need their exact code or
+  name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, and `--extend-select` and `--ignore` add
   to the configured lists.
 
@@ -1777,14 +1778,13 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 33 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 34 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
 - 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
 - 🔌 Opt-in rule.
-- 🧪 Experimental rule. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
 
 ## Mutation & State (MUT)
 
@@ -1792,14 +1792,15 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 🧪 |
+| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 |
 | MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
 | MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
 | MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
 | MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
-| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
+| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 |
+| MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | 🔌 |
 | MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
 | MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
 | MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
@@ -2005,9 +2006,9 @@ On a save, the edit reaches other files only through what it changes:
 
 | The edit changes | Also re-analyzed |
 | ---------------- | ---------------- |
-| a function's effects | its callers, and the functions of a call cycle through it (their effects change with it) |
+| a function's effects, or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
 | a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator | every file that resolved names through it |
-| a method of a class family | the classes of that family |
+| a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
 | the writes that leave a `@cached_property` stale (`MUT111`, when selected) | the files reading such a property: whether a read is reported depends on every writer of the class family, wherever it is |
 | a function generators are handed to | those generators: whether it iterates them decides where their writes and reads are reported |
 | a function's own in-place changes or its calls, while its effects stay the same | the files with `MUT108` / `MUT110` reports above it: a report's call chain ends at the first function whose body makes the change |
@@ -2900,6 +2901,106 @@ No automatic fix.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
     tie to a class, under `MUT207`.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/
+
+# conditional-ownership-mutation (MUT112)
+
+Family: Mutation & State (MUT) · Opt-in · No automatic fix
+
+Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.
+
+## What it does
+Checks for a container that is a new object on one path and borrowed state on another, and that
+is then changed in place. The rule is opt-in: enable it with `--extend-select MUT112` or
+`extend-select = ["MUT112"]`.
+
+A value is a new object where the function makes it: a display (`[]`, `{}`), a comprehension, a
+copy (`list(x)`, `dict(x)`, `x.copy()`, `copy.copy`), a constructor call, an operator's result
+(`a + b`), or a call of a project function that returns a new object. It is borrowed where it
+comes from state that outlives the call: a parameter, an attribute, a global, a variable of an
+enclosing function, an element of one of these, or a call of a project function that returns
+such state. The paths meet in a conditional expression or an `if`:
+
+- `items = given or []`, `items = given if given else []`;
+- `options = dict(defaults, **extra) if extra else defaults`;
+- `seen = registry.get(key, {})`, `tags = getattr(obj, "tags", [])`;
+- `x = shared`, then `if c: x = []`.
+
+What a project function returns is part of its summary, through any number of wrappers: a
+function that returns its argument on one path and a new object on another makes its call's
+result both when the caller passes borrowed state, and one returning an attribute it caches
+makes its call's result borrowed.
+
+A change is an item assignment or deletion, a container method (`append`, `extend`, `update`,
+`setdefault`, `pop`, ...), an in-place operator on a `list`, `dict`, `set`, or `bytearray`, or a
+call of a project function that changes the container it is handed. The rule reports the first
+change of the value in the function. It also reports:
+
+- a change made by a closure to a variable of the enclosing function that holds such a value;
+- a store of such a value in `self.<attr>` when a method of the class, of a subclass, or of a
+  base class changes that attribute in place (`self.items.append(x)`, through an alias, or
+  through a helper), at the store.
+
+It does not report:
+
+- a value that is a new object on every path, or borrowed on every path;
+- a value rebound to a copy before the change (`x = list(x)`), also when the copy is made only
+  where the value is still the borrowed object (`if x is shared: x = shared.copy()`);
+- the accumulator idiom, where a parameter is replaced by a new object only when it is `None`
+  or a sentinel (`if out is None: out = []`, `out = [] if out is None else out`): the function
+  fills what its caller hands it. Such a value counts when it is also stored on `self`, where
+  the instance keeps the caller's object;
+- a new object the function stores in other state before the paths meet
+  (`rows = table[key] = []`, `table.setdefault(key, rows)`): it is that state's on every path;
+- a value stored back where it borrows from (`self.items = self.items or []`,
+  `d[k] = d.get(k) or []`);
+- attributes named as memos or caches (`_cache`, `memo`), which are meant to be filled;
+- removing from a value whose new objects all start empty (`d.get(k, {}).pop(x, None)`): the
+  removal does nothing to them;
+- a conditional expression changed in place without a name (`(a if c else b).append(x)`): the
+  code picks the container on purpose;
+- attribute assignments, and changes of a value below the borrowed one (`x[0].append(1)`): a
+  copy of `x` shares those too;
+- `self` in its own methods, and paths a branch on a constant never takes (`while True:`).
+
+## Why is this bad?
+The function treats the value as its own on one path and changes a shared object on the other.
+The caller's list, a cached dictionary, or a class attribute changes only when the borrowed path
+runs, for example only when the caller passes a non-empty list, so the bug shows up far away and
+on some inputs only.
+
+## Example
+```python
+def collect(name: str, scopes: list[str] | None = None) -> list[str]:
+    use_scopes = scopes or []
+    use_scopes.extend(lookup(name))  # MUT112: changes the caller's list when it is not empty
+    return use_scopes
+```
+
+Use instead:
+```python
+def collect(name: str, scopes: list[str] | None = None) -> list[str]:
+    use_scopes = list(scopes or [])
+    use_scopes.extend(lookup(name))
+    return use_scopes
+```
+
+## Known limitations
+- The paths are not told apart by the tests on them: a value that an `if v is SENTINEL: return`
+  excludes, or a callee that returns its argument only when it is not a container, still counts.
+- Calls of `async def` functions and generators are not followed: their results are not what
+  their bodies return.
+- A store in an attribute is followed for `self` only.
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["MUT112"]` enables the rule.
 
 
 ---
