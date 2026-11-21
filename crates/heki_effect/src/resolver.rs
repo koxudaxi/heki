@@ -393,6 +393,13 @@ pub struct FunctionDecl {
     /// How many leading parameters only a position binds (those before `/`, the receiver
     /// included).
     pub positional_only: u8,
+    /// How many leading parameters have no default (the receiver included): a call leaving one
+    /// unbound raises `TypeError`. Python gives every positional parameter after one with a
+    /// default a default too, so these are the positional parameters without one.
+    pub required_positional: u8,
+    /// The keyword-only parameters without a default, by position, ascending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_keyword_only: Vec<u8>,
     /// How many leading parameters have a name a keyword can give (all but `*args` /
     /// `**kwargs`, which come last); a keyword binds those past the positional-only ones
     /// ([`Self::keyword_param`]).
@@ -3557,6 +3564,18 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                     .take_while(|p| !p.kw_only && !p.is_vararg && !p.is_kwarg),
             ),
             positional_only: count_u8(f.params.iter().filter(|p| p.pos_only)),
+            required_positional: count_u8(
+                f.params
+                    .iter()
+                    .take_while(|p| !p.kw_only && !p.is_vararg && !p.is_kwarg && !p.has_default),
+            ),
+            required_keyword_only: f
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.kw_only && !p.has_default)
+                .filter_map(|(i, _)| u8::try_from(i).ok())
+                .collect(),
             named_params: count_u8(f.params.iter().filter(|p| !p.is_vararg && !p.is_kwarg)),
             has_varargs: f.params.iter().any(|p| p.is_vararg),
             has_kwargs: f.params.iter().any(|p| p.is_kwarg),
@@ -4839,16 +4858,17 @@ pub(crate) fn passed_var(
     args.get(usize::from(i)).copied()
 }
 
-/// The constant `var` holds (through copies), with `def` giving each variable's definition.
+/// The constant `var` holds (through copies), with `def` giving each variable's definition: a
+/// literal, or the module constant `globals` gives the read of ([`TypeCtx::module_constant`]).
 pub(crate) fn literal<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
-    globals: &dyn Fn(&str) -> Option<LiteralValue>,
+    globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
     var: VarId,
 ) -> Option<LiteralValue> {
-    match copy_root_kind(def, var)? {
+    let inst = copy_root(def, var)?;
+    match &inst.kind {
         InstKind::Const { literal, .. } => literal_value(literal),
-        InstKind::LoadGlobal { name, .. } => globals(name),
-        _ => None,
+        _ => globals(inst),
     }
 }
 
@@ -4866,12 +4886,18 @@ pub(crate) fn const_literal<'i>(
 
 /// What defines the value `var` copies, through local copies.
 fn copy_root_kind<'i>(def: impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<&'i InstKind> {
+    copy_root(def, var).map(|inst| &inst.kind)
+}
+
+/// The instruction defining the value `var` copies, through local copies.
+fn copy_root<'i>(def: impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<&'i Inst> {
     let mut cur = var;
     // Copies of an SSA variable form a tree, so the walk ends.
     loop {
-        match &def(cur)?.kind {
+        let inst = def(cur)?;
+        match &inst.kind {
             InstKind::Copy { src, .. } => cur = *src,
-            other => return Some(other),
+            _ => return Some(inst),
         }
     }
 }
@@ -4888,14 +4914,14 @@ fn literal_value(literal: &ConstLiteral) -> Option<LiteralValue> {
 }
 
 /// [`ArgFact`] of `var`: its constant (a literal, or a module constant bound once that
-/// `globals` gives, [`TypeCtx::global_literal`]), the class `class_of` gives it, the flags it
+/// `globals` gives, [`TypeCtx::module_constant`]), the class `class_of` gives it, the flags it
 /// sets through the named objects `name_of` gives its operands, and whether it names a file
 /// ([`names_a_file`]).
 pub(crate) fn arg_fact<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     class_of: impl Fn(VarId) -> Option<String>,
     name_of: impl Fn(VarId) -> Option<String>,
-    globals: &dyn Fn(&str) -> Option<LiteralValue>,
+    globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
     var: VarId,
 ) -> ArgFact {
     ArgFact {
@@ -4947,7 +4973,7 @@ enum FilePart {
 }
 
 /// What `var` is built from: a string literal or a module string constant bound once
-/// (`globals`) names a file unless it has an in-memory form ([`in_memory_name`]), and so does
+/// (`globals`, read by name, through an import, or as a module's attribute) names a file unless it has an in-memory form ([`in_memory_name`]), and so does
 /// `__file__`; a copy, `+`, `/`, and `.parent` are made from their operands, a [`PATH_FUNCTIONS`]
 /// call (the called object or receiver resolved by `name_of`) from its arguments, and a
 /// [`PATH_METHODS`] call from its receiver and arguments. Anything else (a parameter, a phi, an
@@ -4955,20 +4981,19 @@ enum FilePart {
 fn file_part<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
-    globals: &dyn Fn(&str) -> Option<LiteralValue>,
+    globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
     var: VarId,
 ) -> FilePart {
     let path_function =
         |name: Option<String>| name.is_some_and(|n| PATH_FUNCTIONS.contains(&n.as_str()));
-    match def(var).map(|i| &i.kind) {
+    let inst = def(var);
+    let names_file = |inst: &Inst| matches!(globals(inst), Some(LiteralValue::Str(text)) if !in_memory_name(&text));
+    match inst.map(|i| &i.kind) {
         Some(InstKind::Const {
             literal: ConstLiteral::Str(text),
             ..
         }) => FilePart::Leaf(!in_memory_name(text)),
-        Some(InstKind::LoadGlobal { name, .. }) => FilePart::Leaf(
-            name == "__file__"
-                || matches!(globals(name), Some(LiteralValue::Str(text)) if !in_memory_name(&text)),
-        ),
+        Some(InstKind::LoadGlobal { name, .. }) if name == "__file__" => FilePart::Leaf(true),
         Some(InstKind::Copy { src, .. }) => FilePart::Made(vec![*src]),
         Some(InstKind::BinOp {
             op: BinOpKind::Add | BinOpKind::Div,
@@ -4992,7 +5017,7 @@ fn file_part<'i>(
         }) if PATH_METHODS.contains(&method.as_str()) => {
             FilePart::Made(std::iter::once(*recv).chain(args.iter().copied()).collect())
         }
-        _ => FilePart::Leaf(false),
+        _ => FilePart::Leaf(inst.is_some_and(names_file)),
     }
 }
 
@@ -5001,7 +5026,7 @@ fn file_part<'i>(
 pub(crate) fn names_a_file<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
-    globals: &dyn Fn(&str) -> Option<LiteralValue>,
+    globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
     var: VarId,
 ) -> bool {
     let budget = Budget::unmetered("heki_effect::resolver::names_a_file");
@@ -5274,6 +5299,14 @@ pub struct TypeCtx<'a> {
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
+/// Where the value of a module global a function reads is decided ([`TypeCtx::global_read`]).
+pub(crate) enum GlobalRead<'i> {
+    /// A module-level name read in the reading module.
+    Own(&'i str),
+    /// A name of another module, by its fqn.
+    Other(String),
+}
+
 static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     module_name: String::new(),
     is_package: false,
@@ -5754,6 +5787,58 @@ impl<'a> TypeCtx<'a> {
         )
     }
 
+    /// The module global the instruction `inst` reads, where its value is decided: a
+    /// module-level name read in this module, or a name of another module by its fqn, which an
+    /// import binds (a module body's copy of its `Import`, a function's own import) or which is
+    /// an attribute of a module object (`settings.PAUSE`; `module_of` names the object's module,
+    /// `None` for any other object).
+    pub(crate) fn global_read<'i>(
+        &self,
+        inst: &'i Inst,
+        module_of: &dyn Fn(VarId) -> Option<String>,
+    ) -> Option<GlobalRead<'i>> {
+        match &inst.kind {
+            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+                Some(GlobalRead::Own(name))
+            }
+            InstKind::Import { .. } => {
+                Some(GlobalRead::Other(self.import_target(inst.span)?.to_owned()))
+            }
+            InstKind::AttrLoad { obj, attr, .. } => {
+                let module = module_of(*obj).filter(|m| self.project.module(m).is_some())?;
+                Some(GlobalRead::Other(format!("{module}.{attr}")))
+            }
+            _ => None,
+        }
+    }
+
+    /// The string constant the global read `read` gives ([`Self::global_str`],
+    /// [`ProjectDecls::str_constant`]).
+    fn global_read_str(&self, read: GlobalRead<'_>) -> Option<&'a str> {
+        match read {
+            GlobalRead::Own(name) => self.global_str(name),
+            GlobalRead::Other(fqn) => self.project.str_constant(&fqn),
+        }
+    }
+
+    /// The module constant `inst` reads ([`Self::global_read`]): a string, a number, or a
+    /// boolean bound once, under the rules on rebinding and imports of [`Self::global_literal`]
+    /// and [`ProjectDecls::literal_constant`].
+    pub(crate) fn module_constant(
+        &self,
+        inst: &Inst,
+        module_of: &dyn Fn(VarId) -> Option<String>,
+    ) -> Option<LiteralValue> {
+        match self.global_read(inst, module_of)? {
+            GlobalRead::Own(name) => self.global_literal(name),
+            GlobalRead::Other(fqn) => self
+                .project
+                .str_constant(&fqn)
+                .map(|text| LiteralValue::Str(text.to_owned()))
+                .or_else(|| self.project.literal_constant(&fqn)),
+        }
+    }
+
     /// The string constant `var` holds (through copies; `def` gives each variable's defining
     /// instruction, `types` the inferred values): a string literal, a module-level string
     /// constant of this module or of another project module (`KEY`, `keys.KEY`,
@@ -5775,13 +5860,11 @@ impl<'a> TypeCtx<'a> {
                     ..
                 } => return Some(s.clone()),
                 InstKind::Copy { src, .. } => cur = *src,
-                InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                    return self.global_str(name).map(str::to_owned);
-                }
-                // A module body reads an imported name as a copy of its `Import`.
-                InstKind::Import { .. } => {
-                    let fqn = self.import_target(inst.span)?;
-                    return self.project.str_constant(fqn).map(str::to_owned);
+                InstKind::LoadGlobal { .. }
+                | InstKind::LoadName { .. }
+                | InstKind::Import { .. } => {
+                    let read = self.global_read(inst, &|_| None)?;
+                    return self.global_read_str(read).map(str::to_owned);
                 }
                 InstKind::AttrLoad { obj, attr, .. } => {
                     let project = self.project;
@@ -5790,8 +5873,8 @@ impl<'a> TypeCtx<'a> {
                             (class, ConstantRead::Class)
                         }
                         Val::Ref(module) => {
-                            let fqn = format!("{module}.{attr}");
-                            return project.str_constant(&fqn).map(str::to_owned);
+                            let read = self.global_read(inst, &|_| Some(module.clone()))?;
+                            return self.global_read_str(read).map(str::to_owned);
                         }
                         Val::Inst(class) if project.is_project_class(class) => {
                             (class, ConstantRead::Instance)

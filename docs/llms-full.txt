@@ -1278,8 +1278,9 @@ The call side of `write-owners`.
   `True`, `False`, `None`, an integer, or a string in single or double quotes (no escapes). A call
   passes it when heki establishes that the argument bound to the parameter is that constant (a
   literal, a string constant bound once, such as a module's `Final` name, or a module's number or
-  boolean bound once, as `EFF101` evaluates them: `LIMIT = 0`, also imported, unless a module
-  rebinds it; an imported name the importing module binds again in a function declaring it
+  boolean bound once, as `EFF101` evaluates them: `LIMIT = 0`, also imported (by the module or by
+  a function) or read as an attribute of its module (`settings.LIMIT`), unless a module rebinds
+  it; an imported name the importing module binds again in a function declaring it
   `global`, in another module-level store, or with `del`, or that a star import may rebind, is no
   constant there): passed by keyword (also to a class without a project `__init__`, a dataclass or a
   pydantic model), by position where every function the call may run binds that position to the
@@ -1287,10 +1288,12 @@ The call side of `write-owners`.
   `False`, `None`, `0`, or `""` (heki keeps defaults by class and truthiness). A keyword binds as
   Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
   `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under
-  its name into `**kwargs`. A call that raises `TypeError` instead of running the function passes
-  nothing: a keyword binding a parameter a position or the receiver binds too, a keyword naming
-  no parameter of a function without `**kwargs`, or a position past the parameters of a function
-  without `*args`. Any other argument (a variable, a call, `*` or `**` unpacking) is not
+  its name into `**kwargs`; the receiver of a method call is its first position. A call that
+  raises `TypeError` instead of running the function passes nothing: a keyword binding a
+  parameter a position or the receiver binds too, a keyword naming no parameter of a function
+  without `**kwargs`, a position (the receiver included) past the parameters of a function
+  without `*args`, or a parameter without a default left unbound where no `*` or `**` unpacking
+  may bind it. Any other argument (a variable, a call, `*` or `**` unpacking) is not
   established, and the call is not reported. A reference passes no arguments, so it never
   matches. A target with an argument list names no symbol outside the project; `unresolved =
   "report"` matches its last name before the list, whatever the arguments of a call on an object
@@ -3379,9 +3382,10 @@ Each step of the chain is established, not assumed:
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
   (`time.sleep(delay)` with `delay` a parameter is not established). A literal argument, and
-  a module constant bound once to one (`PAUSE = 0`, also imported from another module, unless
-  a module rebinds it or the importing module binds the name again: a `global` store or `del`
-  in a function, another module-level store, a star import), is evaluated: `time.sleep(PAUSE)`
+  a module constant bound once to one (`PAUSE = 0`, also imported from another module by the
+  module or by a function, or read as an attribute of its module, `settings.PAUSE`, unless a
+  module rebinds it or the importing module binds the name again: a `global` store or `del` in
+  a function, another module-level store, a star import), is evaluated: `time.sleep(PAUSE)`
   does not wait. An argument heki cannot
   evaluate counts as one the call waits on (assumption R6), the URL or name a database
   connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
@@ -4068,14 +4072,17 @@ A target ending in an argument list names only the calls passing those constants
 `container_flags(kind="dict")` is `container_flags(dt, "dict")`, not `container_flags(dt, "list")`.
 A call passes a constant when heki establishes it: the argument is a literal, a string constant
 bound once (a module's `Final` name), or a module's number or boolean bound once (`LIMIT = 0`),
-also imported unless the importing module binds the name again (a `global` store or `del` in a
-function, another module-level store, a star import), passed by keyword, by position where every function the call may run binds that position to the
-parameter, or left out where every such function's default is `True`, `False`, `None`, `0`, or
-`""` and the value. A keyword binds as Python binds it: never a positional-only parameter, and one
-naming no parameter passes its value under its name into `**kwargs`. A call that raises
-`TypeError` instead of running the function (a parameter bound by a position and a keyword, a
-keyword without `**kwargs` to land in, a position past the parameters without `*args`) passes
-nothing. A variable, a call result, `*` or `**` unpacking, or a position of a class without a
+read by name, through an import (also a function's own), or as an attribute of the module
+(`settings.LIMIT`), and unless the importing module binds the name again (a `global` store or
+`del` in a function, another module-level store, a star import); passed by keyword, by position
+where every function the call may run binds that position to the parameter, or left out where
+every such function's default is `True`, `False`, `None`, `0`, or `""` and the value. A keyword
+binds as Python binds it: never a positional-only parameter, and one naming no parameter passes
+its value under its name into `**kwargs`; the receiver is the first position. A call that raises
+`TypeError` instead of running the function (a parameter bound by a position, or the receiver, and
+a keyword, a keyword without `**kwargs` to land in, a position past the parameters without
+`*args`, a parameter without a default left unbound where no `*` or `**` unpacking may bind it)
+passes nothing. A variable, a call result, `*` or `**` unpacking, or a position of a class without a
 project `__init__` establishes nothing, and the call is not reported. A reference passes nothing,
 so it never matches such a target.
 

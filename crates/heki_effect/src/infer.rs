@@ -1216,14 +1216,15 @@ impl<'e, 'a> Engine<'e, 'a> {
             call.star_from,
             (index, keyword),
             |v| {
+                let name_of = |n| match self.need(n).ok().flatten()? {
+                    Ty::Ref(fqn) => Some(fqn.clone()),
+                    _ => None,
+                };
                 resolver::arg_fact(
                     |d| self.shape.inst(d),
                     class,
-                    |n| match self.need(n).ok().flatten()? {
-                        Ty::Ref(fqn) => Some(fqn.clone()),
-                        _ => None,
-                    },
-                    &|n| self.cx.global_literal(n),
+                    name_of,
+                    &|inst| self.cx.module_constant(inst, &name_of),
                     v,
                 )
             },

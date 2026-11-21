@@ -717,3 +717,136 @@ fn an_imported_constant_its_module_binds_again_passes_nothing() {
         ]
     );
 }
+
+const REQUIRED: &str = r#"def guarded(required, *, kind=True):
+    return required
+
+
+def keyed(*, need, kind=True):
+    return need
+
+
+class Box:
+    def check(*args, kind=False):
+        return args
+
+    def strict(*, kw):
+        return kw
+
+    def plain(self, x):
+        return x
+"#;
+
+const REQUIRED_USE: &str = r#"from pkg.sig import Box, guarded, keyed
+
+
+def missing(args):
+    guarded(kind=True)
+    guarded(1, kind=True)
+    guarded(required=1, kind=True)
+    keyed(kind=True)
+    keyed(need=1, kind=True)
+    guarded(*args, kind=True)
+
+
+def receivers(b: Box):
+    b.check(kind=True)
+    b.strict(kw=1)
+    b.plain(x=1)
+    b.plain(self=b, x=1)
+"#;
+
+#[test]
+fn a_call_leaving_a_parameter_unbound_passes_nothing() {
+    let p = Project::new("call_target_arguments_required");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"guarded(kind=True)\", \"keyed(kind=True)\", \"Box.check(kind=True)\", \"Box.strict(kw=1)\", \"Box.plain(x=1)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/sig.py", REQUIRED)
+    .write("pkg/use.py", REQUIRED_USE);
+    let call = |line: u64, func: &str, target: &str| {
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!("`{func}` calls `{target}` outside the call owners of `c`"),
+        )
+    };
+    // Nothing for the calls that raise `TypeError`: a parameter without a default left unbound
+    // (positional or keyword-only), a receiver no positional parameter or `*args` takes, and a
+    // keyword naming the receiver's parameter. `*` unpacking may bind the parameter, and the
+    // receiver of a method taking only `*args` and keywords lands in `*args`.
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(6, "missing", "guarded(kind=True)"),
+            call(7, "missing", "guarded(kind=True)"),
+            call(9, "missing", "keyed(kind=True)"),
+            call(10, "missing", "guarded(kind=True)"),
+            call(14, "receivers", "Box.check(kind=True)"),
+            call(16, "receivers", "Box.plain(x=1)"),
+        ]
+    );
+}
+
+const READ_FORMS: &str = r#"import pkg.settings as cfg
+from pkg import settings
+from pkg.sig import levels
+
+
+def by_attribute():
+    levels(kind=settings.FLAG)
+    levels(level=cfg.LIMIT)
+
+
+def by_local_import():
+    from pkg.settings import FLAG, LIMIT
+    levels(kind=FLAG)
+    levels(level=LIMIT)
+
+
+def rebound_elsewhere():
+    levels(level=settings.MOVED)
+"#;
+
+#[test]
+fn a_module_constant_read_as_an_attribute_or_a_local_import_passes_its_value() {
+    let p = Project::new("call_target_arguments_read_forms");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"levels(kind=True)\", \"levels(level=0)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/sig.py",
+        "def levels(kind=None, level=None):\n    return level\n",
+    )
+    .write("pkg/settings.py", "FLAG = True\nLIMIT = 0\nMOVED = 0\n")
+    .write(
+        "pkg/mover.py",
+        "from pkg import settings\n\n\ndef move():\n    settings.MOVED = 5\n",
+    )
+    .write("pkg/use.py", READ_FORMS);
+    let call = |line: u64, func: &str, target: &str| {
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!("`{func}` calls `levels({target})` outside the call owners of `c`"),
+        )
+    };
+    // Not matched: an attribute another module rebinds.
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(7, "by_attribute", "kind=True"),
+            call(8, "by_attribute", "level=0"),
+            call(13, "by_local_import", "kind=True"),
+            call(14, "by_local_import", "level=0"),
+        ]
+    );
+}

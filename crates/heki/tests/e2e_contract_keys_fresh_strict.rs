@@ -2128,6 +2128,70 @@ unresolved = "report"
     );
 }
 
+// A copy handed by keyword after `*` unpacking: the keyword binds its parameter exactly, so the
+// helper keeps the copy only by keeping that parameter; a position after the unpacking may bind
+// any parameter.
+const AFTER_UNPACKING: &str = r#"import copy
+
+REGISTRY: list[object] = []
+
+
+def _show(*rest: object, label: object = None) -> None:
+    print(label)
+
+
+def _keep_label(*rest: object, label: object = None) -> None:
+    REGISTRY.append(label)
+
+
+def shown(obj, extra: list[object]) -> None:
+    dup = copy.copy(obj)
+    _show(*extra, label=dup)
+    dup.name = "x"
+
+
+def kept(obj, extra: list[object]) -> None:
+    dup = copy.copy(obj)
+    _keep_label(*extra, label=dup)
+    dup.name = "x"
+
+
+def positional(obj, extra: list[object]) -> None:
+    dup = copy.copy(obj)
+    _show(*extra, dup)
+    dup.name = "x"
+"#;
+
+#[test]
+fn construction_through_a_keyword_after_unpacking() {
+    let p = Project::new("fresh_keyword_after_unpacking");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataModelFieldBase.name"]
+allowed-writers = ["pkg.store.*"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/after.py", AFTER_UNPACKING);
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d("pkg/after.py", 23, "MUT205", "kept", "name"),
+            d("pkg/after.py", 29, "MUT205", "positional", "name"),
+        ]
+    );
+}
+
 // ================================================== strict mode and entries: more shapes
 
 const STRICT_SHAPES: &str = r#"from pkg.model import DataModel, DataModelFieldBase
