@@ -162,6 +162,7 @@ impl Watcher<'_> {
         ProjectOptions {
             paths: &self.args.paths,
             config: self.args.analysis.config.as_deref(),
+            working_dir: None,
             target_version: self.args.analysis.target_version.as_deref(),
             overrides: None,
         }
@@ -420,7 +421,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         // climbs to the root, changes with it.
         let relayout = ws
             .as_ref()
-            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root) != ws.env.layout);
+            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root, &ws.env.cfg) != ws.env.layout);
         if reconfigured || relayout {
             match w.load((&files, &config)) {
                 Ok(loaded) => {
