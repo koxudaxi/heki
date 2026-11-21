@@ -176,11 +176,20 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo build --release -p heki
+      - run: cargo build --release -p heki --features count-alloc
       # `heki check` (with and without an ownership contract) and the `--watch` engine on a
-      # generated project: fails when one's peak RSS exceeds its budget in the script.
-      - name: Peak RSS within budget
+      # generated project: fails when one's peak heap exceeds its budget in the script. The
+      # counting build reads the same bytes on every run.
+      - name: Peak heap within budget
         run: python3 scripts/check_memory.py --heki target/release/heki
+      # At release time (release.yml calls this workflow), and on a manual run: the peak RSS of
+      # a release build, which also holds the allocator's fragmentation and mappings, under a
+      # coarse budget.
+      - if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        run: cargo build --release -p heki
+      - name: Peak RSS within budget
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        run: python3 scripts/check_memory.py --heki target/release/heki --measure rss
 
   sdist:
     name: source distribution tests
