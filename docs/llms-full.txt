@@ -1401,14 +1401,39 @@ names the first read it reaches and counts every one.
 environment unless the module they import is established to be the project's own:
 
 - every text `name` may hold names a module of the project (`"pkg.config"`, a module constant,
-  either of two such texts), or starts with a package of the project and a dot
-  (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`). The longest project
-  module before that dot must be a regular package whose `__init__.py` heki reads and does not
-  rebind `__path__` (`pkgutil.extend_path` lets installed distributions add modules to it);
+  either of two such texts) that the import finds in the project, or starts with a package of
+  the project and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`)
+  under which it finds only modules of the project (below);
 - a relative name (`".config"`, `f"..parser.{name}"`) is anchored at `package`: a text the code
   fixes, or the module's own `__package__` or `__name__`;
 - the call is not inside a `try` with an `except` clause naming `ImportError` or
   `ModuleNotFoundError`: the code expects the import to fail.
+
+Python finds the modules under a package on its `__path__`, the package's own directory unless
+code changes it. heki follows what the modules of the project do to the `__path__` of a package,
+its own in its `__init__.py` or another's through an import (`plugins.__path__`, `from plugins
+import __path__`):
+
+- adding directories after the package's own (`__path__.append(d)`, `__path__.extend(ds)`,
+  `__path__ += ds`, `__path__ = __path__ + ds`, `__path__ = pkgutil.extend_path(__path__,
+  __name__)`, also on `__import__("pkgutil")`, and `pkg_resources.declare_namespace`) leaves the
+  package's own modules found first, but any other name under the package may be an installed
+  module;
+- any other change (`__path__ = [d]`, `__path__.insert(0, d)`, a slice store, `del __path__`), or
+  a use heki does not follow (the list handed to a function other than a builtin that only reads
+  it and `pkgutil.iter_modules`, `walk_packages`, or `extend_path`, returned, or stored
+  elsewhere), may take any name under the package elsewhere, its own modules included. So may a
+  package whose `__init__.py` heki cannot read.
+
+Reading the path (iterating it, `__path__[0]`, `len(__path__)`, `pkgutil.iter_modules(__path__)`)
+changes nothing. A module is found in the project when each package along its name leads the
+import there first: heki takes the project's top-level packages to be found in the project, a
+regular package of the project is found before the directories added after its parent's own,
+and a directory without `__init__.py` is a namespace package with a portion in each directory of
+its parent's path, in that order. A name under a package holds only modules of the project when
+the packages along it lead to the project's directories alone and no package under it changes
+its path: `f"pkg.{name}"` reads the environment once a package anywhere under `pkg` changes its
+`__path__`, while a change in another package does not affect it.
 
 A name heki cannot tell (a parameter, `"pkg" + name`, a namespace package without
 `__init__.py`) stays a read of the environment, and so does an import of a module the project
@@ -1669,7 +1694,7 @@ deliberately conservative:
 | The object is created in the function and never escapes | heki counts anything it cannot see as shared: parameters, globals, attributes, values passed to unknown functions, names captured by closures | `sink(rows)` inside the loop blocks `rows.append(...)` |
 | Access is exclusive: no other variable, iterator, or view still refers to the old object after the statement | an in-place update would change what they see | `for v in x: x = x + [v]` ends, but `x.append(v)` would loop forever, so heki reports nothing |
 | Evaluation order and exceptions are kept | a rewrite must not call anything earlier or later | `{**d, f(): g()}` becomes `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first |
-| Builtin names are the builtins | the module can rebind them | trusted only while nothing rebinds them: an assignment, a `global` store, `from m import *`, a change through `globals()` (storing or deleting an item, a method that changes the dict, the dict handed on; reading it rebinds nothing), or a module that patches `builtins` (a `.pyi` stub never runs, so its `import builtins` does not count) |
+| Builtin names are the builtins | the module can rebind them | trusted only while nothing rebinds them: an assignment, a `global` store, `from m import *`, any call of `globals()`, or a module that patches `builtins` (a `.pyi` stub never runs, so its `import builtins` does not count) |
 | Locals change only through the code | `eval`, `exec`, `locals()`, `sys._getframe`, and frame attributes can change them behind any analysis | candidates in such functions are always blocked; `heki assumptions` lists these places in a project |
 
 The scope analysis is checked against CPython's `symtable`, and adversarial programs that break a
@@ -4326,9 +4351,12 @@ count for a read.
     `importlib.util.find_spec` that imports a module of the project reads no environment: every
     text its name may hold names a project module (`"pkg.config"`, a module constant), or
     starts with a project package and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`),
-    a package whose `__init__` does not rebind `__path__`; a relative name is anchored at
-    `package` (a text, or the module's own `__package__` or `__name__`). Inside a `try` that
-    takes an `ImportError`, such a call still counts;
+    and the packages along the name lead the import to the project's module, or under the
+    package to the project's directories alone: a package whose `__path__` a module of the
+    project changes (`__path__.append(d)`, `pkgutil.extend_path`, `__path__ = [d]`), or whose
+    `__init__` heki cannot read, may lead it to an installed module. A relative name is
+    anchored at `package` (a text, or the module's own `__package__` or `__name__`). Inside a
+    `try` that takes an `ImportError`, such a call still counts;
   - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
     parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
