@@ -125,6 +125,18 @@ impl EffectiveSoundnessKb {
     }
 }
 
+/// Classes whose instances are futures, never coroutines: `asyncio.create_task` rejects them, and
+/// `asyncio.ensure_future` returns an `asyncio` one unchanged and rejects a
+/// `concurrent.futures.Future` (`EFF107`: no new task). A `return_type` may name one without
+/// catalogued methods: the class itself is the fact.
+pub const FUTURE_CLASSES: &[&str] = &[
+    "asyncio.Future",
+    "asyncio.Task",
+    "asyncio.futures.Future",
+    "asyncio.tasks.Task",
+    "concurrent.futures.Future",
+];
+
 /// Execution Effect tags owned exclusively by Layer 2 (`heki_effect`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1018,11 +1030,12 @@ mod tests {
                 ),
             ),
             (
-                with_prefix(
-                    "asyncio",
-                    &["StreamWriter.write", "sleep", "gather", "wait_for"],
-                ),
+                with_prefix("asyncio", &["StreamWriter.write", "sleep", "wait_for"]),
                 async_safe(entry(&[])),
+            ),
+            (
+                s(&["asyncio.gather"]),
+                returning("asyncio.Future", async_safe(entry(&[]))),
             ),
             (
                 s(&[
@@ -1047,7 +1060,7 @@ mod tests {
                         "BaseEventLoop.run_in_executor",
                     ],
                 ),
-                offload(1),
+                returning("asyncio.Future", offload(1)),
             ),
             (
                 [
@@ -1099,6 +1112,16 @@ mod tests {
                     &["get_running_loop", "get_event_loop", "new_event_loop"],
                 ),
                 returning("asyncio.AbstractEventLoop", entry(&[])),
+            ),
+            (
+                with_prefix(
+                    "asyncio",
+                    &[
+                        "AbstractEventLoop.create_future",
+                        "BaseEventLoop.create_future",
+                    ],
+                ),
+                returning("asyncio.Future", entry(&[])),
             ),
             (
                 s(&["sqlite3.connect"]),
@@ -1803,7 +1826,7 @@ mod tests {
                 s(&["asyncio.wrap_future"]),
                 EcosystemEntry {
                     done_when_awaited: Some(0),
-                    ..entry(&[])
+                    ..returning("asyncio.Future", entry(&[]))
                 },
             ),
             (
@@ -2006,10 +2029,10 @@ mod tests {
     }
 
     /// A `return_type` naming a class without catalogued methods would leave the factory's
-    /// result unresolved without any sign (a typo, or a class spelled another way). A call of a
-    /// capitalized name is typed as an instance of that name (`TypeCtx::call_result`), so a
-    /// `return_type` there would be ignored: aliases such as `redis.StrictRedis` cannot be
-    /// declared this way.
+    /// result unresolved without any sign (a typo, or a class spelled another way), unless the
+    /// class itself is the fact ([`FUTURE_CLASSES`]). A call of a capitalized name is typed as
+    /// an instance of that name (`TypeCtx::call_result`), so a `return_type` there would be
+    /// ignored: aliases such as `redis.StrictRedis` cannot be declared this way.
     #[test]
     fn layer2_return_types_name_catalogued_classes() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
@@ -2017,7 +2040,8 @@ mod tests {
             if let Some(class) = &e.return_type {
                 let methods = format!("{class}.");
                 assert!(
-                    kb.entries.keys().any(|k| k.starts_with(&methods)),
+                    kb.entries.keys().any(|k| k.starts_with(&methods))
+                        || FUTURE_CLASSES.contains(&class.as_str()),
                     "{symbol} -> {class}"
                 );
                 let name = symbol.rsplit('.').next().unwrap_or(symbol);
