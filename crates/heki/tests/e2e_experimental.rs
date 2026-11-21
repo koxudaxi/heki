@@ -61,6 +61,7 @@ impl DocsTree {
         let root = repo_root();
         for rel in [
             "scripts/build_docs.py",
+            "scripts/ansi_svg.py",
             "zensical.toml",
             "README.md",
             "ARCHITECTURE.md",
@@ -145,6 +146,32 @@ fn docs_check_fails_on_a_stale_experimental_page() {
     assert_eq!(code, 1);
     assert!(
         out.starts_with("Generated docs are out of date") && out.contains("experimental.md"),
+        "{out}"
+    );
+}
+
+#[test]
+fn docs_check_fails_on_a_stale_example_image() {
+    let docs = DocsTree::new("example_image");
+    assert_eq!(docs.build_docs(&[]).0, 0);
+    // The README's examples as a terminal shows them: the rule codes in bold red, the severity in
+    // bold yellow.
+    let image = docs.0.read("docs/assets/example-check.svg");
+    assert!(
+        image.contains(r#"class="b f1">EFF101</tspan>"#)
+            && image.contains(r#"class="b f1">EFF103</tspan>"#)
+            && image.contains(r#"class="b f3">warning</tspan>"#)
+            && image.contains(">Found 2 diagnostic(s) in 3 file(s).</tspan>"),
+        "{image}"
+    );
+    assert_eq!(docs.build_docs(&["--check"]).0, 0);
+
+    // The image follows the code of the examples.
+    let (code, out) = docs.check_with("README.md", "async def get_user", "async def fetch_user");
+    assert_eq!(code, 1);
+    assert!(
+        out.starts_with("Generated docs are out of date")
+            && out.contains("docs/assets/example-check.svg"),
         "{out}"
     );
 }
