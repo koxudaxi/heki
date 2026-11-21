@@ -1661,6 +1661,7 @@ Commands:
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
   assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
+  inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -1777,6 +1778,40 @@ Options:
           Print help
 ```
 
+## `heki inspect`
+
+```text
+Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
+
+Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
+
+Arguments:
+  <SYMBOL>    A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+  [PATHS]...  The project to analyze, as for `heki check` [default: .]
+
+Options:
+      --output-format <OUTPUT_FORMAT>
+          `text`, or `json` [default: text] [possible values: text, json]
+      --callers
+          List the callers transitively, and the reports above the function
+      --depth <DEPTH>
+          How many caller levels `--callers` lists [default: 3]
+      --select <SELECT>
+          Comma-separated rule codes, prefixes, or slugs to enable
+      --extend-select <EXTEND_SELECT>
+          Additional rules to enable on top of defaults/config
+      --ignore <IGNORE>
+          Comma-separated rule codes or slugs to ignore
+      --config <CONFIG>
+          Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+      --target-version <TARGET_VERSION>
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+      --baseline <BASELINE>
+          Ratchet baseline TOML file (line-number-independent)
+  -h, --help
+          Print help
+```
+
 
 ---
 
@@ -1870,6 +1905,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
+| `command.inspect` | command | `heki inspect` | 0.2.0 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -1882,6 +1918,14 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 - **Since:** 0.1.1
 
 It reads the output of CPython 3.15's sampling profiler, and that format can still change.
+
+## `command.inspect`
+
+- **Kind:** command
+- **Target:** `heki inspect`
+- **Since:** 0.2.0
+
+The facts it shows, its purity verdict, and its JSON object can still change as heki's summaries close gaps; the object's `version` changes when a field is removed or changes meaning.
 
 ## `rule.MUT101`
 
@@ -2285,8 +2329,11 @@ one before's result, an edit through the language server changing every method o
 thousands of methods, methods changing a typed dict of `self` thousands of times, a method storing
 under a key after each of hundreds of tests that such a dict holds the key, a function reading
 attributes down a chain ten thousand deep (`x = x.child`), an argument handed down through
-thousands of functions of one module to the one that changes it, and thousands of reports whose
-call chains enter one module.
+thousands of functions of one module to the one that changes it, thousands of reports whose
+call chains enter one module, the callers of the bottom of a lattice of calls thirty levels deep,
+the chains `heki inspect` walks down thousands of calls of one module, a value chosen among a
+thousand module globals before it is changed, and thousands of calls handing a global to a helper
+that changes it.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

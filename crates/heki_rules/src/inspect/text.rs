@@ -168,7 +168,7 @@ pub fn render_text(r: &InspectReport) -> String {
             what.join(" or ")
         }
     };
-    let _ = writeln!(out, "returns   {} : {origins}", ret.kind);
+    let _ = writeln!(out, "returns   {}: {origins}", ret.kind);
     if let Some(s) = &ret.shared_with {
         let _ = writeln!(out, "  shared with read-only producer {}", s.producer);
     }

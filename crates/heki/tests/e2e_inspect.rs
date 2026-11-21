@@ -125,6 +125,8 @@ fn symbols_resolve_by_name_suffix_glob_line_and_file() {
         ("pkg/users.py:35", "line", "pkg.users.fetch"),
         ("pkg/users.py:20", "line", "pkg.users.Loader.size"),
         ("pkg/users.py:3", "line", "pkg.users.<module>"),
+        ("pkg/users.py:7", "line", "pkg.users.<module>"),
+        ("pkg/users.py:9", "line", "pkg.users.Loader.__init__"),
         ("pkg/users.py:48", "line", "pkg.users.outer.<locals>.inner"),
         ("pkg/users.py:49", "line", "pkg.users.outer"),
         ("pkg/users.py::Loader.load", "name", "pkg.users.Loader.load"),
@@ -1137,7 +1139,7 @@ changes
   global CACHE   directly: users.py:13
   other objects  not computed (an ownership contract, MUT108, or MUT112 propagates them)
 retains   stores url; what it keeps is not computed (needs an ownership contract)
-returns   value : state that outlives the call
+returns   value: state that outlives the call
 callers   1
   handler  users.py:39
 reports
@@ -1409,7 +1411,7 @@ fn the_text_form_shows_every_kind_of_fact() {
         &lazy,
         "iterating it runs: blocking_net, unpooled_client_alloc",
     );
-    has(&text("facts.ident", &[]), "returns   value : `x`");
+    has(&text("facts.ident", &[]), "returns   value: `x`");
     has(&text("facts.first", &[]), "an element of `xs`");
     has(&text("facts.fresh", &[]), "a new object");
     has(

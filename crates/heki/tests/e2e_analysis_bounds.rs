@@ -2232,3 +2232,40 @@ fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
     );
     assert_eq!(last["callers"]["count"], 100);
 }
+
+/// A function choosing one of a thousand module globals before changing it, and one making
+/// three thousand calls that each hand a global to a helper changing its argument: the roots of
+/// a merged value are kept up to a limit, and the calls' hand-offs are looked up by call.
+#[test]
+fn shared_state_of_thousands_of_globals_is_walked_once() {
+    let mut lines: Vec<String> = (0..1_000).map(|i| format!("G{i} = []")).collect();
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def append(xs):".to_owned(),
+        "    xs.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def choose(k):".to_owned(),
+        "    x = G0".to_owned(),
+    ]);
+    for i in 1..1_000 {
+        lines.extend([format!("    if k == {i}:"), format!("        x = G{i}")]);
+    }
+    lines.extend([
+        "    x.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def hand():".to_owned(),
+    ]);
+    lines.extend((0..3_000).map(|i| format!("    append(G{})", i % 1_000)));
+    let p = Project::new("bounds_shared_state");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let choose = inspect_within(&p, &["m.choose"], Duration::from_secs(20));
+    assert_eq!(
+        choose["purity"]["because"],
+        serde_json::json!(["changes_globals"])
+    );
+    let hand = inspect_within(&p, &["m.hand"], Duration::from_secs(20));
+    assert_eq!(hand["changes"]["globals"].as_array().unwrap().len(), 3_000);
+}

@@ -18,6 +18,7 @@ use heki_effect::{
 };
 use heki_ir::IrFunction;
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -535,9 +536,15 @@ struct Builder<'a, 'i> {
     inputs: &'a InspectInputs<'i>,
     lines: Lines<'a>,
     calls: RefCell<CallsByCaller<'i>>,
+    /// How many project functions each call site may run, by file, caller, and position,
+    /// indexed one file at a time on the first hop into it.
+    candidates: RefCell<FxHashMap<&'i Path, CandidatesByCall<'i>>>,
 }
 
-impl Builder<'_, '_> {
+/// How many project functions each call site of one file may run, by caller and position.
+type CandidatesByCall<'i> = FxHashMap<(&'i FuncKey, Span), usize>;
+
+impl<'i> Builder<'_, 'i> {
     fn rel(&self, path: &Path) -> String {
         (self.inputs.rel_of)(path)
     }
@@ -551,13 +558,28 @@ impl Builder<'_, '_> {
         }
     }
 
-    fn hop(&self, hop: &CallHop) -> Hop {
-        let candidates = self.inputs.index.files.get(&hop.path).map_or(1, |file| {
-            file.call_sites
-                .iter()
-                .find(|s| s.caller == hop.caller && s.span == hop.span)
-                .map_or(1, |s| s.project_callees().len().max(1))
+    /// How many project functions the call at `span` of `caller` in `path` may run (1 for a
+    /// call that is not a project call site).
+    fn candidates_at(&self, path: &Path, caller: &FuncKey, span: Span) -> usize {
+        let index: &'i ProjectIndex = self.inputs.index;
+        let Some((file_path, file)) = index.files.get_key_value(path) else {
+            return 1;
+        };
+        let mut by_file = self.candidates.borrow_mut();
+        let sites = by_file.entry(file_path.as_path()).or_insert_with(|| {
+            let mut sites = FxHashMap::default();
+            for s in &file.call_sites {
+                sites
+                    .entry((&s.caller, s.span))
+                    .or_insert_with(|| s.project_callees().len().max(1));
+            }
+            sites
         });
+        sites.get(&(caller, span)).copied().unwrap_or(1)
+    }
+
+    fn hop(&self, hop: &CallHop) -> Hop {
+        let candidates = self.candidates_at(&hop.path, &hop.caller, hop.span);
         Hop {
             path: self.rel(&hop.path),
             line: self.lines.line_col(&hop.path, hop.span.start).0,
@@ -621,6 +643,7 @@ pub fn inspect(
             files: RefCell::default(),
         },
         calls: RefCell::new(index.calls_by_caller()),
+        candidates: RefCell::default(),
     };
     let decl = inputs.decls.function_decl(key);
     let params: Vec<String> = decl.map(|d| d.param_names.clone()).unwrap_or_default();
@@ -998,7 +1021,10 @@ fn changes_made_in(
 ) -> Vec<MadeChange> {
     let index = b.inputs.index;
     let every = cell.is_none() && chain.is_empty();
-    let wanted = |state: &SharedState| every || state.is_change_of(cell);
+    // A value reached from more globals than the summary keeps changes one it does not name.
+    let named =
+        |state: &SharedState| !matches!(state, SharedState::Global(name) if name.is_empty());
+    let wanted = |state: &SharedState| named(state) && (every || state.is_change_of(cell));
     let direct = chain.is_empty();
     let made = |state: &SharedState, chain: Vec<Hop>, at: Location, direct: bool| {
         let (name, cell_of, cell) = match state {
