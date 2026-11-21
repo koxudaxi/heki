@@ -486,3 +486,38 @@ fn lists_that_extend_each_other_are_not_fixed() {
         .collect();
     assert_eq!(queries.len(), 1, "{found:#?}");
 }
+
+/// A length test repeated through `steps` assignments, each `and` of the one before with its
+/// double negation: every value implies the same one cap, kept once, so the caps stay one per
+/// measured value instead of doubling at each step.
+fn repeated_length_test(steps: usize) -> String {
+    let mut lines = vec![
+        "import sqlite3".to_owned(),
+        String::new(),
+        String::new(),
+        "def f(conn: sqlite3.Connection, xs):".to_owned(),
+        "    b0 = len(xs) <= 6".to_owned(),
+    ];
+    for i in 1..=steps {
+        lines.push(format!("    b{i} = b{} and not not b{}", i - 1, i - 1));
+    }
+    lines.push(format!("    if not b{steps}:"));
+    lines.push("        raise ValueError(xs)".to_owned());
+    lines.push("    for x in xs:".to_owned());
+    lines.push("        conn.execute(\"SELECT ?\", (x,))".to_owned());
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn length_tests_repeated_through_assignments_keep_one_cap() {
+    for steps in [4, 40] {
+        let p = Project::new(&format!("bounds_repeated_len_{steps}"));
+        p.write("m.py", &repeated_length_test(steps));
+        let found = check_within(&p, Duration::from_secs(20));
+        // The loop runs at most six times, so it is no N+1.
+        assert!(
+            !found.iter().any(|d| d["rule_code"] == "EFF103"),
+            "{found:#?}"
+        );
+    }
+}

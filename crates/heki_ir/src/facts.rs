@@ -271,6 +271,15 @@ struct LenGuard {
     bound: u32,
 }
 
+/// One cap per measured value, its smallest: the caps of one list all hold at once. Keeping
+/// one per value bounds every list by the values the function measures, however often tests
+/// repeat the same caps.
+fn tightest(mut caps: Vec<(VarId, u32)>) -> Vec<(VarId, u32)> {
+    caps.sort_unstable();
+    caps.dedup_by_key(|(var, _)| *var);
+    caps
+}
+
 /// The caps of [`FnIndex::implied_caps`] decided so far: per value and outcome (one being
 /// decided implies nothing), and per block for the tests on the single-predecessor way into it.
 struct CapWalk<'p> {
@@ -1498,6 +1507,7 @@ impl<'a> FnIndex<'a> {
             }
             Def::Param | Def::None => Vec::new(),
         };
+        let caps = tightest(caps);
         walk.values.insert((v, holds), caps.clone());
         caps
     }
@@ -1539,6 +1549,7 @@ impl<'a> FnIndex<'a> {
                 && then_bb != else_bb
             {
                 caps.extend(self.implied_caps(cond, then_bb == blk, walk));
+                caps = tightest(caps);
             }
             walk.blocks.insert(blk, caps.clone());
         }
