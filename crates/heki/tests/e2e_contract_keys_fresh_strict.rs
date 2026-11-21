@@ -499,6 +499,10 @@ def realias() -> None:
     same = keys
     same.LABEL = "_other"
     same.KEY = "_other"
+
+
+def via_builtin(field: DataModelFieldBase, keys: dict) -> None:
+    field.__dict__[keys.KEY] = True
 "#;
 
 #[test]
@@ -585,6 +589,8 @@ unresolved = "report"
             d(u, 163, "MUT201", "write_through_same", forced),
             // Stored through a chain of aliases of the class.
             d(u, 171, "MUT205", "Aliased.write", class),
+            // An attribute of a value of no project class names no constant.
+            d(u, 182, "MUT205", "via_builtin", class),
         ]
     );
 }
