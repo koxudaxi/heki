@@ -25,8 +25,8 @@ hold. Only exact reports are shown by default.
   ends with a note saying how many.
 
 See [Rule selection](configuration.md#rule-selection-toolhekilint). `EFF101`, `EFF103`,
-`DATA101`, the proven tier of the eight `OPT` rewrite rules, and the exact tier of `OPT113` are
-exact (certified below); the other rules are heuristic.
+`DATA101`, `MUT110`, `MUT114`, the proven tier of the eight `OPT` rewrite rules, and the exact
+tier of `OPT113` are exact (certified below); the other rules are heuristic.
 
 ## What a report states
 

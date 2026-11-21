@@ -11,11 +11,14 @@ $ heki check
 $ heki check --heuristic
 ```
 
-The first command runs the exact rules (hand-checked samples of their reports found none wrong
-about the code) and the rules of the [contracts](configuration.md#contracts) you declare. In
-0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules (the reports whose rewrite
-heki proves safe) and the exact tier of `OPT113`. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
-output labels them ([Rule Precision](precision.md)).
+The first command runs the exact rules and the rules of the [contracts](configuration.md#contracts)
+you declare. An exact rule is certified: every report it made on the development corpus and on a
+frozen holdout corpus was checked by hand, and none was false
+([Rule Precision](precision.md#certifications)). In 0.2.0 the exact rules are `EFF101`,
+`EFF103`, `DATA101`, `MUT110`, `MUT114`, the proven tier of the `OPT` rewrite rules (the reports
+whose rewrite heki proves safe), and the exact tier of `OPT113`. A text run says how many
+heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the
+code, and every output labels them.
 
 heki checks every Python file under the current directory, except the
 [excluded and ignored ones](configuration.md#which-files-are-checked). Pass files or directories
@@ -28,7 +31,7 @@ $ heki check src/ tests/test_api.py
 ## Read a diagnostic
 
 ```console
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` reaches the blocking call `requests.get` on the event loop
+app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)
   |
 5 |     user = load_user(user_id)
   |            ^
@@ -41,8 +44,8 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[warning, heuristic]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here. An error makes `heki check` fail; a warning is shown without failing it, unless `--fail-on warning` (`lint.fail-on = "warning"`) is set. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
-| the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
+| `[warning]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here, or for a bug that is rarely harmful. An error makes `heki check` fail; a warning is shown without failing it, unless `--fail-on warning` (`lint.fail-on = "warning"`) is set. A heuristic report adds `heuristic` (`[warning, heuristic]`): it can be wrong about the code, as a premise of its claim can be open |
+| the message | what heki established, in one sentence: here, that the call to `load_user` always runs `requests.get`, a call that waits on the network, on the event loop |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
 

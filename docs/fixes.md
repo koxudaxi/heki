@@ -13,10 +13,9 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 $ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
-- A fix comes with a report: `--fix` applies only the fixes of the reports shown. The `OPT`
-  rules are [heuristic](precision.md) for now, so a run without configuration applies none;
-  add `--heuristic` (`lint.heuristic = true`), or select the rules, as in
-  `heki check --fix --select OPT101,OPT102`.
+- A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
+  rewrite heki proves safe is [exact](precision.md#certifications) and shown by default, so a
+  run without configuration applies the fixes of `OPT101` and `OPT102`.
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - `--include-size-dependent` applies the size-dependent rewrites in every function, with or
   without `--profile`.

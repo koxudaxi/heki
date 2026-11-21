@@ -87,10 +87,11 @@ Each of these passes, because each tool sees one step:
 heki follows the call into `load_user` and the alias into `add_default`:
 
 ```console
-$ heki check --heuristic --output-format concise
-app/api.py:5:12: EFF101 [heuristic] `handler` reaches the blocking call `requests.get` on the event loop
+$ heki check --output-format concise
+app/api.py:5:12: EFF101 `app.users.load_user` always runs the waiting call `requests.get` on the event loop (3 calls down, on every path)
 app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
+note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
 
 ## Where heki pays off
