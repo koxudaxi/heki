@@ -12,6 +12,7 @@
 mod builder;
 mod dominators;
 mod facts;
+pub mod walk;
 
 pub use builder::build_module_ir;
 pub use dominators::{Dominated, DominatorTree, immediate_dominators};

@@ -11,7 +11,7 @@ use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::iterations::{
     self, BetweenSteps, ContainerChange, IteratedContainer, IteratedResult, ResultIteration,
 };
-use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
+use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
@@ -62,12 +62,12 @@ pub const CONTAINER_MUTATORS: &[&str] = &[
     "__delitem__",
 ];
 
-/// The (value, place) pairs the store walk of `returns_origins` may take per byte of a function's
+/// The (value, place) pairs the store walk of `return_origins` may take per byte of a function's
 /// source, above a floor: a function past it returns objects of unknown origin.
 const KEPT_PAIRS_PER_SOURCE_BYTE: usize = 1;
 const MIN_KEPT_PAIRS: usize = 4096;
 
-/// The values the origin walks of `returns_origins` may take per byte of a function's source,
+/// The values the origin walks of `return_origins` may take per byte of a function's source,
 /// above a floor: a function past it returns objects of unknown origin.
 const ORIGIN_STEPS_PER_SOURCE_BYTE: usize = 1;
 const MIN_ORIGIN_STEPS: usize = 4096;
@@ -221,7 +221,11 @@ fn extract_module(
         // Same qualname defined twice (conditional definitions): its origin nodes follow the
         // first definition's.
         if let Some(first) = file.local_functions.get(&key) {
-            rebase_origin_nodes(&mut summary, &mut sites, first.origin_nodes.len());
+            rebase_origin_nodes(
+                &mut summary,
+                &mut sites,
+                first.return_origin_facts().nodes.len(),
+            );
         }
         file.call_sites.extend(sites);
         // Same qualname defined twice (conditional definitions): keep the union of facts.
@@ -326,9 +330,11 @@ fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offs
             *n = n.saturating_add(offset);
         }
     };
-    shift(&mut summary.returns_nodes);
-    for o in &mut summary.origin_nodes {
-        shift(&mut o.nodes);
+    if let Some(facts) = &mut summary.return_origins {
+        shift(&mut facts.returned.nodes);
+        for o in &mut facts.nodes {
+            shift(&mut o.nodes);
+        }
     }
     let args = sites
         .iter_mut()
@@ -438,10 +444,13 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         }
         _ => ReturnsNew::No,
     };
-    into.returns_origins.join(other.returns_origins);
-    into.returns_results.extend(other.returns_results);
-    into.returns_nodes.extend(other.returns_nodes);
-    into.origin_nodes.extend(other.origin_nodes);
+    if let Some(other) = other.return_origins {
+        let facts = into.return_origins.get_or_insert_with(Box::default);
+        facts.returned.known.join(other.returned.known);
+        facts.returned.results.extend(other.returned.results);
+        facts.returned.nodes.extend(other.returned.nodes);
+        facts.nodes.extend(other.nodes);
+    }
     into.unresolved_write_sites
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
@@ -2359,22 +2368,27 @@ impl<'a> Extractor<'a> {
             .collect()
     }
 
-    /// `MUT112`: what the object the function returns may be ([`EffectSummary::returns_origins`]),
-    /// the project calls whose results it may be ([`EffectSummary::returns_results`]), and what
-    /// each argument of those calls may be, in turn through the calls whose results the
-    /// arguments may be ([`ArgOrigin::origins`]: a callee returning its parameter returns the
-    /// argument). A memoizing decorator returns state it keeps; another decorator may return
-    /// anything.
+    /// `MUT112`: what the object the function returns may be and the project calls whose results
+    /// it may be ([`EffectSummary::return_origins`]), and what each argument of those calls may
+    /// be, in turn through the calls whose results the arguments may be ([`ArgOrigin::origins`]:
+    /// a callee returning its parameter returns the argument). A memoizing decorator returns
+    /// state it keeps; another decorator may return anything.
     fn returned_origins(&mut self) {
         let f = self.f;
         if f.kind != FunctionKind::Sync || f.is_module_body {
             return;
         }
         if self.summary.is_lru_cache {
-            self.summary.returns_origins = Origins {
-                held: true,
-                ..Origins::default()
-            };
+            self.summary.return_origins = Some(Box::new(ReturnOrigins {
+                returned: LocalOrigins {
+                    known: Origins {
+                        held: true,
+                        ..Origins::default()
+                    },
+                    ..LocalOrigins::default()
+                },
+                nodes: Vec::new(),
+            }));
             return;
         }
         let live = &self.live;
@@ -2509,10 +2523,11 @@ impl<'a> Extractor<'a> {
             queue.extend(o.results.iter().map(|r| r.span));
             nodes.set(id, o);
         }
-        self.summary.returns_origins = returns.known;
-        self.summary.returns_results = returns.results;
-        self.summary.returns_nodes = returns.nodes;
-        self.summary.origin_nodes = nodes.into_origins();
+        let facts = ReturnOrigins {
+            returned: returns,
+            nodes: nodes.into_origins(),
+        };
+        self.summary.return_origins = (!facts.is_empty()).then(|| Box::new(facts));
         for (site, ci, slot, o) in args {
             let callees = self.sites[site]
                 .project_callees_mut()

@@ -1854,8 +1854,8 @@ fn steps_hash_writers() -> Vec<Step> {
 }
 
 /// `MUT112`: what a function returns reaches its callers through a wrapper in another module
-/// (`EffectSummary::returns_origins`), also when the wrapper hands it a call's result
-/// (`EffectSummary::returns_results`), and a store in `self.<attr>` follows the in-place changes
+/// (`EffectSummary::return_origins`), also when the wrapper hands it a call's result
+/// (`ReturnOrigins::returned`), and a store in `self.<attr>` follows the in-place changes
 /// that the methods of its class family make in other modules (`heki_rules::family_readers`).
 fn steps_mut112() -> Vec<Step> {
     vec![

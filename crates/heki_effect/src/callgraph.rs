@@ -505,9 +505,9 @@ fn return_flow_edge(
 }
 
 /// `MUT112` return flow: what the project calls whose results the function may return
-/// (`EffectSummary::returns_results`) return, with the arguments bound to the parameters each
+/// (`EffectSummary::return_origins`) return, with the arguments bound to the parameters each
 /// callee returns in their place, through the calls whose results those arguments may be in
-/// turn, and through the phis the function's origin walks met (`EffectSummary::origin_nodes`).
+/// turn, and through the phis the function's origin walks met (`ReturnOrigins::nodes`).
 /// `sites` are the function's call sites.
 ///
 /// Each call result and each phi is resolved once: what it is of its own (for a call, what its
@@ -516,6 +516,9 @@ fn return_flow_edge(
 /// a call or a phi depend on itself). The fixpoint only joins, and each change adds a kind or a
 /// parameter to one value, so it ends after a bounded number of changes per value.
 fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut EffectSummary) {
+    let Some(facts) = s.return_origins.as_deref_mut() else {
+        return;
+    };
     let at: FxHashMap<Span, &CallSite> = sites
         .iter()
         .map(|(path, i)| &index.files[path].call_sites[*i])
@@ -528,11 +531,12 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
     let mut index_of: FxHashMap<Resolved, usize> = FxHashMap::default();
     let mut value: Vec<Origins> = Vec::new();
     let mut needs: Vec<Vec<(Resolved, bool)>> = Vec::new();
-    let mut pending: Vec<Resolved> = s
-        .returns_results
+    let mut pending: Vec<Resolved> = facts
+        .returned
+        .results
         .iter()
         .map(|r| Resolved::Call(r.span))
-        .chain(s.returns_nodes.iter().map(|n| Resolved::Node(*n)))
+        .chain(facts.returned.nodes.iter().map(|n| Resolved::Node(*n)))
         .collect();
     while let Some(item) = pending.pop() {
         if index_of.contains_key(&item) {
@@ -559,7 +563,7 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
                         .filter(|(_, callee)| runs_at_call(callee, site))
                 });
                 for (bc, callee) in callees {
-                    let returned = callee.returns_origins;
+                    let returned = callee.return_origin_facts().returned.known;
                     own.join(Origins {
                         params: 0,
                         elements: 0,
@@ -586,7 +590,7 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
                 }
             }
             Resolved::Node(n) => {
-                let local = &s.origin_nodes[n as usize];
+                let local = &facts.nodes[n as usize];
                 own.join(local.known);
                 depend(local, false, &mut deps);
             }
@@ -621,23 +625,30 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
             }
         }
     }
-    let resolved: Vec<Origins> = s
-        .returns_results
+    let resolved: Vec<Origins> = facts
+        .returned
+        .results
         .iter()
         .map(|r| (Resolved::Call(r.span), r.element))
-        .chain(s.returns_nodes.iter().map(|n| (Resolved::Node(*n), false)))
+        .chain(
+            facts
+                .returned
+                .nodes
+                .iter()
+                .map(|n| (Resolved::Node(*n), false)),
+        )
         .filter_map(|(item, element)| {
             let v = value[*index_of.get(&item)?];
             Some(if element { v.element() } else { v })
         })
         .collect();
     for o in resolved {
-        s.returns_origins.join(o);
+        facts.returned.known.join(o);
     }
 }
 
 /// A value [`returned_results`] resolves: a project call's result (by its span) or a phi (by its
-/// position in `EffectSummary::origin_nodes`).
+/// position in `ReturnOrigins::nodes`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Resolved {
     Call(Span),

@@ -369,10 +369,12 @@ pub struct ModuleDecls {
     pub imports: BTreeMap<String, String>,
     /// `if TYPE_CHECKING:` imports, usable for annotation resolution only.
     pub type_checking_imports: BTreeMap<String, String>,
-    /// Class qualname -> declaration.
-    pub classes: BTreeMap<String, ClassDecl>,
+    /// Class qualname -> declaration. Boxed, like `functions`: a map node has room for eleven
+    /// entries and most modules define a few, so a declaration kept in the node would cost
+    /// eleven times its size.
+    pub classes: BTreeMap<String, Box<ClassDecl>>,
     /// Function qualname -> declaration (module body excluded).
-    pub functions: BTreeMap<String, FunctionDecl>,
+    pub functions: BTreeMap<String, Box<FunctionDecl>>,
     /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`).
     pub global_types: BTreeMap<String, Ty>,
     /// Module globals bound to a small display that no function of the module grows
@@ -2056,7 +2058,10 @@ impl ProjectDecls {
     }
 
     pub fn function_decl(&self, key: &FuncKey) -> Option<&FunctionDecl> {
-        self.module(&key.module)?.functions.get(&key.qualname)
+        self.module(&key.module)?
+            .functions
+            .get(&key.qualname)
+            .map(Box::as_ref)
     }
 
     /// The declared type of reading `attr` on an instance of `class`, from the first class along
@@ -2427,15 +2432,11 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         }
     }
     for class in &semantic.classes {
-        decls
-            .classes
-            .insert(class.qualname.clone(), ClassDecl::default());
+        decls.classes.insert(class.qualname.clone(), Box::default());
     }
     for f in &input.ir.functions {
         if is_summarized_function(f) {
-            decls
-                .functions
-                .insert(f.qualname.clone(), FunctionDecl::default());
+            decls.functions.insert(f.qualname.clone(), Box::default());
         }
     }
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
@@ -2630,7 +2631,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
         };
-        decls.functions.insert(f.qualname.clone(), decl);
+        decls.functions.insert(f.qualname.clone(), Box::new(decl));
     }
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
