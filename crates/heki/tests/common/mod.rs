@@ -56,9 +56,10 @@ impl Project {
         )
     }
 
-    /// `heki check <args>`.
+    /// `heki check --heuristic <args>`: the rules these tests exercise are heuristic, and
+    /// without it they run only when named (`--no-heuristic` in `args` turns it off again).
     pub fn check(&self, args: &[&str]) -> (i32, String, String) {
-        let mut all = vec!["check"];
+        let mut all = vec!["check", "--heuristic"];
         all.extend_from_slice(args);
         self.heki(&all)
     }

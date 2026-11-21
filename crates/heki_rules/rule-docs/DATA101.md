@@ -20,6 +20,23 @@ collect and combine once. A loop whose trip count the code fixes is not reported
 (`for is_p_wave in [False, True]`, `for _ in range(steps)` with `steps = 8`): it copies a fixed
 number of times, whatever the input.
 
+## What a report states
+
+A report states that the value is rebuilt from its previous value by the reallocating call on every
+iteration of the loop, so each iteration copies all of it.
+
+Its premises:
+
+- **Loop-carried**: the new value is computed from the previous one and feeds the next iteration.
+  Established by the IR, except that the exception edge of a `with` block counts as carrying the
+  previous value for every context manager.
+- **On every iteration**: the reallocation runs on every iteration. Open: one that runs on some
+  iterations only counts.
+- **Data-sized**: the code does not fix the trip count. Open: a trip count heki cannot bound counts
+  as data-sized.
+- **Reallocates**: the call copies all of its inputs into a new value, as the ecosystem catalog
+  describes it.
+
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
 size.
