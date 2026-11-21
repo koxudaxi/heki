@@ -22,7 +22,7 @@ release can change rules, configuration keys, diagnostics, and output formats.
   how to show them.
 - Every rule page says what a report states: the premises of its claim, and which of them a
   heuristic report may not have established. `docs/precision.md` defines exact and heuristic
-  reports, the assumptions R1-R6 exact claims rest on, how a rule is certified, and what each
+  reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
   rule measured.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
