@@ -410,13 +410,15 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
 }
 
 /// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins, `MUT113`'s
-/// iteration facts, and the must-facts of the effect rules whose reports are split by them,
-/// each only with its rules. The readers assert it
-/// ([`heki_effect::ProjectIndex::opt_in_facts`]).
+/// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, and the must-facts of
+/// the effect rules whose reports are split by them, each only with its rules. The readers assert
+/// it ([`heki_effect::ProjectIndex::opt_in_facts`]).
 pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         return_origins: selection.is_enabled("MUT112"),
         iterations: selection.is_enabled("MUT113"),
+        locks: selection.is_enabled("EFF109"),
+        exclusive: selection.is_enabled("EFF110"),
         must_effects: crate::eff_rules::MUST_EFFECT_RULES
             .iter()
             .any(|code| selection.is_enabled(code)),

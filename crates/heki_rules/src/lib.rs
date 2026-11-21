@@ -4,7 +4,7 @@
 //!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT201`, `MUT202`, `MUT203`,
 //!   `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
-//!   `EFF107`, `EFF201`, `DATA101`)
+//!   `EFF107`, `EFF109`, `EFF110`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
@@ -489,6 +489,30 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/EFF107.md"),
     },
     RuleMeta {
+        code: "EFF109",
+        slug: "lock-reacquired-while-held",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).",
+        doc: include_str!("../rule-docs/EFF109.md"),
+    },
+    RuleMeta {
+        code: "EFF110",
+        slug: "exclusive-object-fanout",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group).",
+        doc: include_str!("../rule-docs/EFF110.md"),
+    },
+    RuleMeta {
         code: "EFF201",
         slug: "effect-boundary-violation",
         family: RuleFamily::Eff,
@@ -825,6 +849,8 @@ pub fn check_project(
             eff_rules::eff102_103(&cx, u, &mut d);
             eff_rules::eff106(&cx, u, &mut d);
             eff_rules::eff107(&cx, u, &mut d);
+            eff_rules::eff109(&cx, u, &mut d);
+            eff_rules::eff110(&cx, u, &mut d);
             data_rules::data101(&cx, u, &mut d);
             opt_rules::opt(&cx, u, &opt_opts, &mut d);
             opt_rules::opt112(&cx, u, &mut d);

@@ -4932,6 +4932,15 @@ impl<'a> TypeCtx<'a> {
             .map(|q| format!("{}.{q}", self.module_name()))
     }
 
+    /// The fully qualified name of the object a module-level name read inside this module is:
+    /// what an import binds (`from pkg.locks import LOCK`), or this module's own global.
+    pub fn global_fqn(&self, name: &str) -> String {
+        match self.module.imports.get(name) {
+            Some(t) => self.project.canonical(t),
+            None => format!("{}.{name}", self.module_name()),
+        }
+    }
+
     /// Value of a module-level name read inside this module.
     pub(crate) fn global(&self, name: &str) -> Ty {
         if let Some(t) = self.module.imports.get(name) {
