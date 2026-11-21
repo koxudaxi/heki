@@ -69,8 +69,26 @@ merge of two baselines).
 
 ## pre-commit
 
-heki ships as one binary on PyPI, so a hook needs no Rust toolchain. Its checks follow calls
-across files, so the hook checks the whole project instead of the staged files only.
+heki's checks follow calls across files, so the hook checks the whole project instead of the
+staged files only:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/koxudaxi/heki
+    rev: v0.2.2
+    hooks:
+      - id: heki
+```
+
+The first run builds heki from the source of that release: pre-commit installs the repository as
+a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
+`PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
+pre-commit keeps the installed hook for later runs. `pre-commit autoupdate` moves `rev` to the
+latest release.
+
+heki also ships as one binary on PyPI, so a local hook can run it without a compile or a Rust
+toolchain:
 
 === "uv"
 
