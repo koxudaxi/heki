@@ -2276,8 +2276,10 @@ another, a function consuming a generator's result many times in a row, a loop o
 generator results whose body makes as many calls, a loop over a `zip` of thousands of `self`
 containers whose body makes as many calls, one `zip` of thousands of `self` containers stepped by as
 many `yield from`s, a generator handed on through thousands of private wrappers, each returning the
-one before's result, and an edit through the language server changing every method of a class of
-thousands of methods.
+one before's result, an edit through the language server changing every method of a class of
+thousands of methods, methods changing a typed dict of `self` thousands of times, a method storing
+under a key after each of hundreds of tests that such a dict holds the key, and a function reading
+attributes down a chain ten thousand deep (`x = x.child`).
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -2980,7 +2982,9 @@ copy (`list(x)`, `dict(x)`, `x.copy()`, `copy.copy`), a constructor call, an ope
 (`a + b`), or a call of a project function that returns a new object. It is borrowed where it
 comes from state that outlives the call: a parameter, an attribute, a global, a variable of an
 enclosing function, an element of one of these, or a call of a project function that returns
-such state. The paths meet in a conditional expression or an `if`:
+such state. An attribute of an object the function makes itself (`visitor = Visitor()`, then
+`visitor.errors`) is part of that object, not borrowed state. The paths meet in a conditional
+expression or an `if`:
 
 - `items = given or []`, `items = given if given else []`;
 - `options = dict(defaults, **extra) if extra else defaults`;
@@ -3009,6 +3013,10 @@ It does not report:
 - a value that is a new object on every path, or borrowed on every path;
 - a value rebound to a copy before the change (`x = list(x)`), also when the copy is made only
   where the value is still the borrowed object (`if x is shared: x = shared.copy()`);
+- a value that a flag of the caller's copies, a test of parameters alone
+  (`if not in_place: x = x.copy()`, `list(x) if copy else x`): where it does not copy, the
+  function changes the borrowed object on purpose. A copy that another test picks
+  (`x if isinstance(x, set) else set(x)`, `if config.get("strict"): x = set(x)`) still counts;
 - the accumulator idiom, where a parameter is replaced by a new object only when it is `None`
   or a sentinel (`if out is None: out = []`, `out = [] if out is None else out`): the function
   fills what its caller hands it. Such a value counts when it may also be a new object the test
@@ -3053,7 +3061,12 @@ def collect(name: str, scopes: list[str] | None = None) -> list[str]:
 
 ## Known limitations
 - The paths are not told apart by the tests on them: a value that an `if v is SENTINEL: return`
-  excludes, or a callee that returns its argument only when it is not a container, still counts.
+  excludes, or a callee that returns its argument only when it is not a container, still counts,
+  and so does a callee's borrowed return that a constant argument rules out
+  (`convert(data, ensure_copy=True)` where `convert` returns `data` itself only without it).
+- A new object that a function gets from a project call and stores on its argument before
+  returning it (`state = runtime.state = make_state()`) still counts as new for its callers,
+  which change the argument's state.
 - Calls of `async def` functions and generators are not followed: their results are not what
   their bodies return.
 - A store in an attribute is followed for `self` only.
@@ -3392,10 +3405,17 @@ helper's change counts as the same change made in the method):
   `popleft`, `discard`, `clear`, `del self.items[k]`, `rotate`, `move_to_end`, `|=`, ...;
 - storing an item (`self.items[k] = v`), which counts for a mapping (the key may be new) but not
   for a deque, whose iterators allow it;
-- reading a missing key of a `defaultdict` (`self.groups[k].append(v)`), unless the read is
-  directly inside `if k in self.groups:`.
+- reading a missing key of a `defaultdict` (`self.groups[k].append(v)`).
 
-Rebinding the attribute (`self.items = {}`) changes no container.
+A store or a `defaultdict` read under a key the container holds adds no key, and does not count:
+inside `if k in self.items:`, past `if k not in self.items: return` or
+`if self.items.get(k) is None: raise KeyError(k)`, or after a read of `self.items[k]` in the same
+block (not for a `Counter`, whose read of a missing key inserts nothing).
+
+Rebinding the attribute (`self.items = {}`) changes no container, and the changes a function makes
+after it binds a new container to the attribute on every path (`self.items = {}`, then
+`self.items[k] = v`) are that new container's, not the one an iteration steps. Changes that a
+method it calls after the rebinding makes (`self.items = {}`, then `self.add(k)`) still count.
 
 What runs while a generator is suspended depends on where its generator object goes:
 
@@ -3478,6 +3498,12 @@ what the code wants.
 - A method returning an iterator or a view instead of being a generator
   (`return iter(self.items)`) is not followed, and neither is a generator passed to a project
   function that iterates it.
+- A generator handed to code heki does not follow counts as outliving the call, also when that
+  code consumes it at once (`self.assertCountEqual(gen(), [...])`).
+- The tests on the paths to a change are not followed across calls: a change only a lazy
+  initialization makes (`if not self.loaded: self._load()`) counts although the iterating method
+  ran it first, and so does a change that a constant argument of the call turns off
+  (`add(item, check=False)` where `add` changes the container only `if check:`).
 
 
 ---

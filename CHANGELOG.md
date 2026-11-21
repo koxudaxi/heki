@@ -85,6 +85,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `if False:`) is not what the function returns: a wrapper returning a cached or
   `readonly-returns` value only there is no producer, and changing its result is no `MUT202`
   report.
+- `MUT112` no longer counts an attribute of an object the function makes itself
+  (`visitor = Visitor()`, then `visitor.errors`) as borrowed state, nor a value that a flag
+  parameter copies (`if not in_place: x = x.copy()`).
+- `MUT113` no longer counts the changes a function makes to a container it has just bound to the
+  attribute (`self.xref = {}`, then `self.xref[k] = v`), nor a store or a `defaultdict` read under
+  a key the container holds (past `if self.items.get(k) is None: raise KeyError(k)`, inside
+  `if k in self.items:` at any depth).
 - `MUT107` (`hash-attr-mutation`) no longer reports a write that cannot change a hash a `set` or
   `dict` has filed: an in-place change (an item store, `append`) of an attribute `__hash__`
   hands whole to `hash()` (`hash(self.items)`: a list or `bytearray` there cannot be hashed, and

@@ -26,8 +26,8 @@ use heki_effect::{
     self_aliases,
 };
 use heki_ir::{
-    BlockId, CompareOpKind, ConstLiteral, FunctionId, Inst, InstKind, IrFunction, Terminator,
-    UnaryOpKind, VarId,
+    BlockId, CompareOpKind, ConstLiteral, FunctionId, Inst, InstKind, IrFunction, PhiNode,
+    Terminator, UnaryOpKind, VarId,
 };
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -442,7 +442,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             types: u.tcx.infer(f),
             u,
             f,
-            copy_roots: copy_roots(&defs),
+            copy_roots: ownership::copy_roots(&defs),
             defs,
             initial: own.clone(),
             own,
@@ -468,7 +468,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         if tests.is_empty() {
             return;
         }
-        let idom = immediate_dominators(self.f, &self.live, &self.preds);
+        let idom = heki_ir::immediate_dominators(self.f, &self.preds, |p, b| self.live.edge(p, b));
         let test_at: FxHashMap<BlockId, usize> =
             tests.iter().enumerate().map(|(i, t)| (t.at, i)).collect();
         let mut heads: FxHashMap<BlockId, (usize, bool)> = FxHashMap::default();
@@ -646,6 +646,17 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     }
 
     fn source(&self, inst: &'a Inst) -> Source<'a> {
+        let made_here = |v: VarId| {
+            ownership::made_here(self.copied_from(v), &self.defs, &|i, made_here| {
+                self.source_given(i, made_here)
+            })
+        };
+        self.source_given(inst, &made_here)
+    }
+
+    /// [`ownership::source`] of `inst`, where `made_here` tells the values that hold an object
+    /// the function makes itself.
+    fn source_given(&self, inst: &'a Inst, made_here: &dyn Fn(VarId) -> bool) -> Source<'a> {
         let kb = self.u.cx.kb;
         match &inst.kind {
             InstKind::AttrLoad { .. } if self.getter_call(inst).is_some() => Source::Project,
@@ -655,9 +666,9 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                     .iter()
                     .any(|s| s.constructs.is_some());
                 let callee = self.call_of(inst).map(|c| c.callee);
-                ownership::source(&inst.kind, callee.as_ref(), constructs, kb)
+                ownership::source(&inst.kind, callee.as_ref(), constructs, kb, made_here)
             }
-            kind => ownership::source(kind, None, false, kb),
+            kind => ownership::source(kind, None, false, kb, made_here),
         }
     }
 
@@ -878,7 +889,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                         if v == phi.dst || !self.live.edge(from, bb) {
                             continue;
                         }
-                        joined = join_opt(joined, self.incoming(from, phi.dst, v));
+                        joined = join_opt(joined, self.incoming(phi, from, v));
                     }
                     let grew = joined.is_some_and(|o| self.grow(phi.dst, o));
                     grew.then_some(phi.dst)
@@ -901,10 +912,15 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         }
     }
 
-    /// The value `v` brings into the phi `phi` from the block `from`: not the objects of the
+    /// The value `v` brings into the phi `phi` from the block `from`: the input it copies where
+    /// a flag of the caller's picks the copy ([`Self::picked_copy`]), not the objects of the
     /// values an `is` test that failed on the way tested it against, and the accumulator
     /// idiom's parameter or replacement where an `is` test against a sentinel selects them.
-    fn incoming(&self, from: BlockId, phi: VarId, v: VarId) -> Option<Own> {
+    fn incoming(&self, phi: &PhiNode, from: BlockId, v: VarId) -> Option<Own> {
+        if let Some(original) = self.picked_copy(phi, from, v) {
+            return self.own.get(&original).cloned();
+        }
+        let phi = phi.dst;
         let mut own = self.own.get(&v)?.clone();
         for other in self.not_same.get(&(phi, from)).into_iter().flatten() {
             if let Some(o) = self.own.get(other) {
@@ -921,6 +937,75 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             });
         }
         Some(own)
+    }
+
+    /// The input of `phi` that its input `v` (from `from`) copies, when a flag of the caller's
+    /// picks the copy's edge (`if not in_place: x = x.copy()`, `list(x) if copy else x`). A copy
+    /// that any other test picks, of the value (`x if isinstance(x, set) else set(x)`) or of
+    /// other state (`if config.get("flag"): x = set(x)`), is no such choice.
+    fn picked_copy(&self, phi: &PhiNode, from: BlockId, v: VarId) -> Option<VarId> {
+        let def = self.defs.get(&self.copied_from(v))?;
+        let callee = self.call_of(def).map(|c| c.callee);
+        let copied = ownership::copied_operand(&def.kind, callee.as_ref(), self.u.cx.kb)?;
+        let original = self.copied_from(copied);
+        let other_input = phi
+            .incoming
+            .iter()
+            .any(|&(_, w)| w != v && w != phi.dst && self.copied_from(w) == original);
+        let cond = self.deciding_condition(from).filter(|_| other_input)?;
+        self.is_flag(cond, original).then_some(original)
+    }
+
+    /// The condition of the branch that leads to `block`, its only predecessor.
+    fn deciding_condition(&self, block: BlockId) -> Option<VarId> {
+        if let [pred] = self.preds[block.0 as usize].as_slice()
+            && let Terminator::Branch { cond, .. } = self.f.block(*pred).terminator
+        {
+            return Some(cond);
+        }
+        None
+    }
+
+    /// Whether the condition `cond` is a flag the caller passes: built from parameters of the
+    /// function other than its receiver and `value`, and constants, through `not`, copies,
+    /// comparisons, and the inputs of `and` / `or`.
+    fn is_flag(&self, cond: VarId, value: VarId) -> bool {
+        let receiver = self
+            .f
+            .params
+            .first()
+            .filter(|_| self.f.owner_class_qualname.is_some())
+            .map(|p| p.var);
+        let flags: FxHashSet<VarId> = self
+            .f
+            .params
+            .iter()
+            .map(|p| p.var)
+            .filter(|p| Some(*p) != receiver && *p != value && !self.self_vars.contains(p))
+            .collect();
+        let phis: FxHashMap<VarId, &PhiNode> = self
+            .f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.phis)
+            .map(|p| (p.dst, p))
+            .collect();
+        let mut work = vec![cond];
+        let mut seen: FxHashSet<VarId> = FxHashSet::default();
+        while let Some(x) = work.pop() {
+            if !seen.insert(x) || flags.contains(&x) {
+                continue;
+            }
+            match (self.defs.get(&x).map(|i| &i.kind), phis.get(&x)) {
+                (Some(InstKind::Const { .. }), _) => {}
+                (Some(InstKind::Copy { src, .. }), _) => work.push(*src),
+                (Some(InstKind::UnaryOp { operand, .. }), _) => work.push(*operand),
+                (Some(InstKind::Compare { lhs, rhs, .. }), _) => work.extend([*lhs, *rhs]),
+                (None, Some(p)) => work.extend(p.incoming.iter().map(|(_, w)| *w)),
+                _ => return false,
+            }
+        }
+        seen.iter().any(|x| flags.contains(x))
     }
 
     /// Join `o` into the value of `var`; whether it grew.
@@ -1263,85 +1348,6 @@ fn identity_condition(
         known.insert(v, answer);
     }
     answer
-}
-
-/// The value each copy among `defs` copies, through any number of copies: each chain is walked
-/// once (`heki_ir` closes no cycle of copies).
-fn copy_roots(defs: &FxHashMap<VarId, &Inst>) -> FxHashMap<VarId, VarId> {
-    let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
-    for (&start, inst) in defs {
-        if !matches!(inst.kind, InstKind::Copy { .. }) {
-            continue;
-        }
-        let mut passed = Vec::new();
-        let mut cur = start;
-        let root = loop {
-            if let Some(&root) = roots.get(&cur) {
-                break root;
-            }
-            match defs.get(&cur).map(|i| &i.kind) {
-                Some(InstKind::Copy { src, .. }) => {
-                    passed.push(cur);
-                    cur = *src;
-                }
-                _ => break cur,
-            }
-        };
-        for v in passed {
-            roots.insert(v, root);
-        }
-    }
-    roots
-}
-
-/// The immediate dominator of each block a run reaches over the edges it can take (`None` for
-/// the other blocks), from one pass in reverse postorder. One pass is exact: in the reducible
-/// graphs Python's statements make, an edge to an earlier block goes back to a loop header that
-/// dominates the edge's source, and leaving such an edge out changes no dominator.
-fn immediate_dominators(
-    f: &IrFunction,
-    live: &ownership::Live,
-    preds: &[Vec<BlockId>],
-) -> Vec<Option<BlockId>> {
-    let rpo: Vec<BlockId> = f
-        .rpo_blocks()
-        .into_iter()
-        .filter(|b| live.block(*b))
-        .collect();
-    let mut order = vec![usize::MAX; f.blocks.len()];
-    for (i, b) in rpo.iter().enumerate() {
-        order[b.0 as usize] = i;
-    }
-    let mut idom: Vec<Option<BlockId>> = vec![None; f.blocks.len()];
-    idom[rpo[0].0 as usize] = Some(rpo[0]);
-    let up = |b: BlockId, idom: &[Option<BlockId>]| {
-        idom[b.0 as usize].expect("a block before in reverse postorder has a dominator")
-    };
-    for &b in &rpo[1..] {
-        let mut found: Option<BlockId> = None;
-        for &p in &preds[b.0 as usize] {
-            if idom[p.0 as usize].is_none() || !live.edge(p, b) {
-                continue;
-            }
-            found = Some(match found {
-                None => p,
-                Some(mut d) => {
-                    let mut q = p;
-                    while d != q {
-                        while order[d.0 as usize] > order[q.0 as usize] {
-                            d = up(d, &idom);
-                        }
-                        while order[q.0 as usize] > order[d.0 as usize] {
-                            q = up(q, &idom);
-                        }
-                    }
-                    d
-                }
-            });
-        }
-        idom[b.0 as usize] = found;
-    }
-    idom
 }
 
 /// Whether the new object `kind` makes starts empty: an empty display, or a container
