@@ -110,7 +110,10 @@ heki_ir::builder::FnBuilder::lower_comprehension_generators  W1  AST lowering, b
 heki_ir::builder::FnBuilder::lower_delete_target  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_display_elems  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_expr  W1  AST lowering, bounded by the IR unit budget
+heki_ir::builder::FnBuilder::lower_field  W1  AST lowering, bounded by the IR unit budget
+heki_ir::builder::FnBuilder::lower_fields  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_for  W1  AST lowering, bounded by the IR unit budget
+heki_ir::builder::FnBuilder::lower_format_spec  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_function_def  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_handlers  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::FnBuilder::lower_or_pattern  W1  AST lowering, bounded by the IR unit budget

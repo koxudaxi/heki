@@ -1,7 +1,7 @@
 use crate::facts::{LoopHint, SMALL_MAX};
 use crate::{
-    A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
-    FunctionId, FunctionKind, Inst, InstKind, IrFunction, LocalAnnotation, LoopBound,
+    A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, Conversion,
+    DictEntry, FunctionId, FunctionKind, Inst, InstKind, IrFunction, LocalAnnotation, LoopBound,
     LoopCarriedInfo, ModuleIr, NaturalLoop, ParamInfo, PhiNode, Terminator, UnaryOpKind, VarId,
 };
 use heki_ast::raw_ast::{self as ast, Expr, Pattern, Stmt};
@@ -3137,33 +3137,32 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 dc.key.as_deref(),
                 span,
             ),
-            Expr::FString(_) => {
-                for field in heki_ast::interpolated_expressions(expr) {
-                    let _ = self.lower_expr(field);
+            Expr::FString(fs) => {
+                let mut parts = Vec::new();
+                let mut has_text = false;
+                for part in fs.value.iter() {
+                    match part {
+                        ast::FStringPartRef::Literal(lit) => has_text |= !lit.value.is_empty(),
+                        ast::FStringPartRef::FString(f) => {
+                            has_text |= self.lower_fields(&f.elements, &mut parts);
+                        }
+                    }
                 }
-                let dst = self.fresh_var(None);
+                let dst = self.joined(parts, has_text, span);
                 if let Some(head) = heki_ast::fstring_head(expr) {
                     self.str_heads.push((dst, head));
                 }
-                self.emit(
-                    InstKind::AllocBuiltin {
-                        dst,
-                        kind: BuiltinKind::Str,
-                        elems: Vec::new(),
-                    },
-                    span,
-                );
                 dst
             }
             // A template keeps the values of its replacement fields (`Template.values`, a tuple)
-            // and is otherwise opaque; a format specification's fields become text.
+            // unconverted and unformatted, and is otherwise opaque; a format specification's
+            // fields are formatted into its text.
             Expr::TString(ts) => {
-                let kept = heki_ast::template_values(ts);
-                let mut values = Vec::with_capacity(kept.len());
-                for field in heki_ast::interpolated_expressions(expr) {
-                    let v = self.lower_expr(field);
-                    if kept.iter().any(|k| std::ptr::eq(*k, field)) {
-                        values.push(v);
+                let mut values = Vec::new();
+                for field in ts.value.iter().flat_map(|t| t.elements.interpolations()) {
+                    values.push(self.lower_expr(&field.expression));
+                    if let Some(spec) = &field.format_spec {
+                        let _ = self.lower_format_spec(spec);
                     }
                 }
                 let held = self.fresh_var(None);
@@ -3178,6 +3177,87 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.emit_const(ConstLiteral::Other, span)
             }
         }
+    }
+
+    /// Lower the replacement fields of `elements` in order, pushing each formatted field onto
+    /// `parts`; whether the elements write any literal text (a field's `x=` included).
+    fn lower_fields(
+        &mut self,
+        elements: &'a ast::InterpolatedStringElements,
+        parts: &mut Vec<VarId>,
+    ) -> bool {
+        let mut has_text = false;
+        for element in elements {
+            match element {
+                ast::InterpolatedStringElement::Literal(_) => has_text = true,
+                ast::InterpolatedStringElement::Interpolation(field) => {
+                    has_text |= field.debug_text.is_some();
+                    parts.push(self.lower_field(field));
+                }
+            }
+        }
+        has_text
+    }
+
+    /// One replacement field: its value, converted, then formatted with its specification,
+    /// which is evaluated after the conversion.
+    fn lower_field(&mut self, field: &'a ast::InterpolatedElement) -> VarId {
+        let span = Span::from(field.range);
+        let mut value = self.lower_expr(&field.expression);
+        let conversion = match field.conversion {
+            ast::ConversionFlag::Str => Some(Conversion::Str),
+            ast::ConversionFlag::Repr => Some(Conversion::Repr),
+            ast::ConversionFlag::Ascii => Some(Conversion::Ascii),
+            // `{x=}` shows `repr(x)` unless the field has a conversion or a specification.
+            ast::ConversionFlag::None
+                if field.debug_text.is_some() && field.format_spec.is_none() =>
+            {
+                Some(Conversion::Repr)
+            }
+            ast::ConversionFlag::None => None,
+        };
+        if let Some(conversion) = conversion {
+            let dst = self.fresh_var(None);
+            self.emit(
+                InstKind::Convert {
+                    dst,
+                    value,
+                    conversion,
+                },
+                span,
+            );
+            value = dst;
+        }
+        let spec = field
+            .format_spec
+            .as_ref()
+            .map(|spec| self.lower_format_spec(spec));
+        let dst = self.fresh_var(None);
+        self.emit(InstKind::Format { dst, value, spec }, span);
+        dst
+    }
+
+    /// The text of a format specification: a constant, or an f-string of its own.
+    fn lower_format_spec(&mut self, spec: &'a ast::InterpolatedStringFormatSpec) -> VarId {
+        let span = Span::from(spec.range);
+        let mut parts = Vec::new();
+        let has_text = self.lower_fields(&spec.elements, &mut parts);
+        if parts.is_empty() {
+            let text: String = spec.elements.literals().map(|l| &*l.value).collect();
+            return self.emit_const(ConstLiteral::Str(text), span);
+        }
+        self.joined(parts, has_text, span)
+    }
+
+    /// The `str` of an f-string's literal text and formatted fields: a field alone is its own
+    /// result (which `__format__` may return as a subclass), anything else a new `str`.
+    fn joined(&mut self, parts: Vec<VarId>, has_text: bool, span: Span) -> VarId {
+        if let ([field], false) = (parts.as_slice(), has_text) {
+            return *field;
+        }
+        let dst = self.fresh_var(None);
+        self.emit(InstKind::BuildString { dst, parts }, span);
+        dst
     }
 
     /// `a < b < c` is `a < b and b < c` with `b` evaluated once: each comparison but the last
@@ -4871,11 +4951,18 @@ fn map_cmpop(op: ast::CmpOp) -> CompareOpKind {
 
 fn rewrite_inst_vars(kind: &mut InstKind, resolve: impl Fn(VarId) -> VarId) {
     match kind {
-        InstKind::AllocBuiltin { elems, .. } => {
-            for e in elems {
+        InstKind::AllocBuiltin { elems: parts, .. } | InstKind::BuildString { parts, .. } => {
+            for e in parts {
                 *e = resolve(*e);
             }
         }
+        InstKind::Format { value, spec, .. } => {
+            *value = resolve(*value);
+            if let Some(s) = spec {
+                *s = resolve(*s);
+            }
+        }
+        InstKind::Convert { value, .. } => *value = resolve(*value),
         InstKind::DictLiteral { entries, .. } => {
             for e in entries {
                 match e {
