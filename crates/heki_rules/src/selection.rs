@@ -165,18 +165,14 @@ impl RuleSelection {
                 .collect()
         };
         let named = named_rules(lint, cli);
-        let exact_reports_only = if heuristic {
-            BTreeSet::new()
-        } else {
-            enabled
-                .iter()
-                .copied()
-                .filter(|code| {
-                    find_rule(code)
-                        .is_some_and(|r| !r.shows_heuristic_reports(named.contains(code), false))
-                })
-                .collect()
-        };
+        let exact_reports_only = enabled
+            .iter()
+            .copied()
+            .filter(|code| {
+                find_rule(code)
+                    .is_some_and(|r| !r.shows_heuristic_reports(named.contains(code), heuristic))
+            })
+            .collect();
         let mut per_file = Vec::new();
         for (pattern, rules) in &lint.per_file_ignores {
             let glob = Glob::new(pattern)
