@@ -133,6 +133,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `requests.py` in the project no longer makes `requests.get` a blocking call. The language
   server and `heki check --watch` keep such a file as the same unknown module while it does not
   parse.
+- `heki check --fix` no longer rewrites `s = s | t` to `s |= t` (`OPT102`) where the set's
+  iteration order can be seen afterwards. Growing a set in place can order the same elements
+  differently from copying it, so a function that iterated, converted, formatted, or returned the
+  set could return another result after the fix. The set form is fixed only when the set is just
+  tested afterwards (`in`, `len`, truthiness, `==`); its other reports say
+  `[not auto-fixable: SetOrderUnobserved(...)]`. The dict forms keep their insertion order and
+  are fixed as before.
 - `EFF102` and `EFF103` no longer count a `functools.cached_property` getter as running on
   every read: it runs once per instance, like a lazy initialization of `self`, also when
   `cached_property` comes from a module that re-exports it (`kombu.utils.cached_property`). A

@@ -140,7 +140,7 @@ def pos_set_union(groups):
     seen = set()
     for g in groups:
         seen = seen | {g}
-    return sorted(seen)
+    return len(seen), 3 in seen
 
 
 # ==============================================================================

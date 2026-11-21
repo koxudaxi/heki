@@ -264,6 +264,30 @@ fn stripping_each_obligation_lets_its_counterexample_through() {
     }
 }
 
+#[test]
+fn stripping_set_order_unobserved_lets_the_reordering_fix_through() {
+    const FOUND: &str = include_str!("../../../tests/difftest/soundness_e2e_counterexamples.py");
+    let f = "cx_set_iterated_after_growth";
+    let baseline = analyze(FOUND);
+    let cs = of(&baseline, f);
+    assert!(!cs.is_empty(), "{f}: no candidate");
+    for c in &cs {
+        let failing = c.verdict.blocker().unwrap_or_else(|| panic!("{f}: {c:#?}"));
+        assert_eq!(
+            failing.kind,
+            K::SetOrderUnobserved,
+            "{}",
+            failing.describe()
+        );
+    }
+    let stripped = analyze_with(FOUND, &[K::SetOrderUnobserved]);
+    assert!(of(&stripped, f).iter().all(|c| c.fix().is_some()), "{f}");
+    let rewrites = analyze_with(REWRITES, &[K::SetOrderUnobserved]);
+    for (g, ..) in rule_shaped() {
+        assert!(of(&rewrites, g).iter().all(|c| !c.is_safe()), "{g}");
+    }
+}
+
 // ------------------------------------------------------------------- gate 3: positives
 
 #[test]
