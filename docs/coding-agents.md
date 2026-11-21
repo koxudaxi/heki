@@ -1,9 +1,48 @@
 # Coding Agents
 
 heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it gives people:
-every diagnostic says what was proven, where the evidence is, and what blocks a fix.
+every diagnostic says what was proven, where the evidence is, and what blocks a fix. `heki
+inspect` says what one function does, so an agent does not read its callees to find out.
 
-## Use the CLI in the agent's loop
+## Analyze the project, not one file
+
+heki follows calls across files. `heki check app/api.py` analyzes that file alone and misses what
+its callees do: run heki on the project (the default `.`) and filter the JSON by path.
+
+## Before an edit: `heki inspect` (experimental)
+
+```console
+$ heki inspect app.users.load_user --output-format json
+$ heki inspect app/users.py:42
+$ heki inspect app/users.py::load_user --callers --depth 3
+```
+
+| Field | Content |
+| ----- | ------- |
+| `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
+| `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
+| `retains` | the parameters it stores where they outlive the call |
+| `returns` | whether its result is a new object, a parameter, or state that outlives the call |
+| `purity` | `pure`, `impure` with the reasons, or `unknown` with the first function whose calls heki cannot resolve, and what the verdict assumes |
+| `callers` | who calls it, whether in a loop; with `--callers`, transitively |
+| `reports` | what `heki check` reports in it; with `--callers`, also above it |
+| `contracts` | the contracts that name it |
+
+- A name is a dotted name (`pkg.mod.Class.method`, or a suffix such as `Class.method`, or a
+  glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2 and lists
+  the candidates (in JSON, under `error.candidates`).
+- `pure` means heki found no effect and no change of an input or of shared state, and resolved
+  every call below. Libraries the [catalog](configuration.md#ecosystem-knowledge-toolhekiecosystem)
+  does not list count as having no effects.
+- A field the configuration does not compute is `null`, with the setting that computes it.
+- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
+  (the report is still printed, with `complete: false`).
+
+Inspect the edited function again after the edit and compare `effects`, `changes`, `retains`, and
+`returns` with the run before it: a new entry is new behavior. Fact keys carry no line numbers, so
+a diff of the two JSON objects shows only what changed.
+
+## After an edit: `heki check`
 
 A typical instruction for the agent:
 
