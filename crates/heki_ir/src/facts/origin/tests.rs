@@ -302,6 +302,16 @@ fn steps_compose_in_the_order_python_applies_them() {
             .map(|o| o.text),
         Some(false)
     );
+    // Leaving items out keeps some of the items but no count, in either order.
+    assert!(items.with(Steps::DROPS).counted().is_none());
+    assert!(counted.dropped().is_none());
+    assert_eq!(
+        items
+            .dropped()
+            .and_then(|s| s.apply(f, ItemSource::Param(0)))
+            .map(|o| o.carries),
+        Some(Carries::Items)
+    );
     // Items of items are followed a few levels deep, and an element taken leaves one less.
     let deep = (0..MAX_PARTS).try_fold(items, |s, _| s.part()).unwrap();
     assert!(deep.part().is_none());
@@ -374,8 +384,8 @@ async def f(rows, payload, ids, n, open_, p, fetch, flag):
             "call:open_(p)",
             "call:list(rows)",
             "fixed",
-            // A component of an item is one of the items' parts: the dict's values.
-            "param1",
+            // A part of an item is no item: only the count follows the dict's items.
+            "param1/count",
             "open",
             "param0",
             "open",
@@ -463,5 +473,106 @@ def f(rows, n):
     assert_eq!(
         origins(src, "f", "# L"),
         vec!["part0", "open", "param0/count", "open"]
+    );
+}
+
+#[test]
+fn a_set_of_derived_values_carries_no_count() {
+    let src = r#"
+def f(rows, ids):
+    for x in {r[0] for r in rows}:  # L
+        pass
+    for x in {r for r in rows}:  # L
+        pass
+    for x in set(r.id for r in rows):  # L
+        pass
+    for x in set(rows):  # L
+        pass
+    for x in set(map(str, rows)):  # L
+        pass
+    for x in frozenset(map(str, rows)):  # L
+        pass
+    for x in map(str, set(rows)):  # L
+        pass
+    for k in dict(zip(map(str, rows), ids)):  # L
+        pass
+    for x in {*map(str, rows)}:  # L
+        pass
+    for x in {**dict(zip(map(str, rows), ids))}:  # L
+        pass
+    for x in sorted(set(map(str, rows))):  # L
+        pass
+    for k in dict.fromkeys(rows):  # L
+        pass
+    for i in range(len(set(map(str, rows)))):  # L
+        pass
+"#;
+    assert_eq!(
+        origins(src, "f", "# L"),
+        vec![
+            // Each set comprehension's own loop comes first.
+            "param0",
+            "open",
+            "param0",
+            "param0",
+            "open",
+            "param0",
+            "open",
+            "open",
+            // A count of a set of the items: one per item kept, not per item.
+            "open",
+            "open",
+            "open",
+            "open",
+            "open",
+            // The reader resolves the call; `dict.fromkeys` is no catalog source.
+            "call:dict.fromkeys(rows)",
+            "open",
+        ]
+    );
+    // A set comprehension is a function of its own before 3.12.
+    let src = "def f(rows):\n    for x in {r[0] for r in rows}:  # L\n        pass\n";
+    assert_eq!(
+        origins_at(src, "f", "# L", PythonVersion::PY311),
+        vec!["open"]
+    );
+}
+
+#[test]
+fn a_filter_keeps_some_items_but_no_count() {
+    let src = r#"
+def f(rows, flag):
+    for x in [r for r in rows if r]:  # L
+        pass
+    for h in [(h, str(t)) for h, t in rows if t]:  # L
+        pass
+    for x in map(str, filter(None, rows)):  # L
+        pass
+    for x in filter(None, map(str, rows)):  # L
+        pass
+    for x in (str(r) for r in rows if r):  # L
+        pass
+    for i in range(len([r for r in rows if r])):  # L
+        pass
+    out = []
+    for r in rows:
+        if flag:
+            out.append(str(r))
+    for x in out:  # L
+        pass
+    kept = []
+    for r in rows:
+        if flag:
+            kept.append(r)
+    for x in kept:  # L
+        pass
+"#;
+    assert_eq!(
+        origins(src, "f", "# L"),
+        vec![
+            // Each comprehension's own loop comes first.
+            "param0", "param0", "param0", "open", "open", "open", "open", "param0", "open", "open",
+            "param0",
+        ]
     );
 }
