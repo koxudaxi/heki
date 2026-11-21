@@ -83,6 +83,10 @@ name = "render"
 scopes = ["pkg.gate.render", "pkg.walk_b.walk"]
 forbid = ["blocking-net", "sleep"]
 allowed-callees = ["requests.get"]
+[[tool.heki.ecosystem]]
+symbol = "pkg.natives.fetch"
+effects = ["blocking_net"]
+
 [[tool.heki.readonly-returns]]
 name = "catalog"
 producers = ["pkg.catalog.Catalog.entry"]
@@ -219,6 +223,16 @@ const ALIAS_REBIND: &str = "from pkg import alias_src\n\nalias_src._set = print\
 const GETTER_SRC: &str =
     "from pkg.model import Registry\n\n\ndef entries_of(r: Registry):\n    return r.entries\n";
 const GETTER_USE: &str = "from pkg.getter_src import entries_of\nfrom pkg.model import Registry\n\n\ndef grow(r: Registry):\n    entries_of(r).append(1)\n";
+// A getter of a base class hands out the guarded container on a subclass, until the subclass
+// binds the name itself.
+const LISTING_BASE: &str = "from pkg.model import Registry\n\n\nclass ListingBase(Registry):\n    @property\n    def listing(self):\n        return self.entries\n";
+const LISTING_CLS: &str =
+    "from pkg.listing_base import ListingBase\n\n\nclass Listing(ListingBase):\n    pass\n";
+const LISTING_USE: &str =
+    "from pkg.listing_cls import Listing\n\n\ndef grow(l: Listing):\n    l.listing.append(1)\n";
+// A name the package does not bind (a compiled submodule would bind it) is what the
+// configuration's catalog entry says; bound by a re-export, it is the function re-exported.
+const NATIVES_USE: &str = "from pkg.natives import fetch\n\n\nasync def pull():\n    fetch()\n";
 const KEY_REBIND: &str =
     "from pkg import key_consts\n\n\ndef reset():\n    key_consts.KEY = \"other\"\n";
 const KEY_SUBCLASS: &str =
@@ -705,6 +719,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/alias_use.py", ALIAS_USE),
         ("pkg/getter_src.py", GETTER_SRC),
         ("pkg/getter_use.py", GETTER_USE),
+        ("pkg/listing_base.py", LISTING_BASE),
+        ("pkg/listing_cls.py", LISTING_CLS),
+        ("pkg/listing_use.py", LISTING_USE),
+        ("pkg/natives/__init__.py", ""),
+        ("pkg/natives_use.py", NATIVES_USE),
         ("pkg/key_class.py", KEY_CLASS),
         ("pkg/key_class_reader.py", KEY_CLASS_READER),
         ("pkg/field_deco.py", FIELD_DECO),
@@ -1545,6 +1564,38 @@ fn steps_aliases_and_getters() -> Vec<Step> {
             vec![save("pkg/getter_src.py", GETTER_SRC)],
         )
         .present(&[("pkg/getter_use.py", "MUT201")]),
+        Step::new(
+            "the subclass binds the getter's name as a class attribute",
+            vec![save(
+                "pkg/listing_cls.py",
+                &LISTING_CLS.replace("    pass\n", "    listing = []\n"),
+            )],
+        )
+        .absent(&[("pkg/listing_use.py", "MUT201")]),
+        Step::new(
+            "the subclass binds the name no more",
+            vec![save("pkg/listing_cls.py", LISTING_CLS)],
+        )
+        .present(&[("pkg/listing_use.py", "MUT201")]),
+        Step::new(
+            "the package re-exports a project function under the catalogued name",
+            vec![
+                Action::Create(
+                    "pkg/natives/impl.py",
+                    "def fetch():\n    return None\n".to_owned(),
+                ),
+                save(
+                    "pkg/natives/__init__.py",
+                    "from pkg.natives.impl import fetch\n",
+                ),
+            ],
+        )
+        .absent(&[("pkg/natives_use.py", "EFF101")]),
+        Step::new(
+            "the package binds the name no more",
+            vec![save("pkg/natives/__init__.py", "")],
+        )
+        .present(&[("pkg/natives_use.py", "EFF101")]),
     ]
 }
 
@@ -2118,6 +2169,8 @@ fn steps() -> Vec<Step> {
             ("pkg/views.py", "MUT201"),
             ("pkg/alias_use.py", "MUT201"),
             ("pkg/getter_use.py", "MUT201"),
+            ("pkg/listing_use.py", "MUT201"),
+            ("pkg/natives_use.py", "EFF101"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(

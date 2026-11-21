@@ -218,7 +218,8 @@ Missed findings close as heki learns more:
   what it returns changes the attribute's object.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
-  `return self.items`).
+  `return self.items`) and every class the object may be runs it. A `cached_property` hands out
+  nothing: what the instance keeps can be replaced.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](rules/unresolved-guarded-write.md)).
 

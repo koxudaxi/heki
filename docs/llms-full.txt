@@ -441,7 +441,8 @@ Missed findings close as heki learns more:
   what it returns changes the attribute's object.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
-  `return self.items`).
+  `return self.items`) and every class the object may be runs it. A `cached_property` hands out
+  nothing: what the instance keeps can be replaced.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/)).
 
@@ -5309,7 +5310,8 @@ allowed writers:
 - through a local alias (`fields = model.fields; fields.append(...)`), also one `getattr` with a
   constant name loads (`getattr(model, "fields").append(...)`), or what a method, property, or
   function returns when it returns the attribute itself on every `return`
-  (`model.field_list().append(...)` with `return self.fields`);
+  (`model.field_list().append(...)` with `return self.fields`) and every class the object may be
+  runs it (no `cached_property`, no class attribute of the name coming first);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
   name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
