@@ -2,7 +2,7 @@
 
 # lock-or-tx-held-across-io (EFF106)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.
 

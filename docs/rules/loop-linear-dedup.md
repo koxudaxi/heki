@@ -2,7 +2,7 @@
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
 

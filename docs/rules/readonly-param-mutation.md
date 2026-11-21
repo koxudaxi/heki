@@ -2,7 +2,7 @@
 
 # readonly-param-mutation (MUT110)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
 
 Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).
 

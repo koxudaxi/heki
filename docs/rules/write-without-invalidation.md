@@ -2,7 +2,7 @@
 
 # write-without-invalidation (MUT109)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.
 

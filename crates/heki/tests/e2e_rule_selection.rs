@@ -171,7 +171,7 @@ fn every_output_labels_a_heuristic_rule_and_only_that() {
     let p = heuristic_and_contract("heuristic_labels", "heuristic = true\n");
     let (_, full, _) = p.heki(&["check"]);
     assert!(
-        full.contains("app.py:5:5: EFF101 (async-blocking-call) [error, heuristic] `handler`"),
+        full.contains("app.py:5:5: EFF101 (async-blocking-call) [warning, heuristic] `handler`"),
         "{full}"
     );
     assert!(

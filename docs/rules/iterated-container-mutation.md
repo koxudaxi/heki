@@ -2,7 +2,7 @@
 
 # iterated-container-mutation (MUT113)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).
 

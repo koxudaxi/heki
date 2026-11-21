@@ -165,7 +165,7 @@ fn watch_full_output_idle_polls_and_a_clean_exit() {
     assert_eq!(out.status.code(), Some(0), "the last report is clean");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [error, heuristic]")
+        stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [warning, heuristic]")
             && stdout.contains("5 |     time.sleep(1)")
             && stdout.contains("\n  = help: use `await asyncio.sleep(...)`"),
         "full output with the source line:\n{stdout}"

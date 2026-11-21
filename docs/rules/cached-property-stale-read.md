@@ -2,7 +2,7 @@
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
 

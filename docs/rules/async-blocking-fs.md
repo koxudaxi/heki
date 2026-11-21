@@ -2,7 +2,7 @@
 
 # async-blocking-fs (EFF105)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `warning` (slower code) · No automatic fix
 
 Opt-in: blocking local filesystem I/O reachable from `async def`.
 

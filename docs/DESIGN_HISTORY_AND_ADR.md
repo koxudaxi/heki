@@ -6,7 +6,7 @@
 > Wave 1/2 corpora of 19 million lines, counterexample experiments, a study of
 > datamodel-code-generator's 196,000 lines and its 20,000 lines of in-house checkers, and checks
 > of CPython 3.15 PEP 810 and `ruff_python_parser` 0.17.5), the reasons for every revision from
-> v1.0 to v4.1, and every major decision (ADR-001 to ADR-018). The project's working name was
+> v1.0 to v4.1, and every major decision (ADR-001 to ADR-019). The project's working name was
 > `pyopt`; crate names below use the current `heki_*` names.
 
 ---
@@ -474,6 +474,20 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   [docs/precision.md](precision.md), and release gate 3 of
   [ARCHITECTURE.md](../ARCHITECTURE.md) is the certification.
 
+
+<a id="adr-019"></a>
+### ADR-019: Severity by consequence
+- **Background**: the default severity followed the rule family: `warning` for `OPT`, `error`
+  for `MUT`, `EFF`, and `DATA`. A blocking call on the event loop, a query in a loop, and a
+  quadratic concatenation make code slower, as the `OPT` rules' findings do, yet were errors.
+- **Decision**: `RuleMeta::consequence` says what happens in the code a rule reports, and sets
+  its default severity: `Bug` (a wrong result, an exception, a lost update, a deadlock, or a
+  broken contract) is `error`, `Slowdown` is `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`,
+  `DATA101`, and the `OPT` rules are slowdowns; `EFF106` (a synchronous lock or a transaction
+  held across I/O can deadlock the event loop), `EFF107`, `EFF201`, and every `MUT` rule are
+  bugs. A rule split off another (a heuristic sibling code) has its parent's consequence.
+  `lint.severity` still overrides per rule, and both severities make `heki check` fail.
+  *Rejected*: severity by family (it says how a rule is built, not what the code does).
 ---
 
 ## 5. Open items
