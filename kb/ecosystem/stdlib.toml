@@ -291,7 +291,9 @@ opaque_to_layer3 = true
 # --- Blocking synchronization (waits on the calling thread) ---
 # Acquiring a lock, waiting for an event, a condition, a barrier, a thread, a queue, or a
 # future blocks until another thread acts (`blocking_sync`); a zero timeout or `blocking=False`
-# / `block=False` / `wait=False` returns at once. `SimpleQueue.put` never blocks.
+# / `block=False` / `wait=False` returns at once. `SimpleQueue.put` never blocks, and `put` on
+# another queue waits only while the queue is full (`waits_while_full`): only one its
+# `maxsize` bounds (`bounded_by`, a positive integer) can be.
 # `Executor.submit` returns the `concurrent.futures.Future` to wait on; waiting on one known to be
 # done (`waits_until_done`: under `if f.done():`, or once `await asyncio.wrap_future(f)`, which
 # completes with `f` (`done_when_awaited`), has returned) returns at once.
@@ -382,6 +384,11 @@ cases = [
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "queue.Queue"
+bounded_by = { arg = 0, param = "maxsize" }
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "queue.Queue.get"
 effects = ["blocking_sync"]
 cases = [
@@ -397,11 +404,17 @@ cases = [
     { arg = 1, param = "block", equals = false, effects = [] },
     { arg = 2, param = "timeout", equals = 0, effects = [] },
 ]
+waits_while_full = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "queue.Queue.join"
 effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.LifoQueue"
+bounded_by = { arg = 0, param = "maxsize" }
 opaque_to_layer3 = true
 
 [[entries]]
@@ -420,11 +433,17 @@ cases = [
     { arg = 1, param = "block", equals = false, effects = [] },
     { arg = 2, param = "timeout", equals = 0, effects = [] },
 ]
+waits_while_full = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "queue.LifoQueue.join"
 effects = ["blocking_sync"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "queue.PriorityQueue"
+bounded_by = { arg = 0, param = "maxsize" }
 opaque_to_layer3 = true
 
 [[entries]]
@@ -443,6 +462,7 @@ cases = [
     { arg = 1, param = "block", equals = false, effects = [] },
     { arg = 2, param = "timeout", equals = 0, effects = [] },
 ]
+waits_while_full = true
 opaque_to_layer3 = true
 
 [[entries]]

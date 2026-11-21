@@ -343,6 +343,7 @@ EffectSummary(f) = {
 
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy init
                                                     // (once per object, from which parameters)
+    capacity_waits:           Vec<CapacityWait>,    // own queue waits whose capacity the callers decide
 
     // Offloading and the async context
     offloads_blocking_params: Bitset,               // wrapper that runs the callable in parameter i on a thread
@@ -501,7 +502,7 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 
 | Rule ID | Default | Stage 0-A density | What it finds and how precision is controlled |
 |---|---|---|---|
-| **EFF101** | Off (heuristic) | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators (their queries and writes still count), sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
+| **EFF101** | Off (heuristic) | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators (their queries and writes still count), sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; `queue.Queue.put` only on a queue known to be bounded (its `maxsize`, followed through locals, attributes, globals, and parameters); a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
 | **EFF102** | Off (heuristic) | Web/async **44.1%** / DB **48.5%** (90–93% indirect) | HTTP clients, sessions, or connection pools created in a loop (across functions too). `for.iter` excluded; `ConstSmall` / `RetryPattern` / `DaemonPolling` loops relaxed |
 | **EFF103** | Off (heuristic) | DB **47.6%** (74% indirect) | Explicit database queries or external RPC calls in a loop (N+1, across functions too). `for.iter`, DDL, migrations, ORM internals, and bulk APIs excluded. **Implicit ORM lazy loading is out of scope (known limitation)** |
 | **EFF105** | Opt-in (heuristic) | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |
