@@ -1722,45 +1722,54 @@ impl<'a> FnIndex<'a> {
         if !measured.contains(&v) && path.is_none() {
             return None;
         }
-        // A test of the same value, or of a read of the same access path (`if
-        // len(report.get("runs", [])) != 40: raise`, then `for run in report["runs"]`) whose
-        // default the test rejects: the key is there, and the read gives the tested value.
-        let tests_it = |g: &LenGuard| {
-            g.var == v
-                || path.as_ref().is_some_and(|p| {
-                    self.access_path(g.var).is_some_and(|q| {
-                        q.root == p.root
-                            && q.keys == p.keys
-                            && q.default
-                                .is_none_or(|d| self.rejects_length(d, g.bound, self.pins_len(g)))
-                    })
-                })
-        };
-        let tested: Vec<&LenGuard> = self
-            .len_guards()
-            .iter()
-            .filter(|g| g.bound <= cap && self.dominates(g.edge_to, at) && tests_it(g))
-            .collect();
-        let bound = tested.iter().map(|g| g.bound).min()?;
-        *pinned = tested.iter().any(|g| g.bound == bound && self.pins_len(g));
         let mut on_the_way = self.reaching(at);
         for b in during {
             on_the_way[b.0 as usize] = true;
         }
-        // Nothing on the way may change what the test measured: the value and the other reads of
-        // its path (any use that may grow them), or the root they are read from (a store into it,
-        // a deletion from it, or a call it is passed to; reading it is what the path does).
-        let mut values = vec![v];
-        values.extend(tested.iter().map(|g| g.var));
-        let origins = Origins {
-            roots: values,
-            shared: true,
-            ..Origins::default()
+        let unchanged = |values: Vec<VarId>| {
+            let origins = Origins {
+                roots: values,
+                shared: true,
+                ..Origins::default()
+            };
+            self.growth(&origins, None, Some(&on_the_way)).is_some()
         };
-        let root = path.as_ref().map(|p| self.aliases(&[p.root]));
-        let mut ops = Vec::new();
-        let root_changed = root.as_ref().is_some_and(|root| {
-            self.f
+        let guards: Vec<&LenGuard> = self
+            .len_guards()
+            .iter()
+            .filter(|g| g.bound <= cap && self.dominates(g.edge_to, at))
+            .collect();
+        // A test of the value itself holds while nothing on the way grows it.
+        let same: Vec<&LenGuard> = guards.iter().copied().filter(|g| g.var == v).collect();
+        let mut tested: Vec<&LenGuard> = if !same.is_empty() && unchanged(vec![v]) {
+            same
+        } else {
+            Vec::new()
+        };
+        // A test of another read of the same access path from the same root (`if
+        // len(report.get("runs", [])) != 40: raise`, then `for run in report["runs"]`), whose
+        // `get` default the test rejects so that the key is there, holds while nothing on the
+        // way grows the reads or changes the root: a store into it, a deletion from it, or a call
+        // it is passed to (reading it is what the path does).
+        if let Some(p) = &path {
+            let linked: Vec<&LenGuard> = guards
+                .iter()
+                .copied()
+                .filter(|g| {
+                    g.var != v
+                        && self.access_path(g.var).is_some_and(|q| {
+                            q.root == p.root
+                                && q.keys == p.keys
+                                && q.default.is_none_or(|d| {
+                                    self.rejects_length(d, g.bound, self.pins_len(g))
+                                })
+                        })
+                })
+                .collect();
+            let root = self.aliases(&[p.root]);
+            let mut ops = Vec::new();
+            let root_changed = self
+                .f
                 .blocks
                 .iter()
                 .filter(|bb| on_the_way[bb.id.0 as usize])
@@ -1779,11 +1788,16 @@ impl<'a> FnIndex<'a> {
                         self.grown_operands(i, false, &mut ops);
                         ops.iter().any(|o| root.contains(o))
                     }
-                })
-        });
-        self.growth(&origins, None, Some(&on_the_way))
-            .filter(|_| !root_changed)
-            .and(Some(bound))
+                });
+            let mut values = vec![v];
+            values.extend(linked.iter().map(|g| g.var));
+            if !linked.is_empty() && !root_changed && unchanged(values) {
+                tested.extend(linked);
+            }
+        }
+        let bound = tested.iter().map(|g| g.bound).min()?;
+        *pinned = tested.iter().any(|g| g.bound == bound && self.pins_len(g));
+        Some(bound)
     }
 
     /// The access path `v` is read down: its root and the attributes and constant keys from
