@@ -92,11 +92,6 @@ KNOWN_OVER: dict[tuple[str, str], str] = {
         "question recurses once per list extending the next (`FnIndex::display_at`)"
         for p in ("function", "method")
     },
-    **{
-        ("item_reads", p): "summarizing each item read looks definitions up by scanning the "
-        "function (`consumption::is_unpacking` and the like)"
-        for p in PLACED
-    },
     ("lists_extending_each_other", "module"): "building the IR of a module body walks the "
     "module-level names again per name (3 s; milliseconds in a function), and EFF107",
     ("copy_chain_in_loop", "module"): "building the IR of a module body walks module-level copy "
