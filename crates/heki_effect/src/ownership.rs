@@ -13,7 +13,7 @@
 use crate::readonly::{COPY_METHODS, SLICE_COPYING_TYPES};
 use crate::resolver::Callee;
 use heki_ast::Span;
-use heki_ir::{Inst, InstKind, PhiNode, VarId};
+use heki_ir::{BlockId, Inst, InstKind, IrFunction, PhiNode, VarId};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -327,14 +327,14 @@ pub fn stores(kind: &InstKind) -> Vec<(VarId, Place<'_>)> {
 /// edge leads to never runs. Exception edges are taken.
 pub struct Live {
     blocks: Vec<bool>,
-    dead: FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)>,
+    dead: FxHashSet<(BlockId, BlockId)>,
 }
 
 impl Live {
-    pub fn of(f: &heki_ir::IrFunction, defs: &FxHashMap<VarId, &Inst>) -> Self {
+    pub fn of(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>) -> Self {
         let dead = dead_edges(f, defs);
         let mut blocks = vec![false; f.blocks.len()];
-        let mut stack: Vec<heki_ir::BlockId> = f.blocks.first().map(|b| b.id).into_iter().collect();
+        let mut stack: Vec<BlockId> = f.blocks.first().map(|b| b.id).into_iter().collect();
         while let Some(b) = stack.pop() {
             let i = b.0 as usize;
             if i >= blocks.len() || blocks[i] {
@@ -355,21 +355,68 @@ impl Live {
     }
 
     /// Whether a run can reach `b`.
-    pub fn block(&self, b: heki_ir::BlockId) -> bool {
+    pub fn block(&self, b: BlockId) -> bool {
         self.blocks[b.0 as usize]
     }
 
     /// Whether a run can take the edge `from -> to`.
-    pub fn edge(&self, from: heki_ir::BlockId, to: heki_ir::BlockId) -> bool {
+    pub fn edge(&self, from: BlockId, to: BlockId) -> bool {
         self.block(from) && !self.dead.contains(&(from, to))
     }
 }
 
+/// The immediate dominator of each block a run reaches over the edges it can take (`None` for
+/// the other blocks), from one pass in reverse postorder. One pass is exact: in the reducible
+/// graphs Python's statements make, an edge to an earlier block goes back to a loop header that
+/// dominates the edge's source, and leaving such an edge out changes no dominator.
+pub fn immediate_dominators(
+    f: &IrFunction,
+    live: &Live,
+    preds: &[Vec<BlockId>],
+) -> Vec<Option<BlockId>> {
+    let rpo: Vec<BlockId> = f
+        .rpo_blocks()
+        .into_iter()
+        .filter(|b| live.block(*b))
+        .collect();
+    let mut order = vec![usize::MAX; f.blocks.len()];
+    for (i, b) in rpo.iter().enumerate() {
+        order[b.0 as usize] = i;
+    }
+    let mut idom: Vec<Option<BlockId>> = vec![None; f.blocks.len()];
+    idom[rpo[0].0 as usize] = Some(rpo[0]);
+    let up = |b: BlockId, idom: &[Option<BlockId>]| {
+        idom[b.0 as usize].expect("a block before in reverse postorder has a dominator")
+    };
+    for &b in &rpo[1..] {
+        let mut found: Option<BlockId> = None;
+        for &p in &preds[b.0 as usize] {
+            if idom[p.0 as usize].is_none() || !live.edge(p, b) {
+                continue;
+            }
+            found = Some(match found {
+                None => p,
+                Some(mut d) => {
+                    let mut q = p;
+                    while d != q {
+                        while order[d.0 as usize] > order[q.0 as usize] {
+                            d = up(d, &idom);
+                        }
+                        while order[q.0 as usize] > order[d.0 as usize] {
+                            q = up(q, &idom);
+                        }
+                    }
+                    d
+                }
+            });
+        }
+        idom[b.0 as usize] = found;
+    }
+    idom
+}
+
 /// The edges of `f` a branch on a constant never takes, by `(from, to)` block.
-fn dead_edges(
-    f: &heki_ir::IrFunction,
-    defs: &FxHashMap<VarId, &Inst>,
-) -> FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)> {
+fn dead_edges(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>) -> FxHashSet<(BlockId, BlockId)> {
     let mut out = FxHashSet::default();
     for b in &f.blocks {
         let heki_ir::Terminator::Branch {
@@ -419,7 +466,7 @@ pub(crate) enum Part {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn origins_of<'i>(
     defs: &FxHashMap<VarId, &'i Inst>,
-    phis: &FxHashMap<VarId, (heki_ir::BlockId, &PhiNode)>,
+    phis: &FxHashMap<VarId, (BlockId, &PhiNode)>,
     live: &Live,
     roots: &[(VarId, Part)],
     source_of: impl Fn(&'i Inst) -> Source<'i>,

@@ -23,8 +23,10 @@ mod construction;
 pub mod consumption;
 mod contracts;
 pub mod guards;
+pub mod held;
 mod infer;
 mod invalidation;
+pub mod locks;
 pub mod ownership;
 pub mod readonly;
 mod report;
@@ -41,6 +43,7 @@ pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
+pub use locks::{LockAcquire, ObjRef, SiteLock};
 pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
@@ -153,7 +156,7 @@ pub fn owned_chain(chain: &[Arc<CallHop>]) -> Vec<CallHop> {
 }
 
 /// Zero the position of every hop of a kept chain (a hop shared with other chains is copied).
-fn zero_hop_spans(chain: &mut [Arc<CallHop>]) {
+pub(crate) fn zero_hop_spans(chain: &mut [Arc<CallHop>]) {
     for hop in chain {
         Arc::make_mut(hop).span = Span { start: 0, end: 0 };
     }
@@ -597,6 +600,10 @@ pub struct EffectSummary {
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
     /// propagated).
     pub unresolved_access_sites: BTreeSet<UnresolvedAccessSite>,
+    /// The non-reentrant locks the function takes when its body runs, itself or through the
+    /// calls that run there on its thread or task, in its own names (`EFF109`; propagated).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub acquires_locks: BTreeMap<ObjRef, LockAcquire>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -779,6 +786,9 @@ impl EffectSummary {
             })
             .collect();
         out.param_change_sites.clear();
+        for acq in out.acquires_locks.values_mut() {
+            *acq = acq.without_locations();
+        }
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);

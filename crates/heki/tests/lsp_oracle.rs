@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT108", "MUT111", "EFF107", "MUT112"]
+extend-select = ["MUT101", "MUT108", "MUT111", "EFF107", "MUT112", "EFF109"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -519,6 +519,14 @@ const OWN_BASE: &str =
 const OWN_SUB: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):\n    def order(self):\n        return sorted(self.items)\n";
 const OWN_SUB_SORTING: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):\n    def order(self):\n        self.items.sort()\n";
 
+// Locks taken again (`EFF109`): a subclass method holding the lock its base class's helper in
+// another module takes, and a function holding a module global that a helper takes only when
+// its argument says so.
+const LOCK_POOL: &str = "import threading\n\nLOCK = threading.Lock()\n\n\nclass Pool:\n    def __init__(self):\n        self._lock = threading.Lock()\n\n    def size(self):\n        with self._lock:\n            return 1\n\n\ndef refill(force=False):\n    if force:\n        with LOCK:\n            return 1\n    return 0\n";
+const LOCK_POOL_PLAIN: &str = "import threading\n\nLOCK = threading.Lock()\n\n\nclass Pool:\n    def __init__(self):\n        self._lock = threading.Lock()\n\n    def size(self):\n        return 1\n\n\ndef refill(force=False):\n    if force:\n        with LOCK:\n            return 1\n    return 0\n";
+const LOCK_USE: &str = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        with self._lock:\n            return self.size()\n\n\ndef drain():\n    with LOCK:\n        return refill()\n";
+const LOCK_USE_FORCED: &str = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        return self.size()\n\n\ndef drain():\n    with LOCK:\n        return refill(force=True)\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -584,6 +592,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/own_use.py", OWN_USE),
         ("pkg/own_base.py", OWN_BASE),
         ("pkg/own_sub.py", OWN_SUB),
+        ("pkg/lock_pool.py", LOCK_POOL),
+        ("pkg/lock_use.py", LOCK_USE),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -1908,6 +1918,50 @@ fn steps_mut111() -> Vec<Step> {
     ]
 }
 
+/// `EFF109`: the holder follows the locks its callees in another module take (their summaries'
+/// `acquires_locks`): a base-class helper stops and starts taking the lock a subclass method
+/// holds, and the holder of a module global starts passing the argument that leads another
+/// helper to it.
+fn steps_eff109() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the base class's helper in another module stops taking the lock",
+            vec![save("pkg/lock_pool.py", LOCK_POOL_PLAIN)],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the helper takes the lock again",
+            vec![save("pkg/lock_pool.py", LOCK_POOL)],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the subclass stops holding the lock, and the other holder passes the argument that \
+             leads the helper to the global lock",
+            vec![save("pkg/lock_use.py", LOCK_USE_FORCED)],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the helper no longer takes the global lock",
+            vec![save(
+                "pkg/lock_pool.py",
+                &LOCK_POOL.replace(
+                    "        with LOCK:\n            return 1\n",
+                    "        return 1\n",
+                ),
+            )],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "both files as they were",
+            vec![
+                save("pkg/lock_pool.py", LOCK_POOL),
+                save("pkg/lock_use.py", LOCK_USE),
+            ],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+    ]
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -1924,6 +1978,7 @@ fn steps() -> Vec<Step> {
             ("pkg/fill.py", "MUT201"),
             ("pkg/fill_main.py", "MUT201"),
             ("pkg/views.py", "MUT201"),
+            ("pkg/lock_use.py", "EFF109"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(
@@ -2112,6 +2167,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_hash_writers());
     steps.extend(steps_mut111());
     steps.extend(steps_mut112());
+    steps.extend(steps_eff109());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
     steps.extend([
@@ -2207,8 +2263,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\"]",
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"EFF109\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"EFF109\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),

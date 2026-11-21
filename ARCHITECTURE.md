@@ -2,7 +2,7 @@
 
 | Item | Content |
 |---|---|
-| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (34 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
+| Status | **Experimental** (pre-release; rules, configuration, and output can still change). Architecture Baseline v4.1, updated on 2026-11-20 for the implemented v1.x rules (35 rules). Based on the Stage 0-A Wave 1/2 measurements (about 19 million lines), a study of datamodel-code-generator's 20,000 lines of in-house checkers, one CLI and configuration with Ruff / `t-linter`, the incremental LSP design, and PEP 810 support verified on `ruff_python_parser` 0.17.5. |
 | Date | 2026-11-20 |
 | Target language | Python (verified on CPython 3.11–3.15, including PEP 709, PEP 649 `__annotate__`, and PEP 810 `lazy import`) |
 | Implementation language | Rust: a single binary with a CLI and an incremental LSP server, distributed with `maturin`. Only the frontend uses `ruff_python_parser` / `ruff_python_ast` (`tag = "0.17.5"`), isolated in `heki_ast`. |
@@ -67,8 +67,8 @@ by crate boundaries, carrying three rule families.
      clients and connection pools re-created in loops, explicit database queries in loops,
      loop-carried quadratic `pd.concat` / `np.vstack`, `await` or network I/O while a
      synchronous lock or a database transaction is held (`EFF106`), tasks kept only by a weak
-     reference (`EFF107`) (both opt-in), and **effect boundaries** declared in `pyproject.toml`
-     (`EFF201`).
+     reference (`EFF107`), a non-reentrant lock taken again while it is held (`EFF109`) (all
+     opt-in), and **effect boundaries** declared in `pyproject.toml` (`EFF201`).
 2. **Soundness / Alias lane (`heki_soundness`)**: conservative abstract interpretation that never
    trusts type annotations (zero unsafe rewrites).
    - **Family 3: Complexity Rewrite (`OPT`)**: behavior-preserving $O(n^2) \to O(n)$ rewrites
@@ -281,6 +281,12 @@ EffectSummary(f) = {
     offloads_blocking_params: Bitset,               // wrapper that runs the callable in parameter i on a thread
     iterates_params:          Bitset,               // stepped by an iteration: a generator passed there runs there
     iterated:                 Option<EffectSummary>, // what iterating the returned object runs
+
+    // Locks (EFF109)
+    acquires_locks:           Map<ObjRef, LockAcquire>, // non-reentrant locks taken on the function's
+                                                    // thread or task, in its names (self.<attr>,
+                                                    // a global, a closure variable), with the chain,
+                                                    // the input guards, and the owner's state tests
     sync_driven_only:         bool,                 // driven only through a sync driver such as run_sync(coro)
     unknown_calls:            bool,
 
@@ -402,7 +408,7 @@ versions.
 The adopted, rejected, and candidate rules are fixed by the Stage 0-A measurements (339
 repositories, 18.1 million lines, all 171 samples reviewed by hand), the Wave 2 measurements
 (19 million lines), and the study of datamodel-code-generator's 20,000 lines of in-house checkers.
-The 34 rules are listed in the [rules reference](docs/rules/index.md).
+The 35 rules are listed in the [rules reference](docs/rules/index.md).
 
 ### Family 1: Mutation & State Effect (`MUT`: hardening mature production code)
 
@@ -439,6 +445,7 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 | **EFF105** | Opt-in | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |
 | **EFF106** | Opt-in | 2.1% (fatal when it happens) | `await` or `BlockingNet` (across functions too) while a type-certain synchronous lock (`threading.Lock` / `RLock` / `Semaphore` / `BoundedSemaphore` / `Condition`) or a database transaction (`.begin()` / `.begin_nested()` / `transaction.atomic()` / ...) is held by a `with`. Async locks and `async with` are out of scope; offloading and test relaxation as in `EFF101` |
 | **EFF107** | Opt-in | — | `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future` results bound to a local variable but never awaited, returned, stored, passed on, or captured (lost to the garbage collector). Discarded results are Ruff's `RUF006` and are not reported; `TaskGroup.create_task` is out of scope |
+| **EFF109** | Opt-in (experimental) | — | A non-reentrant lock (`threading.Lock`, `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`) taken again while it is held, by a nested `with` / `acquire()` or by a function the holder calls on its own thread or task, across modules; both sides name the lock the same way (`self.<attr>`, a module global, a closure variable), mapped through each call's arguments (`EffectSummary::acquires_locks`). Calls that only create a coroutine or a generator, run on a worker thread, or hand a callable on are not followed; acquisitions a constant argument switches off, or behind a test of the lock owner's state that the holder or its callees change (re-entrance flags), and non-blocking or timed acquisitions are not reported |
 | **EFF201** | When configured (contract) | — | **Declared effect boundaries**: functions matching the `scopes` of `[[tool.heki.effect-boundaries]]` must not reach a forbidden effect (`blocking-*`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`, `calls` of `call-targets`), directly or transitively; `allow-writes` with `write-universe` reports every reached write in the universe that is not allowed (one implementation with `writes-targets`; candidates, not a gate: dcg's pass declarations show over-approximation). Paths through `allowed-callees` and the inside of other scope functions are not followed (boundary-only reporting); the shortest call chain is attached |
 | **DATA101** | On | Data/ML **19.5%** (about 90% precise with `LoopCarried`) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. **An SSA `LoopCarried` value is required**: one-off concatenation, padding, and `ConstSmall` loops are excluded |
 
@@ -696,7 +703,7 @@ message = "render entry points must not mutate model state"
 | M8 | End-to-end test suite through the real binary and LSP process; 100% of reachable lines |
 | M9 | CI / release / documentation workflows and the user guide |
 | v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT109`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, the `MUT202` return flow, `MUT205`, `MUT111`, and contract keys, entries, and fresh objects (31 rules) |
-| v0.2.0 | `MUT206`, `MUT207`, `MUT112`, string constants bound once and class constants as keys (34 rules) |
+| v0.2.0 | `MUT206`, `MUT207`, `MUT112`, `EFF109`, string constants bound once and class constants as keys (35 rules) |
 
 ### Gates for every release (from Stage 0-B)
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.

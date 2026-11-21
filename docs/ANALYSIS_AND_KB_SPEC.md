@@ -334,6 +334,12 @@ EffectSummary(f) = {
     // What iterating the returned object runs (a plain function returning a generator)
     iterated:                 Option<EffectSummary>,       // in the function's own parameters
 
+    // Locks (EFF109; propagated)
+    acquires_locks:           Map<ObjRef, LockAcquire>,    // non-reentrant locks taken on the function's
+                                                           // thread or task: ObjRef = parameter i or its
+                                                           // attribute, a global, a closure variable;
+                                                           // chain, input guards, owner state tests
+
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
@@ -806,7 +812,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 1. **Offload wrapper propagation** (from datamodel-code-generator `bodies.py:112`):
    - When a function `w(fn, *args)` calls `asyncio.to_thread(fn, ...)` (`offloads_blocking_arg =
      0`) or similar, the parameter index of `fn` is recorded in `w`'s `offloads_blocking_params`
@@ -868,7 +874,35 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    that no decorator replaces, `FunctionDecl::called_as_defined`; never a class's `__init__`),
    or a value typed as one of `heki_kb::FUTURE_CLASSES` (an annotation, or a Layer 2
    `return_type` such as `loop.run_in_executor` / `asyncio.gather` → `asyncio.Future`).
-8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+8. **`EFF109`** (opt-in): a non-reentrant lock taken again while it is held.
+   - A lock is an instance of a Layer 2 class flagged `non_reentrant_lock` (`threading.Lock`,
+     `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`), named by where the function
+     reaches it (`heki_effect::locks::ObjRef`): parameter `i` or its attribute (`self._lock`), a
+     module global (by fully qualified name, read by name, through imports, or on its module),
+     or a variable of an enclosing function its closures capture (typed from what that function
+     binds to it, `TypeCtx::captured`). An acquisition is a `with` / `async with` over
+     it, an awaited `acquire()` without arguments, or a blocking `acquire()` the catalog lists
+     (`threading.Lock.acquire`) without a timeout or `blocking=False`.
+   - `EffectSummary::acquires_locks` holds the function's own acquisitions (a hop to the lock's
+     class at the acquisition), each with the input guards every acquisition needs, the module
+     globals that branch conditions read on every path to every acquisition of the lock, and,
+     for a lock a parameter holds, the attributes of that object, and the project methods called
+     on it, that they test (one walk up the dominator tree from the acquisitions' common
+     dominator, at most 16 tests: past that, the acquisition counts as guarded). Propagation adds the acquisitions of each callee whose
+     body runs at the call on the caller's thread or task (not on a worker), with the lock
+     mapped through the argument bound to the parameter, the call in front of the chain, and the
+     guards mapped by `guards::through_call` (a constant argument deciding one against it drops
+     it); several acquisitions of one lock keep the guards and tests all of them have and the
+     shortest chain.
+   - The rule runs a forward must-hold dataflow (`heki_effect::held`, shared with `EFF106`: a bit
+     per acquisition, an `ExitWith` giving back those of its statement, a `release()` the
+     acquisitions of its lock, also a `with`'s) and reports, while a lock is held, its own
+     acquisition again and a call site whose callees take it (`ProjectIndex::site_locks`), unless
+     that acquisition is behind a test of state the holder changes (an attribute of the lock's
+     owner in the holder's summary, `mutated_param_paths`, `mutates_self_attrs`, a tested method
+     counting with the attributes it reads; a module global the holder stores), or some function
+     of the module releases the lock where it does not hold it (a signal between threads).
+9. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
    bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
@@ -984,7 +1018,8 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
-`sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
+`sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
+`non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal, a string
 literal with a given prefix or not empty, an instance of a given class, or an integer that sets
@@ -996,7 +1031,8 @@ through `*` / `**` unpacking, selects none. A boolean flag case (`equals = false
 is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: the effects it
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
-`offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`): an
+`offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
+`non-reentrant-lock`): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),

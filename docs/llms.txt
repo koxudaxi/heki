@@ -19,7 +19,7 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 34 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 35 rules in four families
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 
 ## Integrations
@@ -47,6 +47,7 @@
 - [list-front-pop (OPT120)](https://heki.koxudaxi.dev/rules/list-front-pop/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)
 - [list-quadratic-concat (OPT101)](https://heki.koxudaxi.dev/rules/list-quadratic-concat/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Safe fix (--fix)
 - [lock-or-tx-held-across-io (EFF106)](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/): Family: Execution Effects (EFF) · Opt-in · Severity error · No automatic fix
+- [lock-reacquired-while-held (EFF109)](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/): Family: Execution Effects (EFF) · Opt-in · Experimental · Severity error · No automatic fix
 - [loop-carried-concat (DATA101)](https://heki.koxudaxi.dev/rules/loop-carried-concat/): Family: Data Pipelines (DATA) · Enabled by default · Severity error · No automatic fix
 - [loop-db-query (EFF103)](https://heki.koxudaxi.dev/rules/loop-db-query/): Family: Execution Effects (EFF) · Enabled by default · Severity error · No automatic fix
 - [loop-invariant-container-rebuild (OPT130)](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/): Family: Complexity Rewrites (OPT) · Enabled by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)

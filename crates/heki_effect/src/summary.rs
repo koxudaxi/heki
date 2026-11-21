@@ -8,6 +8,7 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
+use crate::locks::{self, LockStep, ObjRef};
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -270,6 +271,9 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
         .extend(body.typed_field_read_sites);
     into.private_calls.extend(body.private_calls);
     into.unknown_calls |= body.unknown_calls;
+    for (lock, acq) in body.acquires_locks {
+        locks::add_acquisition(&mut into.acquires_locks, lock, acq);
+    }
     into.refresh_typed_field_writes();
 }
 
@@ -409,6 +413,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
         .extend(other.unresolved_access_sites);
+    for (lock, acq) in other.acquires_locks {
+        locks::add_acquisition(&mut into.acquires_locks, lock, acq);
+    }
     into.refresh_typed_field_writes();
 }
 
@@ -570,6 +577,8 @@ struct Extractor<'a> {
     scratch: RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The loops around each block.
     around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
+    /// The blocks acquiring each lock, with the parameter holding it (`locks::owner_tests`).
+    lock_blocks: std::collections::BTreeMap<ObjRef, (Option<u8>, BTreeSet<BlockId>)>,
     guards: LocalGuards,
     summary: EffectSummary,
     sites: Vec<CallSite>,
@@ -705,6 +714,7 @@ impl<'a> Extractor<'a> {
             phis: OnceCell::new(),
             scratch: RefCell::default(),
             around: OnceCell::new(),
+            lock_blocks: std::collections::BTreeMap::new(),
             guards: LocalGuards::default(),
             summary,
             sites: Vec::new(),
@@ -1402,6 +1412,7 @@ impl<'a> Extractor<'a> {
                 self.visit(bb.id, index, &inst.kind, inst.span);
             }
         }
+        self.lock_owner_tests();
         self.resolve_construction();
         self.returned_origins();
         self.iterations();
@@ -2244,6 +2255,7 @@ impl<'a> Extractor<'a> {
 
     fn visit(&mut self, bb: BlockId, index: usize, kind: &'a InstKind, span: Span) {
         self.store_escapes(kind);
+        self.lock_acquired(bb, kind, span);
         match kind {
             InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
                 if self.self_vars.contains(obj) {
@@ -2476,6 +2488,87 @@ impl<'a> Extractor<'a> {
                 self.iteration(bb, *iterable, *is_async, span)
             }
             _ => {}
+        }
+    }
+
+    /// A non-reentrant lock `kind` takes (`EffectSummary::acquires_locks`), with the guards on
+    /// the function's inputs and, for a lock a parameter holds, the tests of that object's
+    /// state on every path to it.
+    fn lock_acquired(&mut self, bb: BlockId, kind: &InstKind, span: Span) {
+        // A branch on a constant never takes the lock its dead side would.
+        if !matches!(
+            kind,
+            InstKind::EnterWith { .. } | InstKind::MethodCall { .. }
+        ) || !self.live.block(bb)
+        {
+            return;
+        }
+        let def = |v: VarId| self.defs.get(&v).copied();
+        let class_of = |v: VarId| locks::lock_class(self.cx, self.f, &self.types, &def, v);
+        let Some(LockStep::Acquire(var)) = locks::lock_step(self.cx, kind, &def, &class_of) else {
+            return;
+        };
+        let (Some(class), Some(lock)) = (
+            class_of(var),
+            locks::obj_ref(self.cx, self.f, self.key, &self.types, &def, var),
+        ) else {
+            return;
+        };
+        let guards = self.guards.occurrence(&self.guard_inputs(), bb);
+        let owner = match lock {
+            ObjRef::Param {
+                param,
+                attr: Some(_),
+            } => Some(param),
+            _ => None,
+        };
+        let (_, blocks) = self
+            .lock_blocks
+            .entry(lock.clone())
+            .or_insert_with(|| (owner, BTreeSet::new()));
+        blocks.insert(bb);
+        let acq = locks::own_acquisition(self.key, self.path, class, span, guards);
+        locks::add_acquisition(&mut self.summary.acquires_locks, lock, acq);
+    }
+
+    /// The tests of state on every path to every acquisition of each lock
+    /// (`LockAcquire::tested_attrs`, `tested_calls`, `tested_globals`).
+    fn lock_owner_tests(&mut self) {
+        if self.lock_blocks.is_empty() {
+            return;
+        }
+        let f = self.f;
+        let dom = locks::DomTree::new(
+            f,
+            ownership::immediate_dominators(f, &self.live, &f.predecessors()),
+        );
+        let def = |v: VarId| self.defs.get(&v).copied();
+        let resolve =
+            |recv: VarId, method: &str| match self.cx.resolve_method(self.types.get(&recv), method)
+            {
+                Callee::Project(keys, _) => keys,
+                _ => Vec::new(),
+            };
+        let global = |name: &str| self.cx.global_fqn(name);
+        let found: Vec<_> = self
+            .lock_blocks
+            .iter()
+            .map(|(lock, (owner, blocks))| {
+                let tests = locks::owner_tests(f, &dom, &def, *owner, blocks, &resolve, &global);
+                (lock.clone(), tests)
+            })
+            .collect();
+        for (lock, tests) in found {
+            let acq = (self.summary.acquires_locks.get_mut(&lock))
+                .expect("a lock with acquiring blocks was taken");
+            match tests {
+                Some(t) => {
+                    acq.tested_attrs = t.attrs;
+                    acq.tested_calls = t.calls;
+                    acq.tested_globals = t.globals;
+                }
+                None => acq.tests_known = false,
+            }
         }
     }
 

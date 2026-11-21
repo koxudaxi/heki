@@ -240,6 +240,8 @@ pub struct EcosystemOverride {
     /// `EFF106`: a `with` over an instance of this class, or over the call's result, holds a
     /// synchronous lock or a database transaction.
     pub sync_lock_or_tx: Option<bool>,
+    /// `EFF109`: an instance of this class is a lock its holder cannot take again.
+    pub non_reentrant_lock: Option<bool>,
 }
 
 /// `copy-sanitizer`: the depth of the copy the call returns (`"shallow"` / `"deep"`, validated
@@ -845,6 +847,10 @@ return-type = "sqlite3.Connection"
 symbol = "mypkg.db.Store.transaction"
 effects = []
 sync-lock-or-tx = true
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.sync.Mutex"
+non-reentrant-lock = true
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -886,6 +892,11 @@ sync-lock-or-tx = true
                     symbol: "mypkg.db.Store.transaction".into(),
                     effects: Some(Vec::new()),
                     sync_lock_or_tx: Some(true),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.sync.Mutex".into(),
+                    non_reentrant_lock: Some(true),
                     ..EcosystemOverride::default()
                 },
             ]

@@ -861,6 +861,15 @@ fn transfer(
     }
     // A generator passed to a callee that iterates it runs there.
     t.iterates_params |= caller_params(facts.iterates_params, bc);
+
+    // d. The locks the callee takes on the caller's thread or task, in the caller's names.
+    for (lock, acq) in &facts.acquires_locks {
+        if let Some((lock, acq)) =
+            crate::locks::through_call(site, bc, lock, acq, lead, rewrite, own_writes)
+        {
+            crate::locks::add_acquisition(&mut t.acquires_locks, lock, acq);
+        }
+    }
 }
 
 /// The typed writes a call hands its caller: an `IndirectHelper` site for each typed field or

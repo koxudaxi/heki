@@ -9,6 +9,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
+| `rule.EFF109` | rule | [`EFF109`](rules/lock-reacquired-while-held.md) | 0.2.0 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
@@ -20,6 +21,14 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 - **Since:** 0.1.1
 
 It reads the output of CPython 3.15's sampling profiler, and that format can still change.
+
+## `rule.EFF109`
+
+- **Kind:** rule
+- **Target:** [`EFF109`](rules/lock-reacquired-while-held.md)
+- **Since:** 0.2.0
+
+Its precision is measured on a small sample of reports only.
 
 ## `rule.MUT101`
 

@@ -205,6 +205,9 @@ pub struct EcosystemEntry {
     /// `sqlalchemy.orm.Session.begin`) holds a lock or a transaction. Async locks are never
     /// flagged.
     pub sync_lock_or_tx: bool,
+    /// `EFF109`: an instance of this class is a lock its holder cannot take again: acquiring it
+    /// while the same thread or task holds it waits forever (`threading.Lock`, `asyncio.Lock`).
+    pub non_reentrant_lock: bool,
     /// What the call does instead when an argument is known (the first case that holds).
     pub cases: Vec<ArgCase>,
     /// Index of a callable argument the call runs on the calling thread, handing it a
@@ -350,6 +353,7 @@ pub struct EcosystemPatch {
     pub copy_sanitizer: Option<Option<CopyDepth>>,
     pub return_type: Option<String>,
     pub sync_lock_or_tx: Option<bool>,
+    pub non_reentrant_lock: Option<bool>,
 }
 
 impl EcosystemPatch {
@@ -374,6 +378,9 @@ impl EcosystemPatch {
         }
         if let Some(v) = self.sync_lock_or_tx {
             entry.sync_lock_or_tx = v;
+        }
+        if let Some(v) = self.non_reentrant_lock {
+            entry.non_reentrant_lock = v;
         }
     }
 }
@@ -412,6 +419,7 @@ impl TryFrom<&EcosystemOverride> for EcosystemPatch {
             copy_sanitizer,
             return_type: value.return_type.clone(),
             sync_lock_or_tx: value.sync_lock_or_tx,
+            non_reentrant_lock: value.non_reentrant_lock,
         })
     }
 }
@@ -1687,11 +1695,30 @@ mod tests {
                 [LOCK_CLASSES, TRANSACTION_STARTERS]
                     .concat()
                     .iter()
-                    .filter(|n| **n != "sqlalchemy.engine.Engine.begin" && !SAVEPOINTS.contains(*n))
+                    .filter(|n| {
+                        **n != "sqlalchemy.engine.Engine.begin"
+                            && !SAVEPOINTS.contains(*n)
+                            && !NON_REENTRANT_LOCKS.contains(*n)
+                    })
                     .map(|n| (*n).to_owned())
                     .collect(),
                 EcosystemEntry {
                     sync_lock_or_tx: true,
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["threading.Lock"]),
+                EcosystemEntry {
+                    sync_lock_or_tx: true,
+                    non_reentrant_lock: true,
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["asyncio.Lock", "asyncio.Condition", "multiprocessing.Lock"]),
+                EcosystemEntry {
+                    non_reentrant_lock: true,
                     ..entry(&[])
                 },
             ),
@@ -1873,6 +1900,14 @@ mod tests {
         "threading.BoundedSemaphore",
         "threading.Condition",
     ];
+    /// `EFF109` locks the holder cannot take again (instances held by `with` / `async with` or
+    /// a blocking `acquire()`).
+    const NON_REENTRANT_LOCKS: &[&str] = &[
+        "threading.Lock",
+        "asyncio.Lock",
+        "asyncio.Condition",
+        "multiprocessing.Lock",
+    ];
     /// Transaction starters that send `SAVEPOINT` (or flush the session) at the call.
     const SAVEPOINTS: &[&str] = &[
         "sqlalchemy.orm.Session.begin_nested",
@@ -1907,8 +1942,8 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(flagged, expected);
-        // Async locks never hold the event loop's thread: they are not registered at all
-        // (async transaction starters such as `AsyncEngine.begin` only type their results).
+        // Async locks never hold the event loop's thread: none is flagged (async transaction
+        // starters such as `AsyncEngine.begin` only type their results).
         for symbol in [
             "asyncio.Lock",
             "asyncio.Semaphore",
@@ -1919,7 +1954,35 @@ mod tests {
             "sqlalchemy.ext.asyncio.AsyncSession.begin",
             "psycopg.AsyncConnection.transaction",
         ] {
-            assert_eq!(kb.lookup(symbol), None, "{symbol}");
+            assert!(
+                kb.lookup(symbol).is_none_or(|e| !e.sync_lock_or_tx),
+                "{symbol}"
+            );
+        }
+    }
+
+    #[test]
+    fn layer2_flags_exactly_the_non_reentrant_locks() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let flagged: BTreeSet<&str> = kb
+            .entries
+            .values()
+            .filter(|e| e.non_reentrant_lock)
+            .map(|e| e.symbol.as_str())
+            .collect();
+        assert_eq!(flagged, NON_REENTRANT_LOCKS.iter().copied().collect());
+        // A reentrant lock, a condition over one by default, and semaphores, whose count the
+        // class does not say, are not.
+        for symbol in [
+            "threading.RLock",
+            "threading.Condition",
+            "threading.Semaphore",
+            "asyncio.Semaphore",
+        ] {
+            assert!(
+                kb.lookup(symbol).is_none_or(|e| !e.non_reentrant_lock),
+                "{symbol}"
+            );
         }
     }
 
@@ -2319,6 +2382,10 @@ mod tests {
                 sync_lock_or_tx: Some(true),
                 ..patch("mypkg.db.open")
             },
+            EcosystemPatch {
+                non_reentrant_lock: Some(true),
+                ..patch("mypkg.sync.Mutex")
+            },
             // An async-safe API keeps only its loop-sensitive effects.
             EcosystemPatch {
                 async_safe: Some(true),
@@ -2371,6 +2438,14 @@ mod tests {
             }
         );
         assert_eq!(
+            got("mypkg.sync.Mutex"),
+            EcosystemEntry {
+                symbol: "mypkg.sync.Mutex".into(),
+                non_reentrant_lock: true,
+                ..EcosystemEntry::default()
+            }
+        );
+        assert_eq!(
             got("vendor.fetch"),
             EcosystemEntry {
                 symbol: "vendor.fetch".into(),
@@ -2396,7 +2471,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [vec![UnpooledClientAlloc], vec![UnpooledClientAlloc]]
         );
-        assert_eq!(kb.entries.len(), builtin.entries.len() + 3);
+        assert_eq!(kb.entries.len(), builtin.entries.len() + 4);
         // Only what the configuration names is a declaration of project code.
         assert!(kb.declared("mypkg.db.open").is_some());
         assert!(kb.declared("time.sleep").is_some());
@@ -2417,6 +2492,7 @@ mod tests {
             copy_sanitizer: Some(CopySanitizerSetting::Depth("deep".into())),
             return_type: Some("mypkg.workers.Handle".into()),
             sync_lock_or_tx: Some(false),
+            non_reentrant_lock: Some(true),
         };
         assert_eq!(
             EcosystemPatch::try_from(&ok).unwrap(),
@@ -2429,6 +2505,7 @@ mod tests {
                 copy_sanitizer: Some(Some(CopyDepth::Deep)),
                 return_type: Some("mypkg.workers.Handle".into()),
                 sync_lock_or_tx: Some(false),
+                non_reentrant_lock: Some(true),
             }
         );
         // `true` is a shallow copy (the values below stay protected), `false` none.
