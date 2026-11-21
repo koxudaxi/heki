@@ -299,8 +299,11 @@ $ uvx --from "zensical==0.1.2" zensical serve
   heuristic rules on the generated pages, copies each rule's measurement from
   [Rule Precision](precision.md) into its page, and fails when a hand-written table row says
   "heuristic" other than exactly when a rule it names is heuristic, when an exact rule lacks a
-  certification there with no false claim in its census and holdout run, or when a rule's
-  documentation has no "What a report states" section.
+  certification there with no false claim in its census and holdout run, when a rule's
+  documentation has no "What a report states" section, or when an exact rule's page lists other
+  premises under "Its premises:" than the premise table (`crates/heki_rules/src/premises.rs`,
+  which `heki rule --output-format json` prints with each rule), in another order or under other
+  names.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which

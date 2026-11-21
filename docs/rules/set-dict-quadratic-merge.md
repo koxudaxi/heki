@@ -22,7 +22,7 @@ updating it would change it in place.
 
 Its premises:
 
-- **Builtin set or dict**: the value is a builtin `set` or `dict` by its construction. Established:
+- **Builtin type by construction**: the value is a builtin `set` or `dict` by its construction. Established:
   the Soundness lane takes types from constructions only.
 - **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.

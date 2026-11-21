@@ -6,7 +6,7 @@ use crate::{
     split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic};
+use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, Callee, Construction,
@@ -3034,11 +3034,7 @@ impl<'a> Mut202Fn<'a> {
         ) else {
             return;
         };
-        let tier = if exact.is_some() {
-            Certainty::Exact
-        } else {
-            Certainty::Heuristic
-        };
+        let tier = crate::premises::tier("MUT114", exact.is_some());
         d.certainty = tier.at_most(d.certainty);
     }
 

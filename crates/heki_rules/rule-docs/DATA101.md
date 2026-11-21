@@ -29,10 +29,10 @@ parameter, a part of one, the rows of a query, the lines of a file, or the entri
 
 Its premises:
 
-- **Loop-carried**: every path around the back edge carries the new value, computed from the
+- **Loop-carried on every path**: every path around the back edge carries the new value, computed from the
   previous one (no path resets the variable). Open in a heuristic report: one path that updates
   it is enough.
-- **On every iteration**: the reallocating call returns on every iteration that completes,
+- **Every iteration**: the reallocating call returns on every iteration that completes,
   exception edges into handlers included. Open in a heuristic report: one that runs on some
   iterations only counts.
 - **Origin**: the loop steps through items the data decides (as for `EFF103`), and the code does

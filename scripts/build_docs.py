@@ -349,6 +349,39 @@ def uncertified_exact_rules(rules: list[dict], certifications: dict[str, dict]) 
     return stale
 
 
+def page_premises(doc: str) -> list[str]:
+    """The premise names a rule page lists under "Its premises:" in its claim section."""
+    lines = doc.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == CLAIM_SECTION)
+    except StopIteration:
+        return []
+    names = []
+    listing = False
+    for line in lines[start + 1 :]:
+        if line.startswith("## "):
+            break
+        if line.strip() == "Its premises:":
+            listing = True
+            continue
+        match = re.match(r"- \*\*([^*]+)\*\*", line) if listing else None
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def premises_disagreeing(rules: list[dict]) -> list[str]:
+    """The exact rules whose page lists other premises than the premise table
+    (`crates/heki_rules/src/premises.rs`), in another order, or under other names."""
+    out = []
+    for r in rules:
+        table = [p["name"] for p in r.get("premises", [])]
+        page = page_premises(r["doc"])
+        if (table or r["certainty"] == "exact") and table != page:
+            out.append(f"{r['code']}: the page lists {page}, the premise table {table}")
+    return out
+
+
 def rules_without_claims(rules: list[dict]) -> list[str]:
     """The rules whose documentation does not say what a report states."""
     return [
@@ -478,6 +511,7 @@ def main() -> int:
             uncertified_exact_rules(rules, precision_rows(CERTIFICATION))
         ),
         "Rules do not say what a report states": rules_without_claims(rules),
+        "Rule pages and the premise table list different premises": premises_disagreeing(rules),
     }
     if any(disagreements.values()):
         for heading, entries in disagreements.items():
