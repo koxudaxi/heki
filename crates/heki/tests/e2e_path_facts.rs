@@ -376,6 +376,9 @@ class Store:
         total = sum(len(x) for x in conn.query())
         for key in {row[0] for row in rows}:
             pass
+        changed = [(h, str(t)) for h, t in rows if t]
+        for h, t in changed:
+            pass
 "#,
     );
     let origins: Vec<Value> = function(&facts, "Store.load")["loops"]
@@ -411,6 +414,9 @@ class Store:
             one("fixed"),
             // The set comprehension's own loop, then the loop over the set: equal keys merge,
             // so the count no longer follows the rows.
+            one("param 1"),
+            json!("open"),
+            // A comprehension with an `if` leaves rows out: no count follows them.
             one("param 1"),
             json!("open"),
         ]

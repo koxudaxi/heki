@@ -6,8 +6,10 @@
 //!   dict views, and a comprehension, generator expression, or list the function fills only by
 //!   appending that produces the item of a loop.
 //! - Through `map`, the element expression of a comprehension (a part of the item included),
-//!   and `range(len(x))` only the count carries ([`Carries::Count`]); an item of what carries
-//!   only a count has no source, and neither has a set or dict of it, whose equal keys merge.
+//!   and `range(len(x))` only the count carries ([`Carries::Count`]): one item per item of the
+//!   source. A step that may leave items out (a filter, an `if` of a comprehension, a set or the
+//!   keys of a dict) keeps some of the items but no count, and an item of what carries only a
+//!   count has no source.
 //! - The pieces `str.split` / `str.splitlines` (also after `strip`-like methods) cut are pieces of
 //!   their receiver's text ([`ItemOrigin::text`]): `CONST.split(";")` is fixed, and the reader
 //!   checks that a call whose text they cut returns text.
@@ -23,7 +25,9 @@
 //! pieces of its text), so each source is decided once per way of reading it.
 
 use super::paths::{Scalar, scalar};
-use super::{FnIndex, ItemStep, comprehension_id, is_immutable_kind};
+use super::{
+    FnIndex, ItemStep, Must, PathReader, Paths, Progress, comprehension_id, is_immutable_kind,
+};
 use crate::walk::{Answer, Budget, Closure, Def, Fallible, KeySet, Use, Visit, reach};
 use crate::{
     BinOpKind, BlockId, BuiltinKind, DictEntry, FunctionId, InstKind, ModuleIr, Terminator, VarId,
@@ -63,8 +67,8 @@ pub enum ItemSource {
 pub enum Carries {
     /// The source's items, some of them, or tuples holding them.
     Items,
-    /// One item per item of the source (that passes a filter): the count derives from it, the
-    /// items do not.
+    /// Exactly one item per item of the source: the count derives from it, the items do not. A
+    /// filter, a condition on what a comprehension produces, or a set keeps no count.
     Count,
 }
 
@@ -117,8 +121,9 @@ impl Steps {
     const COUNT: u8 = 2;
     /// The value's text is changed in place.
     const TEXT: u8 = 4;
-    /// The value is gathered into a set or the keys of a dict, which keeps one of equal items.
-    const DEDUP: u8 = 8;
+    /// Some of the value's items may be left out: by a filter, by a condition on what a
+    /// comprehension produces, or by a set or the keys of a dict, which keeps one of equal items.
+    const DROPS: u8 = 8;
 
     fn has(self, flag: u8) -> bool {
         self.flags & flag != 0
@@ -149,11 +154,16 @@ impl Steps {
     }
 
     /// The steps with a count taken first: an item or a piece of what carries only a count has
-    /// no source the walk can name, and neither has a set of it (equal results of different
-    /// items merge, so the count no longer follows the items; a set of the items themselves only
-    /// keeps some of them).
+    /// no source the walk can name, and a count with items left out after it no longer follows
+    /// the source's items.
     fn counted(self) -> Option<Self> {
-        (self.parts == 0 && !self.has(Self::PIECES | Self::DEDUP)).then(|| self.with(Self::COUNT))
+        (self.parts == 0 && !self.has(Self::PIECES | Self::DROPS)).then(|| self.with(Self::COUNT))
+    }
+
+    /// The steps with some items left out first: what is left are some of the source's items,
+    /// but no count of them.
+    fn dropped(self) -> Option<Self> {
+        (!self.has(Self::COUNT)).then(|| self.with(Self::DROPS))
     }
 
     /// What these steps make of `source`, of `function`: `None` when an item of a call's
@@ -322,7 +332,7 @@ impl<'m> ItemOrigins<'m> {
                 for e in entries {
                     match e {
                         DictEntry::KeyValue { key, .. } => walk.element(*key),
-                        DictEntry::Unpack { dict } => walk.ask(*dict, steps.with(Steps::DEDUP)),
+                        DictEntry::Unpack { dict } => walk.ask_with(*dict, steps.dropped()),
                     }
                 }
             }
@@ -367,7 +377,7 @@ impl<'m> ItemOrigins<'m> {
             InstKind::EnterWith { .. } => walk.call_at(b, i),
             InstKind::MakeGenExpr {
                 func_id: Some(g), ..
-            } => self.of_generator(*g, walk),
+            } => self.of_generator(budget, *g, walk),
             InstKind::BinOp {
                 op: BinOpKind::Add,
                 lhs,
@@ -396,13 +406,13 @@ impl<'m> ItemOrigins<'m> {
     ) {
         // A set keeps one of equal items; an element it holds is not changed by that.
         let gathered = if kind == BuiltinKind::Set {
-            walk.steps.with(Steps::DEDUP)
+            walk.steps.dropped()
         } else {
-            walk.steps
+            Some(walk.steps)
         };
         for (k, e) in elems.iter().enumerate() {
             if ix.shape().is_starred(dst, k) {
-                walk.ask(*e, gathered);
+                walk.ask_with(*e, gathered);
             } else {
                 walk.element(*e);
             }
@@ -410,8 +420,13 @@ impl<'m> ItemOrigins<'m> {
         if is_immutable_kind(kind) || !self.may_grow(ix, dst) {
             return;
         }
-        walk.steps = gathered;
-        self.of_appends(budget, ix, dst, walk);
+        match gathered {
+            Some(steps) => {
+                walk.steps = steps;
+                self.of_appends(budget, ix, dst, walk);
+            }
+            None => walk.fail(),
+        }
     }
 
     /// What a list or set `root` holds when the function only appends to it (`append`, `add`):
@@ -421,7 +436,7 @@ impl<'m> ItemOrigins<'m> {
     fn of_appends(&self, budget: &Budget, ix: &FnIndex<'m>, root: VarId, walk: &mut Decision) {
         let shape = ix.shape();
         let aliases: RefCell<Vec<VarId>> = RefCell::new(Vec::new());
-        let appends: RefCell<Vec<(BlockId, VarId)>> = RefCell::new(Vec::new());
+        let appends: RefCell<Vec<(BlockId, usize, VarId)>> = RefCell::new(Vec::new());
         let alias_of = |u: &Use| match *u {
             Use::Phi(b, i) => Some(ix.f.block(b).phis[i as usize].dst),
             Use::Inst(b, i) => match &ix.f.block(b).insts[i as usize].kind {
@@ -457,7 +472,7 @@ impl<'m> ItemOrigins<'m> {
                                 && kwargs.is_empty()
                                 && args.len() == 1 =>
                             {
-                                appends.borrow_mut().push((b, args[0]));
+                                appends.borrow_mut().push((b, i as usize, args[0]));
                                 true
                             }
                             _ => false,
@@ -474,26 +489,28 @@ impl<'m> ItemOrigins<'m> {
             return walk.fail();
         }
         let aliases = aliases.into_inner();
-        for (b, value) in appends.into_inner() {
-            walk.produces(ix, b, value, &aliases);
+        let paths = Paths::new(ix, &PathReader::ir(), budget);
+        for (b, i, value) in appends.into_inner() {
+            walk.produces(ix, &paths, (b, i), value, &aliases);
         }
     }
 
     /// What iterating the generator expression `g` yields: what each `yield` produces.
-    fn of_generator(&self, g: FunctionId, walk: &mut Decision) {
+    fn of_generator(&self, budget: &Budget, g: FunctionId, walk: &mut Decision) {
         let gx = self.index(g);
+        let paths = Paths::new(&gx, &PathReader::ir(), budget);
         let mut inner = Decision {
             f: g,
             ..walk.clone_empty()
         };
         // A generator expression yields its element on each step; `yield` cannot appear in it.
         for bb in &gx.f.blocks {
-            for inst in &bb.insts {
+            for (i, inst) in bb.insts.iter().enumerate() {
                 if let InstKind::Yield {
                     value: Some(value), ..
                 } = inst.kind
                 {
-                    inner.produces(&gx, bb.id, value, &[]);
+                    inner.produces(&gx, &paths, (bb.id, i), value, &[]);
                 }
             }
         }
@@ -511,17 +528,11 @@ impl<'m> ItemOrigins<'m> {
                 return walk.call_at(b, i);
             }
             return match step {
-                ItemStep::Same(x) | ItemStep::Kept(x) => {
-                    let dedup = matches!(built, Some("set" | "frozenset" | "dict"));
-                    walk.ask(
-                        x,
-                        if dedup {
-                            steps.with(Steps::DEDUP)
-                        } else {
-                            steps
-                        },
-                    );
+                ItemStep::Same(x) if !matches!(built, Some("set" | "frozenset" | "dict")) => {
+                    walk.ask(x, steps);
                 }
+                // A filter, a set, or a dict leaves some items out.
+                ItemStep::Same(x) | ItemStep::Kept(x) => walk.ask_with(x, steps.dropped()),
                 ItemStep::Mapped(x) => walk.ask_counted(x),
                 ItemStep::Zip(args) if !args.is_empty() => {
                     for a in args {
@@ -652,6 +663,14 @@ impl Decision {
         self.next.push((f, v, steps));
     }
 
+    /// `v` read through `steps`, when the steps leave a source to read.
+    fn ask_with(&mut self, v: VarId, steps: Option<Steps>) {
+        match steps {
+            Some(steps) => self.ask(v, steps),
+            None => self.fail(),
+        }
+    }
+
     fn ask_counted(&mut self, v: VarId) {
         match self.steps.counted() {
             Some(steps) => self.ask(v, steps),
@@ -659,12 +678,22 @@ impl Decision {
         }
     }
 
-    /// What producing `value` in block `b` of `ix`'s function (an append, a `yield`) adds: the
-    /// item of the innermost loop around `b` adds that loop's items; any other value, a part of
+    /// What producing `value` at point `at` of `ix`'s function (an append, a `yield`) adds: the
+    /// item of the innermost loop around it adds that loop's items; any other value, a part of
     /// the item included (`r[0]`), one item per iteration of it; a value outside every loop one
-    /// element. A loop over one of `aliases` (the collection being filled) feeds itself.
-    fn produces(&mut self, ix: &FnIndex<'_>, b: BlockId, value: VarId, aliases: &[VarId]) {
+    /// element. Where some iterations that complete produce nothing (an `if` of a comprehension,
+    /// a `continue` before it), items are left out. A loop over one of `aliases` (the collection
+    /// being filled) feeds itself.
+    fn produces(
+        &mut self,
+        ix: &FnIndex<'_>,
+        paths: &Paths<'_, '_>,
+        at: (BlockId, usize),
+        value: VarId,
+        aliases: &[VarId],
+    ) {
         let shape = ix.shape();
+        let b = at.0;
         let Some(lp) = shape.innermost(b) else {
             let f = std::mem::replace(&mut self.f, ix.f.id);
             self.element(value);
@@ -684,12 +713,21 @@ impl Decision {
             return self.fail();
         }
         let value = shape.copy_root(value);
-        if value == item {
-            self.ask_in(ix.f.id, iterable, self.steps);
+        let every = shape
+            .innermost_index(b)
+            .map(|li| paths.on_every_iteration(li, at, Progress::Called))
+            == Some(Answer::Known(Must::Every));
+        let steps = if every {
+            Some(self.steps)
         } else {
-            let f = std::mem::replace(&mut self.f, ix.f.id);
-            self.ask_counted(iterable);
-            self.f = f;
+            self.steps.dropped()
+        };
+        let f = std::mem::replace(&mut self.f, ix.f.id);
+        match steps {
+            Some(steps) if value == item => self.ask(iterable, steps),
+            Some(_) if every => self.ask_counted(iterable),
+            _ => self.fail(),
         }
+        self.f = f;
     }
 }

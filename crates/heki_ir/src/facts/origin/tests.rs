@@ -302,15 +302,15 @@ fn steps_compose_in_the_order_python_applies_them() {
             .map(|o| o.text),
         Some(false)
     );
-    // A set of what carries only a count has no count that follows the items; a count of a set
-    // of the items is one per item kept.
-    assert!(items.with(Steps::DEDUP).counted().is_none());
+    // Leaving items out keeps some of the items but no count, in either order.
+    assert!(items.with(Steps::DROPS).counted().is_none());
+    assert!(counted.dropped().is_none());
     assert_eq!(
-        counted
-            .with(Steps::DEDUP)
-            .apply(f, ItemSource::Param(0))
+        items
+            .dropped()
+            .and_then(|s| s.apply(f, ItemSource::Param(0)))
             .map(|o| o.carries),
-        Some(Carries::Count)
+        Some(Carries::Items)
     );
     // Items of items are followed a few levels deep, and an element taken leaves one less.
     let deep = (0..MAX_PARTS).try_fold(items, |s, _| s.part()).unwrap();
@@ -519,7 +519,8 @@ def f(rows, ids):
             "param0",
             "open",
             "open",
-            "param0/count",
+            // A count of a set of the items: one per item kept, not per item.
+            "open",
             "open",
             "open",
             "open",
@@ -534,5 +535,44 @@ def f(rows, ids):
     assert_eq!(
         origins_at(src, "f", "# L", PythonVersion::PY311),
         vec!["open"]
+    );
+}
+
+#[test]
+fn a_filter_keeps_some_items_but_no_count() {
+    let src = r#"
+def f(rows, flag):
+    for x in [r for r in rows if r]:  # L
+        pass
+    for h in [(h, str(t)) for h, t in rows if t]:  # L
+        pass
+    for x in map(str, filter(None, rows)):  # L
+        pass
+    for x in filter(None, map(str, rows)):  # L
+        pass
+    for x in (str(r) for r in rows if r):  # L
+        pass
+    for i in range(len([r for r in rows if r])):  # L
+        pass
+    out = []
+    for r in rows:
+        if flag:
+            out.append(str(r))
+    for x in out:  # L
+        pass
+    kept = []
+    for r in rows:
+        if flag:
+            kept.append(r)
+    for x in kept:  # L
+        pass
+"#;
+    assert_eq!(
+        origins(src, "f", "# L"),
+        vec![
+            // Each comprehension's own loop comes first.
+            "param0", "param0", "param0", "open", "open", "open", "open", "param0", "open", "open",
+            "param0",
+        ]
     );
 }
