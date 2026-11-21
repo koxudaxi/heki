@@ -47,6 +47,10 @@ pub(crate) fn mut112(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         cx.index.propagates_typed_writes(),
         "`typed_writes` decides for MUT112"
     );
+    debug_assert!(
+        cx.index.opt_in_facts().return_origins,
+        "`opt_in_facts` decides for MUT112"
+    );
     let classes = ClassMethods::new(cx.units, cx.index);
     let found: Vec<Vec<Diagnostic>> = cx
         .units

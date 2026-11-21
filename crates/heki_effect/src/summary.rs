@@ -20,7 +20,7 @@ use crate::resolver::{
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
     CallTarget, Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey,
-    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, PerItem,
+    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, OptInFacts, PerItem,
     ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite,
     TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
@@ -129,13 +129,14 @@ pub(crate) fn summarize_module(
     own: (Arc<ModuleDecls>, DeclKeys),
     track: bool,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> FileSummary {
     let (own_decls, completion_reads) = own;
     let (mut file, reads) = if track {
-        decls.record(|| extract_module(input, decls, kb, contracts))
+        decls.record(|| extract_module(input, decls, kb, contracts, opt_in))
     } else {
         (
-            extract_module(input, decls, kb, contracts),
+            extract_module(input, decls, kb, contracts, opt_in),
             DeclKeys::default(),
         )
     };
@@ -150,6 +151,7 @@ fn extract_module(
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> FileSummary {
     let cx = TypeCtx::new(input, decls, kb);
     let mut file = FileSummary {
@@ -176,13 +178,13 @@ fn extract_module(
             qualname: func_qualname(f).to_owned(),
         };
         let (mut summary, mut sites, flow) =
-            Extractor::new(f, &key, &cx, &input.path, contracts).run();
+            Extractor::new(f, &key, &cx, &input.path, contracts, opt_in).run();
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
         if !f.is_module_body {
             for body in class_bodies_run_by(input.ir, f) {
                 let (s, body_sites, _) =
-                    Extractor::new(body, &key, &cx, &input.path, contracts).run();
+                    Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
                 absorb_class_body(&mut summary, s);
                 sites.extend(
                     body_sites
@@ -622,6 +624,8 @@ struct Extractor<'a> {
     maybe_new: FxHashSet<VarId>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
+    /// The opt-in facts the enabled rules read.
+    opt_in: OptInFacts,
 }
 
 /// A project call, for the sites of the object it returns (`SiteRole`).
@@ -797,6 +801,7 @@ impl<'a> Extractor<'a> {
         cx: &'a TypeCtx<'a>,
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
+        opt_in: OptInFacts,
     ) -> Self {
         let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
@@ -880,6 +885,7 @@ impl<'a> Extractor<'a> {
             track: false,
             maybe_new: FxHashSet::default(),
             ownership: false,
+            opt_in,
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -1555,19 +1561,23 @@ impl<'a> Extractor<'a> {
             }
         }
         self.resolve_construction();
-        self.returned_origins();
+        if self.opt_in.return_origins {
+            self.returned_origins();
+        }
         self.iterations();
-        let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
-        let container_iterations = iterations::container_iterations(
-            f,
-            self.cx,
-            &self.types,
-            &self.self_attr_alias,
-            &site_spans,
-            self.summary.is_generator,
-        );
-        if !container_iterations.is_empty() {
-            self.summary.iteration_facts_mut().container_iterations = container_iterations;
+        if self.opt_in.iterations {
+            let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
+            let container_iterations = iterations::container_iterations(
+                f,
+                self.cx,
+                &self.types,
+                &self.self_attr_alias,
+                &site_spans,
+                self.summary.is_generator,
+            );
+            if !container_iterations.is_empty() {
+                self.summary.iteration_facts_mut().container_iterations = container_iterations;
+            }
         }
         self.apply_declaration();
         if self.summary.is_cached_property && f.kind == FunctionKind::Sync {
@@ -1671,7 +1681,9 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        self.result_iterations(&iterated);
+        if self.opt_in.iterations {
+            self.result_iterations(&iterated);
+        }
         // Which call results a plain function returns (a generator's `return` value ends its
         // iteration and is no iterator handed out).
         let mut returned = vec![false; self.project_calls.len()];
@@ -1685,11 +1697,13 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        let results: FxHashSet<VarId> = by_dst.keys().copied().collect();
-        let held = iterations::held_results(f, &flow, &results, plain);
-        for call in &self.project_calls {
-            if held.contains(&call.dst) {
-                self.sites[call.site].result_held = true;
+        if self.opt_in.iterations {
+            let results: FxHashSet<VarId> = by_dst.keys().copied().collect();
+            let held = iterations::held_results(f, &flow, &results, plain);
+            for call in &self.project_calls {
+                if held.contains(&call.dst) {
+                    self.sites[call.site].result_held = true;
+                }
             }
         }
         // Each site with the position where the callee's body runs into this function's body
@@ -3184,6 +3198,9 @@ impl<'a> Extractor<'a> {
     /// An in-place change of the container `var` holds (`MUT113`): of a parameter itself, and of
     /// `self.<attr>` of a class whose iterators check for changes.
     fn container_change(&mut self, var: VarId, change: ContainerChange, span: Span) {
+        if !self.opt_in.iterations {
+            return;
+        }
         if let Some((i, None)) = self.param_alias.get(&var).cloned() {
             let facts = self.summary.iteration_facts_mut();
             iterations::merge_changes(&mut facts.changes_param_containers, [(i, change)]);

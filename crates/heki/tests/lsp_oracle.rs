@@ -1850,6 +1850,21 @@ fn steps_hash_writers() -> Vec<Step> {
 /// that the methods of its class family make in other modules (`heki_rules::family_readers`).
 fn steps_mut112() -> Vec<Step> {
     vec![
+        // The summaries carry the facts of `MUT112` and `MUT113` only while a rule reads them
+        // (`OptInFacts`): a configuration selecting them again re-indexes with the facts.
+        Step::new(
+            "MUT112 and MUT113 are no longer selected, and the function two modules below stops copying its argument",
+            vec![
+                Action::Configure(CONFIG.replace(", \"MUT112\", \"MUT113\"]", "]")),
+                save("pkg/own_prepare.py", OWN_PREPARE_SAME),
+            ],
+        )
+        .absent(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "MUT112 and MUT113 are selected again",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .present(&[("pkg/own_use.py", "MUT112")]),
         Step::new(
             "the function two modules below stops copying its argument",
             vec![save("pkg/own_prepare.py", OWN_PREPARE_SAME)],

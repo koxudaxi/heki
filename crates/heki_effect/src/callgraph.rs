@@ -280,11 +280,13 @@ fn recompute(
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
-    returned_results(
-        index,
-        out.get(func).map(Vec::as_slice).unwrap_or(&[]),
-        &mut s,
-    );
+    if index.opt_in.return_origins {
+        returned_results(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            &mut s,
+        );
+    }
     if !s.returns_self_attrs.is_empty() {
         drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }

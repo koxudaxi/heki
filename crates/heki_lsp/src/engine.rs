@@ -358,8 +358,13 @@ impl Workspace {
             .collect();
         let contracts = heki_rules::summary_contracts(env_cfg).map_err(EngineError::Rules)?;
         let typed_writes = heki_rules::typed_writes(env_cfg, &selection);
-        let summaries =
-            summarize_project_with_reads(&project.inputs(), &project.env.kb, contracts.as_deref());
+        let opt_in = heki_rules::opt_in_facts(&selection);
+        let summaries = summarize_project_with_reads(
+            &project.inputs(),
+            &project.env.kb,
+            contracts.as_deref(),
+            opt_in,
+        );
         let files = project
             .files
             .iter()
@@ -393,7 +398,7 @@ impl Workspace {
             errors,
         } = project;
         drop(parsed);
-        let index = ProjectIndex::build_for(summaries, contracts, typed_writes);
+        let index = ProjectIndex::build_for(summaries, contracts, typed_writes, opt_in);
         let decls = index.decl_passes();
         // The options of the rules (contract targets and patterns) are read by every check, and
         // an invalid one fails them all: the workspace fails to load, as `heki check` fails

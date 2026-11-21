@@ -650,10 +650,17 @@ which module imports which.
    (`typed_field_writes` with `ContainerMut`, `AliasContainerMut`, or `IndirectHelper` on a class
    of the family); with `MUT112` selected, propagation carries typed writes, and the language
    server re-checks the family of every changed method (`family_readers`).
+6. **Only when selected** (`OptInFacts::return_origins`, `heki_rules::opt_in_facts`): the
+   summaries carry `returns_origins`, `returns_results`, `returns_nodes`, `origin_nodes`, and
+   `ArgOrigin::origins`, and propagation resolves them, only with `MUT112` selected; a run
+   without it computes none of them. A configuration change re-indexes the language server's
+   project with the facts the new selection reads.
 
 #### `MUT113`: containers changed while a method iterates them (opt-in)
 The facts are in `EffectSummary::iterations` (`iterations::IterationFacts`, absent for the many
-functions with none).
+functions with none), with `CallSite::result_held`. The summaries carry them only with `MUT113`
+selected (`OptInFacts::iterations`), and propagation copies what callees change in place from
+them; a run without the rule computes none of them.
 
 1. Containers: a `self.<attr>` whose class (from the value inferred, an annotation, or the
    `__init__` assignment) is `dict`, `OrderedDict`, `defaultdict`, `Counter`, `set`, or `deque`
