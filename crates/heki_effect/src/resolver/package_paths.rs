@@ -5,9 +5,9 @@
 
 use super::{ModuleDecls, PathChange, imported_fqn};
 use crate::ModuleInput;
-use heki_ir::walk::{Answer, Budget, Use, Visit, reach};
+use heki_ir::walk::{Budget, Closure, Def, Join, Use};
 use heki_ir::{BinOpKind, FnIndex, InstKind, Terminator, VarId, comprehension_id};
-use rustc_hash::FxHashSet;
+use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 
 /// The functions of the standard library that read a package path they are given and leave it
@@ -34,14 +34,72 @@ pub(super) fn path_changes(
             decls,
             own: input.is_package.then_some(input.module_name.as_str()),
         };
-        for (package, held) in paths.held() {
-            if let Some(change) = paths.change(&package, &held) {
-                let joined = out.entry(package).or_insert(change);
-                *joined = (*joined).max(change);
-            }
+        let held = paths.held();
+        for (package, change) in paths.changes(&held) {
+            let joined = out.entry(package.to_owned()).or_insert(change);
+            *joined = (*joined).max(change);
         }
     }
     out
+}
+
+/// The packages a joined fact names: none, one (by its index among the packages whose paths a
+/// function holds), or several.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Packages {
+    #[default]
+    None,
+    One(u32),
+    Several,
+}
+
+impl Join for Packages {
+    fn join(&mut self, other: &Self) -> bool {
+        let joined = match (*self, *other) {
+            (_, Self::None) => *self,
+            (Self::None, other) => other,
+            (Self::One(a), Self::One(b)) if a == b => *self,
+            _ => Self::Several,
+        };
+        let grew = joined != *self;
+        *self = joined;
+        grew
+    }
+}
+
+/// What the uses of values holding a path do to it: the change they make whatever the package,
+/// and the packages whose `__path__` they bind the value to, which leaves that package's path as
+/// it is and makes any other package share its list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Uses {
+    change: Option<PathChange>,
+    bound: Packages,
+}
+
+impl Uses {
+    fn changing(change: Option<PathChange>) -> Self {
+        Self {
+            change,
+            bound: Packages::None,
+        }
+    }
+
+    /// What the uses do to the path of the package `package` (an index, as in [`Packages`]).
+    fn change_for(self, package: u32) -> Option<PathChange> {
+        match self.bound {
+            Packages::None => self.change,
+            Packages::One(bound) if bound == package => self.change,
+            _ => Some(PathChange::Replaced),
+        }
+    }
+}
+
+impl Join for Uses {
+    fn join(&mut self, other: &Self) -> bool {
+        let changed = other.change > self.change;
+        self.change = self.change.max(other.change);
+        self.bound.join(&other.bound) || changed
+    }
 }
 
 /// What one function does with the path of one package.
@@ -171,81 +229,155 @@ impl Paths<'_> {
         }
     }
 
-    /// How the function changes the path of `package`, which it holds as `held`: through the
-    /// values holding it ([`reach`] over copies, phis, and `+=`), the uses of each
-    /// ([`Self::use_change`]), and what the function binds to it ([`Self::stored`]).
-    fn change(&self, package: &str, held: &Held) -> Option<PathChange> {
-        let shape = &self.ix.shape;
-        let budget = Budget::of_function("heki_effect::resolver::package_paths::change", self.ix.f);
-        let mut values: FxHashSet<VarId> = FxHashSet::default();
-        let mut change = held.change;
-        let replaced = reach(
-            &budget,
-            held.loads.iter().chain(&held.stores).copied(),
-            |v, next| next.extend(shape.readers(v).iter().filter_map(|at| self.alias(*at, v))),
-            |v| {
-                values.insert(v);
-                let by_uses = shape
-                    .readers(v)
-                    .iter()
-                    .map(|at| self.use_change(package, *at, v))
-                    .max()
-                    .flatten();
-                change = change.max(by_uses);
-                match by_uses {
-                    Some(PathChange::Replaced) => Visit::Stop(()),
-                    _ => Visit::Expand,
-                }
-            },
-        );
-        match replaced {
-            Answer::Known(None) => held
-                .stores
-                .iter()
-                .map(|w| Some(self.stored(*w, &values)))
-                .fold(change, Option::max),
-            Answer::Known(Some(())) | Answer::Open => Some(PathChange::Replaced),
+    /// How the function changes the path of each package `held` names: the uses of the values
+    /// holding it ([`Self::uses`]), joined over the values each one reaches through copies, phis,
+    /// and `+=`, and what the function binds to it ([`Self::stored`]). The packages share one
+    /// budget and one answer per value: values holding the paths of many packages are each
+    /// decided once.
+    fn changes<'h>(&self, held: &'h BTreeMap<String, Held>) -> Vec<(&'h str, PathChange)> {
+        if held.is_empty() {
+            return Vec::new();
         }
+        let names: Vec<&str> = held.keys().map(String::as_str).collect();
+        let package = |name: Option<&str>| match name.map(|n| names.binary_search(&n)) {
+            Some(Ok(at)) => Packages::One(at as u32),
+            _ => Packages::Several,
+        };
+        let mut roots: FxHashMap<VarId, Packages> = FxHashMap::default();
+        for (at, h) in held.values().enumerate() {
+            for v in h.loads.iter().chain(&h.stores) {
+                roots.entry(*v).or_default().join(&Packages::One(at as u32));
+            }
+        }
+        let budget =
+            Budget::of_function("heki_effect::resolver::package_paths::changes", self.ix.f);
+        let uses: Closure<VarId, Uses> = Closure::new();
+        let holders: Closure<VarId, Packages> = Closure::new();
+        let mut out = Vec::new();
+        for (at, (name, h)) in held.iter().enumerate() {
+            let at = at as u32;
+            // A value holds the path of the package when every value it is made from does: a
+            // load of it, or a value bound to it.
+            let holds_path = |v: VarId| {
+                holders
+                    .ask(
+                        &budget,
+                        v,
+                        |x| match roots.get(&x) {
+                            Some(root) => *root,
+                            None if self.sources(x).is_some() => Packages::None,
+                            None => Packages::Several,
+                        },
+                        |x, next| {
+                            if !roots.contains_key(&x) {
+                                next.extend(self.sources(x).into_iter().flatten());
+                            }
+                        },
+                    )
+                    .map(|holder| *holder == Packages::One(at))
+                    .open_means(false)
+            };
+            let by_uses = h.loads.iter().chain(&h.stores).map(|start| {
+                uses.ask(
+                    &budget,
+                    *start,
+                    |v| self.uses(v, &package),
+                    |v, next| next.extend(self.aliases(v)),
+                )
+                .map(|joined| joined.change_for(at))
+                .open_means(Some(PathChange::Replaced))
+            });
+            let by_stores = h.stores.iter().map(|w| Some(self.stored(*w, holds_path)));
+            if let Some(change) = by_uses.chain(by_stores).fold(h.change, Option::max) {
+                out.push((name.as_str(), change));
+            }
+        }
+        out
     }
 
-    /// The value the use `at` of `v` gives that holds the same path: a copy, a phi, and `+=`
-    /// (which gives a list its own object back).
-    fn alias(&self, at: Use, v: VarId) -> Option<VarId> {
+    /// The values `v` is made from when it holds the same object as they do: the source of a
+    /// copy, the inputs of a phi, and the left operand of `+=`. `None` for any other value.
+    fn sources(&self, v: VarId) -> Option<Vec<VarId>> {
         let f = self.ix.f;
-        match at {
-            Use::Phi(b, i) => Some(f.block(b).phis[i as usize].dst),
-            Use::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
-                InstKind::Copy { dst, .. } => Some(*dst),
+        match self.ix.shape.def(v) {
+            Def::Phi(b, i) => Some(
+                f.block(b).phis[i as usize]
+                    .incoming
+                    .iter()
+                    .map(|(_, x)| *x)
+                    .collect(),
+            ),
+            Def::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
+                InstKind::Copy { src, .. } => Some(vec![*src]),
                 InstKind::BinOp {
-                    dst,
                     op: BinOpKind::Add,
                     lhs,
                     in_place: true,
                     ..
-                } if *lhs == v => Some(*dst),
+                } => Some(vec![*lhs]),
                 _ => None,
             },
-            Use::Terminator(_) => None,
+            Def::None | Def::Param => None,
         }
     }
 
-    /// What the use `at` of `v`, a value holding the path of `package`, does to the path. A copy,
-    /// a phi, and `+=` give values holding it too, whose own uses decide. Reading it changes
-    /// nothing; adding directories after its own appends; anything else may replace it,
-    /// handing it to code heki does not follow included.
-    fn use_change(&self, package: &str, at: Use, v: VarId) -> Option<PathChange> {
+    /// The values the uses of `v` give that hold the same object: copies, phis, and `+=` (which
+    /// gives a list its own object back).
+    fn aliases(&self, v: VarId) -> impl Iterator<Item = VarId> + '_ {
+        let f = self.ix.f;
+        self.ix
+            .shape
+            .readers(v)
+            .iter()
+            .filter_map(move |at| match *at {
+                Use::Phi(b, i) => Some(f.block(b).phis[i as usize].dst),
+                Use::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
+                    InstKind::Copy { dst, .. } => Some(*dst),
+                    InstKind::BinOp {
+                        dst,
+                        op: BinOpKind::Add,
+                        lhs,
+                        in_place: true,
+                        ..
+                    } if *lhs == v => Some(*dst),
+                    _ => None,
+                },
+                Use::Terminator(_) => None,
+            })
+    }
+
+    /// What the uses of `v`, a value holding a path, do to it ([`Self::use_of`]), joined.
+    fn uses(&self, v: VarId, package: &impl Fn(Option<&str>) -> Packages) -> Uses {
+        let mut joined = Uses::default();
+        for at in self.ix.shape.readers(v) {
+            joined.join(&self.use_of(*at, v, package));
+        }
+        joined
+    }
+
+    /// What the use `at` of `v`, a value holding a path, does to it. A copy, a phi, and `+=` give
+    /// values holding it too, whose own uses decide. Reading it changes nothing; adding
+    /// directories after its own appends; binding it to a package's `__path__` leaves that path
+    /// as it is (what binding it does is [`Self::stored`]'s) and shares its list with any other;
+    /// anything else may replace it, handing it to code heki does not follow included.
+    /// `package` gives the index of a package by its name.
+    fn use_of(&self, at: Use, v: VarId, package: &impl Fn(Option<&str>) -> Packages) -> Uses {
         let f = self.ix.f;
         let kind = match at {
             Use::Inst(b, i) => &f.block(b).insts[i as usize].kind,
-            Use::Phi(..) => return None,
+            Use::Phi(..) => return Uses::default(),
             Use::Terminator(b) => {
-                return match f.block(b).terminator {
+                return Uses::changing(match f.block(b).terminator {
                     Terminator::Branch { .. } => None,
                     _ => Some(PathChange::Replaced),
-                };
+                });
             }
         };
-        match kind {
+        let bound = |name: Option<&str>| Uses {
+            change: None,
+            bound: package(name),
+        };
+        Uses::changing(match kind {
             InstKind::Copy { .. }
             | InstKind::MakeIter { .. }
             | InstKind::Compare { .. }
@@ -272,25 +404,24 @@ impl Paths<'_> {
                 captured,
                 ..
             } => (*outer_iter != v || captured.contains(&v)).then_some(PathChange::Replaced),
-            kind if self.binds_path(package, kind, v) || self.only_reads(kind, v) => None,
+            InstKind::StoreGlobal { name, .. } if name == "__path__" => return bound(self.own),
+            InstKind::AttrStore { obj, attr, value } if attr == "__path__" && *value == v => {
+                return bound(self.imported(*obj).as_deref());
+            }
+            kind if self.binds_import(kind, v) || self.only_reads(kind, v) => None,
             _ => Some(PathChange::Replaced),
-        }
+        })
     }
 
-    /// Whether `kind` binds `v` to the path of `package` (what binding it does is
-    /// [`Self::stored`]'s), or to the name an import binds `v` to (`p` of `from plugins import
+    /// Whether `kind` binds `v` to the name an import binds it to (`p` of `from plugins import
     /// __path__ as p`).
-    fn binds_path(&self, package: &str, kind: &InstKind, v: VarId) -> bool {
+    fn binds_import(&self, kind: &InstKind, v: VarId) -> bool {
         match kind {
-            InstKind::StoreGlobal { name, .. } if name == "__path__" => self.own == Some(package),
             InstKind::StoreGlobal { name, .. } => {
                 matches!(
                     self.ix.shape.inst(v).map(|i| &i.kind),
                     Some(InstKind::Import { .. })
                 ) && self.ix.f.var_name(v) == Some(name.as_str())
-            }
-            InstKind::AttrStore { obj, attr, value } => {
-                attr == "__path__" && *value == v && self.imported(*obj).as_deref() == Some(package)
             }
             _ => false,
         }
@@ -320,18 +451,18 @@ impl Paths<'_> {
     }
 
     /// How binding `w` to the path changes it: the path with directories after its own
-    /// (`__path__ + [d]`, `__path__ += [d]`, `pkgutil.extend_path(__path__, __name__)`, `values`
-    /// holding the path) appends, and anything else replaces it.
-    fn stored(&self, w: VarId, values: &FxHashSet<VarId>) -> PathChange {
+    /// (`__path__ + [d]`, `__path__ += [d]`, `pkgutil.extend_path(__path__, __name__)`, where
+    /// `holds_path` tells the value holding the path) appends, and anything else replaces it.
+    fn stored(&self, w: VarId, holds_path: impl Fn(VarId) -> bool) -> PathChange {
         let w = self.ix.shape.copy_root(w);
         let appended = match self.ix.shape.inst(w).map(|i| &i.kind) {
             Some(InstKind::BinOp {
                 op: BinOpKind::Add,
                 lhs,
                 ..
-            }) => values.contains(lhs),
+            }) => holds_path(*lhs),
             Some(kind @ (InstKind::Call { args, .. } | InstKind::MethodCall { args, .. })) => {
-                args.first().is_some_and(|a| values.contains(a))
+                args.first().is_some_and(|a| holds_path(*a))
                     && self.called(kind).as_deref() == Some("pkgutil.extend_path")
             }
             _ => false,

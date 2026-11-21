@@ -896,6 +896,31 @@ const OWN_PATH_SHAPES: &[(&str, &str, bool, bool)] = &[
         false,
     ),
     (
+        "concatenated_in_a_loop",
+        "for directory in [\"/opt/plugins\", \"/opt/more\"]:\n    __path__ = __path__ + [directory]\n",
+        true,
+        false,
+    ),
+    (
+        "concatenated_after_adding",
+        "def setup():\n    global __path__\n    paths = __path__\n    paths += [\"/opt/plugins\"]\n    __path__ = paths + [\"/opt/more\"]\n",
+        true,
+        false,
+    ),
+    (
+        "concatenated_to_a_parameter",
+        "def setup(paths):\n    global __path__\n    __path__ = paths + [\"/opt/plugins\"]\n",
+        true,
+        true,
+    ),
+    // `paths` may be another list, which `__path__` then starts with.
+    (
+        "concatenated_after_a_choice",
+        "def setup(flag):\n    global __path__\n    paths = __path__ if flag else [\"/opt/plugins\"]\n    __path__ = paths + [\"/opt/more\"]\n",
+        true,
+        true,
+    ),
+    (
         "extend_path",
         "from pkgutil import extend_path\n\n__path__ = extend_path(__path__, __name__)\n",
         true,
@@ -1005,11 +1030,16 @@ const OTHERS_PATH_SHAPES: &[(&str, bool, bool)] = &[
     ("replaced", true, true),
     ("removed", true, true),
     ("listed", false, false),
+    // Both packages then share one list.
+    ("lent", true, true),
+    ("borrower", true, true),
 ];
 
 const CHANGING_PATHS: &str = r#"import pkgutil
 
+import pkg.borrower
 import pkg.grown
+import pkg.lent
 import pkg.listed
 import pkg.removed
 import pkg.replaced as replaced
@@ -1021,6 +1051,7 @@ replaced.__path__ = ["/opt/plugins"]
 for info in pkgutil.iter_modules(pkg.listed.__path__):
     pass
 del pkg.removed.__path__
+pkg.borrower.__path__ = pkg.lent.__path__
 
 
 def add_more():
@@ -1029,6 +1060,10 @@ def add_more():
 
 def rebind(module):
     module.__path__ = []
+
+
+def lend(module):
+    module.__path__ = pkg.lent.__path__
 "#;
 
 #[test]

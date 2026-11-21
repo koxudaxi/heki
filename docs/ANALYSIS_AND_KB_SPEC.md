@@ -1340,9 +1340,15 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    `Appended` for directories after the package's own (`append`, `extend`, `+=`, `__path__ +
    ds`, `pkgutil.extend_path`, `pkg_resources.declare_namespace`), `Replaced` for any other
    change or a use it does not follow (handing the list to a function other than a builtin
-   that only reads it and `pkgutil`'s readers, returning or storing it elsewhere). Each
-   function's values holding a path are walked with `reach` over copies, phis, and `+=` from
-   its loads and the values bound to it, and the uses of each decide. `ProjectDecls`
+   that only reads it and `pkgutil`'s readers, returning or storing it elsewhere). In each
+   function, the uses of the values holding a path (its loads and the values bound to it) are
+   joined over the values each reaches through copies, phis, and `+=` (a `Closure`, so a value
+   merging the paths of many packages is decided once); binding a value to a package's
+   `__path__` leaves that path as it is and shares the list with any other package the value
+   holds. A value bound to a path appends only when the value it adds to (`p + ds`,
+   `extend_path(p, ...)`) holds that path on every way it comes, back through copies, phis, and
+   `+=` (a second `Closure`). The walks of one function spend one budget; past it a package's
+   path counts as replaced. `ProjectDecls`
    joins them per package with the packages heki could not read (`changed_paths`, sorted, so
    the packages under a name are one range). The project modules and packages it looks up are
    declaration reads (`DeclKeys::modules`, `DeclKeys::package_paths`; a change of a package's
