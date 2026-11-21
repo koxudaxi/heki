@@ -3150,3 +3150,65 @@ fn the_values_holding_a_package_path_are_each_decided_once() {
         );
     }
 }
+
+/// Functions of one module each merging the `__path__` of two thousand packages through a chain
+/// of conditional aliases (`v1 = v0 if flag else requests.p1.__path__`), the first chain starting
+/// at a package of the project and inserting a directory before its own at the end.
+fn merged_package_paths(functions: usize, packages: usize) -> String {
+    let mut lines = vec!["import requests".to_owned(), "import pkg.plug".to_owned()];
+    for f in 0..functions {
+        let first = if f == 0 {
+            "pkg.plug".to_owned()
+        } else {
+            format!("requests.f{f}_0")
+        };
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def merge{f}(flag):"),
+            format!("    v0 = {first}.__path__"),
+        ]);
+        for i in 1..=packages {
+            lines.push(format!(
+                "    v{i} = v{} if flag else requests.f{f}_{i}.__path__",
+                i - 1
+            ));
+        }
+        lines.push(if f == 0 {
+            format!("    v{packages}.insert(0, flag)")
+        } else {
+            format!("    return len(v{packages})")
+        });
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The values holding the paths of many packages are decided once for all of them: each
+/// package's values reach every merge after its own, which walked once per package took time
+/// quadratic in the packages of a function. The project's package at the head of the first chain
+/// is still found changed.
+#[test]
+fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
+    let p = Project::new("bounds_merged_package_paths");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"env\"\nscopes = [\"probe.*\"]\nforbid = [\"reads-environment\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/plug/__init__.py", "")
+    .write("pkg/boot.py", &merged_package_paths(8, 2_000))
+    .write("clean/__init__.py", "")
+    .write(
+        "probe.py",
+        "from importlib import import_module\n\n\ndef plugin(name):\n    return import_module(f\"pkg.plug.{name}\")\n\n\ndef unrelated(name):\n    return import_module(f\"clean.{name}\")\n",
+    );
+    let found = check_within(&p, Duration::from_secs(10));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF201")
+            .map(|d| d["qualname"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["plugin"]
+    );
+}
