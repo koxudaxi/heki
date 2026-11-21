@@ -144,6 +144,13 @@ A Soundness-lane rewrite preserves meaning when these four agree before and afte
 of allocations, reference counts, the values of `id()`, traceback line numbers, and the message
 strings of built-in exceptions (their types are preserved).
 
+**Observed, although the language leaves it open**: the iteration order of a `set`. CPython fixes
+it for given elements and history (an `int` hashes to itself in every run), and whatever
+iterates, converts, formats, or returns the set shows it. Copying a set into a new table
+(`s | t`) and growing its table in place (`s |= t`) can order the same elements differently, so a
+rewrite from one to the other proves that nothing observes the order (`SetOrderUnobserved`). A
+dict iterates in insertion order, which both keep.
+
 ### 3.2 Assumptions (A1–A5)
 
 | ID | Name | Content | How heki treats it |
@@ -230,7 +237,7 @@ rewrite:
 | **R3** | The ecosystem catalog (Layer 2) describes the library: an entry's effect, and the condition under which it has it | An effect with a condition (`queue.Queue.put` waits only on a bounded queue) is established only when its condition is |
 | **R4** | Imports resolve as configured (`src`, `known-first-party`, the layout) | An import that does not resolve gives no fact |
 | **R5** | The checked files are the project: code outside them reaches a module only through its public names | A fact about the callers of a private function counts only the checked files. A receiver typed by a `Protocol`, or by a union with a `Protocol` member, stays unresolved: its structural implementers are never a complete set |
-| **R6** | A library call's argument is a waiting value unless heki establishes otherwise | A catalog entry that waits lists the argument values for which it returns at once (`time.sleep(0)`, a numeric host for `getaddrinfo`); a call whose argument is established as one of them is silent, and an argument heki cannot evaluate counts as waiting |
+| **R6** | A library call's argument is a waiting value unless heki establishes otherwise, and so are the arguments that opened the connection it runs on | A catalog entry that waits lists the argument values for which it returns at once (`time.sleep(0)`, a numeric host for `getaddrinfo`); a call whose argument is established as one of them is silent, and an argument heki cannot evaluate counts as waiting, a SQLAlchemy engine's or another DB-API connection's URL included. `sqlite3.connect` is the one exception, as its in-memory form is common: its connection waits only when heki establishes that the database argument names a file (`names_file`) |
 | **R7** | No asynchronous or resource-exhaustion exception (`MemoryError`, `KeyboardInterrupt`, a signal) is raised: without this, nothing would run "whenever" anything else does, as such an exception can arise at any instruction (A1(d) for rewrites) | Under R1, R3, and R4, a load of a defined local, of a module name bound once, of a builtin the module does not rebind, or of a member of an imported module, and a `list` or `tuple` display, do not raise; other attribute loads, subscripts, `set` and `dict` displays, calls, awaits, and operators may |
 
 "A branch heki cannot decide can go both ways" is not an assumption: it is what makes a report
@@ -256,8 +263,9 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
 - **Lowering**: `for` (the anonymous iterator becomes an explicit SSA variable through `MakeIter`
   and `IterNext`; **the `for.iter` header expression stays outside the loop body**), `while`,
   `with` / `async with`, `try` / `except` / `else` / `finally`, comprehensions, generator
-  expressions (`MakeGenExpr`), augmented assignments, unpacking, and `match` become basic
-  instructions.
+  expressions (`MakeGenExpr`), augmented assignments, unpacking, `match`, and f-strings (each
+  replacement field converted and formatted where it stands, `Convert` and `Format`, then
+  joined, `BuildString`) become basic instructions.
 - **First-class `await` / `yield`**: suspension points are explicit, and awaited calls are
   distinguished from synchronous calls.
 - **Classes, decorators, and loops**: natural loops with a `LoopBound` (`ConstSmall(k)` /
@@ -510,7 +518,7 @@ single-expression lints.)*
 | Rule ID | Default | Pattern → rewrite | Profitability | `heki check --fix` | Main safety obligations / profitability conditions |
 |---|---|---|---|---|---|
 | **OPT101** | Off (heuristic) | `x = x + [e]`, `x = x + [e1, *it]` (a list display on the right) → `x.append(e)` / `x.extend([...])` | `unconditional` | **Applied (when `safe`)** | Safety: `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe`, `EvalOrderPreserved` / Profit: `LoopCarried(x)` |
-| **OPT102** | Off (heuristic) | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s.add(e)`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`) / Profit: `LoopCarried` |
+| **OPT102** | Off (heuristic) | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s \|= {e}`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`; **the set is only tested afterwards, with `in`, `len`, truthiness, or `==`, since growing it in place can change its iteration order**, `SetOrderUnobserved`) / Profit: `LoopCarried` |
 | **OPT103** | Off (heuristic) | Quadratic accumulation of immutable values (`tuple +=`, `bytes +=`, `self.s +=`, ...) → a buffer and one final conversion | `size-dependent` | Suggestion only | Safety: `Unique`, `ExclusiveAccessAtWrite`, `ExactType(lhs / rhs)`, no intermediate reads (`NoIntermediateReads`), `ExceptionStateSafe` / Profit: `LoopCarried`, `NotConstSmall` (local `s += x` excluded: CPython already appends in place) |
 | **OPT110** | Off (heuristic) | `e in lst` in a loop → a `set` built before the loop | `size-dependent` | With `--include-size-dependent` | Safety: `ValueLoopInvariant(lst)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` / Profit: `NotConstSmall(lst)` |
 | **OPT111** | Off (heuristic) | `if v not in seen: seen.append(v)` in a loop → an auxiliary `set` | `size-dependent` | With `--include-size-dependent` | Safety: `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, no removals (`OnlyPairedAppends`) / Profit: `NotConstSmall` |

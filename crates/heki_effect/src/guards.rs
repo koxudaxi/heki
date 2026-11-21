@@ -30,7 +30,7 @@
 //! a callee's guards across a call site for both the fixpoint and the rules. Anything not
 //! recognized keeps the effect.
 
-use crate::resolver::{Val, aliases_of};
+use crate::resolver::{ProjectDecls, Val, aliases_of};
 use crate::{
     ArgBinding, BoundCallee, CallSite, ConstArg, ConstClass, EffectGuards, EffectSummary,
     GuardSubject, GuardTest, InputGuard, SiteRole, Slot,
@@ -175,17 +175,21 @@ const FILE_PROTOCOL: &[&str] = &[
     "writelines",
 ];
 
+/// The builtin kinds of displays and comprehensions, with their classes.
+const DISPLAY_CLASSES: [(BuiltinKind, ConstClass); 4] = [
+    (BuiltinKind::List, ConstClass::List),
+    (BuiltinKind::Tuple, ConstClass::Tuple),
+    (BuiltinKind::Set, ConstClass::Set),
+    (BuiltinKind::Dict, ConstClass::Dict),
+];
+
 impl ConstClass {
-    /// The class of a display or comprehension of `kind` (an f-string, `Str`, has none: a single
-    /// replacement field is the result of `__format__`, which may be a `str` subclass).
+    /// The class of a display or comprehension of `kind`.
     fn of_builtin(kind: BuiltinKind) -> Option<Self> {
-        match kind {
-            BuiltinKind::List => Some(Self::List),
-            BuiltinKind::Tuple => Some(Self::Tuple),
-            BuiltinKind::Set => Some(Self::Set),
-            BuiltinKind::Dict => Some(Self::Dict),
-            _ => None,
-        }
+        DISPLAY_CLASSES
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, class)| *class)
     }
 
     /// The buffer class a call of `module.name` constructs.
@@ -702,6 +706,8 @@ pub(crate) struct GuardInputs<'f, 'a> {
     pub scratch: &'f RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The catalog, for the awaits that finish a future (`EcosystemEntry::done_when_awaited`).
     pub kb: &'a EffectiveEcosystemKb,
+    /// The project the names those awaits call resolve in ([`ProjectDecls::catalog`]).
+    pub project: &'a ProjectDecls,
 }
 
 /// The guards of one function's own effect sites and call sites, computed on first use.
@@ -1579,7 +1585,7 @@ fn finished_by(cx: &GuardInputs<'_, '_>, kind: &InstKind) -> Option<FutureKey> {
         },
         _ => return None,
     };
-    let k = cx.kb.lookup(&symbol)?.done_when_awaited?;
+    let k = cx.project.catalog(cx.kb, &symbol)?.done_when_awaited?;
     if star_from.is_some_and(|s| s <= k) {
         return None;
     }

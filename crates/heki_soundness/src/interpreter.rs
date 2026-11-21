@@ -942,6 +942,16 @@ impl<'a> FnCtx<'a> {
                 }
                 self.after_def(st, *dst, span);
             }
+            InstKind::Convert { dst, value, .. } => {
+                self.step_format(st, *dst, *value, None, site, span);
+            }
+            InstKind::Format { dst, value, spec } => {
+                self.step_format(st, *dst, *value, *spec, site, span);
+            }
+            InstKind::BuildString { dst, .. } => {
+                self.fresh(st, *dst, BuiltinKind::Str, site, span, ElemKinds::Unknown);
+                self.after_def(st, *dst, span);
+            }
             InstKind::Compare { dst, op, lhs, rhs } => {
                 let (lt, rt) = (st.exact_type(*lhs), st.exact_type(*rhs));
                 let plain = |k: Option<BuiltinKind>| {
@@ -1198,6 +1208,28 @@ impl<'a> FnCtx<'a> {
             }
             InstKind::ExitWith { mgr, .. } => Self::escape_all(st, [*mgr], span),
         }
+    }
+
+    /// A conversion or a formatting of `value` (with the specification `spec`). A builtin
+    /// converts and formats itself with builtin code, which hands its items (to their
+    /// `__repr__`) but never the value itself to other code; another class's `__str__`,
+    /// `__repr__`, or `__format__` may keep the value and the specification.
+    fn step_format(
+        &self,
+        st: &mut FrameState,
+        dst: VarId,
+        value: VarId,
+        spec: Option<VarId>,
+        site: AllocId,
+        span: Span,
+    ) {
+        if self.exact_on_every_path(st, value, 0) {
+            self.fresh(st, dst, BuiltinKind::Str, site, span, ElemKinds::Unknown);
+        } else {
+            Self::escape_all(st, std::iter::once(value).chain(spec), span);
+            Self::opaque(st, dst, "formatted value", span);
+        }
+        self.after_def(st, dst, span);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1637,6 +1669,27 @@ impl<'a> FnCtx<'a> {
             });
         }
         out
+    }
+
+    /// The exact type each instruction of `bb` gives the value it defines, stepping the block
+    /// once from its entry state.
+    pub(crate) fn defined_types(
+        &self,
+        an: &Analysis,
+        bb: BlockId,
+    ) -> Vec<(VarId, Option<BuiltinKind>)> {
+        an.block_in[bb.0 as usize]
+            .clone()
+            .map_or_else(Vec::new, |mut st| {
+                let insts = self.f.block(bb).insts.iter().enumerate();
+                insts
+                    .filter_map(|(i, inst)| {
+                        let mut eff = InstEffects::default();
+                        self.step(&mut st, bb, i, inst, &mut eff);
+                        inst.kind.dst().map(|d| (d, st.exact_type(d)))
+                    })
+                    .collect()
+            })
     }
 
     /// State immediately before instruction `idx` of `bb` (`idx == insts.len()`: before the

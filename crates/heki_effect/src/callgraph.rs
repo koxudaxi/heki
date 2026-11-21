@@ -374,12 +374,13 @@ pub(crate) fn site_must_chain(
             effects,
             unconditional,
             ..
-        } => {
-            (effects.contains(&e) && unconditional & crate::effect_bit(e) != 0).then(|| SiteMust {
-                chain: vec![site_hop(site, path, symbol.clone())],
-                witnesses: vec![(symbol.clone(), symbol.clone())],
-            })
-        }
+        } => (effects.contains(&e) && unconditional & crate::effect_bit(e) != 0).then(|| {
+            let hop = site_hop(site, path, symbol.clone());
+            SiteMust {
+                chain: vec![hop.clone()],
+                witnesses: vec![hop],
+            }
+        }),
         CallTarget::Project(callees) => {
             let mut out = SiteMust::default();
             for bc in callees {
@@ -400,7 +401,9 @@ pub(crate) fn site_must_chain(
                 let Some(sink) = chain.last() else {
                     continue;
                 };
-                out.witnesses.push((bc.callee.fqn(), sink.callee.clone()));
+                if !out.witnesses.contains(sink) {
+                    out.witnesses.push(CallHop::clone(sink));
+                }
                 if out.chain.is_empty() || chain.len() + 1 < out.chain.len() {
                     out.chain = std::iter::once(site_hop(site, path, bc.callee.fqn()))
                         .chain(chain.iter().map(|h| CallHop::clone(h)))
@@ -417,15 +420,26 @@ pub(crate) fn site_must_chain(
 pub struct SiteMust {
     /// The shortest chain from the call to the effect.
     pub chain: Vec<CallHop>,
-    /// Per implementation that returns normally (its fqn, or the Layer 2 symbol), the call
-    /// that has the effect at the end of its chain.
-    pub witnesses: Vec<(String, String)>,
+    /// Per implementation that returns normally, the call that has the effect at the end of its
+    /// chain, where that call is (each call once).
+    pub witnesses: Vec<CallHop>,
 }
 
 impl SiteMust {
-    /// The calls with the effect at the end of the chains, each once.
+    /// The functions called with the effect at the end of the chains, each once.
     pub fn sinks(&self) -> BTreeSet<&str> {
-        self.witnesses.iter().map(|(_, s)| s.as_str()).collect()
+        self.witnesses.iter().map(|h| h.callee.as_str()).collect()
+    }
+
+    /// What a report claims the call runs: each of [`Self::sinks`].
+    pub fn target(&self) -> String {
+        self.sinks().into_iter().collect::<Vec<_>>().join(", ")
+    }
+
+    /// The related locations of a report: the shortest chain, then each witness off it.
+    pub fn related(&self) -> Vec<CallHop> {
+        let off_chain = self.witnesses.iter().filter(|w| !self.chain.contains(w));
+        self.chain.iter().chain(off_chain).cloned().collect()
     }
 }
 

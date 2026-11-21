@@ -1212,7 +1212,7 @@ fn exact_claims_establish_each_premise() {
             (
                 72,
                 "EFF101",
-                "`get` always runs a waiting call on the event loop: `requests.get` (in `pkg.premises.Child.get`) or `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
+                "`get` always runs a waiting call on the event loop: `requests.get` (in `Remote.get`) or `requests.post` (in `Local.get`)"
             ),
             (
                 76,
@@ -1277,12 +1277,12 @@ fn exact_claims_establish_each_premise() {
             (
                 137,
                 "EFF103",
-                "every iteration over parameter `xs` sends a database statement: `sqlite3.Connection.executemany` (in `pkg.premises.OtherStore.save`) or `sqlite3.Connection.execute` (in `pkg.premises.SqlStore.save`)"
+                "every iteration over parameter `xs` sends a database statement: `sqlite3.Connection.executemany` (in `OtherStore.save`) or `sqlite3.Connection.execute` (in `SqlStore.save`)"
             ),
             (
                 141,
                 "EFF101",
-                "`get` always runs a waiting call on the event loop: `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Child.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
+                "`get` always runs a waiting call on the event loop: `requests.post` (in `Local.get`) or `requests.get` (in `Remote.get`)"
             ),
             (
                 154,
@@ -1335,5 +1335,31 @@ fn exact_claims_establish_each_premise() {
                 "every iteration over the rows of `sqlite3.Connection.execute` sends a database statement: `sqlite3.Connection.execute`"
             ),
         ]
+    );
+    // Each implementation's waiting call is named, and related, where it is: `Child.get` reaches
+    // `requests.get` through `super().get`, in `Remote.get`.
+    let witnesses = diags
+        .iter()
+        .find(|d| d["line"] == 72)
+        .map(|d| {
+            let related: Vec<(u64, &str)> = d["related"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| (r["line"].as_u64().unwrap(), r["message"].as_str().unwrap()))
+                .collect();
+            (d["target"].as_str().unwrap(), related)
+        })
+        .unwrap();
+    assert_eq!(
+        witnesses,
+        (
+            "requests.get, requests.post",
+            vec![
+                (72, "`tp_two_sinks` calls `pkg.premises.Local.get`"),
+                (24, "`Local.get` calls `requests.post`"),
+                (19, "`Remote.get` calls `requests.get`"),
+            ]
+        )
     );
 }

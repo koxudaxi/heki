@@ -174,7 +174,7 @@ def set_or_parenthesized(items):
     s = set()
     for g in items:
         s = (s | {g})
-    return s
+    return len(s)
 
 
 def int_flags(items):
@@ -390,7 +390,7 @@ def set_or_built(items):
     s = set()
     for g in items:
         s = s | set([g, -g])
-    return s
+    return len(s), -1 in s
 
 
 class Encoder:
@@ -405,6 +405,188 @@ class Encoder:
             self.data += b"x"
             self.parts += (i,)
         return self.data, self.parts
+
+
+# ==============================================================================
+# OPT102 on a set: `s |= t` grows the set in place, `s | t` builds a new one, and
+# the two can iterate in different orders
+# ==============================================================================
+def set_only_tested(items):
+    """`in`, `len`, truthiness, `==` with a set, and `del` never see the order."""
+    s = set()
+    for g in items:
+        s = s | {g}
+    facts = (len(s), bool(s), not s, s == {0, 1}, s != {2})
+    hits = 0
+    for p in (0, 3, 7):
+        if p in s:
+            hits += 1
+        if p not in s:
+            hits -= 1
+    if s:
+        hits += 10
+    del s
+    return facts, hits
+
+
+def set_tested_in_loop(items):
+    """A de-duplicating loop tests the set while it grows."""
+    seen = set()
+    out = []
+    for g in items:
+        if g % 3 in seen:
+            continue
+        seen = seen | {g % 3}
+        out.append(g)
+    return out
+
+
+def set_two_writes(items):
+    """Two accumulations and set operators on exact sets: every value is only tested."""
+    s = set()
+    for g in items:
+        if g % 2:
+            s = s | {g}
+        else:
+            s = s | {-g}
+        s |= {0}
+    both = s & {1, -2}
+    return len(s), len(both), 1 in s
+
+
+def set_returned(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    return s
+
+
+def set_sorted(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    return sorted(s)
+
+
+def set_iterated(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    out = []
+    for v in s:
+        out.append(v)
+    return out
+
+
+def set_counted_by_generator(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    return sum(1 for v in s)
+
+
+def set_popped(items):
+    s = {-1}
+    for g in items:
+        s = s | {g}
+    return s.pop()
+
+
+def set_appended(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    held = []
+    held.append(s)
+    return len(held)
+
+
+def set_stored(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    pair = [s]
+    return len(pair)
+
+
+def set_yielded(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    yield s
+
+
+def set_formatted(items):
+    """A replacement field shows the set's text, in its order."""
+    s = set()
+    for g in items:
+        s = s | {g}
+    return f"{s}"
+
+
+def set_compared_with_parameter(items, other):
+    s = set()
+    for g in items:
+        s = s | {g}
+    return s == other
+
+
+def set_compared_with_a_merge(items, other, flag):
+    s = set()
+    for g in items:
+        s = s | {g}
+    t = s if flag else other
+    return s == t
+
+
+def set_combined_with_parameter(items, other):
+    s = set()
+    for g in items:
+        s = s | {g}
+    return len(s - other)
+
+
+def set_combined_then_listed(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    both = s | {100}
+    return list(both)
+
+
+def set_merged_into_another(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    out = set()
+    view = out
+    out |= s
+    return list(view)
+
+
+def set_copied_then_listed(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    t = s
+    return list(t)
+
+
+def set_subset_test(items):
+    s = set()
+    for g in items:
+        s = s | {g}
+    return s <= {1, 2, 3}
+
+
+def set_read_in_handler(items):
+    s = set()
+    try:
+        for g in items:
+            s = s | {int(g)}
+    except ValueError:
+        return sorted(s)
+    return len(s)
 
 
 def run(fn, *args):
@@ -471,6 +653,26 @@ def main() -> int:
             run(Report().render, items),
             run(capped_by_test, [b"ab"] * n),
             run(element_attributes, items),
+            run(set_only_tested, items),
+            run(set_tested_in_loop, items),
+            run(set_two_writes, items),
+            run(set_returned, items),
+            run(set_sorted, items),
+            run(set_iterated, items),
+            run(set_counted_by_generator, items),
+            run(set_popped, items),
+            run(set_appended, items),
+            run(set_stored, items),
+            run(lambda xs: list(set_yielded(xs)), items),
+            run(set_formatted, items),
+            run(set_compared_with_parameter, items, {0, 1}),
+            run(set_compared_with_a_merge, items, {0}, n % 2),
+            run(set_combined_with_parameter, items, {1}),
+            run(set_combined_then_listed, items),
+            run(set_merged_into_another, items),
+            run(set_copied_then_listed, items),
+            run(set_subset_test, items),
+            run(set_read_in_handler, [str(i) for i in items] + ["x"][: n % 2]),
             repr(logged),
         ]
     print("\n".join(lines))

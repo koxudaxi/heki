@@ -2955,6 +2955,14 @@ const HANDLER: &str = "from app.slow import wait\n\n\nasync def handle():\n    w
 const DUP_MODULE: &str = "def one():\n    pass\n";
 const DUP_PACKAGE: &str = "import time\n\n\ndef two():\n    time.sleep(1)\n";
 const DUP_USER: &str = "from app.dup import two\n\n\nasync def use():\n    two()\n";
+// A catalog module's name, which a project module takes over (`steps_unread_module`).
+const SHADOW_USER: &str = "import httpx\n\n\nasync def fetch(url):\n    return httpx.get(url)\n";
+const SHADOW: &str = "def get(url):\n    return url\n";
+const SHADOW_BROKEN: &str = "def get(url):\n    return url\nprint \"done\"\n";
+const SHADOW_BLOCKING: &str = "import time\n\n\ndef get(url):\n    time.sleep(1)\n";
+// Python runs it; heki does not read the encoding.
+const SHADOW_UNREAD: &str =
+    "# -*- coding: cp1252 -*-\nimport time\n\n\ndef get(url):\n    time.sleep(1)\n";
 // A helper under `src/` without package markers, imported by its `src`-layout name.
 const SRC_UTIL: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
 const SRC_CALLER: &str = "from pkg.util import wait\n\n\nasync def call():\n    wait()\n";
@@ -2991,6 +2999,7 @@ fn edge_files() -> Vec<(&'static str, String)> {
         ("app/dup.py", DUP_MODULE),
         ("app/dup/__init__.py", DUP_PACKAGE),
         ("app/dup_user.py", DUP_USER),
+        ("app/shadow_user.py", SHADOW_USER),
         ("src/pkg/util.py", SRC_UTIL),
         ("caller.py", SRC_CALLER),
         ("python/tool/util.py", SRC_UTIL),
@@ -3018,6 +3027,7 @@ fn edge_steps() -> Vec<Step> {
             .present(&[
                 ("app/handler.py", "EFF101"),
                 ("app/dup_user.py", "EFF101"),
+                ("app/shadow_user.py", "EFF101"),
                 ("caller.py", "EFF101"),
                 ("py_caller.py", "EFF101"),
                 ("named_caller.py", "EFF101"),
@@ -3025,6 +3035,7 @@ fn edge_steps() -> Vec<Step> {
             .absent(&[("app/render.py", "EFF201"), ("lib_caller.py", "EFF101")]),
     ];
     steps.extend(steps_shared_module_name());
+    steps.extend(steps_unread_module());
     steps.extend(steps_boundary_calls());
     steps.extend(steps_recursive_snapshot());
     steps.extend(steps_moved_lines());
@@ -3138,6 +3149,48 @@ fn steps_shared_module_name() -> Vec<Step> {
             vec![save("app/dup/__init__.py", DUP_PACKAGE)],
         )
         .present(&[("app/dup_user.py", "EFF101")]),
+    ]
+}
+
+/// A project module takes the name of a module the catalog lists: a name under it resolves to the
+/// project's module, and to nothing while that module does not parse, never to the catalog.
+fn steps_unread_module() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a module that does not parse takes a catalog module's name",
+            vec![Action::Create("httpx.py", SHADOW_BROKEN.to_owned())],
+        )
+        .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new("the module parses", vec![save("httpx.py", SHADOW)])
+            .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new(
+            "the module stops parsing again",
+            vec![save("httpx.py", SHADOW_BROKEN)],
+        )
+        .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new("the module blocks", vec![save("httpx.py", SHADOW_BLOCKING)])
+            .present(&[("app/shadow_user.py", "EFF101")]),
+        Step::new(
+            "an unsaved edit is discarded while the disk holds an encoding heki does not read",
+            vec![
+                Action::Change("httpx.py", SHADOW.to_owned()),
+                Action::Write("httpx.py", SHADOW_UNREAD.to_owned()),
+                Action::Close("httpx.py"),
+            ],
+        )
+        .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new(
+            "the closed module is written blocking on the disk",
+            vec![Action::Write("httpx.py", SHADOW_BLOCKING.to_owned())],
+        )
+        .present(&[("app/shadow_user.py", "EFF101")]),
+        Step::new(
+            "the closed module is written in an encoding heki does not read",
+            vec![Action::Write("httpx.py", SHADOW_UNREAD.to_owned())],
+        )
+        .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new("the module is deleted", vec![Action::Delete("httpx.py")])
+            .present(&[("app/shadow_user.py", "EFF101")]),
     ]
 }
 

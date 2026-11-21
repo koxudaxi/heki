@@ -1,7 +1,7 @@
 use crate::facts::{LoopHint, SMALL_MAX};
 use crate::{
-    A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
-    FunctionId, FunctionKind, Inst, InstKind, IrFunction, LocalAnnotation, LoopBound,
+    A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, Conversion,
+    DictEntry, FunctionId, FunctionKind, Inst, InstKind, IrFunction, LocalAnnotation, LoopBound,
     LoopCarriedInfo, ModuleIr, NaturalLoop, ParamInfo, PhiNode, Terminator, UnaryOpKind, VarId,
 };
 use heki_ast::raw_ast::{self as ast, Expr, Pattern, Stmt};
@@ -426,7 +426,11 @@ impl<'a> ModuleLowerer<'a> {
             passed_from: None,
         };
         let fn_id = self.alloc_function_slot(placeholder);
-        self.lowered_at.insert(spec.span, fn_id);
+        // The module body is no definition, and its span (the whole source) is also the span of
+        // a definition or an expression that spans the whole file.
+        if !spec.is_module_body {
+            self.lowered_at.insert(spec.span, fn_id);
+        }
 
         let mut builder = FnBuilder::new(
             self,
@@ -616,14 +620,17 @@ struct FnBuilder<'m, 'a> {
     may_raise: Vec<bool>,
     preds: Vec<Vec<BlockId>>,
     sealed: Vec<bool>,
+    /// A path from the entry reaches the block through the edges added so far. Lowering adds
+    /// the edges entering a block before the ones leaving it, except a loop's back edges, which
+    /// come from blocks reached only through its header: marking a block when an edge from a
+    /// marked one enters it finds every block a path reaches.
+    reachable: Vec<bool>,
     cur_bb: BlockId,
 
     var_names: Vec<Option<String>>,
     current_def: FxHashMap<(BlockId, String), VarId>,
     incomplete_phis: FxHashMap<BlockId, Vec<(String, VarId)>>,
     var_replacements: FxHashMap<VarId, VarId>,
-    /// The source of each `Copy`.
-    copy_src: FxHashMap<VarId, VarId>,
 
     exc_target_stack: Vec<BlockId>,
     /// The statements around the current point that a jump out of them runs, innermost last.
@@ -703,12 +710,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             may_raise: vec![false],
             preds: vec![Vec::new()],
             sealed: vec![true], // entry block has no predecessors
+            reachable: vec![true],
             cur_bb: BlockId(0),
             var_names: Vec::new(),
             current_def: FxHashMap::default(),
             incomplete_phis: FxHashMap::default(),
             var_replacements: FxHashMap::default(),
-            copy_src: FxHashMap::default(),
             exc_target_stack: Vec::new(),
             unwind: Vec::new(),
             loop_stack: Vec::new(),
@@ -754,6 +761,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.may_raise.push(false);
         self.preds.push(Vec::new());
         self.sealed.push(sealed);
+        self.reachable.push(false);
         // Any block allocated while inside active loops belongs to those loop bodies.
         for lp in &mut self.loop_stack {
             lp.body_blocks.push(id);
@@ -765,6 +773,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let p = &mut self.preds[to.0 as usize];
         if !p.contains(&from) {
             p.push(from);
+        }
+        if self.reachable[from.0 as usize] {
+            self.reachable[to.0 as usize] = true;
         }
     }
 
@@ -790,9 +801,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     fn emit(&mut self, kind: InstKind, span: Span) {
         self.spend_unit();
-        if let InstKind::Copy { dst, src } = kind {
-            self.copy_src.insert(dst, src);
-        }
         self.ensure_open_block();
         let bb = self.cur_bb;
         if kind.may_raise() {
@@ -1147,13 +1155,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 break;
             }
         }
-        // The one other value can be a copy of the phi: a loop no path enters has only its back
-        // edge, which passes the phi around through copies. Taking that value would close the
-        // copies into a cycle; the phi stays, with no value from outside.
+        // In a block a path from the entry reaches, the one other value comes in on every path
+        // and is defined before the block. A loop no path enters has only its back edges, whose
+        // one other value can be computed from the phi (`d = d.x` in a loop after `return`):
+        // taking it would define a value from itself, a cycle of definitions without a phi. The
+        // phi stays there, with no value from outside.
         if trivial
             && let Some(s) = same
             && s != phi_var
-            && !self.copies(s, phi_var)
+            && self.reachable[bb.0 as usize]
         {
             self.var_replacements.insert(phi_var, s);
             return s;
@@ -1189,19 +1199,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     fn canonical_var(&self, v: VarId) -> VarId {
         resolve_replacement(&self.var_replacements, v)
-    }
-
-    /// Whether `v` is `of` through copies. The copies form no cycle: only replacing a phi can
-    /// close one, and `finish_phi` asks this first.
-    fn copies(&self, v: VarId, of: VarId) -> bool {
-        let mut cur = v;
-        while let Some(&src) = self.copy_src.get(&cur) {
-            cur = self.canonical_var(src);
-            if cur == of {
-                return true;
-            }
-        }
-        false
     }
 
     // -------------------------------------------------------------------------
@@ -3140,33 +3137,32 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 dc.key.as_deref(),
                 span,
             ),
-            Expr::FString(_) => {
-                for field in heki_ast::interpolated_expressions(expr) {
-                    let _ = self.lower_expr(field);
+            Expr::FString(fs) => {
+                let mut parts = Vec::new();
+                let mut has_text = false;
+                for part in fs.value.iter() {
+                    match part {
+                        ast::FStringPartRef::Literal(lit) => has_text |= !lit.value.is_empty(),
+                        ast::FStringPartRef::FString(f) => {
+                            has_text |= self.lower_fields(&f.elements, &mut parts);
+                        }
+                    }
                 }
-                let dst = self.fresh_var(None);
+                let dst = self.joined(parts, has_text, span);
                 if let Some(head) = heki_ast::fstring_head(expr) {
                     self.str_heads.push((dst, head));
                 }
-                self.emit(
-                    InstKind::AllocBuiltin {
-                        dst,
-                        kind: BuiltinKind::Str,
-                        elems: Vec::new(),
-                    },
-                    span,
-                );
                 dst
             }
             // A template keeps the values of its replacement fields (`Template.values`, a tuple)
-            // and is otherwise opaque; a format specification's fields become text.
+            // unconverted and unformatted, and is otherwise opaque; a format specification's
+            // fields are formatted into its text.
             Expr::TString(ts) => {
-                let kept = heki_ast::template_values(ts);
-                let mut values = Vec::with_capacity(kept.len());
-                for field in heki_ast::interpolated_expressions(expr) {
-                    let v = self.lower_expr(field);
-                    if kept.iter().any(|k| std::ptr::eq(*k, field)) {
-                        values.push(v);
+                let mut values = Vec::new();
+                for field in ts.value.iter().flat_map(|t| t.elements.interpolations()) {
+                    values.push(self.lower_expr(&field.expression));
+                    if let Some(spec) = &field.format_spec {
+                        let _ = self.lower_format_spec(spec);
                     }
                 }
                 let held = self.fresh_var(None);
@@ -3181,6 +3177,87 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 self.emit_const(ConstLiteral::Other, span)
             }
         }
+    }
+
+    /// Lower the replacement fields of `elements` in order, pushing each formatted field onto
+    /// `parts`; whether the elements write any literal text (a field's `x=` included).
+    fn lower_fields(
+        &mut self,
+        elements: &'a ast::InterpolatedStringElements,
+        parts: &mut Vec<VarId>,
+    ) -> bool {
+        let mut has_text = false;
+        for element in elements {
+            match element {
+                ast::InterpolatedStringElement::Literal(_) => has_text = true,
+                ast::InterpolatedStringElement::Interpolation(field) => {
+                    has_text |= field.debug_text.is_some();
+                    parts.push(self.lower_field(field));
+                }
+            }
+        }
+        has_text
+    }
+
+    /// One replacement field: its value, converted, then formatted with its specification,
+    /// which is evaluated after the conversion.
+    fn lower_field(&mut self, field: &'a ast::InterpolatedElement) -> VarId {
+        let span = Span::from(field.range);
+        let mut value = self.lower_expr(&field.expression);
+        let conversion = match field.conversion {
+            ast::ConversionFlag::Str => Some(Conversion::Str),
+            ast::ConversionFlag::Repr => Some(Conversion::Repr),
+            ast::ConversionFlag::Ascii => Some(Conversion::Ascii),
+            // `{x=}` shows `repr(x)` unless the field has a conversion or a specification.
+            ast::ConversionFlag::None
+                if field.debug_text.is_some() && field.format_spec.is_none() =>
+            {
+                Some(Conversion::Repr)
+            }
+            ast::ConversionFlag::None => None,
+        };
+        if let Some(conversion) = conversion {
+            let dst = self.fresh_var(None);
+            self.emit(
+                InstKind::Convert {
+                    dst,
+                    value,
+                    conversion,
+                },
+                span,
+            );
+            value = dst;
+        }
+        let spec = field
+            .format_spec
+            .as_ref()
+            .map(|spec| self.lower_format_spec(spec));
+        let dst = self.fresh_var(None);
+        self.emit(InstKind::Format { dst, value, spec }, span);
+        dst
+    }
+
+    /// The text of a format specification: a constant, or an f-string of its own.
+    fn lower_format_spec(&mut self, spec: &'a ast::InterpolatedStringFormatSpec) -> VarId {
+        let span = Span::from(spec.range);
+        let mut parts = Vec::new();
+        let has_text = self.lower_fields(&spec.elements, &mut parts);
+        if parts.is_empty() {
+            let text: String = spec.elements.literals().map(|l| &*l.value).collect();
+            return self.emit_const(ConstLiteral::Str(text), span);
+        }
+        self.joined(parts, has_text, span)
+    }
+
+    /// The `str` of an f-string's literal text and formatted fields: a field alone is its own
+    /// result (which `__format__` may return as a subclass), anything else a new `str`.
+    fn joined(&mut self, parts: Vec<VarId>, has_text: bool, span: Span) -> VarId {
+        if let ([field], false) = (parts.as_slice(), has_text) {
+            return *field;
+        }
+        let dst = self.fresh_var(None);
+        self.emit(InstKind::BuildString { dst, parts }, span);
+        dst
     }
 
     /// `a < b < c` is `a < b and b < c` with `b` evaluated once: each comparison but the last
@@ -3729,6 +3806,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.may_raise = vec![false];
         self.preds = vec![Vec::new()];
         self.sealed = vec![true];
+        self.reachable = vec![true];
         self.incomplete_phis.clear();
         self.var_replacements.clear();
         self.finished_loops.clear();
@@ -4873,11 +4951,18 @@ fn map_cmpop(op: ast::CmpOp) -> CompareOpKind {
 
 fn rewrite_inst_vars(kind: &mut InstKind, resolve: impl Fn(VarId) -> VarId) {
     match kind {
-        InstKind::AllocBuiltin { elems, .. } => {
-            for e in elems {
+        InstKind::AllocBuiltin { elems: parts, .. } | InstKind::BuildString { parts, .. } => {
+            for e in parts {
                 *e = resolve(*e);
             }
         }
+        InstKind::Format { value, spec, .. } => {
+            *value = resolve(*value);
+            if let Some(s) = spec {
+                *s = resolve(*s);
+            }
+        }
+        InstKind::Convert { value, .. } => *value = resolve(*value),
         InstKind::DictLiteral { entries, .. } => {
             for e in entries {
                 match e {

@@ -32,10 +32,13 @@ Each step of the chain is established, not assumed:
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
-  (`time.sleep(delay)` with `delay` a parameter is not established); a SQLite connection waits
-  only when heki establishes that it was opened on a file (a literal or a module constant
-  without an in-memory form, or a path built from such parts): any other connection may be in
-  memory.
+  (`time.sleep(delay)` with `delay` a parameter is not established). An argument heki cannot
+  evaluate counts as one the call waits on (assumption R6), the URL or name a database
+  connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
+  connection opened from a value heki does not know waits. `sqlite3.connect` is the one
+  exception, as its in-memory form is common: a SQLite connection waits only when heki
+  establishes that it was opened on a file (a literal or a module constant without an in-memory
+  form, or a path built from such parts and `__file__`), and any other may be in memory.
 
 Waits on another thread (`Thread.join()`, `Event.wait()`, acquiring a lock, `Queue.get()`,
 `Future.result()`, `Executor.shutdown()`) end at once when that thread has done its part, which
@@ -62,8 +65,9 @@ Its premises:
   can run (assumptions R2 and R5), each a synchronous function run as written, and each has the
   fact.
 - **Waits**: the last call waits for the network, a database, a child process, or a sleep on
-  every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate
-  (R6).
+  every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate,
+  the arguments that opened its connection included (R6; a SQLite connection only when it was
+  established to be opened on a file).
 
 Not part of the claim: how long the call waits, and how often the reported call runs.
 

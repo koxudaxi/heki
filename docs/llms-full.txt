@@ -413,6 +413,12 @@ Two more cases stay quiet by design:
 - A blocking wait on a `concurrent.futures.Future` known to be done (`if f.done():`, after
   `await asyncio.wrap_future(f)`) returns at once.
 
+A file that cannot be read or does not parse is reported (exit code 2), and every other file is
+checked as usual. A file that does not parse cannot run either, so heki assumes nothing it would
+do: it calls nothing, defines no subclass, and patches no `builtins`. Its module still owns its
+name: `import requests` reaches a project's own `requests.py`, and while that file does not
+parse, the names under it resolve to nothing, never to the `requests` of the catalog.
+
 A function whose model would pass its size budget (4 units per byte of its source, at most
 50,000; real code stays below one unit per byte) is left unmodeled: heki rewrites nothing in it
 and treats its body as one call it cannot resolve. `heki assumptions` lists it with the hazard
@@ -583,7 +589,9 @@ oldest version `requires-python` admits.
 ### Source encodings
 
 heki reads the encoding a PEP 263 declaration names: UTF-8 (with or without a BOM), Latin-1, and
-ASCII. A file declaring any other encoding is reported as an error and not checked.
+ASCII. A file declaring any other encoding is reported as an error and not checked. Unlike a file
+that does not parse, such a file runs: what it defines and does stays unknown to the analysis of
+the other files.
 
 ### Sizes known only at run time
 
@@ -1584,7 +1592,7 @@ The recorded set can only shrink:
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink | records the smaller entry |
 | An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1) | reports it the same way and leaves the file as it is (exit code 1) |
-| A file could not be analyzed (a syntax error, an unreadable file) | reports the error (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
+| A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
 
@@ -1666,8 +1674,10 @@ With a baseline configured, the hook fails only on new findings.
 With SARIF:
 
 - findings (exit code `1`) become code-scanning alerts and keep the step green;
-- a configuration, read, or syntax error (exit code `2`) still fails the step: heki then writes
-  SARIF only for the files it could analyze, which would hide the others;
+- a configuration, read, or syntax error (exit code `2`) still fails the step; a file heki could
+  not read or parse is an `error` notification of the run
+  (`invocations[0].toolExecutionNotifications`, with `executionSuccessful: false`), and the
+  results of the other files are kept;
 - results carry the message, the location, the call chain (`relatedLocations`), and the help
   (`properties.help`; SARIF's `rules[].help` is one text per rule, and a report's help can name
   the object it is about).
@@ -1734,6 +1744,8 @@ Source: https://heki.koxudaxi.dev/cli-reference/
 # CLI Reference
 
 Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
+
+A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
 
 ## `heki`
 
@@ -2033,7 +2045,10 @@ Exact claims hold in every run consistent with seven assumptions
 - **R4**: imports resolve as configured.
 - **R5**: the checked files are the project.
 - **R6**: a library call's argument is a value it waits on (a nonzero sleep, a host name to look
-  up) unless heki establishes otherwise.
+  up) unless heki establishes otherwise, and so are the arguments that opened the connection it
+  runs on (a SQLAlchemy engine or another DB-API connection opened from a URL heki does not
+  know waits). `sqlite3.connect` is the one exception, as its in-memory form is common: a SQLite
+  connection waits only when heki establishes that it was opened on a file.
 - **R7**: no asynchronous or resource-exhaustion exception (`MemoryError`, `KeyboardInterrupt`, a
   signal) is raised. Under it, loading a local, a module name bound once, a builtin, or a member
   of an imported module, and building a `list` or `tuple` display, do not raise; other attribute
@@ -2270,7 +2285,8 @@ Code actions edit the version of the document their diagnostics were computed on
   an entry that grew).
 - A file belongs to the project when `heki check` would find it. A file that an ignore file, a
   hidden directory, or `exclude` leaves out is not analyzed, also when it is created or opened.
-- A file that does not parse is left out of the project until it parses again.
+- A file that does not parse is a module heki knows nothing about until it parses again, as in
+  `heki check`: the names under it resolve to nothing in the other files.
 - A configuration `heki check` rejects (an unknown rule, a contract target that is not
   `Class.attr`, an invalid pattern) is logged as a warning, and the server analyzes nothing until
   it is fixed.
@@ -2846,10 +2862,13 @@ Each step of the chain is established, not assumed:
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
-  (`time.sleep(delay)` with `delay` a parameter is not established); a SQLite connection waits
-  only when heki establishes that it was opened on a file (a literal or a module constant
-  without an in-memory form, or a path built from such parts): any other connection may be in
-  memory.
+  (`time.sleep(delay)` with `delay` a parameter is not established). An argument heki cannot
+  evaluate counts as one the call waits on (assumption R6), the URL or name a database
+  connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
+  connection opened from a value heki does not know waits. `sqlite3.connect` is the one
+  exception, as its in-memory form is common: a SQLite connection waits only when heki
+  establishes that it was opened on a file (a literal or a module constant without an in-memory
+  form, or a path built from such parts and `__file__`), and any other may be in memory.
 
 Waits on another thread (`Thread.join()`, `Event.wait()`, acquiring a lock, `Queue.get()`,
 `Future.result()`, `Executor.shutdown()`) end at once when that thread has done its part, which
@@ -2876,8 +2895,9 @@ Its premises:
   can run (assumptions R2 and R5), each a synchronous function run as written, and each has the
   fact.
 - **Waits**: the last call waits for the network, a database, a child process, or a sleep on
-  every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate
-  (R6).
+  every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate,
+  the arguments that opened its connection included (R6; a SQLite connection only when it was
+  established to be opened on a file).
 
 Not part of the claim: how long the call waits, and how often the reported call runs.
 
@@ -4423,7 +4443,8 @@ def bfs(graph: dict[int, list[int]], start: int) -> list[int]:
 Proven safe only when the list is created in the function, never leaves it (not returned,
 stored, or passed to other code except read-only builtins such as `len`), and every use has a
 `deque` equivalent: no sorting, no slicing, no indexes other than `0` and `-1`, no `==`
-against lists. An annotation the rewrite cannot turn into a `deque` one (`Sequence[str]`, a
+against lists, and no text of it (a replacement field of an f-string, `str()`), which differs
+for a `deque`. An annotation the rewrite cannot turn into a `deque` one (`Sequence[str]`, a
 union) or another annotated declaration of the variable blocks the fix, so that a type checker
 accepts the fixed file.
 
@@ -6053,7 +6074,13 @@ Applied by `heki check --fix` only when proven safe, with the same obligations a
   `bytes` / `bool` / `float` values and the later entries are constants or local names;
   `d = {**d, **other}` with an unknown mapping `other` is not rewritten;
 - an update that inserts several keys stops halfway when an insertion raises, where the display
-  left `d` unchanged: it is not applied when an exception handler reads `d`.
+  left `d` unchanged: it is not applied when an exception handler reads `d`;
+- `s |= t` grows the set's table in place, while `s = s | t` copies it into a new one, and the
+  two can iterate the same elements in different orders (an `int` set in the same order in every
+  run). The set form is applied only when every later use of the set just tests it (`x in s`,
+  `len(s)`, truthiness, `==` / `!=` with a builtin value); a set that is iterated, converted
+  (`sorted(s)`, `list(s)`), formatted, returned, stored, yielded, or passed to other code keeps
+  `s = s | t`. A dict keeps its insertion order either way.
 
 
 ---
