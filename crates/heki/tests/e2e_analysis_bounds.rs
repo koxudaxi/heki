@@ -2045,11 +2045,11 @@ fn locked_class(name: &str, count: usize, body: Vec<String>) -> Project {
     p
 }
 
-/// Thousands of tests of `self`'s state before thousands of acquisitions of one lock: the tests
-/// on every path to every acquisition come from one walk up the dominator tree per lock, not
-/// one per acquisition.
+/// Thousands of tests of `self`'s state before thousands of acquisitions of one lock and as many
+/// calls: the tests on every path to each block come from one pass over the dominator tree, not
+/// from a walk per acquisition or per call site.
 #[test]
-fn owner_tests_before_many_acquisitions_take_one_walk_per_lock() {
+fn state_tests_before_many_acquisitions_and_calls_take_one_pass() {
     let n = 2_000;
     let mut body = vec!["    def run(self):".to_owned()];
     for i in 0..n {

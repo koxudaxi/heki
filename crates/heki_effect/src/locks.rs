@@ -5,11 +5,19 @@
 //! function that closures capture. An
 //! acquisition is a `with` or `async with` over an instance of a catalog class flagged
 //! `non_reentrant_lock`, an awaited `acquire()` of one, or a blocking `acquire()` the catalog
-//! lists. `EffectSummary::acquires_locks` holds the function's own acquisitions and those of the
-//! calls that run in its body on its own thread or task, in the function's names: a callee's
+//! lists. [`LockFacts::acquires`] holds the function's own acquisitions and those of the calls
+//! that run in its body on its own thread or task, in the function's names: a callee's
 //! parameter becomes the caller's argument; a global and a cell stay what they are. A call that
 //! only creates a coroutine or a generator, a function run on a worker thread, and a callable
 //! handed to code heki does not follow take nothing at the call.
+//!
+//! A name is the same object on both sides only while nothing binds it again: a function that
+//! may bind a name ([`LockFacts::rebinds`] for a global or a closure variable,
+//! `EffectSummary::mutated_param_paths` for an attribute of a parameter), itself or through its
+//! calls, takes no lock under that name for its callers, and a holder that binds it, or calls
+//! such a function, no longer holds what the name reaches. The tests of state on every path to
+//! an acquisition ([`StateTests`]) are those of the acquiring function and of every function on
+//! the way from the holder's call: each call site keeps the tests on every path to it.
 
 use crate::guards;
 use crate::held::{Acquisitions, Change};
@@ -20,7 +28,9 @@ use crate::{
 };
 use crate::{callgraph, owned_chain};
 use heki_ast::Span;
-use heki_ir::{BlockId, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{
+    BlockId, ConstLiteral, DominatorTree, Inst, InstKind, IrFunction, Terminator, VarId,
+};
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -83,7 +93,7 @@ impl ObjRef {
     }
 }
 
-/// One lock a function takes (`EffectSummary::acquires_locks`).
+/// One lock a function takes ([`LockFacts::acquires`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockAcquire {
     /// The lock's catalog class (`threading.Lock`).
@@ -119,6 +129,63 @@ impl LockAcquire {
         let mut out = self.clone();
         crate::zero_hop_spans(&mut out.chain);
         out
+    }
+}
+
+/// A function's `EFF109` facts (`EffectSummary::locks`; computed only while the rule runs,
+/// `OptInFacts::locks`). Both are propagated to callers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockFacts {
+    /// The locks the function takes when its body runs, itself or through the calls that run
+    /// there on its thread or task, in its own names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub acquires: BTreeMap<ObjRef, LockAcquire>,
+    /// The module globals and closure variables the function may bind or delete, itself or
+    /// through its calls. The attributes of parameters it may bind are in
+    /// `EffectSummary::mutated_param_paths`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rebinds: BTreeSet<ObjRef>,
+}
+
+pub(crate) static NO_LOCK_FACTS: LockFacts = LockFacts {
+    acquires: BTreeMap::new(),
+    rebinds: BTreeSet::new(),
+};
+
+impl LockFacts {
+    /// Copy with every source location zeroed (Early Cutoff).
+    pub(crate) fn without_locations(&self) -> Self {
+        Self {
+            acquires: (self.acquires.iter())
+                .map(|(lock, acq)| (lock.clone(), acq.without_locations()))
+                .collect(),
+            rebinds: self.rebinds.clone(),
+        }
+    }
+
+    /// Add the facts of `other`: its acquisitions ([`add_acquisition`]) and what it binds.
+    pub(crate) fn absorb(&mut self, other: LockFacts) {
+        for (lock, acq) in other.acquires {
+            add_acquisition(&mut self.acquires, lock, acq);
+        }
+        self.rebinds.extend(other.rebinds);
+    }
+}
+
+/// Whether the function with facts `facts` may bind the name `lock` (its own names): then the
+/// lock its body takes under that name may be another object than the one the name reached
+/// at the call.
+pub(crate) fn may_rebind(facts: &crate::EffectSummary, lock: &ObjRef) -> bool {
+    match lock {
+        ObjRef::Param {
+            param,
+            attr: Some(attr),
+        } => facts
+            .mutated_param_paths
+            .get(param)
+            .is_some_and(|paths| paths.contains(attr)),
+        ObjRef::Param { attr: None, .. } => false,
+        ObjRef::Global(_) | ObjRef::Cell { .. } => facts.lock_facts().rebinds.contains(lock),
     }
 }
 
@@ -218,7 +285,8 @@ pub struct SiteLock {
 
 impl crate::ProjectIndex {
     /// The locks the project callees of `site` (in file `path`) take in its caller's body, on
-    /// the caller's thread or task ([`Self::delivery`]), in the caller's names.
+    /// the caller's thread or task ([`Self::delivery`]), in the caller's names; not one taken
+    /// under a name the callee may bind first ([`may_rebind`]).
     pub fn site_locks(&self, path: &Path, site: &CallSite) -> Vec<SiteLock> {
         let mut out = Vec::new();
         for bc in site.project_callees() {
@@ -232,7 +300,10 @@ impl crate::ProjectIndex {
             };
             let lead = callgraph::lead_hops(site, path, &bc.callee, d.via);
             let rewrite = callgraph::rewrites(callee, d.from);
-            for (lock, acq) in &facts.acquires_locks {
+            for (lock, acq) in &facts.lock_facts().acquires {
+                if may_rebind(facts, lock) {
+                    continue;
+                }
                 let Some((lock, acq)) =
                     through_call(site, bc, lock, acq, &lead, rewrite, &BTreeMap::new())
                 else {
@@ -250,6 +321,32 @@ impl crate::ProjectIndex {
             }
         }
         out
+    }
+
+    /// The names of the caller of `site` that its project callees may bind ([`may_rebind`]),
+    /// in the caller's names: an attribute of a parameter, a module global, a closure variable.
+    pub fn site_rebinds(&self, site: &CallSite) -> Vec<ObjRef> {
+        let callees = site
+            .project_callees()
+            .iter()
+            .filter_map(|bc| Some((bc, self.summary(&bc.callee)?)));
+        callees
+            .flat_map(|(bc, callee)| {
+                let attrs = callee
+                    .mutated_param_paths
+                    .iter()
+                    .flat_map(|(param, paths)| {
+                        (paths.iter().filter(|a| !a.is_empty())).map(|a| ObjRef::Param {
+                            param: *param,
+                            attr: Some(a.clone()),
+                        })
+                    });
+                let names = attrs.chain(callee.lock_facts().rebinds.iter().cloned());
+                names
+                    .filter_map(|name| name.through(bc))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 }
 
@@ -272,8 +369,10 @@ pub struct LockSteps {
 
 /// The lock acquisitions of `f` (the function `key`) in the blocks a run reaches, and what
 /// each instruction does to them: a `with` or an `acquire()` takes one, a `release()` gives
-/// back the `acquire()`s of its lock, and an `ExitWith` the acquisitions of its `with`
-/// statement.
+/// back the acquisitions of its lock, an `ExitWith` those of its `with` statement, and binding
+/// the name of a lock (`self._lock = threading.Lock()`, [`rebound_name`]) those of that name,
+/// which no longer reaches the held object. `rebound_by_call` gives the names the calls
+/// anchored at an instruction may bind (`ProjectIndex::site_rebinds`).
 pub fn lock_steps<'i>(
     tcx: &TypeCtx<'_>,
     f: &IrFunction,
@@ -281,6 +380,7 @@ pub fn lock_steps<'i>(
     types: &FxHashMap<VarId, Val>,
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
     live: &Live,
+    rebound_by_call: &dyn Fn(&Inst) -> Vec<ObjRef>,
 ) -> LockSteps {
     let class_of = |v: VarId| lock_class(tcx, f, types, def, v);
     let mut steps = LockSteps {
@@ -289,6 +389,7 @@ pub fn lock_steps<'i>(
         takes: FxHashMap::default(),
         releases: FxHashMap::default(),
     };
+    let mut rebound = Vec::new();
     for bb in f.blocks.iter().filter(|b| live.block(b.id)) {
         for (i, inst) in bb.insts.iter().enumerate() {
             match lock_step(tcx, &inst.kind, def, &class_of) {
@@ -312,9 +413,19 @@ pub fn lock_steps<'i>(
                         steps.releases.insert((bb.id, i), lock);
                     }
                 }
-                None => {}
+                None => {
+                    let mut names = rebound_by_call(inst);
+                    names.extend(rebound_name(tcx, f, key, types, def, &inst.kind));
+                    if !names.is_empty() {
+                        rebound.push(((bb.id, i), names));
+                    }
+                }
             }
         }
+    }
+    for (at, names) in rebound {
+        let given = steps.taken.released(|t| names.contains(&t.lock));
+        steps.changes.insert(at, Change::Give(given));
     }
     for bb in &f.blocks {
         for (i, inst) in bb.insts.iter().enumerate() {
@@ -329,6 +440,61 @@ pub fn lock_steps<'i>(
         steps.changes.insert(*at, Change::Give(given));
     }
     steps
+}
+
+/// The name an instruction of `f` (the function `key`) binds or deletes, as [`obj_ref`] names
+/// objects: an attribute of a parameter or of a module, a module global, or a variable that
+/// closures capture (in the function binding it, or `nonlocal`).
+pub fn rebound_name<'i>(
+    tcx: &TypeCtx<'_>,
+    f: &IrFunction,
+    key: &FuncKey,
+    types: &FxHashMap<VarId, Val>,
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+    kind: &InstKind,
+) -> Option<ObjRef> {
+    let own_cell = |name: &str| {
+        f.captured_vars
+            .iter()
+            .any(|c| c == name)
+            .then(|| ObjRef::Cell {
+                owner: key.fqn(),
+                name: name.to_owned(),
+            })
+    };
+    match kind {
+        InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } => {
+            let obj = through_copies(def, *obj);
+            if let Some(param) = f.params.iter().take(64).position(|p| p.var == obj) {
+                return Some(ObjRef::Param {
+                    param: u8::try_from(param).ok()?,
+                    attr: Some(attr.clone()),
+                });
+            }
+            match types.get(&obj) {
+                Some(Val::Ref(fqn)) => Some(ObjRef::Global(
+                    tcx.project.canonical(&format!("{fqn}.{attr}")),
+                )),
+                _ => None,
+            }
+        }
+        InstKind::StoreGlobal { name, .. }
+        | InstKind::Delete {
+            name, global: true, ..
+        } => Some(ObjRef::Global(tcx.global_fqn(name))),
+        InstKind::StoreDeref { name, .. } | InstKind::Delete { name, .. } => {
+            match tcx.captured(f, name) {
+                Some((owner, _)) => Some(ObjRef::Cell {
+                    owner,
+                    name: name.clone(),
+                }),
+                None => own_cell(name),
+            }
+        }
+        // Reading a captured variable binds nothing.
+        InstKind::LoadDeref { .. } => None,
+        _ => own_cell(f.var_name(kind.dst()?)?),
+    }
 }
 
 /// How an instruction takes or gives back a lock.
@@ -501,143 +667,209 @@ fn through_copies<'i>(def: &dyn Fn(VarId) -> Option<&'i Inst>, mut var: VarId) -
     var
 }
 
-/// The most tests of a lock owner's state an acquisition keeps; past it, the acquisition counts
-/// as guarded ([`LockAcquire::tests_known`] is false).
+/// The most tests of state a block or an acquisition keeps; past it, every test may be one, and
+/// an acquisition behind them counts as guarded ([`LockAcquire::tests_known`] is false).
 const MAX_OWNER_TESTS: usize = 16;
 
-/// The dominator tree of a function's reachable blocks: each block's immediate dominator, its
-/// depth, and its position in a preorder walk.
-pub struct DomTree {
-    idom: Vec<Option<BlockId>>,
-    depth: Vec<u32>,
-    pre: Vec<u32>,
-}
-
-impl DomTree {
-    /// From the immediate dominators (`None` for a block a run does not reach).
-    pub fn new(f: &IrFunction, idom: Vec<Option<BlockId>>) -> Self {
-        let n = f.blocks.len();
-        let mut depth = vec![0u32; n];
-        let mut children: Vec<Vec<BlockId>> = vec![Vec::new(); n];
-        let mut root = None;
-        // An immediate dominator comes before its blocks in reverse postorder.
-        for b in f.rpo_blocks() {
-            match idom[b.0 as usize] {
-                Some(d) if d == b => root = Some(b),
-                Some(d) => {
-                    depth[b.0 as usize] = depth[d.0 as usize] + 1;
-                    children[d.0 as usize].push(b);
-                }
-                None => {}
-            }
-        }
-        let mut pre = vec![u32::MAX; n];
-        let mut next = 0u32;
-        let mut stack: Vec<BlockId> = root.into_iter().collect();
-        while let Some(b) = stack.pop() {
-            pre[b.0 as usize] = next;
-            next += 1;
-            stack.extend(children[b.0 as usize].iter().rev().copied());
-        }
-        Self { idom, depth, pre }
-    }
-
-    fn up(&self, b: BlockId) -> Option<BlockId> {
-        self.idom[b.0 as usize].filter(|d| *d != b)
-    }
-
-    /// The nearest block dominating both (blocks a run reaches).
-    fn common(&self, mut a: BlockId, mut b: BlockId) -> BlockId {
-        let up = |x: BlockId| self.up(x).expect("two blocks of one tree meet at its root");
-        while a != b {
-            let (da, db) = (self.depth[a.0 as usize], self.depth[b.0 as usize]);
-            if da >= db {
-                a = up(a);
-            }
-            if db >= da {
-                b = up(b);
-            }
-        }
-        a
-    }
-}
-
-/// The tests of state on every path to every block of `blocks` (the acquisitions of one lock,
-/// in blocks a run reaches) ([`LockAcquire::tested_attrs`], `tested_calls`, `tested_globals`).
-#[derive(Debug, Default)]
+/// The tests of state on every path to a block, a call site, or the acquisitions of one lock:
+/// the attributes of the parameters that the branch conditions read, the project methods
+/// called on a parameter whose result they test, and the module globals they read. Code
+/// changing one of them before it gets there may keep it from going on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateTests {
-    pub attrs: BTreeSet<String>,
-    pub calls: BTreeSet<FuncKey>,
+    /// `(parameter, attribute)`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub attrs: BTreeSet<(u8, String)>,
+    /// `(parameter, method)`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub calls: BTreeSet<(u8, FuncKey)>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub globals: BTreeSet<String>,
+    /// Past [`MAX_OWNER_TESTS`]: every test may be one (the sets are empty).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub many: bool,
 }
 
-/// The tests of state on every path to every block of `blocks`: the attributes the branch
-/// conditions read on parameter `owner` (the lock's owner, when a parameter holds the lock), the
-/// project methods called on it whose result they test (`resolve` gives a method's
-/// definitions), and the module globals they read (`global` gives a name's fully qualified
-/// one). `None` past [`MAX_OWNER_TESTS`]. One walk up the dominator tree from the blocks'
-/// common dominator: a block dominating them all ends in a branch before each of them, unless
-/// it is one of them.
-pub fn owner_tests<'i>(
-    f: &IrFunction,
-    dom: &DomTree,
+impl StateTests {
+    fn is_empty(&self) -> bool {
+        !self.many && self.attrs.is_empty() && self.calls.is_empty() && self.globals.is_empty()
+    }
+
+    /// Past [`MAX_OWNER_TESTS`], keep none and say so.
+    fn cap(&mut self) {
+        if self.attrs.len() + self.calls.len() + self.globals.len() > MAX_OWNER_TESTS {
+            *self = Self {
+                many: true,
+                ..Self::default()
+            };
+        }
+    }
+}
+
+/// The tests of state on every path to each block of a function a run reaches
+/// ([`StateTests`]): those of its immediate dominator, and what the condition of the branch
+/// ending that dominator reads. Blocks below no branch share their dominator's tests, so the
+/// walk is one pass over the dominator tree.
+pub struct BlockTests {
+    dom: DominatorTree,
+    /// Per block, in `sets`: the tests on every path to it, and those on every path past its
+    /// terminator (its branch read too).
+    at: Vec<Option<(usize, usize)>>,
+    sets: Vec<StateTests>,
+}
+
+impl BlockTests {
+    /// `dom`: the dominator tree over the edges a run can take. `resolve` gives the definitions
+    /// of a method called on a value, `global` the fully qualified name of a module global.
+    pub fn of<'i>(
+        f: &IrFunction,
+        dom: DominatorTree,
+        def: &dyn Fn(VarId) -> Option<&'i Inst>,
+        resolve: &dyn Fn(VarId, &str) -> Vec<FuncKey>,
+        global: &dyn Fn(&str) -> String,
+    ) -> Self {
+        let param_of = |v: VarId| {
+            let v = through_copies(def, v);
+            (f.params.iter().take(64))
+                .position(|p| p.var == v)
+                .and_then(|i| u8::try_from(i).ok())
+        };
+        let mut sets = vec![StateTests::default()];
+        let mut at: Vec<Option<(usize, usize)>> = vec![None; f.blocks.len()];
+        // A dominator comes before the blocks it dominates in reverse postorder.
+        for b in f.rpo_blocks() {
+            let to = match dom.strict_dominator(b) {
+                Some(d) => at[d.0 as usize].expect("a dominator comes first").1,
+                None if dom.number(b).is_some() => 0,
+                // Only an edge a run cannot take leads there.
+                None => continue,
+            };
+            let past = match f.block(b).terminator {
+                Terminator::Branch { cond, .. } => {
+                    let mut tests = sets[to].clone();
+                    if !tests.many {
+                        read_condition(def, cond, &param_of, resolve, global, &mut tests);
+                        tests.cap();
+                    }
+                    sets.push(tests);
+                    sets.len() - 1
+                }
+                _ => to,
+            };
+            at[b.0 as usize] = Some((to, past));
+        }
+        Self { dom, at, sets }
+    }
+
+    /// The tests on every path to every block of `blocks` (blocks a run reaches): those of
+    /// their nearest common dominator, and its branch when it is not one of them.
+    pub fn common(&self, blocks: &BTreeSet<BlockId>) -> Option<&StateTests> {
+        let by_number = |b: &&BlockId| self.dom.number(**b);
+        let lo = blocks.iter().min_by_key(by_number)?;
+        let hi = blocks.iter().max_by_key(by_number)?;
+        let common = self.dom.common(*lo, *hi);
+        let (to, past) = self.at[common.0 as usize]?;
+        Some(&self.sets[if blocks.contains(&common) { to } else { past }])
+    }
+
+    /// The tests on every path to a call site in block `b`, before it: `None` when there is
+    /// none, or when no run reaches the block.
+    pub fn of_site(&self, b: BlockId) -> Option<Box<StateTests>> {
+        let tests = &self.sets[self.at[b.0 as usize]?.0];
+        (!tests.is_empty()).then(|| Box::new(tests.clone()))
+    }
+}
+
+/// What a branch condition `cond` reads into `tests`: the attributes of a parameter
+/// (`param_of`), the project methods called on one, and the module globals, through copies,
+/// `not`, and comparisons.
+fn read_condition<'i>(
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
-    owner: Option<u8>,
-    blocks: &BTreeSet<BlockId>,
+    cond: VarId,
+    param_of: &dyn Fn(VarId) -> Option<u8>,
     resolve: &dyn Fn(VarId, &str) -> Vec<FuncKey>,
     global: &dyn Fn(&str) -> String,
-) -> Option<StateTests> {
-    let mut tests = StateTests::default();
-    let owner = owner
-        .and_then(|p| f.params.get(usize::from(p)))
-        .map(|p| p.var);
-    let by_pre = |b: &&BlockId| dom.pre[b.0 as usize];
-    let lo = blocks.iter().min_by_key(by_pre)?;
-    let hi = blocks.iter().max_by_key(by_pre)?;
-    let common = dom.common(*lo, *hi);
-    let mut cur = if blocks.contains(&common) {
-        dom.up(common)
-    } else {
-        Some(common)
-    };
-    let is_owner = |v: VarId| Some(through_copies(def, v)) == owner;
+    tests: &mut StateTests,
+) {
+    let mut stack = vec![cond];
     let mut seen = FxHashSet::default();
-    while let Some(d) = cur {
-        cur = dom.up(d);
-        let Terminator::Branch { cond, .. } = f.block(d).terminator else {
-            continue;
+    while let Some(v) = stack.pop() {
+        // A value read twice (`x == x`) is read once.
+        let kind = if seen.insert(v) {
+            def(v).map(|i| &i.kind)
+        } else {
+            None
         };
-        let mut stack = vec![cond];
-        while let Some(v) = stack.pop() {
-            if !seen.insert(v) {
-                continue;
+        match kind {
+            Some(InstKind::Copy { src, .. }) => stack.push(*src),
+            Some(InstKind::UnaryOp { operand, .. }) => stack.push(*operand),
+            Some(InstKind::Compare { lhs, rhs, .. }) => stack.extend([*lhs, *rhs]),
+            Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                if let Some(p) = param_of(*obj) {
+                    tests.attrs.insert((p, attr.clone()));
+                }
             }
-            match def(v).map(|i| &i.kind) {
-                Some(InstKind::Copy { src, .. }) => stack.push(*src),
-                Some(InstKind::UnaryOp { operand, .. }) => stack.push(*operand),
-                Some(InstKind::Compare { lhs, rhs, .. }) => stack.extend([*lhs, *rhs]),
-                Some(InstKind::AttrLoad { obj, attr, .. }) if is_owner(*obj) => {
-                    tests.attrs.insert(attr.clone());
+            Some(InstKind::MethodCall { recv, method, .. }) => {
+                if let Some(p) = param_of(*recv) {
+                    tests
+                        .calls
+                        .extend(resolve(*recv, method).into_iter().map(|k| (p, k)));
                 }
-                Some(InstKind::MethodCall { recv, method, .. }) if is_owner(*recv) => {
-                    tests.calls.extend(resolve(*recv, method));
-                }
-                Some(InstKind::LoadGlobal { name, .. }) => {
-                    tests.globals.insert(global(name));
-                }
-                _ => {}
             }
-        }
-        if tests.attrs.len() + tests.calls.len() + tests.globals.len() > MAX_OWNER_TESTS {
-            return None;
+            Some(InstKind::LoadGlobal { name, .. }) => {
+                tests.globals.insert(global(name));
+            }
+            _ => {}
         }
     }
-    Some(tests)
+}
+
+/// Set the tests of state of an acquisition of `lock` from `tests`: the attributes and methods
+/// of the lock's owner (the parameter holding it) and the globals, or every test past
+/// [`MAX_OWNER_TESTS`] ([`LockAcquire::tests_known`]).
+pub(crate) fn set_owner_tests(acq: &mut LockAcquire, lock: &ObjRef, tests: &StateTests) {
+    acq.tested_attrs.clear();
+    acq.tested_calls.clear();
+    acq.tested_globals.clear();
+    acq.tests_known = true;
+    add_owner_tests(acq, lock, tests);
+}
+
+/// Add the tests of state `tests` on the way to an acquisition of `lock` (a call site's,
+/// [`crate::CallSite::state_tests`]), as [`set_owner_tests`] does.
+pub(crate) fn add_owner_tests(acq: &mut LockAcquire, lock: &ObjRef, tests: &StateTests) {
+    let owner = match lock {
+        ObjRef::Param {
+            param,
+            attr: Some(_),
+        } => Some(*param),
+        _ => None,
+    };
+    let of_owner = |p: &u8| Some(*p) == owner;
+    acq.tested_attrs.extend(
+        (tests.attrs.iter())
+            .filter(|(p, _)| of_owner(p))
+            .map(|(_, a)| a.clone()),
+    );
+    acq.tested_calls.extend(
+        (tests.calls.iter())
+            .filter(|(p, _)| of_owner(p))
+            .map(|(_, k)| k.clone()),
+    );
+    acq.tested_globals.extend(tests.globals.iter().cloned());
+    let count = acq.tested_attrs.len() + acq.tested_calls.len() + acq.tested_globals.len();
+    // Tests that are not known stand for every test already.
+    if !acq.tests_known || tests.many || count > MAX_OWNER_TESTS {
+        acq.tested_attrs.clear();
+        acq.tested_calls.clear();
+        acq.tested_globals.clear();
+        acq.tests_known = false;
+    }
 }
 
 /// The acquisition [`LockAcquire`] for a lock of class `class` taken by the function `caller`
-/// at `span`, with its guards (the tests of the lock owner's state are added once every
-/// acquisition is known, [`owner_tests`]).
+/// at `span`, with its guards (the tests of state on the way are set once every acquisition is
+/// known, [`set_owner_tests`]).
 pub(crate) fn own_acquisition(
     caller: &FuncKey,
     path: &Path,

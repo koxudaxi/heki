@@ -2057,10 +2057,18 @@ fn steps_mut113() -> Vec<Step> {
 }
 
 /// `EFF109`: the holder follows the locks its callees in another module take (their summaries'
-/// `acquires_locks`): a base-class helper stops and starts taking the lock a subclass method
+/// `LockFacts::acquires`): a base-class helper stops and starts taking the lock a subclass method
 /// holds, and the holder of a module global starts passing the argument that leads another
-/// helper to it.
+/// helper to it. It also follows the names they bind (`LockFacts::rebinds`) and the tests of
+/// state on the way to the lock (`CallSite::state_tests`), and the summaries carry the facts
+/// only while the rule is selected (`OptInFacts`).
 fn steps_eff109() -> Vec<Step> {
+    let more = LOCK_POOL.replace(
+        "            return 1\n\n\ndef refill",
+        "            return 1\n\n    def checked_size(self):\n        if self.closed:\n            return 0\n        return self.size()\n\n\ndef reset():\n    global LOCK\n    LOCK = threading.Lock()\n\n\ndef refill",
+    );
+    let resetting = "from pkg.lock_pool import LOCK, Pool, refill, reset\n\n\nclass Spool(Pool):\n    def grow(self):\n        return self.size()\n\n\ndef drain():\n    with LOCK:\n        reset()\n        return refill(force=True)\n";
+    let wrapped = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        with self._lock:\n            self.closed = True\n            return self.checked_size()\n\n\ndef drain():\n    with LOCK:\n        return refill()\n";
     vec![
         Step::new(
             "the base class's helper in another module stops taking the lock",
@@ -2089,6 +2097,56 @@ fn steps_eff109() -> Vec<Step> {
             )],
         )
         .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "EFF109 is no longer selected, and the helper's module changes",
+            vec![
+                Action::Configure(CONFIG.replace(", \"EFF109\"]", "]")),
+                Action::Save("pkg/lock_pool.py", format!("# Pools.\n{LOCK_POOL}")),
+            ],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "EFF109 is selected again",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the other holder calls a function of the helper's module that binds the global lock \
+             again before the helper takes it",
+            vec![
+                Action::Save("pkg/lock_pool.py", more.clone()),
+                save("pkg/lock_use.py", resetting),
+            ],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "that function no longer binds the lock",
+            vec![Action::Save(
+                "pkg/lock_pool.py",
+                more.replace(
+                    "    global LOCK\n    LOCK = threading.Lock()\n",
+                    "    pass\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the subclass holds the lock, sets a flag, and calls a wrapper of the other module \
+             that tests it before the helper",
+            vec![
+                Action::Save("pkg/lock_pool.py", more.clone()),
+                save("pkg/lock_use.py", wrapped),
+            ],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the wrapper no longer tests the flag",
+            vec![Action::Save(
+                "pkg/lock_pool.py",
+                more.replace("        if self.closed:\n            return 0\n", ""),
+            )],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
         Step::new(
             "both files as they were",
             vec![

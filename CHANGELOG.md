@@ -39,8 +39,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
   same way (an attribute of `self` or of another parameter, a module global, a variable of an
   enclosing function). It does not report an acquisition a constant argument switches off, one
   behind a test of state the holder changes (an attribute of the lock's owner, also through its
-  callees, or a module global it sets), a lock given back before it is taken again, or a lock
-  another thread gives back as a signal.
+  callees, or a module global it sets, tested by the function taking the lock or by one on the
+  way to it), a lock given back before it is taken again, a lock whose name may be bound to
+  another object first (by the holder, by a function it calls, or on the way to the inner
+  acquisition), or a lock another thread gives back as a signal. Its facts are computed only
+  while it is selected.
   `[[tool.heki.ecosystem]]` takes `non-reentrant-lock = true` for other lock classes.
 
 ### Changed

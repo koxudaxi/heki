@@ -46,11 +46,16 @@ It does not report:
   where only `notify` leads to the lock);
 - an acquisition behind a test of state the holder changes: an attribute of the lock's owner
   that the holder, or what it calls, changes (`if self._closed: return`,
-  `if self._in_own_start(): raise`), or a module global the holder sets (`if _LIB is not None:
-  return _LIB` in a lazy initialization under the lock): such code keeps a flag to know whether
-  it holds the lock, which heki does not evaluate;
+  `if self._in_own_start(): raise`, in the acquiring function or in one on the way to it), or a
+  module global the holder sets (`if _LIB is not None: return _LIB` in a lazy initialization
+  under the lock): such code keeps a flag to know whether it holds the lock, which heki does not
+  evaluate;
 - a lock the code gives back before taking it again, also inside the `with` that took it
   (`self._lock.release()`, then `self._lock.acquire()`);
+- a lock whose name may be bound to another object before it is taken again
+  (`self._lock = threading.Lock()`, `global _LOCK`, `del self._lock`): by the holder, by a
+  function the holder calls first, or by the function taking the lock or one on the way to it;
+  the name then reaches another lock;
 - a lock some function of the module releases without holding it: another thread gives it back
   as a signal, so taking it again waits for that thread, by design;
 - `acquire(blocking=False)` and `acquire(timeout=...)`, which return;

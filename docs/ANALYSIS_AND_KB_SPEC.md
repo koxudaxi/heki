@@ -334,11 +334,13 @@ EffectSummary(f) = {
     // What iterating the returned object runs (a plain function returning a generator)
     iterated:                 Option<EffectSummary>,       // in the function's own parameters
 
-    // Locks (EFF109; propagated)
-    acquires_locks:           Map<ObjRef, LockAcquire>,    // non-reentrant locks taken on the function's
-                                                           // thread or task: ObjRef = parameter i or its
-                                                           // attribute, a global, a closure variable;
-                                                           // chain, input guards, owner state tests
+    // Locks (EFF109; propagated; only with EFF109 selected, OptInFacts::locks)
+    locks:                    Option<LockFacts>,           // acquires: non-reentrant locks taken on the
+                                                           // function's thread or task (ObjRef =
+                                                           // parameter i or its attribute, a global, a
+                                                           // closure variable; chain, input guards,
+                                                           // tests of state on the way); rebinds: the
+                                                           // globals and closure variables it may bind
 
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
@@ -991,25 +993,41 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      binds to it, `TypeCtx::captured`). An acquisition is a `with` / `async with` over
      it, an awaited `acquire()` without arguments, or a blocking `acquire()` the catalog lists
      (`threading.Lock.acquire`) without a timeout or `blocking=False`.
-   - `EffectSummary::acquires_locks` holds the function's own acquisitions (a hop to the lock's
-     class at the acquisition), each with the input guards every acquisition needs, the module
-     globals that branch conditions read on every path to every acquisition of the lock, and,
-     for a lock a parameter holds, the attributes of that object, and the project methods called
-     on it, that they test (one walk up the dominator tree from the acquisitions' common
-     dominator, at most 16 tests: past that, the acquisition counts as guarded). Propagation adds the acquisitions of each callee whose
-     body runs at the call on the caller's thread or task (not on a worker), with the lock
-     mapped through the argument bound to the parameter, the call in front of the chain, and the
-     guards mapped by `guards::through_call` (a constant argument deciding one against it drops
-     it); several acquisitions of one lock keep the guards and tests all of them have and the
-     shortest chain.
+   - The facts are in `EffectSummary::locks` (`locks::LockFacts`, absent for the many functions
+     with none) and `CallSite::state_tests`; the summaries carry them only with `EFF109` selected
+     (`OptInFacts::locks`), and a run without the rule computes none of them.
+   - The tests of state on every path to a block (`locks::BlockTests`, one pass over the
+     dominator tree of the edges a run can take): the attributes of the parameters, the project
+     methods called on a parameter, and the module globals that the conditions of the branches
+     ending its dominators read; at most 16 tests, past that every test may be one. Each call
+     site keeps those of its block (`CallSite::state_tests`).
+   - `LockFacts::acquires` holds the function's own acquisitions (a hop to the lock's class at
+     the acquisition), each with the input guards every acquisition needs and the tests of state
+     on every path to every acquisition of the lock (those of the acquisitions' common
+     dominator): the module globals, and, for a lock a parameter holds, the attributes of that
+     object and the project methods called on it (past 16 tests, the acquisition counts as
+     guarded). Propagation adds the acquisitions of each callee whose body runs at the call on
+     the caller's thread or task (not on a worker), with the lock mapped through the argument
+     bound to the parameter, the call in front of the chain, the guards mapped by
+     `guards::through_call` (a constant argument deciding one against it drops it), and the
+     tests of state of the call site added; several acquisitions of one lock keep the guards and
+     tests all of them have and the shortest chain.
+   - `LockFacts::rebinds` holds the module globals and closure variables the function may bind
+     or delete (`global`, `nonlocal`, an attribute of a module, a variable its closures capture),
+     itself or through its calls; `mutated_param_paths` has the attributes of parameters. A
+     callee that may bind a lock's name takes no lock under that name at the call
+     (`locks::may_rebind`): the name may reach another object by then.
    - The rule runs a forward must-hold dataflow (`heki_effect::held`, shared with `EFF106`: a bit
      per acquisition, an `ExitWith` giving back those of its statement, a `release()` the
-     acquisitions of its lock, also a `with`'s) and reports, while a lock is held, its own
-     acquisition again and a call site whose callees take it (`ProjectIndex::site_locks`), unless
-     that acquisition is behind a test of state the holder changes (an attribute of the lock's
-     owner in the holder's summary, `mutated_param_paths`, `mutates_self_attrs`, a tested method
-     counting with the attributes it reads; a module global the holder stores), or some function
-     of the module releases the lock where it does not hold it (a signal between threads).
+     acquisitions of its lock, also a `with`'s, and binding a lock's name, by the holder or by a
+     call whose callees may bind it (`ProjectIndex::site_rebinds`), those of that name) and
+     reports, while a lock is held, its own acquisition again and a call site whose callees take
+     it (`ProjectIndex::site_locks`), unless that acquisition is behind a test of state the
+     holder changes (an attribute of the lock's owner, tested by the acquiring function or by a
+     function on the way, that the holder's summary changes, `mutated_param_paths`,
+     `mutates_self_attrs`, a tested method counting with the attributes it reads; a module global
+     the holder stores; the holder's own tests do not count), or some function of the module
+     releases the lock where it does not hold it (a signal between threads).
 9. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`

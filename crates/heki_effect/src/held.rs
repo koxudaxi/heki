@@ -1,4 +1,4 @@
-//! What is certainly held at each point of a function (`EFF106`, `EFF109`, `EFF110`): a forward
+//! What is certainly held at each point of a function (`EFF106`, `EFF109`): a forward
 //! must-dataflow over the CFG, exception edges included, of the acquisitions an analysis
 //! tracks.
 //!

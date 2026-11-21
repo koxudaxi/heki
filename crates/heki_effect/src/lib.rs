@@ -48,7 +48,7 @@ pub use iterations::{
     BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
     IterationFacts, ResultIteration,
 };
-pub use locks::{LockAcquire, ObjRef, SiteLock};
+pub use locks::{LockAcquire, LockFacts, ObjRef, SiteLock, StateTests};
 pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
@@ -610,10 +610,11 @@ pub struct EffectSummary {
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
     /// propagated).
     pub unresolved_access_sites: BTreeSet<UnresolvedAccessSite>,
-    /// The non-reentrant locks the function takes when its body runs, itself or through the
-    /// calls that run there on its thread or task, in its own names (`EFF109`; propagated).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub acquires_locks: BTreeMap<ObjRef, LockAcquire>,
+    /// The `EFF109` facts: the non-reentrant locks the function takes and the names it may
+    /// bind (`None` when it does neither, as most functions; read through
+    /// [`Self::lock_facts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locks: Option<Box<LockFacts>>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -797,9 +798,7 @@ impl EffectSummary {
             .collect();
         out.param_change_sites.clear();
         out.iterations = out.iterations.map(|f| Box::new(f.without_locations()));
-        for acq in out.acquires_locks.values_mut() {
-            *acq = acq.without_locations();
-        }
+        out.locks = out.locks.map(|l| Box::new(l.without_locations()));
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -864,6 +863,23 @@ impl EffectSummary {
     /// [`Self::iterations`], to add facts to.
     pub(crate) fn iteration_facts_mut(&mut self) -> &mut IterationFacts {
         self.iterations.get_or_insert_with(Box::default)
+    }
+
+    /// [`Self::locks`], empty when there are none.
+    pub fn lock_facts(&self) -> &LockFacts {
+        self.locks.as_deref().unwrap_or(&locks::NO_LOCK_FACTS)
+    }
+
+    /// [`Self::locks`], to add facts to.
+    pub(crate) fn lock_facts_mut(&mut self) -> &mut LockFacts {
+        self.locks.get_or_insert_with(Box::default)
+    }
+
+    /// Add the `EFF109` facts of `other` ([`LockFacts::absorb`]).
+    pub(crate) fn absorb_lock_facts(&mut self, other: Option<Box<LockFacts>>) {
+        if let Some(other) = other {
+            self.lock_facts_mut().absorb(*other);
+        }
     }
 
     /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
@@ -1210,6 +1226,11 @@ pub struct CallSite {
     /// suspended (`MUT113`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_held: bool,
+    /// The tests of state on every path to the call (`EFF109`: a lock its callees take behind
+    /// a test of state the holder changes is not reported; only computed while the rule runs,
+    /// `None` when there is none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_tests: Option<Box<StateTests>>,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).
@@ -1478,12 +1499,14 @@ pub enum TypedWrites {
 /// The facts of the opt-in rules that summaries and propagation compute only when a rule
 /// reads them: `MUT112`'s return origins (`EffectSummary::returns_origins`, `returns_results`,
 /// `returns_nodes`, `origin_nodes`, `ArgOrigin::origins`) and `MUT113`'s iteration facts
-/// (`EffectSummary::iterations`, `CallSite::result_held`). `CallSite::returned`, which `MUT202`
+/// (`EffectSummary::iterations`, `CallSite::result_held`), and `EFF109`'s lock facts
+/// (`EffectSummary::locks`, `CallSite::state_tests`). `CallSite::returned`, which `MUT202`
 /// reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
     pub return_origins: bool,
     pub iterations: bool,
+    pub locks: bool,
 }
 
 impl OptInFacts {
@@ -1491,6 +1514,7 @@ impl OptInFacts {
     pub const ALL: Self = Self {
         return_origins: true,
         iterations: true,
+        locks: true,
     };
 }
 

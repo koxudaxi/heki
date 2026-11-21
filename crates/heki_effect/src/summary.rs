@@ -277,9 +277,7 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
         .extend(body.typed_field_read_sites);
     into.private_calls.extend(body.private_calls);
     into.unknown_calls |= body.unknown_calls;
-    for (lock, acq) in body.acquires_locks {
-        locks::add_acquisition(&mut into.acquires_locks, lock, acq);
-    }
+    into.absorb_lock_facts(body.locks);
     into.refresh_typed_field_writes();
 }
 
@@ -422,9 +420,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
         .extend(other.unresolved_access_sites);
-    for (lock, acq) in other.acquires_locks {
-        locks::add_acquisition(&mut into.acquires_locks, lock, acq);
-    }
+    into.absorb_lock_facts(other.locks);
     into.refresh_typed_field_writes();
 }
 
@@ -586,8 +582,10 @@ struct Extractor<'a> {
     scratch: RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The loops around each block.
     around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
-    /// The blocks acquiring each lock, with the parameter holding it (`locks::owner_tests`).
-    lock_blocks: std::collections::BTreeMap<ObjRef, (Option<u8>, BTreeSet<BlockId>)>,
+    /// The blocks acquiring each lock (`locks::BlockTests::common`).
+    lock_blocks: std::collections::BTreeMap<ObjRef, BTreeSet<BlockId>>,
+    /// The tests of state on every path to each block (`EFF109`).
+    state_tests: OnceCell<locks::BlockTests>,
     guards: LocalGuards,
     summary: EffectSummary,
     sites: Vec<CallSite>,
@@ -926,6 +924,7 @@ impl<'a> Extractor<'a> {
             scratch: RefCell::default(),
             around: OnceCell::new(),
             lock_blocks: std::collections::BTreeMap::new(),
+            state_tests: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
             sites: Vec::new(),
@@ -2551,7 +2550,10 @@ impl<'a> Extractor<'a> {
         // (The subscript instructions bind `index` to their key.)
         let index_in_block = index;
         self.store_escapes(kind);
-        self.lock_acquired(bb, kind, span);
+        if self.opt_in.locks {
+            self.lock_acquired(bb, kind, span);
+            self.name_rebound(kind);
+        }
         match kind {
             InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
                 if self.self_vars.contains(obj) {
@@ -2811,9 +2813,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// A non-reentrant lock `kind` takes (`EffectSummary::acquires_locks`), with the guards on
-    /// the function's inputs and, for a lock a parameter holds, the tests of that object's
-    /// state on every path to it.
+    /// A non-reentrant lock `kind` takes (`LockFacts::acquires`), with the guards on the
+    /// function's inputs (the tests of state on every path to it are added once every
+    /// acquisition is known, [`Self::lock_owner_tests`]).
     fn lock_acquired(&mut self, bb: BlockId, kind: &InstKind, span: Span) {
         // A branch on a constant never takes the lock its dead side would.
         if !matches!(
@@ -2835,20 +2837,41 @@ impl<'a> Extractor<'a> {
             return;
         };
         let guards = self.guards.occurrence(&self.guard_inputs(), bb);
-        let owner = match lock {
-            ObjRef::Param {
-                param,
-                attr: Some(_),
-            } => Some(param),
-            _ => None,
-        };
-        let (_, blocks) = self
-            .lock_blocks
-            .entry(lock.clone())
-            .or_insert_with(|| (owner, BTreeSet::new()));
-        blocks.insert(bb);
+        self.lock_blocks.entry(lock.clone()).or_default().insert(bb);
         let acq = locks::own_acquisition(self.key, self.path, class, span, guards);
-        locks::add_acquisition(&mut self.summary.acquires_locks, lock, acq);
+        locks::add_acquisition(&mut self.summary.lock_facts_mut().acquires, lock, acq);
+    }
+
+    /// A module global or a closure variable `kind` binds or deletes (`LockFacts::rebinds`;
+    /// the attributes of parameters are in `mutated_param_paths`).
+    fn name_rebound(&mut self, kind: &InstKind) {
+        if self.f.is_module_body {
+            return;
+        }
+        let def = |v: VarId| self.defs.get(&v).copied();
+        let name = locks::rebound_name(self.cx, self.f, self.key, &self.types, &def, kind);
+        if let Some(name @ (ObjRef::Global(_) | ObjRef::Cell { .. })) = name {
+            self.summary.lock_facts_mut().rebinds.insert(name);
+        }
+    }
+
+    /// The tests of state on every path to each block a run reaches, over the edges it can
+    /// take.
+    fn state_tests(&self) -> &locks::BlockTests {
+        self.state_tests.get_or_init(|| {
+            let f = self.f;
+            let dom = heki_ir::DominatorTree::over(f, |p, b| self.live.edge(p, b));
+            let def = |v: VarId| self.defs.get(&v).copied();
+            let resolve = |recv: VarId, method: &str| match self
+                .cx
+                .resolve_method(self.types.get(&recv), method)
+            {
+                Callee::Project(keys, _) => keys,
+                _ => Vec::new(),
+            };
+            let global = |name: &str| self.cx.global_fqn(name);
+            locks::BlockTests::of(f, dom, &def, &resolve, &global)
+        })
     }
 
     /// The tests of state on every path to every acquisition of each lock
@@ -2857,38 +2880,23 @@ impl<'a> Extractor<'a> {
         if self.lock_blocks.is_empty() {
             return;
         }
-        let f = self.f;
-        let dom = locks::DomTree::new(
-            f,
-            heki_ir::immediate_dominators(f, &f.predecessors(), |p, b| self.live.edge(p, b)),
-        );
-        let def = |v: VarId| self.defs.get(&v).copied();
-        let resolve =
-            |recv: VarId, method: &str| match self.cx.resolve_method(self.types.get(&recv), method)
-            {
-                Callee::Project(keys, _) => keys,
-                _ => Vec::new(),
-            };
-        let global = |name: &str| self.cx.global_fqn(name);
-        let found: Vec<_> = self
-            .lock_blocks
-            .iter()
-            .map(|(lock, (owner, blocks))| {
-                let tests = locks::owner_tests(f, &dom, &def, *owner, blocks, &resolve, &global);
-                (lock.clone(), tests)
+        let blocks = std::mem::take(&mut self.lock_blocks);
+        let tests = self.state_tests();
+        let found: Vec<(ObjRef, locks::StateTests)> = blocks
+            .into_iter()
+            .map(|(lock, blocks)| {
+                let t = tests
+                    .common(&blocks)
+                    .expect("a lock with acquiring blocks a run reaches");
+                (lock, t.clone())
             })
             .collect();
+        let acquires = &mut self.summary.lock_facts_mut().acquires;
         for (lock, tests) in found {
-            let acq = (self.summary.acquires_locks.get_mut(&lock))
+            let acq = acquires
+                .get_mut(&lock)
                 .expect("a lock with acquiring blocks was taken");
-            match tests {
-                Some(t) => {
-                    acq.tested_attrs = t.attrs;
-                    acq.tested_calls = t.calls;
-                    acq.tested_globals = t.globals;
-                }
-                None => acq.tests_known = false,
-            }
+            locks::set_owner_tests(acq, &lock, &tests);
         }
     }
 
@@ -3942,6 +3950,7 @@ impl<'a> Extractor<'a> {
                         dispatch: None,
                         result_discarded: false,
                         result_held: false,
+                        state_tests: None,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -4597,6 +4606,11 @@ impl<'a> Extractor<'a> {
             dispatch: None,
             result_discarded: false,
             result_held: false,
+            state_tests: if self.opt_in.locks {
+                self.state_tests().of_site(bb)
+            } else {
+                None
+            },
         }
     }
 
@@ -5130,6 +5144,7 @@ fn role_site(
         dispatch: site.dispatch.clone(),
         result_discarded: false,
         result_held: false,
+        state_tests: site.state_tests.clone(),
     }
 }
 

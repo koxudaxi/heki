@@ -66,7 +66,13 @@ pub struct Dominated(Vec<(u32, u32)>);
 
 impl DominatorTree {
     pub fn of(f: &IrFunction) -> Self {
-        let idom = immediate_dominators(f, &f.predecessors(), |_, _| true);
+        Self::over(f, |_, _| true)
+    }
+
+    /// [`Self::of`] over the edges `takes` admits: a block only the other edges lead to
+    /// dominates nothing and has no dominator.
+    pub fn over(f: &IrFunction, takes: impl Fn(BlockId, BlockId) -> bool) -> Self {
+        let idom = immediate_dominators(f, &f.predecessors(), takes);
         let mut children = vec![Vec::new(); f.blocks.len()];
         for (b, d) in idom.iter().enumerate() {
             if let Some(d) = d.filter(|d| d.0 as usize != b) {
@@ -94,6 +100,26 @@ impl DominatorTree {
     /// The nearest block other than `b` that dominates it.
     pub fn strict_dominator(&self, b: BlockId) -> Option<BlockId> {
         self.idom[b.0 as usize].filter(|d| *d != b)
+    }
+
+    /// The number of `b` in preorder (`None` for a block the entry does not reach).
+    pub fn number(&self, b: BlockId) -> Option<u32> {
+        self.subtree[b.0 as usize].map(|(at, _)| at)
+    }
+
+    /// The nearest block that dominates both `a` and `b` (blocks the entry reaches).
+    pub fn common(&self, a: BlockId, b: BlockId) -> BlockId {
+        let at = self.number(b).expect("the entry reaches `b`");
+        let mut d = a;
+        loop {
+            let (start, end) = self.subtree[d.0 as usize].expect("the entry reaches `a`");
+            if start <= at && at < end {
+                return d;
+            }
+            d = self
+                .strict_dominator(d)
+                .expect("the entry dominates every block it reaches");
+        }
     }
 
     /// The blocks that one of `blocks` dominates (each of `blocks` included).

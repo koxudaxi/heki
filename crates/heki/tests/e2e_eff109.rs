@@ -3,8 +3,9 @@
 //! `self`, awaited coroutines, a module global through a chain of helpers and back into the
 //! holder, a property getter, a generator iterated there, a closure, a lock passed on as an
 //! argument, another module), the shapes that hold no lock or take it elsewhere, the
-//! re-entrance guards and constant arguments that keep a helper from taking it, the catalog
-//! entries a configuration adds, the opt-in selection, and `heki rule`.
+//! re-entrance guards (also in a function on the way to the lock) and constant arguments that
+//! keep a helper from taking it, a name bound to another lock before it is taken again, the
+//! catalog entries a configuration adds, the opt-in selection, and `heki rule`.
 
 mod common;
 
@@ -1229,5 +1230,336 @@ fn eff109_leaves_locks_taken_again_on_purpose() {
             "hold_ready",
             "purpose._LIB_LOCK->purpose.ready_load"
         )]
+    );
+}
+
+/// A name bound to another object between the two acquisitions, so that the inner one takes
+/// another lock, not reported: by the holder (an attribute of `self`, also through an alias or
+/// `del`, an attribute of a module, a closure variable), by a function the holder calls first
+/// (an attribute, a module global, `del` of one, a `nonlocal` variable), by the helper taking the
+/// lock, or by a function on the way to it. Binding another attribute does not count.
+const REBOUND_LOCKS: &str = r#"import threading
+
+LOCK = threading.Lock()
+
+
+def take() -> None:
+    with LOCK:
+        pass
+
+
+def renew() -> None:
+    global LOCK
+    LOCK = threading.Lock()
+"#;
+
+const REBOUND: &str = r#"import threading
+
+from pkg import locks
+from pkg.locks import renew, take
+
+_LOCK = threading.Lock()
+
+
+def take_own() -> None:
+    with _LOCK:
+        pass
+
+
+def drop_own() -> None:
+    global _LOCK
+    del _LOCK
+
+
+def module_store() -> None:
+    with locks.LOCK:
+        locks.LOCK = threading.Lock()
+        take()
+
+
+def through_renew() -> None:
+    with locks.LOCK:
+        renew()
+        take()
+
+
+def through_del() -> None:
+    with _LOCK:
+        drop_own()
+        take_own()
+
+
+def still_held() -> None:
+    with locks.LOCK:
+        take()
+
+
+class Pool:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._other = threading.Lock()
+
+    def size(self) -> int:
+        with self._lock:
+            return 1
+
+    def _reset(self) -> None:
+        self._lock = threading.Lock()
+
+    def _reset_other(self) -> None:
+        self._other = threading.Lock()
+
+    def fresh_size(self) -> int:
+        self._lock = threading.Lock()
+        with self._lock:
+            return 1
+
+    def reset_then_size(self) -> int:
+        self._reset()
+        return self.size()
+
+    def by_alias(self) -> int:
+        with self._lock:
+            me = self
+            me._lock = threading.Lock()
+            return self.size()
+
+    def by_del(self) -> int:
+        with self._lock:
+            del self._lock
+            return self.size()
+
+    def by_call(self) -> int:
+        with self._lock:
+            self._reset()
+            return self.size()
+
+    def by_callee(self) -> int:
+        with self._lock:
+            return self.fresh_size()
+
+    def by_wrapper(self) -> int:
+        with self._lock:
+            return self.reset_then_size()
+
+    def other_reset(self) -> int:
+        with self._lock:
+            self._reset_other()
+            return self.size()
+
+
+def cells() -> None:
+    lock = threading.Lock()
+
+    def take_cell() -> None:
+        with lock:
+            pass
+
+    def renew_cell() -> None:
+        nonlocal lock
+        lock = threading.Lock()
+
+    with lock:
+        renew_cell()
+        take_cell()
+    with lock:
+        lock = threading.Lock()
+        take_cell()
+    with lock:
+        take_cell()
+
+
+def own_store() -> None:
+    global _LOCK
+    with _LOCK:
+        _LOCK = threading.Lock()
+        take_own()
+
+
+def locals_only(pool: Pool) -> None:
+    other = Pool()
+    other.size_hint = 1
+    scratch = [pool]
+    del scratch
+    if False:
+        take_own()
+    with _LOCK:
+        take_own()
+"#;
+
+#[test]
+fn eff109_leaves_a_name_bound_to_another_lock() {
+    let p = Project::new("eff109_rebound");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/locks.py", REBOUND_LOCKS)
+        .write("pkg/rebound.py", REBOUND);
+    assert_eq!(
+        found(&diagnostics(&p, SELECT)),
+        vec![
+            d(
+                "pkg/rebound.py",
+                39,
+                "still_held",
+                "pkg.locks.LOCK->pkg.locks.take"
+            ),
+            d(
+                "pkg/rebound.py",
+                93,
+                "Pool.other_reset",
+                "self._lock->pkg.rebound.Pool.size"
+            ),
+            d(
+                "pkg/rebound.py",
+                114,
+                "cells",
+                "lock->pkg.rebound.cells.<locals>.take_cell"
+            ),
+            d(
+                "pkg/rebound.py",
+                132,
+                "locals_only",
+                "pkg.rebound._LOCK->pkg.rebound.take_own"
+            ),
+        ]
+    );
+}
+
+/// The tests of state in a function on the way from the holder to the acquisition: a flag the
+/// holder sets, one or two calls deep, a re-entrance flag the wrapper tests and sets itself, a
+/// method reading what the holder sets, and a module global the holder sets, not reported. A
+/// flag the holder does not change, and the holder's own test before the call, keep the report.
+const WRAPPED: &str = r#"import threading
+
+_READY = False
+_GLOBAL_LOCK = threading.Lock()
+
+
+def take_global() -> None:
+    with _GLOBAL_LOCK:
+        pass
+
+
+def when_ready() -> None:
+    if not _READY:
+        return
+    take_global()
+
+
+def start() -> None:
+    global _READY
+    with _GLOBAL_LOCK:
+        _READY = True
+        when_ready()
+
+
+def start_unset() -> None:
+    with _GLOBAL_LOCK:
+        when_ready()
+
+
+class Stream:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._closed = False
+        self._stopping = False
+        self._busy = False
+        self._owner = None
+
+    def take(self) -> None:
+        with self._lock:
+            pass
+
+    def wrapper(self) -> None:
+        if self._closed:
+            return
+        self.take()
+
+    def deeper(self) -> None:
+        self.wrapper()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self.wrapper()
+
+    def close_deeper(self) -> None:
+        with self._lock:
+            self._closed = True
+            self.deeper()
+
+    def stop(self) -> None:
+        if self._stopping:
+            return
+        self._stopping = True
+        self._do_stop()
+
+    def _do_stop(self) -> None:
+        with self._lock:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        self.stop()
+
+    def _in_own_call(self) -> bool:
+        return self._owner is threading.current_thread()
+
+    def checked(self) -> None:
+        if self._in_own_call():
+            return
+        self.take()
+
+    def run(self) -> None:
+        with self._lock:
+            self._owner = threading.current_thread()
+            self.checked()
+
+    def flush(self) -> None:
+        with self._lock:
+            self.wrapper()
+
+    def flush_busy(self) -> None:
+        with self._lock:
+            self._busy = True
+            self.wrapper()
+
+    def drain(self) -> None:
+        with self._lock:
+            if not self._closed:
+                self._closed = True
+                self.take()
+"#;
+
+#[test]
+fn eff109_reads_the_tests_of_functions_on_the_way() {
+    let p = Project::new("eff109_wrapped");
+    p.write("wrapped.py", WRAPPED);
+    assert_eq!(
+        found(&diagnostics(&p, SELECT)),
+        vec![
+            d(
+                "wrapped.py",
+                27,
+                "start_unset",
+                "wrapped._GLOBAL_LOCK->wrapped.when_ready"
+            ),
+            d(
+                "wrapped.py",
+                88,
+                "Stream.flush",
+                "self._lock->wrapped.Stream.wrapper"
+            ),
+            d(
+                "wrapped.py",
+                93,
+                "Stream.flush_busy",
+                "self._lock->wrapped.Stream.wrapper"
+            ),
+            d(
+                "wrapped.py",
+                99,
+                "Stream.drain",
+                "self._lock->wrapped.Stream.take"
+            ),
+        ]
     );
 }
