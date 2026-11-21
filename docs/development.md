@@ -179,8 +179,9 @@ steps are known to grow faster than linearly or to spend a budget.
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
 slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many `continue`s and
-`isinstance` tests, a long chain of assignments a loop carries, many loops one after another, each
-with a lazy initialization (the blocks each covers count toward a budget proportional to the
+`isinstance` tests, a long chain of assignments a loop carries, closure cells bound thousands of
+times, each binding followed by a generator expression reading them, many loops one after another,
+each with a lazy initialization (the blocks each covers count toward a budget proportional to the
 source), many waits on one future before many `await`s of it, task factories at the end of a long
 chain of copies, a long chain of aliases of a class with an attribute store through the last one per
 alias, a class with thousands of subclasses whose class constant as many functions read on an

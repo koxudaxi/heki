@@ -1,6 +1,6 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
+//! the closure cells child scopes read, the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
 //! the walk to the callable a builtin calls once per item, contracts with many call targets, the
 //! walk to the uses handing a reference to a call target on, and the locks `EFF109` follows.
 
@@ -155,6 +155,66 @@ fn types_past_the_inference_pass_bound_are_unknown() {
     };
     assert_eq!(blocking(4), 1);
     assert_eq!(blocking(30), 0);
+}
+
+/// A function binding `names` variables in turn `bindings` times in all, each binding followed
+/// by a generator expression reading every variable: closure cells bound many times, each read
+/// by as many scopes. The values are of a wide container type, so that joining them costs more
+/// than the rest of the work per binding. The function returns `_given` of a `Model` that a last
+/// generator expression takes out of each variable. With `declared`, each variable is annotated
+/// once.
+fn cells_read_after_each_binding(bindings: usize, names: usize, declared: bool) -> String {
+    let ty = format!("dict[str, list[tuple[{}]]]", vec!["Model"; 32].join(", "));
+    let mut lines = vec![
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        String::new(),
+        format!("def load(i) -> {ty}:"),
+        "    return {}".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs, out):".to_owned(),
+    ];
+    if declared {
+        lines.extend((0..names).map(|k| format!("    x{k}: {ty} = load({k})")));
+    }
+    let all: Vec<String> = (0..names).map(|k| format!("x{k}")).collect();
+    for i in 0..bindings {
+        lines.push(format!("    x{} = load({i})", i % names));
+        lines.push(format!(
+            "    out.append(sum(1 for _ in xs if {}))",
+            all.join(" and ")
+        ));
+    }
+    let given: Vec<String> = (0..names)
+        .map(|k| format!("next(x{k}[\"k\"][0][0] for _ in xs)._given"))
+        .collect();
+    lines.push(format!("    return {}", given.join(", ")));
+    lines.join("\n") + "\n"
+}
+
+/// The scopes created between the bindings of a closure cell read the values bound to it so far
+/// as one joined fact, kept as the bindings are computed, not folded from every binding again per
+/// scope. The cells keep their types: a forbidden read of `Model._given` per variable.
+#[test]
+fn scopes_reading_a_cell_bound_many_times_read_its_joined_fact() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT203\"]\n\n\
+                  [[tool.heki.read-owners]]\nname = \"given\"\ntargets = [\"m.Model._given\"]\n\
+                  forbidden-readers = [\"m:shape\"]\n";
+    for (names, declared) in [(1, false), (4, true)] {
+        let p = Project::new(&format!("bounds_cells_{names}"));
+        p.write("pyproject.toml", config).write(
+            "m.py",
+            &cells_read_after_each_binding(3_000, names, declared),
+        );
+        let found = check_within(&p, Duration::from_secs(20));
+        assert_eq!(
+            found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
+            names
+        );
+    }
 }
 
 /// An `async def` handing a buffer it keeps in a loop to a reader that downloads only what has

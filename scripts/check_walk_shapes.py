@@ -105,6 +105,14 @@ KNOWN_OVER: dict[tuple[str, str], str] = {
     "block",
     ("reverse_chain_in_loop", "module"): "dense alias passes take one pass per link of a chain "
     "laid against block order (`grown_vars`, `aliases`)",
+    **{
+        (family, p): "MUT202 lists each function's call sites by a scan of the file's "
+        "(`Mut202Fn::function_sites`) and looks up each call's site in a scan of the function's "
+        "(`mut_rules::site_call`), and the bound of each generator expression's loop indexes its "
+        "creator again (`facts::refine_round`)"
+        for family in ("cell_reads", "cell_reads_of_several_names")
+        for p in ("function", "method")
+    },
     ("wide_hierarchy", "project"): "each method call walks the whole subclass family of its "
     "receiver's class (`ProjectDecls::definitions`)",
     ("callers_of_one_helper", "project"): "MUT201 walks the helper's callers again per caller",
@@ -321,6 +329,27 @@ def attribute_chain(n: int) -> Body:
     return Body(("p",), [*lines, f"return a{n}"])
 
 
+CELL_TYPE = "dict[str, list[tuple[Base, Base, Base]]]"
+
+
+def cell_reads(n: int) -> Body:
+    """Many assignments to one name of a declared container type, each followed by a generator
+    expression reading it: a closure cell bound many times and read by as many scopes."""
+    lines = [f"x: {CELL_TYPE} = g(0)"]
+    for i in range(n):
+        lines += [f"x = g({i})", "out.append(sum(1 for _ in xs if x))"]
+    return Body(("xs", "out"), lines)
+
+
+def cell_reads_of_several_names(n: int) -> Body:
+    """Assignments to four names in turn, each followed by a generator expression reading all
+    four."""
+    lines = [f"x{k}: {CELL_TYPE} = g({k})" for k in range(4)]
+    for i in range(n):
+        lines += [f"x{i % 4} = g({i})", "out.append(sum(1 for _ in xs if x0 and x1 and x2 and x3))"]
+    return Body(("xs", "out"), lines)
+
+
 def wide_hierarchy(n: int) -> str:
     """Many subclasses overriding one method, and as many functions calling it on the base."""
     lines = []
@@ -379,6 +408,9 @@ FAMILIES = [
     Family("match_pass_through", match_pass_through),
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
+    # A module body's names are globals, not closure cells.
+    Family("cell_reads", cell_reads, placements=("function", "method")),
+    Family("cell_reads_of_several_names", cell_reads_of_several_names, placements=("function", "method")),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
