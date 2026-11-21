@@ -7,7 +7,10 @@
 
 use heki_ast::{LineIndex, Span};
 use heki_ir::walk::{Answer, Budget};
-use heki_ir::{FnIndex, InstKind, ModuleBindings, ModuleIr, Must, PathReader, Paths, Progress};
+use heki_ir::{
+    Carries, FnIndex, FunctionId, InstKind, ItemOrigins, ItemSource, ModuleBindings, ModuleIr,
+    Must, PathReader, Paths, Progress,
+};
 use heki_kb::EffectiveEcosystemKb;
 use serde::Serialize;
 
@@ -51,6 +54,16 @@ struct IterationFacts {
 struct LoopFacts {
     line: u32,
     fixed_trips: Answer<u32>,
+    origin: Answer<Vec<OriginFacts>>,
+}
+
+/// An item origin, a call source by its text.
+#[derive(Serialize)]
+struct OriginFacts {
+    source: String,
+    carries: Carries,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    text: bool,
 }
 
 pub fn module(ir: &ModuleIr, src: &str, kb: &EffectiveEcosystemKb) -> ModuleFacts {
@@ -61,6 +74,7 @@ pub fn module(ir: &ModuleIr, src: &str, kb: &EffectiveEcosystemKb) -> ModuleFact
         module_member: &member,
         ..PathReader::with_bindings(&bindings)
     };
+    let origins = ItemOrigins::new(ir);
     let functions = ir
         .functions
         .iter()
@@ -121,6 +135,15 @@ pub fn module(ir: &ModuleIr, src: &str, kb: &EffectiveEcosystemKb) -> ModuleFact
                 .map(|(li, lp)| LoopFacts {
                     line: loop_line(li),
                     fixed_trips: ix.fixed_trips(lp, &mut |_| None),
+                    origin: origins.of_loop(&budget, f.id, li).map(|set| {
+                        set.into_iter()
+                            .map(|o| OriginFacts {
+                                source: source_text(ir, src, f.id, o.function, o.source),
+                                carries: o.carries,
+                                text: o.text,
+                            })
+                            .collect()
+                    }),
                 })
                 .collect();
             FunctionFacts {
@@ -141,4 +164,31 @@ fn text(src: &str, span: Span) -> String {
         .unwrap_or_default();
     let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     flat.chars().take(60).collect()
+}
+
+/// A source as the tests read it: a call by its text, and the function it belongs to when that
+/// is not the loop's own (a generator expression reads its creator's).
+fn source_text(
+    ir: &ModuleIr,
+    src: &str,
+    loop_function: FunctionId,
+    function: FunctionId,
+    source: ItemSource,
+) -> String {
+    let owner = ir.function(function);
+    let text = match source {
+        ItemSource::Param(p) => format!("param {p}"),
+        ItemSource::ParamPart(p) => format!("part of param {p}"),
+        ItemSource::Receiver => "receiver".to_owned(),
+        ItemSource::Fixed => "fixed".to_owned(),
+        ItemSource::Call { block, index } => {
+            let span = owner.block(block).insts[index as usize].span;
+            format!("call {}", text(src, span))
+        }
+    };
+    if function == loop_function {
+        text
+    } else {
+        format!("{text} of {}", owner.qualname)
+    }
 }

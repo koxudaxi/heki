@@ -885,6 +885,9 @@ impl<'p, 'a> Paths<'p, 'a> {
     fn immediate_dominators(&self, preds: &[SmallVec<[u32; 2]>]) -> Option<Vec<u32>> {
         let mut idom = vec![UNREACHED; preds.len()];
         idom[0] = 0;
+        let nodes = preds.len();
+        let mut reducible = true;
+        let mut settled = false;
         for _ in 0..MAX_PASSES {
             let mut changed = false;
             let mut steps = 0usize;
@@ -899,17 +902,23 @@ impl<'p, 'a> Paths<'p, 'a> {
                         found = p;
                         continue;
                     }
+                    // A dominator comes before what it dominates, so each walk up ends within
+                    // the nodes; one that would not (a graph that is not reducible) leaves the
+                    // dominators undecided.
                     let (mut a, mut b) = (p, found);
-                    while a != b {
-                        while a > b {
+                    let mut walked = 0;
+                    while a != b && walked <= nodes {
+                        while a > b && walked <= nodes {
                             a = idom[a as usize];
-                            steps += 1;
+                            walked += 1;
                         }
-                        while b > a {
+                        while b > a && walked <= nodes {
                             b = idom[b as usize];
-                            steps += 1;
+                            walked += 1;
                         }
                     }
+                    steps += walked;
+                    reducible &= a == b;
                     found = a;
                 }
                 steps += preds[x].len();
@@ -921,11 +930,12 @@ impl<'p, 'a> Paths<'p, 'a> {
             if !self.budget.take(steps) {
                 return None;
             }
-            if !changed {
-                return Some(idom);
+            settled = !changed;
+            if settled {
+                break;
             }
         }
-        None
+        (settled && reducible).then_some(idom)
     }
 }
 
@@ -950,12 +960,12 @@ fn exception_target(
                 _ => None,
             })
             .collect();
-        if managers.is_empty()
-            || !managers
+        let goes_on = !managers.is_empty()
+            && managers
                 .iter()
-                .all(|m| (reader.exit_suppresses)(*m) == Answer::Known(false))
-        {
-            return Some(to);
+                .all(|m| (reader.exit_suppresses)(*m) == Answer::Known(false));
+        if !goes_on {
+            break;
         }
         to = f.block(to).exc_target?;
     }

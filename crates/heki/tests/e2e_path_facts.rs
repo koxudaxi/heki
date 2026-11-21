@@ -1,7 +1,7 @@
 //! The path and loop facts of `heki_ir::facts`, end to end through `heki dump-facts`: whether a
 //! call runs whenever its function returns, over the edges into its handlers; whether it runs on
-//! every iteration of a loop that completes; branches the module's constants decide; and the
-//! trip counts the code fixes, past 16 too.
+//! every iteration of a loop that completes; branches the module's constants decide; the trip
+//! counts the code fixes, past 16 too; and where the items a loop steps through come from.
 
 mod common;
 
@@ -200,6 +200,7 @@ fn trip_counts_the_code_fixes_past_sixteen() {
     let facts = dump_facts(
         "paths_trip_counts",
         r#"NAMES = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q")
+ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
 
 def counts(rows, db):
@@ -222,6 +223,13 @@ def counts(rows, db):
         n += 1
     for i in range(3):
         db.one(i)
+    for i in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20):
+        db.one(i)
+    for c in ALPHABET:
+        db.one(c)
+    k = 0
+    while 500 > k:
+        k += 1
 "#,
     );
     let trips: Vec<Value> = function(&facts, "counts")["loops"]
@@ -241,6 +249,93 @@ def counts(rows, db):
             json!({"known": 30}),
             json!({"known": 1000}),
             json!({"known": 3}),
+            json!({"known": 20}),
+            json!({"known": 26}),
+            // The counter on the right of its test.
+            json!({"known": 500}),
         ]
+    );
+}
+
+#[test]
+fn the_items_a_loop_steps_through_come_from_named_sources() {
+    let facts = dump_facts(
+        "paths_origins",
+        r#"_IS_SYNC = False
+
+
+class Store:
+    def load(self, rows, conn, path, json):
+        for row in sorted(rows):
+            pass
+        for row in conn.execute("SELECT 1"):
+            pass
+        for line in path.read_text().splitlines():
+            pass
+        for x in map(str, rows):
+            pass
+        for part in "a;b".split(";"):
+            pass
+        for x in json.loads(rows):
+            pass
+        for x in self.rows:
+            pass
+        kept = [r for r in rows if r]
+        for x in kept:
+            pass
+        for x in (conn if _IS_SYNC else rows):
+            pass
+        for row in rows:
+            for cell in row:
+                pass
+        for row in conn.fetchall():
+            for cell in row:
+                pass
+        while rows:
+            rows = rows[1:]
+        for batch in [rows]:
+            for row in batch:
+                pass
+        total = sum(len(x) for x in conn.query())
+"#,
+    );
+    let origins: Vec<Value> = function(&facts, "Store.load")["loops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["origin"].clone())
+        .collect();
+    let one = |source: &str| json!({"known": [{"source": source, "carries": "items"}]});
+    assert_eq!(
+        origins,
+        vec![
+            one("param 1"),
+            one("call conn.execute(\"SELECT 1\")"),
+            json!({"known": [{"source": "call path.read_text()", "carries": "items", "text": true}]}),
+            json!({"known": [{"source": "param 1", "carries": "count"}]}),
+            one("fixed"),
+            // The reader resolves a call: `json.loads` is no catalog source.
+            one("call json.loads(rows)"),
+            one("receiver"),
+            // The comprehension's own loop, then the loop over the list it fills.
+            one("param 1"),
+            one("param 1"),
+            one("param 1"),
+            // An inner loop comes before the loop around it.
+            one("part of param 1"),
+            one("param 1"),
+            json!("open"),
+            one("call conn.fetchall()"),
+            json!("open"),
+            // An item of a display is the element itself.
+            one("param 1"),
+            one("fixed"),
+        ]
+    );
+    // A generator expression's loop reads the iterable its creator passes.
+    let genexpr = function(&facts, "Store.load.<locals>.<genexpr>");
+    assert_eq!(
+        genexpr["loops"][0]["origin"],
+        json!({"known": [{"source": "call conn.query() of Store.load", "carries": "items"}]})
     );
 }

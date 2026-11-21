@@ -524,6 +524,149 @@ def loop(rows, db):
 }
 
 #[test]
+fn the_remaining_shapes_of_tests_raises_and_regions() {
+    let src = r#"
+import os
+import json
+del json
+
+def f(sock, flag, conn, row, db):
+    if sock.ready:
+        sock.maybe()
+    if (False if flag else False):
+        sock.dead_phi()
+    try:
+        conn.send(row.a.b)
+    except ValueError:
+        return None
+    try:
+        json.loads(row)
+    except Exception:
+        return None
+    try:
+        if flag:
+            raise ValueError()
+        db.fetch()
+    except ValueError:
+        return None
+    for r in row:
+        db.inside(r)
+    db.outside()
+"#;
+    for (call, called) in [
+        ("sock.maybe()", NOT_EVERY),
+        ("sock.dead_phi()", DEAD),
+        ("conn.send(row.a.b)", NOT_EVERY),
+        ("json.loads(row)", NOT_EVERY),
+        ("db.fetch()", NOT_EVERY),
+    ] {
+        let (c, _, _) = facts(src, "f", call);
+        assert_eq!(c, called, "{call}");
+    }
+    let ir = build(src);
+    let f = ir.functions.iter().find(|f| f.name == "f").unwrap();
+    let ix = FnIndex::new(f, &ir.constants);
+    let bindings = ModuleBindings::of(&ir);
+    let budget = Budget::of_function("test", f);
+    // The reader that knows only the bindings knows no module member.
+    let paths = Paths::new(&ix, &PathReader::with_bindings(&bindings), &budget);
+    let at = |method: &str| {
+        f.blocks
+            .iter()
+            .find_map(|bb| {
+                let i = bb.insts.iter().position(
+                    |i| matches!(&i.kind, InstKind::MethodCall { method: m, .. } if m == method),
+                )?;
+                Some((bb.id, i))
+            })
+            .unwrap()
+    };
+    // A point outside a loop never runs on its iterations.
+    assert_eq!(
+        paths.on_every_iteration(0, at("outside"), Progress::Called),
+        DEAD
+    );
+    assert_eq!(
+        paths.on_every_iteration(0, at("inside"), Progress::Called),
+        EVERY
+    );
+}
+
+#[test]
+fn a_member_of_an_imported_module_is_known_only_to_a_reader_that_says_so() {
+    let src = r#"
+import os
+import subprocess
+
+def f(p):
+    with open(p):
+        pass
+    try:
+        subprocess.run(p)
+    except TypeError:
+        return None
+
+def joined(p):
+    try:
+        os.path.join(p)
+    except TypeError:
+        return None
+
+def executed(p, conn):
+    try:
+        conn.execute(p)
+    except TypeError:
+        return None
+"#;
+    let ir = build(src);
+    let f = ir.functions.iter().find(|f| f.name == "f").unwrap();
+    let ix = FnIndex::new(f, &ir.constants);
+    let bindings = ModuleBindings::of(&ir);
+    let budget = Budget::of_function("test", f);
+    let paths = Paths::new(&ix, &PathReader::with_bindings(&bindings), &budget);
+    let at = |name: &str| {
+        f.blocks
+            .iter()
+            .find_map(|bb| {
+                let i = bb.insts.iter().position(
+                    |i| matches!(&i.kind, InstKind::MethodCall { method, .. } if method == name),
+                )?;
+                Some((bb.id, i))
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        paths.on_every_return(at("run"), Progress::Called),
+        NOT_EVERY
+    );
+    // With the reader's catalog: `subprocess.run` is a member of the module, and `conn` holds an
+    // object whose class has `execute`. `os.path` is a member too, but `join` is looked up on
+    // the value it gives, which no reader here knows.
+    for (name, call, called) in [
+        ("f", "subprocess.run(p)", EVERY),
+        ("executed", "conn.execute(p)", EVERY),
+        ("joined", "os.path.join(p)", NOT_EVERY),
+    ] {
+        let (c, _, _) = facts(src, name, call);
+        assert_eq!(c, called, "{call}");
+    }
+}
+
+#[test]
+fn an_attribute_of_a_value_that_is_no_module_may_raise() {
+    let src = r#"
+def f(db, xs):
+    try:
+        join = "-".join
+        db.fetch(join(xs))
+    except AttributeError:
+        return None
+"#;
+    let (called, _, _) = facts(src, "f", "db.fetch(join(xs))");
+    assert_eq!(called, NOT_EVERY);
+}
+
+#[test]
 fn a_loop_a_decided_branch_excludes_has_no_iteration() {
     let src = r#"
 def f(db, rows):
