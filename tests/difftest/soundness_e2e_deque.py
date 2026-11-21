@@ -7,6 +7,7 @@ imports `deque` from `collections`, so the rewrites spell it `deque(...)`.
 """
 from __future__ import annotations
 
+import io
 from collections import deque
 
 
@@ -180,6 +181,16 @@ def alias_after_site(n):
     return out
 
 
+def formatted_items(items):
+    """The replacement fields format an item and the queue's length, not the queue."""
+    q = list(items)
+    out = []
+    while q:
+        x = q.pop(0)
+        out.append(f"{x!r} left: {len(q):>{len(out) + 1}}")
+    return out
+
+
 # ==============================================================================
 # Uses without one
 # ==============================================================================
@@ -231,6 +242,34 @@ def pop_middle(n):
         if len(q) > 2:
             q.pop(1)
     return len(q)
+
+
+def formatted_queue(items):
+    """An f-string, `str()`, and code heki cannot see all show the queue's text."""
+    q = list(items)
+    out = []
+    while q:
+        out.append(q.pop(0))
+        out.append(f"left: {q}")
+    return out
+
+
+def stringified_queue(items):
+    q = list(items)
+    out = []
+    while q:
+        out.append(q.pop(0))
+        out.append("left: " + str(q))
+    return out
+
+
+def printed_queue(items, sink):
+    q = list(items)
+    out = []
+    while q:
+        out.append(q.pop(0))
+        print("left:", q, file=sink)
+    return out, sink.getvalue()
 
 
 def front_insert_twice(n):
@@ -385,12 +424,16 @@ def main() -> int:
             run(unknown_list_methods, n),
             run(deque_more_uses, n),
             run(alias_after_site, n),
+            run(formatted_items, items),
             run(middle_index, n),
             run(sorted_in_loop, n),
             run(passed_to_zip, n),
             run(self_extend, n),
             run(compared, n),
             run(pop_middle, n),
+            run(formatted_queue, items),
+            run(stringified_queue, items),
+            run(printed_queue, items, io.StringIO()),
             run(front_insert_twice, n),
             run(dict_pop, n),
             run(dict_del, n),
