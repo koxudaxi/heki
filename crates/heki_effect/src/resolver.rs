@@ -2478,7 +2478,9 @@ impl ProjectDecls {
         let mro = self.mro(&class);
         let found = self.definitions_along(&mro, &class, method, false, false, |_| true);
         if found.is_empty() {
-            return self.inherited_external(&mro, method, false, kb).callee(self);
+            return self
+                .inherited_external(&mro, method, false, kb)
+                .callee(self);
         }
         Callee::Project(found, true)
     }
