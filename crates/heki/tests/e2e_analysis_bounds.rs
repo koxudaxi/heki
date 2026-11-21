@@ -1220,3 +1220,52 @@ fn strict_writes_of_one_name_in_a_helper_walk_its_callers_once() {
     );
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
 }
+
+/// `links` functions in one module, each making `calls` other calls and handing its argument to
+/// the next, the last changing it in place, below a function with a read-only parameter.
+fn argument_handed_down(links: usize, calls: usize) -> String {
+    let other = vec!["g()"; calls].join("; ");
+    let mut lines = vec![
+        "from collections.abc import Sequence".to_owned(),
+        String::new(),
+        String::new(),
+        "def g():".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def entry(xs: Sequence[int]):".to_owned(),
+        "    f0(xs)".to_owned(),
+    ];
+    for i in 0..links - 1 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def f{i}(x):"),
+            format!("    {other}; f{}(x)", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        format!("def f{}(x):", links - 1),
+        "    x.append(1)".to_owned(),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The chain of a parameter's change through twelve thousand functions of one module, each
+/// with ten other calls: the walk to the function whose body makes the change indexes the
+/// module's calls by caller once, not once per function it passes.
+#[test]
+fn a_change_handed_down_through_one_module_indexes_its_calls_once() {
+    let p = Project::new("bounds_change_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT110\"]\n",
+    )
+    .write("m.py", &argument_handed_down(12_000, 10));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["rule_code"], "MUT110");
+    assert_eq!(found[0]["related"].as_array().unwrap().len(), 12_000);
+}

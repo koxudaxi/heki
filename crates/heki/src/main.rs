@@ -81,28 +81,11 @@ struct CheckArgs {
     /// Preview fixes as a unified diff without writing files.
     #[arg(long)]
     diff: bool,
-    /// Comma-separated rule codes, prefixes, or slugs to enable.
-    #[arg(long, value_delimiter = ',')]
-    select: Vec<String>,
-    /// Additional rules to enable on top of defaults/config.
-    #[arg(long, value_delimiter = ',')]
-    extend_select: Vec<String>,
-    /// Comma-separated rule codes or slugs to ignore.
-    #[arg(long, value_delimiter = ',')]
-    ignore: Vec<String>,
+    #[command(flatten)]
+    analysis: AnalysisArgs,
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Full)]
     output_format: OutputFormat,
-    /// Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file
-    /// with the keys at its top level, like `heki.toml`.
-    #[arg(long)]
-    config: Option<PathBuf>,
-    /// Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`).
-    #[arg(long)]
-    target_version: Option<String>,
-    /// Ratchet baseline TOML file (line-number-independent).
-    #[arg(long)]
-    baseline: Option<PathBuf>,
     /// Generate or shrink-update the Ratchet baseline file.
     #[arg(long)]
     update_baseline: bool,
@@ -114,6 +97,32 @@ struct CheckArgs {
     /// Watch for file changes and re-run incrementally.
     #[arg(long)]
     watch: bool,
+}
+
+/// The options that decide what `heki check` computes: the rule selection (whether typed writes
+/// propagate), the configuration (the contracts), the target version, and the baseline (the
+/// status of each report). Every command that reports from `heki check`'s analysis takes them.
+#[derive(Debug, Args)]
+struct AnalysisArgs {
+    /// Comma-separated rule codes, prefixes, or slugs to enable.
+    #[arg(long, value_delimiter = ',')]
+    select: Vec<String>,
+    /// Additional rules to enable on top of defaults/config.
+    #[arg(long, value_delimiter = ',')]
+    extend_select: Vec<String>,
+    /// Comma-separated rule codes or slugs to ignore.
+    #[arg(long, value_delimiter = ',')]
+    ignore: Vec<String>,
+    /// Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file
+    /// with the keys at its top level, like `heki.toml`.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`).
+    #[arg(long)]
+    target_version: Option<String>,
+    /// Ratchet baseline TOML file (line-number-independent).
+    #[arg(long)]
+    baseline: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

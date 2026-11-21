@@ -47,14 +47,14 @@ Options:
           Additional rules to enable on top of defaults/config
       --ignore <IGNORE>
           Comma-separated rule codes or slugs to ignore
-      --output-format <OUTPUT_FORMAT>
-          Output format [default: full] [possible values: full, concise, json, github, sarif]
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
       --target-version <TARGET_VERSION>
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+      --output-format <OUTPUT_FORMAT>
+          Output format [default: full] [possible values: full, concise, json, github, sarif]
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
       --profile <PROFILE>

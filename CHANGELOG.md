@@ -106,6 +106,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `SCHEMA.split(";")` or `SCHEMA.splitlines()`).
 - `EFF101` no longer reports `socket.getaddrinfo` with the `AI_NUMERICHOST` flag, which parses
   a numeric address and never asks a resolver.
+- `MUT108` and `MUT110` find the call chain down to the function that changes an argument in
+  time linear in the calls they pass: an argument handed down through thousands of functions of
+  one module no longer takes time quadratic in them.
 
 ## [0.1.2] - 2026-11-21
 

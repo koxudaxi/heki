@@ -15,15 +15,15 @@ use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ProjectIndex, ReadOnlyAttr,
-    ReadOnlyKind, SiteRole, Slot, WriteKind,
+    BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ParamChange, ProjectIndex,
+    ReadOnlyAttr, ReadOnlyKind, SiteRole, Slot, WriteKind,
 };
 use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// What a function changes in place: its parameter itself (`None`) or a slot of it.
-type Changed = Option<Slot>;
+type Changed = ParamChange;
 
 /// Write kinds that change an attribute's object in place, which `MUT108` reports and `MUT112`
 /// follows. Rebinding and deletion belong to type checkers; `setattr` / `object.__setattr__` and
@@ -220,7 +220,7 @@ impl Rule<'_, '_> {
                 .map_or(0, |d| d.readonly_params | d.mutable_params);
             for (k, o) in bc.params.iter().enumerate().take(64) {
                 let k = u8::try_from(k).expect("at most 64 parameters");
-                let itself = changes(callee, k, &None);
+                let itself = callee.changes_param(k, &None);
                 // An instance the caller constructs (or an attribute of one) is filled before
                 // anyone else holds it.
                 let shared = self.fields && !o.fresh;
@@ -325,81 +325,14 @@ impl Rule<'_, '_> {
     /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
     /// the shortest chain of calls down to the function whose own body makes the change.
     fn chain(&self, call: &Call<'_>, k: u8, what: Changed) -> Vec<CallHop> {
-        let index = self.cx.index;
-        let hop = |caller: &FuncKey, callee: &FuncKey, span: Span, path: &Path| CallHop {
-            caller: caller.clone(),
-            callee: callee.fqn(),
-            span,
-            path: path.to_path_buf(),
+        let into = CallHop {
+            caller: call.site.caller.clone(),
+            callee: call.bc.callee.fqn(),
+            span: call.site.span,
+            path: call.path.to_path_buf(),
         };
-        let start = &call.bc.callee;
-        // Breadth-first states: (function, parameter, change, parent state, hop into it).
-        let mut states: Vec<(FuncKey, u8, Changed, Option<usize>, CallHop)> = vec![(
-            start.clone(),
-            k,
-            what.clone(),
-            None,
-            hop(&call.site.caller, start, call.site.span, call.path),
-        )];
-        let mut visited: FxHashSet<(FuncKey, u8, Changed)> = FxHashSet::default();
-        visited.insert((start.clone(), k, what));
-        let mut found = 0;
-        let mut i = 0;
-        while i < states.len() {
-            let (func, j, what) = (states[i].0.clone(), states[i].1, states[i].2.clone());
-            let path = index
-                .file_of(&func)
-                .expect("states are summarized functions");
-            let file = &index.files[path];
-            if file
-                .local_functions
-                .get(&func)
-                .is_some_and(|local| changes(local, j, &what))
-            {
-                found = i;
-                break;
-            }
-            for s in file
-                .call_sites
-                .iter()
-                .filter(|s| s.caller == func && s.role == SiteRole::Call)
-            {
-                let callees = s
-                    .project_callees()
-                    .iter()
-                    .filter_map(|c| Some((c, index.summary(&c.callee)?)));
-                for (c, cs) in callees {
-                    for (j2, o) in c.params.iter().enumerate().take(64) {
-                        let j2 = u8::try_from(j2).expect("at most 64 parameters");
-                        let as_itself = o.param == Some((j, None));
-                        // The same change of the argument itself, the same slot of it, or the
-                        // argument itself when it is that slot (`helper(p.a)`).
-                        let next = match &what {
-                            Some(_) if as_itself && changes(cs, j2, &what) => Some(what.clone()),
-                            None => (as_itself && changes(cs, j2, &None)).then_some(None),
-                            Some(slot) => (o.param_slot.as_ref() == Some(&(j, slot.clone()))
-                                && changes(cs, j2, &None))
-                            .then_some(None),
-                        };
-                        if let Some(next) = next
-                            && visited.insert((c.callee.clone(), j2, next.clone()))
-                        {
-                            let into = hop(&func, &c.callee, s.span, path);
-                            states.push((c.callee.clone(), j2, next, Some(i), into));
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
-        let mut chain = Vec::new();
-        let mut at = Some(found);
-        while let Some(i) = at {
-            chain.push(states[i].4.clone());
-            at = states[i].3;
-        }
-        chain.reverse();
-        chain
+        let below = self.cx.index.param_change_chain(&call.bc.callee, k, &what);
+        std::iter::once(into).chain(below.hops).collect()
     }
 
     /// One report per `(rule, function, span, target)`.
@@ -427,8 +360,8 @@ impl Rule<'_, '_> {
 }
 
 /// What the call chains of the reports read of the functions of one file besides their final
-/// summaries ([`Rule::chain`] walks the functions below the call that hands an object over, in
-/// any file): per function, the parameters its own body changes in place, the slots of them it
+/// summaries ([`ProjectIndex::param_change_chain`] walks the functions below the call that hands
+/// an object over, in any file): per function, the parameters its own body changes in place, the slots of them it
 /// changes in place, and its project calls without positions (the language server re-checks the
 /// files whose diagnostics show a call site that moved).
 pub type ChainFacts =
@@ -479,18 +412,4 @@ pub fn chain_facts(index: &ProjectIndex, path: &Path) -> ChainFacts {
         }
     }
     out
-}
-
-/// Whether summary `s` changes its parameter `j` itself (`None`) or a slot of it in place.
-fn changes(s: &EffectSummary, j: u8, what: &Changed) -> bool {
-    match what {
-        None => s
-            .mutated_param_paths
-            .get(&j)
-            .is_some_and(|paths| paths.contains("")),
-        Some(slot) => s
-            .inplace_param_slots
-            .get(&j)
-            .is_some_and(|slots| slots.contains(slot)),
-    }
 }

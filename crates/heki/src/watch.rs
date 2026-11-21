@@ -161,8 +161,8 @@ impl Watcher<'_> {
     fn opts(&self) -> ProjectOptions<'_> {
         ProjectOptions {
             paths: &self.args.paths,
-            config: self.args.config.as_deref(),
-            target_version: self.args.target_version.as_deref(),
+            config: self.args.analysis.config.as_deref(),
+            target_version: self.args.analysis.target_version.as_deref(),
             overrides: None,
         }
     }
@@ -175,12 +175,15 @@ impl Watcher<'_> {
         let config = stamps_of(&config_files, earlier.1);
         let files = self.scan(&env, earlier.0)?;
         let selectors = Selectors {
-            select: self.args.select.clone(),
-            extend_select: self.args.extend_select.clone(),
-            ignore: self.args.ignore.clone(),
+            select: self.args.analysis.select.clone(),
+            extend_select: self.args.analysis.extend_select.clone(),
+            ignore: self.args.analysis.ignore.clone(),
         };
-        let (ws, errors) =
-            Workspace::load(&self.opts(), &selectors, self.args.baseline.as_deref())?;
+        let (ws, errors) = Workspace::load(
+            &self.opts(),
+            &selectors,
+            self.args.analysis.baseline.as_deref(),
+        )?;
         Ok(Loaded {
             ws,
             errors,
@@ -195,9 +198,10 @@ impl Watcher<'_> {
     fn config_files(&self, env: &ProjectEnv) -> Vec<PathBuf> {
         let root = &env.root;
         let mut config: Vec<PathBuf> = CONFIG_FILES.iter().map(|n| root.join(n)).collect();
-        config.extend(self.args.config.clone());
+        config.extend(self.args.analysis.config.clone());
         config.extend(
             self.args
+                .analysis
                 .baseline
                 .clone()
                 .or_else(|| env.cfg.baseline.as_ref().map(|b| root.join(b))),
