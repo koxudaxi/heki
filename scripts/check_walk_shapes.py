@@ -16,7 +16,7 @@ Each shape is checked with every rule selected and one contract of each kind nam
 and functions the shapes define, through `heki check` and through the `--watch` engine. The cost
 is the wall time and the peak (the heap of the memory gate's counting build, or what the system
 reports, see `check_memory.py`) minus those of an empty module; the time limit is scaled to the
-machine by a fixed linear shape.
+machine by fixed linear shapes of calls and of loops.
 
 `heki check --walk-steps` gives the steps each owner's walks took per function. They must grow
 at most 2.5 times from n / 2 to n (quadratic growth inside the budget shows without timing
@@ -53,11 +53,14 @@ from check_memory import HEAP_LINE, MIB, execute  # noqa: E402
 
 LIMIT_SECONDS = 1.0
 LIMIT_MIB = 1024.0
-# The seconds are those of the machine the limits were measured on: a fixed linear shape (many
-# `with` statements in a function) takes `REFERENCE_SECONDS` there, and the time limit scales by
-# how much longer it takes on the machine running the gate (never below 1).
-REFERENCE = ("with_statements", "function", 3104)
-REFERENCE_SECONDS = 0.30
+# The seconds are those of the machine the limits were measured on. Fixed linear shapes, one of
+# calls and one of loops, take these seconds there (beyond an empty module), and the time limit
+# scales by the largest factor by which the machine running the gate is slower on one of them
+# (never below 1): machines differ unevenly on calls and on loops, and the gated shapes do both.
+REFERENCES = (
+    ("with_statements", "function", 3104, 0.26),
+    ("alias_loops", "function", 2000, 0.11),
+)
 # A run past this is over the limits whatever it would have taken.
 TIMEOUT_SECONDS = 10.0
 # The steps of an owner may grow this much from n / 2 to n.
@@ -514,10 +517,14 @@ def main() -> int:
         base_seconds = min(run[0] for run in empty)
         base_peak = min(run[1] for run in empty)
         print(f"empty module: {base_seconds:.2f} s, {base_peak:.0f} MiB", flush=True)
-        name, placement, n = REFERENCE
-        reference = source(next(f for f in FAMILIES if f.name == name), placement, n)
-        took = min(runner.check(reference, watch=False)[0] for _ in range(3)) - base_seconds
-        limit_seconds = LIMIT_SECONDS * max(1.0, took / REFERENCE_SECONDS)
+        factor = 1.0
+        for name, placement, n, seconds in REFERENCES:
+            reference = source(next(f for f in FAMILIES if f.name == name), placement, n)
+            took = min(runner.check(reference, watch=False)[0] for _ in range(3)) - base_seconds
+            print(f"reference {name}/{placement} n={n}: {took:.2f} s ({seconds:.2f} s on the "
+                  "machine of the limits)", flush=True)
+            factor = max(factor, took / seconds)
+        limit_seconds = LIMIT_SECONDS * factor
         print(f"time limit on this machine: {limit_seconds:.2f} s", flush=True)
         for family in families:
             for placement in family.placements:
