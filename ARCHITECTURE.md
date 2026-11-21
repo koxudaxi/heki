@@ -144,6 +144,13 @@ A Soundness-lane rewrite preserves meaning when these four agree before and afte
 of allocations, reference counts, the values of `id()`, traceback line numbers, and the message
 strings of built-in exceptions (their types are preserved).
 
+**Observed, although the language leaves it open**: the iteration order of a `set`. CPython fixes
+it for given elements and history (an `int` hashes to itself in every run), and whatever
+iterates, converts, formats, or returns the set shows it. Copying a set into a new table
+(`s | t`) and growing its table in place (`s |= t`) can order the same elements differently, so a
+rewrite from one to the other proves that nothing observes the order (`SetOrderUnobserved`). A
+dict iterates in insertion order, which both keep.
+
 ### 3.2 Assumptions (A1–A5)
 
 | ID | Name | Content | How heki treats it |
@@ -510,7 +517,7 @@ single-expression lints.)*
 | Rule ID | Default | Pattern → rewrite | Profitability | `heki check --fix` | Main safety obligations / profitability conditions |
 |---|---|---|---|---|---|
 | **OPT101** | Off (heuristic) | `x = x + [e]`, `x = x + [e1, *it]` (a list display on the right) → `x.append(e)` / `x.extend([...])` | `unconditional` | **Applied (when `safe`)** | Safety: `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe`, `EvalOrderPreserved` / Profit: `LoopCarried(x)` |
-| **OPT102** | Off (heuristic) | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s.add(e)`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`) / Profit: `LoopCarried` |
+| **OPT102** | Off (heuristic) | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s \|= {e}`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`; **the set is only tested afterwards, with `in`, `len`, truthiness, or `==`, since growing it in place can change its iteration order**, `SetOrderUnobserved`) / Profit: `LoopCarried` |
 | **OPT103** | Off (heuristic) | Quadratic accumulation of immutable values (`tuple +=`, `bytes +=`, `self.s +=`, ...) → a buffer and one final conversion | `size-dependent` | Suggestion only | Safety: `Unique`, `ExclusiveAccessAtWrite`, `ExactType(lhs / rhs)`, no intermediate reads (`NoIntermediateReads`), `ExceptionStateSafe` / Profit: `LoopCarried`, `NotConstSmall` (local `s += x` excluded: CPython already appends in place) |
 | **OPT110** | Off (heuristic) | `e in lst` in a loop → a `set` built before the loop | `size-dependent` | With `--include-size-dependent` | Safety: `ValueLoopInvariant(lst)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` / Profit: `NotConstSmall(lst)` |
 | **OPT111** | Off (heuristic) | `if v not in seen: seen.append(v)` in a loop → an auxiliary `set` | `size-dependent` | With `--include-size-dependent` | Safety: `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, no removals (`OnlyPairedAppends`) / Profit: `NotConstSmall` |

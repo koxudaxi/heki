@@ -19,7 +19,8 @@ use heki_effect::{CONTAINER_MUTATORS, CallSite, Items, TypeCtx, Val};
 use heki_ir::walk::FnShape;
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
-    LoopBound, ModuleConstants, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
+    LoopBound, ModuleConstants, NaturalLoop, PhiNode, SMALL_MAX, SmallDisplay, Terminator,
+    UnaryOpKind, VarId,
 };
 use heki_soundness::{
     AnalysisOptions, OptCandidate, ProfitabilityTier, SafetyTier, analyze_module,
@@ -165,7 +166,7 @@ impl<'a, 'c> Sizes<'a, 'c> {
         decided_again
             && self
                 .ix
-                .fixed_trip(lp, &mut |inst| self.leaf_len(inst))
+                .fixed_trip(lp, &mut |inst| self.leaf_len(inst), SMALL_MAX)
                 .is_none()
             && self.passed_trip(lp).is_none()
     }

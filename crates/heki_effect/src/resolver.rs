@@ -20,7 +20,7 @@ use heki_ir::{
     BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
     SmallDisplay, VarId,
 };
-use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
+use heki_kb::{ArgFact, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -434,6 +434,10 @@ pub struct ModuleDecls {
     /// `obj.attr[KEY]`, as its literal would.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub str_constants: BTreeMap<String, StrConstant>,
+    /// A file of the project that heki could not read or parse: the module exists, and heki
+    /// knows nothing it defines ([`Self::unread_module`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread: bool,
 }
 
 /// A string constant of a module or class ([`ModuleDecls::str_constants`]).
@@ -463,6 +467,18 @@ pub enum StrValue {
 }
 
 impl ModuleDecls {
+    /// The declarations of a module heki could not read or parse: none. A name under it is
+    /// unresolved ([`ProjectDecls::outside`]), never looked up in the catalog: the module may
+    /// shadow a module the catalog lists, as any project module does.
+    pub fn unread_module(module_name: &str, is_package: bool) -> Self {
+        Self {
+            module_name: module_name.to_owned(),
+            is_package,
+            unread: true,
+            ..Self::default()
+        }
+    }
+
     /// The pass-1 declarations these were completed from (`project_decls_for`): without the
     /// inferred instance attribute and module global types, and without the offloading
     /// decorators resolved through the project (`FunctionDecl::offloaded_by`).
@@ -1187,6 +1203,8 @@ pub(crate) enum Symbol<'a> {
     Class(&'a ClassDecl),
     Function(FuncKey, &'a FunctionDecl),
     Global(&'a Ty),
+    /// A name under a project module heki could not read.
+    Unread,
     External,
 }
 
@@ -1742,6 +1760,9 @@ impl ProjectDecls {
         if rest.is_empty() {
             return Symbol::Module;
         }
+        if m.unread {
+            return Symbol::Unread;
+        }
         if let Some(c) = m.classes.get(rest) {
             return Symbol::Class(c);
         }
@@ -1756,6 +1777,35 @@ impl ProjectDecls {
             return Symbol::Global(t);
         }
         Symbol::External
+    }
+
+    /// Whether `fqn` is a name under a project module heki could not read.
+    fn under_unread(&self, fqn: &str) -> bool {
+        self.split_module(fqn).is_some_and(|(m, _)| m.unread)
+    }
+
+    /// The target of a call to `fqn`, a name no project definition holds: the external function
+    /// the catalog may list, or nothing heki knows when `fqn` is under a project module it could
+    /// not read (that module, not the catalog's, is what the name refers to).
+    pub(crate) fn outside(&self, fqn: String) -> Callee {
+        if self.under_unread(&fqn) {
+            Callee::Unresolved
+        } else {
+            Callee::External(fqn)
+        }
+    }
+
+    /// The catalog entry of `symbol`, a name the project's code reaches; none for a name under
+    /// a project module heki could not read ([`Self::outside`]).
+    pub fn catalog<'k>(
+        &self,
+        kb: &'k EffectiveEcosystemKb,
+        symbol: &str,
+    ) -> Option<&'k EcosystemEntry> {
+        if self.under_unread(symbol) {
+            return None;
+        }
+        kb.lookup(symbol)
     }
 
     fn class(&self, fqn: &str) -> Option<&ClassDecl> {
@@ -2217,14 +2267,14 @@ impl ProjectDecls {
     pub(crate) fn method_targets(&self, class: &str, method: &str, skip_self: bool) -> Callee {
         let class = self.canonical(class);
         if !self.is_project_class(&class) {
-            return Callee::External(format!("{class}.{method}"));
+            return self.outside(format!("{class}.{method}"));
         }
         let (found, external) = self.definitions(&class, method, skip_self, !skip_self, |_| true);
         if found.len() > CHA_CANDIDATE_LIMIT {
             return Callee::TooMany;
         }
         if found.is_empty() {
-            return external.map_or(Callee::Unresolved, Callee::External);
+            return external.map_or(Callee::Unresolved, |e| self.outside(e));
         }
         Callee::Project(found, true)
     }
@@ -2236,7 +2286,7 @@ impl ProjectDecls {
         let class = self.canonical(class);
         match self.definitions(&class, method, false, false, |_| true) {
             (found, _) if !found.is_empty() => Callee::Project(found, true),
-            (_, external) => external.map_or(Callee::Unresolved, Callee::External),
+            (_, external) => external.map_or(Callee::Unresolved, |e| self.outside(e)),
         }
     }
 
@@ -3255,7 +3305,7 @@ fn offloading_decorator(cx: &TypeCtx<'_>, f: &IrFunction) -> Option<String> {
         let symbol = cx
             .project
             .canonical(&cx.module.resolve_dotted(head, false)?);
-        let entry = cx.kb.lookup(&symbol)?;
+        let entry = cx.project.catalog(cx.kb, &symbol)?;
         (entry.offloads_blocking_arg == Some(0)).then_some(symbol)
     })
 }
@@ -3636,10 +3686,10 @@ impl Ty {
 
 /// The targets of constructing `class` from its `__init__` targets: they bind the new
 /// instance; a class without a project `__init__` is called by its own name.
-fn constructor(class: &str, init: Callee) -> Callee {
+fn constructor(project: &ProjectDecls, class: &str, init: Callee) -> Callee {
     match init {
         Callee::Project(keys, _) => Callee::Project(keys, true),
-        _ => Callee::External(class.to_owned()),
+        _ => project.outside(class.to_owned()),
     }
 }
 
@@ -3679,6 +3729,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
     str_constants: BTreeMap::new(),
+    unread: false,
 };
 
 impl<'a> TypeCtx<'a> {
@@ -3790,7 +3841,7 @@ impl<'a> TypeCtx<'a> {
                     })
                     .map(|t| decl.call_type(t));
             }
-            Symbol::Module | Symbol::Global(_) => return None,
+            Symbol::Module | Symbol::Global(_) | Symbol::Unread => return None,
             Symbol::External => {}
         }
         if let Some(b) = fqn.strip_prefix("builtins.") {
@@ -3801,7 +3852,7 @@ impl<'a> TypeCtx<'a> {
             return Some(Ty::inst(fqn));
         }
         // Layer 2 factory or constructor registered with a lowercase name (`sqlite3.connect`, `boto3.client`).
-        let entry = self.kb.lookup(fqn)?;
+        let entry = self.catalog(fqn)?;
         if let Some(rt) = entry.return_type_in(entry.case_for(arg)) {
             return Some(Ty::inst(rt));
         }
@@ -3835,13 +3886,19 @@ impl<'a> TypeCtx<'a> {
         match callee {
             Some(Recv::Ref(fqn)) => match self.project.symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
-                Symbol::Class(_) => constructor(fqn, self.project.class_targets(fqn, "__init__")),
-                Symbol::Module | Symbol::Global(_) => Callee::Unresolved,
+                Symbol::Class(_) => constructor(
+                    self.project,
+                    fqn,
+                    self.project.class_targets(fqn, "__init__"),
+                ),
+                Symbol::Module | Symbol::Global(_) | Symbol::Unread => Callee::Unresolved,
                 Symbol::External => Callee::External(fqn.to_owned()),
             },
-            Some(Recv::Class(class)) => {
-                constructor(class, self.project.method_targets(class, "__init__", false))
-            }
+            Some(Recv::Class(class)) => constructor(
+                self.project,
+                class,
+                self.project.method_targets(class, "__init__", false),
+            ),
             Some(Recv::Inst(class)) => self.project.method_targets(class, "__call__", false),
             Some(Recv::Super(_)) | None => Callee::Unresolved,
         }
@@ -4036,6 +4093,11 @@ impl<'a> TypeCtx<'a> {
         types: &FxHashMap<VarId, Val>,
     ) -> Option<String> {
         self.str_constant_with(var, &|v| shape.inst(v), types)
+    }
+
+    /// [`ProjectDecls::catalog`] of this module's project.
+    pub fn catalog(&self, symbol: &str) -> Option<&'a EcosystemEntry> {
+        self.project.catalog(self.kb, symbol)
     }
 
     /// The fqn the import statement at `span` binds (what a module body's copy of its
