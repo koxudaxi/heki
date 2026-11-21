@@ -2539,3 +2539,105 @@ unresolved = "report"
         ]
     );
 }
+
+/// One module per use of the dict of module globals, each binding `KEY: Final = "_hidden"` and
+/// writing `node.__dict__[KEY]` (line 9): `(module, the body of `use`, module-level lines)`.
+const GLOBALS_USES: &[(&str, &str, &str)] = &[
+    ("read_get", "    return globals().get(name)", ""),
+    ("read_item", "    return globals()[name]", ""),
+    ("read_in", "    return name in globals()", ""),
+    (
+        "read_loop",
+        "    for key in globals():\n        print(key)\n    return None",
+        "",
+    ),
+    ("read_len", "    return len(globals())", ""),
+    (
+        "read_alias",
+        "    found = globals()\n    return found.get(name)",
+        "",
+    ),
+    ("read_items", "    return sorted(globals().items())", ""),
+    (
+        "write_item",
+        "    globals()[name] = value\n    return None",
+        "",
+    ),
+    (
+        "write_update",
+        "    globals().update({name: value})\n    return None",
+        "",
+    ),
+    ("write_del", "    del globals()[name]\n    return None", ""),
+    (
+        "write_setdefault",
+        "    return globals().setdefault(name, value)",
+        "",
+    ),
+    (
+        "write_handed",
+        "    register(globals())\n    return None",
+        "",
+    ),
+    ("write_returned", "    return globals()", ""),
+    (
+        "write_builtin",
+        "    fetch = globals\n    fetch()[name] = value\n    return None",
+        "",
+    ),
+    (
+        "write_alias",
+        "    found = globals()\n    found[name] = value\n    return None",
+        "",
+    ),
+];
+
+/// Reading the dict of module globals (`globals().get(name)`, `name in globals()`, iterating it)
+/// binds no name, so the module's constants still name keys;
+/// storing into it, deleting from it, a method changing it, or handing it on (also the builtin
+/// `globals` itself) may bind any name, even one declared `Final`.
+#[test]
+fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
+    let p = Project::new("keys_globals_uses");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"c\"\ntargets = [\"pkg.model.Node._hidden\"]\n\
+         allowed-writers = [\"pkg.model.Store.*\"]\nunresolved = \"report\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Node:\n    def __init__(self) -> None:\n        self.kind = \"a\"\n",
+    );
+    for (module, body, tail) in GLOBALS_USES {
+        p.write(
+            &format!("pkg/{module}.py"),
+            &format!(
+                "from typing import Final\n\nfrom pkg.model import Node\n\nKEY: Final = \"_hidden\"\n\n\n\
+                 def write(node: Node) -> None:\n    node.__dict__[KEY] = 1\n\n\n\
+                 def register(found: object) -> None:\n    pass\n\n\n\
+                 def use(name: str, value: object) -> object:\n{body}\n\n\n{tail}"
+            ),
+        );
+    }
+    let codes: Vec<(String, String)> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|x| x.1 == 9)
+        .map(|x| (x.0, x.2))
+        .collect();
+    let expected: Vec<(String, String)> = GLOBALS_USES
+        .iter()
+        .map(|(module, _, _)| {
+            let code = if module.starts_with("read_") {
+                "MUT201"
+            } else {
+                "MUT205"
+            };
+            (format!("pkg/{module}.py"), code.to_owned())
+        })
+        .collect();
+    let mut sorted = expected.clone();
+    sorted.sort();
+    assert_eq!(codes, sorted);
+}
