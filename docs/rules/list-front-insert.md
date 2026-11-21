@@ -2,13 +2,9 @@
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.insert(0, v)` -> `collections.deque`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 84% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
@@ -20,22 +16,26 @@ costs no more than building it.
 
 ## What a report states
 
-A report states that inserting at the front of the list (`lst.insert(0, x)`) shifts every element,
-on every iteration of the loop.
+A report states that inserting at the front of the list (`lst.insert(0, x)`), in a loop, moves
+every element each time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.

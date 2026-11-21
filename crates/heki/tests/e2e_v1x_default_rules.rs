@@ -737,21 +737,21 @@ fn opt112_reports_linear_scans_of_long_lived_lists_in_data_sized_loops() {
     assert_eq!(
         (message(0), help(0)),
         (
-            "`names.index()` scans the whole list on every iteration of the loop (O(n²))",
+            "`names.index()` scans the list each time it runs in the loop",
             "build a `dict` (value → index) or a `set` once before the loop"
         )
     );
     assert_eq!(
         (message(1), help(1)),
         (
-            "`alias.remove()` scans the whole list on every iteration of the loop (O(n²))",
+            "`alias.remove()` scans the list each time it runs in the loop",
             "collect the values to drop in a `set` and rebuild the list once with a comprehension"
         )
     );
     assert_eq!(
         (message(2), help(2)),
         (
-            "`items.count()` scans the whole list on every iteration of the loop (O(n²))",
+            "`items.count()` scans the list each time it runs in the loop",
             "count once before the loop with `collections.Counter(items)`"
         )
     );
@@ -1102,22 +1102,22 @@ fn opt113_reports_nested_loop_equijoins_but_not_traversals_or_all_pairs_loops() 
     assert_eq!(
         (message(0), help(0)),
         (
-            "nested loops join `orders` and `customers` on `order.customer_id == customer.id` (O(n·m))",
-            "index `customers` by `customer.id` in a `dict` before the outer loop"
+            "nested loops join `orders` and `customers` on `order.customer_id == customer.id`",
+            "if the keys are hashable, index `customers` by `customer.id` in a `dict` before the outer loop"
         )
     );
     assert_eq!(
         (message(6), help(6)),
         (
-            "nested loops join `xs` and `ys` on `x == y` (O(n·m))",
-            "group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+            "nested loops join `xs` and `ys` on `x == y`",
+            "if the keys are hashable, group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
         )
     );
     assert_eq!(
         (message(8), help(8)),
         (
-            "nested loops join `A` and `C` on `c.k == a.k` (O(n·m))",
-            "index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+            "nested loops join `A` and `C` on `c.k == a.k`",
+            "if the keys are hashable, index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
         )
     );
     assert_eq!(diags[0]["column"], 16);
@@ -1221,11 +1221,11 @@ fn opt113_skips_joins_whose_loop_size_the_code_fixes() {
     let native = &diags[4];
     assert_eq!(
         native["message"],
-        "nested loops join `operations` and `config[\"calls\"]` on `call[\"op\"] == name` (O(n·m))"
+        "nested loops join `operations` and `config[\"calls\"]` on `call[\"op\"] == name`"
     );
     assert_eq!(
         native["help"],
-        "index `config[\"calls\"]` in a `dict` from `call[\"op\"]` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+        "if the keys are hashable, index `config[\"calls\"]` in a `dict` from `call[\"op\"]` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
     );
 }
 

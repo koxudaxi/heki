@@ -70,13 +70,13 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| OPT101 | [list-quadratic-concat](list-quadratic-concat.md) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ |
-| OPT102 | [set-dict-quadratic-merge](set-dict-quadratic-merge.md) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ |
-| OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ |
-| OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ |
-| OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ |
+| OPT101 | [list-quadratic-concat](list-quadratic-concat.md) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
+| OPT102 | [set-dict-quadratic-merge](set-dict-quadratic-merge.md) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
+| OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
+| OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
+| OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
 | OPT112 | [loop-linear-list-lookup](loop-linear-list-lookup.md) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
-| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ |
-| OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ |
-| OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ |
-| OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ |
+| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
+| OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
+| OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
+| OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |

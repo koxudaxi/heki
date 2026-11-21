@@ -842,7 +842,10 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// What calling special method `name` on an instance returns. The syntax calling it (`x[k]`,
     /// `for v in x`) hands no argument facts to the catalog's argument cases.
     fn dunder(&self, o: &Obj, name: &str) -> Option<Ty> {
-        let targets = self.cx.project.method_targets(&o.class, name, false);
+        let targets = self
+            .cx
+            .project
+            .method_targets(&o.class, name, false, self.cx.kb);
         self.cx.callee_result(&targets, |_, _| None)
     }
 
@@ -1197,6 +1200,11 @@ impl<'e, 'a> Engine<'e, 'a> {
                 };
                 iterator(fqn, inner)
             }
+            // `object.__new__(cls)` allocates an instance of `cls` without initializing it.
+            "builtins.object.__new__" if !args.is_empty() => match self.need(args[0])? {
+                Some(Ty::Ref(class) | Ty::Class(class)) => Ty::inst(class.as_str()),
+                _ => return Ok(None),
+            },
             "builtins.sorted" => Ty::container("builtins.list", Args::items(items(0))),
             "builtins.list" | "builtins.set" | "builtins.frozenset" => {
                 Ty::container(fqn, Args::items(items(0)))
@@ -1257,6 +1265,15 @@ impl<'e, 'a> Engine<'e, 'a> {
             && !cx.project.is_project_class(fqn)
         {
             return self.call_named(&cx.project.canonical(&format!("{fqn}.{method}")), call);
+        }
+        // `Model.__new__(Model)`, `super().__new__(cls)`: what `object.__new__` allocates.
+        if method == "__new__"
+            && let Some(Ty::Ref(class) | Ty::Class(class) | Ty::Super(class)) = r
+            && cx
+                .project
+                .new_is_object_new(class, matches!(r, Some(Ty::Super(_))), cx.kb)
+        {
+            return self.call_named("builtins.object.__new__", call);
         }
         if let Some(o) = r.and_then(Ty::obj)
             && let Some(item) = self.container_method(o, method, args)
@@ -1325,7 +1342,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .and_then(|t| t.bind_self(Some(&self_ty)))
                 .map(|t| decl.call_type(t));
         }
-        match cx.project.method_targets(class, method, skip_self) {
+        match cx.project.method_targets(class, method, skip_self, cx.kb) {
             Callee::External(symbol)
                 if cx
                     .catalog(&symbol)

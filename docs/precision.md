@@ -10,8 +10,10 @@ Every heki report is **exact** or **heuristic**:
   without ruling it out. It can be wrong about the code, and every output labels it `heuristic`.
 
 A rule is exact once it is certified (below), and heuristic until then. An exact rule's reports
-are exact, with one exception: an `OPT` rule's report whose rewrite heki could not prove safe
-is heuristic, as that premise is open. Only exact reports are shown by default.
+are exact, with one exception: an `OPT` rule's report that did not establish a premise of the
+rule's exact tier is heuristic, as that premise is open: a rewrite heki could not prove safe, a
+loop whose trip count the code fixes, or an `OPT113` join whose rule page premises do not all
+hold. Only exact reports are shown by default.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
   `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by
@@ -22,7 +24,9 @@ is heuristic, as that premise is open. Only exact reports are shown by default.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
-See [Rule selection](configuration.md#rule-selection-toolhekilint). No rule is exact yet.
+See [Rule selection](configuration.md#rule-selection-toolhekilint). The proven tier of the eight
+`OPT` rewrite rules and the exact tier of `OPT113` are exact (certified below); the other rules
+are heuristic.
 
 ## What a report states
 
@@ -114,10 +118,24 @@ release, or the rule becomes heuristic in that release and needs a new certifica
 ## Certifications
 
 A certified rule has a row here: the release that certified it, and the reports of its census
-and of its holdout run with the false claims among them. No rule is certified yet.
+and of its holdout run with the false claims among them. The census of the proven `OPT` tier
+checked by hand every exact report on the Stage 0-A corpus with the build of 2026-11-21 (one
+report, whose rewrite needed the set-order obligation, left the tier); the holdout run checked
+every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
+census reports are those of its exact tier with the plain-key premise, all among the reports
+the census of the earlier tier checked by hand.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
+| `OPT101` | 0.2.0 | 7 / 0 | 2 / 0 |
+| `OPT102` | 0.2.0 | 1 / 0 | 0 / 0 |
+| `OPT103` | 0.2.0 | 128 / 0 | 188 / 0 |
+| `OPT110` | 0.2.0 | 8 / 0 | 0 / 0 |
+| `OPT111` | 0.2.0 | 7 / 0 | 7 / 0 |
+| `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 |
+| `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
+| `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
+| `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 |
 
 ## Measurements
 
@@ -137,16 +155,16 @@ loop a fixed 4 times, which is not data-sized.
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
 | `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
-| `OPT101` | heuristic | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
-| `OPT102` | heuristic | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |
-| `OPT103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 44 / 4 | 92% | 81-97% | 4% |
-| `OPT110` | heuristic | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
-| `OPT111` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
+| `OPT101` | exact | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
+| `OPT102` | exact | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |
+| `OPT103` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 44 / 4 | 92% | 81-97% | 4% |
+| `OPT110` | exact | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
+| `OPT111` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
 | `OPT112` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 43 / 5 | 90% | 79-96% | 4% |
-| `OPT113` | heuristic | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
-| `OPT120` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
-| `OPT121` | heuristic | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
-| `OPT130` | heuristic | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |
+| `OPT113` | exact | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
+| `OPT120` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
+| `OPT121` | exact | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
+| `OPT130` | exact | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |
 
 The other rules (the contract rules and the opt-in rules) have not been measured on this
 protocol yet.

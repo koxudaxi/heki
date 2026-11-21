@@ -418,7 +418,9 @@ def by_key(orders, customers):
             (14, "build a `set` of `right` before the outer loop".to_owned()),
             (
                 23,
-                "index `customers` in a `dict` from `customer.id` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list".to_owned()
+                // `order.customers.append(customer)` hands the inner item to a method heki does
+                // not know, which may change its key.
+                "if `customers` is the same collection, with the same keys, on every iteration of the outer loop and the keys are hashable, index `customers` in a `dict` from `customer.id` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list".to_owned()
             ),
         ]
     );
