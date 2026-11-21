@@ -483,6 +483,8 @@ fn watch_rechecks_a_call_chain_whose_end_moves() {
     wait_for(&rx, "[heki watch] 1 diagnostic(s) in 4 file(s)");
     let (code, check, _) = p.check(&[]);
     assert_eq!(code, 1, "{check}");
+    // The helpers type nothing, so the report names no line (it is heuristic): its chain is
+    // the call into `relay` alone.
     assert_eq!(
         check.matches("  = related: ").count(),
         1,

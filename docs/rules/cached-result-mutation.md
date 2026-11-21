@@ -2,26 +2,22 @@
 
 # cached-result-mutation (MUT114)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Enabled by default · Severity `error` (a bug) · No automatic fix
 
 Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks in-place changes of an object that a function cached by `functools.lru_cache` /
 `functools.cache` returned. The cache hands the same object to every later call with the same
 arguments, so the change is seen by all of them.
 
-A report states the rule's full claim, which makes it exact once the rule is certified, when
-the function changes in place, at the reported line, the list, dict, or set that a cached
-function returned:
+A report is exact when the function changes in place, at the reported line, the list, dict, or
+set that a cached function returned:
 
 - the cached function is decorated with `functools.cache`, or with `functools.lru_cache` whose
-  `maxsize` is not the literal `0`, known by what its name is bound to (`from functools import
-  lru_cache as _lru_cache` counts, a `cache` decorator the module defines itself does not), and
+  `maxsize` is left out, `None`, or a literal number above `0` (a name holding `0` would keep
+  nothing), known by what its name is bound to (`from functools import lru_cache as _lru_cache`
+  counts, a `cache` decorator the module defines itself does not), and
   otherwise only with `staticmethod` / `classmethod`;
 - it takes a parameter besides a method's `self` / `cls`, so the cache keys its results;
 - every return a run can reach hands out a builtin container of one kind: its return annotation
@@ -50,8 +46,8 @@ dict, or set that a function cached by `functools.lru_cache` / `functools.cache`
 
 Its premises:
 
-- **Cached**: the decorator is `functools.cache`, or `functools.lru_cache` with a `maxsize`
-  other than the literal `0`, known by what its name is bound to. Established.
+- **Cached**: the decorator is `functools.cache`, or `functools.lru_cache` with `maxsize` left
+  out, `None`, or a literal number above `0`, known by what its name is bound to. Established.
 - **Keyed**: the cached function takes a parameter besides `self` / `cls`. Established.
 - **Container kind**: every return a run can reach hands out a builtin container of the named
   kind, by its return annotation (R2) or by construction. Established.

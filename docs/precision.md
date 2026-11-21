@@ -143,6 +143,8 @@ before reports reaching one waiting call are folded together.
 | `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
 | `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
+| `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
+| `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
 
 ## Measurements
 
@@ -161,7 +163,7 @@ loop a fixed 4 times, which is not data-sized.
 | `EFF103` | exact | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
 | `DATA101` | exact | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
-| `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
+| `MUT110` | exact | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
 | `OPT101` | exact | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
 | `OPT102` | exact | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |

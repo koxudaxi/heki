@@ -57,8 +57,12 @@ pub enum RuleFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Consequence {
-    /// A bug: a wrong result, an exception, a lost update, a deadlock, or a broken contract.
+    /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a
+    /// broken contract.
     Bug,
+    /// A bug that is rarely harmful: a promise the code makes is broken, such as a read-only
+    /// annotation, where the callers seldom notice.
+    MinorBug,
     /// Slower code that computes the right result.
     Slowdown,
 }
@@ -148,11 +152,11 @@ impl RuleMeta {
     }
 
     /// The severity of the rule's diagnostics unless `lint.severity` names the rule: `error` for
-    /// a bug, `warning` for slower code.
+    /// a bug that can be critical, `warning` for a bug that is rarely harmful and for slower code.
     pub const fn default_severity(&self) -> Severity {
         match self.consequence {
             Consequence::Bug => Severity::Error,
-            Consequence::Slowdown => Severity::Warning,
+            Consequence::MinorBug | Consequence::Slowdown => Severity::Warning,
         }
     }
 }
@@ -244,12 +248,12 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT110",
         slug: "readonly-param-mutation",
         family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::Default,
-        consequence: Consequence::Bug,
+        consequence: Consequence::MinorBug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).",
+        summary: "Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.",
         doc: include_str!("../rule-docs/MUT110.md"),
     },
     RuleMeta {
@@ -292,7 +296,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT114",
         slug: "cached-result-mutation",
         family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::Default,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
@@ -1330,17 +1334,17 @@ mod registry_tests {
     }
 
     #[test]
-    fn a_rule_is_an_error_for_a_bug_and_a_warning_for_slower_code() {
+    fn a_rule_is_an_error_for_a_critical_bug_and_a_warning_otherwise() {
         for r in CORE_RULES {
             let expected = match r.consequence {
                 Consequence::Bug => Severity::Error,
-                Consequence::Slowdown => Severity::Warning,
+                Consequence::MinorBug | Consequence::Slowdown => Severity::Warning,
             };
             assert_eq!(r.default_severity(), expected, "{}", r.code);
             // The `OPT` rules report slower code, and every `MUT` rule a bug.
             match r.family {
                 RuleFamily::Opt => assert_eq!(r.consequence, Consequence::Slowdown, "{}", r.code),
-                RuleFamily::Mut => assert_eq!(r.consequence, Consequence::Bug, "{}", r.code),
+                RuleFamily::Mut => assert_ne!(r.consequence, Consequence::Slowdown, "{}", r.code),
                 RuleFamily::Eff | RuleFamily::Data => {}
             }
         }

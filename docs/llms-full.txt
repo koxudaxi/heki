@@ -143,7 +143,7 @@ Each report shows the chain of calls that leads to the bug.
 | A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) | exact |
 | A database query, or a new HTTP client, a loop can run on every iteration | [`EFF113`](https://heki.koxudaxi.dev/rules/loop-possible-db-query/), [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | heuristic |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | heuristic |
-| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | heuristic |
+| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | exact |
 | Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | heuristic |
 | Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | heuristic |
 | Opt-in: a generator consumed twice | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | heuristic |
@@ -2014,11 +2014,11 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
 | MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
-| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). | ≈ |
+| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line. |  |
 | MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | ≈ 🔌 🧪 |
 | MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
 | MUT113 | [iterated-container-mutation](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | ≈ 🔌 🧪 |
-| MUT114 | [cached-result-mutation](https://heki.koxudaxi.dev/rules/cached-result-mutation/) | Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it. | ≈ |
+| MUT114 | [cached-result-mutation](https://heki.koxudaxi.dev/rules/cached-result-mutation/) | Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it. |  |
 | MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. | ≈ 📜 |
 | MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it. | ≈ 📜 |
 | MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. | ≈ 📜 |
@@ -2218,6 +2218,8 @@ before reports reaching one waiting call are folded together.
 | `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
 | `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
+| `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
+| `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
 
 ## Measurements
 
@@ -2236,7 +2238,7 @@ loop a fixed 4 times, which is not data-sized.
 | `EFF103` | exact | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
 | `DATA101` | exact | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
-| `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
+| `MUT110` | exact | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
 | `OPT101` | exact | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
 | `OPT102` | exact | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |
@@ -3542,26 +3544,22 @@ Source: https://heki.koxudaxi.dev/rules/cached-result-mutation/
 
 # cached-result-mutation (MUT114)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Enabled by default · Severity `error` (a bug) · No automatic fix
 
 Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks in-place changes of an object that a function cached by `functools.lru_cache` /
 `functools.cache` returned. The cache hands the same object to every later call with the same
 arguments, so the change is seen by all of them.
 
-A report states the rule's full claim, which makes it exact once the rule is certified, when
-the function changes in place, at the reported line, the list, dict, or set that a cached
-function returned:
+A report is exact when the function changes in place, at the reported line, the list, dict, or
+set that a cached function returned:
 
 - the cached function is decorated with `functools.cache`, or with `functools.lru_cache` whose
-  `maxsize` is not the literal `0`, known by what its name is bound to (`from functools import
-  lru_cache as _lru_cache` counts, a `cache` decorator the module defines itself does not), and
+  `maxsize` is left out, `None`, or a literal number above `0` (a name holding `0` would keep
+  nothing), known by what its name is bound to (`from functools import lru_cache as _lru_cache`
+  counts, a `cache` decorator the module defines itself does not), and
   otherwise only with `staticmethod` / `classmethod`;
 - it takes a parameter besides a method's `self` / `cls`, so the cache keys its results;
 - every return a run can reach hands out a builtin container of one kind: its return annotation
@@ -3590,8 +3588,8 @@ dict, or set that a function cached by `functools.lru_cache` / `functools.cache`
 
 Its premises:
 
-- **Cached**: the decorator is `functools.cache`, or `functools.lru_cache` with a `maxsize`
-  other than the literal `0`, known by what its name is bound to. Established.
+- **Cached**: the decorator is `functools.cache`, or `functools.lru_cache` with `maxsize` left
+  out, `None`, or a literal number above `0`, known by what its name is bound to. Established.
 - **Keyed**: the cached function takes a parameter besides `self` / `cls`. Established.
 - **Container kind**: every return a run can reach hands out a builtin container of the named
   kind, by its return annotation (R2) or by construction. Established.
@@ -6011,13 +6009,9 @@ Source: https://heki.koxudaxi.dev/rules/readonly-param-mutation/
 
 # readonly-param-mutation (MUT110)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Enabled by default · Severity `warning` (a bug that is rarely harmful) · No automatic fix
 
-Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 4 sampled reports (round 3, 2026-11-21), 100% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.
 
 ## What it does
 Checks functions that hand a parameter annotated as a read-only container to code that changes
@@ -6027,8 +6021,8 @@ inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself or throu
 `items.append(...)`, `table[key] = ...`), itself or through further helpers, any number of calls
 deep.
 
-The rule reports the call that hands the parameter over, with the calls down to the change as
-related locations. A generator function changes what it is handed where its generator is
+The rule reports the call that hands the parameter over, and names the line where the change
+happens, with the calls down to it and the line itself as related locations. A generator function changes what it is handed where its generator is
 iterated (`for`, `list(...)`, a function iterating it), and is reported there; one that is
 created and never iterated changes nothing.
 
@@ -6048,16 +6042,23 @@ It does not report:
 ## What a report states
 
 A report states that the function hands its parameter annotated `Sequence`, `Mapping`, or
-`ReadOnly`, as itself or through a local alias, to a function that changes it in place, directly or
-through the helpers shown.
+`ReadOnly`, as itself, to a function, and that whenever the named line runs during that call, it
+changes the caller's object in place. It does not say that every call reaches the line: the
+change often sits under a test of the argument's type (`if isinstance(values, list):`), and the
+claim is anchored there.
 
 Its premises:
 
 - **Read-only parameter**: the parameter's annotation. Established.
-- **Passed as itself**: the argument is the parameter or a local alias of it, not a copy.
-- **Changed in place**: the helper, or a helper it hands the argument to, changes it in place. Open:
-  a change on one of the helper's paths is enough, and through a method call one candidate
-  implementation is.
+- **Passed as itself**: on every path to the call, the argument is the parameter or a local
+  alias of it, not a copy or another value. Established.
+- **Changed at the line**: the named line changes in place the object bound to the parameter of
+  the function it is in, on every path to the line, a builtin container there (`list`, `dict`,
+  `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and
+  that parameter receives the argument through the calls shown, each handing it on as itself.
+  Established. Open: a change of a value of another class (a `Sequence` whose `append` returns a
+  new one), and one made where a generator that another function returns is iterated; such a
+  report names no line and is heuristic.
 
 ## Why is this bad?
 A `Sequence` or `Mapping` annotation promises the caller that the function only reads its

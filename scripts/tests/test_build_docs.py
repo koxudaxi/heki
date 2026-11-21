@@ -64,3 +64,4 @@ def test_the_tables_of_the_real_page_are_read() -> None:
     certified = build_docs.precision_rows(build_docs.CERTIFICATION)
     assert certified["OPT103"]["census"] == "128" and certified["OPT103"]["holdout_false"] == "0"
     assert certified["EFF101"]["census"] == "287" and certified["EFF101"]["holdout_false"] == "0"
+    assert certified["MUT114"]["census"] == "5" and certified["MUT114"]["holdout_false"] == "0"

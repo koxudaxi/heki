@@ -134,7 +134,7 @@ Each report shows the chain of calls that leads to the bug.
 | A database statement on every iteration of a loop over data | [`EFF103`](rules/loop-db-query.md) | exact |
 | A database query, or a new HTTP client, a loop can run on every iteration | [`EFF113`](rules/loop-possible-db-query.md), [`EFF102`](rules/loop-unpooled-client.md) | heuristic |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](rules/hash-attr-mutation.md) | heuristic |
-| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) | heuristic |
+| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) | exact |
 | Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](rules/readonly-type-mutation.md) | heuristic |
 | Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic |
 | Opt-in: a generator consumed twice | [`MUT106`](rules/iterator-double-consumption.md) | heuristic |
