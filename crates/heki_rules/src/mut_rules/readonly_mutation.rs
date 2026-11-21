@@ -267,7 +267,17 @@ impl Rule<'_, '_> {
                     && let Some(decl) = readonly.filter(|d| d.readonly_params & (1u64 << p) != 0)
                 {
                     let name = &decl.param_names[usize::from(*p)];
-                    let (chain, (changer, j)) = self.chain(&call, k, None);
+                    // A helper whose parameter is annotated, read-only or mutable, is checked on
+                    // its own: a change reached only through one is not this call's report.
+                    let unannotated = |f: &FuncKey, j: u8| {
+                        cx.decls.function_decl(f).is_none_or(|d| {
+                            (d.readonly_params | d.mutable_params) & (1u64 << j) == 0
+                        })
+                    };
+                    let (chain, (changer, j), found) = self.chain(&call, k, None, &unannotated);
+                    if !found && self.chain(&call, k, None, &|_, _| true).2 {
+                        continue;
+                    }
                     // The line where the function at the end of the chain changes the object its
                     // parameter `j` holds, which is the caller's parameter whenever it runs. The
                     // chain does not follow a change made where a returned generator is
@@ -349,7 +359,7 @@ impl Rule<'_, '_> {
             call.site.caller.qualname,
             call.bc.callee.fqn()
         );
-        let (chain, _) = self.chain(call, k, what);
+        let (chain, _, _) = self.chain(call, k, what, &|_, _| true);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
         self.emit(
             out, "MUT108", unit, caller, span, target, message, FIX, &chain,
@@ -367,9 +377,16 @@ impl Rule<'_, '_> {
     }
 
     /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
-    /// the shortest chain of calls down to the function whose own body makes the change, and
-    /// that function with its parameter.
-    fn chain(&self, call: &Call<'_>, k: u8, what: Changed) -> (Vec<CallHop>, (FuncKey, u8)) {
+    /// the shortest chain of calls down to the function whose own body makes the change, entering
+    /// only the parameters `enters` admits, and that function with its parameter; whether such
+    /// a function was found (else the chain is the first hop).
+    fn chain(
+        &self,
+        call: &Call<'_>,
+        k: u8,
+        what: Changed,
+        enters: &dyn Fn(&FuncKey, u8) -> bool,
+    ) -> (Vec<CallHop>, (FuncKey, u8), bool) {
         let index = self.cx.index;
         let hop = |caller: &FuncKey, callee: &FuncKey, span: Span, path: &Path| CallHop {
             caller: caller.clone(),
@@ -388,7 +405,7 @@ impl Rule<'_, '_> {
         )];
         let mut visited: FxHashSet<(FuncKey, u8, Changed)> = FxHashSet::default();
         visited.insert((start.clone(), k, what));
-        let mut found = 0;
+        let mut found = None;
         let mut i = 0;
         while i < states.len() {
             let (func, j, what) = (states[i].0.clone(), states[i].1, states[i].2.clone());
@@ -401,7 +418,7 @@ impl Rule<'_, '_> {
                 .get(&func)
                 .is_some_and(|local| changes(local, j, &what))
             {
-                found = i;
+                found = Some(i);
                 break;
             }
             for s in file
@@ -427,6 +444,7 @@ impl Rule<'_, '_> {
                             .then_some(None),
                         };
                         if let Some(next) = next
+                            && enters(&c.callee, j2)
                             && visited.insert((c.callee.clone(), j2, next.clone()))
                         {
                             let into = hop(&func, &c.callee, s.span, path);
@@ -437,15 +455,16 @@ impl Rule<'_, '_> {
             }
             i += 1;
         }
-        let end = (states[found].0.clone(), states[found].1);
+        let end_state = found.unwrap_or(0);
+        let end = (states[end_state].0.clone(), states[end_state].1);
         let mut chain = Vec::new();
-        let mut at = Some(found);
+        let mut at = Some(end_state);
         while let Some(i) = at {
             chain.push(states[i].4.clone());
             at = states[i].3;
         }
         chain.reverse();
-        (chain, end)
+        (chain, end, found.is_some())
     }
 
     /// One report per `(rule, function, span, target)`.

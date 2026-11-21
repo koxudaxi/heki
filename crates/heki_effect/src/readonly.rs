@@ -237,6 +237,15 @@ pub enum ContainerKind {
 }
 
 impl ContainerKind {
+    /// The builtin class.
+    pub fn class(self) -> &'static str {
+        match self {
+            Self::List => "builtins.list",
+            Self::Dict => "builtins.dict",
+            Self::Set => "builtins.set",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::List => "list",

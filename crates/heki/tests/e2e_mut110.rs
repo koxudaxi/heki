@@ -525,3 +525,65 @@ fn mut110_joins_the_changes_of_each_definition() {
     assert_eq!(diags[0]["certainty"], "exact", "{diags:#?}");
     assert_eq!(chain(&diags[0]).last(), Some(&(a.into(), 8)));
 }
+
+/// Under R2 a value that passes `isinstance(xs, list)` may be an instance of a project subclass
+/// of `list`; when one overrides the changing method (`reverse`), the line may change nothing,
+/// so the report names no line and is heuristic.
+const OVERRIDDEN: &str = r#"from collections.abc import Sequence
+
+
+class Frozen(list):
+    def reverse(self):
+        pass
+
+
+def reverse_lists(xs):
+    if isinstance(xs, list):
+        xs.reverse()
+
+
+def use(xs: Sequence[int]) -> None:
+    reverse_lists(xs)
+"#;
+
+/// A helper annotated `Mapping` is checked on its own, and the one it hands the argument to is
+/// annotated `dict[str, int]`, which a type checker reports: a change reached only through them
+/// is no report of the outer call.
+const THROUGH_ANNOTATED: &str = r#"from collections.abc import Mapping
+
+
+def put(xs: dict[str, int], n):
+    xs.setdefault("z", n)
+
+
+def relay(xs, n):
+    checked(xs, n)
+
+
+def checked(xs: Mapping[str, int], n):
+    put(xs, n)
+
+
+def entry(values: Mapping[str, int], n):
+    alias = values
+    relay(alias, n)
+"#;
+
+#[test]
+fn mut110_leaves_open_a_project_subclass_overriding_the_change() {
+    let p = Project::new("mut110_overridden");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/overridden.py", OVERRIDDEN);
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(found(&diags), vec![d("pkg/overridden.py", 15, "use", "xs")]);
+    assert_eq!(diags[0]["certainty"], "heuristic", "{diags:#?}");
+    assert_eq!(chain(&diags[0]), vec![("pkg/overridden.py".into(), 15)]);
+}
+
+#[test]
+fn mut110_does_not_follow_a_change_through_annotated_helpers() {
+    let p = Project::new("mut110_through_annotated");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/annotated.py", THROUGH_ANNOTATED);
+    assert!(diagnostics(&p, &[]).is_empty());
+}

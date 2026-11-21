@@ -2130,6 +2130,21 @@ fn steps_mut114_mut202_mut109() -> Vec<Step> {
             vec![save("pkg/fields.py", FIELDS)],
         )
         .present(&[("pkg/fields_user.py", "MUT114")]),
+        // Under R2 the list may be an instance of a project subclass: one in another module that
+        // overrides `append` leaves the claim open (`ProjectDecls::method_not_overridden`).
+        Step::new(
+            "a new module subclasses list and overrides append",
+            vec![Action::Create(
+                "pkg/frozen_list.py",
+                "class FrozenList(list):\n    def append(self, item):\n        pass\n".to_owned(),
+            )],
+        )
+        .present(&[("pkg/fields_user.py", "MUT114")]),
+        Step::new(
+            "the subclass is deleted",
+            vec![Action::Delete("pkg/frozen_list.py")],
+        )
+        .present(&[("pkg/fields_user.py", "MUT114")]),
         Step::new(
             "a wrapper in another module starts returning a declared producer's value",
             vec![save("pkg/lookup.py", LOOKUP_SHARED)],

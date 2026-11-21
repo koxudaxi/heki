@@ -3081,7 +3081,7 @@ impl<'a> Extractor<'a> {
                 ..
             } if self.has_in_place_operator(*lhs, *op) => {
                 if self.changes_in_place(*dst, *lhs, *op) {
-                    self.container_mut(*lhs, None, None, span);
+                    self.container_mut(*lhs, op.in_place_method(), None, None, span);
                 }
                 // `self.items |= other` changes the container before storing it back.
                 self.container_change(*lhs, ContainerChange::Resizes, span);
@@ -4069,12 +4069,14 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// In-place mutation of the container held in `var` (mutator method or subscript write):
-    /// `const_key` is a literal key (`self.<attr>` keys), `item_key` the constant key of the
-    /// changed entry (also a `Final` constant).
+    /// In-place mutation of the container held in `var` (mutator method or subscript write) by
+    /// `method` (`append`, `__setitem__`, `__iadd__`, ...): `const_key` is a literal key
+    /// (`self.<attr>` keys), `item_key` the constant key of the changed entry (also a `Final`
+    /// constant).
     fn container_mut(
         &mut self,
         var: VarId,
+        method: &str,
         const_key: Option<&str>,
         item_key: Option<String>,
         span: Span,
@@ -4088,10 +4090,12 @@ impl<'a> Extractor<'a> {
         match self.param_alias.get(&var).cloned() {
             Some((i, None)) => {
                 // A builtin container's own method or item store changes it in place; another
-                // class's (a `Sequence` whose `append` returns a new one) may not.
+                // class's may not (a `Sequence` whose `append` returns a new one, or, under R2, a
+                // project subclass of the builtin whose `reverse` does nothing).
                 let builtin = matches!(
                     self.val(var),
                     Some(Val::Inst(class)) if BUILTIN_CONTAINERS.contains(&class.as_str())
+                        && self.cx.project.method_not_overridden(class, method)
                 );
                 if builtin {
                     self.summary
@@ -4165,7 +4169,12 @@ impl<'a> Extractor<'a> {
         } else {
             None
         };
-        self.container_mut(obj, key_const, item_key, span);
+        let method = if is_delete {
+            "__delitem__"
+        } else {
+            "__setitem__"
+        };
+        self.container_mut(obj, method, key_const, item_key, span);
     }
 
     fn container_method(&mut self, recv: VarId, method: &str, args: &[VarId], span: Span) {
@@ -4200,7 +4209,7 @@ impl<'a> Extractor<'a> {
         } else {
             None
         };
-        self.container_mut(recv, None, item_key, span);
+        self.container_mut(recv, method, None, item_key, span);
     }
 
     fn hop(&self, callee: String, span: Span) -> CallHop {

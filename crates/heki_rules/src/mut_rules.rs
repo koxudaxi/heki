@@ -2547,17 +2547,18 @@ impl<'a> Mut202Fn<'a> {
         &self,
         inst: &'a Inst,
     ) -> Option<(&'a FuncKey, heki_effect::CachedResult)> {
-        let (operand, change) = match &inst.kind {
-            InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
-                (*obj, Change::Item)
+        let (operand, change, method) = match &inst.kind {
+            InstKind::SubscriptStore { obj, .. } => (*obj, Change::Item, "__setitem__"),
+            InstKind::SubscriptDelete { obj, .. } => (*obj, Change::Item, "__delitem__"),
+            InstKind::MethodCall { recv, method, .. } => {
+                (*recv, Change::Method(method), method.as_str())
             }
-            InstKind::MethodCall { recv, method, .. } => (*recv, Change::Method(method)),
             InstKind::BinOp {
                 lhs,
                 op,
                 in_place: true,
                 ..
-            } => (*lhs, Change::InPlace(*op)),
+            } => (*lhs, Change::InPlace(*op), op.in_place_method()),
             _ => return None,
         };
         let MustResult::Of(key) = self.must_results().get(&operand).copied()? else {
@@ -2569,7 +2570,13 @@ impl<'a> Mut202Fn<'a> {
             Change::Method(m) => cached.kind.mutator(m),
             Change::InPlace(op) => cached.kind.in_place_op(op),
         };
-        changes.then_some((key, cached))
+        // Under R2 the result may be an instance of a project subclass of the builtin, whose
+        // own `method` runs instead.
+        let builtin = self
+            .cx
+            .decls
+            .method_not_overridden(cached.kind.class(), method);
+        (changes && builtin).then_some((key, cached))
     }
 
     /// The function's call sites in the index, every role.

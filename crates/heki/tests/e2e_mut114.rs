@@ -452,3 +452,39 @@ fn mut114_knows_each_container_kind_by_annotation_or_construction() {
         "{diags:#?}"
     );
 }
+
+/// Under R2 a cached function annotated `-> list` may hand out an instance of a project subclass
+/// of `list`; when a project subclass overrides the changing method or operator (`sort`,
+/// `setdefault`, `__ior__`), the change may change nothing, so the report states no exact claim.
+#[test]
+fn mut114_leaves_open_a_project_subclass_overriding_the_change() {
+    for (name, subclass, producer, change) in [
+        (
+            "list_sort",
+            "class Frozen(list):\n    def sort(self, *args, **kwargs):\n        pass\n",
+            "@lru_cache(maxsize=8)\ndef get(name) -> list:\n    return Frozen([name, \"id\"])\n",
+            "    result.sort()\n",
+        ),
+        (
+            "dict_setdefault",
+            "class FrozenDict(dict):\n    def setdefault(self, key, default=None):\n        pass\n",
+            "@cache\ndef get(name) -> dict[str, object]:\n    return FrozenDict(dict(name=name))\n",
+            "    result.setdefault(\"x\", 1)\n",
+        ),
+        (
+            "set_ior",
+            "class FrozenSet(set):\n    def __ior__(self, other):\n        pass\n",
+            "@lru_cache\ndef get(name) -> set[str]:\n    return FrozenSet({name, \"id\"})\n",
+            "    result |= {\"x\"}\n",
+        ),
+    ] {
+        let p = Project::new(&format!("mut114_override_{name}"));
+        let source = format!(
+            "from functools import cache, lru_cache\n\n\n{subclass}\n\n{producer}\n\ndef use(name):\n    result = get(name)\n{change}"
+        );
+        p.write("m.py", &source);
+        let diags = diagnostics(&p, &["--select", "MUT114"]);
+        assert_eq!(claims(&diags), vec![(16, false)], "{name}: {diags:#?}");
+        assert_eq!(diags[0]["certainty"], "heuristic", "{name}");
+    }
+}

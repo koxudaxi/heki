@@ -2235,6 +2235,21 @@ impl ProjectDecls {
             .flatten()
     }
 
+    /// Whether no project class derived from `class` (a builtin container, say) binds `method`
+    /// itself or takes it from another project class along its MRO: under R2 a value of type
+    /// `class` may be an instance of such a subclass, whose `method` runs instead of `class`'s.
+    pub fn method_not_overridden(&self, class: &str, method: &str) -> bool {
+        self.subclasses_of(class).iter().all(|sub| {
+            self.mro(sub)
+                .into_iter()
+                .filter(|c| self.is_project_class(c))
+                .all(|c| {
+                    self.read(|k| note(&mut k.class_facts, &c));
+                    self.class(&c).is_none_or(|d| !d.members.contains(method))
+                })
+        })
+    }
+
     /// Every project class that (transitively) inherits from `class`, sorted.
     pub fn subclasses_of(&self, class: &str) -> Vec<String> {
         let mut out = Vec::new();

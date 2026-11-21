@@ -29,7 +29,9 @@ It does not report:
 - a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
   `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument;
 - a helper parameter annotated read-only: that helper is checked in turn (its own handing over is
-  reported, a change in its own body is a type error);
+  reported, a change in its own body is a type error); a change reached only through such a
+  helper, or through one whose parameter is annotated with a mutable type, further down the
+  calls, is no report of the outer call either;
 - variadic parameters (`*items: Sequence[int]`).
 
 ## What a report states
@@ -48,10 +50,12 @@ Its premises:
 - **Changed at the line**: the named line changes in place the object bound to the parameter of
   the function it is in, on every path to the line, a builtin container there (`list`, `dict`,
   `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and
-  that parameter receives the argument through the calls shown, each handing it on as itself.
+  that parameter receives the argument through the calls shown, each handing it on as itself,
+  none of them annotated. No project subclass of that container overrides the changing method
+  (`reverse`, `__setitem__`, `__iadd__`, ...): under R2 the value may be an instance of one.
   Established. Open: a change of a value of another class (a `Sequence` whose `append` returns a
-  new one), and one made where a generator that another function returns is iterated; such a
-  report names no line and is heuristic.
+  new one), a change by a method a project subclass overrides, and one made where a generator
+  that another function returns is iterated; such a report names no line and is heuristic.
 
 ## Why is this bad?
 A `Sequence` or `Mapping` annotation promises the caller that the function only reads its

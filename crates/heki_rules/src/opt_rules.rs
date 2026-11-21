@@ -1296,15 +1296,12 @@ impl JoinPremises<'_, '_, '_> {
         }
     }
 
-    /// Whether no project class derived from one of `classes` defines `method` itself: under
-    /// R2 a value annotated with a builtin container may be an instance of such a subclass.
+    /// Whether no project class derived from one of `classes` overrides `method`
+    /// ([`ProjectDecls::method_not_overridden`]).
     fn not_overridden(&self, classes: &[&str], method: &str) -> bool {
-        classes.iter().all(|class| {
-            let subclasses = self.decls.subclasses_of(class);
-            subclasses
-                .iter()
-                .all(|sub| self.decls.mro_method(sub, method).is_none())
-        })
+        classes
+            .iter()
+            .all(|class| self.decls.method_not_overridden(class, method))
     }
 
     /// Whether iterating `v` runs no code of the project: its type is a builtin container, and
