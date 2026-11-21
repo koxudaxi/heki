@@ -189,6 +189,10 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "socket.getaddrinfo"
 effects = ["blocking_net"]
+# `AI_NUMERICHOST` takes only a numeric address and never asks a resolver.
+cases = [
+    { arg = 5, param = "flags", flag = ["socket.AI_NUMERICHOST", "socket.AddressInfo.AI_NUMERICHOST"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]

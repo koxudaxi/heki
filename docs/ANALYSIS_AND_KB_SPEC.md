@@ -154,15 +154,30 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     one predecessor branches on it, through `not`, `and` / `or`, and comparison chains, and the
     tests on the single-predecessor way to each operand. A generator expression's or a
     comprehension function's loop over `.0` takes the bound of the iterable its creator passes
-    (`IrFunction::passed_from`).
+    (`IrFunction::passed_from`); and a `while` loop over a counter that runs at most 16 times
+    (`FnIndex::counted_trips`): its test compares a header phi with a constant (`==`, `!=`,
+    `<`, `<=`, `>`, `>=`, either side) or tests the phi itself (a count down to zero), the
+    test's false side leaves the loop (an operand of `and` bounds it, one of `or` does not), the
+    phi enters the loop as an integer constant, and every input along a path back is the phi
+    plus one and the same nonzero constant (`i += 1`), so `i = 1` ... `while i < 6:` runs 5
+    times.
   - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
-    handler) over a small constant range or a target named like `retry` / `attempt`, or a
-    `while` loop with a retry body that sleeps.
+    handler) over a small constant range or a target named like `retry` / `attempt` (also one
+    name of a tuple target), or a `while` loop with a retry body that sleeps; and a paced loop
+    other than `while True:`: a `while` loop, or a `for` loop whose body never reads the names
+    its target binds (a target binding an attribute or an item counts as read), in which every
+    path from the header back to it runs a call that waits
+    (`facts::waits_every_iteration`): a sleep (a call or method named `sleep`) of a duration
+    other than a literal zero, or a `wait` with a `timeout=` keyword that is not a literal zero
+    or a positive constant (`stop.wait(1)`; `asyncio.wait(tasks)` may return at once), awaited
+    in a coroutine (`asyncio.create_task(asyncio.sleep(1))` waits elsewhere). The walk leaves a
+    waiting block by its exception edge too, since an exception may skip the wait.
   - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops (the
     flag's name has the word `running`, `active`, or `alive`, or after `not` a word like `stop`
-    or `shutdown`, and the body does not drain it as a collection: no `pop()` / `popleft()` /
-    `remove()` ..., subscript, or `for` over it), and `while True:` with a retry body that
-    sleeps (resident workers and reconnect loops).
+    or `shutdown`; an event's `is_set()` / `wait(...)` tests the event as the flag; and the body
+    does not drain it as a collection: no `pop()` / `popleft()` / `remove()` ..., subscript, or
+    `for` over it), `while True:` with a retry body that sleeps, and a paced `while True:` loop
+    (resident workers and reconnect loops).
   - `Unbounded`: everything else.
 - **Size facts** (`heki_ir::facts`, the one home of size and trip-count facts; profitability and
   Advisory noise only, never Soundness premises):
@@ -186,7 +201,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
   - `IrFunction.starred` marks starred display elements, `BasicBlock.term_span` the source of a
     block's terminator (blocker lines point at it), and `ModuleIr.constants`
-    (`ModuleConstants`) the module's constant integers and displays.
+    (`ModuleConstants`) the module's constant integers, displays, strings, and tuples of
+    strings. A string constant, or a tuple of them, is one entry: its text (`strs` /
+    `str_tuples`, one `Arc<str>` per string the module writes, which aliases and items share),
+    whose length gives its display.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
     read other modules' small displays through the declarations (`ModuleDecls.small_globals`,
     `ClassDecl.attr_displays`), so the language server re-checks their users when they change.
@@ -711,10 +729,16 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`) is a loop over
      its items, relaxed as a `for` loop over the same iterable.
    - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
-     `executescript` call whose literal statement is DDL (`CREATE` / `ALTER` / `DROP` /
-     `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so helpers running DDL run
-     no query either; queries in migration functions excluded; the internals of ORM libraries
-     excluded.
+     `executescript` call (or SQLAlchemy's `exec_driver_sql`) whose statement is DDL (`CREATE`
+     / `ALTER` / `DROP` / `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so
+     helpers running DDL run no query either. The statement is DDL when every text it may hold
+     starts with such a keyword (`summary/statements.rs`): a string constant, the literal start
+     of an f-string (`IrFunction::str_heads`), of a `+` / `%` with a constant first operand,
+     or of `.format()` on one, when the keyword ends inside it; `strip()` / `upper()` ... of
+     one, SQLAlchemy's `text()` of one, each input of a phi, and each item a loop over a tuple
+     display, a module constant tuple, or the pieces `.split(sep)` / `.splitlines()` cut a
+     module constant string into (`ModuleConstants::strs` / `str_tuples`). Queries in
+     migration functions excluded; the internals of ORM libraries excluded.
    - **`DATA101`**: only `df = pd.concat([df, ...])` / `arr = np.vstack([arr, ...])` whose SSA
      `PhiNode` accumulates across the back edge (`LoopCarried`), or a project call there whose
      callee's `reallocates_params` covers the argument carrying the previous value; one-off
@@ -866,8 +890,10 @@ deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal, a string
-literal with a given prefix or not empty, or an instance of a given class (`pd.read_csv` of a
-`https://` URL is `blocking_net`, of an `io.StringIO` nothing); the first case that holds sets
+literal with a given prefix or not empty, an instance of a given class, or an integer that sets
+a named flag, alone or as an operand of `|` (`pd.read_csv` of a `https://` URL is
+`blocking_net`, of an `io.StringIO` nothing; `socket.getaddrinfo(..., flags=AI_NUMERICHOST)`
+resolves nothing); the first case that holds sets
 the call's `effects` and `return_type`, and an argument that is not passed, or may be passed
 through `*` / `**` unpacking, selects none. A boolean flag case (`equals = false`) whose argument
 is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: the effects it

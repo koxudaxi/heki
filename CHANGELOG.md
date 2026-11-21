@@ -86,6 +86,18 @@ release can change rules, configuration keys, diagnostics, and output formats.
   a function (an `EFF103` report on a loop of `CREATE TABLE` statements).
 - `DATA101` no longer reports an accumulation in a loop whose trip count the code fixes
   (`for is_p_wave in [False, True]`, `range(4)`).
+- Polls and retries are no longer taken for loops over data (`EFF102`, `EFF103`, and the
+  size-dependent rules): a loop that sleeps or waits with a timeout on every path back to its
+  test (`while not job_done(): time.sleep(5)`, `for _ in range(30): ... sleep(1)`), a `while`
+  loop over a counter the code bounds (`i = 1` ... `while i < 6:` ... `i += 1`), a loop until a
+  stop event is set (`while not stop_event.is_set():`), and a retry over a tuple target naming
+  the attempt (`for attempt, proxy in enumerate(proxies):`).
+- `EFF103` no longer reports DDL built at run time or taken from constants: an f-string, `%`,
+  or `.format()` starting with `CREATE` / `ALTER` / `DROP` / `PRAGMA`, SQLAlchemy's `text()` of
+  one, and the statements of a module's schema constants (a tuple of statements, the pieces of
+  `SCHEMA.split(";")` or `SCHEMA.splitlines()`).
+- `EFF101` no longer reports `socket.getaddrinfo` with the `AI_NUMERICHOST` flag, which parses
+  a numeric address and never asks a resolver.
 
 ## [0.1.2] - 2026-11-21
 

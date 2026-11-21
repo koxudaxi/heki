@@ -667,6 +667,10 @@ pub struct IrFunction {
     /// `f(*xs)` passes the elements of `xs`, not `xs`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starred: Vec<(VarId, u32)>,
+    /// The text each f-string starts with (`heki_ast::fstring_head`): the `dst` of the string
+    /// it builds and `ALTER TABLE ` of `f"ALTER TABLE {name}"`, in the order of the variables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub str_heads: Vec<(VarId, String)>,
     pub blocks: Vec<BasicBlock>,
     pub loops: Vec<NaturalLoop>,
     pub loop_carried: Vec<LoopCarriedInfo>,
@@ -790,6 +794,15 @@ impl IrFunction {
         self.starred
             .iter()
             .any(|&(d, i)| d == dst && i as usize == index)
+    }
+
+    /// The text the f-string `var` holds starts with ([`Self::str_heads`]).
+    pub fn str_head(&self, var: VarId) -> Option<&str> {
+        let i = self
+            .str_heads
+            .binary_search_by_key(&var, |(v, _)| *v)
+            .ok()?;
+        Some(self.str_heads[i].1.as_str())
     }
 
     /// Check whether any decorator ends with one of the provided names (e.g. `cached_property`).
@@ -1260,5 +1273,25 @@ def outer(xs):
     fn records_star_imports_for_builtin_shadowing() {
         assert!(build("from os.path import *\n").has_star_import);
         assert!(!build("from os.path import join\nimport os\n").has_star_import);
+    }
+
+    /// A name bound to another string or tuple constant, and a tuple item naming a string
+    /// constant, share its text: the tables keep one copy of each text the module writes.
+    #[test]
+    fn aliased_text_constants_share_one_text() {
+        let src =
+            "S0 = \"CREATE TABLE t (x)\"\nS1 = S0\nS2 = S1\nT0 = (S0, \"DROP TABLE t\")\nT1 = T0\n";
+        let constants = build(src).constants;
+        let s0 = &constants.strs["S0"];
+        for alias in ["S1", "S2"] {
+            assert!(
+                std::sync::Arc::ptr_eq(s0, &constants.strs[alias]),
+                "{alias}"
+            );
+        }
+        let t0 = &constants.str_tuples["T0"];
+        assert!(std::sync::Arc::ptr_eq(t0, &constants.str_tuples["T1"]));
+        assert!(std::sync::Arc::ptr_eq(s0, &t0[0]));
+        assert_eq!(&*t0[1], "DROP TABLE t");
     }
 }

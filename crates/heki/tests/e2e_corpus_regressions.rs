@@ -717,6 +717,114 @@ fn r14_loops_whose_trip_count_the_code_fixes_are_not_reported() {
     );
 }
 
+const POLLS_AND_RETRIES: &str = r#"import sqlite3
+import threading
+import time
+from time import sleep
+
+import requests
+
+
+def retry_counted() -> requests.Response | None:
+    i = 1
+    while i < 6:
+        print(f"Attempt {i}...")
+        try:
+            return requests.get("https://example.com/data")
+        except requests.RequestException:
+            pass
+        i += 1
+    return None
+
+
+def wait_for_health(base_url: str) -> None:
+    for _ in range(30):
+        try:
+            if requests.get(f"{base_url}/health", timeout=2).status_code == 200:
+                break
+        except requests.RequestException:
+            pass
+        sleep(1)
+
+
+def get_with_tries(uri: str, tries: int = 3) -> requests.Response:
+    while True:
+        tries -= 1
+        response = requests.get(uri)
+        if response.status_code == 200:
+            return response
+        if not tries:
+            raise RuntimeError(response.status_code)
+        time.sleep(15)
+
+
+def job_done(url: str) -> bool:
+    return requests.get(url).json()["done"]
+
+
+def poll_job(url: str) -> None:
+    while not job_done(url):
+        time.sleep(5)
+
+
+def serve_commands(stop: threading.Event, path: str) -> None:
+    while not stop.is_set():
+        sqlite3.connect(path).execute("SELECT 1")
+
+
+def try_each_proxy(url: str, proxies: list[str]) -> requests.Response | None:
+    for attempt, proxy in enumerate(proxies):
+        try:
+            return requests.get(url, proxies={"https": proxy})
+        except requests.RequestException:
+            time.sleep(attempt)
+    return None
+
+
+def per_url_paced(urls: list[str]) -> None:
+    for url in urls:
+        requests.get(url)
+        time.sleep(1)
+
+
+def per_message(read) -> None:
+    while True:
+        requests.post("https://example.com/hook", json=read())
+
+
+def per_message_yielding(read) -> None:
+    while True:
+        requests.post("https://example.com/hook", json=read())
+        time.sleep(0)
+
+
+def per_message_unless_idle(read) -> None:
+    while True:
+        if message := read():
+            requests.post("https://example.com/hook", json=message)
+            continue
+        time.sleep(1)
+"#;
+
+#[test]
+fn loops_that_wait_for_a_condition_or_count_attempts_are_not_data_sized() {
+    // Retries over a counter the code bounds, waits for a health check or a job, a loop until
+    // a stop event, and attempts over a tuple target: none is a loop over data. Reported: a
+    // loop over items, also one that sleeps per item, and resident loops that run without
+    // waiting on some path (`sleep(0)` only yields).
+    assert_reports(
+        "reg_polls_and_retries",
+        POLLS_AND_RETRIES,
+        "EFF102,EFF103",
+        &[
+            ("per_url_paced", "EFF102"),
+            ("per_message", "EFF102"),
+            ("per_message_yielding", "EFF102"),
+            ("per_message_unless_idle", "EFF102"),
+        ],
+    );
+}
+
 // ======================================================================== fix quality
 
 const R15_NO_IMPORT: &str = "\"\"\"A module without imports.\"\"\"\n\n\ndef bfs(start, children):\n    queue = [start]\n    order = []\n    while queue:\n        node = queue.pop(0)\n        order.append(node)\n        queue.extend(children(node))\n    return order\n\n\nprint(bfs(1, lambda n: [n + 1] if n < 4 else []))\n";
@@ -1033,6 +1141,57 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
         ("drained_active", unbounded.clone()),
         ("Worker.serve", serde_json::json!("daemon_polling")),
         ("Worker.until_shutdown", serde_json::json!("daemon_polling")),
+        // An event is a flag too; its name decides as a plain flag's does.
+        (
+            "Worker.until_stop_event",
+            serde_json::json!("daemon_polling"),
+        ),
+        ("Worker.until_ready_event", unbounded.clone()),
+        // A `while` loop over a counter the code starts, steps, and limits with constants,
+        // counting up or down, also to zero; not past 16 trips, not when a path back skips
+        // the step, and not from a parameter or past the limit it tests for.
+        ("counted_up", small(5)),
+        ("counted_inclusive", small(6)),
+        ("counted_down", small(3)),
+        ("counted_mirrored", small(4)),
+        ("counted_down_inclusive", small(4)),
+        ("counted_once", small(1)),
+        ("counted_down_strict", small(3)),
+        ("counter_tested_by_identity", unbounded.clone()),
+        ("counter_doubled", unbounded.clone()),
+        ("counter_steps_differ", unbounded.clone()),
+        ("counter_merged_before", unbounded.clone()),
+        ("counted_past_small", unbounded.clone()),
+        ("counter_skipped", unbounded.clone()),
+        ("counter_from_parameter", unbounded.clone()),
+        ("countdown_past_zero", unbounded.clone()),
+        // A loop that waits on every path back (a sleep, a wait with a timeout) polls or
+        // retries: `while True:` stays resident. A `for` loop reading its target steps
+        // through items however it waits; a path back without the wait, a sleep an exception
+        // can skip, `sleep(0)`, and `asyncio.wait(tasks)` pace nothing.
+        ("paced_until", serde_json::json!("retry_pattern")),
+        ("paced_attempts", serde_json::json!("retry_pattern")),
+        ("paced_forever", serde_json::json!("daemon_polling")),
+        ("paced_by_timed_wait", serde_json::json!("daemon_polling")),
+        ("paced_by_timeout", serde_json::json!("daemon_polling")),
+        ("zero_timeout", unbounded.clone()),
+        // A coroutine waits where it awaits; a sleep it only schedules waits elsewhere.
+        (
+            "paced_by_awaited_sleep",
+            serde_json::json!("daemon_polling"),
+        ),
+        ("sleep_only_scheduled", unbounded.clone()),
+        (
+            "paced_by_computed_delay",
+            serde_json::json!("retry_pattern"),
+        ),
+        ("paced_over_items", unbounded.clone()),
+        ("sleeps_on_one_path", unbounded.clone()),
+        ("sleeps_after_a_raise", unbounded.clone()),
+        ("zero_sleep", unbounded.clone()),
+        ("waits_for_tasks", unbounded.clone()),
+        // A retry body over a target with an attempt in a tuple.
+        ("attempt_in_a_tuple", serde_json::json!("retry_pattern")),
     ];
     let functions = ir["functions"].as_array().unwrap();
     let loop_of = |name: &str| -> &Value {
@@ -1042,6 +1201,19 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
     for (name, bound) in expected {
         assert_eq!(loop_of(name)["bound"], bound, "{name}");
     }
+    // A starred target binds a name too; what the body does with an attribute target is not
+    // followed, so the loop steps through items.
+    let unpacked = functions
+        .iter()
+        .find(|f| f["qualname"] == "unpacked_targets")
+        .unwrap();
+    let unpacked_bounds: Vec<&Value> = unpacked["loops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lp| &lp["bound"])
+        .collect();
+    assert_eq!(unpacked_bounds, [&unbounded, &unbounded]);
     // `10 > len(buf)` and `len(buf) <= 9` cap at 10; `!=`, `len(buf) > 0`, and a starred
     // `len(*parts)` cap nothing.
     for name in ["cap_gt", "cap_lte"] {

@@ -83,6 +83,158 @@ async def handler(cur: sqlite3.Cursor) -> None:
     assert_eq!(lines(&p, "EFF101"), vec![32]);
 }
 
+const DDL_AT_RUN_TIME: &str = r#"import sqlite3
+
+import sqlalchemy
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+
+ADDITIVE = (
+    "CREATE TABLE IF NOT EXISTS a (x)",
+    """CREATE INDEX a_x ON a(x)""",
+)
+SCHEMA = """
+CREATE TABLE refs (name TEXT);
+CREATE INDEX refs_name ON refs(name);
+PRAGMA user_version=5
+"""
+CURRENT = SCHEMA
+CURRENT_ADDITIVE = ADDITIVE
+LEGACY = "CREATE TABLE b (y)\r\nCREATE TABLE c (z)"
+SEED = ("CREATE TABLE d (x)", "INSERT INTO d VALUES (1)")
+SEED_LINES = "CREATE TABLE f (x)\rINSERT INTO f VALUES (1)\n"
+
+
+def drop(conn: sqlite3.Connection, table: str) -> None:
+    conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def migrate(conn: Connection, columns: list[tuple[str, str]]) -> None:
+    for table, column in columns:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column}"))
+        conn.execute(sqlalchemy.text("ALTER TABLE " f"{table} ADD COLUMN {column}"))
+        conn.execute(text(f"CREATE INDEX IF NOT EXISTS i ON t(x)"))
+
+
+def formatted(conn: sqlite3.Connection, tables: list[str]) -> None:
+    for t in tables:
+        conn.execute("DROP TABLE %s" % t)
+        conn.execute("DROP VIEW {}".format(t))
+        drop(conn, t)
+
+
+def per_database(paths: list[str], legacy: bool, fail) -> None:
+    for path in paths:
+        conn = sqlite3.connect(path)
+        for statement in ADDITIVE:
+            conn.execute(statement)
+        for statement in CURRENT.split(";"):
+            conn.execute(statement.strip())
+        schema = LEGACY if legacy else SCHEMA
+        for line in schema.splitlines():
+            conn.execute(line)
+        statements = ("CREATE TABLE e (x)", "CREATE TABLE g (x)")
+        again = statements
+        for statement in again:
+            conn.execute(statement)
+        named = CURRENT_ADDITIVE
+        for statement in named:
+            conn.execute(statement)
+        if legacy:
+            chosen = LEGACY
+        elif path:
+            chosen = SCHEMA
+        else:
+            fail(path)
+        for line in chosen.splitlines():
+            conn.execute(line)
+
+
+def queries(conn: sqlite3.Connection, ids: list[int], kind: str, verb: str, q, build, make) -> None:
+    sql = "CREATE TABLE h (x)"
+    for i in ids:
+        conn.execute(f"SELECT * FROM t WHERE id = {i}")  # reported
+        conn.execute(f"CREATE{kind} x")  # reported
+        conn.execute(f"{verb} TABLE x")  # reported
+        conn.execute("COMMIT")  # reported
+        conn.execute(q.sql)  # reported
+        conn.execute(build(i))  # reported
+        conn.execute(sql)  # reported
+        sql = sql + ", y"
+        for statement in SEED:
+            conn.execute(statement)  # reported
+        statements = ["CREATE TABLE e (x)"]
+        statements.append("SELECT 1")
+        for statement in statements:
+            conn.execute(statement)  # reported
+        for statement in (*ADDITIVE, "SELECT 1"):
+            conn.execute(statement)  # reported
+        for line in SEED_LINES.splitlines():
+            conn.execute(line)  # reported
+        for word in SCHEMA.split():
+            conn.execute(word)  # reported
+        for piece in f"CREATE TABLE {kind} (x); SELECT 1".split(";"):
+            conn.execute(piece)  # reported
+        for statement in make():
+            conn.execute(statement)  # reported
+        deep = "CREATE TABLE t (x" DEEP
+        conn.execute(deep)  # reported
+"#;
+
+#[test]
+fn ddl_built_at_run_time_or_taken_from_constants_is_ddl() {
+    let p = Project::new("ddl_built_at_run_time");
+    // A statement built from more parts than the walk follows is not followed.
+    let source = DDL_AT_RUN_TIME.replace("DEEP", &" + kind".repeat(70));
+    p.write("app.py", &source);
+    // An f-string (implicitly concatenated, or without a field), `%`, or `.format()` starting
+    // with a DDL keyword, SQLAlchemy's `text()` of one, a helper running one, and the
+    // statements of module constants (a tuple's items, the pieces of a split schema, either of
+    // two schemas, through names, also where a path leaves the name unbound) are DDL. Reported: a query, a head whose first word may go
+    // on or is a field, an unknown or extended statement, a constant tuple with a query, a list
+    // that grew, a starred display, a query on a line of its own (`\r` ends a line, as for
+    // `str.splitlines()`), a split into words, a split of a head, items of a call, and a
+    // statement built from 70 parts.
+    let reported: Vec<u64> = (1..)
+        .zip(source.lines())
+        .filter(|(_, line)| line.ends_with("# reported"))
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(lines(&p, "EFF103"), reported);
+}
+
+const SCHEMA_OWNER: &str = r#"import sqlite3
+
+SQL = "CREATE TABLE t (x)"
+STATEMENTS = ("CREATE TABLE u (x)",)
+
+
+def setup(conn: sqlite3.Connection, rows: list[int]) -> None:
+    for row in rows:
+        conn.execute(SQL)
+        for statement in STATEMENTS:
+            conn.execute(statement)
+"#;
+
+#[test]
+fn a_constant_another_module_rebinds_is_no_fixed_statement() {
+    let p = Project::new("ddl_rebound_elsewhere");
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/db.py", SCHEMA_OWNER);
+    // Reading the constants elsewhere leaves them DDL.
+    p.write(
+        "pkg/other.py",
+        "from pkg import db\n\n\ndef peek():\n    return db.SQL, db.STATEMENTS\n",
+    );
+    assert_eq!(lines(&p, "EFF103"), Vec::<u64>::new());
+    // Another module rebinding them may make them queries.
+    p.write(
+        "pkg/other.py",
+        "from pkg import db\n\n\ndef reconfigure():\n    db.SQL = \"SELECT 1\"\n    db.STATEMENTS = (\"SELECT 1\",)\n",
+    );
+    assert_eq!(lines(&p, "EFF103"), vec![9, 11]);
+}
+
 #[test]
 fn a_reentrant_lock_stays_held_after_a_nested_with_exits() {
     let p = Project::new("reentrant_lock");

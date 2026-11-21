@@ -252,6 +252,30 @@ pub fn interpolated_expressions(expr: &ruff_python_ast::Expr) -> Vec<&ruff_pytho
     out
 }
 
+/// The text an f-string starts with: its literals before its first replacement field
+/// (`ALTER TABLE ` of `f"ALTER TABLE {name} ADD {column}"`, implicitly concatenated literals
+/// included), all of its text when it has none. `None` for any other expression.
+pub fn fstring_head(expr: &ruff_python_ast::Expr) -> Option<String> {
+    use ruff_python_ast::{FStringPartRef, InterpolatedStringElement};
+
+    let fs = expr.as_f_string_expr()?;
+    let mut head = String::new();
+    for part in fs.value.iter() {
+        match part {
+            FStringPartRef::Literal(lit) => head.push_str(&lit.value),
+            FStringPartRef::FString(f) => {
+                for element in &f.elements {
+                    match element {
+                        InterpolatedStringElement::Literal(lit) => head.push_str(&lit.value),
+                        InterpolatedStringElement::Interpolation(_) => return Some(head),
+                    }
+                }
+            }
+        }
+    }
+    Some(head)
+}
+
 /// The values a template string keeps (`Template.values`): its top-level replacement fields,
 /// in source order (a format specification's fields become text).
 pub fn template_values(ts: &ruff_python_ast::ExprTString) -> Vec<&ruff_python_ast::Expr> {
