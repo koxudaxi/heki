@@ -343,19 +343,40 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
     )
 }
 
+/// The memory gate's allocator (`count-alloc`): it counts the bytes heki asks for, which do not
+/// depend on the system allocator's caching or on the machine's memory pressure.
+#[cfg(feature = "count-alloc")]
+#[global_allocator]
+static ALLOC: cap::Cap<std::alloc::System> = cap::Cap::new(std::alloc::System, usize::MAX);
+
 fn main() -> ExitCode {
+    // One thread, the main one, runs the parallel work of a counting build: a second thread's
+    // timing would move the peak between runs.
+    #[cfg(feature = "count-alloc")]
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .use_current_thread()
+        .build_global()
+        .expect("the global thread pool is built before any parallel work");
     let cli = Cli::parse();
     let format = match &cli.command {
         Commands::Check(args) => args.output_format,
         _ => OutputFormat::Full,
     };
-    match run(cli) {
+    let code = match run(cli) {
         Ok(code) => code,
         Err(err) => {
             log!(format, "heki error: {err:#}");
             ExitCode::from(2)
         }
-    }
+    };
+    #[cfg(feature = "count-alloc")]
+    eprintln!(
+        "heki heap: peak {} bytes, total {} bytes",
+        ALLOC.max_allocated(),
+        ALLOC.total_allocated()
+    );
+    code
 }
 
 #[cfg(test)]

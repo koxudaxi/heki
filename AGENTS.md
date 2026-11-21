@@ -69,7 +69,8 @@ python3.15 tests/difftest/ir_counterexamples.py
 cargo build --release -p heki
 python3.15 scripts/build_docs.py --heki target/release/heki --check
 python3.15 scripts/build_llms_txt.py --check
-# Peak memory of `heki check` and the `--watch` engine on a generated project
+# Peak heap of `heki check` and the `--watch` engine on a generated project (a counting build)
+cargo build --release -p heki --features count-alloc
 python3.15 scripts/check_memory.py --heki target/release/heki
 # The scripts of the release workflows
 uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests

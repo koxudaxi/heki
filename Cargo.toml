@@ -62,6 +62,8 @@ tower-lsp = "0.20"
 # The `file:` URIs of the end-to-end LSP tests (the version `tower-lsp` uses).
 url = "2.5"
 tower-service = "0.3"
+# The memory gate's counting allocator (`heki`'s `count-alloc` feature, never in a release).
+cap = { version = "0.1.2", features = ["stats"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

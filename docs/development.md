@@ -56,24 +56,49 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 ## Memory
 
 ```console
-$ cargo build --release
+$ cargo build --release -p heki --features count-alloc
 $ python3 scripts/check_memory.py --heki target/release/heki
 ```
 
-- CI fails when the peak memory of `heki check` (with and without an ownership contract) or of
+- CI fails when the peak heap of `heki check` (with and without an ownership contract) or of
   the `--watch` engine on a generated project exceeds its budget in the script.
-- The peak is the lowest of three runs: the resident set size on Linux, the physical footprint
-  on macOS, each platform with its own budgets.
+- The peak heap is the most bytes heki holds at once, counted by the allocator of a
+  `count-alloc` build (release builds leave the feature off). The counting build also runs its
+  parallel work on the main thread alone, what `RAYON_NUM_THREADS=1` asks without the second
+  thread whose timing would move the peak. No allocator cache, memory pressure, or thread timing
+  changes the count: every run reads the same bytes, and one run per mode suffices. The total of
+  the bytes allocated is printed next to it.
+- Each budget is the peak on CI's Linux runner when it was set, plus 5 %. Another machine reads
+  a few hundred bytes more or less, from the length of the generated project's path.
+- A budget changes, down or up, only with the owner's decision. A change that would exceed one
+  first finds what grew (below) and removes it where it lives; when the growth is the cost of
+  facts a default rule needs, the measurements go to the owner.
 - The generated project is shaped after what dominates heki's memory on real code bases: typed
   field writes reached through long chains of private helpers (with an ownership contract, every
   caller keeps the write sites they hand over, with their chains), effect chains below
   `async def` entry points, and many modules and classes (every file's check reads the project's
   declarations).
 
-When a budget is exceeded, find what grew before raising it:
+At release time (`release.yml` runs CI on the release commit) and on a manual CI run, a release
+build also runs the three modes, and its peak memory as the system sees it, the lowest of three
+runs, stays under a coarse budget: about 10 % above it when the budget was set. This peak also
+holds what the heap count leaves out: the allocator's fragmentation, its mappings, and the code.
+It is the resident set size on Linux and the physical footprint on macOS, each platform with its
+own budgets.
 
-- `/usr/bin/time -l` (macOS) or `-v` (Linux) gives the peak of a run;
-- a counting global allocator in a scratch build gives the live bytes per phase.
+```console
+$ cargo build --release -p heki
+$ python3 scripts/check_memory.py --heki target/release/heki --measure rss
+```
+
+To find what grew:
+
+- the script prints each mode's peak and total heap bytes, so counting builds of two commits
+  compare to the byte;
+- a heap profiler (`dhat` in a scratch build, or heaptrack on Linux) shows the allocation sites
+  live at the peak;
+- `/usr/bin/time -l` (macOS) or `-v` (Linux) gives the peak memory of a run as the system sees
+  it.
 
 ## Analysis cost
 

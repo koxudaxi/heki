@@ -713,9 +713,11 @@ message = "render entry points must not mutate model state"
 4. **Performance**: a 100,000-line repository is analyzed in a few seconds.
 5. **Release integrity**: the release workflow runs CI on the release commit and checks the tag
    against every distribution's version before it publishes.
-6. **Memory**: CI (`scripts/check_memory.py`) bounds the peak memory (resident set size on
-   Linux, physical footprint on macOS) of `heki check`, with and without an ownership contract,
-   and of the `--watch` engine on a generated project.
+6. **Memory**: CI (`scripts/check_memory.py`) bounds the peak heap of `heki check`, with and
+   without an ownership contract, and of the `--watch` engine on a generated project, counted by
+   a counting build that reads the same bytes on every run; at release time, the peak memory as
+   the system sees it (resident set size on Linux, physical footprint on macOS) under a coarse
+   budget.
 
 ### Remaining for v1.0
 The conservative `SoundnessSummary` (A2), Layer 3 on-demand analysis with its disk cache,
