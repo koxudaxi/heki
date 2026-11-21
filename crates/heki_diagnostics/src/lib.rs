@@ -2,8 +2,10 @@
 //! and line-number-independent Ratchet baselines (ADR-015 / ADR-017).
 
 mod fix;
+mod style;
 
 pub use fix::{PythonFixPass, apply_fixes, fix_python_source, unified_diff};
+pub use style::Stylesheet;
 
 use heki_ast::{LineIndex, Span};
 use heki_env::Severity;
@@ -11,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use style::paint;
 use thiserror::Error;
 
 /// Paths are written as every report writes them ([`path_text`]): one that is not valid UTF-8
@@ -213,16 +216,18 @@ pub struct FileFailure {
 }
 
 /// Render diagnostics, and in SARIF the `failures` of the run. `source_line(path, line)` returns
-/// the 1-based source line for `full`.
+/// the 1-based source line for `full`. Only the text formats (`full` and `concise`) take
+/// `styles`; the others are read by programs and never hold escape codes.
 pub fn render(
     diags: &[Diagnostic],
     failures: &[FileFailure],
     format: OutputFormat,
+    styles: &Stylesheet,
     source_line: &dyn Fn(&Path, u32) -> Option<String>,
 ) -> String {
     match format {
-        OutputFormat::Full => render_full(diags, source_line),
-        OutputFormat::Concise => render_concise(diags),
+        OutputFormat::Full => render_full(diags, styles, source_line),
+        OutputFormat::Concise => render_concise(diags, styles),
         OutputFormat::Json => {
             // Diagnostics hold strings, numbers, and paths (written lossily by `report_path`).
             let mut s = serde_json::to_string_pretty(diags).expect("diagnostics serialize");
@@ -239,41 +244,56 @@ pub fn render(
     }
 }
 
-fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<String>) -> String {
+fn render_full(
+    diags: &[Diagnostic],
+    styles: &Stylesheet,
+    source_line: &dyn Fn(&Path, u32) -> Option<String>,
+) -> String {
     let mut out = String::new();
+    let bar = paint(styles.gutter, '|');
+    let equals = paint(styles.gutter, '=');
     for d in diags {
-        let severity = severity_word(d.severity);
+        let path = path_text(&d.path);
+        let severity = styles.severity(d.severity);
+        let label = d.certainty.label().map(|l| format!(", {l}"));
         let _ = writeln!(
             out,
-            "{}:{}:{}: {} ({}) [{}] {}",
-            path_text(&d.path),
-            d.line,
-            d.column,
-            d.rule_code,
+            "{} {} ({}) [{}{}] {}",
+            styles.location(&path, d.line, d.column),
+            paint(styles.rule_code, &d.rule_code),
             d.rule_slug,
-            d.certainty
-                .label()
-                .map_or_else(|| severity.to_owned(), |l| format!("{severity}, {l}")),
+            paint(severity, severity_word(d.severity)),
+            label.unwrap_or_default(),
             d.message
         );
         if let Some(text) = source_line(&d.path, d.line) {
             let gutter = d.line.to_string().len();
-            let _ = writeln!(out, "{:gutter$} |", "");
-            let _ = writeln!(out, "{} | {}", d.line, text.trim_end());
-            let _ = writeln!(out, "{:gutter$} | {}^", "", caret_padding(&text, d.column));
+            let _ = writeln!(out, "{:gutter$} {bar}", "");
+            let _ = writeln!(
+                out,
+                "{} {}",
+                paint(styles.gutter, format_args!("{} |", d.line)),
+                text.trim_end()
+            );
+            let _ = writeln!(
+                out,
+                "{:gutter$} {bar} {}{}",
+                "",
+                caret_padding(&text, d.column),
+                paint(severity, '^')
+            );
         }
         for r in &d.related {
             let _ = writeln!(
                 out,
-                "  = related: {}:{}:{}: {}",
-                path_text(&r.path),
-                r.line,
-                r.column,
+                "  {equals} {}: {} {}",
+                paint(styles.related, "related"),
+                styles.location(&path_text(&r.path), r.line, r.column),
                 r.message
             );
         }
         if let Some(help) = &d.help {
-            let _ = writeln!(out, "  = help: {help}");
+            let _ = writeln!(out, "  {equals} {}: {help}", paint(styles.help, "help"));
         }
         out.push('\n');
     }
@@ -350,17 +370,15 @@ fn display_width(c: char) -> usize {
     }
 }
 
-fn render_concise(diags: &[Diagnostic]) -> String {
+fn render_concise(diags: &[Diagnostic], styles: &Stylesheet) -> String {
     let mut out = String::new();
     for d in diags {
         let label = d.certainty.label().map(|l| format!(" [{l}]"));
         let _ = writeln!(
             out,
-            "{}:{}:{}: {}{} {}",
-            path_text(&d.path),
-            d.line,
-            d.column,
-            d.rule_code,
+            "{} {}{} {}",
+            styles.location(&path_text(&d.path), d.line, d.column),
+            paint(styles.rule_code, &d.rule_code),
             label.unwrap_or_default(),
             d.message
         );
@@ -977,6 +995,7 @@ mod tests {
             std::slice::from_ref(&d),
             &[],
             OutputFormat::Json,
+            &Stylesheet::plain(),
             &|_, _| None,
         );
         assert!(!one.contains("\"sites\""), "{one}");
@@ -985,6 +1004,7 @@ mod tests {
             std::slice::from_ref(&d),
             &[],
             OutputFormat::Json,
+            &Stylesheet::plain(),
             &|_, _| None,
         );
         assert!(three.contains("\"sites\": 3"), "{three}");
@@ -1056,7 +1076,13 @@ mod tests {
         let mut d = diag(1, "MUT201", "m");
         d.path = PathBuf::from(std::ffi::OsStr::from_bytes(b"src/\xff.py"));
         d.related[0].path = d.path.clone();
-        let out = render(&[d], &[], OutputFormat::Json, &|_, _| None);
+        let out = render(
+            &[d],
+            &[],
+            OutputFormat::Json,
+            &Stylesheet::plain(),
+            &|_, _| None,
+        );
         let json: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(json[0]["path"], "src/\u{FFFD}.py");
         assert_eq!(json[0]["related"][0]["path"], "src/\u{FFFD}.py");
@@ -1071,13 +1097,25 @@ mod tests {
         d.column = u32::try_from(text.find("time").unwrap()).unwrap() + 1;
         d.related.clear();
         let line = |_: &Path, n: u32| (n == 4).then(|| text.to_owned());
-        let full = render(std::slice::from_ref(&d), &[], OutputFormat::Full, &line);
+        let full = render(
+            std::slice::from_ref(&d),
+            &[],
+            OutputFormat::Full,
+            &Stylesheet::plain(),
+            &line,
+        );
         assert!(
             full.contains(&format!("\n  | \t{}^\n", " ".repeat(13))),
             "{full:?}"
         );
-        let s: serde_json::Value =
-            serde_json::from_str(&render(&[d], &[], OutputFormat::Sarif, &line)).unwrap();
+        let s: serde_json::Value = serde_json::from_str(&render(
+            &[d],
+            &[],
+            OutputFormat::Sarif,
+            &Stylesheet::plain(),
+            &line,
+        ))
+        .unwrap();
         assert_eq!(
             s["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]["startColumn"],
             14
@@ -1101,7 +1139,7 @@ mod tests {
         let mut diags = vec![diag(2, "MUT201", "write, outside: owners\nsecond")];
         diags[0].help = Some("use the store".into());
         let line = |_: &Path, n: u32| (n == 2).then(|| "    model.fields.append(x)".to_owned());
-        let full = render(&diags, &[], OutputFormat::Full, &line);
+        let full = render(&diags, &[], OutputFormat::Full, &Stylesheet::plain(), &line);
         assert!(full.starts_with("src/a.py:2:5: MUT201 (write-owner-violation) [error] write"));
         assert!(full.contains("2 |     model.fields.append(x)"));
         assert!(full.contains("  |     ^"));
@@ -1110,18 +1148,42 @@ mod tests {
             "{full}"
         );
         assert_eq!(
-            render(&diags, &[], OutputFormat::Concise, &line),
+            render(
+                &diags,
+                &[],
+                OutputFormat::Concise,
+                &Stylesheet::plain(),
+                &line
+            ),
             "src/a.py:2:5: MUT201 write, outside: owners\nsecond\n"
         );
         assert_eq!(
-            render(&diags, &[], OutputFormat::Github, &line),
+            render(
+                &diags,
+                &[],
+                OutputFormat::Github,
+                &Stylesheet::plain(),
+                &line
+            ),
             "::error file=src/a.py,line=2,col=5,title=heki MUT201::write, outside: owners%0Asecond\n"
         );
-        let json: Vec<Diagnostic> =
-            serde_json::from_str(&render(&diags, &[], OutputFormat::Json, &line)).unwrap();
+        let json: Vec<Diagnostic> = serde_json::from_str(&render(
+            &diags,
+            &[],
+            OutputFormat::Json,
+            &Stylesheet::plain(),
+            &line,
+        ))
+        .unwrap();
         assert_eq!(json, diags);
-        let s: serde_json::Value =
-            serde_json::from_str(&render(&diags, &[], OutputFormat::Sarif, &line)).unwrap();
+        let s: serde_json::Value = serde_json::from_str(&render(
+            &diags,
+            &[],
+            OutputFormat::Sarif,
+            &Stylesheet::plain(),
+            &line,
+        ))
+        .unwrap();
         assert_eq!(s["version"], "2.1.0");
         assert_eq!(s["runs"][0]["tool"]["driver"]["name"], "heki");
         assert_eq!(s["runs"][0]["results"][0]["ruleId"], "MUT201");
@@ -1150,21 +1212,39 @@ mod tests {
         let diags = [heuristic, exact];
         let none = |_: &Path, _: u32| None;
         assert_eq!(
-            render(&diags, &[], OutputFormat::Full, &none),
+            render(&diags, &[], OutputFormat::Full, &Stylesheet::plain(), &none),
             "src/a.py:2:5: EFF102 (loop-unpooled-client) [error, heuristic] m\n\n\
              src/a.py:3:5: MUT201 (write-owner-violation) [error] m\n\n"
         );
         assert_eq!(
-            render(&diags, &[], OutputFormat::Concise, &none),
+            render(
+                &diags,
+                &[],
+                OutputFormat::Concise,
+                &Stylesheet::plain(),
+                &none
+            ),
             "src/a.py:2:5: EFF102 [heuristic] m\nsrc/a.py:3:5: MUT201 m\n"
         );
         assert_eq!(
-            render(&diags, &[], OutputFormat::Github, &none),
+            render(
+                &diags,
+                &[],
+                OutputFormat::Github,
+                &Stylesheet::plain(),
+                &none
+            ),
             "::error file=src/a.py,line=2,col=5,title=heki EFF102 (heuristic)::m\n\
              ::error file=src/a.py,line=3,col=5,title=heki MUT201::m\n"
         );
-        let json: serde_json::Value =
-            serde_json::from_str(&render(&diags, &[], OutputFormat::Json, &none)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&render(
+            &diags,
+            &[],
+            OutputFormat::Json,
+            &Stylesheet::plain(),
+            &none,
+        ))
+        .unwrap();
         assert_eq!(
             [&json[0]["certainty"], &json[1]["certainty"]],
             ["heuristic", "exact"]
@@ -1182,8 +1262,14 @@ mod tests {
         unproven.line = 5;
         unproven.certainty = Certainty::Heuristic;
         let diags = [diags[0].clone(), diags[1].clone(), proven, unproven];
-        let s: serde_json::Value =
-            serde_json::from_str(&render(&diags, &[], OutputFormat::Sarif, &none)).unwrap();
+        let s: serde_json::Value = serde_json::from_str(&render(
+            &diags,
+            &[],
+            OutputFormat::Sarif,
+            &Stylesheet::plain(),
+            &none,
+        ))
+        .unwrap();
         assert_eq!(
             s["runs"][0]["tool"]["driver"]["rules"],
             serde_json::json!([
@@ -1231,17 +1317,35 @@ mod tests {
     #[test]
     fn a_report_without_help_has_no_help_line_and_a_null_field() {
         let diags = vec![diag(2, "MUT201", "m")];
-        let full = render(&diags, &[], OutputFormat::Full, &|_, _| None);
+        let full = render(
+            &diags,
+            &[],
+            OutputFormat::Full,
+            &Stylesheet::plain(),
+            &|_, _| None,
+        );
         assert!(!full.contains("= help:"), "{full}");
-        let json: serde_json::Value =
-            serde_json::from_str(&render(&diags, &[], OutputFormat::Json, &|_, _| None)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&render(
+            &diags,
+            &[],
+            OutputFormat::Json,
+            &Stylesheet::plain(),
+            &|_, _| None,
+        ))
+        .unwrap();
         assert_eq!(
             json[0].get("help"),
             Some(&serde_json::Value::Null),
             "{json}"
         );
-        let s: serde_json::Value =
-            serde_json::from_str(&render(&diags, &[], OutputFormat::Sarif, &|_, _| None)).unwrap();
+        let s: serde_json::Value = serde_json::from_str(&render(
+            &diags,
+            &[],
+            OutputFormat::Sarif,
+            &Stylesheet::plain(),
+            &|_, _| None,
+        ))
+        .unwrap();
         assert!(
             s["runs"][0]["results"][0].get("properties").is_none(),
             "{s}"

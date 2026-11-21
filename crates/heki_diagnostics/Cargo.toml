@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+anstyle.workspace = true
 heki_ast.workspace = true
 heki_env.workspace = true
 serde.workspace = true
