@@ -41,7 +41,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[warning, heuristic]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here; both make `heki check` fail. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
+| `[warning, heuristic]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here. An error makes `heki check` fail; a warning is shown without failing it, unless `--fail-on warning` (`lint.fail-on = "warning"`) is set. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
 | the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
@@ -133,6 +133,6 @@ does, and with `/` separators on every platform, Windows included.
 
 | Code | Meaning |
 | ---- | ------- |
-| `0` | no diagnostics |
-| `1` | diagnostics found (or Ratchet regressions, or `--diff` would change files) |
+| `0` | no diagnostics, or only warnings (they are printed) |
+| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, or `--diff` would change files |
 | `2` | configuration error, unreadable file, unknown rule, or syntax error |
