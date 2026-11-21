@@ -220,9 +220,10 @@ unresolved = "report"
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
 `getattr(ref, "children")`, or `ref.__dict__["children"]`.
 
-A read, or a call (`call-owners`), through a value typed with a project protocol that declares
-the member is judged by the protocol, the type the code uses it through: `def f(h: Host):
-h._m` reads `Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
+A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
+`allowed-callees`), through a value typed with a project protocol that declares the member is
+judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` reads
+`Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
 implementation called through the protocol keeps what it reads and calls. A write through such
 a value still writes the implementations' attribute.
 

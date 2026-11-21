@@ -289,3 +289,33 @@ fn a_glob_target_names_the_protocol_method_called() {
         "{stdout}"
     );
 }
+
+/// An effect boundary forbidding calls of `Host._helper` judges `h._helper()` by the protocol's
+/// declaration, and so does its `allowed-callees`: naming the declaration exempts the call.
+#[test]
+fn a_boundary_exempts_a_protocol_call_by_its_declaration() {
+    let boundary = |allowed: &str| {
+        format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"no-helpers\"\nscopes = [\"pkg.use.*\"]\nforbid = [\"calls\"]\ncall-targets = [\"Host._helper\"]\n{allowed}"
+        )
+    };
+    let p = Project::new("protocol_boundary_allowed");
+    p.write("pyproject.toml", &boundary(""))
+        .write("pkg/__init__.py", "")
+        .write("pkg/host.py", MIXED_HOST)
+        .write("pkg/use.py", MIXED_USE);
+    let calls = |p: &Project| -> Vec<String> {
+        let (_, stdout, _) = p.check(&["--output-format", "concise"]);
+        stdout
+            .lines()
+            .filter(|l| l.contains("EFF201"))
+            .map(|l| l.split(": EFF201").next().unwrap_or(l).to_owned())
+            .collect()
+    };
+    assert_eq!(calls(&p), vec!["pkg/use.py:9:12".to_owned()]);
+    p.write(
+        "pyproject.toml",
+        &boundary("allowed-callees = [\"Host._helper\"]\n"),
+    );
+    assert!(calls(&p).is_empty());
+}
