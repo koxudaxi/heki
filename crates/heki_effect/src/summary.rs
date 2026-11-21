@@ -2286,18 +2286,22 @@ impl<'a> Extractor<'a> {
 
     /// The bases of the class statements in the function ([`Contracts::reference_bases`]), each
     /// as a reference site of the project class it is (`Base`, `core.Base`, `Base[int]`). A base
-    /// is the value the statement passes ([`IrFunction::class_bases`]), typed in the statement's
+    /// is the value the statement passes ([`heki_ir::ModuleIr::class_bases`]), typed in the statement's
     /// block as any value is, so a name it reads is what the statement's scope binds (a
     /// parameter, a local, a closure cell, a class-body name), whatever the module imports under
     /// that name. A site is at the base when the statement loads it, else at the statement (a
     /// name an import or the module body binds is read without a load of its own).
     fn base_sites(&mut self) -> Vec<CallSite> {
         let (f, shape) = (self.f, self.shape);
-        let bases = f.class_bases.iter().filter_map(|&(class, index)| {
-            let (bb, statement) = shape.defining(class)?;
-            let base = *statement.kind.operands().get(index as usize)?;
-            Some((bb, statement.span, base))
-        });
+        let bases = self
+            .cx
+            .ir()
+            .class_bases_of(f.id)
+            .filter_map(|(class, index)| {
+                let (bb, statement) = shape.defining(class)?;
+                let base = *statement.kind.operands().get(index as usize)?;
+                Some((bb, statement.span, base))
+            });
         let mut out = Vec::new();
         for (bb, statement, base) in bases {
             self.pos = (bb, 0);

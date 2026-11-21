@@ -82,7 +82,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Strings | `Convert(value, conversion)`, `Format(value, spec)`, `BuildString(parts)` | As CPython compiles an f-string: each replacement field, left to right, evaluates its value, converts it (`!s` / `!r` / `!a`, and `{x=}` without a specification: `Convert`, which runs `__str__` / `__repr__`), evaluates its format specification (an f-string of its own), and formats the result (`Format`: `format(value, spec)`, which runs `__format__`); each runs code of the value's class unless that is a builtin, and may raise. A field alone is the f-string's result (`__format__` may return a `str` subclass); any other f-string is a `BuildString` of its formatted fields, a new `str` that keeps none of them. A template string keeps its values unconverted and unformatted, as the tuple `Template.values`, formats its specifications' fields, and is otherwise opaque |
 | Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it |
 | Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
-| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (`IrFunction.class_bases` lists the bases among them; a `type` alias is a `MakeClosure` without a lowered body) |
+| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (`ModuleIr.class_bases` lists the bases among them; a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
 | Exceptions | `CatchException(types)` | Starts an exception handler |
@@ -206,7 +206,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
-  - `IrFunction.starred` marks starred display elements, `IrFunction.class_bases` the bases a
+  - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a
     class statement passes, `BasicBlock.term_span` the source of a block's terminator (blocker
     lines point at it), and `ModuleIr.constants` (`ModuleConstants`) the module's constant
     integers, displays, strings, and tuples of strings. A string constant, or a tuple of them,
@@ -530,7 +530,7 @@ evaluated annotations are not told apart, nor a class's bases and keywords), and
 binding a name to the value itself (an import, a module alias). With `references =
 "calls-and-bases"` (`Contracts::reference_bases`), the bases of a class statement are reference
 sites too (`CallSite::is_base`): one per value the statement passes as a base
-(`IrFunction::class_bases`) that is a project class, typed in the statement's block as any value
+(`ModuleIr::class_bases`) that is a project class, typed in the statement's block as any value
 is (a parameter or a local of the imported class's name is another value), constructing that
 class, at the base's load when the statement loads it, else at the class statement. The class
 bodies a module runs add their references to the module body's (their other facts are not the
