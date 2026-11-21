@@ -340,9 +340,10 @@ symbol's last name (aliases included), a function or class of the module itself 
 unbound name by its spelling.
 
 String constants (`ModuleDecls::str_constants`) name attributes and keys for every rule:
-module-level names declared `Final`, or bound once and rebound by no other module
-(`StrConstant::rebindable`, checked against `ProjectDecls::rebound_elsewhere` where a constant is
-read), and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
+the module's string constants (`heki_ir::ModuleConstants::strs`, whose texts they share), and
+module-level names bound once to a constant of another module, each rebound by no other module
+unless declared `Final` (`StrConstant::rebindable`, checked against
+`ProjectDecls::rebound_elsewhere` where a constant is read), and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
 an instance by no other code of their module (and, without `Final`, by no other module), read
 through the MRO when the MRO of every subclass finds the same definition (none defines the name
 again or lists another base defining it first); a class that code stores the name on

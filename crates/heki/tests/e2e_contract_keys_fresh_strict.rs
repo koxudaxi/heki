@@ -771,6 +771,40 @@ fn a_final_dataclass_field_is_a_constant_only_where_the_class_keeps_its_default(
     );
 }
 
+const STARRED_KEYS: &str = r#"from pkg.model import DataModelFieldBase
+
+STARRED = "_forced_field_assignment"
+_PRIVATE = "_forced_field_assignment"
+
+from pkg.helpers import *
+
+AFTER = "_forced_field_assignment"
+
+
+def write(field: DataModelFieldBase) -> None:
+    field.__dict__[STARRED] = True
+    field.__dict__[_PRIVATE] = True
+    field.__dict__[AFTER] = True
+"#;
+
+/// A star import may rebind the public names the module bound before it, so they hold no
+/// constant there; it imports no `_private` name, and a name bound after it keeps its value.
+#[test]
+fn a_star_import_after_a_module_constant_may_rebind_it() {
+    let p = class_keys_project("keys_star_import", STARRED_KEYS);
+    p.write("pkg/helpers.py", "def helper() -> None:\n    pass\n");
+    let u = "pkg/use.py";
+    let forced = "DataModelFieldBase._forced_field_assignment";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 12, "MUT205", "write", "DataModelFieldBase"),
+            d(u, 13, "MUT201", "write", forced),
+            d(u, 14, "MUT201", "write", forced),
+        ]
+    );
+}
+
 #[test]
 fn a_final_key_of_another_module_follows_its_value() {
     let p = keys_project("keys_other_value");

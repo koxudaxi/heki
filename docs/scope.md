@@ -204,15 +204,15 @@ Missed findings close as heki learns more:
   (`KEY: Final = "_key"`), also when imported, re-exported, or bound to another `Final` name, a
   module-level string bound once in its module, or a class constant declared `ClassVar` or
   `Final` and bound once (`Model.KEY`, `self.KEY`, `cls.KEY`).
-- **Not followed** for a module-level name without `Final` that another module rebinds or
-  deletes, a class constant stored on its class or an instance outside the class body
-  (`Model.KEY = "x"`; from another module, only one without `Final`), a class constant a
-  subclass defines again, is given its own value (`Child.KEY = "x"`), or inherits first from
-  another base it lists before the class (`class Child(Other, Model)`; read on that subclass,
-  or on an instance or `cls` that may be one), a `Final` field of a dataclass or of a class a
-  `dataclass_transform` builds read on an instance (`Keys("x").KEY` is `"x"`), or on a class
-  object whose default a class with `slots=True` or built by a transform replaces, or a
-  computed name.
+- **Not followed** for a module-level name without `Final` that another module rebinds or deletes,
+  one bound in a loop or before a star import that may rebind it, a class constant stored on its
+  class or an instance outside the class body (`Model.KEY = "x"`; from another module, only one
+  without `Final`), a class constant a subclass defines again, is given its own value
+  (`Child.KEY = "x"`), or inherits first from another base it lists before the class
+  (`class Child(Other, Model)`; read on that subclass, or on an instance or `cls` that may be one),
+  a `Final` field of a dataclass or of a class a `dataclass_transform` builds read on an instance
+  (`Keys("x").KEY` is `"x"`), or on a class object whose default a class with `slots=True` or built
+  by a transform replaces, or a computed name.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](rules/unresolved-guarded-write.md)).
 

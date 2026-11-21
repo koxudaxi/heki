@@ -418,8 +418,9 @@ pub struct StrConstant {
 /// What a string constant is bound to ([`StrConstant`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StrValue {
-    /// `KEY = "_key"`.
-    Literal(String),
+    /// `KEY = "_key"`; a module-level one shares its text with the module's constants
+    /// (`heki_ir::ModuleConstants::strs`), and with the names bound to it there.
+    Literal(Arc<str>),
     /// `KEY = OTHER` / `KEY = keys.OTHER`: the fully qualified name of the constant it is
     /// bound to, resolved within the module (chased by [`ProjectDecls::str_constant`]).
     Alias(String),
@@ -2791,7 +2792,9 @@ fn count_u8<T>(items: impl Iterator<Item = T>) -> u8 {
 /// [`ModuleDecls::str_constants`]: the module-level names bound exactly once in the module and
 /// the class-body names declared `ClassVar` or `Final` (`typing` / `typing_extensions`, also
 /// subscripted) bound exactly once in the class body, each to a string literal or to another
-/// name. A name stored twice (`global KEY` in a function, two branches) or deleted is no
+/// name (`constant_source`). A module-level literal is the text of one of the module's
+/// constants (`heki_ir::ModuleConstants::strs`), shared with it, and a name those leave out is
+/// no constant. A name stored twice (`global KEY` in a function, two branches) or deleted is no
 /// constant, and neither is a name an import statement binds: it resolves through the imports.
 /// A class attribute the module also stores or deletes outside the class body
 /// (`ClassDecl::rebound_attrs`) is none either.
@@ -2870,7 +2873,13 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
                 continue;
             }
             let value = match constant_source(&defs, &imports, value) {
-                Some(Ok(s)) => StrValue::Literal(s.to_owned()),
+                // A module-level name holds the text of one of the module's constants, or no
+                // constant (one bound in a loop, or that a star import or `exec` may rebind).
+                Some(Ok(_)) if f.is_module_body => match input.ir.constants.strs.get(name) {
+                    Some(text) => StrValue::Literal(Arc::clone(text)),
+                    None => continue,
+                },
+                Some(Ok(s)) => StrValue::Literal(Arc::from(s)),
                 Some(Err(fqn)) => StrValue::Alias(fqn),
                 None => continue,
             };
