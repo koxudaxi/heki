@@ -25,7 +25,8 @@ hold. Only exact reports are shown by default.
   ends with a note saying how many.
 
 See [Rule selection](configuration.md#rule-selection-toolhekilint). The proven tier of the eight
-`OPT` rewrite rules is exact (certified below); the other rules are heuristic.
+`OPT` rewrite rules and the exact tier of `OPT113` are exact (certified below); the other rules
+are heuristic.
 
 ## What a report states
 
@@ -120,7 +121,9 @@ A certified rule has a row here: the release that certified it, and the reports 
 and of its holdout run with the false claims among them. The census of the proven `OPT` tier
 checked by hand every exact report on the Stage 0-A corpus with the build of 2026-11-21 (one
 report, whose rewrite needed the set-order obligation, left the tier); the holdout run checked
-every exact report of one run on the 100 packages of the frozen holdout corpus.
+every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
+census reports are those of its exact tier with the plain-key premise, all among the reports
+the census of the earlier tier checked by hand.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
@@ -132,6 +135,7 @@ every exact report of one run on the 100 packages of the frozen holdout corpus.
 | `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 |
 | `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
 | `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
+| `OPT113` | 0.2.0 | 9 / 0 | 6 / 0 |
 
 ## Measurements
 
@@ -157,7 +161,7 @@ loop a fixed 4 times, which is not data-sized.
 | `OPT110` | exact | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
 | `OPT111` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
 | `OPT112` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 43 / 5 | 90% | 79-96% | 4% |
-| `OPT113` | heuristic | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
+| `OPT113` | exact | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
 | `OPT120` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
 | `OPT121` | exact | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
 | `OPT130` | exact | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |

@@ -13,8 +13,8 @@ $ heki check --heuristic
 
 The first command runs the exact rules (hand-checked samples of their reports found none wrong
 about the code) and the rules of the [contracts](configuration.md#contracts) you declare. In
-0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules: the reports whose rewrite
-heki proves safe. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
+0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules (the reports whose rewrite
+heki proves safe) and the exact tier of `OPT113`. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
 output labels them ([Rule Precision](precision.md)).
 
 heki checks every Python file under the current directory, except the

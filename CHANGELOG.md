@@ -86,7 +86,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
   contract is declared, whatever its certainty. The proven tier of the eight `OPT` rewrite rules
   (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) is exact: a census of
   every one of its 234 reports on the Stage 0-A corpus, and a check of the 235 of one run on a
-  frozen holdout corpus of 100 packages, found none wrong. `heki check` with no
+  frozen holdout corpus of 100 packages, found none wrong. `OPT113`'s exact tier is certified
+  too (9 reports in the census and 6 in the holdout run, none wrong) and runs by default. `heki check` with no
   configuration runs these rules and the contract rules and shows the reports whose rewrite is
   proven safe, and `heki check --fix` applies the proven fixes of `OPT101` and `OPT102`. `MUT202`, which also reports `@lru_cache` / `@cache` results
   without a contract, is selected like the other heuristic rules, so a `readonly-returns`
@@ -115,7 +116,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop, and, for a rule's exact tier, the proven rewrite; no size is claimed. A proven report of
   a size-dependent `OPT` rule in a loop whose trip count the code fixes past 16 (`range(50)`,
   `rows[:100]`, a display of 20 items) is heuristic: true, but no evidence either way.
-- `OPT113` reports carry a tier. A report is in the exact tier when both loops step through the
+- `OPT113` reports carry a tier. A report is in the exact tier when each key the inner loop loads
+  is a plain attribute of an item whose class heki knows (a dataclass, `attrs`, or `NamedTuple`
+  field, or what the class stores, with no property or other descriptor of that name in the
+  project), or an item of a builtin container, when both loops step through the
   function's inputs (parameters, or attributes or items of them), an inner item whose key differs
   runs nothing but the comparison (no statement before the test or after the `if`, no earlier
   `and` operand, and an inner iterable that is a builtin container by its type or construction,

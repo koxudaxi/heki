@@ -1908,14 +1908,15 @@ impl ProjectDecls {
     /// R2, of a project subclass) reads a plain attribute and runs no code of the project: a
     /// class along its MRO declares it (a field, a slot, or what its body or methods store), no
     /// class of its MRO or of its subclasses binds it to a method, property, or other call in
-    /// its body or defines `__getattr__` or `__getattribute__`, every base is a project class,
-    /// and no metaclass heki does not know creates the class.
+    /// its body or defines `__getattr__` or `__getattribute__`, every base is a project class
+    /// (or `object`, `NamedTuple`, `Generic`), and no metaclass heki does not know creates the
+    /// class.
     pub fn plain_attr(&self, class: &str, attr: &str) -> bool {
         let class = self.canonical(class);
         let decls_of = |classes: Vec<String>| -> Option<Vec<&ClassDecl>> {
             classes
                 .iter()
-                .filter(|c| !matches!(c.as_str(), "object" | "builtins.object"))
+                .filter(|c| !PLAIN_BASES.contains(&c.as_str()))
                 .map(|c| {
                     self.read(|k| note(&mut k.class_facts, c));
                     self.class(c)
@@ -2877,6 +2878,17 @@ fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     }
 }
 
+/// External bases whose instances read the attributes of their subclasses as plain ones: a
+/// `NamedTuple`'s fields are tuple items, and `Generic` adds only type parameters.
+const PLAIN_BASES: &[&str] = &[
+    "object",
+    "builtins.object",
+    "typing.NamedTuple",
+    "typing_extensions.NamedTuple",
+    "typing.Generic",
+    "typing_extensions.Generic",
+];
+
 /// The field specifiers whose call in a class body declares a field and leaves no descriptor.
 const FIELD_SPECIFIERS: &[&str] = &[
     "field",
@@ -2890,9 +2902,17 @@ const FIELD_SPECIFIERS: &[&str] = &[
 /// `ClassDecl::code_attrs` of the module's classes, from their bodies.
 fn code_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     for f in input.ir.functions.iter().filter(|f| f.is_class_body) {
-        let Some(class) = decls.classes.get_mut(&f.qualname) else {
-            continue;
-        };
+        // The semantic model declares every class the IR has (one AST).
+        if let Some(class) = decls.classes.get_mut(&f.qualname) {
+            class.code_attrs = class_body_code_attrs(f);
+        }
+    }
+}
+
+/// The names a class body binds to something that may run code when read on an instance.
+fn class_body_code_attrs(f: &IrFunction) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    {
         let shape = heki_ir::walk::FnShape::new(f);
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             let Some(attr) = inst
@@ -2917,10 +2937,11 @@ fn code_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                 _ => false,
             };
             if !plain {
-                class.code_attrs.insert(attr.to_owned());
+                out.insert(attr.to_owned());
             }
         }
     }
+    out
 }
 
 /// [`attr_displays`] of one class body or method (`selfs`: the variables holding `self`).

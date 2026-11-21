@@ -544,7 +544,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT113",
         slug: "nested-loop-equijoin",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,

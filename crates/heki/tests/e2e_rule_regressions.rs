@@ -1217,13 +1217,172 @@ fn starred_elements_keep_the_names_in_blockers() {
 /// bound to it, rebinds, or may let other code change (`yield`, a builtin handed a function, a
 /// closure capturing it), a store into the compared key of an inner item, also by a function handed
 /// the item, and a trip count the code fixes.
-const PREMISES: &str = r#"RUNNERS = (
+const PREMISES: &str = r#"from dataclasses import dataclass, field
+from typing import NamedTuple
+
+from library import Base as LibraryBase
+
+
+@dataclass
+class Row:
+    k: int
+    id: int
+    customer_id: int
+    type_var: int
+    key: int
+    active: bool
+    ok: bool
+    flag: bool
+    pending: bool
+    used: bool = field(default=False)
+
+
+class Plain:
+    def __init__(self, k):
+        self.k = k
+
+
+class Pair(NamedTuple):
+    k: int
+
+
+class External(LibraryBase):
+    def __init__(self, k):
+        self.k = k
+
+
+class Prop:
+    @property
+    def k(self):
+        return 1
+
+
+class Base:
+    def __init__(self, k):
+        self.k = k
+
+
+class Sub(Base):
+    @property
+    def k(self):
+        return 2
+
+
+class Meta(type):
+    pass
+
+
+class Made(metaclass=Meta):
+    def __init__(self, k):
+        self.k = k
+
+
+def described():
+    return None
+
+
+class Desc:
+    k = described()
+
+
+def plain_items(xs: list[Plain], ys: list[Plain]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def tuple_fields(xs: list[Pair], ys: list[Pair]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def union_items(xs: list[Row | Plain], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def inert_work(xs: list[Row], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in ys:
+            n = len(ys)
+            if a.k == b.k:
+                out.append(n)
+    return out
+
+
+def external_base(xs: list[External], ys: list[External]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def property_key(xs: list[Prop], ys: list[Prop]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def subclass_property(xs: list[Base], ys: list[Base]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def metaclass_made(xs: list[Made], ys: list[Made]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def descriptor_key(xs: list[Desc], ys: list[Desc]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def untyped_items(xs, ys: list):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+RUNNERS = (
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
 )
 
 
-def exact_join(orders, customers: list):
+def exact_join(orders: list[Row], customers: list[Row]):
     out = []
     for order in orders:
         for customer in customers:
@@ -1242,7 +1401,7 @@ def outer_constant(jobs):
     return out
 
 
-def work_before_test(xs, ys, check):
+def work_before_test(xs: list[Row], ys: list[Row], check):
     out = []
     for c1 in xs:
         for c2 in ys:
@@ -1252,7 +1411,7 @@ def work_before_test(xs, ys, check):
     return out
 
 
-def inner_changed(records, events):
+def inner_changed(records: list[Row], events: list[Row]):
     for record in records:
         for event in events:
             if event.key == record.key:
@@ -1269,7 +1428,7 @@ def lazy_inner(names, calls, receiver_of):
     return out
 
 
-def and_filter(xs, ys):
+def and_filter(xs: list[Row], ys: list[Row]):
     out = []
     for a in xs:
         for b in ys:
@@ -1278,7 +1437,7 @@ def and_filter(xs, ys):
     return out
 
 
-def sorted_inner(xs, ys):
+def sorted_inner(xs: list[Row], ys: list[Row]):
     out = []
     for a in xs:
         for b in sorted(ys):
@@ -1287,7 +1446,7 @@ def sorted_inner(xs, ys):
     return out
 
 
-def sliced(xs, ys):
+def sliced(xs: list[Row], ys: list[Row]):
     out = []
     for a in xs:
         for b in ys[:100]:
@@ -1314,7 +1473,7 @@ def mixed_keys(xs: list[str], ys: list[str | int]):
     return out
 
 
-def after_if_work(xs, ys, log):
+def after_if_work(xs: list[Row], ys: list[Row], log):
     out = []
     for a in xs:
         for b in ys:
@@ -1324,7 +1483,7 @@ def after_if_work(xs, ys, log):
     return out
 
 
-def filtered_inner(xs, ys, keep):
+def filtered_inner(xs: list[Row], ys: list[Row], keep):
     out = {}
     for a in xs:
         for b in filter(keep, ys):
@@ -1333,7 +1492,7 @@ def filtered_inner(xs, ys, keep):
     return out
 
 
-def enumerated(xs, ys: list):
+def enumerated(xs: list[Row], ys: list[Row]):
     out = []
     for a in xs:
         for i, b in enumerate(ys):
@@ -1342,7 +1501,7 @@ def enumerated(xs, ys: list):
     return out
 
 
-def view(xs, table: dict):
+def view(xs: list[Row], table: dict[str, Row]):
     out = []
     for a in xs:
         for b in table.values():
@@ -1351,7 +1510,7 @@ def view(xs, table: dict):
     return out
 
 
-def either(xs, ys: list, zs: tuple, flag):
+def either(xs: list[Row], ys: list[Row], zs: list[Row], flag):
     rows = ys if flag else zs
     out = []
     for a in xs:
@@ -1361,7 +1520,7 @@ def either(xs, ys: list, zs: tuple, flag):
     return out
 
 
-def rebound(xs, ys, zs):
+def rebound(xs: list[Row], ys: list[Row], zs: list[Row]):
     out = []
     for a in xs:
         rows = ys if a.flag else zs
@@ -1381,7 +1540,7 @@ def generator_before(names, calls, receiver_of):
     return out
 
 
-def unknown_type(xs, ys):
+def unknown_type(xs: list[Row], ys):
     out = []
     for a in xs:
         for b in ys:
@@ -1390,7 +1549,7 @@ def unknown_type(xs, ys):
     return out
 
 
-def aliased(xs, ys: list):
+def aliased(xs: list[Row], ys: list[Row]):
     rows = ys
     out = []
     for a in xs:
@@ -1401,7 +1560,7 @@ def aliased(xs, ys: list):
     return out
 
 
-def prefiltered(xs, ys):
+def prefiltered(xs: list[Row], ys: list[Row]):
     kept = [b for b in ys if b.ok]
     out = []
     for a in xs:
@@ -1411,7 +1570,7 @@ def prefiltered(xs, ys):
     return out
 
 
-def words(xs, text: str):
+def words(xs: list[Row], text: str):
     out = []
     for a in xs:
         for w in text.split():
@@ -1420,21 +1579,21 @@ def words(xs, text: str):
     return out
 
 
-def rekeyed(xs, ys: list):
+def rekeyed(xs: list[Row], ys: list[Row]):
     for a in xs:
         for b in ys:
             if a.k == b.k:
                 b.k = None
 
 
-def item_rekeyed(xs, ys: list):
+def item_rekeyed(xs: list[dict], ys: list[dict]):
     for a in xs:
         for b in ys:
             if a["k"] == b["k"]:
                 b["k"] = None
 
 
-def marks(xs, ys: list, cache: dict):
+def marks(xs: list[Row], ys: list[Row], cache: dict):
     for a in xs:
         for b in ys:
             if a.k == b.k:
@@ -1442,7 +1601,7 @@ def marks(xs, ys: list, cache: dict):
         del cache[a.k]
 
 
-def by_key(xs, d: dict):
+def by_key(xs: list[Row], d: dict):
     out = []
     for a in xs:
         for k, v in d.items():
@@ -1451,7 +1610,7 @@ def by_key(xs, d: dict):
     return out
 
 
-def by_keys(xs, d: dict):
+def by_keys(xs: list[Row], d: dict):
     out = []
     for a in xs:
         for k in d.keys():
@@ -1460,7 +1619,7 @@ def by_keys(xs, d: dict):
     return out
 
 
-def by_value(xs, d: dict):
+def by_value(xs: list[Row], d: dict[str, Row]):
     out = []
     for a in xs:
         for k, v in d.items():
@@ -1469,7 +1628,7 @@ def by_value(xs, d: dict):
     return out
 
 
-def by_item_value(xs, d: dict):
+def by_item_value(xs: list[Row], d: dict):
     out = []
     for a in xs:
         for k, v in d.items():
@@ -1478,7 +1637,7 @@ def by_item_value(xs, d: dict):
     return out
 
 
-def sorted_with_key(xs, ys: list, shrink):
+def sorted_with_key(xs: list[Row], ys: list[Row], shrink):
     for a in xs:
         for b in ys:
             if a.k == b.k:
@@ -1486,7 +1645,7 @@ def sorted_with_key(xs, ys: list, shrink):
         sorted(ys, key=shrink)
 
 
-def filter_before(xs, ys: list, keep):
+def filter_before(xs: list[Row], ys: list[Row], keep):
     kept = filter(keep, ys)
     out = []
     for a in xs:
@@ -1496,14 +1655,14 @@ def filter_before(xs, ys: list, keep):
     return out
 
 
-def helper_rekeys(xs, ys: list, rekey):
+def helper_rekeys(xs: list[Row], ys: list[Row], rekey):
     for a in xs:
         for b in ys:
             if a.k == b.k:
                 rekey(b)
 
 
-def closure_drops(xs, ys: list):
+def closure_drops(xs: list[Row], ys: list[Row]):
     drop = lambda: ys.pop()
     out = []
     for a in xs:
@@ -1514,7 +1673,7 @@ def closure_drops(xs, ys: list):
     return out
 
 
-def lambda_in_loop(xs, ys: list, other: list):
+def lambda_in_loop(xs: list[Row], ys: list[Row], other: list):
     for a in xs:
         for b in ys:
             if a.k == b.k:
@@ -1522,7 +1681,7 @@ def lambda_in_loop(xs, ys: list, other: list):
         other.sort(key=lambda x: ys.index(x))
 
 
-def extended_alias(xs, ys: list):
+def extended_alias(xs: list[Row], ys: list[Row]):
     rows = ys
     for a in xs:
         for b in ys:
@@ -1531,7 +1690,7 @@ def extended_alias(xs, ys: list):
         rows += ["new"]
 
 
-def yielding(xs, ys):
+def yielding(xs: list[Row], ys: list[Row]):
     for a in xs:
         for b in ys:
             if a.k == b.k:
@@ -1569,6 +1728,16 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
     assert_eq!(
         tiers,
         [
+            ("plain_items", true, tier(true)),
+            ("tuple_fields", true, tier(true)),
+            ("union_items", true, tier(true)),
+            ("inert_work", false, tier(false)),
+            ("external_base", false, tier(false)),
+            ("property_key", false, tier(false)),
+            ("subclass_property", false, tier(false)),
+            ("metaclass_made", false, tier(false)),
+            ("descriptor_key", false, tier(false)),
+            ("untyped_items", false, tier(false)),
             ("exact_join", true, tier(true)),
             ("outer_constant", false, tier(false)),
             ("work_before_test", false, tier(false)),
@@ -1617,9 +1786,10 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
     // built once only for an inner collection that is the same on every outer iteration.
     assert!(help("str_keys").starts_with("group the elements of `ys`"));
     assert!(help("mixed_keys").starts_with("group the elements of `ys`"));
-    assert!(help("exact_join").starts_with("if the keys are hashable, index `customers`"));
+    assert!(help("exact_join").starts_with("index `customers`"));
+    assert!(help("untyped_items").starts_with("if the keys are hashable, "));
     assert!(help("inner_changed").starts_with(
-        "if `events` is the same collection, with the same keys, on every iteration of the outer loop and the keys are hashable,"
+        "if `events` is the same collection, with the same keys, on every iteration of the outer loop, "
     ));
     // A store into the compared key of an inner item would leave an index built once stale.
     assert!(help("rekeyed").starts_with(
@@ -1631,14 +1801,22 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
         "`d` is already keyed by `k`: look each outer key up in it (`d.get(...)`) instead of looping over it"
     );
     assert!(help("by_keys").starts_with("`d` is already keyed by `k`"));
-    assert!(help("by_value").starts_with("if the keys are hashable, index `d.items()`"));
+    assert!(help("by_value").starts_with("index `d.items()`"));
     assert!(help("by_item_value").starts_with("if the keys are hashable,"));
 }
 
 /// Under assumption R2 a value annotated `list` may be an instance of a project subclass: one
 /// with its own `__iter__` (or a `dict` subclass with its own `items`) runs code to advance the
 /// inner loop, so the joins over such annotated values are heuristic.
-const OVERRIDES: &str = r#"class LoudList(list):
+const OVERRIDES: &str = r#"from dataclasses import dataclass
+
+
+@dataclass
+class Row:
+    k: int
+
+
+class LoudList(list):
     def __iter__(self):
         print("next")
         return super().__iter__()
@@ -1650,7 +1828,7 @@ class LoudDict(dict):
         return super().items()
 
 
-def over_list(xs, ys: list):
+def over_list(xs: list[Row], ys: list[Row]):
     out = []
     for a in xs:
         for b in ys:
@@ -1659,7 +1837,7 @@ def over_list(xs, ys: list):
     return out
 
 
-def over_items(xs, d: dict):
+def over_items(xs: list[Row], d: dict[str, Row]):
     out = []
     for a in xs:
         for k, v in d.items():
@@ -1668,7 +1846,7 @@ def over_items(xs, d: dict):
     return out
 
 
-def over_sorted(xs, ys: list):
+def over_sorted(xs: list[Row], ys: list[Row]):
     out = []
     for a in xs:
         for b in sorted(ys):

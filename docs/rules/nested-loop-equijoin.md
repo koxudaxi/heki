@@ -2,13 +2,9 @@
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks nested loops that join two collections by comparing a key of each with `==`:
@@ -49,7 +45,14 @@ does not match".
 Its premises:
 
 - **Equality of keys**: the comparison is `==` between keys of the two items (the items, their
-  components, attributes, or constant subscripts). Established.
+  components, attributes, or constant subscripts). Established. Each key that the inner loop loads
+  runs no code of the project: an attribute is a plain one of an item whose class heki knows (a
+  dataclass, `attrs`, or `NamedTuple` field, a slot, or what the class body or a method stores, with
+  no property, method, other descriptor, `__getattr__`, or `__getattribute__` of that name along the
+  class's MRO or in a project subclass, every base a project class, and no metaclass heki does not
+  know), and a subscript reads a builtin container or a component of a tuple the inner loop's
+  builtin step makes. An attribute of an item of unknown class may be a property, so the report is
+  then heuristic.
 - **Steps through inputs**: each loop steps through items of the function's inputs: every source
   of its items is a parameter, or an attribute or an item of one (`orders`, `req.rows`,
   `sorted(customers)`), also through a list the function fills only by appending items of such a

@@ -1270,7 +1270,7 @@ impl JoinPremises<'_, '_, '_> {
     /// `obj` to be an instance of (every class of a union), running no code of the project
     /// (`ProjectDecls::plain_attr`). An object of unknown class may have a property of that
     /// name.
-    fn plain_attr(&self, obj: VarId, attr: &str) -> bool {
+    fn plain_key_attr(&self, obj: VarId, attr: &str) -> bool {
         match self.types.get(&obj) {
             Some(Val::Inst(class)) => self.decls.plain_attr(class, attr),
             Some(Val::Union(classes)) => classes.iter().all(|c| self.decls.plain_attr(c, attr)),
@@ -1418,7 +1418,6 @@ impl JoinPremises<'_, '_, '_> {
     /// out of the inner loop.
     fn idle_on_mismatch(&self, inner: &ForLoop<'_>, outer: &ForLoop<'_>, cmp: VarId) -> bool {
         let f = self.defs.f;
-        let inner_element = self.defs.next_of(inner.lp).map(|(e, _)| e);
         let shape = self.sizes.ix.shape();
         let alias = forward_aliases(f, &[cmp]);
         let header = inner.lp.header;
@@ -1433,18 +1432,21 @@ impl JoinPremises<'_, '_, '_> {
             })
         };
         // A key load runs no code of the project: a plain attribute of an item whose class heki
-        // knows, an item of a builtin container, or a component of a tuple the inner loop's
+        // knows, an item of a builtin container, or a component of the tuple the inner loop's
         // builtin step makes (`for k, v in d.items()`).
-        let tuples = self.steps_through_tuples(inner);
+        let tuple_item = self
+            .steps_through_tuples(inner)
+            .then(|| self.defs.next_of(inner.lp).map(|(e, _)| e))
+            .flatten();
         let key_work = |inst: &Inst| match &inst.kind {
             InstKind::IterNext { .. } => true,
             InstKind::Const { dst, .. } => index_of_key(dst),
             InstKind::Copy { dst, .. } => key(dst),
-            InstKind::AttrLoad { dst, obj, attr } => key(dst) && self.plain_attr(*obj, attr),
+            InstKind::AttrLoad { dst, obj, attr } => key(dst) && self.plain_key_attr(*obj, attr),
             InstKind::SubscriptLoad { dst, obj, .. } => {
                 key(dst)
                     && (self.builtin_type(*obj, CONTAINERS)
-                        || (tuples && Some(shape.copy_root(*obj)) == inner_element))
+                        || tuple_item == Some(shape.copy_root(*obj)))
             }
             InstKind::Compare { dst, .. } => *dst == cmp,
             _ => false,
