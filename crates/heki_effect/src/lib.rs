@@ -27,6 +27,7 @@ pub mod held;
 mod infer;
 mod invalidation;
 pub mod locks;
+pub mod one_at_a_time;
 pub mod ownership;
 pub mod readonly;
 mod report;
@@ -44,6 +45,7 @@ pub use invalidation::{
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use locks::{LockAcquire, ObjRef, SiteLock};
+pub use one_at_a_time::ExclusiveUse;
 pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
@@ -604,6 +606,11 @@ pub struct EffectSummary {
     /// calls that run there on its thread or task, in its own names (`EFF109`; propagated).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub acquires_locks: BTreeMap<ObjRef, LockAcquire>,
+    /// The objects allowing one operation at a time the function uses when its body runs,
+    /// itself or through the calls that run there on its task, in its own names, unless it
+    /// holds a lock there (`EFF110`; propagated).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub exclusive_uses: BTreeMap<ObjRef, ExclusiveUse>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -788,6 +795,9 @@ impl EffectSummary {
         out.param_change_sites.clear();
         for acq in out.acquires_locks.values_mut() {
             *acq = acq.without_locations();
+        }
+        for u in out.exclusive_uses.values_mut() {
+            *u = u.without_locations();
         }
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
@@ -1179,6 +1189,10 @@ pub struct CallSite {
     /// [`EffectSummary::returns_self_attrs`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_discarded: bool,
+    /// The caller certainly holds a lock at the call: what the callees use one operation at a
+    /// time is kept to one task at a time (`EFF110`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub under_lock: bool,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).

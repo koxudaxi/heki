@@ -113,8 +113,8 @@ supported version that every clause admits:
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
 - A prefix or `ALL` enables only the default rules. The opt-in rules (`EFF105`, `EFF106`,
-  `EFF107`, `EFF109`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`) need their exact
-  code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF107`, `EFF109`, `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`) need
+  their exact code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, and `--extend-select` and `--ignore` add
   to the configured lists.
 
@@ -446,6 +446,7 @@ excluded = true               # never reported
 | `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
 | `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 | `non-reentrant-lock` | An instance of this class is a lock its holder cannot take again: acquiring it while the same thread or task holds it waits forever (`EFF109`). |
+| `one-at-a-time` | Tasks may not be inside this method on one object at once (`EFF110`): `"always"` (a second task's call raises), `"when_unbound"` (only while the object holds no connection, as an `AsyncSession`), or `"unbinds"` (as `"when_unbound"`, and the object holds no connection after the call: `commit`). |
 
 - An override sets the keys it lists on the built-in entry for the same symbol. The keys it leaves
   out keep their built-in values; `effects = []` removes every effect.
@@ -461,7 +462,7 @@ For a project function:
 | `async-safe` | keeps the blocking effects of the body from its callers |
 | `return-type` | types its result, over its annotation |
 | `offloads-blocking-arg` | the parameter the body offloads, counted as for a library method |
-| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock` | not read: library symbols only |
+| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time` | not read: library symbols only |
 
 ## Inline suppressions
 

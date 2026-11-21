@@ -25,7 +25,7 @@ opaque_packages = [
     "requests", "httpx", "aiohttp", "urllib3", "sqlalchemy", "sqlmodel", "django", "psycopg",
     "psycopg_pool", "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc",
     "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi", "asgiref", "asyncer",
-    "channels",
+    "channels", "asyncpg", "websockets",
 ]
 
 # --- Offloads blocking work (argument index of the offloaded callable) ---
@@ -433,6 +433,69 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "aiohttp.ClientSession.ws_connect"
 async_safe = true
+return_type = "aiohttp.ClientWebSocketResponse"
+opaque_to_layer3 = true
+
+# A WebSocket response raises `RuntimeError: Concurrent call to receive() is not allowed` when
+# a second task receives while another does (`EFF110`); `async for` over it receives.
+[[entries]]
+symbol = "aiohttp.ClientWebSocketResponse.receive"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.ClientWebSocketResponse.receive_str"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.ClientWebSocketResponse.receive_bytes"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.ClientWebSocketResponse.receive_json"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.ClientWebSocketResponse.__anext__"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.web.WebSocketResponse.receive"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.web.WebSocketResponse.receive_str"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.web.WebSocketResponse.receive_bytes"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.web.WebSocketResponse.receive_json"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "aiohttp.web.WebSocketResponse.__anext__"
+async_safe = true
+one_at_a_time = "always"
 opaque_to_layer3 = true
 
 # --- HTTP: urllib3 ---
@@ -1204,66 +1267,104 @@ opaque_to_layer3 = true
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.execute"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.scalars"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.scalar"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.get"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.get_one"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.refresh"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.commit"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "unbinds"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.flush"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.stream"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.stream_scalars"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.run_sync"
 async_safe = true
 sync_facade_arg = 0
+one_at_a_time = "when_unbound"
+opaque_to_layer3 = true
+
+# An `AsyncSession` allows one operation at a time while it holds no connection: before its
+# first operation, and after `commit()`, `rollback()`, or `close()` give it back, a second
+# task's operation raises `InvalidRequestError` (`EFF110`).
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.rollback"
+async_safe = true
+one_at_a_time = "unbinds"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlalchemy.ext.asyncio.AsyncSession.close"
+async_safe = true
+one_at_a_time = "unbinds"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.rollback"
+async_safe = true
+one_at_a_time = "unbinds"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sqlmodel.ext.asyncio.session.AsyncSession.close"
+async_safe = true
+one_at_a_time = "unbinds"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1282,6 +1383,223 @@ opaque_to_layer3 = true
 symbol = "sqlalchemy.ext.asyncio.async_sessionmaker.begin"
 async_safe = true
 return_type = "sqlalchemy.ext.asyncio.AsyncSession"
+opaque_to_layer3 = true
+
+# --- Task groups: anyio ---
+# `anyio.create_task_group()` makes the task group `start_soon(func, *args)` starts tasks in
+# (`EFF110` reads the tasks it starts together).
+
+[[entries]]
+symbol = "anyio.create_task_group"
+async_safe = true
+return_type = "anyio.abc.TaskGroup"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anyio.abc.TaskGroup.start_soon"
+async_safe = true
+opaque_to_layer3 = true
+
+# --- DB: asyncpg ---
+# A connection runs one query at a time: a second task's query while another runs raises
+# `InterfaceError: cannot perform operation: another operation is in progress` (`EFF110`).
+
+[[entries]]
+symbol = "asyncpg.connect"
+async_safe = true
+return_type = "asyncpg.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.execute"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.executemany"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.fetch"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.fetchrow"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.fetchval"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.fetchmany"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.prepare"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.copy_from_table"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.copy_from_query"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.copy_to_table"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.copy_records_to_table"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+# --- WebSockets: websockets ---
+# A connection receives in one task at a time: a second `recv()` while another waits raises
+# (`ConcurrencyError`, a `RuntimeError`; `EFF110`). `async for` over it receives too.
+# `websockets.connect` is the asyncio client's (the legacy client returns a
+# `WebSocketClientProtocol`).
+
+[[entries]]
+symbol = "websockets.connect"
+async_safe = true
+return_type = "websockets.asyncio.client.ClientConnection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.asyncio.client.connect"
+async_safe = true
+return_type = "websockets.asyncio.client.ClientConnection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.ClientConnection.recv"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.ClientConnection.recv_streaming"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.ClientConnection.__anext__"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.ServerConnection.recv"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.ServerConnection.recv_streaming"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.ServerConnection.__anext__"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.asyncio.client.ClientConnection.recv"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.asyncio.client.ClientConnection.recv_streaming"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.asyncio.client.ClientConnection.__anext__"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.asyncio.server.ServerConnection.recv"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.asyncio.server.ServerConnection.recv_streaming"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.asyncio.server.ServerConnection.__anext__"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.WebSocketClientProtocol.recv"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.WebSocketClientProtocol.__anext__"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.WebSocketServerProtocol.recv"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.WebSocketServerProtocol.__anext__"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.legacy.protocol.WebSocketCommonProtocol.recv"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "websockets.legacy.protocol.WebSocketCommonProtocol.__anext__"
+async_safe = true
+one_at_a_time = "always"
 opaque_to_layer3 = true
 
 # --- DB: SQLModel ---
@@ -1343,60 +1661,70 @@ opaque_to_layer3 = true
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.exec"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.execute"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.scalars"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.scalar"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.get"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.get_one"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.refresh"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.commit"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "unbinds"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.flush"
 effects = ["db_query"]
 async_safe = true
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.run_sync"
 async_safe = true
 sync_facade_arg = 0
+one_at_a_time = "when_unbound"
 opaque_to_layer3 = true
 
 # --- DB: psycopg (3) and psycopg_pool ---

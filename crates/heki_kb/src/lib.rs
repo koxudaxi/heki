@@ -47,6 +47,10 @@ pub enum KbError {
     InvalidEffect(String),
     #[error("invalid copy-sanitizer `{0}` in user ecosystem override (`shallow` or `deep`)")]
     InvalidCopyDepth(String),
+    #[error(
+        "invalid one-at-a-time `{0}` in user ecosystem override (`always`, `when_unbound`, or `unbinds`)"
+    )]
+    InvalidOneAtATime(String),
 }
 
 /// Layer 1 parameter effect (Soundness lane ONLY — no advisory I/O effects).
@@ -177,6 +181,33 @@ impl ExecEffectKind {
     }
 }
 
+/// How a method of a class lets tasks call it on one object at a time (`EFF110`): a second task
+/// calling one while another task is inside one of them raises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OneAtATime {
+    /// Always (`asyncio.StreamReader.readline`, asyncpg's `Connection.fetch`).
+    Always,
+    /// While the object holds no connection: before its first operation, and after one that
+    /// gives the connection back (SQLAlchemy's `AsyncSession.execute`).
+    WhenUnbound,
+    /// As [`Self::WhenUnbound`], and the object holds no connection after it
+    /// (`AsyncSession.commit`).
+    Unbinds,
+}
+
+impl OneAtATime {
+    /// The setting's name in `[[tool.heki.ecosystem]]`.
+    pub fn from_name(name: &str) -> Result<Self, KbError> {
+        match name {
+            "always" => Ok(Self::Always),
+            "when_unbound" => Ok(Self::WhenUnbound),
+            "unbinds" => Ok(Self::Unbinds),
+            _ => Err(KbError::InvalidOneAtATime(name.to_owned())),
+        }
+    }
+}
+
 /// How much of its operand a copy sanitizer copies (`MUT202`): the object only, so the values
 /// below it stay shared (`copy.copy`), or everything below it too (`copy.deepcopy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +239,9 @@ pub struct EcosystemEntry {
     /// `EFF109`: an instance of this class is a lock its holder cannot take again: acquiring it
     /// while the same thread or task holds it waits forever (`threading.Lock`, `asyncio.Lock`).
     pub non_reentrant_lock: bool,
+    /// `EFF110`: tasks may not be inside this method on one object at once (`async for` over an
+    /// instance runs its class's `__anext__`).
+    pub one_at_a_time: Option<OneAtATime>,
     /// What the call does instead when an argument is known (the first case that holds).
     pub cases: Vec<ArgCase>,
     /// Index of a callable argument the call runs on the calling thread, handing it a
@@ -354,6 +388,7 @@ pub struct EcosystemPatch {
     pub return_type: Option<String>,
     pub sync_lock_or_tx: Option<bool>,
     pub non_reentrant_lock: Option<bool>,
+    pub one_at_a_time: Option<OneAtATime>,
 }
 
 impl EcosystemPatch {
@@ -381,6 +416,9 @@ impl EcosystemPatch {
         }
         if let Some(v) = self.non_reentrant_lock {
             entry.non_reentrant_lock = v;
+        }
+        if let Some(v) = self.one_at_a_time {
+            entry.one_at_a_time = Some(v);
         }
     }
 }
@@ -420,6 +458,11 @@ impl TryFrom<&EcosystemOverride> for EcosystemPatch {
             return_type: value.return_type.clone(),
             sync_lock_or_tx: value.sync_lock_or_tx,
             non_reentrant_lock: value.non_reentrant_lock,
+            one_at_a_time: value
+                .one_at_a_time
+                .as_deref()
+                .map(OneAtATime::from_name)
+                .transpose()?,
         })
     }
 }
@@ -709,6 +752,108 @@ mod tests {
         }
     }
 
+    /// `e` with tasks kept to one at a time in it (`EFF110`).
+    fn one_at_a_time(kind: OneAtATime, e: EcosystemEntry) -> EcosystemEntry {
+        EcosystemEntry {
+            one_at_a_time: Some(kind),
+            ..e
+        }
+    }
+
+    /// `methods` of each of `classes`.
+    fn with_prefix_all(classes: &[&str], methods: &[&str]) -> Vec<String> {
+        classes
+            .iter()
+            .flat_map(|c| with_prefix(c, methods))
+            .collect()
+    }
+
+    /// The methods tasks may call on one object one at a time (`EFF110`), and the factories
+    /// typing those objects.
+    fn one_at_a_time_apis() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let always = || one_at_a_time(OneAtATime::Always, async_safe(entry(&[])));
+        let asyncio_websockets = [
+            "websockets.ClientConnection",
+            "websockets.ServerConnection",
+            "websockets.asyncio.client.ClientConnection",
+            "websockets.asyncio.server.ServerConnection",
+        ];
+        let legacy_websockets = [
+            "websockets.WebSocketClientProtocol",
+            "websockets.WebSocketServerProtocol",
+            "websockets.legacy.protocol.WebSocketCommonProtocol",
+        ];
+        vec![
+            (
+                [
+                    with_prefix(
+                        "asyncio.StreamReader",
+                        &["read", "readline", "readexactly", "readuntil", "__anext__"],
+                    ),
+                    with_prefix(
+                        "asyncpg.Connection",
+                        &[
+                            "execute",
+                            "executemany",
+                            "fetch",
+                            "fetchrow",
+                            "fetchval",
+                            "fetchmany",
+                            "prepare",
+                            "copy_from_table",
+                            "copy_from_query",
+                            "copy_to_table",
+                            "copy_records_to_table",
+                        ],
+                    ),
+                    with_prefix_all(
+                        &asyncio_websockets,
+                        &["recv", "recv_streaming", "__anext__"],
+                    ),
+                    with_prefix_all(&legacy_websockets, &["recv", "__anext__"]),
+                    with_prefix_all(
+                        &[
+                            "aiohttp.ClientWebSocketResponse",
+                            "aiohttp.web.WebSocketResponse",
+                        ],
+                        &[
+                            "receive",
+                            "receive_str",
+                            "receive_bytes",
+                            "receive_json",
+                            "__anext__",
+                        ],
+                    ),
+                ]
+                .concat(),
+                always(),
+            ),
+            (
+                s(&["asyncpg.connect"]),
+                async_safe(returning("asyncpg.Connection", entry(&[]))),
+            ),
+            (
+                s(&["anyio.create_task_group"]),
+                async_safe(returning("anyio.abc.TaskGroup", entry(&[]))),
+            ),
+            (
+                s(&["anyio.abc.TaskGroup.start_soon"]),
+                async_safe(entry(&[])),
+            ),
+            (
+                s(&["websockets.connect", "websockets.asyncio.client.connect"]),
+                async_safe(returning(
+                    "websockets.asyncio.client.ClientConnection",
+                    entry(&[]),
+                )),
+            ),
+            (
+                s(&["aiohttp.ClientSession.ws_connect"]),
+                async_safe(returning("aiohttp.ClientWebSocketResponse", entry(&[]))),
+            ),
+        ]
+    }
+
     fn async_safe(e: EcosystemEntry) -> EcosystemEntry {
         EcosystemEntry {
             async_safe: true,
@@ -798,6 +943,11 @@ mod tests {
     ];
     const SQLMODEL_SESSION_QUERIES: &[&str] = &[
         "exec", "execute", "scalars", "scalar", "get", "get_one", "refresh", "commit", "flush",
+    ];
+    /// The async session classes (`EFF110`: one operation at a time while unbound).
+    const ASYNC_SESSIONS: &[&str] = &[
+        "sqlalchemy.ext.asyncio.AsyncSession",
+        "sqlmodel.ext.asyncio.session.AsyncSession",
     ];
     const DJANGO_QUERYSET: &str = "django.db.models.query.QuerySet";
     /// Django `QuerySet` methods that run the query (their `a*` variants are coroutines).
@@ -944,6 +1094,7 @@ mod tests {
     /// entry without symbol)`.
     fn layer2_required() -> Vec<(Vec<String>, EcosystemEntry)> {
         [
+            one_at_a_time_apis(),
             standard_library(),
             http_clients(),
             boto3_clients(),
@@ -1254,10 +1405,7 @@ mod tests {
                 [
                     with_prefix("httpx.AsyncClient", HTTPX_CLIENT_VERBS),
                     with_prefix("aiohttp.ClientSession", VERBS8),
-                    s(&[
-                        "aiohttp.ClientSession.ws_connect",
-                        "redis.asyncio.Redis.scan",
-                    ]),
+                    s(&["redis.asyncio.Redis.scan"]),
                 ]
                 .concat(),
                 async_safe(entry(&[])),
@@ -1506,14 +1654,6 @@ mod tests {
                         SA_CONNECTION_QUERIES,
                     ),
                     s(&["sqlalchemy.ext.asyncio.AsyncConnection.stream"]),
-                    with_prefix(
-                        "sqlalchemy.ext.asyncio.AsyncSession",
-                        SA_ASYNC_SESSION_QUERIES,
-                    ),
-                    with_prefix(
-                        "sqlmodel.ext.asyncio.session.AsyncSession",
-                        SQLMODEL_SESSION_QUERIES,
-                    ),
                     s(&["psycopg.AsyncCursor.executemany"]),
                     async_queryset_runs,
                     s(&[
@@ -1545,15 +1685,43 @@ mod tests {
                 async_safe(entry(&[])),
             ),
             (
+                [
+                    with_prefix(
+                        "sqlalchemy.ext.asyncio.AsyncSession",
+                        SA_ASYNC_SESSION_QUERIES,
+                    ),
+                    with_prefix(
+                        "sqlmodel.ext.asyncio.session.AsyncSession",
+                        SQLMODEL_SESSION_QUERIES,
+                    ),
+                ]
+                .concat()
+                .into_iter()
+                .filter(|q| !q.ends_with(".commit"))
+                .collect(),
+                one_at_a_time(OneAtATime::WhenUnbound, async_safe(entry(&[DbQuery]))),
+            ),
+            (
+                with_prefix_all(ASYNC_SESSIONS, &["commit"]),
+                one_at_a_time(OneAtATime::Unbinds, async_safe(entry(&[DbQuery]))),
+            ),
+            (
+                with_prefix_all(ASYNC_SESSIONS, &["rollback", "close"]),
+                one_at_a_time(OneAtATime::Unbinds, async_safe(entry(&[]))),
+            ),
+            (
                 // `fn(sync_session, *args)` runs on the loop's thread through a greenlet.
-                s(&[
-                    "sqlalchemy.ext.asyncio.AsyncConnection.run_sync",
-                    "sqlalchemy.ext.asyncio.AsyncSession.run_sync",
-                    "sqlmodel.ext.asyncio.session.AsyncSession.run_sync",
-                ]),
+                s(&["sqlalchemy.ext.asyncio.AsyncConnection.run_sync"]),
                 EcosystemEntry {
                     sync_facade_arg: Some(0),
                     ..async_safe(entry(&[]))
+                },
+            ),
+            (
+                with_prefix_all(ASYNC_SESSIONS, &["run_sync"]),
+                EcosystemEntry {
+                    sync_facade_arg: Some(0),
+                    ..one_at_a_time(OneAtATime::WhenUnbound, async_safe(entry(&[])))
                 },
             ),
             (
@@ -2077,6 +2245,8 @@ mod tests {
             "psycopg_pool.Async",
             "pymongo.Async",
             "pymongo.asynchronous.",
+            "asyncpg.",
+            "websockets.",
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let mut seen = BTreeSet::new();
@@ -2493,6 +2663,7 @@ mod tests {
             return_type: Some("mypkg.workers.Handle".into()),
             sync_lock_or_tx: Some(false),
             non_reentrant_lock: Some(true),
+            one_at_a_time: Some("when_unbound".into()),
         };
         assert_eq!(
             EcosystemPatch::try_from(&ok).unwrap(),
@@ -2506,8 +2677,32 @@ mod tests {
                 return_type: Some("mypkg.workers.Handle".into()),
                 sync_lock_or_tx: Some(false),
                 non_reentrant_lock: Some(true),
+                one_at_a_time: Some(OneAtATime::WhenUnbound),
             }
         );
+        for (name, kind) in [
+            ("always", OneAtATime::Always),
+            ("unbinds", OneAtATime::Unbinds),
+        ] {
+            let cfg = EcosystemOverride {
+                symbol: "mypkg.Channel.recv".into(),
+                one_at_a_time: Some(name.into()),
+                ..EcosystemOverride::default()
+            };
+            assert_eq!(
+                EcosystemPatch::try_from(&cfg).unwrap().one_at_a_time,
+                Some(kind)
+            );
+        }
+        let cfg = EcosystemOverride {
+            symbol: "mypkg.Channel.recv".into(),
+            one_at_a_time: Some("sometimes".into()),
+            ..EcosystemOverride::default()
+        };
+        assert!(matches!(
+            EcosystemPatch::try_from(&cfg),
+            Err(KbError::InvalidOneAtATime(v)) if v == "sometimes"
+        ));
         // `true` is a shallow copy (the values below stay protected), `false` none.
         for (setting, depth) in [
             (CopySanitizerSetting::Flag(true), Some(CopyDepth::Shallow)),

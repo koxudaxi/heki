@@ -1,5 +1,5 @@
 //! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
-//! `EFF107`, `EFF109`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
+//! `EFF107`, `EFF109`, `EFF110`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
     CallTargetPattern, ContractTarget, SiteId, allows_fresh, called_targets, group_texts,
@@ -401,6 +401,7 @@ impl Repeats<'_> {
     }
 }
 
+mod fanout_exclusive;
 mod held_across_io;
 mod lock_retaken;
 mod unretained_task;
@@ -419,6 +420,12 @@ pub(crate) fn eff107(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 /// `EFF109` (opt-in): a non-reentrant lock taken again while it is held.
 pub(crate) fn eff109(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     lock_retaken::run(cx, unit, out);
+}
+
+/// `EFF110` (opt-in): an object allowing one operation at a time, used by tasks started
+/// together.
+pub(crate) fn eff110(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    fanout_exclusive::run(cx, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one

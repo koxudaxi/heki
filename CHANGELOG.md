@@ -38,6 +38,15 @@ release can change rules, configuration keys, diagnostics, and output formats.
   callees, or a module global it sets), a lock given back before it is taken again, or a lock
   another thread gives back as a signal.
   `[[tool.heki.ecosystem]]` takes `non-reentrant-lock = true` for other lock classes.
+- `EFF110` (`exclusive-object-fanout`, opt-in, experimental) reports an object that allows one
+  operation at a time (`asyncio.StreamReader`, an asyncpg `Connection`, a websockets connection,
+  an aiohttp WebSocket response) used by tasks a function starts together: two of them, or one
+  started for every item, through `asyncio.gather`, `asyncio.wait`, an `asyncio.TaskGroup`, or an
+  anyio task group, through helpers and keyword arguments. SQLAlchemy's `AsyncSession` is
+  reported only where the fan-out can be its first operation since it was made or committed.
+  It does not report different objects (a process's `stdout` and `stderr`), uses under a lock,
+  an object each task gets for itself, or a task started again only once it is done.
+  `[[tool.heki.ecosystem]]` takes `one-at-a-time` for other methods.
 
 ### Changed
 

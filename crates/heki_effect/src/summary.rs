@@ -7,8 +7,10 @@ use crate::cache_flow;
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
+use crate::held;
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::locks::{self, LockStep, ObjRef};
+use crate::one_at_a_time;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -274,6 +276,9 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
     for (lock, acq) in body.acquires_locks {
         locks::add_acquisition(&mut into.acquires_locks, lock, acq);
     }
+    for (obj, u) in body.exclusive_uses {
+        one_at_a_time::add_use(&mut into.exclusive_uses, obj, u);
+    }
     into.refresh_typed_field_writes();
 }
 
@@ -415,6 +420,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         .extend(other.unresolved_access_sites);
     for (lock, acq) in other.acquires_locks {
         locks::add_acquisition(&mut into.acquires_locks, lock, acq);
+    }
+    for (obj, u) in other.exclusive_uses {
+        one_at_a_time::add_use(&mut into.exclusive_uses, obj, u);
     }
     into.refresh_typed_field_writes();
 }
@@ -577,6 +585,8 @@ struct Extractor<'a> {
     scratch: RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The loops around each block.
     around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
+    /// The positions where the function certainly holds a lock ([`Self::lock_held_at`]).
+    lock_held: OnceCell<FxHashSet<Position>>,
     /// The blocks acquiring each lock, with the parameter holding it (`locks::owner_tests`).
     lock_blocks: std::collections::BTreeMap<ObjRef, (Option<u8>, BTreeSet<BlockId>)>,
     guards: LocalGuards,
@@ -715,6 +725,7 @@ impl<'a> Extractor<'a> {
             scratch: RefCell::default(),
             around: OnceCell::new(),
             lock_blocks: std::collections::BTreeMap::new(),
+            lock_held: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
             sites: Vec::new(),
@@ -2256,6 +2267,7 @@ impl<'a> Extractor<'a> {
     fn visit(&mut self, bb: BlockId, index: usize, kind: &'a InstKind, span: Span) {
         self.store_escapes(kind);
         self.lock_acquired(bb, kind, span);
+        self.exclusive_use(bb, index, kind, span);
         match kind {
             InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
                 if self.self_vars.contains(obj) {
@@ -2529,6 +2541,31 @@ impl<'a> Extractor<'a> {
         blocks.insert(bb);
         let acq = locks::own_acquisition(self.key, self.path, class, span, guards);
         locks::add_acquisition(&mut self.summary.acquires_locks, lock, acq);
+    }
+
+    /// An object `kind` uses one operation at a time (`EffectSummary::exclusive_uses`), unless
+    /// the function holds a lock there.
+    fn exclusive_use(&mut self, bb: BlockId, index: usize, kind: &InstKind, span: Span) {
+        if !matches!(
+            kind,
+            InstKind::MethodCall { .. } | InstKind::MakeIter { is_async: true, .. }
+        ) || !self.live.block(bb)
+        {
+            return;
+        }
+        let class_of = |v: VarId| one_at_a_time::instance_class(&self.types, v);
+        let Some((obj, method, one)) = one_at_a_time::use_step(self.cx, kind, &class_of) else {
+            return;
+        };
+        let def = |v: VarId| self.defs.get(&v).copied();
+        let Some(obj) = locks::obj_ref(self.cx, self.f, self.key, &self.types, &def, obj) else {
+            return;
+        };
+        if self.lock_held_at((bb, index)) {
+            return;
+        }
+        let u = one_at_a_time::own_use(self.key, self.path, method, one, span);
+        one_at_a_time::add_use(&mut self.summary.exclusive_uses, obj, u);
     }
 
     /// The tests of state on every path to every acquisition of each lock
@@ -3305,6 +3342,7 @@ impl<'a> Extractor<'a> {
                         per_item: None,
                         dispatch: None,
                         result_discarded: false,
+                        under_lock: false,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -3959,7 +3997,39 @@ impl<'a> Extractor<'a> {
             per_item: None,
             dispatch: None,
             result_discarded: false,
+            under_lock: self.lock_held_at(self.pos),
         }
+    }
+
+    /// Whether the function certainly holds a lock before the instruction at `at`: a `with` or
+    /// an `acquire()` of a catalog lock (`locks::lock_steps`), computed once per function.
+    fn lock_held_at(&self, at: Position) -> bool {
+        self.lock_held
+            .get_or_init(|| {
+                let def = |v: VarId| self.defs.get(&v).copied();
+                let steps =
+                    locks::lock_steps(self.cx, self.f, self.key, &self.types, &def, &self.live);
+                let mut out = FxHashSet::default();
+                if steps.taken.is_empty() {
+                    return out;
+                }
+                let entry =
+                    held::at_entry(self.f, steps.taken.len(), |b, i| steps.changes.get(&(b, i)));
+                for (b, state) in entry.into_iter().enumerate() {
+                    let Some(mut state) = state else {
+                        continue;
+                    };
+                    let bb = BlockId(b as u32);
+                    for i in 0..self.f.block(bb).insts.len() {
+                        if !state.is_empty() {
+                            out.insert((bb, i));
+                        }
+                        state.apply(steps.changes.get(&(bb, i)));
+                    }
+                }
+                out
+            })
+            .contains(&at)
     }
 
     /// The allocation a call makes and the escapes of what it is handed, before its callees
@@ -4491,6 +4561,7 @@ fn role_site(
         per_item: site.per_item.clone(),
         dispatch: site.dispatch.clone(),
         result_discarded: false,
+        under_lock: site.under_lock,
     }
 }
 
