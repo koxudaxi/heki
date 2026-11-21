@@ -2264,19 +2264,16 @@ impl<'a> Mut202Fn<'a> {
                         .chain(b.insts.iter().filter_map(|i| i.kind.dst()))
                 })
                 .collect();
-            let mut state: FxHashMap<VarId, MustResult<'a>> = FxHashMap::default();
+            // A variable no instruction or phi defines (a parameter) is no cached result.
+            let mut state: FxHashMap<VarId, MustResult<'a>> = defined
+                .into_iter()
+                .map(|v| (v, MustResult::Unset))
+                .collect();
             let get = |state: &FxHashMap<VarId, MustResult<'a>>, v: VarId| {
-                state.get(&v).copied().unwrap_or(if defined.contains(&v) {
-                    MustResult::Unset
-                } else {
-                    MustResult::Other
-                })
+                state.get(&v).copied().unwrap_or(MustResult::Other)
             };
             let rpo = f.rpo_blocks();
-            for pass in 0.. {
-                if pass == MUST_RESULT_PASSES {
-                    return FxHashMap::default();
-                }
+            let converged = (0..MUST_RESULT_PASSES).any(|_| {
                 let mut changed = false;
                 for &bb in &rpo {
                     let block = f.block(bb);
@@ -2301,11 +2298,9 @@ impl<'a> Mut202Fn<'a> {
                         changed |= state.insert(dst, value) != Some(value);
                     }
                 }
-                if !changed {
-                    break;
-                }
-            }
-            state
+                !changed
+            });
+            converged.then_some(state).unwrap_or_default()
         })
     }
 
@@ -2313,9 +2308,8 @@ impl<'a> Mut202Fn<'a> {
     /// keeps its results ([`heki_effect::CachedResult`]).
     fn cached_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
         let call = site_call(&|v| self.ix.def_inst(v), self.function_sites(), inst, false)?;
-        let [bc] = call.site?.project_callees() else {
-            return None;
-        };
+        let callees = call.site?.project_callees();
+        let bc = callees.first().filter(|_| callees.len() == 1)?;
         let summary = self.cx.index.summary(&bc.callee)?;
         summary.cached_result.is_some().then_some(&bc.callee)
     }

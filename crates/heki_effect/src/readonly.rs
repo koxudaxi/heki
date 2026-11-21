@@ -388,7 +388,7 @@ fn cache_decorator(
         let decorator = match target.as_deref() {
             Some("functools.lru_cache") => CacheDecorator::LruCache,
             Some("functools.cache") if args.is_none() => CacheDecorator::Cache,
-            Some("builtins.staticmethod" | "builtins.classmethod") if args.is_none() => continue,
+            // The builtins, which no import or definition of the module rebinds.
             None if matches!(head, "staticmethod" | "classmethod") && args.is_none() => continue,
             _ => return None,
         };

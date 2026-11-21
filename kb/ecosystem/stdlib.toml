@@ -7,7 +7,7 @@ opaque_packages = [
     "builtins", "asyncio", "socket", "ssl", "subprocess", "time", "io", "os",
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
-    "queue",
+    "queue", "html",
 ]
 
 # --- Sleep ---

@@ -227,3 +227,199 @@ fn mut114_states_its_claim_only_where_every_premise_holds() {
         "{formatter:#?}"
     );
 }
+
+const KINDS: &str = r#"from functools import lru_cache
+from typing import List
+
+FLAG = True
+
+
+@lru_cache
+def tags(a) -> set[str]:
+    return {a}
+
+
+@lru_cache
+def names(a) -> List[str]:
+    return [a]
+
+
+@lru_cache
+def copied(a):
+    x = [a]
+    return x
+
+
+@lru_cache
+def joined(a, c):
+    x = [a] if c else [c]
+    return x
+
+
+@lru_cache
+def built(a):
+    return sorted(a)
+
+
+@lru_cache
+def made_set(a):
+    return set(a)
+
+
+@lru_cache
+def made_dict(a):
+    return dict(a=a)
+
+
+@lru_cache
+def made_list(a):
+    return list(a)
+
+
+@lru_cache
+def config(a) -> dict[str, int]:
+    return {}
+
+
+@lru_cache
+def frozen(a):
+    return frozenset(a)
+
+
+@lru_cache
+def pair(a):
+    return (a,)
+
+
+@lru_cache
+def mixed_kinds(a):
+    if a:
+        return [a]
+    return {a}
+
+
+@lru_cache
+def falls_off(a):
+    if a:
+        return [a]
+
+
+@lru_cache
+def raises(a):
+    raise ValueError(a)
+
+
+@lru_cache
+def maybe_dict(a) -> dict | None:
+    return {}
+
+
+@lru_cache
+def counted(a) -> int:
+    return 1
+
+
+@lru_cache
+async def fetched(a) -> list:
+    return [a]
+
+
+@lru_cache
+def generated(a):
+    yield [a]
+
+
+if FLAG:
+
+    @lru_cache
+    def twice(a) -> list:
+        return [a]
+
+else:
+
+    @lru_cache
+    def twice(a) -> set:
+        return {a}
+
+
+class Registry:
+    @staticmethod
+    @lru_cache
+    def entries(kind) -> dict:
+        return {}
+
+
+def use(g, c):
+    t = tags(g)
+    t.add("x")
+    t2 = tags(g)
+    t2 |= {"y"}
+    n = names(g)
+    n.append("z")
+    n2 = names(g)
+    n2 += ["w"]
+    copied(g).append(1)
+    joined(g, c).append(1)
+    built(g).append(1)
+    made_set(g).add(1)
+    made_dict(g)["k"] = 1
+    made_list(g).append(1)
+    frozen(g).add(1)
+    pair(g)[0] = 1
+    mixed_kinds(g).append(1)
+    falls_off(g).append(1)
+    raises(g).append(1)
+    maybe_dict(g)["k"] = 1
+    counted(g).append(1)
+    d = config(g)
+    d |= {"a": 2}
+    twice(g).append(1)
+    Registry.entries(g)["k"] = 1
+    for x in generated(g):
+        x.append(1)
+"#;
+
+#[test]
+fn mut114_knows_each_container_kind_by_annotation_or_construction() {
+    let p = Project::new("mut114_kinds");
+    p.write("kinds.py", KINDS);
+    let diags = diagnostics(&p, &["--select", "MUT114"]);
+    assert_eq!(
+        claims(&diags),
+        vec![
+            // A set by annotation, its method and `|=`; a list by `typing.List`, its method and
+            // `+=`; lists, sets, and dicts built by assignment, phi, `sorted`, `set`, `dict`, and
+            // `list`.
+            (124, true),
+            (126, true),
+            (128, true),
+            (130, true),
+            (131, true),
+            (132, true),
+            (133, true),
+            (134, true),
+            (135, true),
+            (136, true),
+            // A `frozenset`, a tuple, a list on one return and a set on another, a fall through
+            // the end (`None`), and no return at all.
+            (137, false),
+            (138, false),
+            (139, false),
+            (140, false),
+            (141, false),
+            // `dict | None` establishes nothing, but every return builds a dict.
+            (142, true),
+            // An annotation that is no container, and a return built as none.
+            (143, false),
+            // `|=` on a dict by annotation.
+            (145, true),
+            // Two definitions that hand out different kinds.
+            (146, false),
+            // A static method under the cache.
+            (147, true),
+            // An item of a generator's value.
+            (149, false),
+        ],
+        "{diags:#?}"
+    );
+}
