@@ -1,5 +1,9 @@
 # heki
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/koxudaxi/heki/main/docs/assets/heki-banner.png" alt="heki: a snake in front of a brick wall" width="600">
+</p>
+
 🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
