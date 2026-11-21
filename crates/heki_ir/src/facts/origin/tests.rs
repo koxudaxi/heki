@@ -45,7 +45,8 @@ fn origins_at(src: &str, name: &str, marker: &str, version: PythonVersion) -> Ve
                         ItemSource::Receiver => "receiver".to_owned(),
                         ItemSource::Fixed => "fixed".to_owned(),
                         ItemSource::Call { block, index } => {
-                            let span = f.block(block).insts[index as usize].span;
+                            let owner = ir.function(o.function);
+                            let span = owner.block(block).insts[index as usize].span;
                             format!("call:{}", &src[span.start as usize..span.end as usize])
                         }
                     };
@@ -262,21 +263,25 @@ def f(rows, other):
 
 #[test]
 fn steps_compose_in_the_order_python_applies_them() {
+    let f = FunctionId(1);
     let items = Steps::default();
     assert_eq!(
-        items.apply(ItemSource::Param(2)).map(|o| o.source),
+        items.apply(f, ItemSource::Param(2)).map(|o| o.source),
         Some(ItemSource::Param(2))
     );
-    let part = items.with(Steps::PART);
+    let part = items.part().unwrap();
     assert_eq!(
-        part.apply(ItemSource::Param(2)).map(|o| o.source),
+        part.apply(f, ItemSource::Param(2)).map(|o| o.source),
         Some(ItemSource::ParamPart(2))
     );
     assert_eq!(
-        part.apply(ItemSource::Call {
-            block: BlockId(0),
-            index: 0
-        }),
+        part.apply(
+            f,
+            ItemSource::Call {
+                block: BlockId(0),
+                index: 0
+            }
+        ),
         None
     );
     // A count of an item is a count; an item of a count is unknown.
@@ -285,18 +290,23 @@ fn steps_compose_in_the_order_python_applies_them() {
     let counted = items.counted().unwrap();
     assert_eq!(
         counted
-            .with(Steps::PART)
-            .apply(ItemSource::Fixed)
+            .part()
+            .and_then(|s| s.apply(f, ItemSource::Fixed))
             .map(|o| o.carries),
         Some(Carries::Count)
     );
     assert_eq!(
         items
             .with(Steps::TEXT)
-            .apply(ItemSource::Fixed)
+            .apply(f, ItemSource::Fixed)
             .map(|o| o.text),
         Some(false)
     );
+    // Items of items are followed a few levels deep, and an element taken leaves one less.
+    let deep = (0..MAX_PARTS).try_fold(items, |s, _| s.part()).unwrap();
+    assert!(deep.part().is_none());
+    assert_eq!(part.unpart(), items);
+    assert_eq!(items.unpart(), items);
 }
 
 #[test]
@@ -377,4 +387,62 @@ async def f(rows, payload, ids, n, open_, p, fetch, flag):
 fn a_loop_of_the_module_body_reads_module_constants() {
     let src = "NAMES = (\"a\", \"b\")\nfor name in NAMES:  # L\n    pass\n";
     assert_eq!(origins(src, "<module>", "# L"), vec!["fixed"]);
+}
+
+#[test]
+fn an_item_of_a_display_is_the_element_itself() {
+    let src = r#"
+def f(rows, n, payload):
+    for batch in [rows]:
+        for row in batch:  # L
+            pass
+    for batch in [rows, payload["xs"]]:
+        for row in batch:  # L
+            pass
+    for key in {"a": 1}:
+        for c in key:  # L
+            pass
+    for pair in [(rows, n)]:
+        for x in pair[0]:  # L
+            pass
+    for word in ["ab", "cd"]:  # L
+        for c in word:  # L
+            pass
+"#;
+    assert_eq!(
+        origins(src, "f", "# L"),
+        // A subscript of an element may be any of its elements.
+        vec![
+            "param0",
+            "param0 part2",
+            "fixed",
+            "param0 param1",
+            "fixed",
+            "fixed"
+        ]
+    );
+}
+
+#[test]
+fn a_source_names_the_function_it_belongs_to() {
+    let src = r#"
+def f(db):
+    total = sum(len(x) for x in db.query())
+"#;
+    let ir = build(src, PythonVersion::PY315);
+    let g = ir
+        .functions
+        .iter()
+        .find(|f| f.name.contains("genexpr"))
+        .unwrap();
+    let creator = ir.functions.iter().find(|f| f.name == "f").unwrap();
+    let origins = ItemOrigins::new(&ir);
+    let budget = Budget::of_function("test", g);
+    let found = origins.of_loop(&budget, g.id, 0);
+    let Answer::Known(set) = found else {
+        panic!("{found:?}");
+    };
+    let origin = set.into_iter().next().unwrap();
+    assert_eq!(origin.function, creator.id);
+    assert!(matches!(origin.source, ItemSource::Call { .. }));
 }

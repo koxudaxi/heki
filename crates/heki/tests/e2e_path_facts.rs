@@ -276,6 +276,10 @@ class Store:
                 pass
         while rows:
             rows = rows[1:]
+        for batch in [rows]:
+            for row in batch:
+                pass
+        total = sum(len(x) for x in conn.query())
 "#,
     );
     let origins: Vec<Value> = function(&facts, "Store.load")["loops"]
@@ -306,6 +310,15 @@ class Store:
             json!("open"),
             one("call conn.fetchall()"),
             json!("open"),
+            // An item of a display is the element itself.
+            one("param 1"),
+            one("fixed"),
         ]
+    );
+    // A generator expression's loop reads the iterable its creator passes.
+    let genexpr = function(&facts, "Store.load.<locals>.<genexpr>");
+    assert_eq!(
+        genexpr["loops"][0]["origin"],
+        json!({"known": [{"source": "call conn.query() of Store.load", "carries": "items"}]})
     );
 }

@@ -49,7 +49,7 @@ pub enum ItemSource {
     /// A method's receiver (`self`, `cls`), or an attribute or item of it (`self.rows`).
     Receiver,
     /// The result of the call (or of the `__enter__` of the `with` statement) at instruction
-    /// `index` of `block`, which the reader resolves.
+    /// `index` of `block` of [`ItemOrigin::function`], which the reader resolves.
     Call { block: BlockId, index: u32 },
     /// A collection the code fixes: a literal, a display without unpacking that nothing grows,
     /// a module constant, `range` of constants.
@@ -70,6 +70,9 @@ pub enum Carries {
 /// One source of a collection's items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ItemOrigin {
+    /// The function whose parameter, receiver, or instruction the source is: the walk crosses
+    /// functions (a generator expression's loop reads the iterable its creator passes).
+    pub function: FunctionId,
     pub source: ItemSource,
     pub carries: Carries,
     /// The items are pieces of the source's text (`str.split`, `str.splitlines`, also after
@@ -97,44 +100,68 @@ const TEXT_METHODS: &[&str] = &[
 /// What the way from a loop to a value applies to the value's sources, in the order the walk
 /// meets the steps (from the collection towards its sources).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-struct Steps(u8);
+struct Steps {
+    /// How many times an item (attribute, subscript, loop item) of the value is taken.
+    parts: u8,
+    flags: u8,
+}
+
+/// The most items of items the walk follows; a deeper item has no source it names.
+const MAX_PARTS: u8 = 3;
 
 impl Steps {
-    /// An item (attribute, subscript, loop item) of the value is taken.
-    const PART: u8 = 1;
     /// Pieces of the value's text are cut.
-    const PIECES: u8 = 2;
+    const PIECES: u8 = 1;
     /// Only a count of the value's items carries.
-    const COUNT: u8 = 4;
+    const COUNT: u8 = 2;
     /// The value's text is changed in place.
-    const TEXT: u8 = 8;
+    const TEXT: u8 = 4;
 
-    fn has(self, step: u8) -> bool {
-        self.0 & step != 0
+    fn has(self, flag: u8) -> bool {
+        self.flags & flag != 0
     }
 
-    fn with(self, step: u8) -> Self {
-        Self(self.0 | step)
+    fn with(self, flag: u8) -> Self {
+        Self {
+            flags: self.flags | flag,
+            ..self
+        }
+    }
+
+    /// The steps with one more item taken.
+    fn part(self) -> Option<Self> {
+        (self.parts < MAX_PARTS).then_some(Self {
+            parts: self.parts + 1,
+            ..self
+        })
+    }
+
+    /// The steps that reach an element of a display or a value appended once, with the item
+    /// that is that element taken: what is left to take is items of it.
+    fn unpart(self) -> Self {
+        Self {
+            parts: self.parts.saturating_sub(1),
+            ..self
+        }
     }
 
     /// The steps with a count taken first: an item or a piece of what carries only a count has
     /// no source the walk can name.
     fn counted(self) -> Option<Self> {
-        (!self.has(Self::PART | Self::PIECES)).then(|| self.with(Self::COUNT))
+        (self.parts == 0 && !self.has(Self::PIECES)).then(|| self.with(Self::COUNT))
     }
 
-    /// What these steps make of a source: `None` when an item of a call's result is taken.
-    fn apply(self, source: ItemSource) -> Option<ItemOrigin> {
+    /// What these steps make of `source`, of `function`: `None` when an item of a call's
+    /// result is taken.
+    fn apply(self, function: FunctionId, source: ItemSource) -> Option<ItemOrigin> {
+        let taken = self.parts > 0 || self.has(Self::PIECES);
         let source = match source {
-            ItemSource::Param(p) | ItemSource::ParamPart(p)
-                if self.has(Self::PART | Self::PIECES) =>
-            {
-                ItemSource::ParamPart(p)
-            }
-            ItemSource::Call { .. } if self.has(Self::PART) => return None,
+            ItemSource::Param(p) | ItemSource::ParamPart(p) if taken => ItemSource::ParamPart(p),
+            ItemSource::Call { .. } if self.parts > 0 => return None,
             other => other,
         };
         Some(ItemOrigin {
+            function,
             source,
             carries: if self.has(Self::COUNT) {
                 Carries::Count
@@ -289,7 +316,7 @@ impl<'m> ItemOrigins<'m> {
                 }
                 for e in entries {
                     match e {
-                        DictEntry::KeyValue { .. } => walk.add_source(Some(ItemSource::Fixed)),
+                        DictEntry::KeyValue { key, .. } => walk.element(*key),
                         DictEntry::Unpack { dict } => walk.ask(*dict, steps),
                     }
                 }
@@ -303,11 +330,13 @@ impl<'m> ItemOrigins<'m> {
             }
             | InstKind::LoadName { name, .. } => {
                 let m = &self.ir.constants;
+                // The items of a string, or of a tuple of strings, are fixed too; those of another
+                // display are values the walk does not follow.
                 let constant = !m.dynamic
                     && (m.ints.contains_key(name)
                         || m.strs.contains_key(name)
                         || m.str_tuples.contains_key(name)
-                        || m.displays.contains_key(name)
+                        || (m.displays.contains_key(name) && steps.parts == 0)
                         || m.bools.contains_key(name));
                 if constant {
                     walk.add_source(Some(ItemSource::Fixed));
@@ -321,7 +350,10 @@ impl<'m> ItemOrigins<'m> {
                 is_slice: false,
                 ..
             }
-            | InstKind::IterNext { iter: obj, .. } => walk.ask(*obj, steps.with(Steps::PART)),
+            | InstKind::IterNext { iter: obj, .. } => match steps.part() {
+                Some(steps) => walk.ask(*obj, steps),
+                None => walk.fail(),
+            },
             InstKind::SubscriptLoad {
                 obj,
                 is_slice: true,
@@ -346,8 +378,9 @@ impl<'m> ItemOrigins<'m> {
         }
     }
 
-    /// A list, tuple, set, or dict display: its starred operands' sources and a fixed item for
-    /// each other operand, when nothing grows it; else what the function appends to it.
+    /// A list, tuple, set, or dict display: its starred operands' sources and each other operand
+    /// as an element ([`Decision::element`]), when nothing grows it; else what the function
+    /// appends to it.
     fn of_display(
         &self,
         budget: &Budget,
@@ -361,7 +394,7 @@ impl<'m> ItemOrigins<'m> {
             if ix.shape().is_starred(dst, k) {
                 walk.ask(*e, walk.steps);
             } else {
-                walk.add_source(Some(ItemSource::Fixed));
+                walk.element(*e);
             }
         }
         if is_immutable_kind(kind) || !self.may_grow(ix, dst) {
@@ -565,11 +598,21 @@ impl Decision {
     /// Add `source` read through the steps; `None`, or a source the steps cannot read (an item
     /// of a call's result), has none the walk can name.
     fn add_source(&mut self, source: Option<ItemSource>) {
-        let Some(origin) = source.and_then(|s| self.steps.apply(s)) else {
+        let Some(origin) = source.and_then(|s| self.steps.apply(self.f, s)) else {
             return self.fail();
         };
         if let Some(origins) = &mut self.fact.0 {
             origins.insert(origin);
+        }
+    }
+
+    /// One element `e` of a collection: a fixed item of it, and when an item of the collection
+    /// is taken, `e` itself, whose items are what is left to take.
+    fn element(&mut self, e: VarId) {
+        if self.steps.parts == 0 {
+            self.add_source(Some(ItemSource::Fixed));
+        } else {
+            self.ask(e, self.steps.unpart());
         }
     }
 
@@ -597,12 +640,15 @@ impl Decision {
 
     /// What producing `value` in block `b` of `ix`'s function (an append, a `yield`) adds: the
     /// item of the innermost loop around `b` (or a component of it) adds that loop's items; any
-    /// other value one item per iteration of it; a value outside every loop one fixed item. A
-    /// loop over one of `aliases` (the collection being filled) feeds itself.
+    /// other value one item per iteration of it; a value outside every loop one element. A loop
+    /// over one of `aliases` (the collection being filled) feeds itself.
     fn produces(&mut self, ix: &FnIndex<'_>, b: BlockId, value: VarId, aliases: &[VarId]) {
         let shape = ix.shape();
         let Some(lp) = shape.innermost(b) else {
-            return self.add_source(Some(ItemSource::Fixed));
+            let f = std::mem::replace(&mut self.f, ix.f.id);
+            self.element(value);
+            self.f = f;
+            return;
         };
         let (Some(iterable), Some(item)) = (
             ix.loop_iterable(lp),
