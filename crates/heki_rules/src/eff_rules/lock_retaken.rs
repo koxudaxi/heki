@@ -26,6 +26,7 @@ use heki_effect::{CallSite, EffectSummary, FuncKey, TypeCtx, anchors_call_site};
 
 /// Call sites of a module by `(caller qualname, span)` (`CheckContext::sites_by_span`).
 type SitesBySpan<'s> = FxHashMap<(String, Span), Vec<&'s CallSite>>;
+use heki_ir::walk::Answer;
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
@@ -268,7 +269,11 @@ impl HolderState<'_> {
     /// sets, or, for a lock a parameter holds, an attribute of that object it (or what it
     /// calls) changes; or behind more tests than heki keeps.
     fn guards(&self, cx: &CheckContext<'_>, found: &SiteLock) -> bool {
-        if !found.tests_known || found.tested_globals.iter().any(|g| self.sets.contains(g)) {
+        // Open: every test may be one of state the holder changes, so no finding.
+        let Answer::Known(tests) = &found.tests else {
+            return true;
+        };
+        if tests.globals.iter().any(|g| self.sets.contains(g)) {
             return true;
         }
         let (
@@ -281,11 +286,8 @@ impl HolderState<'_> {
         else {
             return false;
         };
-        let mut tested: BTreeSet<&str> = found.tested_attrs.iter().map(String::as_str).collect();
-        let callees = found
-            .tested_calls
-            .iter()
-            .filter_map(|k| cx.index.summary(k));
+        let mut tested: BTreeSet<&str> = tests.attrs.iter().map(String::as_str).collect();
+        let callees = tests.calls.iter().filter_map(|k| cx.index.summary(k));
         tested.extend(callees.flat_map(|c| c.reads_self_attrs.iter().map(|r| r.attr.as_str())));
         let writes_param = s
             .mutated_param_paths

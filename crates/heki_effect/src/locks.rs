@@ -28,6 +28,7 @@ use crate::{
 };
 use crate::{callgraph, owned_chain};
 use heki_ast::Span;
+use heki_ir::walk::Answer;
 use heki_ir::{
     BlockId, ConstLiteral, DominatorTree, Inst, InstKind, IrFunction, Terminator, VarId,
 };
@@ -104,23 +105,27 @@ pub struct LockAcquire {
     /// Tests of the function's inputs that every acquisition needs (`guards`; `once_per` is
     /// never set): a call whose argument decides one against it takes nothing.
     pub guards: EffectGuards,
-    /// For a lock held by a parameter (`self._lock`): the attributes of that object tested on
-    /// every path to every acquisition (`if self._closed: return`). Code changing one of them
-    /// before it gets there may keep it from taking the lock.
+    /// The tests of state on every path to every acquisition, in the acquiring function and in
+    /// the functions on the way to it; open past the most tests kept, where every test may be
+    /// one.
+    pub tests: Answer<OwnerTests>,
+}
+
+/// The tests of state on the way to the acquisitions of one lock. Code changing one of them
+/// before it gets there may keep it from taking the lock.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerTests {
+    /// For a lock held by a parameter (`self._lock`): the attributes of that object tested
+    /// (`if self._closed: return`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub tested_attrs: BTreeSet<String>,
+    pub attrs: BTreeSet<String>,
     /// For a lock held by a parameter: the project methods called on that object whose result
-    /// is tested on every path to every acquisition (`if self._owns_lock(): return`); what they
-    /// read counts as tested.
+    /// is tested (`if self._owns_lock(): return`); what they read counts as tested.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub tested_calls: BTreeSet<FuncKey>,
-    /// The module globals (fully qualified) tested on every path to every acquisition
-    /// (`if _LIB is not None: return _LIB`).
+    pub calls: BTreeSet<FuncKey>,
+    /// The module globals (fully qualified) tested (`if _LIB is not None: return _LIB`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub tested_globals: BTreeSet<String>,
-    /// `tested_attrs` and `tested_calls` are every test. False past the most tests kept: every
-    /// test may be one, and the acquisition counts as guarded.
-    pub tests_known: bool,
+    pub globals: BTreeSet<String>,
 }
 
 impl LockAcquire {
@@ -203,18 +208,17 @@ pub(crate) fn add_acquisition(
         Entry::Occupied(mut e) => {
             let cur = e.get_mut();
             cur.guards.inputs.retain(|g| acq.guards.inputs.contains(g));
-            // Tests that are not known stand for every test.
-            if !cur.tests_known {
-                cur.tested_attrs.clone_from(&acq.tested_attrs);
-                cur.tested_calls.clone_from(&acq.tested_calls);
-                cur.tested_globals.clone_from(&acq.tested_globals);
-                cur.tests_known = acq.tests_known;
-            } else if acq.tests_known {
-                cur.tested_attrs.retain(|a| acq.tested_attrs.contains(a));
-                cur.tested_calls.retain(|k| acq.tested_calls.contains(k));
-                cur.tested_globals
-                    .retain(|g| acq.tested_globals.contains(g));
-            }
+            // The tests on the way to every acquisition: an open answer stands for every test,
+            // so the other acquisition's tests are the common ones.
+            cur.tests = match (std::mem::replace(&mut cur.tests, Answer::Open), acq.tests) {
+                (Answer::Known(mut a), Answer::Known(b)) => {
+                    a.attrs.retain(|x| b.attrs.contains(x));
+                    a.calls.retain(|k| b.calls.contains(k));
+                    a.globals.retain(|g| b.globals.contains(g));
+                    Answer::Known(a)
+                }
+                (Answer::Open, other) | (other, Answer::Open) => other,
+            };
             if acq.chain.len() < cur.chain.len() {
                 cur.chain = acq.chain;
                 cur.class = acq.class;
@@ -251,10 +255,7 @@ pub(crate) fn through_call(
             class: acq.class.clone(),
             chain: callgraph::extend_chain(lead, &acq.chain, rewrite),
             guards: through.guards,
-            tested_attrs: acq.tested_attrs.clone(),
-            tested_calls: acq.tested_calls.clone(),
-            tested_globals: acq.tested_globals.clone(),
-            tests_known: acq.tests_known,
+            tests: acq.tests.clone(),
         },
     ))
 }
@@ -276,11 +277,8 @@ pub struct SiteLock {
     /// Starts with the hop of this call site; ends at the acquisition.
     pub chain: Vec<CallHop>,
     pub class: String,
-    pub tested_attrs: BTreeSet<String>,
-    pub tested_calls: BTreeSet<FuncKey>,
-    pub tested_globals: BTreeSet<String>,
-    /// [`LockAcquire::tests_known`].
-    pub tests_known: bool,
+    /// [`LockAcquire::tests`].
+    pub tests: Answer<OwnerTests>,
 }
 
 impl crate::ProjectIndex {
@@ -313,10 +311,7 @@ impl crate::ProjectIndex {
                     lock,
                     chain: owned_chain(&acq.chain),
                     class: acq.class,
-                    tested_attrs: acq.tested_attrs,
-                    tested_calls: acq.tested_calls,
-                    tested_globals: acq.tested_globals,
-                    tests_known: acq.tests_known,
+                    tests: acq.tests,
                 });
             }
         }
@@ -668,13 +663,13 @@ fn through_copies<'i>(def: &dyn Fn(VarId) -> Option<&'i Inst>, mut var: VarId) -
 }
 
 /// The most tests of state a block or an acquisition keeps; past it, every test may be one, and
-/// an acquisition behind them counts as guarded ([`LockAcquire::tests_known`] is false).
+/// an acquisition behind them counts as guarded ([`LockAcquire::tests`] is open).
 const MAX_OWNER_TESTS: usize = 16;
 
-/// The tests of state on every path to a block, a call site, or the acquisitions of one lock:
-/// the attributes of the parameters that the branch conditions read, the project methods
-/// called on a parameter whose result they test, and the module globals they read. Code
-/// changing one of them before it gets there may keep it from going on.
+/// The tests of state on every path to a block or a call site: the attributes of the
+/// parameters that the branch conditions read, the project methods called on a parameter whose
+/// result they test, and the module globals they read. Code changing one of them before it gets
+/// there may keep it from going on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateTests {
     /// `(parameter, attribute)`.
@@ -685,37 +680,24 @@ pub struct StateTests {
     pub calls: BTreeSet<(u8, FuncKey)>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub globals: BTreeSet<String>,
-    /// Past [`MAX_OWNER_TESTS`]: every test may be one (the sets are empty).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub many: bool,
 }
 
 impl StateTests {
-    fn is_empty(&self) -> bool {
-        !self.many && self.attrs.is_empty() && self.calls.is_empty() && self.globals.is_empty()
-    }
-
-    /// Past [`MAX_OWNER_TESTS`], keep none and say so.
-    fn cap(&mut self) {
-        if self.attrs.len() + self.calls.len() + self.globals.len() > MAX_OWNER_TESTS {
-            *self = Self {
-                many: true,
-                ..Self::default()
-            };
-        }
+    fn len(&self) -> usize {
+        self.attrs.len() + self.calls.len() + self.globals.len()
     }
 }
 
 /// The tests of state on every path to each block of a function a run reaches
-/// ([`StateTests`]): those of its immediate dominator, and what the condition of the branch
-/// ending that dominator reads. Blocks below no branch share their dominator's tests, so the
-/// walk is one pass over the dominator tree.
+/// ([`StateTests`], open past [`MAX_OWNER_TESTS`]): those of its immediate dominator, and what
+/// the condition of the branch ending that dominator reads. Blocks below no branch share their
+/// dominator's tests, so the walk is one pass over the dominator tree.
 pub struct BlockTests {
     dom: DominatorTree,
     /// Per block, in `sets`: the tests on every path to it, and those on every path past its
     /// terminator (its branch read too).
     at: Vec<Option<(usize, usize)>>,
-    sets: Vec<StateTests>,
+    sets: Vec<Answer<StateTests>>,
 }
 
 impl BlockTests {
@@ -734,7 +716,7 @@ impl BlockTests {
                 .position(|p| p.var == v)
                 .and_then(|i| u8::try_from(i).ok())
         };
-        let mut sets = vec![StateTests::default()];
+        let mut sets = vec![Answer::Known(StateTests::default())];
         let mut at: Vec<Option<(usize, usize)>> = vec![None; f.blocks.len()];
         // A dominator comes before the blocks it dominates in reverse postorder.
         for b in f.rpo_blocks() {
@@ -746,11 +728,11 @@ impl BlockTests {
             };
             let past = match f.block(b).terminator {
                 Terminator::Branch { cond, .. } => {
-                    let mut tests = sets[to].clone();
-                    if !tests.many {
+                    let tests = sets[to].clone().and_then(|mut tests| {
                         read_condition(def, cond, &param_of, resolve, global, &mut tests);
-                        tests.cap();
-                    }
+                        let count = tests.len();
+                        kept(tests, count)
+                    });
                     sets.push(tests);
                     sets.len() - 1
                 }
@@ -763,7 +745,7 @@ impl BlockTests {
 
     /// The tests on every path to every block of `blocks` (blocks a run reaches): those of
     /// their nearest common dominator, and its branch when it is not one of them.
-    pub fn common(&self, blocks: &BTreeSet<BlockId>) -> Option<&StateTests> {
+    pub fn common(&self, blocks: &BTreeSet<BlockId>) -> Option<&Answer<StateTests>> {
         let by_number = |b: &&BlockId| self.dom.number(**b);
         let lo = blocks.iter().min_by_key(by_number)?;
         let hi = blocks.iter().max_by_key(by_number)?;
@@ -774,9 +756,10 @@ impl BlockTests {
 
     /// The tests on every path to a call site in block `b`, before it: `None` when there is
     /// none, or when no run reaches the block.
-    pub fn of_site(&self, b: BlockId) -> Option<Box<StateTests>> {
+    pub fn of_site(&self, b: BlockId) -> Option<Box<Answer<StateTests>>> {
         let tests = &self.sets[self.at[b.0 as usize]?.0];
-        (!tests.is_empty()).then(|| Box::new(tests.clone()))
+        let none = matches!(tests, Answer::Known(t) if t.len() == 0);
+        (!none).then(|| Box::new(tests.clone()))
     }
 }
 
@@ -824,20 +807,9 @@ fn read_condition<'i>(
     }
 }
 
-/// Set the tests of state of an acquisition of `lock` from `tests`: the attributes and methods
-/// of the lock's owner (the parameter holding it) and the globals, or every test past
-/// [`MAX_OWNER_TESTS`] ([`LockAcquire::tests_known`]).
-pub(crate) fn set_owner_tests(acq: &mut LockAcquire, lock: &ObjRef, tests: &StateTests) {
-    acq.tested_attrs.clear();
-    acq.tested_calls.clear();
-    acq.tested_globals.clear();
-    acq.tests_known = true;
-    add_owner_tests(acq, lock, tests);
-}
-
-/// Add the tests of state `tests` on the way to an acquisition of `lock` (a call site's,
-/// [`crate::CallSite::state_tests`]), as [`set_owner_tests`] does.
-pub(crate) fn add_owner_tests(acq: &mut LockAcquire, lock: &ObjRef, tests: &StateTests) {
+/// The tests of state among `tests` on the way to an acquisition of `lock`: the attributes and
+/// methods of the lock's owner (the parameter holding it) and the globals.
+pub(crate) fn owner_tests(lock: &ObjRef, tests: &Answer<StateTests>) -> Answer<OwnerTests> {
     let owner = match lock {
         ObjRef::Param {
             param,
@@ -846,30 +818,45 @@ pub(crate) fn add_owner_tests(acq: &mut LockAcquire, lock: &ObjRef, tests: &Stat
         _ => None,
     };
     let of_owner = |p: &u8| Some(*p) == owner;
-    acq.tested_attrs.extend(
-        (tests.attrs.iter())
+    tests.as_ref().map(|t| OwnerTests {
+        attrs: (t.attrs.iter())
             .filter(|(p, _)| of_owner(p))
-            .map(|(_, a)| a.clone()),
-    );
-    acq.tested_calls.extend(
-        (tests.calls.iter())
+            .map(|(_, a)| a.clone())
+            .collect(),
+        calls: (t.calls.iter())
             .filter(|(p, _)| of_owner(p))
-            .map(|(_, k)| k.clone()),
-    );
-    acq.tested_globals.extend(tests.globals.iter().cloned());
-    let count = acq.tested_attrs.len() + acq.tested_calls.len() + acq.tested_globals.len();
-    // Tests that are not known stand for every test already.
-    if !acq.tests_known || tests.many || count > MAX_OWNER_TESTS {
-        acq.tested_attrs.clear();
-        acq.tested_calls.clear();
-        acq.tested_globals.clear();
-        acq.tests_known = false;
+            .map(|(_, k)| k.clone())
+            .collect(),
+        globals: t.globals.clone(),
+    })
+}
+
+/// Add the tests of state `tests` of a call site on the way to an acquisition of `lock`
+/// ([`crate::CallSite::state_tests`]): open when either is, or past [`MAX_OWNER_TESTS`].
+pub(crate) fn add_owner_tests(acq: &mut LockAcquire, lock: &ObjRef, tests: &Answer<StateTests>) {
+    let more = owner_tests(lock, tests);
+    let tests = std::mem::replace(&mut acq.tests, Answer::Open);
+    acq.tests = tests.zip(more).and_then(|(mut t, more)| {
+        t.attrs.extend(more.attrs);
+        t.calls.extend(more.calls);
+        t.globals.extend(more.globals);
+        let count = t.attrs.len() + t.calls.len() + t.globals.len();
+        kept(t, count)
+    });
+}
+
+/// `count` tests of state, open past [`MAX_OWNER_TESTS`].
+fn kept<T>(tests: T, count: usize) -> Answer<T> {
+    if count > MAX_OWNER_TESTS {
+        Answer::Open
+    } else {
+        Answer::Known(tests)
     }
 }
 
 /// The acquisition [`LockAcquire`] for a lock of class `class` taken by the function `caller`
 /// at `span`, with its guards (the tests of state on the way are set once every acquisition is
-/// known, [`set_owner_tests`]).
+/// known, [`owner_tests`]).
 pub(crate) fn own_acquisition(
     caller: &FuncKey,
     path: &Path,
@@ -890,9 +877,6 @@ pub(crate) fn own_acquisition(
             once_per: None,
             ..guards
         },
-        tested_attrs: BTreeSet::new(),
-        tested_calls: BTreeSet::new(),
-        tested_globals: BTreeSet::new(),
-        tests_known: true,
+        tests: Answer::Known(OwnerTests::default()),
     }
 }

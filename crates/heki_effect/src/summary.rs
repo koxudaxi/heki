@@ -2890,20 +2890,21 @@ impl<'a> Extractor<'a> {
     }
 
     /// The tests of state on every path to every acquisition of each lock
-    /// (`LockAcquire::tested_attrs`, `tested_calls`, `tested_globals`).
+    /// (`LockAcquire::tests`).
     fn lock_owner_tests(&mut self) {
         if self.lock_blocks.is_empty() {
             return;
         }
         let blocks = std::mem::take(&mut self.lock_blocks);
         let tests = self.state_tests();
-        let found: Vec<(ObjRef, locks::StateTests)> = blocks
+        let found: Vec<_> = blocks
             .into_iter()
             .map(|(lock, blocks)| {
                 let t = tests
                     .common(&blocks)
                     .expect("a lock with acquiring blocks a run reaches");
-                (lock, t.clone())
+                let owner = locks::owner_tests(&lock, t);
+                (lock, owner)
             })
             .collect();
         let acquires = &mut self.summary.lock_facts_mut().acquires;
@@ -2911,7 +2912,7 @@ impl<'a> Extractor<'a> {
             let acq = acquires
                 .get_mut(&lock)
                 .expect("a lock with acquiring blocks was taken");
-            locks::set_owner_tests(acq, &lock, &tests);
+            acq.tests = tests;
         }
     }
 

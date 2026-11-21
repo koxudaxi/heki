@@ -1000,14 +1000,15 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - The tests of state on every path to a block (`locks::BlockTests`, one pass over the
      dominator tree of the edges a run can take): the attributes of the parameters, the project
      methods called on a parameter, and the module globals that the conditions of the branches
-     ending its dominators read; at most 16 tests, past that every test may be one. Each call
-     site keeps those of its block (`CallSite::state_tests`).
+     ending its dominators read; at most 16 tests, past that the answer is open
+     (`heki_ir::walk::Answer`) and every test may be one. Each call site keeps those of its block
+     (`CallSite::state_tests`).
    - `LockFacts::acquires` holds the function's own acquisitions (a hop to the lock's class at
      the acquisition), each with the input guards every acquisition needs and the tests of state
      on every path to every acquisition of the lock (those of the acquisitions' common
      dominator): the module globals, and, for a lock a parameter holds, the attributes of that
-     object and the project methods called on it (past 16 tests, the acquisition counts as
-     guarded). Propagation adds the acquisitions of each callee whose body runs at the call on
+     object and the project methods called on it (`LockAcquire::tests`; open past 16 tests,
+     where the acquisition counts as guarded). Propagation adds the acquisitions of each callee whose body runs at the call on
      the caller's thread or task (not on a worker), with the lock mapped through the argument
      bound to the parameter, the call in front of the chain, the guards mapped by
      `guards::through_call` (a constant argument deciding one against it drops it), and the
