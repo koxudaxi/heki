@@ -1018,7 +1018,7 @@ fn changes_made_in(
 ) -> Vec<MadeChange> {
     let index = b.inputs.index;
     let every = cell.is_none() && chain.is_empty();
-    // A value reached from more globals than the summary keeps changes one it does not name.
+    // A value whose roots the walk left open changes a global it does not name.
     let named =
         |state: &SharedState| !matches!(state, SharedState::Global(name) if name.is_empty());
     let wanted = |state: &SharedState| named(state) && (every || state.is_change_of(cell));

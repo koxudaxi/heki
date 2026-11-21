@@ -26,6 +26,7 @@ use crate::{
     UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator,
@@ -643,7 +644,11 @@ struct Extractor<'a> {
     reach: FxHashMap<VarId, Reach>,
     /// The module global or closure cell each variable's object may be reached from
     /// (`Self::global_root`; built on the first change the function makes).
-    global_roots: OnceCell<FxHashMap<VarId, RootSet<'a>>>,
+    /// The module globals and closure cells each value may be reached from
+    /// ([`Self::global_roots`]), on the function's tables and budget.
+    roots: Closure<VarId, KeySet<Root<'a>>>,
+    roots_budget: Budget,
+    shape: FnShape<'a>,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -974,7 +979,9 @@ impl<'a> Extractor<'a> {
                 .map(|_| Events::default()),
             exempt: None,
             reach: FxHashMap::default(),
-            global_roots: OnceCell::new(),
+            roots: Closure::new(),
+            roots_budget: Budget::of_function("summary::global_roots", f),
+            shape: FnShape::new(f),
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
@@ -1387,54 +1394,49 @@ impl<'a> Extractor<'a> {
         self.reach.get(&var).copied().unwrap_or_default()
     }
 
-    /// The module globals and closure cells the object `var` holds may be reached from: from the
-    /// loads of globals and of the enclosing functions' variables (in the module body, from the
-    /// values it binds to the module's names) along the steps of [`Self::reach`], joined where
-    /// values merge; a variable is revisited only when its roots grow.
-    fn global_roots(&self, var: VarId) -> Option<&RootSet<'a>> {
+    /// The module globals and closure cells the object `var` holds may be reached from: the
+    /// loads of globals and of the enclosing functions' variables (in the module body, the values
+    /// it binds to the module's names) it is reached from along the steps of [`Self::reach`];
+    /// open past the function's budget.
+    fn global_roots(&self, var: VarId) -> Answer<std::rc::Rc<KeySet<Root<'a>>>> {
         let f = self.f;
-        let roots = self.global_roots.get_or_init(|| {
-            let mut next: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
-            let mut roots: FxHashMap<VarId, RootSet<'a>> = FxHashMap::default();
-            let mut queue = std::collections::VecDeque::new();
-            for bb in &f.blocks {
-                for phi in &bb.phis {
-                    for (_, v) in &phi.incoming {
-                        next.entry(*v).or_default().push(phi.dst);
-                    }
+        let shape = &self.shape;
+        let own = |v: VarId| {
+            let mut roots = KeySet::new();
+            match shape.inst(v).map(|inst| &inst.kind) {
+                Some(InstKind::LoadGlobal { name, .. }) => {
+                    roots.insert(Root::Global(name));
                 }
-                for inst in &bb.insts {
-                    let root = match &inst.kind {
-                        InstKind::LoadGlobal { dst, name, .. } => Some((*dst, Root::Global(name))),
-                        InstKind::LoadDeref { dst, name } => Some((*dst, Root::Cell(name))),
-                        InstKind::StoreGlobal { name, value } if f.is_module_body => {
-                            Some((*value, Root::Global(name)))
-                        }
-                        kind => {
-                            if let Some((dst, src)) = reached_through(kind) {
-                                next.entry(src).or_default().push(dst);
-                            }
-                            None
-                        }
-                    };
-                    if let Some((dst, root)) = root
-                        && roots.entry(dst).or_default().add(root)
-                    {
-                        queue.push_back(dst);
-                    }
+                Some(InstKind::LoadDeref { name, .. }) => {
+                    roots.insert(Root::Cell(name));
                 }
+                _ => {}
             }
-            while let Some(v) = queue.pop_front() {
-                let from = roots[&v].clone();
-                for &d in next.get(&v).into_iter().flatten() {
-                    if roots.entry(d).or_default().join(&from) {
-                        queue.push_back(d);
+            if f.is_module_body {
+                for u in shape.readers(v) {
+                    if let Use::Inst(b, i) = *u
+                        && let InstKind::StoreGlobal { name, value } =
+                            &f.block(b).insts[i as usize].kind
+                        && *value == v
+                    {
+                        roots.insert(Root::Global(name));
                     }
                 }
             }
             roots
-        });
-        roots.get(&var)
+        };
+        let sources = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
+            Def::Inst(b, i) => out.extend(
+                reached_through(&f.block(b).insts[i as usize].kind)
+                    .filter(|(dst, _)| *dst == v)
+                    .map(|(_, src)| src),
+            ),
+            Def::Phi(b, i) => {
+                out.extend(f.block(b).phis[i as usize].incoming.iter().map(|(_, v)| *v))
+            }
+            Def::Param | Def::None => {}
+        };
+        self.roots.ask(&self.roots_budget, var, own, sources)
     }
 
     /// A change, at `span`, of state that outlives the call.
@@ -1484,24 +1486,19 @@ impl<'a> Extractor<'a> {
     }
 
     /// The shared state the object `var` holds may be reached from: each module global and
-    /// closure cell, and past [`MAX_ROOTS`] of them a module global whose name is not kept (an
-    /// empty name).
+    /// closure cell, or, when the walk is open past its budget, a module global whose name is not
+    /// known (an empty name).
     fn shared_states(&self, var: VarId) -> Vec<SharedState> {
-        let Some(roots) = self.global_roots(var) else {
-            return Vec::new();
-        };
-        let mut out: Vec<SharedState> = roots
-            .roots
-            .iter()
-            .map(|root| match root {
-                Root::Global(name) => SharedState::Global((*name).to_owned()),
-                Root::Cell(name) => self.cell_state(name, false),
-            })
-            .collect();
-        if roots.more {
-            out.push(SharedState::Global(String::new()));
+        match self.global_roots(var) {
+            Answer::Known(roots) => roots
+                .iter()
+                .map(|root| match root {
+                    Root::Global(name) => SharedState::Global((*name).to_owned()),
+                    Root::Cell(name) => self.cell_state(name, false),
+                })
+                .collect(),
+            Answer::Open => vec![SharedState::Global(String::new())],
         }
-        out
     }
 
     /// The enclosing function whose variable `name` is (the nearest one whose nested functions
@@ -5552,47 +5549,12 @@ fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarI
 }
 
 /// Where an object that outlives the call is held ([`Extractor::global_roots`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Root<'a> {
     /// A module global, by name.
     Global(&'a str),
     /// The closure cell of an enclosing function's variable, by name.
     Cell(&'a str),
-}
-
-/// The most roots [`RootSet`] keeps for one value.
-const MAX_ROOTS: usize = 8;
-
-/// The roots a value may be reached from: at most [`MAX_ROOTS`], and whether there are more.
-#[derive(Debug, Clone, Default)]
-struct RootSet<'a> {
-    roots: Vec<Root<'a>>,
-    more: bool,
-}
-
-impl<'a> RootSet<'a> {
-    /// Add `root`; whether the set grew.
-    fn add(&mut self, root: Root<'a>) -> bool {
-        if self.more || self.roots.contains(&root) {
-            return false;
-        }
-        if self.roots.len() == MAX_ROOTS {
-            self.more = true;
-        } else {
-            self.roots.push(root);
-        }
-        true
-    }
-
-    /// Add the roots of `other`; whether the set grew.
-    fn join(&mut self, other: &Self) -> bool {
-        let before = (self.roots.len(), self.more);
-        for root in &other.roots {
-            self.add(*root);
-        }
-        self.more |= other.more;
-        (self.roots.len(), self.more) != before
-    }
 }
 
 /// The step by which an instruction's result is reached from an operand's object (`dst`, `src`):

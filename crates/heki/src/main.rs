@@ -8,6 +8,7 @@ macro_rules! log {
 }
 
 mod check;
+mod dump_facts;
 mod inspect;
 mod watch;
 
@@ -66,6 +67,9 @@ enum Commands {
     /// Internal/testing: dump `heki_ir` SSA-CFG IR as JSON for debugging and verification.
     #[command(hide = true)]
     DumpIr(DumpSemanticArgs),
+    /// Internal/testing: dump the path and loop facts of `heki_ir::facts` as JSON.
+    #[command(hide = true)]
+    DumpFacts(DumpSemanticArgs),
     /// Internal: dump the experimental features as JSON for `scripts/build_docs.py`.
     #[command(hide = true)]
     DumpExperimental,
@@ -101,6 +105,10 @@ struct CheckArgs {
     /// Watch for file changes and re-run incrementally.
     #[arg(long)]
     watch: bool,
+    /// Internal: write the steps each owner's walks took per function to this JSON file
+    /// (`scripts/check_walk_shapes.py`).
+    #[arg(long, hide = true)]
+    walk_steps: Option<PathBuf>,
 }
 
 /// The options that decide what `heki check` computes: the rule selection (whether typed writes
@@ -360,6 +368,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let model = heki_semantic::analyze_module(&parsed, &src, profile);
             let ir = heki_ir::build_module_ir(&parsed, &src, &model, profile);
             println!("{}", serde_json::to_string_pretty(&ir)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::DumpFacts(args) => {
+            let src = heki_ast::read_source(&args.file)?;
+            let parsed = heki_ast::parse_module(&src)
+                .map_err(|errs| anyhow::anyhow!("parse errors: {errs:?}"))?;
+            let ver = heki_env::PythonVersion::parse_tag(&args.target_version)
+                .unwrap_or(heki_env::PythonVersion::PY315);
+            let profile = heki_env::RuntimeProfile::from(ver);
+            let model = heki_semantic::analyze_module(&parsed, &src, profile);
+            let ir = heki_ir::build_module_ir(&parsed, &src, &model, profile);
+            let kb = heki_kb::EffectiveEcosystemKb::load_builtin(&[])?;
+            let facts = dump_facts::module(&ir, &src, &kb);
+            println!("{}", serde_json::to_string_pretty(&facts)?);
             Ok(ExitCode::SUCCESS)
         }
         Commands::DumpExperimental => {

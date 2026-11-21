@@ -718,6 +718,29 @@ def old_entry_reads_what_eq_changes():
 
 
 # ------------------------------------------------------------------------------
+# OPT102 (default `--fix`): `s |= t` grows the set's table in place, `s | t` copies it into a
+# new one, and the two can iterate in different orders (int hashes are not randomized)
+# ------------------------------------------------------------------------------
+SET_ORDER_ITEMS = [
+    255, 433, 481, 258, 201, 301, 436, 17, 245, 124, 380, 408, 206, 212, 340, 88, 187, 280, 451, 359
+]
+
+
+def cx_set_iterated_after_growth(xs):
+    s = set()
+    for x in xs:
+        s = s | {x}
+    return [v for v in s]
+
+
+def old_set_iterated_after_growth(xs):
+    s = set()
+    for x in xs:
+        s |= {x}
+    return [v for v in s]
+
+
+# ------------------------------------------------------------------------------
 # OPT130: what the hoisted constructor shares, expands, or receives
 # ------------------------------------------------------------------------------
 def cx_rebuilt_container_changed(n):
@@ -940,6 +963,11 @@ def main() -> int:
         ),
         (cx_later_entry_before_collision, old_later_entry_before_collision, lambda f: f()),
         (cx_entry_reads_what_eq_changes, old_entry_reads_what_eq_changes, lambda f: f()),
+        (
+            cx_set_iterated_after_growth,
+            old_set_iterated_after_growth,
+            lambda f: f(SET_ORDER_ITEMS),
+        ),
         (cx_rebuilt_container_changed, old_rebuilt_container_changed, lambda f: f(5)),
         (
             cx_rebuild_with_unpacked_argument,
