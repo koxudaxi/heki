@@ -69,6 +69,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   of `self` changed in place while a method iterates it: by another method of the class while a
   generator is suspended inside the iteration, or by a function the loop's body calls; the next
   step raises `RuntimeError`.
+- SARIF output lists every file heki could not read or parse as an `error` notification of the
+  run (`invocations[0].toolExecutionNotifications`, with its location), and then sets
+  `executionSuccessful` to `false`; the results of the other files are kept. JSON output is
+  unchanged: the errors stay on stderr, and the exit code is still `2`.
 
 ### Changed
 
@@ -107,6 +111,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Fixed
 
+- A project module that cannot be read or does not parse still owns its module name: the names
+  under it resolve to nothing, never to a module of the same name the catalog lists. A broken
+  `requests.py` in the project no longer makes `requests.get` a blocking call. The language
+  server and `heki check --watch` keep such a file as the same unknown module while it does not
+  parse.
 - `EFF102` and `EFF103` no longer count a `functools.cached_property` getter as running on
   every read: it runs once per instance, like a lazy initialization of `self`, also when
   `cached_property` comes from a module that re-exports it (`kombu.utils.cached_property`). A
