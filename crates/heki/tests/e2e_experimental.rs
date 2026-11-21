@@ -158,46 +158,43 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
 
     // The row of an experimental rule says so.
     let (code, out) = docs.check_with(
-        "README.md",
-        "| Opt-in, experimental: a `@cached_property` left stale",
-        "| Opt-in: a `@cached_property` left stale",
-    );
-    assert_eq!(code, 1);
-    assert!(
-        out.starts_with(heading)
-            && out.contains("README.md:")
-            && out.contains(": the row of MUT101 does not say experimental"),
-        "{out}"
-    );
-    // A rule named in a link, in the copy of the README on the site.
-    let (code, out) = docs.check_with(
-        "docs/index.md",
-        "| Opt-in, experimental: a `@cached_property` left stale",
-        "| Opt-in: a `@cached_property` left stale",
-    );
-    assert_eq!(code, 1);
-    assert!(
-        out.contains(": the row of MUT101 does not say experimental"),
-        "{out}"
-    );
-    // The row of a stable rule does not, also among other rules in its cell.
-    let (code, out) = docs.check_with(
-        "README.md",
-        "| A database query, or a new HTTP client, a loop can run on every iteration |",
-        "| An experimental database query, or a new HTTP client, a loop can run on every iteration |",
-    );
-    assert_eq!(code, 1);
-    assert!(
-        out.contains(": the row of EFF102, EFF113 says experimental"),
-        "{out}"
-    );
-    let (code, out) = docs.check_with(
         "ARCHITECTURE.md",
         "| **MUT101** | Opt-in (experimental, heuristic) |",
         "| **MUT101** | Opt-in (heuristic) |",
     );
     assert_eq!(code, 1);
-    assert!(out.contains("ARCHITECTURE.md:"), "{out}");
+    assert!(
+        out.starts_with(heading)
+            && out.contains("ARCHITECTURE.md:")
+            && out.contains(": the row of MUT101 does not say experimental"),
+        "{out}"
+    );
+    // The row of a stable rule does not, in the README and in its copy on the site, which names
+    // the rule in a link.
+    for rel in ["README.md", "docs/index.md"] {
+        let (code, out) = docs.check_with(
+            rel,
+            "| A database statement on every iteration of a loop over data |",
+            "| An experimental database statement on every iteration of a loop over data |",
+        );
+        assert_eq!(code, 1, "{rel}");
+        assert!(
+            out.contains(&format!("{rel}:"))
+                && out.contains(": the row of EFF103 says experimental"),
+            "{rel}: {out}"
+        );
+    }
+    // Also among other rules in its cell.
+    let (code, out) = docs.check_with(
+        "docs/adoption.md",
+        "| heuristic | async services |",
+        "| heuristic | experimental async services |",
+    );
+    assert_eq!(code, 1);
+    assert!(
+        out.contains(": the row of EFF105, EFF107 says experimental"),
+        "{out}"
+    );
     // A rule named in the text of a cell is not the row's rule.
     let (code, out) = docs.check_with(
         "ARCHITECTURE.md",
@@ -260,22 +257,25 @@ fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rul
         "{contract}"
     );
 
-    // The row of a heuristic rule says so, in the guides, the README, and the measurements.
-    for (rel, old, new) in [
+    // The row of a heuristic rule says so, in the guides, the measurements, and the architecture.
+    for (rel, old, new, rule) in [
         (
-            "README.md",
-            "| A database query, or a new HTTP client, a loop can run on every iteration | `EFF113`, `EFF102` | heuristic |",
-            "| A database query, or a new HTTP client, a loop can run on every iteration | `EFF113`, `EFF102` | exact |",
+            "docs/adoption.md",
+            "| [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic |",
+            "| [`EFF106`](rules/lock-or-tx-held-across-io.md) | exact |",
+            "EFF106",
         ),
         (
             "docs/precision.md",
             "| `EFF102` | heuristic | round 3",
             "| `EFF102` | exact | round 3",
+            "EFF102",
         ),
         (
             "ARCHITECTURE.md",
             "| **EFF102** | Off (heuristic) |",
             "| **EFF102** | On |",
+            "EFF102",
         ),
     ] {
         let (code, out) = docs.check_with(rel, old, new);
@@ -283,7 +283,7 @@ fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rul
         assert!(
             out.starts_with(heading)
                 && out.contains(&format!("{rel}:"))
-                && out.contains(": the row of EFF102")
+                && out.contains(&format!(": the row of {rule}"))
                 && out.contains(" does not say heuristic"),
             "{rel}: {out}"
         );
@@ -291,7 +291,7 @@ fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rul
     // The row of an exact rule does not say heuristic.
     let (code, out) = docs.check_with(
         "README.md",
-        "| A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` | exact |",
+        "| A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` |",
         "| A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` | heuristic |",
     );
     assert_eq!(code, 1);
