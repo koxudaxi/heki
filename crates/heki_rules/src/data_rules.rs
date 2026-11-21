@@ -6,6 +6,7 @@ use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{CallSite, SiteEffect, TypeCtx};
+use heki_ir::walk::FnShape;
 use heki_ir::{
     BinOpKind, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop,
     UnaryOpKind, VarId,
@@ -34,14 +35,14 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             continue;
         }
         let key = CheckContext::key(unit, f);
-        let sizes = Sizes::new(cx, &tcx, &no_types, f, unit, &constants);
+        let sizes = Sizes::new(cx, &tcx, &no_types, FnShape::new(f), unit, &constants);
         let mut defs: FxHashMap<VarId, &Inst> = FxHashMap::default();
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let Some(d) = inst.kind.dst() {
                 defs.insert(d, inst);
             }
         }
-        let starred = first_starred(f);
+        let shape = &sizes.ix.shape;
         for (lc, _) in accumulating_loops(f)
             .into_iter()
             .filter(|(_, lp)| sizes.data_sized(lp))
@@ -57,7 +58,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                     _ => defs.get(v)?,
                 };
                 let call = CallInst::of(&inst.kind)?;
-                if !combines(f, &defs, &starred, &call, lc.phi_var) {
+                if !combines(shape, &defs, &call, lc.phi_var) {
                     return None;
                 }
                 let at: &[&CallSite] = sites
@@ -68,8 +69,8 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                     .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                     .collect();
                 let chain = shortest(&effects, ExecEffectKind::QuadraticRealloc)?;
-                let reallocates =
-                    chain.len() == 1 || reallocates_argument(cx, at, f, &defs, inst, lc.phi_var);
+                let reallocates = chain.len() == 1
+                    || reallocates_argument(cx, at, shape, &defs, inst, lc.phi_var);
                 reallocates.then(|| (inst.span, chain.to_vec()))
             });
             let Some((span, chain)) = hit else {
@@ -106,7 +107,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
 fn reallocates_argument<'i>(
     cx: &CheckContext<'_>,
     sites: &[&'i CallSite],
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     defs: &FxHashMap<VarId, &'i Inst>,
     inst: &'i Inst,
     previous: VarId,
@@ -116,12 +117,14 @@ fn reallocates_argument<'i>(
     call.iter()
         .flat_map(|c| c.bound_arguments(cx))
         .any(|(_, summary, pos, v)| {
-            pos < 64 && summary.reallocates_params & (1u64 << pos) != 0 && carries(f, v, previous)
+            pos < 64
+                && summary.reallocates_params & (1u64 << pos) != 0
+                && carries(shape, v, previous)
         })
 }
 
 /// Whether `v` is `previous`, a copy of it, or a display holding one.
-fn carries(f: &IrFunction, v: VarId, previous: VarId) -> bool {
+fn carries(shape: &FnShape<'_>, v: VarId, previous: VarId) -> bool {
     let mut stack = vec![v];
     let mut seen = Vec::new();
     while let Some(v) = stack.pop() {
@@ -132,7 +135,7 @@ fn carries(f: &IrFunction, v: VarId, previous: VarId) -> bool {
             continue;
         }
         seen.push(v);
-        match f.def_inst(v).map(|(_, i)| &i.kind) {
+        match shape.inst(v).map(|i| &i.kind) {
             Some(InstKind::Copy { src, .. }) => stack.push(*src),
             Some(InstKind::AllocBuiltin { elems, .. }) => stack.extend(elems.iter().copied()),
             _ => {}
@@ -145,12 +148,12 @@ fn carries(f: &IrFunction, v: VarId, previous: VarId) -> bool {
 /// arguments, or a keyword argument other than the `out=` destination, followed back through the
 /// phis and the operands each instruction's result may hold ([`held_operands`]).
 fn combines(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     defs: &FxHashMap<VarId, &Inst>,
-    starred: &FxHashMap<VarId, usize>,
     call: &CallInst<'_>,
     previous: VarId,
 ) -> bool {
+    let f = shape.f;
     let mut work: Vec<VarId> = call
         .recv
         .map(|(recv, _)| recv)
@@ -164,7 +167,7 @@ fn combines(
         .flat_map(|b| &b.phis)
         .map(|p| (p.dst, p))
         .collect();
-    let mut derivations = Derivations::new(defs, starred, previous);
+    let mut derivations = Derivations::new(defs, shape, previous);
     let mut seen: FxHashSet<VarId> = work.iter().copied().collect();
     while let Some(v) = work.pop() {
         if v == previous {
@@ -231,21 +234,17 @@ enum FromPrevious {
 /// (`w, v = q[0], q[1:]` takes `v` from the display). Each answer is kept per value.
 struct Derivations<'a> {
     defs: &'a FxHashMap<VarId, &'a Inst>,
-    /// The first operand written with `*` of each display ([`first_starred`]).
-    starred: &'a FxHashMap<VarId, usize>,
+    /// The function's tables: the first operand written with `*` of each display.
+    shape: &'a FnShape<'a>,
     previous: VarId,
     known: FxHashMap<VarId, FromPrevious>,
 }
 
 impl<'a> Derivations<'a> {
-    fn new(
-        defs: &'a FxHashMap<VarId, &'a Inst>,
-        starred: &'a FxHashMap<VarId, usize>,
-        previous: VarId,
-    ) -> Self {
+    fn new(defs: &'a FxHashMap<VarId, &'a Inst>, shape: &'a FnShape<'a>, previous: VarId) -> Self {
         Self {
             defs,
-            starred,
+            shape,
             previous,
             known: FxHashMap::default(),
         }
@@ -357,24 +356,11 @@ impl<'a> Derivations<'a> {
         };
         let i = usize::try_from(*i).ok()?;
         let item = *elems.get(i)?;
-        self.starred
-            .get(dst)
-            .is_none_or(|&first| first > i)
+        self.shape
+            .first_starred(*dst)
+            .is_none_or(|first| first as usize > i)
             .then_some(item)
     }
-}
-
-/// The first operand written with `*` (`IrFunction::starred`) of each display or call of `f`.
-fn first_starred(f: &IrFunction) -> FxHashMap<VarId, usize> {
-    let mut first: FxHashMap<VarId, usize> = FxHashMap::default();
-    for &(dst, i) in &f.starred {
-        let i = i as usize;
-        first
-            .entry(dst)
-            .and_modify(|k| *k = (*k).min(i))
-            .or_insert(i);
-    }
-    first
 }
 
 /// The keyword arguments of a call but `out=`, the destination buffer it writes into.

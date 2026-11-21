@@ -83,6 +83,8 @@ struct Loops {
     depth: Vec<u16>,
     /// Index into `f.loops` (`u32::MAX`: in no loop).
     innermost: Vec<u32>,
+    /// Per block, the index into `f.loops` of the loop it heads (`u32::MAX`: none).
+    headed: Vec<u32>,
     /// Each loop's body, sorted.
     bodies: Vec<Vec<BlockId>>,
 }
@@ -104,13 +106,15 @@ impl<'a> FnShape<'a> {
 
     // ---------------------------------------------------------------------------- values
 
-    /// Where `v` is defined. The builder defines each value once; were one defined more than
-    /// once, the first instruction in block order would win, as in [`IrFunction::def_inst`],
-    /// then the first phi, then the parameter.
+    /// Where `v` is defined. The builder defines each value once, which debug builds check
+    /// here; were one defined more than once, the first instruction in block order would win,
+    /// as in [`IrFunction::def_inst`], then the first phi, then the parameter.
     pub fn def(&self, v: VarId) -> Def {
         let defs = self.defs.get_or_init(|| {
             let mut defs = vec![Def::None; self.f.var_names.len()];
             let mut set = |v: VarId, d: Def| {
+                let before = defs.get(v.0 as usize).copied().unwrap_or(Def::None);
+                debug_assert_eq!(before, Def::None, "{v:?} is defined twice");
                 if let Some(slot @ Def::None) = defs.get_mut(v.0 as usize) {
                     *slot = d;
                 }
@@ -339,7 +343,7 @@ impl<'a> FnShape<'a> {
     /// blocks a path from the entry reaches; what a walk takes for the others is its own
     /// statement.
     pub fn dominators(&self) -> &DominatorTree {
-        self.dominators.get_or_init(|| DominatorTree::of(self.f))
+        self.dominators.get_or_init(|| DominatorTree::of(self))
     }
 
     // ----------------------------------------------------------------------------- loops
@@ -350,6 +354,13 @@ impl<'a> FnShape<'a> {
             .bodies
             .get(li)
             .is_some_and(|body| body.binary_search(&b).is_ok())
+    }
+
+    /// Whether `b` is in the body of `lp`, one of `f.loops`. The builder gives each loop a
+    /// header block of its own, which debug builds check, so the header names the loop.
+    pub fn in_body(&self, lp: &NaturalLoop, b: BlockId) -> bool {
+        let headed = self.loops_table().headed.get(lp.header.0 as usize);
+        headed.is_some_and(|&li| self.in_loop(li as usize, b))
     }
 
     /// The deepest loop whose body holds `b` (the last listed of equally deep ones), as an
@@ -379,8 +390,12 @@ impl<'a> FnShape<'a> {
             let blocks = self.f.blocks.len();
             let mut depth = vec![0u16; blocks];
             let mut innermost = vec![u32::MAX; blocks];
+            let mut headed = vec![u32::MAX; blocks];
             let mut bodies = Vec::with_capacity(self.f.loops.len());
             for (li, lp) in self.f.loops.iter().enumerate() {
+                let head = &mut headed[lp.header.0 as usize];
+                debug_assert_eq!(*head, u32::MAX, "{:?} heads two loops", lp.header);
+                *head = li as u32;
                 for &b in &lp.body {
                     let at = &mut innermost[b.0 as usize];
                     // `max_by_key` keeps the last of equal maxima.
@@ -396,6 +411,7 @@ impl<'a> FnShape<'a> {
             Loops {
                 depth,
                 innermost,
+                headed,
                 bodies,
             }
         })

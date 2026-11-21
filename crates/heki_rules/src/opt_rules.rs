@@ -14,6 +14,7 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
 use heki_effect::{CONTAINER_MUTATORS, CallSite, Items, TypeCtx, Val};
+use heki_ir::walk::FnShape;
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, ModuleConstants, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
@@ -116,23 +117,23 @@ impl<'a, 'c> Sizes<'a, 'c> {
         cx: &'c CheckContext<'a>,
         tcx: &'c TypeCtx<'a>,
         types: &'c FxHashMap<VarId, Val>,
-        f: &'c IrFunction,
+        shape: FnShape<'c>,
         unit: &'c ModuleUnit<'_>,
         constants: &'c ModuleConstants,
     ) -> Self {
         let withheld = constants.displays.len() != unit.input.ir.constants.displays.len();
-        Self::of(cx, tcx, types, f, constants, withheld)
+        Self::of(cx, tcx, types, shape, constants, withheld)
     }
 
     fn of(
         cx: &'c CheckContext<'a>,
         tcx: &'c TypeCtx<'a>,
         types: &'c FxHashMap<VarId, Val>,
-        f: &'c IrFunction,
+        shape: FnShape<'c>,
         constants: &'c ModuleConstants,
         withheld: bool,
     ) -> Self {
-        let ix = FnIndex::new(f, constants);
+        let ix = FnIndex::with_shape(shape, constants);
         Self {
             cx,
             tcx,
@@ -182,7 +183,7 @@ impl<'a, 'c> Sizes<'a, 'c> {
             self.cx,
             self.tcx,
             &untyped,
-            self.tcx.ir().function(creator),
+            FnShape::new(self.tcx.ir().function(creator)),
             self.constants,
             self.withheld,
         );
@@ -225,13 +226,10 @@ impl<'a, 'c> Sizes<'a, 'c> {
         if self.ix.container_bound(var).is_some() {
             return true;
         }
-        // Copies form chains ending at their source (SSA).
-        let mut v = var;
-        while let Some(InstKind::Copy { src, .. }) = self.ix.def_inst(v).map(|i| &i.kind) {
-            v = *src;
-        }
+        let v = self.ix.shape.copy_root(var);
         self.ix
-            .def_inst(v)
+            .shape
+            .inst(v)
             .and_then(|inst| self.leaf_display(inst))
             .is_some_and(|d| d.is_of(kinds) && self.ix.load_unchanged(v))
     }
@@ -239,7 +237,7 @@ impl<'a, 'c> Sizes<'a, 'c> {
     /// What an imported name loaded into `var` refers to (`consts` of `from pkg import
     /// consts`), without type inference.
     fn imported(&self, var: VarId) -> Option<Val> {
-        let inst = self.ix.def_inst(var)?;
+        let inst = self.ix.shape.inst(var)?;
         Some(Val::Ref(self.cx.decls.canonical(self.import_of(inst)?)))
     }
 
@@ -307,11 +305,12 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let constants = cx.fixed_constants(unit);
     for f in &unit.input.ir.functions {
+        let shape = FnShape::new(f);
         // `index(x, start)` scans from a position, usually one that advances (a linear walk).
         let calls: Vec<(BlockId, Span, VarId, &str)> = f
             .blocks
             .iter()
-            .filter(|b| f.is_in_loop(b.id))
+            .filter(|b| shape.loop_depth(b.id) > 0)
             .flat_map(|b| {
                 b.insts.iter().filter_map(move |i| match &i.kind {
                     InstKind::MethodCall {
@@ -327,8 +326,8 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             continue;
         }
         let types = tcx.infer(f);
-        let defs = Defs::new(f);
-        let sizes = Sizes::new(cx, &tcx, &types, f, unit, &constants);
+        let sizes = Sizes::new(cx, &tcx, &types, shape, unit, &constants);
+        let defs = Defs::new(&sizes.ix.shape);
         for (bb, span, recv, method) in calls {
             // Only a receiver that is certainly a builtin `list` (`set.remove`, `str.index`, a
             // project class's `remove`, or an unknown type are not linear scans of a list).
@@ -339,8 +338,8 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 .loops
                 .iter()
                 .filter(|lp| {
-                    lp.body.contains(&bb)
-                        && runs_again(f, lp, bb)
+                    defs.shape.in_body(lp, bb)
+                        && runs_again(defs.shape, lp, bb)
                         && sizes.ix.lives_across(lp, recv)
                         && sizes.data_sized(lp)
                 })
@@ -407,10 +406,7 @@ struct ListUse<'d, 'a> {
 
 impl<'d, 'a> ListUse<'d, 'a> {
     fn new(defs: &'d Defs<'a>, hot: &[&NaturalLoop], list: VarId) -> Self {
-        let mut root = list;
-        while let Some(InstKind::Copy { src, .. }) = defs.kind(root) {
-            root = *src;
-        }
+        let root = defs.shape.copy_root(list);
         Self {
             defs,
             blocks: hot.iter().flat_map(|lp| lp.body.iter().copied()).collect(),
@@ -530,14 +526,15 @@ impl<'d, 'a> ListUse<'d, 'a> {
 /// Whether block `bb` of loop `lp` can run again in the same run of the loop: the loop header
 /// is reachable from its normal successors without leaving the loop. A block that returns,
 /// raises, or `break`s on every path runs once.
-fn runs_again(f: &IrFunction, lp: &NaturalLoop, bb: BlockId) -> bool {
+fn runs_again(shape: &FnShape<'_>, lp: &NaturalLoop, bb: BlockId) -> bool {
+    let f = shape.f;
     let mut seen = FxHashSet::default();
     let mut stack = f.block(bb).terminator.successors();
     while let Some(b) = stack.pop() {
         if b == lp.header {
             return true;
         }
-        if lp.body.contains(&b) && seen.insert(b) {
+        if shape.in_body(lp, b) && seen.insert(b) {
             stack.extend(f.block(b).terminator.successors());
         }
     }
@@ -585,6 +582,7 @@ fn squash(text: &str) -> String {
 /// Defining instruction or phi of every variable of one function, with its block.
 struct Defs<'a> {
     f: &'a IrFunction,
+    shape: &'a FnShape<'a>,
     insts: FxHashMap<VarId, (BlockId, &'a Inst)>,
     phis: FxHashMap<VarId, (BlockId, &'a PhiNode)>,
     /// `MakeIter` results: the iterable and its span.
@@ -592,7 +590,8 @@ struct Defs<'a> {
 }
 
 impl<'a> Defs<'a> {
-    fn new(f: &'a IrFunction) -> Self {
+    fn new(shape: &'a FnShape<'a>) -> Self {
+        let f = shape.f;
         let mut insts = FxHashMap::default();
         let mut phis = FxHashMap::default();
         let mut iterables = FxHashMap::default();
@@ -611,6 +610,7 @@ impl<'a> Defs<'a> {
         }
         Self {
             f,
+            shape,
             insts,
             phis,
             iterables,
@@ -714,18 +714,18 @@ impl<'a> Defs<'a> {
                 continue;
             }
             if let Some((bb, phi)) = self.phis.get(&v)
-                && lp.body.contains(bb)
+                && self.shape.in_body(lp, *bb)
             {
                 stack.extend(phi.incoming.iter().map(|(_, x)| *x));
             } else if let Some((bb, inst)) = self.insts.get(&v)
-                && lp.body.contains(bb)
+                && self.shape.in_body(lp, *bb)
             {
                 let element = matches!(inst.kind, InstKind::IterNext { .. })
                     && self
                         .f
                         .loops
                         .iter()
-                        .any(|l| l.header == *bb && l.body.contains(&inner));
+                        .any(|l| l.header == *bb && self.shape.in_body(l, inner));
                 if element {
                     return true;
                 }
@@ -783,7 +783,6 @@ impl<'a> Defs<'a> {
                     && self.f.loops.iter().all(|lp| lp.header != *m)
                     && self.f.block(*m).phis.iter().any(|p| p.incoming.iter().any(|(from, _)| *from == e)))
         });
-        let preds = self.f.predecessors();
         !negated
             && !alternative
             && !picks_value
@@ -791,7 +790,7 @@ impl<'a> Defs<'a> {
             && branches.iter().all(|&(from, then_bb, else_bb)| {
                 !self.continues(from, then_bb)
                     && self.idle_on_mismatch(inner, then_bb, else_bb)
-                    && !self.after_other_work(&preds, from)
+                    && !self.after_other_work(from)
             })
     }
 
@@ -811,15 +810,16 @@ impl<'a> Defs<'a> {
         !matches.is_empty()
             && matches.iter().all(|&then_bb| {
                 then_bb != inner.header
-                    && !(inner.body.contains(&then_bb) && runs_again(self.f, inner, then_bb))
+                    && !(self.shape.in_body(inner, then_bb)
+                        && runs_again(self.shape, inner, then_bb))
             })
     }
 
     /// Whether block `from` runs only on the false side of another branch whose true side does
     /// work: an `elif` after an `if` that handles other pairs (`if a.x == b.k: ... elif a.y ==
     /// b.k: ...` matches on two keys, so one index skips pairs the other test handles).
-    fn after_other_work(&self, preds: &[Vec<BlockId>], from: BlockId) -> bool {
-        let [p] = preds[from.0 as usize].as_slice() else {
+    fn after_other_work(&self, from: BlockId) -> bool {
+        let [p] = self.shape.preds(from) else {
             return false;
         };
         matches!(self.f.block(*p).terminator, Terminator::Branch { then_bb, else_bb, .. }
@@ -837,7 +837,7 @@ impl<'a> Defs<'a> {
         let mut matched = FxHashSet::default();
         let mut stack = vec![then_bb];
         while let Some(b) = stack.pop() {
-            if b != inner.header && inner.body.contains(&b) && matched.insert(b) {
+            if b != inner.header && self.shape.in_body(inner, b) && matched.insert(b) {
                 stack.extend(self.f.block(b).terminator.successors());
             }
         }
@@ -848,7 +848,7 @@ impl<'a> Defs<'a> {
                 return true;
             }
             let block = self.f.block(b);
-            if !inner.body.contains(&b) || !seen.insert(b) || !block.insts.is_empty() {
+            if !self.shape.in_body(inner, b) || !seen.insert(b) || !block.insts.is_empty() {
                 return false;
             }
             let Terminator::Jump(next) = block.terminator else {
@@ -864,15 +864,15 @@ impl<'a> Defs<'a> {
         b.insts.is_empty()
             && b.phis.is_empty()
             && matches!(b.terminator, Terminator::Jump(h)
-                if self.f.loops.iter().any(|lp| lp.header == h && lp.body.contains(&from)))
+                if self.f.loops.iter().any(|lp| lp.header == h && self.shape.in_body(lp, from)))
     }
 
     /// Whether `var` is a loop element itself (through `Copy`), not a part of it.
-    fn whole_element(&self, mut var: VarId) -> bool {
-        while let Some(InstKind::Copy { src, .. }) = self.kind(var) {
-            var = *src;
-        }
-        matches!(self.kind(var), Some(InstKind::IterNext { .. }))
+    fn whole_element(&self, var: VarId) -> bool {
+        matches!(
+            self.kind(self.shape.copy_root(var)),
+            Some(InstKind::IterNext { .. })
+        )
     }
 
     /// The unhashable builtin type (`list`, `dict`, `set`, `bytearray`) the key `var` is known
@@ -958,8 +958,8 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
         if f.is_class_body || f.loops.len() < 2 {
             continue;
         }
-        let defs = Defs::new(f);
-        let sizes = Sizes::new(cx, &tcx, &no_types, f, unit, &constants);
+        let sizes = Sizes::new(cx, &tcx, &no_types, FnShape::new(f), unit, &constants);
+        let defs = Defs::new(&sizes.ix.shape);
         // Inferred only for a function with a report.
         let mut types: Option<FxHashMap<VarId, Val>> = None;
         // Both loops are data-sized `for` loops (inlined comprehensions included).
@@ -973,7 +973,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             let mut hit: Option<Join<'_, '_>> = None;
             let outers = fors.iter().filter(|o| {
                 o.lp.header != inner.lp.header
-                    && o.lp.body.contains(&inner.lp.header)
+                    && defs.shape.in_body(o.lp, inner.lp.header)
                     && !defs.reads_elements(o.lp, inner.lp.header, inner.iterable)
             });
             for outer in outers {

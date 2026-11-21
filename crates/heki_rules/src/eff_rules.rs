@@ -18,6 +18,7 @@ use heki_effect::{
     EffectSummary, Facts, FuncKey, PerItem, Runner, SiteEffect, TypeCtx, WriteKind,
     anchors_call_site, boundary_reports_in,
 };
+use heki_ir::walk::FnShape;
 use heki_ir::{InstKind, IrFunction};
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -249,13 +250,13 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             ExecEffectKind::DbQuery => want103 && !migration_fn,
             _ => false,
         };
-        // Built when a call has an effect to report.
-        let mut sizes: Option<Sizes<'_, '_>> = None;
+        let sizes = Sizes::new(cx, &tcx, &no_types, FnShape::new(f), unit, &constants);
+        let shape = &sizes.ix.shape;
         let mut data_sized: Vec<Option<bool>> = vec![None; f.loops.len()];
         // An iteration shares its span with the call producing the iterable: one report.
         let mut seen: FxHashSet<Span> = FxHashSet::default();
         for bb in &f.blocks {
-            let depth = f.block_loop_depth(bb.id);
+            let depth = shape.loop_depth(bb.id);
             if depth == 0 && !per_item_calls {
                 continue;
             }
@@ -300,14 +301,12 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if effects.is_empty() {
                     continue;
                 }
-                let sizes = sizes
-                    .get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit, &constants));
                 let around = *data_loops.get_or_insert_with(|| {
                     f.loops
                         .iter()
                         .enumerate()
                         .filter(|(i, lp)| {
-                            lp.body.contains(&bb.id)
+                            shape.in_loop(*i, bb.id)
                                 && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
                         })
                         .fold(0, |mask, (_, lp)| mask | loop_bit(lp))

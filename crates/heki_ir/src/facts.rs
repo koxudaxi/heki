@@ -21,6 +21,7 @@
 //! - `while len(acc) < N` (also one `and` operand) with a constant `N` of at most
 //!   [`LEN_CAP_MAX`] caps `acc` ([`crate::NaturalLoop::len_caps`]).
 
+use crate::walk::{Def, FnShape};
 use crate::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator,
@@ -203,20 +204,12 @@ pub(crate) struct LoopHint {
     pub forever: bool,
 }
 
-/// Where a variable is defined.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Def {
-    None,
-    Param,
-    Inst(BlockId, u32),
-    Phi(BlockId, u32),
-}
-
-/// The definitions of one function's variables and the facts above, computed on demand.
+/// The facts above for one function, computed on demand.
 pub struct FnIndex<'a> {
     pub f: &'a IrFunction,
+    /// The tables of `f` the facts' walks read, for the owner's other walks too.
+    pub shape: FnShape<'a>,
     module: &'a ModuleConstants,
-    defs: Vec<Def>,
     /// [`Self::container_bound`] of each value asked so far. A value whose answer is being
     /// decided reads as not fixed: a size that depends on itself is not fixed by the code.
     bounds: RefCell<FxHashMap<VarId, Option<u32>>>,
@@ -226,8 +219,6 @@ pub struct FnIndex<'a> {
     /// [`Self::display_at`] of each value and sink asked so far, in the same way: two lists that
     /// extend each other hold no display the code fixes.
     sink_displays: RefCell<FxHashMap<(VarId, Sink), Option<SmallDisplay>>>,
-    /// The predecessors of each block of `f` (normal and exception edges).
-    preds: OnceCell<Vec<Vec<BlockId>>>,
     /// The values `f` passes to `len()` (after copies): only their lengths can be tested.
     measured: OnceCell<FxHashSet<VarId>>,
     /// The length caps the branches of `f` establish ([`Self::guarded_len`]).
@@ -299,8 +290,8 @@ fn tightest(mut caps: Vec<(VarId, u32)>) -> Vec<(VarId, u32)> {
 
 /// The caps of [`FnIndex::implied_caps`] decided so far: per value and outcome (one being
 /// decided implies nothing), and per block for the tests on the single-predecessor way into it.
-struct CapWalk<'p> {
-    preds: &'p [Vec<BlockId>],
+#[derive(Default)]
+struct CapWalk {
     values: FxHashMap<(VarId, bool), Vec<(VarId, u32)>>,
     blocks: FxHashMap<BlockId, Vec<(VarId, u32)>>,
 }
@@ -341,33 +332,18 @@ const MAX_NESTED_SIZES: u32 = 16;
 
 impl<'a> FnIndex<'a> {
     pub fn new(f: &'a IrFunction, module: &'a ModuleConstants) -> Self {
-        let mut defs = vec![Def::None; f.var_names.len()];
-        let mut set = |v: VarId, d: Def| {
-            if let Some(slot) = defs.get_mut(v.0 as usize) {
-                *slot = d;
-            }
-        };
-        for p in &f.params {
-            set(p.var, Def::Param);
-        }
-        for bb in &f.blocks {
-            for (i, phi) in bb.phis.iter().enumerate() {
-                set(phi.dst, Def::Phi(bb.id, i as u32));
-            }
-            for (i, inst) in bb.insts.iter().enumerate() {
-                if let Some(d) = inst.kind.dst() {
-                    set(d, Def::Inst(bb.id, i as u32));
-                }
-            }
-        }
+        Self::with_shape(FnShape::new(f), module)
+    }
+
+    /// The facts of the function whose tables an owner built before.
+    pub fn with_shape(shape: FnShape<'a>, module: &'a ModuleConstants) -> Self {
         Self {
-            f,
+            f: shape.f,
+            shape,
             module,
-            defs,
             bounds: RefCell::default(),
             trips: RefCell::default(),
             sink_displays: RefCell::default(),
-            preds: OnceCell::new(),
             measured: OnceCell::new(),
             guards: OnceCell::new(),
             recorded_trips: true,
@@ -381,38 +357,14 @@ impl<'a> FnIndex<'a> {
         self
     }
 
-    fn def(&self, v: VarId) -> Def {
-        self.defs.get(v.0 as usize).copied().unwrap_or(Def::None)
-    }
-
-    /// The instruction defining `v`, if any.
-    pub fn def_inst(&self, v: VarId) -> Option<&'a Inst> {
-        match self.def(v) {
-            Def::Inst(b, i) => Some(&self.f.block(b).insts[i as usize]),
-            _ => None,
-        }
-    }
-
     fn phi_incoming(&self, b: BlockId, i: u32) -> &'a [(BlockId, VarId)] {
         &self.f.block(b).phis[i as usize].incoming
-    }
-
-    /// `v` with the copies leading to it undone (SSA copies form chains ending at their
-    /// source).
-    fn copied_from(&self, mut v: VarId) -> VarId {
-        for _ in 0..self.defs.len() {
-            match self.def_inst(v).map(|i| &i.kind) {
-                Some(InstKind::Copy { src, .. }) => v = *src,
-                _ => break,
-            }
-        }
-        v
     }
 
     /// The builtin a call names, when it is one of the read-only builtins these facts know and
     /// the real one: a global load of the callee's name that the module never rebinds.
     pub fn builtin(&self, callee_var: Option<VarId>, callee: &str) -> Option<&'a str> {
-        match &self.def_inst(callee_var?)?.kind {
+        match &self.shape.inst(callee_var?)?.kind {
             InstKind::LoadGlobal {
                 name,
                 is_lazy_import: false,
@@ -496,7 +448,7 @@ impl<'a> FnIndex<'a> {
         let loads = |o: &Origins| {
             o.roots.iter().any(|r| {
                 matches!(
-                    self.def_inst(*r).map(|i| &i.kind),
+                    self.shape.inst(*r).map(|i| &i.kind),
                     Some(InstKind::LoadGlobal { .. })
                 )
             })
@@ -539,7 +491,7 @@ impl<'a> FnIndex<'a> {
             return false;
         }
         stack.push(v);
-        let ok = match self.def(v) {
+        let ok = match self.shape.def(v) {
             Def::Phi(b, i) => self
                 .phi_incoming(b, i)
                 .iter()
@@ -661,7 +613,7 @@ impl<'a> FnIndex<'a> {
     /// list, tuple, or set display, a string constant, or a builtin constructor call (what a
     /// slice can slice).
     fn made_kind(&self, v: VarId) -> Option<BuiltinKind> {
-        match &self.def_inst(self.copied_from(v))?.kind {
+        match &self.shape.inst(self.shape.copy_root(v))?.kind {
             InstKind::AllocBuiltin { kind, .. } => Some(*kind),
             InstKind::Const {
                 literal: ConstLiteral::Str(_),
@@ -714,14 +666,14 @@ impl<'a> FnIndex<'a> {
     /// what it slices: `[:k]`, `[a:b]`, `[-k:]`, `[-a:-b]` (a positive step divides them).
     fn slice_len(&self, index: VarId) -> Option<u32> {
         // A slice passes the tuple of its three bounds (`None` where one is left out).
-        let parts: [VarId; 3] = self.def_inst(index)?.kind.operands().try_into().ok()?;
+        let parts: [VarId; 3] = self.shape.inst(index)?.kind.operands().try_into().ok()?;
         let bound = |v: VarId| -> Result<Option<i64>, ()> {
-            match &self.def_inst(self.copied_from(v)).map(|i| &i.kind) {
+            match &self.shape.inst(self.shape.copy_root(v)).map(|i| &i.kind) {
                 Some(InstKind::Const {
                     literal: ConstLiteral::None,
                     ..
                 }) => Ok(None),
-                _ => self.const_int(v).map(Some).ok_or(()),
+                _ => self.fixed_int(v).map(Some).ok_or(()),
             }
         };
         let [lower, upper, step] = parts.map(bound);
@@ -918,9 +870,10 @@ impl<'a> FnIndex<'a> {
     /// it). `None` when one of them is not fixed.
     fn runs(&self, b: BlockId, roots: &[VarId], alias: &FxHashSet<VarId>) -> Option<u32> {
         let made_in = |lp: &NaturalLoop| {
-            roots
-                .iter()
-                .all(|r| matches!(self.def(*r), Def::Inst(rb, _) | Def::Phi(rb, _) if lp.body.contains(&rb)))
+            roots.iter().all(|r| {
+                let def = self.shape.def(*r);
+                matches!(def, Def::Inst(rb, _) | Def::Phi(rb, _) if self.shape.in_body(lp, rb))
+            })
         };
         let carried = |lp: &NaturalLoop| {
             self.f
@@ -931,7 +884,7 @@ impl<'a> FnIndex<'a> {
         };
         let mut n: u32 = 1;
         for (li, lp) in self.f.loops.iter().enumerate() {
-            if lp.body.contains(&b) && (!made_in(lp) || carried(lp)) {
+            if self.shape.in_loop(li, b) && (!made_in(lp) || carried(lp)) {
                 n = n.checked_mul(self.trip_count(li)?)?;
             }
         }
@@ -1007,7 +960,7 @@ impl<'a> FnIndex<'a> {
                     out.push(*recv);
                 }
                 let str_recv = matches!(
-                    self.def_inst(*recv).map(|i| &i.kind),
+                    self.shape.inst(*recv).map(|i| &i.kind),
                     Some(InstKind::Const {
                         literal: ConstLiteral::Str(_) | ConstLiteral::Bytes,
                         ..
@@ -1070,7 +1023,7 @@ impl<'a> FnIndex<'a> {
             // it escapes to.
             InstKind::StoreGlobal { name, value } => {
                 let import_binding = matches!(
-                    self.def_inst(*value).map(|i| &i.kind),
+                    self.shape.inst(*value).map(|i| &i.kind),
                     Some(InstKind::Import { .. })
                 ) && self.f.var_name(*value) == Some(name.as_str());
                 if !self.module.displays.contains_key(name) && !import_binding {
@@ -1090,7 +1043,7 @@ impl<'a> FnIndex<'a> {
 
     /// `v` is an integer literal (an item store `xs[0] = v` keeps a list's size).
     fn is_int_constant(&self, v: VarId) -> bool {
-        let kind = self.def_inst(v).map(|i| &i.kind);
+        let kind = self.shape.inst(v).map(|i| &i.kind);
         matches!(
             kind,
             Some(InstKind::Const {
@@ -1170,7 +1123,7 @@ impl<'a> FnIndex<'a> {
         if let Some(n) = self.container_bound_nested(v, depth) {
             return Some(n);
         }
-        let inst = self.def_inst(v)?;
+        let inst = self.shape.inst(v)?;
         let small = |n: usize| u32::try_from(n).ok().filter(|n| *n <= SMALL_MAX);
         match &inst.kind {
             InstKind::Copy { src, .. } => self.iter_bound_depth(*src, leaf, depth + 1),
@@ -1196,7 +1149,7 @@ impl<'a> FnIndex<'a> {
                 match name {
                     "range" if kwargs.is_empty() && (1..=3).contains(&args.len()) => {
                         let ints: Option<Vec<i64>> = (0..args.len())
-                            .map(|i| plain(i).and_then(|a| self.const_int(a)))
+                            .map(|i| plain(i).and_then(|a| self.fixed_int(a)))
                             .collect();
                         range_len(&ints?).and_then(|n| small(n as usize))
                     }
@@ -1258,17 +1211,12 @@ impl<'a> FnIndex<'a> {
 
     /// The instruction defining the value `v` holds, through copies.
     fn source(&self, v: VarId) -> Option<&'a Inst> {
-        let mut inst = self.def_inst(v)?;
-        // Copies of an SSA variable form a tree, so the walk ends.
-        while let InstKind::Copy { src, .. } = inst.kind {
-            inst = self.def_inst(src)?;
-        }
-        Some(inst)
+        self.shape.inst(self.shape.copy_root(v))
     }
 
     /// The value of an integer expression the code fixes: a literal, a module constant, or
     /// `+`, `-`, `*` and negation of them.
-    pub fn const_int(&self, v: VarId) -> Option<i64> {
+    pub fn fixed_int(&self, v: VarId) -> Option<i64> {
         self.const_int_depth(v, 0)
     }
 
@@ -1276,7 +1224,7 @@ impl<'a> FnIndex<'a> {
         if depth > 16 {
             return None;
         }
-        match &self.def_inst(v)?.kind {
+        match &self.shape.inst(v)?.kind {
             InstKind::Const {
                 literal: ConstLiteral::Int(n),
                 ..
@@ -1331,7 +1279,7 @@ impl<'a> FnIndex<'a> {
             _ => return None,
         };
         let var = self.len_argument(measured)?;
-        let n = self.const_int(bound)?.checked_add(i64::from(inclusive))?;
+        let n = self.fixed_int(bound)?.checked_add(i64::from(inclusive))?;
         let limit = u32::try_from(n).ok().filter(|n| *n <= LEN_CAP_MAX)?;
         Some(LenCap { var, limit })
     }
@@ -1349,16 +1297,16 @@ impl<'a> FnIndex<'a> {
                 cond,
                 then_bb,
                 else_bb,
-            } if lp.body.contains(&then_bb) && !lp.body.contains(&else_bb) => cond,
+            } if self.shape.in_body(lp, then_bb) && !self.shape.in_body(lp, else_bb) => cond,
             _ => return None,
         };
         // The test as `(counter, limit)` and whether it holds for their order.
-        let (counter, limit, op, counter_first) = match self.def(cond) {
+        let (counter, limit, op, counter_first) = match self.shape.def(cond) {
             Def::Phi(..) => (cond, 0, CompareOpKind::NotEq, true),
             Def::Inst(b, i) if b == lp.header => match header.insts[i as usize].kind {
-                InstKind::Compare { op, lhs, rhs, .. } => match self.const_int(rhs) {
+                InstKind::Compare { op, lhs, rhs, .. } => match self.fixed_int(rhs) {
                     Some(n) => (lhs, n, op, true),
-                    None => (rhs, self.const_int(lhs)?, op, false),
+                    None => (rhs, self.fixed_int(lhs)?, op, false),
                 },
                 _ => return None,
             },
@@ -1385,7 +1333,7 @@ impl<'a> FnIndex<'a> {
     /// the header whose input from before the loop is an integer constant and whose input along
     /// every path back is `v` plus (or minus) one integer constant.
     fn counter(&self, body: &FxHashSet<BlockId>, header: BlockId, v: VarId) -> Option<(i64, i64)> {
-        let Def::Phi(b, i) = self.def(v) else {
+        let Def::Phi(b, i) = self.shape.def(v) else {
             return None;
         };
         if b != header {
@@ -1396,7 +1344,7 @@ impl<'a> FnIndex<'a> {
         for &(pred, x) in self.phi_incoming(b, i) {
             // The value that enters the loop (the header's only predecessor outside it).
             if !body.contains(&pred) {
-                start = Some(self.const_int(x)?);
+                start = Some(self.fixed_int(x)?);
                 continue;
             }
             let this = match &self.source(x)?.kind {
@@ -1405,19 +1353,19 @@ impl<'a> FnIndex<'a> {
                     lhs,
                     rhs,
                     ..
-                } if *lhs == v => self.const_int(*rhs)?,
+                } if *lhs == v => self.fixed_int(*rhs)?,
                 InstKind::BinOp {
                     op: BinOpKind::Add,
                     lhs,
                     rhs,
                     ..
-                } if *rhs == v => self.const_int(*lhs)?,
+                } if *rhs == v => self.fixed_int(*lhs)?,
                 InstKind::BinOp {
                     op: BinOpKind::Sub,
                     lhs,
                     rhs,
                     ..
-                } if *lhs == v => self.const_int(*rhs)?.checked_neg()?,
+                } if *lhs == v => self.fixed_int(*rhs)?.checked_neg()?,
                 _ => return None,
             };
             if this == 0 || step.is_some_and(|s| s != this) {
@@ -1436,7 +1384,7 @@ impl<'a> FnIndex<'a> {
             return None;
         };
         // The iterator is a `MakeIter`, whose one operand is the iterable.
-        self.def_inst(iter)?.kind.operands().first().copied()
+        self.shape.inst(iter)?.kind.operands().first().copied()
     }
 
     /// How many times the loop `f.loops[li]` runs at most, when the code fixes it: its
@@ -1471,7 +1419,7 @@ impl<'a> FnIndex<'a> {
         let iterable = self.loop_iterable(lp)?;
         let made_iter = self.f.block(lp.header).insts.first()?.kind.operands();
         // The `MakeIter` of the header's `IterNext`, before the loop.
-        let (at, _) = self.f.def_inst(*made_iter.first()?)?;
+        let (at, _) = self.shape.defining(*made_iter.first()?)?;
         self.iter_bound(iterable, leaf)
             .or_else(|| self.guarded_len(iterable, at, &lp.body))
     }
@@ -1483,22 +1431,27 @@ impl<'a> FnIndex<'a> {
     /// or in `during` (a loop over `v`, whose iterator sees what the body appends) grows `v`;
     /// what happens to it after (`return {"cards": cards}`) leaves the length there as it is.
     fn guarded_len(&self, v: VarId, at: BlockId, during: &[BlockId]) -> Option<u32> {
-        let v = self.copied_from(v);
+        let v = self.shape.copy_root(v);
         let measured = self.measured.get_or_init(|| {
             self.f
                 .blocks
                 .iter()
                 .flat_map(|b| &b.insts)
-                .filter_map(|i| Some(self.copied_from(self.len_argument(i.kind.dst()?)?)))
+                .filter_map(|i| Some(self.shape.copy_root(self.len_argument(i.kind.dst()?)?)))
                 .collect()
         });
         if !measured.contains(&v) {
             return None;
         }
+        // Every path from the entry to `at` (normal and exception edges) runs through the guarded
+        // edge: also when no path from the entry reaches `at`, since none avoids the edge either.
+        let shape = &self.shape;
+        let guards_at =
+            |to: BlockId| to == at || !shape.reachable(at) || shape.dominators().dominates(to, at);
         let bound = self
             .len_guards()
             .iter()
-            .filter(|g| g.var == v && g.bound <= SMALL_MAX && self.dominates(g.edge_to, at))
+            .filter(|g| g.var == v && g.bound <= SMALL_MAX && guards_at(g.edge_to))
             .map(|g| g.bound)
             .min()?;
         let mut on_the_way = self.reaching(at);
@@ -1514,19 +1467,14 @@ impl<'a> FnIndex<'a> {
             .and(Some(bound))
     }
 
-    fn preds(&self) -> &[Vec<BlockId>] {
-        self.preds.get_or_init(|| self.f.predecessors())
-    }
-
     /// Membership (by block id) of the blocks from which `b` can be reached (normal and
     /// exception edges), `b` included.
     fn reaching(&self, b: BlockId) -> Vec<bool> {
-        let preds = self.preds();
         let mut seen = vec![false; self.f.blocks.len()];
         let mut stack = vec![b];
         while let Some(cur) = stack.pop() {
             if !std::mem::replace(&mut seen[cur.0 as usize], true) {
-                stack.extend(preds[cur.0 as usize].iter().copied());
+                stack.extend(self.shape.preds(cur).iter().copied());
             }
         }
         seen
@@ -1536,11 +1484,7 @@ impl<'a> FnIndex<'a> {
     /// branches on a test, the `len(x) <= N` facts the test's outcome on that edge implies.
     fn len_guards(&self) -> &[LenGuard] {
         self.guards.get_or_init(|| {
-            let mut walk = CapWalk {
-                preds: self.preds(),
-                values: FxHashMap::default(),
-                blocks: FxHashMap::default(),
-            };
+            let mut walk = CapWalk::default();
             let mut out = Vec::new();
             for bb in &self.f.blocks {
                 let Terminator::Branch {
@@ -1552,7 +1496,7 @@ impl<'a> FnIndex<'a> {
                     continue;
                 };
                 for (to, holds) in [(then_bb, true), (else_bb, false)] {
-                    if self.preds().get(to.0 as usize).map(Vec::as_slice) != Some(&[bb.id]) {
+                    if self.shape.preds(to) != [bb.id] {
                         continue;
                     }
                     for (var, bound) in self.implied_caps(cond, holds, &mut walk) {
@@ -1574,13 +1518,13 @@ impl<'a> FnIndex<'a> {
     /// cannot be the outcome, and every other one implies a cap with the tests on the way to
     /// its edge (`len(x) > 5 or flag` is false only when `flag` is, after `len(x) > 5` was
     /// false).
-    fn implied_caps(&self, v: VarId, holds: bool, walk: &mut CapWalk<'_>) -> Vec<(VarId, u32)> {
+    fn implied_caps(&self, v: VarId, holds: bool, walk: &mut CapWalk) -> Vec<(VarId, u32)> {
         if let Some(known) = walk.values.get(&(v, holds)) {
             return known.clone();
         }
         walk.values.insert((v, holds), Vec::new());
-        let caps = match self.def(v) {
-            Def::Inst(..) => match self.def_inst(v).map(|i| &i.kind) {
+        let caps = match self.shape.def(v) {
+            Def::Inst(..) => match self.shape.inst(v).map(|i| &i.kind) {
                 Some(InstKind::Copy { src, .. }) => self.implied_caps(*src, holds, walk),
                 Some(InstKind::UnaryOp {
                     op: UnaryOpKind::Not,
@@ -1633,13 +1577,9 @@ impl<'a> FnIndex<'a> {
 
     /// The caps the tests on the straight way into the end of block `b` imply: the branches
     /// into it and into its single-predecessor ancestors.
-    fn caps_on_the_way(&self, b: BlockId, walk: &mut CapWalk<'_>) -> Vec<(VarId, u32)> {
-        let single_pred = |walk: &CapWalk<'_>, blk: BlockId| match walk
-            .preds
-            .get(blk.0 as usize)
-            .map(Vec::as_slice)
-        {
-            Some(&[p]) if p != blk => Some(p),
+    fn caps_on_the_way(&self, b: BlockId, walk: &mut CapWalk) -> Vec<(VarId, u32)> {
+        let single_pred = |blk: BlockId| match self.shape.preds(blk) {
+            &[p] if p != blk => Some(p),
             _ => None,
         };
         // The way up to the first block answered already or without a single predecessor (a
@@ -1651,7 +1591,7 @@ impl<'a> FnIndex<'a> {
             if let Some(known) = walk.blocks.get(&cur) {
                 break known.clone();
             }
-            match single_pred(walk, cur) {
+            match single_pred(cur) {
                 Some(p) if on_way.insert(cur) => {
                     way.push((cur, p));
                     cur = p;
@@ -1698,11 +1638,11 @@ impl<'a> FnIndex<'a> {
                 Some(x) => (x, rhs),
                 None => (self.len_argument(rhs)?, lhs),
             };
-            let n = u32::try_from(self.const_int(bound)?).ok()?;
-            return Some((self.copied_from(measured), n));
+            let n = u32::try_from(self.fixed_int(bound)?).ok()?;
+            return Some((self.shape.copy_root(measured), n));
         }
         let cap = self.len_cap(op, lhs, rhs)?;
-        Some((self.copied_from(cap.var), cap.limit.checked_sub(1)?))
+        Some((self.shape.copy_root(cap.var), cap.limit.checked_sub(1)?))
     }
 
     /// `x` when `v` is `len(x)` of the builtin.
@@ -1714,7 +1654,7 @@ impl<'a> FnIndex<'a> {
             args,
             kwargs,
             ..
-        } = &self.def_inst(v)?.kind
+        } = &self.shape.inst(v)?.kind
         else {
             return None;
         };
@@ -1727,27 +1667,6 @@ impl<'a> FnIndex<'a> {
             }
             _ => None,
         }
-    }
-
-    /// Every path from the entry to `b` (normal and exception edges) runs through `d`.
-    fn dominates(&self, d: BlockId, b: BlockId) -> bool {
-        if d == b {
-            return true;
-        }
-        let mut seen = vec![false; self.f.blocks.len()];
-        let mut stack = vec![BlockId(0)];
-        while let Some(cur) = stack.pop() {
-            if cur == d || std::mem::replace(&mut seen[cur.0 as usize], true) {
-                continue;
-            }
-            if cur == b {
-                return false;
-            }
-            let block = self.f.block(cur);
-            stack.extend(block.terminator.successors());
-            stack.extend(block.exc_target);
-        }
-        true
     }
 
     // --------------------------------------------------------------------------- lifetimes
@@ -1766,8 +1685,8 @@ impl<'a> FnIndex<'a> {
     /// walk: what it did, and no if it reached such a phi, which is now seen (the answer is a
     /// conjunction: once one part says no, the whole does).
     fn lives_across_seen(&self, lp: &NaturalLoop, v: VarId, walk: &mut Lifetimes) -> (bool, bool) {
-        match self.def(v) {
-            Def::Phi(b, i) if b != lp.header && lp.body.contains(&b) => {
+        match self.shape.def(v) {
+            Def::Phi(b, i) if b != lp.header && self.shape.in_body(lp, b) => {
                 let lives = walk.seen.insert(v)
                     && self
                         .phi_incoming(b, i)
@@ -1775,7 +1694,7 @@ impl<'a> FnIndex<'a> {
                         .all(|&(_, x)| self.lives_across_seen(lp, x, walk).0);
                 (lives, true)
             }
-            Def::Inst(b, i) if lp.body.contains(&b) => {
+            Def::Inst(b, i) if self.shape.in_body(lp, b) => {
                 if let Some(&(lives, phi)) = walk.answered.get(&v) {
                     return (lives && !phi, phi);
                 }
@@ -1810,8 +1729,9 @@ impl<'a> FnIndex<'a> {
 /// Whether every path from the header of `lp` back to it runs a call that waits (a sleep, or a
 /// wait with a timeout): the loop is paced by time, as a poll or a retry is, and the data
 /// decides nothing about how often it runs. An exception edge leaves a block before its wait.
-fn waits_every_iteration(f: &IrFunction, lp: &NaturalLoop) -> bool {
-    let waits = |b: BlockId| f.block(b).insts.iter().any(|i| waits_for_time(f, i));
+fn waits_every_iteration(shape: &FnShape<'_>, lp: &NaturalLoop) -> bool {
+    let f = shape.f;
+    let waits = |b: BlockId| f.block(b).insts.iter().any(|i| waits_for_time(shape, i));
     if !lp.body.iter().any(|b| waits(*b)) {
         return false;
     }
@@ -1845,7 +1765,8 @@ fn waits_every_iteration(f: &IrFunction, lp: &NaturalLoop) -> bool {
 /// with a timeout that is not a literal zero (`stop.wait(1)`, `event.wait(timeout=delay)`;
 /// `wait(timeout=0)` returns at once), awaited in a coroutine. A `wait` given anything else
 /// may wait for futures that are done already (`asyncio.wait(tasks)`).
-fn waits_for_time(f: &IrFunction, inst: &Inst) -> bool {
+fn waits_for_time(shape: &FnShape<'_>, inst: &Inst) -> bool {
+    let f = shape.f;
     let (name, args, kwargs, is_awaited) = match &inst.kind {
         InstKind::Call {
             callee,
@@ -1874,7 +1795,7 @@ fn waits_for_time(f: &IrFunction, inst: &Inst) -> bool {
     if coroutine && !is_awaited {
         return false;
     }
-    let seconds = |v: VarId| match f.def_inst(v).map(|(_, i)| &i.kind) {
+    let seconds = |v: VarId| match shape.inst(v).map(|i| &i.kind) {
         Some(InstKind::Const {
             literal: ConstLiteral::Int(n),
             ..
@@ -2059,7 +1980,7 @@ fn module_constants(
     let mut shared = SharedTexts::default();
     let mut candidates: Vec<(String, SmallDisplay)> = Vec::new();
     for bb in &module.blocks {
-        if module.is_in_loop(bb.id) {
+        if ix.shape.loop_depth(bb.id) > 0 {
             continue;
         }
         for (i, inst) in bb.insts.iter().enumerate() {
@@ -2076,7 +1997,7 @@ fn module_constants(
             }
             // A string constant, or a tuple of them, is one entry: its text, whose length is its
             // size (both are immutable, whatever their uses).
-            if let Some(n) = ix.const_int(*value) {
+            if let Some(n) = ix.fixed_int(*value) {
                 ints.insert(name.clone(), n);
             } else if let Some(text) = shared.text(&ix, *value) {
                 candidates.extend(
@@ -2277,7 +2198,7 @@ fn refine_round(
             if bound == LoopBound::Unbounded {
                 bound = if let Some(n) = ix.counted_trips(lp) {
                     LoopBound::ConstSmall(n)
-                } else if hint.repeats && waits_every_iteration(f, lp) {
+                } else if hint.repeats && waits_every_iteration(&ix.shape, lp) {
                     if hint.forever {
                         LoopBound::DaemonPolling
                     } else {

@@ -433,35 +433,6 @@ impl Live {
     }
 }
 
-/// The value each copy among `defs` copies, through any number of copies: each chain is walked
-/// once (`heki_ir` closes no cycle of copies).
-pub fn copy_roots(defs: &FxHashMap<VarId, &Inst>) -> FxHashMap<VarId, VarId> {
-    let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
-    for (&start, inst) in defs {
-        if !matches!(inst.kind, InstKind::Copy { .. }) {
-            continue;
-        }
-        let mut passed = Vec::new();
-        let mut cur = start;
-        let root = loop {
-            if let Some(&root) = roots.get(&cur) {
-                break root;
-            }
-            match defs.get(&cur).map(|i| &i.kind) {
-                Some(InstKind::Copy { src, .. }) => {
-                    passed.push(cur);
-                    cur = *src;
-                }
-                _ => break cur,
-            }
-        };
-        for v in passed {
-            roots.insert(v, root);
-        }
-    }
-    roots
-}
-
 /// The edges of `f` a branch on a constant never takes, by `(from, to)` block.
 fn dead_edges(
     f: &heki_ir::IrFunction,

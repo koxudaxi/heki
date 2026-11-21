@@ -9,6 +9,7 @@
 //! graph, so a wrapper needs no configuration of its own.
 
 use crate::{Callee, SharedChain};
+use heki_ir::walk::FnShape;
 use heki_ir::{DictEntry, Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use heki_kb::{CopyDepth, EffectiveEcosystemKb};
 use rustc_hash::FxHashMap;
@@ -27,10 +28,10 @@ pub const SLICE_COPYING_TYPES: &[&str] = &[
 /// The step from `obj` to what the `SubscriptLoad` `inst` reads from it: an item of target
 /// unpacking, a shallow copy for a slice of a builtin sequence (`obj_type`, its inferred class),
 /// or an element.
-pub fn subscript_step(f: &IrFunction, inst: &Inst, obj_type: Option<&str>) -> ReturnStep {
+pub fn subscript_step(shape: &FnShape<'_>, inst: &Inst, obj_type: Option<&str>) -> ReturnStep {
     match &inst.kind {
         InstKind::SubscriptLoad { index, .. }
-            if crate::consumption::is_unpacking(f, *index, inst.span) =>
+            if crate::consumption::is_unpacking(shape, *index, inst.span) =>
         {
             ReturnStep::TARGET_ITEM
         }
@@ -282,12 +283,13 @@ impl ProtectedReturn {
 /// generator's or coroutine's caller gets a generator or a coroutine, never the returned value,
 /// so neither is walked.
 pub(crate) fn returned_values<'t>(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     defs: &FxHashMap<VarId, &Inst>,
     live: &crate::ownership::Live,
     derive: impl Fn(&InstKind) -> Vec<(VarId, Derivation)>,
     type_of: impl Fn(VarId) -> Option<&'t str>,
 ) -> FxHashMap<VarId, ReturnStep> {
+    let f = shape.f;
     let mut steps: FxHashMap<VarId, ReturnStep> = FxHashMap::default();
     if !matches!(f.kind, heki_ir::FunctionKind::Sync) {
         return steps;
@@ -332,7 +334,7 @@ pub(crate) fn returned_values<'t>(
             InstKind::IterNext { iter, .. } => work.push((*iter, step.after(ReturnStep::ELEMENT))),
             InstKind::AttrLoad { obj, .. } => work.push((*obj, step.after(ReturnStep::ELEMENT))),
             InstKind::SubscriptLoad { obj, .. } => {
-                let derived = subscript_step(f, inst, type_of(*obj));
+                let derived = subscript_step(shape, inst, type_of(*obj));
                 work.push((*obj, step.after(derived)));
             }
             InstKind::DictLiteral { .. } | InstKind::AllocBuiltin { .. } => {

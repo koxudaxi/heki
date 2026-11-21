@@ -15,7 +15,8 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::resolve_inst;
 use heki_effect::{CallHop, CallSite, Callee, SiteEffect, TypeCtx, Val, anchors_call_site};
-use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
+use heki_ir::walk::FnShape;
+use heki_ir::{BlockId, Inst, InstKind, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -61,12 +62,13 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             continue;
         }
         let types = tcx.infer(f);
-        let held = held_managers(cx, &tcx, f, &types);
+        let shape = FnShape::new(f);
+        let held = held_managers(cx, &tcx, &shape, &types);
         if held.is_empty() {
             continue;
         }
         let sites = sites.get_or_insert_with(|| cx.sites_by_span(unit));
-        let reached = held_at_entry(f, &held)
+        let reached = held_at_entry(&shape, &held)
             .into_iter()
             .enumerate()
             .filter_map(|(b, s)| s.map(|s| (BlockId(b as u32), s)));
@@ -196,9 +198,10 @@ fn describe(qualname: &str, held: &Held, line: u32, offense: Offense) -> Report 
 fn held_managers(
     cx: &CheckContext<'_>,
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
 ) -> FxHashMap<VarId, Held> {
+    let f = shape.f;
     let flagged = |symbol: &str| cx.kb.lookup(symbol).is_some_and(|e| e.sync_lock_or_tx);
     let mut out = FxHashMap::default();
     for inst in f.blocks.iter().flat_map(|b| &b.insts) {
@@ -215,19 +218,11 @@ fn held_managers(
             _ => None,
         };
         let held = lock.or_else(|| {
-            let mut cur = mgr;
-            while let Some((_, def)) = f.def_inst(cur) {
-                match &def.kind {
-                    InstKind::Copy { src, .. } => cur = *src,
-                    kind => {
-                        return match resolve_inst(tcx, types, kind) {
-                            Callee::External(symbol) if flagged(&symbol) => Some((symbol, true)),
-                            _ => None,
-                        };
-                    }
-                }
+            let def = shape.inst(shape.copy_root(mgr))?;
+            match resolve_inst(tcx, types, &def.kind) {
+                Callee::External(symbol) if flagged(&symbol) => Some((symbol, true)),
+                _ => None,
             }
-            None
         });
         if let Some((symbol, transaction)) = held {
             out.entry(mgr).or_insert(Held {
@@ -258,10 +253,10 @@ fn transfer(kind: &InstKind, held: &FxHashMap<VarId, Held>, span: Span, state: &
 /// The managers certainly held on entry to each block (`None`: unreachable), a forward
 /// must-dataflow joined by intersection. Along an exception edge only what the block holds at
 /// every one of its instructions flows.
-fn held_at_entry(f: &IrFunction, held: &FxHashMap<VarId, Held>) -> Vec<Option<State>> {
+fn held_at_entry(shape: &FnShape<'_>, held: &FxHashMap<VarId, Held>) -> Vec<Option<State>> {
+    let f = shape.f;
     let mut ins: Vec<Option<State>> = vec![None; f.blocks.len()];
     ins[0] = Some(State::new());
-    let rpo = f.rpo_blocks();
     let meet = |slot: &mut Option<State>, incoming: &State| -> bool {
         let next = match slot {
             Some(cur) => cur
@@ -278,7 +273,7 @@ fn held_at_entry(f: &IrFunction, held: &FxHashMap<VarId, Held>) -> Vec<Option<St
     loop {
         let mut changed = false;
         // Reverse postorder reaches every block from an already visited predecessor first.
-        for &b in &rpo {
+        for &b in shape.rpo() {
             let mut state = ins[b.0 as usize].clone().unwrap_or_default();
             let bb = f.block(b);
             let mut throughout = state.clone();
