@@ -180,6 +180,12 @@ Two more cases stay quiet by design:
 - A blocking wait on a `concurrent.futures.Future` known to be done (`if f.done():`, after
   `await asyncio.wrap_future(f)`) returns at once.
 
+A file that cannot be read or does not parse is reported (exit code 2), and every other file is
+checked as usual. A file that does not parse cannot run either, so heki assumes nothing it would
+do: it calls nothing, defines no subclass, and patches no `builtins`. Its module still owns its
+name: `import requests` reaches a project's own `requests.py`, and while that file does not
+parse, the names under it resolve to nothing, never to the `requests` of the catalog.
+
 A function whose model would pass its size budget (4 units per byte of its source, at most
 50,000; real code stays below one unit per byte) is left unmodeled: heki rewrites nothing in it
 and treats its body as one call it cannot resolve. `heki assumptions` lists it with the hazard
@@ -357,7 +363,9 @@ oldest version `requires-python` admits.
 ### Source encodings
 
 heki reads the encoding a PEP 263 declaration names: UTF-8 (with or without a BOM), Latin-1, and
-ASCII. A file declaring any other encoding is reported as an error and not checked.
+ASCII. A file declaring any other encoding is reported as an error and not checked. Unlike a file
+that does not parse, such a file runs: what it defines and does stays unknown to the analysis of
+the other files.
 
 ### Sizes known only at run time
 

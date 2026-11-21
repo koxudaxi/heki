@@ -88,7 +88,8 @@ Code actions edit the version of the document their diagnostics were computed on
   an entry that grew).
 - A file belongs to the project when `heki check` would find it. A file that an ignore file, a
   hidden directory, or `exclude` leaves out is not analyzed, also when it is created or opened.
-- A file that does not parse is left out of the project until it parses again.
+- A file that does not parse is a module heki knows nothing about until it parses again, as in
+  `heki check`: the names under it resolve to nothing in the other files.
 - A configuration `heki check` rejects (an unknown rule, a contract target that is not
   `Class.attr`, an invalid pattern) is logged as a warning, and the server analyzes nothing until
   it is fixed.
