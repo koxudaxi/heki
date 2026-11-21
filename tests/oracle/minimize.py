@@ -11,6 +11,10 @@ repeated until none applies or the time budget runs out:
 
 Each candidate is checked from scratch: heki runs on it again, so the repro is a project heki
 reports on and the program refutes, not a fragment of one.
+
+A refutation that stands on how `premise_generator.py` built the program (a premise it made
+false, with an exact report) keeps its program text: a reduction could make the premise true
+again while the report stays. Only its entry points narrow.
 """
 
 from __future__ import annotations
@@ -24,6 +28,10 @@ import tempfile
 import time
 
 import driver
+
+# Refutations that stand on how the program was built (`premise_generator.py`): a premise the
+# generator made false, with an exact report of the rule.
+BY_CONSTRUCTION = ("stripped-premise", "relevance-premise")
 
 
 def read_project(root):
@@ -80,6 +88,11 @@ class Minimizer:
     def run(self, files, meta, finding):
         meta = dict(meta)
         entry, index = finding.get("entry"), finding.get("input")
+        if finding["kind"] in BY_CONSTRUCTION:
+            # The premise is false by how the generator built the program, which a reduction
+            # could undo (unwrapping an early return restores "Every return") while the report
+            # stays exact: the program text is kept, and only the entry points narrow.
+            return files, self._narrow_entries(files, meta)
         if entry is not None:
             only = dict(meta["entries"][entry])
             narrowed = dict(meta, entries=[dict(only, inputs=[only["inputs"][index]])])
@@ -111,6 +124,13 @@ class Minimizer:
                         files = smaller
                         changed = True
         return files, meta
+
+    def _narrow_entries(self, files, meta):
+        for entry in meta["entries"]:
+            narrowed = dict(meta, entries=[dict(entry, inputs=entry["inputs"][:1])])
+            if self.holds(files, narrowed):
+                return narrowed
+        return meta
 
     def _first_holding(self, files, meta, rel, transform):
         try:

@@ -2914,6 +2914,15 @@ a rule becomes exact](https://heki.koxudaxi.dev/precision/#how-a-rule-becomes-ex
 5. `minimize.py` shrinks a refuting project, running heki again on every candidate, until no
    statement can go.
 
+`premise_generator.py` generates from the premise table instead (`--mode table`; `--mode both`,
+the default, alternates the two): for an exact rule it reads the premises `heki rule
+--output-format json` lists, and builds a program that keeps all of them or strips one, false
+by construction on an input the program runs. With a premise stripped, an exact report of the
+rule is a refutation whatever the runs show (step 1 of the certification, premise stripping); a
+base program heki does not report is counted, not refuted. A premise of the table the generator
+cannot strip stops the run, so the generator grows with the table. `--table-heki` takes the
+table from another build, to check a release older than the table with it.
+
 A refutation is a heki bug unless the program breaks one of the assumptions R1 to R7; the oracle
 reports such a case as a violation instead (for example a library call whose deciding argument is
 computed, R6), and the generator keeps its programs inside them. The output directory holds

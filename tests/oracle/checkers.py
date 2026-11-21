@@ -258,11 +258,11 @@ def check_data101(claim, runs, sources=None):
             if last[0] != first[0] and last[0] in built:
                 continue
             if not reallocs:
-                premise = "On every iteration: no reallocating call returned on this iteration"
+                premise = "Every iteration: no reallocating call returned on this iteration"
             elif last[0] == first[0]:
-                premise = "Loop-carried: the value was not rebuilt on this iteration"
+                premise = "Loop-carried on every path: the value was not rebuilt on this iteration"
             else:
-                premise = "Loop-carried / Reallocates: the new value was not built from the previous one"
+                premise = "Loop-carried on every path / Reallocates: the new value was not built from the previous one"
             result.refute(
                 "not-rebuilt",
                 premise,

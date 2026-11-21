@@ -196,7 +196,7 @@ class Data101(unittest.TestCase):
             )
         )
         refutation = checkers.check(self.claim, [trace])["refutations"][0]
-        self.assertTrue(refutation["premise"].startswith("On every iteration"))
+        self.assertTrue(refutation["premise"].startswith("Every iteration"))
 
 
 class Mut110(unittest.TestCase):
@@ -476,6 +476,82 @@ class Helpers(unittest.TestCase):
         self.assertNotEqual(before, monitor.snapshot(items))
 
 
+class PremiseTable(unittest.TestCase):
+    table = {
+        "EFF101": ["Every return", "Every implementation", "Waits"],
+        "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Changed in place"],
+    }
+
+    def test_the_generator_strips_every_premise_of_the_table(self):
+        import premise_generator
+
+        self.assertEqual(premise_generator.check_table(self.table), ["EFF101", "MUT114"])
+        with self.assertRaises(premise_generator.TableError):
+            premise_generator.check_table({"EFF101": ["Every return", "A premise no builder strips"]})
+
+    def test_every_program_keeps_all_premises_or_strips_one(self):
+        import premise_generator
+
+        seen = set()
+        for seed in range(200):
+            project = premise_generator.generate(seed, self.table)
+            premise = project.premise
+            self.assertIn(premise["stripped"], [None, *self.table[premise["rule"]]])
+            seen.add((premise["rule"], premise["stripped"]))
+        self.assertEqual(len(seen), 4 + 6)
+
+    def report(self, rule):
+        return {"rule_code": rule, "certainty": "exact", "path": "app/s0.py", "line": 3, "related": []}
+
+    def test_an_exact_report_with_a_premise_stripped_refutes_it(self):
+        import driver
+
+        out = {"refutations": [], "departures": [], "premise": None}
+        driver._check_stripped_premise({"rule": "EFF101", "stripped": "Waits"}, [self.report("EFF101")], out)
+        self.assertEqual(out["refutations"][0]["kind"], "stripped-premise")
+        self.assertEqual(out["premise"], {"rule": "EFF101", "stripped": "Waits", "exact": 1})
+
+    def test_a_relevance_premise_is_a_departure_and_a_base_program_refutes_nothing(self):
+        import driver
+
+        out = {"refutations": [], "departures": [], "premise": None}
+        driver._check_stripped_premise({"rule": "MUT114", "stripped": "Keyed"}, [self.report("MUT114")], out)
+        self.assertEqual((out["refutations"], out["departures"][0]["kind"]), ([], "relevance-premise"))
+        out = {"refutations": [], "departures": [], "premise": None}
+        driver._check_stripped_premise({"rule": "EFF101", "stripped": None}, [self.report("EFF101")], out)
+        self.assertEqual(out["refutations"], [])
+
+
+class Minimizing(unittest.TestCase):
+    """A refutation that stands on how the program was built keeps its program text."""
+
+    files = {
+        "app/__init__.py": "",
+        "app/s0.py": "def f(flag):\n    if flag:\n        return None\n    return 1\n",
+    }
+    meta = {"entries": [{"module": "app.s0", "func": "f", "inputs": [{"args": [True]}, {"args": [False]}]}]}
+
+    def minimizer(self):
+        import minimize
+
+        class Always(minimize.Minimizer):
+            def holds(self, files, meta):
+                return True
+
+        return Always(None, "EFF101", "x", budget=30)
+
+    def test_a_stripped_premise_keeps_the_program_and_narrows_the_inputs(self):
+        finding = {"kind": "stripped-premise", "entry": None, "input": None}
+        files, meta = self.minimizer().run(dict(self.files), self.meta, finding)
+        self.assertEqual(files, self.files)
+        self.assertEqual(meta["entries"][0]["inputs"], [{"args": [True]}])
+
+    def test_a_run_time_refutation_is_reduced(self):
+        finding = {"kind": "no-wait", "entry": 0, "input": 1}
+        files, _meta = self.minimizer().run(dict(self.files), self.meta, finding)
+        self.assertNotEqual(files, self.files)
+
+
 class Ins:
     """An instruction as `dis` gives it, for the loop matcher."""
 
@@ -486,7 +562,14 @@ class Ins:
 
 class LoopMatching(unittest.TestCase):
     loop = {"id": "L0", "pos": [4, 13, 4, 18], "alt_pos": [[4, 4, 5, 20]]}
-    code = [Ins(8, "GET_ITER"), Ins(10, "FOR_ITER"), Ins(14, "UNPACK_SEQUENCE"), Ins(16, "STORE_FAST"), Ins(18, "STORE_FAST"), Ins(20, "LOAD_FAST")]
+    code = [
+        Ins(8, "GET_ITER"),
+        Ins(10, "FOR_ITER"),
+        Ins(14, "UNPACK_SEQUENCE"),
+        Ins(16, "STORE_FAST"),
+        Ins(18, "STORE_FAST"),
+        Ins(20, "LOAD_FAST"),
+    ]
 
     def test_the_iterable_s_position_finds_the_loop(self):
         pos_of = {8: (4, 13, 4, 18), 10: (4, 13, 4, 18), 20: (5, 8, 5, 9)}
@@ -529,7 +612,9 @@ class Recorder(unittest.TestCase):
         comp = next(n for n in ast.walk(tree) if isinstance(n, ast.ListComp))
         loops = [
             plan._loop_entry("Lfor", fors[0], "loops_mod.py"),
-            plan._loop_entry("Lcomp", (comp.generators[0], comp), "loops_mod.py", capture_body=["b"], keys=["a", "b"]),
+            plan._loop_entry(
+                "Lcomp", (comp.generators[0], comp), "loops_mod.py", capture_body=["b"], keys=["a", "b"]
+            ),
         ]
         recorder = monitor.Recorder(root, {"loops": loops})
         sys.path.insert(0, root)

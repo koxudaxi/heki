@@ -1454,8 +1454,11 @@ class Project:
             os.makedirs(os.path.dirname(full), exist_ok=True)
             with open(full, "w", encoding="utf-8") as f:
                 f.write(text)
+        meta = {"seed": self.seed, "entries": self.entries, "families": self.families}
+        if getattr(self, "premise", None):
+            meta["premise"] = self.premise
         with open(os.path.join(root, "oracle.json"), "w", encoding="utf-8") as f:
-            json.dump({"seed": self.seed, "entries": self.entries, "families": self.families}, f, indent=1)
+            json.dump(meta, f, indent=1)
 
 
 def _module_text(imports, defs):
