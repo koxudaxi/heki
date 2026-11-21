@@ -183,6 +183,7 @@ impl Watcher<'_> {
             &self.opts(),
             &selectors,
             self.args.analysis.baseline.as_deref(),
+            false,
         )?;
         Ok(Loaded {
             ws,

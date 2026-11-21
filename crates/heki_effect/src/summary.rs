@@ -20,10 +20,10 @@ use crate::resolver::{
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
     CallTarget, CellChange, Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey,
-    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, OptInFacts, PerItem,
-    ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SiteRole, Slot,
-    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite,
-    WriteKind,
+    GuardSubject, HandedState, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind,
+    OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
+    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
+    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
@@ -277,31 +277,25 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
         .extend(body.typed_field_read_sites);
     into.private_calls.extend(body.private_calls);
     into.unknown_calls |= body.unknown_calls;
-    add_state_changes(
-        into,
-        body.changed_state,
-        body.changes_globals,
-        body.changes_cells,
-    );
+    add_state_changes(into, body.shared_state.as_deref());
     into.refresh_typed_field_writes();
 }
 
-/// Add the changes of shared state of another body of the function (its `changed_state`,
-/// `changes_globals`, and `changes_cells`) to `into`'s, keeping the first change of each.
-fn add_state_changes(
-    into: &mut EffectSummary,
-    changed: BTreeMap<SharedState, Span>,
-    globals: bool,
-    cells: BTreeSet<CellChange>,
-) {
-    into.changes_globals |= globals;
-    into.changes_cells.extend(cells);
-    for (state, span) in changed {
-        let first = into.changed_state.entry(state).or_insert(span);
-        if span.start < first.start {
-            *first = span;
-        }
-    }
+/// Add the changes of shared state of another body of the function (`other`'s changed state,
+/// globals, cells, and the state its calls hand on) to `into`'s, keeping the first change of
+/// each.
+fn add_state_changes(into: &mut EffectSummary, other: Option<&SharedStateFacts>) {
+    let Some(other) = other.filter(|o| {
+        o.globals || !o.cells.is_empty() || !o.changed.is_empty() || !o.handed.is_empty()
+    }) else {
+        return;
+    };
+    into.change_shared_state(|f| {
+        f.globals |= other.globals;
+        f.cells.extend(other.cells.iter().cloned());
+        f.changed.extend(other.changed.iter().cloned());
+        f.handed.extend(other.handed.iter().cloned());
+    });
 }
 
 /// A `@typing.overload` signature.
@@ -410,14 +404,15 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     into.private_calls.extend(other.private_calls);
     into.offloads_blocking_params |= other.offloads_blocking_params;
     into.unknown_calls |= other.unknown_calls;
-    add_state_changes(
-        into,
-        other.changed_state,
-        other.changes_globals,
-        other.changes_cells,
-    );
+    add_state_changes(into, other.shared_state.as_deref());
     // A must-fact: new in every definition.
-    into.new_cells.retain(|c| other.new_cells.contains(c));
+    if !into.new_cells().is_empty() {
+        let other_new = other.shared_state.as_ref().map(|f| &f.new_cells);
+        into.change_shared_state(|f| {
+            f.new_cells
+                .retain(|c| other_new.is_some_and(|o| o.contains(c)));
+        });
+    }
     if let Some(o) = other.returns_protected {
         let ProtectedReturn {
             producer,
@@ -639,7 +634,7 @@ struct Extractor<'a> {
     reach: FxHashMap<VarId, Reach>,
     /// The module global or closure cell each variable's object may be reached from
     /// (`Self::global_root`; built on the first change the function makes).
-    global_roots: OnceCell<FxHashMap<VarId, Root<'a>>>,
+    global_roots: OnceCell<FxHashMap<VarId, RootSet<'a>>>,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -1382,14 +1377,15 @@ impl<'a> Extractor<'a> {
         self.reach.get(&var).copied().unwrap_or_default()
     }
 
-    /// The module global or closure cell the object `var` holds may be reached from (the first
-    /// one found): breadth first from the loads of globals and of the enclosing functions'
-    /// variables along the steps of [`Self::reach`], each variable once.
-    fn global_root(&self, var: VarId) -> Option<Root<'a>> {
+    /// The module globals and closure cells the object `var` holds may be reached from: from the
+    /// loads of globals and of the enclosing functions' variables (in the module body, from the
+    /// values it binds to the module's names) along the steps of [`Self::reach`], joined where
+    /// values merge; a variable is revisited only when its roots grow.
+    fn global_roots(&self, var: VarId) -> Option<&RootSet<'a>> {
         let f = self.f;
         let roots = self.global_roots.get_or_init(|| {
             let mut next: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
-            let mut roots: FxHashMap<VarId, Root<'a>> = FxHashMap::default();
+            let mut roots: FxHashMap<VarId, RootSet<'a>> = FxHashMap::default();
             let mut queue = std::collections::VecDeque::new();
             for bb in &f.blocks {
                 for phi in &bb.phis {
@@ -1401,6 +1397,9 @@ impl<'a> Extractor<'a> {
                     let root = match &inst.kind {
                         InstKind::LoadGlobal { dst, name, .. } => Some((*dst, Root::Global(name))),
                         InstKind::LoadDeref { dst, name } => Some((*dst, Root::Cell(name))),
+                        InstKind::StoreGlobal { name, value } if f.is_module_body => {
+                            Some((*value, Root::Global(name)))
+                        }
                         kind => {
                             if let Some((dst, src)) = reached_through(kind) {
                                 next.entry(src).or_default().push(dst);
@@ -1409,59 +1408,90 @@ impl<'a> Extractor<'a> {
                         }
                     };
                     if let Some((dst, root)) = root
-                        && roots.insert(dst, root).is_none()
+                        && roots.entry(dst).or_default().add(root)
                     {
                         queue.push_back(dst);
                     }
                 }
             }
             while let Some(v) = queue.pop_front() {
-                let root = roots[&v];
+                let from = roots[&v].clone();
                 for &d in next.get(&v).into_iter().flatten() {
-                    if let std::collections::hash_map::Entry::Vacant(e) = roots.entry(d) {
-                        e.insert(root);
+                    if roots.entry(d).or_default().join(&from) {
                         queue.push_back(d);
                     }
                 }
             }
             roots
         });
-        roots.get(&var).copied()
+        roots.get(&var)
     }
 
     /// A change, at `span`, of state that outlives the call.
     fn change_state(&mut self, state: SharedState, span: Span) {
+        if !self.opt_in.shared_state {
+            return;
+        }
+        let f = self.summary.shared_state_mut();
         match &state {
-            SharedState::Global(_) => self.summary.changes_globals = true,
-            SharedState::Cell(cell) => {
-                self.summary.changes_cells.insert(cell.clone());
-            }
+            SharedState::Global(_) => f.globals = true,
+            SharedState::Cell(cell) => f.cells.push(cell.clone()),
         }
-        let first = self.summary.changed_state.entry(state).or_insert(span);
-        if span.start < first.start {
-            *first = span;
-        }
+        f.changed.push((state, span));
     }
 
-    /// Rebinding or deleting the module global `name` (`global name`).
+    /// A change of the module global `name` or of its object.
     fn change_global(&mut self, name: &str, span: Span) {
         self.change_state(SharedState::Global(name.to_owned()), span);
+    }
+
+    /// Rebinding or deleting the module global `name`: a change of shared state, except in the
+    /// module body, whose bindings define the module's names.
+    fn bind_global(&mut self, name: &str, span: Span) {
+        if !self.f.is_module_body {
+            self.change_global(name, span);
+        }
     }
 
     /// A change of the closure cell of the enclosing functions' variable `name`: rebinding it
     /// (`rebinds`) or changing its object in place. A cell whose owner heki cannot find counts
     /// as a module global.
     fn change_cell(&mut self, name: &str, rebinds: bool, span: Span) {
-        let state = self
-            .cell_owner(name)
+        let state = self.cell_state(name, rebinds);
+        self.change_state(state, span);
+    }
+
+    /// The shared state of the enclosing functions' variable `name` ([`Self::change_cell`]).
+    fn cell_state(&self, name: &str, rebinds: bool) -> SharedState {
+        self.cell_owner(name)
             .map_or(SharedState::Global(name.to_owned()), |owner| {
                 SharedState::Cell(CellChange {
                     owner,
                     name: name.to_owned(),
                     rebinds,
                 })
-            });
-        self.change_state(state, span);
+            })
+    }
+
+    /// The shared state the object `var` holds may be reached from: each module global and
+    /// closure cell, and past [`MAX_ROOTS`] of them a module global whose name is not kept (an
+    /// empty name).
+    fn shared_states(&self, var: VarId) -> Vec<SharedState> {
+        let Some(roots) = self.global_roots(var) else {
+            return Vec::new();
+        };
+        let mut out: Vec<SharedState> = roots
+            .roots
+            .iter()
+            .map(|root| match root {
+                Root::Global(name) => SharedState::Global((*name).to_owned()),
+                Root::Cell(name) => self.cell_state(name, false),
+            })
+            .collect();
+        if roots.more {
+            out.push(SharedState::Global(String::new()));
+        }
+        out
     }
 
     /// The enclosing function whose variable `name` is (the nearest one whose nested functions
@@ -1471,11 +1501,7 @@ impl<'a> Extractor<'a> {
         let mut end = qualname.len();
         while let Some(i) = qualname[..end].rfind(".<locals>.") {
             let outer = &qualname[..i];
-            let owns =
-                self.cx.module_ir().functions.iter().any(|g| {
-                    func_qualname(g) == outer && g.captured_vars.iter().any(|c| c == name)
-                });
-            if owns {
+            if self.cx.captures(outer, name) {
                 return Some(outer.to_owned());
             }
             end = i;
@@ -1483,13 +1509,43 @@ impl<'a> Extractor<'a> {
         None
     }
 
+    /// The shared state the call at `site` hands to its project callee `callee`: the receiver
+    /// `recv` (parameter 0) and the arguments `bound` (parameter, variable).
+    fn handed(
+        &self,
+        site: Span,
+        callee: usize,
+        recv: Option<VarId>,
+        bound: &[(u8, VarId)],
+    ) -> Vec<HandedState> {
+        let Ok(callee) = u8::try_from(callee) else {
+            return Vec::new();
+        };
+        let args = recv
+            .map(|r| (0, r))
+            .into_iter()
+            .chain(bound.iter().copied());
+        args.flat_map(|(param, var)| {
+            self.shared_states(var)
+                .into_iter()
+                .map(move |state| HandedState {
+                    site,
+                    callee,
+                    param,
+                    state,
+                })
+        })
+        .collect()
+    }
+
     /// A change of the object `var` holds, at `span`: a change of the global or closure cell it
     /// is reached from, if any.
     fn change_object(&mut self, var: VarId, span: Span) {
-        match self.global_root(var) {
-            Some(Root::Global(name)) => self.change_global(name, span),
-            Some(Root::Cell(name)) => self.change_cell(name, false, span),
-            None => {}
+        if !self.opt_in.shared_state {
+            return;
+        }
+        for state in self.shared_states(var) {
+            self.change_state(state, span);
         }
     }
 
@@ -1497,7 +1553,7 @@ impl<'a> Extractor<'a> {
     /// new container (a display, or a copy of one).
     fn find_new_cells(&mut self) {
         let f = self.f;
-        if f.captured_vars.is_empty() {
+        if f.captured_vars.is_empty() || !self.opt_in.shared_state {
             return;
         }
         let new_container = |v: VarId| {
@@ -1524,12 +1580,15 @@ impl<'a> Extractor<'a> {
                 bound_otherwise.insert(name);
             }
         }
-        self.summary.new_cells = f
+        let new_cells: Vec<String> = f
             .captured_vars
             .iter()
             .filter(|c| !bound_otherwise.contains(c.as_str()))
             .cloned()
             .collect();
+        if !new_cells.is_empty() {
+            self.summary.shared_state_mut().new_cells = new_cells;
+        }
     }
 
     /// The project class a call constructs: a call of a class object (`Model(...)`,
@@ -1823,6 +1882,9 @@ impl<'a> Extractor<'a> {
             self.summary.hashed_whole_self_attrs = (!hashed.is_empty()).then(|| Box::new(hashed));
         }
         self.summary.refresh_typed_field_writes();
+        if let Some(state) = &mut self.summary.shared_state {
+            Arc::make_mut(state).normalize();
+        }
         let flow = self.events.take().map(|events| {
             let n = self.contracts.map_or(0, |c| c.invalidations());
             let (entry, calls, writes) = invalidation::analyze(f, events, n);
@@ -2772,7 +2834,7 @@ impl<'a> Extractor<'a> {
             // A value stored in a module global or a closure variable outlives the call.
             InstKind::StoreGlobal { name, value } => {
                 self.note_escape(*value);
-                self.change_global(name, span);
+                self.bind_global(name, span);
             }
             InstKind::StoreDeref { name, value } => {
                 self.note_escape(*value);
@@ -2780,7 +2842,12 @@ impl<'a> Extractor<'a> {
             }
             InstKind::Delete {
                 name, global: true, ..
-            } => self.change_global(name, span),
+            } => self.bind_global(name, span),
+            InstKind::Delete {
+                name,
+                nonlocal: true,
+                ..
+            } => self.change_cell(name, true, span),
             InstKind::AttrStore { obj, attr, value } => {
                 self.write_attr(*obj, attr, WriteKind::DirectAttr, span);
                 self.note_escape(*value);
@@ -4058,6 +4125,7 @@ impl<'a> Extractor<'a> {
                 let loops = self.loops_around(bb);
                 // `(callee, its index, receiver, bound arguments, offset)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
+                let mut handed: Vec<HandedState> = Vec::new();
                 // A constructor call binds the object it creates, unless the class may return
                 // an existing instance.
                 let new_recv = call
@@ -4187,6 +4255,9 @@ impl<'a> Extractor<'a> {
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_recv, bound.clone(), offset));
                     }
+                    if !offloaded && self.opt_in.shared_state {
+                        handed.extend(self.handed(call.span, callees.len(), handed_recv, &bound));
+                    }
                     // A copy of the exact length; the buffer keeps its room for the next call.
                     let mut exact = Vec::with_capacity(params.len());
                     exact.append(&mut params);
@@ -4203,6 +4274,9 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 self.param_origins = buffer;
+                if !handed.is_empty() {
+                    self.summary.shared_state_mut().handed.extend(handed);
+                }
                 for (decl, i, recv, bound, offset) in handovers {
                     let bound = &bound;
                     self.hand_over(
@@ -5468,13 +5542,51 @@ fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarI
     }
 }
 
-/// Where an object that outlives the call is held ([`Extractor::global_root`]).
-#[derive(Debug, Clone, Copy)]
+/// Where an object that outlives the call is held ([`Extractor::global_roots`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Root<'a> {
     /// A module global, by name.
     Global(&'a str),
     /// The closure cell of an enclosing function's variable, by name.
     Cell(&'a str),
+}
+
+/// The most roots [`RootSet`] keeps for one value.
+const MAX_ROOTS: usize = 8;
+
+/// The roots a value may be reached from: at most [`MAX_ROOTS`], and whether there are more.
+#[derive(Debug, Clone, Default)]
+struct RootSet<'a> {
+    roots: Vec<Root<'a>>,
+    more: bool,
+}
+
+impl<'a> RootSet<'a> {
+    /// Add `root`; whether the set grew.
+    fn add(&mut self, root: Root<'a>) -> bool {
+        if self.more || self.roots.contains(&root) {
+            return false;
+        }
+        if self.roots.len() == MAX_ROOTS {
+            self.more = true;
+        } else {
+            self.roots.push(root);
+        }
+        true
+    }
+
+    /// Add the roots of `other`; whether the set grew.
+    fn join(&mut self, other: &Self) -> bool {
+        let mut grew = false;
+        for root in &other.roots {
+            grew |= self.add(*root);
+        }
+        if other.more && !self.more {
+            self.more = true;
+            grew = true;
+        }
+        grew
+    }
 }
 
 /// The step by which an instruction's result is reached from an operand's object (`dst`, `src`):

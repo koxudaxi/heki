@@ -10,10 +10,10 @@ use crate::guards;
 use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
-    Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn,
-    ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, Slot, TypedFieldWriteSite,
-    UnresolvedWriteSite, WriteKind, cache_flow,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CellChange, Construction, Delivery,
+    EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins, ProjectIndex,
+    ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine, SharedState, SiteRole,
+    Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -720,14 +720,57 @@ fn add_cell_changes(
     bc: &BoundCallee,
     facts: &EffectSummary,
 ) {
-    for cell in &facts.changes_cells {
-        let own = cell.owner == site.caller.qualname
-            && bc.callee.module == site.caller.module
-            && (cell.rebinds || local.new_cells.contains(&cell.name));
-        if !own {
-            t.changes_cells.insert(cell.clone());
-        }
+    let leaving: Vec<&CellChange> = facts
+        .changes_cells()
+        .iter()
+        .filter(|cell| {
+            let own = cell.owner == site.caller.qualname
+                && bc.callee.module == site.caller.module
+                && (cell.rebinds || local.new_cells().contains(&cell.name));
+            !own
+        })
+        .collect();
+    if !leaving.is_empty() {
+        t.change_shared_state(|f| f.cells.extend(leaving.into_iter().cloned()));
     }
+}
+
+/// Add to `t` the shared state the caller (whose local summary is `local`) hands to the callee
+/// `bc` at `site` when the callee's `facts` change that argument (`helper(CACHE)`, a method of a
+/// module-level object changing `self`).
+fn add_handed_changes(
+    t: &mut EffectSummary,
+    local: &EffectSummary,
+    site: &CallSite,
+    bc: &BoundCallee,
+    facts: &EffectSummary,
+) {
+    if local.shared_state.is_none() {
+        return;
+    }
+    let Some(ci) = site
+        .project_callees()
+        .iter()
+        .position(|b| std::ptr::eq(b, bc))
+    else {
+        return;
+    };
+    let changed: Vec<&SharedState> = local
+        .handed_at(site.span, ci)
+        .filter(|h| facts.changes_argument(h.param))
+        .map(|h| &h.state)
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    t.change_shared_state(|f| {
+        for state in changed {
+            match state {
+                SharedState::Global(_) => f.globals = true,
+                SharedState::Cell(cell) => f.cells.push(cell.clone()),
+            }
+        }
+    });
 }
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`, a summary of the caller
@@ -751,8 +794,11 @@ fn transfer(
     t.offloads_blocking_params |= caller_params(facts.offloads_blocking_params, bc);
 
     // Shared state that outlives the call.
-    t.changes_globals |= facts.changes_globals;
+    if facts.changes_globals() && !t.changes_globals() {
+        t.change_shared_state(|f| f.globals = true);
+    }
     add_cell_changes(t, local, site, bc, facts);
+    add_handed_changes(t, local, site, bc, facts);
 
     // b. Execution effects, with the shortest chain to each. An effect whose guard the call
     //    decides against does not run here; the others take the call's guards and the

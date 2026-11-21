@@ -320,12 +320,21 @@ EffectSummary(f) = {
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)
-    changed_state:            Map<SharedState, Span>,      // module globals and enclosing functions' closure
+    shared_state:             Option<SharedStateFacts>,    // None for a function that changes no shared state
+                                                           // (only with OptInFacts::shared_state: heki inspect
+                                                           // and the language server, never heki check):
+      changed:                [(SharedState, Span)],       // module globals and enclosing functions' closure
                                                            // cells the own body rebinds, deletes, or changes
-                                                           // in place, first change of each (local)
-    changes_globals:          bool,                        // a module global changed by the body or a body
-                                                           // running in it (propagated)
-    changes_cells:            Set<CellChange>,             // closure cells changed so, except the own
+                                                           // in place (from every root a merged value may
+                                                           // have), first change of each (local); the
+                                                           // module body's bindings define its names and
+                                                           // do not count, its in-place changes do
+      handed:                 [HandedState],               // shared state its calls hand to a project callee
+                                                           // as an argument or the receiver (local)
+      globals:                bool,                        // a module global changed by the body, a body
+                                                           // running in it, or a callee changing what it is
+                                                           // handed (propagated)
+      cells:                  [CellChange],                // closure cells changed so, except the own
                                                            // variables whose change stays inside the call:
                                                            // rebound by a nested function, or bound only
                                                            // to new containers (new_cells) (propagated)
