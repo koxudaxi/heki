@@ -36,7 +36,7 @@ heki_effect::ownership::Live::of  W2  worklist: reach, Closure, or fixpoint
 heki_effect::ownership::origins_of  W2  worklist: reach, Closure, or fixpoint
 heki_effect::readonly::returned_values  W2  worklist: reach, Closure, or fixpoint
 heki_effect::resolver::ProjectDecls::c3  W1  recursion (calls itself): Memo or Closure
-heki_effect::resolver::ProjectDecls::definitions  W2  worklist: reach, Closure, or fixpoint
+heki_effect::resolver::ProjectDecls::definitions_along  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_effect::resolver::ProjectDecls::find_class_str_constant  W1  recursion (through ProjectDecls::class_str_constant): Memo or Closure
 heki_effect::resolver::aliases_of  W3  passes until nothing changes: fixpoint
 heki_effect::resolver::constant_source  W3  passes until nothing changes: fixpoint
@@ -51,10 +51,14 @@ heki_effect::summary::Extractor::build_reach  W3  passes until nothing changes: 
 heki_effect::summary::Extractor::call  W1  recursion (through Extractor::handed_callable): Memo or Closure
 heki_effect::summary::Extractor::drives_manually  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::Extractor::escape  W1  recursion (calls itself): Memo or Closure
+heki_effect::summary::Extractor::external_read  W1  recursion (calls itself): Memo or Closure; stage-2 migration debt
 heki_effect::summary::Extractor::handed_callable  W1  recursion (through Extractor::call): Memo or Closure
 heki_effect::summary::Extractor::hashed_whole_self_attrs  W2  worklist: reach, Closure, or fixpoint
+heki_effect::summary::Extractor::reference_site  W4  block_loop_depth: FnShape; stage-2 migration debt
 heki_effect::summary::Extractor::returned_origins  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::Extractor::returned_self_attrs  W2  worklist: reach, Closure, or fixpoint
+heki_effect::summary::HandedValues::handed_at  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
+heki_effect::summary::HandedValues::reaching  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_effect::summary::class_bodies_run_by  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::statements::Extractor::head_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
 heki_effect::summary::statements::Extractor::item_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
@@ -146,7 +150,7 @@ heki_rules::mut_rules::iterated_mutation::generators_reached  W2  worklist: reac
 heki_rules::mut_rules::private_methods_called_from_init  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::reachable_blocks  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::readonly_mutation::Rule::emit  W1  not recursive: `cx.emit` is `CheckContext::emit`, of the same name
-heki_rules::mut_rules::runs_inside_allowed  W2  worklist: reach, Closure, or fixpoint
+heki_rules::mut_rules::runs_inside_allowed_through  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_rules::mut_rules::unresolved::unknown_above  W2  worklist: reach, Closure, or fixpoint
 heki_rules::opt_rules::Defs::derived  W3  passes until nothing changes: fixpoint
 heki_rules::opt_rules::Defs::element_text  W1  recursion (calls itself): Memo or Closure

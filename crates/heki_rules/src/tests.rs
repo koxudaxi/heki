@@ -479,7 +479,7 @@ fn mut201_glob_writers_and_bad_targets() {
     ));
 }
 
-// ============================================================================ MUT202
+// ============================================================================ MUT114 / MUT202
 
 const MUT202_SRC: &str = r#"
 import copy
@@ -549,13 +549,21 @@ fn mut202_producers_propagation_and_sanitizers() {
         ..HekiConfig::default()
     };
     let diags = check(MUT202_SRC, &config);
-    let fns: BTreeSet<&str> = diags
-        .iter()
-        .filter(|d| d.rule_code == "MUT202")
-        .map(|d| d.qualname.as_str())
-        .collect();
+    let functions_of = |code: &str| -> BTreeSet<&str> {
+        diags
+            .iter()
+            .filter(|d| d.rule_code == code)
+            .map(|d| d.qualname.as_str())
+            .collect()
+    };
+    // A declared producer is `MUT202`; the `functools` caches are `MUT114`.
     assert_eq!(
-        fns,
+        functions_of("MUT202"),
+        BTreeSet::from(["tp_config_shallow_top"]),
+        "{diags:#?}"
+    );
+    assert_eq!(
+        functions_of("MUT114"),
         BTreeSet::from([
             "tp_nested",
             "tp_top",
@@ -563,17 +571,17 @@ fn mut202_producers_propagation_and_sanitizers() {
             "tp_helper",
             "tp_iter",
             "tp_shallow_nested",
-            "tp_config_shallow_top",
         ]),
         "{diags:#?}"
     );
     let helper = diags.iter().find(|d| d.qualname == "tp_helper").unwrap();
+    assert_eq!(helper.rule_code, "MUT114");
     assert_eq!(helper.target, "app.schema");
     assert_eq!(helper.related.len(), 1);
 }
 
 #[test]
-fn mut202_model_copy_deep_flag() {
+fn mut114_model_copy_deep_flag() {
     let src = r#"
 from functools import lru_cache
 from pydantic import BaseModel
@@ -689,7 +697,7 @@ fn eff101_root_cause_grouping() {
     assert!(
         diags[0]
             .message
-            .ends_with("(+10 more async call sites reaching the same blocking root cause)"),
+            .ends_with("(+10 more async call sites that always run `time.sleep`)"),
         "{}",
         diags[0].message
     );
@@ -944,21 +952,21 @@ fn mut101_skips_methods_a_stale_index_does_not_summarize() {
 }
 
 #[test]
-fn mut202_skips_callees_a_stale_index_does_not_summarize() {
+fn mut114_skips_callees_a_stale_index_does_not_summarize() {
     let edited = "from functools import lru_cache\n\n@lru_cache\ndef load():\n    return []\n\ndef mutate(items):\n    items.append(1)\n\ndef use():\n    mutate(load())\n";
     let old = "from functools import lru_cache\n\n@lru_cache\ndef load():\n    return []\n";
     let diags = check_against(
         &[build("app.py", edited)],
         &[build("app.py", old)],
-        &["MUT202"],
+        &["MUT114"],
     );
     assert!(diags.is_empty(), "{diags:#?}");
     let diags = check_against(
         &[build("app.py", edited)],
         &[build("app.py", edited)],
-        &["MUT202"],
+        &["MUT114"],
     );
-    assert_eq!(codes(&diags), vec!["MUT202"]);
+    assert_eq!(codes(&diags), vec!["MUT114"]);
 }
 
 #[test]
@@ -1037,4 +1045,24 @@ fn discovery_of_single_files_matches_the_walk() {
         &dir.join("gone/new.py")
     ));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn test_code_is_what_pytest_discovers() {
+    use crate::eff_rules::is_test_code;
+    for (qualname, path, test) in [
+        ("test_login", "app/views.py", true),
+        ("TestLogin.test_redirect", "app/views.py", true),
+        ("test_login.<locals>.helper", "app/views.py", true),
+        ("handler", "tests/api.py", true),
+        ("handler", "src/test/api.py", true),
+        ("handler", "evals/web/test_flows.py", true),
+        ("handler", "app/views_test.py", true),
+        ("handler", "app/views.py", false),
+        ("handler", "app/testing.py", false),
+        ("handler", "app/tests.py", false),
+        ("contest", "app/contest/views.py", false),
+    ] {
+        assert_eq!(is_test_code(qualname, path), test, "{qualname} {path}");
+    }
 }

@@ -361,12 +361,14 @@ impl Origins {
 }
 
 /// `len(var) <= bound` on every path through the edge into `edge_to` (its one predecessor
-/// branches on a test implying it).
+/// branches on the test `cond`, which is `holds` on that edge, implying it).
 #[derive(Debug, Clone, Copy)]
 struct LenGuard {
     edge_to: BlockId,
     var: VarId,
     bound: u32,
+    cond: VarId,
+    holds: bool,
 }
 
 /// One cap per measured value, its smallest: the caps of one list all hold at once. Keeping
@@ -1805,40 +1807,30 @@ impl<'a> FnIndex<'a> {
     /// leaving), not only caps it.
     fn pins_len(&self, g: &LenGuard) -> bool {
         let shape = &self.shape;
-        let [from] = shape.preds(g.edge_to) else {
+        // Each `not` around the comparison flips the outcome the edge gives it.
+        let not_of = |&(v, holds): &(VarId, bool)| match shape.inst(v).map(|i| &i.kind) {
+            Some(InstKind::UnaryOp {
+                op: UnaryOpKind::Not,
+                operand,
+                ..
+            }) => Some((shape.copy_root(*operand), !holds)),
+            _ => None,
+        };
+        let start = (shape.copy_root(g.cond), g.holds);
+        let (v, holds) = std::iter::successors(Some(start), not_of)
+            .take(MAX_ACCESS_STEPS as usize)
+            .fold(start, |_, step| step);
+        let Some(InstKind::Compare { op, lhs, rhs, .. }) = shape.inst(v).map(|i| &i.kind) else {
             return false;
         };
-        let Terminator::Branch { cond, then_bb, .. } = self.f.block(*from).terminator else {
-            return false;
-        };
-        let mut holds = then_bb == g.edge_to;
-        let mut v = shape.copy_root(cond);
-        for _ in 0..MAX_ACCESS_STEPS {
-            match shape.inst(v).map(|i| &i.kind) {
-                Some(InstKind::UnaryOp {
-                    op: UnaryOpKind::Not,
-                    operand,
-                    ..
-                }) => {
-                    holds = !holds;
-                    v = shape.copy_root(*operand);
-                }
-                Some(InstKind::Compare { op, lhs, rhs, .. }) => {
-                    let equal = matches!(
-                        (op, holds),
-                        (CompareOpKind::Eq, true) | (CompareOpKind::NotEq, false)
-                    );
-                    let bound = |x: VarId| {
-                        paths::scalar(self, x) == Some(paths::Scalar::Int(i64::from(g.bound)))
-                    };
-                    let measures = |x: VarId| self.len_argument(x).is_some();
-                    return equal
-                        && ((measures(*lhs) && bound(*rhs)) || (measures(*rhs) && bound(*lhs)));
-                }
-                _ => return false,
-            }
-        }
-        false
+        let equal = matches!(
+            (op, holds),
+            (CompareOpKind::Eq, true) | (CompareOpKind::NotEq, false)
+        );
+        let bound =
+            |x: VarId| paths::scalar(self, x) == Some(paths::Scalar::Int(i64::from(g.bound)));
+        let measures = |x: VarId| self.len_argument(x).is_some();
+        equal && ((measures(*lhs) && bound(*rhs)) || (measures(*rhs) && bound(*lhs)))
     }
 
     /// Whether a test that the length is at most `bound` (exactly `bound` when `pinned`) fails
@@ -1902,6 +1894,8 @@ impl<'a> FnIndex<'a> {
                             edge_to: to,
                             var,
                             bound,
+                            cond,
+                            holds,
                         });
                     }
                 }

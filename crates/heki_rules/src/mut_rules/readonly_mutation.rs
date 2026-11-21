@@ -13,7 +13,7 @@
 use super::{Allowance, facts_run_at, initializes_itself, runs_inside_allowed};
 use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Certainty, Diagnostic, RelatedLocation};
 use heki_effect::{
     BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ProjectIndex, ReadOnlyAttr,
     ReadOnlyKind, SiteRole, Slot, WriteKind,
@@ -93,6 +93,16 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             rule.handed_over(unit, path, site, out);
         }
     }
+}
+
+/// A `MUT110` report of one call, emitted once every callee of the call is read.
+struct HandedParam {
+    name: String,
+    message: String,
+    help: String,
+    chain: Vec<CallHop>,
+    /// The line that changes the caller's object, which makes the report exact.
+    witness: Option<RelatedLocation>,
 }
 
 /// One project callee of a call site, with the facts of it that run there.
@@ -206,6 +216,7 @@ impl Rule<'_, '_> {
             let summary = cx.index.summary(&bc.callee)?;
             Some((bc, facts_run_at(cx.index, site, summary)?))
         });
+        let mut handed: Vec<HandedParam> = Vec::new();
         for (bc, callee) in callees {
             let call = Call {
                 unit,
@@ -256,27 +267,50 @@ impl Rule<'_, '_> {
                     && let Some(decl) = readonly.filter(|d| d.readonly_params & (1u64 << p) != 0)
                 {
                     let name = &decl.param_names[usize::from(*p)];
-                    let message = format!(
-                        "`{}` passes its read-only parameter `{name}` to `{}`, which changes it in place",
-                        site.caller.qualname,
-                        bc.callee.fqn()
-                    );
+                    let (chain, (changer, j)) = self.chain(&call, k, None);
+                    // The line where the function at the end of the chain changes the object its
+                    // parameter `j` holds, which is the caller's parameter whenever it runs. The
+                    // chain does not follow a change made where a returned generator is
+                    // iterated: without its line the claim is open, and the report heuristic.
+                    let witness = self.inplace_site(&changer, j).map(|(path, span)| {
+                        let what =
+                            format!("`{}` changes the object in place here", changer.qualname);
+                        cx.related_at(path, span, what)
+                    });
+                    let (caller, callee) = (&site.caller.qualname, bc.callee.fqn());
+                    let message = match &witness {
+                        Some(w) => format!(
+                            "`{caller}` passes its read-only parameter `{name}` to `{callee}`; whenever line {} of `{}` runs, it changes the caller's object in place",
+                            w.line, changer.qualname,
+                        ),
+                        None => format!(
+                            "`{caller}` passes its read-only parameter `{name}` to `{callee}`, which changes it in place"
+                        ),
+                    };
                     let help = format!(
                         "pass a copy (`list({name})` / `dict({name})`), or annotate the helper's parameter with a mutable type"
                     );
-                    let chain = self.chain(&call, k, None);
-                    let (caller, span) = (&site.caller, site.span);
-                    self.emit(
-                        out,
-                        "MUT110",
-                        unit,
-                        caller,
-                        span,
-                        name.clone(),
+                    handed.push(HandedParam {
+                        name: name.clone(),
                         message,
-                        &help,
-                        &chain,
-                    );
+                        help,
+                        chain,
+                        witness,
+                    });
+                }
+            }
+        }
+        // One report per parameter: the one naming a line when any callee has one.
+        handed.sort_by_key(|h| h.witness.is_none());
+        for h in handed {
+            let (caller, span) = (&site.caller, site.span);
+            let target = h.name;
+            if let Some(d) = self.emit(
+                out, "MUT110", unit, caller, span, target, h.message, &h.help, &h.chain,
+            ) {
+                match h.witness {
+                    Some(w) => d.related.push(w),
+                    None => d.certainty = Certainty::Heuristic.at_most(d.certainty),
                 }
             }
         }
@@ -315,16 +349,27 @@ impl Rule<'_, '_> {
             call.site.caller.qualname,
             call.bc.callee.fqn()
         );
-        let chain = self.chain(call, k, what);
+        let (chain, _) = self.chain(call, k, what);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
         self.emit(
             out, "MUT108", unit, caller, span, target, message, FIX, &chain,
         );
     }
 
+    /// The first of the function's own in-place changes of its parameter `j` itself
+    /// (`EffectSummary::param_inplace_sites`), with the function's file.
+    fn inplace_site(&self, func: &FuncKey, j: u8) -> Option<(&Path, Span)> {
+        let index = self.cx.index;
+        let path = index.file_of(func)?;
+        let local = index.files.get(path)?.local_functions.get(func)?;
+        let first = local.param_inplace_sites.get(&j)?.first()?;
+        Some((path, *first))
+    }
+
     /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
-    /// the shortest chain of calls down to the function whose own body makes the change.
-    fn chain(&self, call: &Call<'_>, k: u8, what: Changed) -> Vec<CallHop> {
+    /// the shortest chain of calls down to the function whose own body makes the change, and
+    /// that function with its parameter.
+    fn chain(&self, call: &Call<'_>, k: u8, what: Changed) -> (Vec<CallHop>, (FuncKey, u8)) {
         let index = self.cx.index;
         let hop = |caller: &FuncKey, callee: &FuncKey, span: Span, path: &Path| CallHop {
             caller: caller.clone(),
@@ -392,6 +437,7 @@ impl Rule<'_, '_> {
             }
             i += 1;
         }
+        let end = (states[found].0.clone(), states[found].1);
         let mut chain = Vec::new();
         let mut at = Some(found);
         while let Some(i) = at {
@@ -399,14 +445,14 @@ impl Rule<'_, '_> {
             at = states[i].3;
         }
         chain.reverse();
-        chain
+        (chain, end)
     }
 
     /// One report per `(rule, function, span, target)`.
     #[allow(clippy::too_many_arguments)]
-    fn emit(
+    fn emit<'o>(
         &mut self,
-        out: &mut Vec<Diagnostic>,
+        out: &'o mut Vec<Diagnostic>,
         code: &'static str,
         unit: &ModuleUnit<'_>,
         func: &FuncKey,
@@ -415,14 +461,17 @@ impl Rule<'_, '_> {
         message: String,
         help: &str,
         chain: &[CallHop],
-    ) {
-        if self.seen.insert((code, func.clone(), span, target.clone())) {
-            let qualname = &func.qualname;
-            let help = Some(help.to_owned());
-            self.cx.emit(
-                out, code, unit, span, qualname, target, message, help, chain,
-            );
-        }
+    ) -> Option<&'o mut Diagnostic> {
+        let first = self.seen.insert((code, func.clone(), span, target.clone()));
+        let qualname = &func.qualname;
+        let help = Some(help.to_owned());
+        first
+            .then(|| {
+                self.cx.emit(
+                    out, code, unit, span, qualname, target, message, help, chain,
+                )
+            })
+            .flatten()
     }
 }
 

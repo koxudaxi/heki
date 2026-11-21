@@ -739,7 +739,7 @@ pub(crate) fn propagate_facts(
                     Through::Instance => targets
                         .classes
                         .iter()
-                        .find(|line| line[0] == w.class)
+                        .find(|line| line[0].fqn == w.class)
                         .map_or(0, |line| contracts.target_of(line, w.attr)),
                 };
                 let reach = w.origin.reach;
