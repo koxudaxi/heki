@@ -24,14 +24,15 @@ use crate::resolver::{
 };
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
-    CallTarget, Construction, ContractClass, Contracts, Dispatch, EffectSummary, FileSummary,
-    FuncKey, GuardSubject, Implementers, Items, ModuleInput, MustExec, NewArg, NewCond, NewKind,
-    OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine,
-    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite,
-    UnresolvedWriteSite, WriteKind,
+    CallTarget, CellChange, Construction, ContractClass, Contracts, Dispatch, EffectSummary,
+    FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items, ModuleInput, MustExec,
+    NewArg, NewCond, NewKind, OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind,
+    ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts, SiteRole, Slot,
+    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite,
+    WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::{Answer, FnShape};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode, Progress,
@@ -312,10 +313,28 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
         .extend(body.typed_field_read_sites);
     into.private_calls.extend(body.private_calls);
     into.unknown_calls |= body.unknown_calls;
+    add_state_changes(into, body.shared_state.as_deref());
     into.capacity_waits.extend(body.capacity_waits);
     into.absorb_lock_facts(body.locks);
     into.absorb_exclusive_uses(body.exclusive.into_iter().flat_map(|uses| *uses));
     into.refresh_typed_field_writes();
+}
+
+/// Add the changes of shared state of another body of the function (`other`'s changed state,
+/// globals, cells, and the state its calls hand on) to `into`'s, keeping the first change of
+/// each.
+fn add_state_changes(into: &mut EffectSummary, other: Option<&SharedStateFacts>) {
+    let Some(other) = other.filter(|o| {
+        o.globals || !o.cells.is_empty() || !o.changed.is_empty() || !o.handed.is_empty()
+    }) else {
+        return;
+    };
+    into.change_shared_state(|f| {
+        f.globals |= other.globals;
+        f.cells.extend(other.cells.iter().cloned());
+        f.changed.extend(other.changed.iter().cloned());
+        f.handed.extend(other.handed.iter().cloned());
+    });
 }
 
 /// A `@typing.overload` signature.
@@ -435,6 +454,15 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     into.private_calls.extend(other.private_calls);
     into.offloads_blocking_params |= other.offloads_blocking_params;
     into.unknown_calls |= other.unknown_calls;
+    add_state_changes(into, other.shared_state.as_deref());
+    // A must-fact: new in every definition.
+    if !into.new_cells().is_empty() {
+        let other_new = other.shared_state.as_ref().map(|f| &f.new_cells);
+        into.change_shared_state(|f| {
+            f.new_cells
+                .retain(|c| other_new.is_some_and(|o| o.contains(c)));
+        });
+    }
     if let Some(o) = other.returns_protected {
         let ProtectedReturn {
             producer,
@@ -682,6 +710,10 @@ struct Extractor<'a> {
     /// Where each variable's object comes from among the objects that existed before the call
     /// (`MUT109`; empty unless an `invalidation` contract is configured).
     reach: FxHashMap<VarId, Reach>,
+    /// The module globals and closure cells each value may be reached from
+    /// ([`Self::global_roots`]), on the function's tables and budget.
+    roots: Closure<VarId, KeySet<Root<'a>>>,
+    roots_budget: Budget,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -965,6 +997,9 @@ impl<'a> Extractor<'a> {
             is_lru_cache: decorated_as(cx.module, f, &["lru_cache", "cache"]),
             owner_class_qualname: f.owner_class_qualname.clone(),
             decorators: f.decorators.clone(),
+            // `eval`, `exec`, `locals()`, frame introspection (Assumption A1): code heki cannot
+            // follow runs here, or reads and changes this frame's state.
+            unknown_calls: !f.a1_hazards.is_empty(),
             ..EffectSummary::default()
         };
         let live = ownership::Live::of(f, &defs);
@@ -1015,6 +1050,8 @@ impl<'a> Extractor<'a> {
                 .map(|_| Events::default()),
             exempt: None,
             reach: FxHashMap::default(),
+            roots: Closure::new(),
+            roots_budget: Budget::of_function("summary::global_roots", f),
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
@@ -1039,6 +1076,7 @@ impl<'a> Extractor<'a> {
             ex.build_reach();
         }
         ex.build_aliases();
+        ex.find_new_cells();
         ex.memo_fills = ex.memo_fills();
         let class_of = |v: VarId| match ex.types.get(&v) {
             Some(Val::Inst(class)) => Some(class.as_str()),
@@ -1608,24 +1646,7 @@ impl<'a> Extractor<'a> {
                     changed |= join_reach(&mut self.reach, phi.dst, r);
                 }
                 for inst in &bb.insts {
-                    let from = match &inst.kind {
-                        InstKind::Copy { dst, src }
-                        | InstKind::AttrLoad { dst, obj: src, .. }
-                        | InstKind::SubscriptLoad { dst, obj: src, .. }
-                        | InstKind::MakeIter {
-                            dst, iterable: src, ..
-                        }
-                        | InstKind::IterNext { dst, iter: src, .. } => Some((*dst, *src)),
-                        InstKind::MethodCall {
-                            dst, recv, method, ..
-                        } if readonly::ELEMENT_ACCESSORS.contains(&method.as_str())
-                            || matches!(method.as_str(), "pop" | "popitem" | "setdefault") =>
-                        {
-                            Some((*dst, *recv))
-                        }
-                        _ => None,
-                    };
-                    if let Some((dst, src)) = from {
+                    if let Some((dst, src)) = reached_through(&inst.kind) {
                         let r = self.reach_of(src);
                         changed |= join_reach(&mut self.reach, dst, r);
                     }
@@ -1640,6 +1661,203 @@ impl<'a> Extractor<'a> {
     /// [`Self::reach`] of `var`.
     fn reach_of(&self, var: VarId) -> Reach {
         self.reach.get(&var).copied().unwrap_or_default()
+    }
+
+    /// The module globals and closure cells the object `var` holds may be reached from: the
+    /// loads of globals and of the enclosing functions' variables (in the module body, the values
+    /// it binds to the module's names) it is reached from along the steps of [`Self::reach`];
+    /// open past the function's budget.
+    fn global_roots(&self, var: VarId) -> Answer<std::rc::Rc<KeySet<Root<'a>>>> {
+        let f = self.f;
+        let shape = self.shape;
+        let own = |v: VarId| {
+            let mut roots = KeySet::new();
+            match shape.inst(v).map(|inst| &inst.kind) {
+                Some(InstKind::LoadGlobal { name, .. }) => {
+                    roots.insert(Root::Global(name));
+                }
+                Some(InstKind::LoadDeref { name, .. }) => {
+                    roots.insert(Root::Cell(name));
+                }
+                _ => {}
+            }
+            if f.is_module_body {
+                for u in shape.readers(v) {
+                    if let Use::Inst(b, i) = *u
+                        && let InstKind::StoreGlobal { name, value } =
+                            &f.block(b).insts[i as usize].kind
+                        && *value == v
+                    {
+                        roots.insert(Root::Global(name));
+                    }
+                }
+            }
+            roots
+        };
+        let sources = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
+            Def::Inst(b, i) => out.extend(
+                reached_through(&f.block(b).insts[i as usize].kind)
+                    .filter(|(dst, _)| *dst == v)
+                    .map(|(_, src)| src),
+            ),
+            Def::Phi(b, i) => {
+                out.extend(f.block(b).phis[i as usize].incoming.iter().map(|(_, v)| *v))
+            }
+            Def::Param | Def::None => {}
+        };
+        self.roots.ask(&self.roots_budget, var, own, sources)
+    }
+
+    /// A change, at `span`, of state that outlives the call.
+    fn change_state(&mut self, state: SharedState, span: Span) {
+        if !self.opt_in.shared_state {
+            return;
+        }
+        let f = self.summary.shared_state_mut();
+        match &state {
+            SharedState::Global(_) => f.globals = true,
+            SharedState::Cell(cell) => f.cells.push(cell.clone()),
+        }
+        f.changed.push((state, span));
+    }
+
+    /// A change of the module global `name` or of its object.
+    fn change_global(&mut self, name: &str, span: Span) {
+        self.change_state(SharedState::Global(name.to_owned()), span);
+    }
+
+    /// Rebinding or deleting the module global `name`: a change of shared state, except in the
+    /// module body, whose bindings define the module's names.
+    fn bind_global(&mut self, name: &str, span: Span) {
+        if !self.f.is_module_body {
+            self.change_global(name, span);
+        }
+    }
+
+    /// A change of the closure cell of the enclosing functions' variable `name`: rebinding it
+    /// (`rebinds`) or changing its object in place. A cell whose owner heki cannot find counts
+    /// as a module global.
+    fn change_cell(&mut self, name: &str, rebinds: bool, span: Span) {
+        let state = self.cell_state(name, rebinds);
+        self.change_state(state, span);
+    }
+
+    /// The shared state of the enclosing functions' variable `name` ([`Self::change_cell`]).
+    fn cell_state(&self, name: &str, rebinds: bool) -> SharedState {
+        self.cell_owner(name)
+            .map_or(SharedState::Global(name.to_owned()), |owner| {
+                SharedState::Cell(CellChange {
+                    owner,
+                    name: name.to_owned(),
+                    rebinds,
+                })
+            })
+    }
+
+    /// The shared state the object `var` holds may be reached from: each module global and
+    /// closure cell, or, when the walk is open past its budget, a module global whose name is not
+    /// known (an empty name).
+    fn shared_states(&self, var: VarId) -> Vec<SharedState> {
+        match self.global_roots(var) {
+            Answer::Known(roots) => roots
+                .iter()
+                .map(|root| match root {
+                    Root::Global(name) => SharedState::Global((*name).to_owned()),
+                    Root::Cell(name) => self.cell_state(name, false),
+                })
+                .collect(),
+            Answer::Open => vec![SharedState::Global(String::new())],
+        }
+    }
+
+    /// The enclosing function whose variable `name` is (the nearest one whose nested functions
+    /// capture it), by qualname.
+    fn cell_owner(&self, name: &str) -> Option<String> {
+        let qualname = func_qualname(self.f);
+        qualname
+            .rmatch_indices(".<locals>.")
+            .map(|(i, _)| &qualname[..i])
+            .find(|outer| self.cx.captures(outer, name))
+            .map(str::to_owned)
+    }
+
+    /// The shared state the call at `site` hands to its project callee `callee`: the receiver
+    /// `recv` (parameter 0) and the arguments `bound` (parameter, variable).
+    fn handed(
+        &self,
+        site: Span,
+        callee: usize,
+        recv: Option<VarId>,
+        bound: &[(u8, VarId)],
+    ) -> Vec<HandedState> {
+        let args = recv
+            .map(|r| (0, r))
+            .into_iter()
+            .chain(bound.iter().copied());
+        args.flat_map(|(param, var)| {
+            self.shared_states(var)
+                .into_iter()
+                .map(move |state| HandedState {
+                    site,
+                    callee,
+                    param,
+                    state,
+                })
+        })
+        .collect()
+    }
+
+    /// A change of the object `var` holds, at `span`: a change of the global or closure cell it
+    /// is reached from, if any.
+    fn change_object(&mut self, var: VarId, span: Span) {
+        if !self.opt_in.shared_state {
+            return;
+        }
+        for state in self.shared_states(var) {
+            self.change_state(state, span);
+        }
+    }
+
+    /// [`EffectSummary::new_cells`]: the captured variables every assignment of which binds a
+    /// new container (a display, or a copy of one).
+    fn find_new_cells(&mut self) {
+        let f = self.f;
+        if f.captured_vars.is_empty() || !self.opt_in.shared_state {
+            return;
+        }
+        let new_container = |v: VarId| {
+            matches!(
+                self.defs.get(&v).map(|i| &i.kind),
+                Some(InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. })
+            )
+        };
+        let mut bound_otherwise: FxHashSet<&str> =
+            f.params.iter().map(|p| p.name.as_str()).collect();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            let Some(dst) = inst.kind.dst() else { continue };
+            let Some(name) = f.var_name(dst) else {
+                continue;
+            };
+            let new = match &inst.kind {
+                InstKind::Copy { src, .. } => new_container(*src),
+                kind => matches!(
+                    kind,
+                    InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. }
+                ),
+            };
+            if !new {
+                bound_otherwise.insert(name);
+            }
+        }
+        let new_cells: Vec<String> = f
+            .captured_vars
+            .iter()
+            .filter(|c| !bound_otherwise.contains(c.as_str()))
+            .cloned()
+            .collect();
+        if !new_cells.is_empty() {
+            self.summary.shared_state_mut().new_cells = new_cells;
+        }
     }
 
     /// The project class a call constructs: a call of a class object (`Model(...)`,
@@ -1978,6 +2196,9 @@ impl<'a> Extractor<'a> {
             self.summary.hashed_whole_self_attrs = (!hashed.is_empty()).then(|| Box::new(hashed));
         }
         self.summary.refresh_typed_field_writes();
+        if let Some(state) = &mut self.summary.shared_state {
+            Arc::make_mut(state).normalize();
+        }
         let flow = self.events.take().map(|events| {
             let n = self.contracts.map_or(0, |c| c.invalidations());
             let (entry, calls, writes) = invalidation::analyze(self.shape, events, n);
@@ -3099,9 +3320,22 @@ impl<'a> Extractor<'a> {
                 self.container_change(*lhs, ContainerChange::Resizes, span);
             }
             // A value stored in a module global or a closure variable outlives the call.
-            InstKind::StoreGlobal { value, .. } | InstKind::StoreDeref { value, .. } => {
+            InstKind::StoreGlobal { name, value } => {
                 self.note_escape(*value);
+                self.bind_global(name, span);
             }
+            InstKind::StoreDeref { name, value } => {
+                self.note_escape(*value);
+                self.change_cell(name, true, span);
+            }
+            InstKind::Delete {
+                name, global: true, ..
+            } => self.bind_global(name, span),
+            InstKind::Delete {
+                name,
+                nonlocal: true,
+                ..
+            } => self.change_cell(name, true, span),
             InstKind::AttrStore { obj, attr, value } => {
                 self.write_attr(*obj, attr, WriteKind::DirectAttr, span);
                 self.note_escape(*value);
@@ -3731,6 +3965,9 @@ impl<'a> Extractor<'a> {
 
     /// Write of attribute `attr` on the object `owner` (AttrStore / AttrDelete / setattr / __dict__).
     fn write_owner_attr(&mut self, owner: Owner, attr: &str, kind: WriteKind, span: Span) {
+        if let Some(var) = owner.var {
+            self.change_object(var, span);
+        }
         let written = owner.written();
         if owner.is_self {
             self.summary.mutates_self_attrs.insert(AttrKeyPath {
@@ -3824,6 +4061,7 @@ impl<'a> Extractor<'a> {
     /// `obj.__dict__[name] = v`): unresolved when the object has a project class.
     fn computed_name(&mut self, owner: &Owner, kind: WriteKind, span: Span) {
         let Some(var) = owner.var else { return };
+        self.change_object(var, span);
         for class in &owner.typed_classes {
             self.unresolved(Unresolved::Name(class.clone()), var, kind, span);
         }
@@ -4184,6 +4422,7 @@ impl<'a> Extractor<'a> {
         item_key: Option<String>,
         span: Span,
     ) {
+        self.change_object(var, span);
         if let Some(attr) = self.self_attr_alias.get(&var).cloned() {
             self.summary.mutates_self_attrs.insert(AttrKeyPath {
                 attr,
@@ -4504,6 +4743,7 @@ impl<'a> Extractor<'a> {
                 let loops = self.loops_around(bb);
                 // `(callee, its index, receiver, bound arguments, offset)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
+                let mut handed_state: Vec<HandedState> = Vec::new();
                 // A constructor call binds the object it creates, unless the class may return
                 // an existing instance.
                 let new_recv = call
@@ -4635,6 +4875,14 @@ impl<'a> Extractor<'a> {
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_recv, bound.clone(), offset));
                     }
+                    if !offloaded && self.opt_in.shared_state {
+                        handed_state.extend(self.handed(
+                            call.span,
+                            callees.len(),
+                            handed_recv,
+                            &bound,
+                        ));
+                    }
                     // A copy of the exact length; the buffer keeps its room for the next call.
                     let mut exact = Vec::with_capacity(params.len());
                     exact.append(&mut params);
@@ -4651,6 +4899,9 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 self.param_origins = buffer;
+                if !handed_state.is_empty() {
+                    self.summary.shared_state_mut().handed.extend(handed_state);
+                }
                 for (decl, i, recv, bound, offset) in handovers {
                     let bound = &bound;
                     self.hand_over(
@@ -6412,6 +6663,38 @@ fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarI
     }
     if let Some(a) = found {
         map.insert(dst, a);
+    }
+}
+
+/// Where an object that outlives the call is held ([`Extractor::global_roots`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Root<'a> {
+    /// A module global, by name.
+    Global(&'a str),
+    /// The closure cell of an enclosing function's variable, by name.
+    Cell(&'a str),
+}
+
+/// The step by which an instruction's result is reached from an operand's object (`dst`, `src`):
+/// a copy, an attribute or item of it, an iterator over it or an item it yields, an element its
+/// accessor returns (`get`, `pop`, `setdefault`, ...).
+fn reached_through(kind: &InstKind) -> Option<(VarId, VarId)> {
+    match kind {
+        InstKind::Copy { dst, src }
+        | InstKind::AttrLoad { dst, obj: src, .. }
+        | InstKind::SubscriptLoad { dst, obj: src, .. }
+        | InstKind::MakeIter {
+            dst, iterable: src, ..
+        }
+        | InstKind::IterNext { dst, iter: src, .. } => Some((*dst, *src)),
+        InstKind::MethodCall {
+            dst, recv, method, ..
+        } if readonly::ELEMENT_ACCESSORS.contains(&method.as_str())
+            || matches!(method.as_str(), "pop" | "popitem" | "setdefault") =>
+        {
+            Some((*dst, *recv))
+        }
+        _ => None,
     }
 }
 

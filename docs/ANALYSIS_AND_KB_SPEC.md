@@ -406,6 +406,24 @@ EffectSummary(f) = {
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)
+    shared_state:             Option<SharedStateFacts>,    // None for a function that changes no shared state
+                                                           // (only with OptInFacts::shared_state: heki inspect
+                                                           // and the language server, never heki check):
+      changed:                [(SharedState, Span)],       // module globals and enclosing functions' closure
+                                                           // cells the own body rebinds, deletes, or changes
+                                                           // in place (from every root a merged value may
+                                                           // have), first change of each (local); the
+                                                           // module body's bindings define its names and
+                                                           // do not count, its in-place changes do
+      handed:                 [HandedState],               // shared state its calls hand to a project callee
+                                                           // as an argument or the receiver (local)
+      globals:                bool,                        // a module global changed by the body, a body
+                                                           // running in it, or a callee changing what it is
+                                                           // handed (propagated)
+      cells:                  [CellChange],                // closure cells changed so, except the own
+                                                           // variables whose change stays inside the call:
+                                                           // rebound by a nested function, or bound only
+                                                           // to new containers (new_cells) (propagated)
     capacity_waits:           Vec<CapacityWait>,           // own waits on queues whose capacity the callers
                                                            // of other functions decide (local)
 
@@ -417,7 +435,9 @@ EffectSummary(f) = {
     // Offloading and the sync-driven context
     offloads_blocking_params: Bitset,                      // wrapper running the callable in parameter i on a thread
     sync_driven_only:         bool,                        // internal async def driven only by a sync driver
-    unknown_calls:            bool,
+    unknown_calls:            bool,                        // an own call heki cannot resolve, more than 8
+                                                           // CHA candidates, or an A1 hazard (eval, exec,
+                                                           // locals(), frame introspection, unmodeled)
 
     // What iterating the returned object runs (a plain function returning a generator)
     iterated:                 Option<EffectSummary>,       // in the function's own parameters

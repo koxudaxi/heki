@@ -419,5 +419,15 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         must_effects: crate::eff_rules::MUST_EFFECT_RULES
             .iter()
             .any(|code| selection.is_enabled(code)),
+        shared_state: false,
+    }
+}
+
+/// [`opt_in_facts`] with the facts `heki inspect` reads besides the rules: the shared state
+/// functions change. `heki check` never computes them.
+pub fn inspect_facts(selection: &RuleSelection) -> OptInFacts {
+    OptInFacts {
+        shared_state: true,
+        ..opt_in_facts(selection)
     }
 }

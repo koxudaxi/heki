@@ -19,7 +19,9 @@ pub mod project;
 pub mod selection;
 pub mod snapshot;
 
-pub use contracts::{MAX_INVALIDATIONS, opt_in_facts, summary_contracts, typed_writes};
+pub use contracts::{
+    MAX_INVALIDATIONS, inspect_facts, opt_in_facts, summary_contracts, typed_writes,
+};
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use mut_rules::{

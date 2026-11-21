@@ -716,9 +716,15 @@ pub struct EffectSummary {
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
     pub sync_driven_only: bool,
-    /// A call in this function (not its callees) could not be resolved, or CHA exceeded
-    /// `resolver::CHA_CANDIDATE_LIMIT` candidates.
+    /// A call in this function (not its callees) could not be resolved, CHA exceeded
+    /// `resolver::CHA_CANDIDATE_LIMIT` candidates, or the function has an A1 hazard (`eval`,
+    /// `exec`, `locals()`, frame introspection, a body too large to model).
     pub unknown_calls: bool,
+    /// The module globals and closure cells the function changes; `None` for the many
+    /// functions that change none and whose nested functions capture no new container. Shared:
+    /// a final summary holds its local summary's facts until propagation changes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_state: Option<Arc<SharedStateFacts>>,
 
     /// What iterating the object this plain function returns runs: the bodies of the
     /// generators it returns (directly, through lazy wrappers, or through the functions whose
@@ -755,6 +761,91 @@ pub struct EffectSummary {
     /// adds their effects where the project shows the queue bounded (local).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capacity_waits: Vec<CapacityWait>,
+}
+
+/// The shared state a function changes ([`EffectSummary::shared_state`]). The lists are sorted
+/// and hold each entry once ([`SharedStateFacts::normalize`]); most hold one or two entries, so
+/// they are vectors of their exact length.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedStateFacts {
+    /// The module globals and the closure cells of enclosing functions the function's own body
+    /// rebinds, deletes, or changes in place (an object reached from one through attributes,
+    /// items, iteration, and element accessors: `CACHE.clear()`, `REGISTRY[k] = v`,
+    /// `settings.DEBUG = True`), each with the span of its first change. A local fact, never
+    /// propagated.
+    pub changed: Vec<(SharedState, Span)>,
+    /// The function's body, or a body that runs in it, changes a module global (propagated).
+    pub globals: bool,
+    /// The closure cells the function's body, or a body that runs in it, changes, except those
+    /// of its own variables that stay inside its call: a variable it rebinds through a nested
+    /// function, or one it binds only to new containers (`new_cells`; propagated).
+    pub cells: Vec<CellChange>,
+    /// The function's variables that nested functions capture and that it binds only to new
+    /// containers (`out = []`): a nested function changing them in place changes an object of
+    /// this call. A local fact.
+    pub new_cells: Vec<String>,
+    /// The shared state the function's calls hand to project functions, as an argument or as
+    /// the receiver, by call: changed when the callee changes that parameter
+    /// ([`EffectSummary::changes_argument`]). A local fact.
+    pub handed: Vec<HandedState>,
+}
+
+impl SharedStateFacts {
+    fn is_empty(&self) -> bool {
+        self.changed.is_empty()
+            && !self.globals
+            && self.cells.is_empty()
+            && self.new_cells.is_empty()
+            && self.handed.is_empty()
+    }
+
+    /// Sort the lists, keep each entry once (the first change of each state), and drop their
+    /// spare room.
+    pub(crate) fn normalize(&mut self) {
+        self.changed
+            .sort_by(|(a, x), (b, y)| a.cmp(b).then(x.start.cmp(&y.start)));
+        self.changed.dedup_by(|later, first| later.0 == first.0);
+        self.cells.sort();
+        self.cells.dedup();
+        self.new_cells.sort();
+        self.new_cells.dedup();
+        self.handed.sort();
+        self.handed.dedup();
+        self.changed.shrink_to_fit();
+        self.cells.shrink_to_fit();
+        self.new_cells.shrink_to_fit();
+        self.handed.shrink_to_fit();
+    }
+}
+
+/// Shared state handed to a callee: the object of `state` (or one reached from it) is
+/// argument `param` of callee `callee` (its index among the call's project callees) at the
+/// call at `site` (`helper(CACHE)`, `registry.add(x)` on a module-level object).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct HandedState {
+    pub site: Span,
+    pub callee: usize,
+    pub param: u8,
+    pub state: SharedState,
+}
+
+/// State that outlives a call: a module global, or the closure cell of a variable of an
+/// enclosing function ([`SharedStateFacts::changed`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedState {
+    Global(String),
+    Cell(CellChange),
+}
+
+/// A change of the closure cell of variable `name` of the function `owner` (a qualname in the
+/// changing function's module), made by a function nested in it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CellChange {
+    pub owner: String,
+    pub name: String,
+    /// The variable is rebound (`nonlocal n; n += 1`), not its object changed in place.
+    pub rebinds: bool,
 }
 
 /// An input of a function that a guard tests: parameter `param` itself, or its attribute
@@ -857,6 +948,68 @@ pub struct ArgBinding {
 }
 
 impl EffectSummary {
+    /// [`SharedStateFacts::changed`].
+    pub fn changed_state(&self) -> &[(SharedState, Span)] {
+        self.shared_state.as_ref().map_or(&[], |f| &f.changed)
+    }
+
+    /// [`SharedStateFacts::globals`].
+    pub fn changes_globals(&self) -> bool {
+        self.shared_state.as_ref().is_some_and(|f| f.globals)
+    }
+
+    /// [`SharedStateFacts::cells`].
+    pub fn changes_cells(&self) -> &[CellChange] {
+        self.shared_state.as_ref().map_or(&[], |f| &f.cells)
+    }
+
+    /// [`SharedStateFacts::new_cells`].
+    pub fn new_cells(&self) -> &[String] {
+        self.shared_state.as_ref().map_or(&[], |f| &f.new_cells)
+    }
+
+    /// The shared state handed at the call at `site` to its project callee `callee`
+    /// ([`SharedStateFacts::handed`]).
+    pub fn handed_at(&self, site: Span, callee: usize) -> impl Iterator<Item = &HandedState> {
+        let handed = self
+            .shared_state
+            .as_ref()
+            .map_or(&[][..], |f| &f.handed[..]);
+        let from = handed.partition_point(|h| h.site.start < site.start);
+        handed[from..]
+            .iter()
+            .take_while(move |h| h.site.start == site.start)
+            .filter(move |h| h.site == site && h.callee == callee)
+    }
+
+    /// Whether the function changes the object its parameter `j` is: in place, an attribute
+    /// of it, or a container held in one of its slots.
+    pub fn changes_argument(&self, j: u8) -> bool {
+        self.mutated_param_paths.contains_key(&j)
+            || self
+                .inplace_param_slots
+                .get(&j)
+                .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Change the shared-state facts with `change` and normalize them, keeping `None` when they
+    /// stay empty (so that a summary without them equals one that never had them).
+    pub(crate) fn change_shared_state(&mut self, change: impl FnOnce(&mut SharedStateFacts)) {
+        let mut facts = self.shared_state.take().unwrap_or_default();
+        let f = Arc::make_mut(&mut facts);
+        change(f);
+        f.normalize();
+        if !f.is_empty() {
+            self.shared_state = Some(facts);
+        }
+    }
+
+    /// Change the shared-state facts while the function's body is read; the caller normalizes
+    /// them once at the end ([`SharedStateFacts::normalize`]).
+    pub(crate) fn shared_state_mut(&mut self) -> &mut SharedStateFacts {
+        Arc::make_mut(self.shared_state.get_or_insert_with(Arc::default))
+    }
+
     /// Drop the execution effects in `hidden`, with their chains and guards, here and in what
     /// iterating the returned object runs.
     pub(crate) fn hide_exec_effects(&mut self, hidden: &BTreeSet<ExecEffectKind>) {
@@ -922,6 +1075,15 @@ impl EffectSummary {
             })
             .collect();
         out.param_change_sites.clear();
+        if let Some(f) = &mut out.shared_state {
+            let f = Arc::make_mut(f);
+            for (_, span) in &mut f.changed {
+                *span = Span { start: 0, end: 0 };
+            }
+            for h in &mut f.handed {
+                h.site = Span { start: 0, end: 0 };
+            }
+        }
         out.param_inplace_sites.clear();
         for w in &mut out.capacity_waits {
             w.hop.span = Span { start: 0, end: 0 };
@@ -970,12 +1132,20 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites, parameter and container changes, iterations, and unresolved accesses are left out:
-    /// those are never propagated.
+    /// sites, parameter, container, and global changes, iterations, and unresolved accesses are
+    /// left out: those are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
             param_change_sites: BTreeMap::new(),
+            shared_state: s.shared_state.as_ref().and_then(|f| {
+                let propagated = SharedStateFacts {
+                    changed: Vec::new(),
+                    handed: Vec::new(),
+                    ..(**f).clone()
+                };
+                (!propagated.is_empty()).then(|| Arc::new(propagated))
+            }),
             param_inplace_sites: BTreeMap::new(),
             iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
@@ -1729,18 +1899,21 @@ pub enum TypedWrites {
     Local,
 }
 
-/// The facts of the opt-in rules that summaries and propagation compute only when a rule
-/// reads them: `MUT112`'s return origins (`EffectSummary::return_origins`, `ArgOrigin::origins`),
-/// `MUT113`'s iteration facts (`EffectSummary::iterations`, `CallSite::result_held`), `EFF109`'s
-/// lock facts (`EffectSummary::locks`, `CallSite::state_tests`), and `EFF110`'s one-at-a-time
-/// uses (`EffectSummary::exclusive`, `CallSite::under_lock`). `CallSite::returned`, which
-/// `MUT202` reads too, is always computed.
+/// The facts that summaries and propagation compute only when something reads them: the
+/// opt-in rules' facts, `MUT112`'s return origins (`EffectSummary::return_origins`,
+/// `ArgOrigin::origins`), `MUT113`'s iteration facts (`EffectSummary::iterations`,
+/// `CallSite::result_held`), `EFF109`'s lock facts (`EffectSummary::locks`,
+/// `CallSite::state_tests`), and `EFF110`'s one-at-a-time uses (`EffectSummary::exclusive`,
+/// `CallSite::under_lock`), and the shared state functions change
+/// (`EffectSummary::shared_state`), which only `heki inspect` reads. `CallSite::returned`,
+/// which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
     pub return_origins: bool,
     pub iterations: bool,
     pub locks: bool,
     pub exclusive: bool,
+    pub shared_state: bool,
     /// [`EffectSummary::must_exec`] and what computes it at call sites.
     pub must_effects: bool,
 }
@@ -1752,6 +1925,7 @@ impl OptInFacts {
         iterations: true,
         locks: true,
         exclusive: true,
+        shared_state: true,
         must_effects: true,
     };
 }

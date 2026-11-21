@@ -362,7 +362,10 @@ EffectSummary(f) = {
                                                     // on the function's task, unless a lock is
                                                     // held (EFF110; only with the rule selected)
     sync_driven_only:         bool,                 // driven only through a sync driver such as run_sync(coro)
-    unknown_calls:            bool,
+    unknown_calls:            bool,                 // unresolved own call, CHA past 8, or an A1 hazard
+    shared_state:             Option<SharedStateFacts>, // module globals and enclosing functions' closure
+                                                    // cells changed, here, in a body run here, or by a
+                                                    // callee handed them (heki inspect and the server)
 
     // Metadata: is_async, is_generator, is_cached_property, is_lru_cache, owner class, decorators
 }

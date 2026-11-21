@@ -181,6 +181,7 @@ impl Watcher<'_> {
             &self.opts(),
             &crate::check::selectors(&self.args.analysis),
             self.args.analysis.baseline.as_deref(),
+            false,
         )?;
         Ok(Loaded {
             ws,

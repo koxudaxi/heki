@@ -4831,6 +4831,9 @@ pub struct TypeCtx<'a> {
     import_by_span: FxHashMap<Span, String>,
     /// Inference state shared by the functions of the module (child scopes and their parents).
     pub(crate) scopes: crate::infer::Scopes,
+    /// The module's functions whose variables nested functions capture, by qualname, as indices
+    /// into the module's functions ([`Self::captures`]); built on first use.
+    captured: std::sync::OnceLock<FxHashMap<String, Vec<usize>>>,
     /// The module's bindings for the path facts, built on first use.
     bindings: std::cell::OnceCell<heki_ir::ModuleBindings>,
     /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
@@ -4858,6 +4861,28 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
 };
 
 impl<'a> TypeCtx<'a> {
+    /// Whether nested functions of the module's function `qualname` capture its variable
+    /// `name` (a closure cell of it).
+    pub(crate) fn captures(&self, qualname: &str, name: &str) -> bool {
+        let functions = &self.ir.functions;
+        let captured = self.captured.get_or_init(|| {
+            let mut by_qualname: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+            for (i, f) in functions.iter().enumerate() {
+                if !f.captured_vars.is_empty() {
+                    by_qualname
+                        .entry(func_qualname(f).to_owned())
+                        .or_default()
+                        .push(i);
+                }
+            }
+            by_qualname
+        });
+        captured.get(qualname).is_some_and(|ids| {
+            ids.iter()
+                .any(|&i| functions[i].captured_vars.iter().any(|c| c == name))
+        })
+    }
+
     pub fn new(
         input: &'a ModuleInput<'a>,
         project: &'a ProjectDecls,
@@ -4880,6 +4905,7 @@ impl<'a> TypeCtx<'a> {
             ir: input.ir,
             import_by_span,
             scopes: crate::infer::Scopes::default(),
+            captured: std::sync::OnceLock::new(),
             bindings: std::cell::OnceCell::new(),
             taken: RefCell::default(),
         }
