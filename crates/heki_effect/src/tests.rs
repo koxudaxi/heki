@@ -773,6 +773,8 @@ fn gate_5_handbuilt_file_summaries() {
         result_discarded: false,
         queues: None,
         result_held: false,
+        complete: false,
+        on_every_return: crate::OnEveryReturn::default(),
     });
     index.update_file(file_b);
 
@@ -1420,6 +1422,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         result_discarded: false,
         queues: None,
         result_held: false,
+        complete: false,
+        on_every_return: crate::OnEveryReturn::default(),
     });
     let live = key("c", "live");
     let mut file_c = file("c.py", "c", &[&live]);
@@ -1449,6 +1453,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         result_discarded: false,
         queues: None,
         result_held: false,
+        complete: false,
+        on_every_return: crate::OnEveryReturn::default(),
     });
     file_c.call_sites.push(CallSite {
         caller: live.clone(),
@@ -1476,6 +1482,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         result_discarded: false,
         queues: None,
         result_held: false,
+        complete: false,
+        on_every_return: crate::OnEveryReturn::default(),
     });
     let dup = file("b_alt.py", "b", &[&caller]);
     let mut index = ProjectIndex::build(vec![file_a.clone(), file_b, file_c, dup]);

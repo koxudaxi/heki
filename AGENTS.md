@@ -80,6 +80,8 @@ python3.15 scripts/build_llms_txt.py --check
 # Peak heap of `heki check` and the `--watch` engine on a generated project (a counting build)
 cargo build --release -p heki --features count-alloc
 python3.15 scripts/check_memory.py --heki target/release/heki
+# Analysis cost of generated shapes at the largest size heki models (1 s / 1 GiB per shape)
+python3.15 scripts/check_walk_shapes.py --heki target/release/heki
 # The scripts of the release workflows
 uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
 ```

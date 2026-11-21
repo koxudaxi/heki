@@ -4,12 +4,12 @@
 //! are reported), a baseline update refused, or pending `--diff` changes, 2 configuration / I/O /
 //! unknown rule / syntax errors.
 
-use crate::{AnalysisArgs, CheckArgs, OutputFormat, SnapshotArgs};
+use crate::{AnalysisArgs, CheckArgs, ColorChoice, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
-    BASELINE_VERSION, CountUnit, Diagnostic, FileFailure, RatchetBaseline, baseline_counts,
-    fix_python_source, github_escape, path_text, render, unified_diff,
+    BASELINE_VERSION, CountUnit, Diagnostic, FileFailure, RatchetBaseline, Stylesheet,
+    baseline_counts, fix_python_source, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{OptInFacts, ProjectIndex, TypedWrites, analyze_project_for, func_qualname};
 use heki_env::{LintConfig, Severity};
@@ -23,6 +23,7 @@ use heki_rules::{
 };
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -145,7 +146,7 @@ pub(crate) fn load_and_index(
     let selection = selection(analysis, &project)?;
     let snapshot = snapshot_for(&selection, &project.env.root, format)?;
     let env = &project.env;
-    let contracts = heki_rules::summary_contracts(&env.cfg)?;
+    let contracts = heki_rules::summary_contracts(&env.cfg, &env.kb)?;
     let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
     let opt_in = heki_rules::opt_in_facts(&selection);
     let inputs = project.inputs();
@@ -395,15 +396,16 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         .as_deref()
         .map(heki_profile::load)
         .transpose()?;
+    let styles = stdout_styles(args.color);
     if args.watch {
-        return crate::watch::run(args, hot.as_ref());
+        return crate::watch::run(args, hot.as_ref(), &styles);
     }
     if args.diff {
         let run = fix_in_memory(args, hot.as_ref())?;
         for f in &run.files {
             print!(
                 "{}",
-                unified_diff(&shown_text(&f.path), &f.original, &f.fixed)
+                unified_diff(&shown_text(&f.path), &f.original, &f.fixed, &styles)
             );
         }
         eprintln!(
@@ -438,7 +440,7 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         ..
     } = analyze(args, hot.as_ref(), None)?;
     project.errors.extend(conflicts);
-    let code = report(args, &project, diags, heuristic_off, withheld)?;
+    let code = report(args, &project, diags, heuristic_off, withheld, &styles)?;
     // The process ends here: freeing the index and the parsed files one allocation at a time
     // would only cost time.
     std::mem::forget(index);
@@ -477,6 +479,7 @@ pub(crate) fn report(
     mut diags: Vec<Diagnostic>,
     heuristic_off: usize,
     withheld: usize,
+    styles: &Stylesheet,
 ) -> Result<ExitCode> {
     let root = &project.env.root;
     let by_path: FxHashMap<&Path, &ParsedFile> = project
@@ -604,6 +607,7 @@ pub(crate) fn report(
             &diags,
             &failures,
             format_of(args.output_format),
+            styles,
             &source_line
         )
     );
@@ -731,6 +735,33 @@ pub(crate) fn finish(format: OutputFormat, errors: &[String], code: ExitCode) ->
     } else {
         ExitCode::from(2)
     })
+}
+
+/// The styles of what `heki check` prints to stdout, colored when Ruff colors: `--color always`
+/// and `never` decide alone. Otherwise `FORCE_COLOR` (not empty) and `CLICOLOR_FORCE` (not `0`)
+/// turn color on, then `NO_COLOR` (set to anything) and `CLICOLOR=0` turn it off, and stdout is
+/// colored when it is a terminal.
+pub(crate) fn stdout_styles(choice: ColorChoice) -> Stylesheet {
+    let var = std::env::var_os;
+    let colored = match choice {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto => {
+            var("FORCE_COLOR").is_some_and(|v| !v.is_empty())
+                || var("CLICOLOR_FORCE").is_some_and(|v| v != "0")
+                || (var("NO_COLOR").is_none()
+                    && var("CLICOLOR").is_none_or(|v| v != "0")
+                    && std::io::stdout().is_terminal())
+        }
+    };
+    if !colored {
+        return Stylesheet::plain();
+    }
+    // A Windows console shows escape codes as text until virtual terminal processing is on. As
+    // in Ruff, a stdout that is not a console (color forced into a file or a pipe) is colored
+    // although it cannot be switched on.
+    let _ = anstyle_query::windows::enable_ansi_colors();
+    Stylesheet::styled()
 }
 
 pub(crate) fn format_of(f: OutputFormat) -> heki_diagnostics::OutputFormat {

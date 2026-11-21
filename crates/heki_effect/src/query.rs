@@ -72,6 +72,8 @@ pub struct ChangeChain {
     /// The function whose own body makes the change (the start function when `hops` is
     /// empty), `None` when no function on the way makes it in its own body.
     pub changed_in: Option<FuncKey>,
+    /// The parameter of `changed_in` whose change it is.
+    pub param: Option<u8>,
 }
 
 impl ProjectIndex {
@@ -175,6 +177,7 @@ impl ProjectIndex {
         ChangeChain {
             hops,
             changed_in: found.map(|i| states[i].func.clone()),
+            param: found.map(|i| states[i].param),
         }
     }
 }
