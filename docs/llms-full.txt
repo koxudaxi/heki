@@ -2843,8 +2843,9 @@ $ cargo nextest run --workspace --cargo-profile ci
   independent tests, so the shards stay short.
 - On Linux the tests are built and run from the unpacked source distribution, which must
   therefore carry every file they embed or read (`include` in `pyproject.toml`).
-- Coverage runs the same way, in the same profile, which reports the same lines as an
-  unoptimized build: each shard merges its profiles, and one job reports and enforces the limit.
+- Coverage runs the same way, in the `ci-coverage` profile: the workspace crates unoptimized, as
+  in `dev`, so the report has the same lines, and the dependencies optimized. Each shard merges
+  its profiles, and one job reports and enforces the limit.
 
 ## Checks against CPython
 

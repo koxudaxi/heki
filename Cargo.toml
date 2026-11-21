@@ -87,3 +87,14 @@ debug = "line-tables-only"
 
 [profile.ci.package."*"]
 opt-level = 3
+
+# The coverage builds of CI: the workspace crates unoptimized, as in `dev`, and the dependencies,
+# which coverage does not measure, optimized. Optimization compiles a small function that only
+# another crate calls into that crate too, and on Linux the report then took the counters of such
+# a function for another build of it ("mismatched data") and left its lines uncovered.
+[profile.ci-coverage]
+inherits = "dev"
+debug = "line-tables-only"
+
+[profile.ci-coverage.package."*"]
+opt-level = 3

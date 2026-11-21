@@ -149,16 +149,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, shard: 1, shards: 3 }
-          - { os: ubuntu-24.04, shard: 2, shards: 3 }
-          - { os: ubuntu-24.04, shard: 3, shards: 3 }
-          - { os: macos-15, shard: 1, shards: 3 }
-          - { os: macos-15, shard: 2, shards: 3 }
-          - { os: macos-15, shard: 3, shards: 3 }
-          - { os: windows-2025, shard: 1, shards: 4 }
-          - { os: windows-2025, shard: 2, shards: 4 }
-          - { os: windows-2025, shard: 3, shards: 4 }
-          - { os: windows-2025, shard: 4, shards: 4 }
+          - { os: ubuntu-24.04, shard: 1, shards: 2 }
+          - { os: ubuntu-24.04, shard: 2, shards: 2 }
+          - { os: macos-15, shard: 1, shards: 2 }
+          - { os: macos-15, shard: 2, shards: 2 }
+          - { os: windows-2025, shard: 1, shards: 3 }
+          - { os: windows-2025, shard: 2, shards: 3 }
+          - { os: windows-2025, shard: 3, shards: 3 }
     runs-on: ${{ matrix.os }}
     steps:
       - if: runner.os != 'Linux'
@@ -190,10 +187,10 @@ jobs:
           --workspace-remap "$TREE" --partition "$PARTITION" --no-fail-fast
 
   coverage-build:
-    # The instrumented test binaries, in the `ci` profile like the tests: its line mapping gives
-    # the same lines and the same uncovered ones as an unoptimized build. cargo-llvm-cov builds
-    # into `coverage/target`, a directory named `target`, so the shards can extract the archive
-    # back to the path the binaries were built at.
+    # The instrumented test binaries, in the `ci-coverage` profile (Cargo.toml): the workspace
+    # crates unoptimized, so the report has the lines of `dev`, and the dependencies optimized.
+    # cargo-llvm-cov builds into `coverage/target`, a directory named `target`, so the shards can
+    # extract the archive back to the path the binaries were built at.
     name: build coverage tests
     if: *full-run
     runs-on: ubuntu-24.04
@@ -214,7 +211,7 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.152
       - run: >-
-          cargo llvm-cov nextest-archive --workspace --locked --cargo-profile ci
+          cargo llvm-cov nextest-archive --workspace --locked --cargo-profile ci-coverage
           --archive-file coverage-tests.tar.zst
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -233,8 +230,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
-        shards: [3]
+        shard: [1, 2, 3, 4]
+        shards: [4]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -312,10 +309,10 @@ jobs:
       # Every line is covered except 3 that cannot run: the `_ => {}` arms for assignment,
       # augmented-assignment and `del` targets in `heki_ir/src/builder.rs`, which ruff's parser
       # rejects (see `docs/development.md`). Lower the limit whenever one goes away.
-      - run: cargo llvm-cov report --profile ci --lcov --output-path lcov.info --fail-uncovered-lines 3
+      - run: cargo llvm-cov report --profile ci-coverage --lcov --output-path lcov.info --fail-uncovered-lines 3
       # On failure too: the summary lists the uncovered lines, the artifact has the full report.
       - if: always()
-        run: cargo llvm-cov report --profile ci --summary-only --show-missing-lines
+        run: cargo llvm-cov report --profile ci-coverage --summary-only --show-missing-lines
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
