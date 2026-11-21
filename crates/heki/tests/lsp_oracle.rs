@@ -4494,6 +4494,71 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
     s.lsp.stop(true);
 }
 
+// ---------------------------------------------- class bases named in their scope (session 4)
+
+const SCOPED_BASES_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "home"
+targets = ["pkg.core.Rule"]
+allowed-callers = ["pkg.core.*"]
+references = "calls-and-bases"
+"#;
+
+const SCOPED_CORE: &str = "class Rule:\n    pass\n";
+// A local alias of the imported class is the base; a parameter of its name is another value.
+const SCOPED_SITE: &str = "from pkg.core import Rule\n\n\ndef through_alias():\n    Base = Rule\n\n    class Derived(Base):\n        pass\n\n    return Derived\n\n\ndef from_parameter(Rule):\n    class Derived(Rule):\n        pass\n\n    return Derived\n";
+
+/// `references = "calls-and-bases"` with a base typed where its class statement runs: renaming
+/// the guarded class in its own module turns off the base a function passes through a local
+/// alias of the import, restoring it turns it on, and the alias becoming a parameter turns it off.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_bases_named_in_their_scope() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/core.py", SCOPED_CORE.to_owned()),
+        ("pkg/site.py", SCOPED_SITE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_scoped_bases", SCOPED_BASES_CONFIG, files, false);
+    let steps = [
+        Step::new("initial index", Vec::new()).present(&[("pkg/site.py", "MUT204")]),
+        Step::new(
+            "the guarded class is renamed",
+            vec![save(
+                "pkg/core.py",
+                &SCOPED_CORE.replace("class Rule", "class Slip"),
+            )],
+        )
+        .absent(&[("pkg/site.py", "MUT204")]),
+        Step::new(
+            "the guarded class is restored",
+            vec![save("pkg/core.py", SCOPED_CORE)],
+        )
+        .present(&[("pkg/site.py", "MUT204")]),
+        Step::new(
+            "the alias becomes a parameter",
+            vec![save(
+                "pkg/site.py",
+                &SCOPED_SITE.replace(
+                    "through_alias():\n    Base = Rule\n",
+                    "through_alias(Base):\n",
+                ),
+            )],
+        )
+        .absent(&[("pkg/site.py", "MUT204")]),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ----------------------------------------------------------- package paths an import goes through
 
 const PATHS_CONFIG: &str = r#"[project]

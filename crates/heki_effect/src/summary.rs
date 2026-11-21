@@ -2285,53 +2285,46 @@ impl<'a> Extractor<'a> {
     }
 
     /// The bases of the class statements in the function ([`Contracts::reference_bases`]), each
-    /// as a reference site of the project class it names, at the base (`Base`, `core.Base`,
-    /// `Base[int]`). The class's declaration says which project classes its bases are; the IR
-    /// keeps them among the other values the class captures, so the one naming a base only gives
-    /// its position: the class statement's when none is loaded inside the statement (a name an
-    /// import or the module body binds is read without a load of its own).
-    fn base_sites(&self) -> Vec<CallSite> {
-        let names_class = |v: VarId| {
-            self.class_called(v)
-                .or_else(|| match &self.defs.get(&v)?.kind {
+    /// as a reference site of the project class it is (`Base`, `core.Base`, `Base[int]`). A base
+    /// is the value the statement passes ([`heki_ir::ModuleIr::class_bases`]), typed in the statement's
+    /// block as any value is, so a name it reads is what the statement's scope binds (a
+    /// parameter, a local, a closure cell, a class-body name), whatever the module imports under
+    /// that name. A site is at the base when the statement loads it, else at the statement (a
+    /// name an import or the module body binds is read without a load of its own).
+    fn base_sites(&mut self) -> Vec<CallSite> {
+        let (f, shape) = (self.f, self.shape);
+        let bases = self
+            .cx
+            .ir()
+            .class_bases_of(f.id)
+            .filter_map(|(class, index)| {
+                let (bb, statement) = shape.defining(class)?;
+                let base = *statement.kind.operands().get(index as usize)?;
+                Some((bb, statement.span, base))
+            });
+        let mut out = Vec::new();
+        for (bb, statement, base) in bases {
+            self.pos = (bb, 0);
+            let named = self
+                .class_called(base)
+                .or_else(|| match &self.defs.get(&base)?.kind {
                     InstKind::SubscriptLoad { obj, .. } => self.class_called(*obj),
                     _ => None,
-                })
-        };
-        let mut out = Vec::new();
-        for bb in &self.f.blocks {
-            for inst in &bb.insts {
-                let InstKind::MakeClosure {
-                    func_id: Some(id),
-                    captured,
-                    ..
-                } = &inst.kind
-                else {
-                    continue;
-                };
-                let body = self.cx.ir().function(*id);
-                if !body.is_class_body {
-                    continue;
-                }
-                let class = format!("{}.{}", self.key.module, body.qualname);
-                for base in self.cx.project.bases_of(&class) {
-                    if !self.cx.project.is_project_class(&base) {
-                        continue;
-                    }
-                    let span = captured
-                        .iter()
-                        .filter(|v| names_class(**v).as_ref() == Some(&base))
-                        .filter_map(|v| self.defs.get(v))
-                        .map(|def| def.span)
-                        .find(|at| inst.span.start <= at.start && at.end <= inst.span.end)
-                        .unwrap_or(inst.span);
-                    let loop_depth = self.loops_around(bb.id).iter().map(|l| l.depth).max();
-                    out.push(CallSite {
-                        is_base: true,
-                        ..self.handed_site(span, loop_depth.unwrap_or(0), Vec::new(), Some(base))
-                    });
-                }
-            }
+                });
+            let Some(named) = named else {
+                continue;
+            };
+            let span = self
+                .defs
+                .get(&base)
+                .map(|def| def.span)
+                .filter(|at| statement.start <= at.start && at.end <= statement.end)
+                .unwrap_or(statement);
+            let loop_depth = self.loops_around(bb).iter().map(|l| l.depth).max();
+            out.push(CallSite {
+                is_base: true,
+                ..self.handed_site(span, loop_depth.unwrap_or(0), Vec::new(), Some(named))
+            });
         }
         out
     }

@@ -349,12 +349,13 @@ The call side of `write-owners`.
   arguments, so it never matches. A target with an argument list names no symbol outside the
   project; `unresolved = "report"` matches its last name before the list, whatever the arguments
   of a call on an object of unknown class.
-- With `references = "calls-and-bases"`, a class statement whose declaration resolves a base to a
-  class target is reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the
-  class statement for a name an import or the module body binds: the class it makes holds the
-  base, and constructing it runs the base's initialization unless it overrides it. A base is
-  matched as a construction is (with `subclasses = false`, the class itself only), and a keyword
-  (`metaclass=Base`) is no base.
+- With `references = "calls-and-bases"`, a class statement passing a class target as a base is
+  reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the class statement
+  for a name an import or the module body binds: the class it makes holds the base, and
+  constructing it runs the base's initialization unless it overrides it. A base is the value the
+  statement passes, typed where the statement runs as any value is (a parameter, a local, or a
+  class-body name of the imported class's name is another value), and matched as a construction
+  is (with `subclasses = false`, the class itself only); a keyword (`metaclass=Base`) is no base.
 
 ### Allowed and forbidden functions
 
