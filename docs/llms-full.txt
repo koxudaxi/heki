@@ -88,7 +88,7 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 
 ```console
 $ heki check --heuristic
-app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute`
+app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
@@ -1723,7 +1723,7 @@ Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pend
 ```text
 Experimental static checker for Python that tracks side effects and mutations across function calls
 
-Usage: heki <COMMAND>
+Usage: heki-exact-c-17f224f8.real <COMMAND>
 
 Commands:
   check        Run semantic checks across Python files or directories (Ruff-aligned)
@@ -1743,7 +1743,7 @@ Options:
 ```text
 Run semantic checks across Python files or directories (Ruff-aligned)
 
-Usage: heki check [OPTIONS] [PATHS]...
+Usage: heki-exact-c-17f224f8.real check [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...  Files or directories to check [default: .]
@@ -1788,7 +1788,7 @@ Options:
 ```text
 Start the incremental Language Server Protocol (LSP) server
 
-Usage: heki server [OPTIONS]
+Usage: heki-exact-c-17f224f8.real server [OPTIONS]
 
 Options:
       --stdio         Use stdio transport (default LSP mode)
@@ -1802,7 +1802,7 @@ Options:
 ```text
 Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style)
 
-Usage: heki rule [OPTIONS] [RULE]
+Usage: heki-exact-c-17f224f8.real rule [OPTIONS] [RULE]
 
 Arguments:
   [RULE]  Rule code (`EFF101`) or slug (`async-blocking-call`), or `--all` to list all rules
@@ -1818,7 +1818,7 @@ Options:
 ```text
 Manage interprocedural effect summary snapshots (`MUT103`)
 
-Usage: heki snapshot [OPTIONS] [PATHS]...
+Usage: heki-exact-c-17f224f8.real snapshot [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...  Files or directories to summarize [default: .]
@@ -1839,7 +1839,7 @@ Options:
 ```text
 List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
 
-Usage: heki assumptions [OPTIONS] [PATHS]...
+Usage: heki-exact-c-17f224f8.real assumptions [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...  [default: .]
@@ -4631,19 +4631,26 @@ number of times, whatever the input.
 ## What a report states
 
 A report states that the value is rebuilt from its previous value by the reallocating call on every
-iteration of the loop, so each iteration copies all of it.
+iteration of the loop that completes, so each such iteration copies all of it. Its exact reports
+(those the rule shows by default once it is certified) also name what the loop steps through: a
+parameter, a part of one, the rows of a query, the lines of a file, or the entries of a directory.
 
 Its premises:
 
-- **Loop-carried**: the new value is computed from the previous one and feeds the next iteration.
-  Established by the IR, except that the exception edge of a `with` block counts as carrying the
-  previous value for every context manager.
-- **On every iteration**: the reallocation runs on every iteration. Open: one that runs on some
+- **Loop-carried**: every path around the back edge carries the new value, computed from the
+  previous one (no path resets the variable). Open in a heuristic report: one path that updates
+  it is enough.
+- **On every iteration**: the reallocating call returns on every iteration that completes,
+  exception edges into handlers included. Open in a heuristic report: one that runs on some
   iterations only counts.
-- **Data-sized**: the code does not fix the trip count. Open: a trip count heki cannot bound counts
-  as data-sized.
-- **Reallocates**: the call copies all of its inputs into a new value, as the ecosystem catalog
-  describes it.
+- **Origin**: the loop steps through items the data decides (as for `EFF103`), and the code does
+  not fix its trip count. Open in a heuristic report: a trip count heki cannot bound counts as
+  data-sized.
+- **Reallocates**: the call copies all of its inputs into a new value on every call, as the
+  ecosystem catalog describes it; through a project function, every implementation the call can
+  run does so on every path on which it returns.
+
+Not part of the claim: how large the value grows.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
