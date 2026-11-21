@@ -148,6 +148,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop (followed by `return`, `break`, or `raise`): it runs once per run of the loop.
 - `EFF101` no longer reports `result()` or `exception()` of a `concurrent.futures.Future` known
   to be done: under `if f.done():`, or once `await asyncio.wrap_future(f)` has returned.
+- `EFF101` no longer reports `put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` that
+  is not known to be bounded: built without a positive `maxsize`, or one heki cannot follow to
+  where it is built. A `put` waits only while its queue is full. heki follows the queue into
+  local variables, the attributes its class family stores, module globals, and parameters
+  whose callers bind known queues; an `effect-boundaries` contract forbidding `blocking-sync`
+  counts a `put` the same way.
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.

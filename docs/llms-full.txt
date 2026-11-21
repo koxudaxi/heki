@@ -413,6 +413,9 @@ Two more cases stay quiet by design:
   holds), or right before the loop ends (`break`, `return`, `raise`), counts once per loop.
 - A blocking wait on a `concurrent.futures.Future` known to be done (`if f.done():`, after
   `await asyncio.wrap_future(f)`) returns at once.
+- `queue.Queue.put` waits only on a queue known to be bounded: a positive `maxsize` on some
+  path, every path known. A `put` on a queue heki cannot follow to where it is built is not
+  reported.
 
 A file that cannot be read or does not parse is reported (exit code 2), and every other file is
 checked as usual. A file that does not parse cannot run either, so heki assumes nothing it would
@@ -549,6 +552,12 @@ A generator's body runs where it is iterated:
   argument (`@lru_cache`, a dict) are not followed.
 - A future is known to be done only through `f.done()` and `await asyncio.wrap_future(f)`, not
   through an event or another future its done callback sets.
+- A queue is known to be bounded through local variables, the attributes its class family's own
+  bodies and methods store, module globals, and parameters whose project callers decide (a
+  helper's at each call, an `async def`'s by the join of every caller). Not followed: stores into
+  an attribute from outside the class family, a `maxsize` checked to be positive but not known,
+  an integer constant imported from another module or passed on through a parameter other than
+  a literal default, and a queue whose function has no project caller.
 - `EFF201` does not use guards.
 - An object a factory function returns counts as obtained once, like a pooled connection.
 
@@ -2627,11 +2636,14 @@ many `yield from`s, a generator handed on through thousands of private wrappers,
 one before's result, an edit through the language server changing every method of a class of
 thousands of methods, methods changing a typed dict of `self` thousands of times, a method storing
 under a key after each of hundreds of tests that such a dict holds the key, and a function reading
-attributes down a chain ten thousand deep (`x = x.child`), and the path facts of a `try` body of
-thousands of calls whose handler returns, of loops nested twenty deep with a call at each depth, of
-a thousand loops one after another, and of a chain of hundreds of `and` tests of module constants,
-and the item origins of a chain of thousands of wrappers, of a list filled by appends in a thousand
-loops, and of a phi of sixty branches each choosing a different parameter.
+attributes down a chain ten thousand deep (`x = x.child`), many queue puts each after a branch that
+may build a new queue, a long chain of helpers handing a queue on, named in the opposite order of
+the calls, a class whose thousands of queue attributes each store the one before, with a put on
+each, and the path facts of a `try` body of thousands of calls whose handler returns, of loops
+nested twenty deep with a call at each depth, of a thousand loops one after another, and of a chain
+of hundreds of `and` tests of module constants, and the item origins of a chain of thousands of
+wrappers, of a list filled by appends in a thousand loops, and of a phi of sixty branches each
+choosing a different parameter.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -2855,7 +2867,8 @@ database drivers
 (`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
 `conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
 waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
-`queue.Queue.get()` / `put()`, `Future.result()`, `concurrent.futures.wait()`; a zero timeout or
+`queue.Queue.get()`, `put()` on a queue known to be bounded (see below), `Future.result()`,
+`concurrent.futures.wait()`; a zero timeout or
 `blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
 on its own flag parameter and its caller passes `False`: `close(wait=False)` over
 `shutdown(wait=wait)`; so does `result()` / `exception()` of a `concurrent.futures.Future` known
@@ -2866,6 +2879,18 @@ call). A function SQLAlchemy's
 its database I/O through the session or connection it receives is awaited for it, its other
 blocking calls are reported. Where an argument decides what a library call does, a literal
 one is followed: `pd.read_csv("https://...")` downloads the file.
+
+`put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` waits only while the queue is full,
+which only a queue its `maxsize` bounds can be, so it is reported only on a queue known to be
+bounded: a positive `maxsize` (a literal, a module constant, a class constant, or an integer a
+constructor parameter receives from every call, such as its default) on some path, and every
+path known. heki follows the queue from where it is built into local variables, the attributes
+the class family's own bodies and methods store (`self.queue = queue.Queue(maxsize=n)`, or a
+queue the class's `__init__` receives), module globals, and parameters, whose project callers
+decide: a helper's at each call, an `async def`'s by what all of its callers pass. A queue built
+without a `maxsize` (or with zero, a negative one, or `None`), one from a call or an object heki
+cannot see, and one a parameter without project callers receives are not known to be bounded,
+and putting on them is not reported.
 
 Reading a `@property` or `functools.cached_property` attribute of a project class runs its
 getter, so the read counts as a call of the getter (`self.client` whose getter opens a
