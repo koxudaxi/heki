@@ -1782,6 +1782,19 @@ fn every_root_of_a_merged_value_and_deleted_cells_count() {
         "A = []\nB = []\n\n\ndef either(flag):\n    target = A if flag else B\n    target.clear()\n\n\ndef outer(flag):\n    out = []\n\n    def add():\n        t = out if flag else A\n        t.append(1)\n\n    add()\n    return out\n\n\ndef keeper():\n    value = 1\n\n    def drop():\n        nonlocal value\n        del value\n\n    drop()\n",
     )]);
     assert_eq!(changed_globals(summary(&index, "m", "either")), ["A", "B"]);
+    // Past eight roots a value also counts as changing a global whose name is not kept.
+    let src: String = (0..10).map(|i| format!("G{i} = []\n")).collect::<String>()
+        + "\n\ndef choose(k):\n    x = G0\n"
+        + &(1..10)
+            .map(|i| format!("    if k == {i}:\n        x = G{i}\n"))
+            .collect::<String>()
+        + "    x.append(1)\n";
+    let many = project(&[("many.py", &src)]);
+    let choose = summary(&many, "many", "choose");
+    assert!(choose.changes_globals());
+    let names = changed_globals(choose);
+    assert_eq!(names.len(), 9);
+    assert!(names.contains(&""));
     // The owner keeps its new list inside its call, but the global still changes.
     let outer = summary(&index, "m", "outer");
     assert!(outer.changes_cells().is_empty());
