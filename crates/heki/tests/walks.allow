@@ -71,6 +71,7 @@ heki_effect::summary::Extractor::drives_manually  W2  worklist: reach, Closure, 
 heki_effect::summary::Extractor::escape  W1  recursion (calls itself): Memo or Closure
 heki_effect::summary::Extractor::external_call  W4  const_str: FnShape
 heki_effect::summary::Extractor::external_escapes  W4  const_bool: FnShape
+heki_effect::summary::Extractor::external_read  W1  recursion (calls itself): Memo or Closure; stage-2 migration debt
 heki_effect::summary::Extractor::handed_callable  W1  recursion (through Extractor::call): Memo or Closure
 heki_effect::summary::Extractor::hashed_whole_self_attrs  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::Extractor::iterations  W4  block_loop_depth: FnShape
