@@ -125,7 +125,7 @@ $ heki check --output-format json
 | ------ | ------ |
 | `full` (default) | each diagnostic with its source line, call chain, and help |
 | `concise` | one line per diagnostic: the message, without the help |
-| `json` | every field: also the help, the evidence, the blocker that stops a fix, and the fix edits ([fields](coding-agents.md#use-the-cli-in-the-agents-loop)) |
+| `json` | every field: also the help, the evidence, the blocker that stops a fix, and the fix edits ([fields](coding-agents.md#after-an-edit-heki-check)) |
 | `github` | GitHub Actions annotations with the message ([CI](adoption.md#continuous-integration)) |
 | `sarif` | the message, the location, the call chain, and the help (`properties.help`), for code-scanning dashboards (no evidence or blocker) |
 
