@@ -397,6 +397,10 @@ effects = ["blocking_net"]
 [[tool.heki.ecosystem]]
 symbol = "mypkg.http.get"
 effects = ["blocking_net"]
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.http.session"
+return-type = "requests.Session"
 "#;
 
 const HTTP: &str = r#"import functools
@@ -405,6 +409,7 @@ import urllib.request
 
 get = functools.partial(urllib.request.urlopen, timeout=5)
 nap = functools.partial(time.sleep, 1)
+session = functools.partial(object)
 
 
 async def same_module() -> None:
@@ -434,6 +439,10 @@ async def declared_global() -> None:
 
 async def undeclared_global() -> None:
     http.nap()
+
+
+async def declared_return_type() -> None:
+    http.session().get("x")
 "#;
 
 /// A name heki does not see the module bind (a compiled submodule, a star import of one) is
@@ -453,7 +462,9 @@ fn a_catalogued_name_heki_does_not_see_bound_keeps_its_effects() {
             d("mypkg/app.py", 11, "EFF101", "mypkg._native.read"),
             d("mypkg/app.py", 15, "EFF101", "mypkg.fetch"),
             d("mypkg/app.py", 19, "EFF101", "mypkg.http.get"),
-            d("mypkg/http.py", 10, "EFF101", "mypkg.http.get"),
+            // The declared `return-type` of a module global types what calling it returns.
+            d("mypkg/app.py", 27, "EFF101", "requests.Session.get"),
+            d("mypkg/http.py", 11, "EFF101", "mypkg.http.get"),
         ]
     );
 }
@@ -525,6 +536,40 @@ def class_attribute_first(d: D) -> None:
 
 def lacking(obj: A | F) -> None:
     obj.view.append(1)
+
+
+class G(A):
+    pass
+
+
+G.view = []  # type: ignore[assignment]
+
+
+class Pool:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+
+    def drain(self) -> list[int]:
+        items = self.items
+        self.items = []
+        return items
+
+    def peek(self) -> list[int]:
+        return self.items
+
+
+def pick(*args: object, node: Pool) -> list[int]:
+    return node.items
+
+
+def rebound_on_class(g: G) -> None:
+    g.view.append(1)
+
+
+def drained(pool: Pool, decoy: A) -> None:
+    pool.drain().append(1)
+    pool.peek().append(1)
+    pick(decoy, node=pool).append(1)
 "#;
 
 const GETTERS_CONFIG: &str = r#"[project]
@@ -535,14 +580,14 @@ select = ["MUT201"]
 
 [[tool.heki.write-owners]]
 name = "store"
-targets = ["A.items", "B.items", "C.items", "D.items", "E.items"]
+targets = ["A.items", "B.items", "C.items", "D.items", "E.items", "Pool.items"]
 allowed-writers = ["pkg.store.*"]
 "#;
 
 /// A getter hands out its attribute only on a class whose reads run it: not on a member of a
 /// union reading a plain attribute or lacking the method, not through a `cached_property`
-/// (its value can be replaced on the instance), and not on a class whose own class attribute
-/// comes first along its MRO.
+/// (its value can be replaced on the instance), not on a class whose own class attribute
+/// comes first along its MRO or is stored on the class outside its body.
 #[test]
 fn a_getter_hands_out_its_attribute_only_where_every_read_runs_it() {
     let p = Project::new("getters_every_read");
@@ -558,6 +603,43 @@ fn a_getter_hands_out_its_attribute_only_where_every_read_runs_it() {
             d(m, 45, "MUT201", "A.items"),
             d(m, 45, "MUT201", "E.items"),
             d(m, 49, "MUT201", "A.items"),
+            // `drain` storing the attribute again is a write itself.
+            d(m, 83, "MUT201", "Pool.items"),
+            // A getter returning the attribute; not one that stores it again before returning
+            // what it held, nor a keyword-only parameter bound by name.
+            d(m, 100, "MUT201", "Pool.items"),
         ]
+    );
+}
+
+const BASES: &str = r#"import requests
+from vendor import CacheMixin
+
+
+class Cached(CacheMixin, requests.Session):
+    pass
+
+
+class Plain(requests.Session):
+    pass
+
+
+async def cached(s: Cached) -> None:
+    s.get("x")
+
+
+async def plain(s: Plain) -> None:
+    s.get("x")
+"#;
+
+/// A method no project class defines comes from the first base outside the project along the
+/// MRO: a catalogued base's after a base heki knows nothing of, which may define it, is unknown.
+#[test]
+fn an_unknown_base_before_a_catalogued_one_leaves_the_method_unknown() {
+    let p = Project::new("unknown_base_first");
+    p.write("pkg/__init__.py", "").write("pkg/bases.py", BASES);
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![d("pkg/bases.py", 18, "EFF101", "requests.Session.get")]
     );
 }
