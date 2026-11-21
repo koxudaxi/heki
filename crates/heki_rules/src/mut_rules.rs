@@ -3,15 +3,16 @@
 
 use crate::{
     CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
+    split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CacheEvent, CacheFlow, CallHop, CallSite, Callee,
-    Construction, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS, ProjectDecls,
-    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
-    WriteKind, attr_writes, self_attr_writes,
+    Construction, ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS,
+    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
+    TypedFieldWriteSite, Val, WriteKind, attr_writes, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
@@ -839,37 +840,33 @@ fn split_item(text: &str) -> Option<(&str, &str)> {
     (!key.contains(quote)).then_some((&text[..start], key))
 }
 
-/// Every project class (fqn), sorted.
-pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<String> {
-    let mut all: Vec<String> = cx
+/// Every project class, with its qualname, sorted by fqn.
+pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<ContractClass> {
+    let mut all: Vec<ContractClass> = cx
         .index
         .files
         .values()
         .flat_map(|f| {
-            f.decls
-                .classes
-                .keys()
-                .map(move |q| format!("{}.{q}", f.module_name))
+            f.decls.classes.keys().map(move |q| ContractClass {
+                fqn: format!("{}.{q}", f.module_name),
+                qualname: Some(q.clone()),
+            })
         })
         .collect();
-    all.sort();
+    all.sort_by(|a, b| a.fqn.cmp(&b.fqn));
     all
 }
 
-fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> FxHashSet<String> {
-    class_family(cx, all, |c| pattern.matches(c))
-}
-
-/// The project classes of `all` that `names` accepts, plus all their subclasses.
-fn class_family(
+/// The project classes (fqn) of `all` that `pattern` names, plus all their subclasses.
+fn class_set(
     cx: &CheckContext<'_>,
-    all: &[String],
-    names: impl Fn(&str) -> bool,
+    pattern: &DottedPattern,
+    all: &[ContractClass],
 ) -> FxHashSet<String> {
     let mut out = FxHashSet::default();
-    for c in all.iter().filter(|c| names(c)) {
-        out.insert(c.clone());
-        out.extend(cx.decls.subclasses_of(c));
+    for c in all.iter().filter(|c| pattern.matches_class(c)) {
+        out.insert(c.fqn.clone());
+        out.extend(cx.decls.subclasses_of(&c.fqn));
     }
     out
 }
@@ -878,7 +875,7 @@ fn class_family(
 /// `InvalidTarget { section }`, a bad glob `Glob { context }`.
 pub(crate) fn parse_targets(
     cx: &CheckContext<'_>,
-    all: &[String],
+    all: &[ContractClass],
     targets: &[String],
     section: &'static str,
     context: &'static str,
@@ -889,7 +886,7 @@ pub(crate) fn parse_targets(
             Some((base, key)) => (base, Some(key.to_owned())),
             None => (t.as_str(), None),
         };
-        let Some((class, attr)) = base.rsplit_once('.') else {
+        let Some((class, attr)) = split_last_dot(base) else {
             return Err(RuleConfigError::InvalidTarget {
                 section,
                 target: t.clone(),
@@ -910,7 +907,7 @@ pub(crate) fn parse_targets(
 /// attribute read).
 pub(crate) fn parse_read_targets(
     cx: &CheckContext<'_>,
-    all: &[String],
+    all: &[ContractClass],
     targets: &[String],
     section: &'static str,
     context: &'static str,
@@ -955,12 +952,13 @@ pub(crate) struct Allowance {
 /// the class family the class part names. The last segment of the text names the function,
 /// method, or class: a glob there matches within that name only (`pkg.*._*` names the private
 /// members of everything in `pkg`, not every function of a private module), as the attribute of
-/// a `Class.attr` target does.
+/// a `Class.attr` target does. A text with a module part (`pkg:_*`) is anchored at its module
+/// already: its qualname part is matched whole.
 #[derive(Debug, Clone)]
 pub(crate) struct FunctionMatcher {
     whole: DottedPattern,
-    /// The text split at its last dot when the last segment is a glob: what holds the member
-    /// (none for a text without a dot), and the member's name.
+    /// The text split at its last dot when the last segment is a glob and the text has no module
+    /// part: what holds the member (none for a text without a dot), and the member's name.
     member: Option<(Option<DottedPattern>, DottedPattern)>,
     method: Option<(FxHashSet<String>, DottedPattern)>,
 }
@@ -968,13 +966,13 @@ pub(crate) struct FunctionMatcher {
 impl FunctionMatcher {
     pub(crate) fn new(
         cx: &CheckContext<'_>,
-        all_classes: &[String],
+        all_classes: &[ContractClass],
         text: &str,
         context: &'static str,
     ) -> Result<Self, RuleConfigError> {
         // The whole text first, so that a bad glob is reported as configured.
         let whole = DottedPattern::new(text, context)?;
-        let (holder, last) = match text.rsplit_once('.') {
+        let (holder, last) = match split_last_dot(text) {
             Some((holder, last)) => (Some(DottedPattern::new(holder, context)?), last),
             None => (None, text),
         };
@@ -985,7 +983,7 @@ impl FunctionMatcher {
                 method = Some((owners, DottedPattern::new(last, context)?));
             }
         }
-        let member = if has_glob_syntax(last) {
+        let member = if whole.module().is_none() && has_glob_syntax(last) {
             Some((holder, DottedPattern::new(last, context)?))
         } else {
             None
@@ -997,34 +995,30 @@ impl FunctionMatcher {
         })
     }
 
-    /// The whole text's glob (`None`: a literal name, [`Self::whole_text`]).
-    pub(crate) fn whole_glob(&self) -> Option<&globset::Glob> {
-        self.whole.glob()
+    pub(crate) fn whole(&self) -> &DottedPattern {
+        &self.whole
     }
 
-    pub(crate) fn whole_text(&self) -> &str {
-        self.whole.text()
-    }
-
-    /// Whether the whole text names `name` (a function's fqn or qualname, a class's fqn). A
-    /// glob in the last segment matches the last name only, and the rest of the text what holds
-    /// it: `pkg.api_*` names `pkg.api_commit`, not `pkg.api_helpers.api_reset`.
-    pub(crate) fn names(&self, name: &str) -> bool {
+    /// Whether the whole text names a project function or class (`fqn` is `module.qualname`).
+    /// A glob in the last segment matches the last name only, and the rest of the text what
+    /// holds it: `pkg.api_*` names `pkg.api_commit`, not `pkg.api_helpers.api_reset`.
+    pub(crate) fn names_def(&self, fqn: &str, qualname: &str) -> bool {
         let Some((holder, member)) = &self.member else {
-            return self.whole.matches(name);
+            return self.whole.matches_def(fqn, qualname);
         };
-        match (holder, name.rsplit_once('.')) {
-            (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
-            (Some(holder), Some((held_by, last))) => {
-                member.matches(last) && holder.matches(held_by)
-            }
-            (Some(_), None) => false,
-        }
+        [fqn, qualname]
+            .into_iter()
+            .any(|name| match (holder, name.rsplit_once('.')) {
+                (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
+                (Some(holder), Some((held_by, last))) => {
+                    member.matches(last) && holder.matches(held_by)
+                }
+                (Some(_), None) => false,
+            })
     }
 
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
-        self.names(&key.fqn())
-            || self.names(&key.qualname)
+        self.names_def(&key.fqn(), &key.qualname)
             || self.method.as_ref().is_some_and(|(family, name)| {
                 key.qualname.rsplit_once('.').is_some_and(|(owner, last)| {
                     name.matches(last) && family.contains(&format!("{}.{owner}", key.module))
@@ -1055,7 +1049,7 @@ impl Allowance {
             targets: None,
         };
         for e in keys.exempt.0 {
-            if e.contains('.') || has_glob_syntax(e) {
+            if e.contains(['.', ':']) || has_glob_syntax(e) {
                 out.allowed.push(DottedPattern::new(e, keys.exempt.1)?);
             } else {
                 out.exempt_names.insert(e.clone());
@@ -1072,7 +1066,7 @@ impl Allowance {
         let fqn = key.fqn();
         self.allowed
             .iter()
-            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+            .any(|p| p.matches_def(&fqn, &key.qualname))
             || self.targets.as_ref().is_some_and(|t| t.any(key))
     }
 
@@ -1098,7 +1092,7 @@ impl Allowance {
         let fqn = key.fqn();
         self.forbidden
             .iter()
-            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+            .any(|p| p.matches_def(&fqn, &key.qualname))
     }
 
     /// `outside the <owners> of `name``, or `inside the forbidden <who> of `name`` for a contract
@@ -2023,10 +2017,13 @@ impl ReadOnlyProducers {
         Ok(Self { rules })
     }
 
-    pub(crate) fn deep_for(&self, fqn: &str) -> Option<bool> {
+    /// Whether a producer names a project function (`fqn` and its `qualname`), an attribute of a
+    /// class ([`ContractClass::member`]), or an external symbol (the symbol twice), and then
+    /// whether one of those naming it is deep.
+    pub(crate) fn deep_for(&self, fqn: &str, qualname: &str) -> Option<bool> {
         let mut found = None;
         for (p, deep) in &self.rules {
-            if p.matches(fqn) {
+            if p.matches_def(fqn, qualname) {
                 found = Some(found.unwrap_or(false) || *deep);
             }
         }
@@ -2035,6 +2032,11 @@ impl ReadOnlyProducers {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.rules.is_empty()
+    }
+
+    /// Whether a producer has a module part.
+    pub(crate) fn names_modules(&self) -> bool {
+        self.rules.iter().any(|(p, _)| p.module().is_some())
     }
 }
 
@@ -2066,7 +2068,7 @@ impl ReadOnlyReturns {
             .filter(|(k, s)| {
                 s.returns_protected.is_some()
                     || s.is_lru_cache
-                    || producers.deep_for(&k.fqn()).is_some() && property(k, s)
+                    || producers.deep_for(&k.fqn(), &k.qualname).is_some() && property(k, s)
             })
             .map(|(k, _)| {
                 k.qualname
@@ -2419,7 +2421,7 @@ impl<'a> Mut202Fn<'a> {
                 if summary.is_some_and(|s| s.is_lru_cache) {
                     return direct(fqn, true);
                 }
-                if let Some(d) = self.returns.producers.deep_for(&fqn) {
+                if let Some(d) = self.returns.producers.deep_for(&fqn, &k.qualname) {
                     return direct(fqn, d);
                 }
                 let r = summary?.returns_protected.as_ref()?;
@@ -2435,7 +2437,7 @@ impl<'a> Mut202Fn<'a> {
             Callee::External(sym) => self
                 .returns
                 .producers
-                .deep_for(sym)
+                .deep_for(sym, sym)
                 .and_then(|d| direct(sym.clone(), d)),
             Callee::TooMany | Callee::Unresolved => None,
         }
@@ -2460,8 +2462,12 @@ impl<'a> Mut202Fn<'a> {
                 }
                 // `readonly-returns` may name a property: `obj.schema`.
                 if let Some(Val::Inst(class)) = self.types.get(obj) {
-                    let fqn = format!("{class}.{attr}");
-                    if let Some(deep) = self.returns.producers.deep_for(&fqn) {
+                    let class = ContractClass {
+                        fqn: class.clone(),
+                        qualname: self.cx.decls.class_qualname(class).map(str::to_owned),
+                    };
+                    let (fqn, qualname) = class.member(attr);
+                    if let Some(deep) = self.returns.producers.deep_for(&fqn, &qualname) {
                         return Ro::new(fqn, Shared::produced(deep), vec![]);
                     }
                 }

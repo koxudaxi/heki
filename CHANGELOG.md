@@ -24,6 +24,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
   heuristic report may not have established. `docs/precision.md` defines exact and heuristic
   reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
   rule measured.
+- Contract names take a module part, `module:qualname`, which names definitions of one module
+  without its submodules: `pkg:*` names what `pkg/__init__.py` defines, where `pkg.*` also covers
+  `pkg.sub.user.sub_user`. The module part matches the whole module name, exactly or as a glob
+  (`pkg.*:run`), and works in every key that names project functions or classes, the class of
+  `Class.attr` targets included (`pkg.model:DataModel.fields`).
 - `call-owners` takes `subclasses = false`: a class target then means constructing exactly the
   class, so raising a subclass of a guarded exception class is no `MUT204` report. `Class.method`
   targets keep covering overrides.

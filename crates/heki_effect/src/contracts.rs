@@ -9,8 +9,52 @@
 //! and nothing is computed for contracts a project does not declare. Without a `Contracts`, only
 //! the configuration-free half of `MUT202` (`@lru_cache` results) is summarized.
 
-use crate::FuncKey;
+use crate::{FuncKey, ProjectDecls};
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+
+/// A class as the contracts match it. A pattern with a module part (`pkg.model:Model`) compares
+/// the class's module and its qualname inside it, which the fqn alone does not tell apart
+/// (`pkg.sub.Model` is in module `pkg.sub`, or nested in a class `sub` of `pkg`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractClass {
+    pub fqn: String,
+    /// The qualname of the project class inside its module (`Outer.Inner`), looked up only when
+    /// a class pattern has a module part ([`Contracts::names_class_modules`]); `None` otherwise,
+    /// and for a class the project does not define.
+    pub qualname: Option<String>,
+}
+
+impl ContractClass {
+    /// The class `fqn` as `contracts` match it.
+    pub fn new(contracts: &dyn Contracts, project: &ProjectDecls, fqn: String) -> Self {
+        let qualname = if contracts.names_class_modules() {
+            project.class_qualname(&fqn).map(str::to_owned)
+        } else {
+            None
+        };
+        Self { fqn, qualname }
+    }
+
+    /// `class` and then its project bases, as [`Contracts::target_of`] takes them.
+    pub fn lineage(contracts: &dyn Contracts, project: &ProjectDecls, class: &str) -> Vec<Self> {
+        std::iter::once(class.to_owned())
+            .chain(project.ancestors_of(class))
+            .map(|fqn| Self::new(contracts, project, fqn))
+            .collect()
+    }
+
+    /// The fqn and the qualname of attribute `attr` of the class, as
+    /// [`Contracts::readonly_producer`] takes them (the fqn twice without the qualname).
+    pub fn member(&self, attr: &str) -> (String, String) {
+        let fqn = format!("{}.{attr}", self.fqn);
+        let qualname = self
+            .qualname
+            .as_ref()
+            .map_or_else(|| fqn.clone(), |q| format!("{q}.{attr}"));
+        (fqn, qualname)
+    }
+}
 
 /// What the declared contracts say about a name, as far as the summaries need it. Masks have
 /// one bit per `invalidation` contract, in configuration order (at most 64 contracts).
@@ -22,9 +66,14 @@ pub trait Contracts: Debug + Send + Sync {
     /// cannot tie to a class.
     fn ownership(&self) -> bool;
 
-    /// `Some(deep)` when a `readonly-returns` entry names `fqn`: a project function, an external
-    /// symbol, or an attribute (`pkg.mod.Class.attr`).
-    fn readonly_producer(&self, fqn: &str) -> Option<bool>;
+    /// Whether an `invalidation` target's class or a `readonly-returns` producer has a module
+    /// part: only then does a [`ContractClass`] carry its qualname.
+    fn names_class_modules(&self) -> bool;
+
+    /// `Some(deep)` when a `readonly-returns` entry names a project function (`fqn` and its
+    /// `qualname`), an attribute of a class ([`ContractClass::member`]), or an external symbol
+    /// (the symbol twice).
+    fn readonly_producer(&self, fqn: &str, qualname: &str) -> Option<bool>;
 
     /// The number of `invalidation` contracts.
     fn invalidations(&self) -> usize;
@@ -44,11 +93,11 @@ pub trait Contracts: Debug + Send + Sync {
 
     /// The contracts whose targets include attribute `attr` of an object of class `classes[0]`;
     /// `classes` lists that class and then its bases (a target class covers its subclasses).
-    fn target_of(&self, classes: &[String], attr: &str) -> u64;
+    fn target_of(&self, classes: &[ContractClass], attr: &str) -> u64;
 
     /// Whether a target of some contract names an attribute of class `classes[0]` or of one of
     /// its bases (`classes` as for [`Contracts::target_of`]).
-    fn names_class(&self, classes: &[String]) -> bool;
+    fn names_class(&self, classes: &[ContractClass]) -> bool;
 
     /// Whether a `read-owners` contract with `unresolved = "report"` names attribute `attr`: a
     /// read of it on an object of unknown class is an unresolved access (`MUT206`).

@@ -1007,11 +1007,22 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
   of a private module whose own name is public; `pkg.api_*` names `pkg.api_commit`, not
   `pkg.api_helpers.api_reset`.
+- A name with a module part, `module:qualname`, names definitions of the project modules the
+  part names, never of their submodules. The module part matches the whole module name, exactly
+  or as a glob (`pkg.*:run`), not a suffix; the qualified name after the colon matches the whole
+  name inside the module, a `*` spanning dots. `pkg:*` names everything `pkg/__init__.py`
+  defines (its functions, classes, methods, nested functions, and module body `<module>`), where
+  `pkg.*` also covers `pkg.sub.user.sub_user`; `pkg.sub:Store.*` names the methods of `Store` in
+  `pkg.sub`. In a `Class.attr` target the module part belongs to the class
+  (`pkg.model:DataModel.fields`), and a call target with one is matched whole (`pkg:*` names
+  every function, method, and class of `pkg`). Such a name never matches an external symbol, and
+  `unresolved = "report"` counts its last name (`decide` of `pkg:decide`). A module part that
+  names no project module is no error: the name matches nothing.
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
-  invalid glob, call targets whose globs are too many to match together (tens of thousands of
+  invalid glob, a name with more than one colon or an empty module or qualified name, call targets whose globs are too many to match together (tens of thousands of
   complex ones), or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
@@ -2549,7 +2560,7 @@ follows these rules:
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
 - A contract's targets are looked up from what an access names (the dotted suffixes of a
-  function's names, its class), never tried one by one: the cost grows with the sites, not with
+  function's names, its module, its class), never tried one by one: the cost grows with the sites, not with
   sites times targets, and the targets of every contract of a rule are indexed together.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
@@ -3364,7 +3375,9 @@ No automatic fix.
     subclasses; a class target covers constructing the class and its subclasses; a target
     naming no class (`reset`) covers every project function and method of that name.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
-    against the function's qualified name and its `Class.method` qualname (`pkg.store.*`).
+    against the function's qualified name and its `Class.method` qualname (`pkg.store.*`). A
+    module part names one module without its submodules: `pkg:*` allows what `pkg/__init__.py`
+    defines, not `pkg.sub.user.sub_user`.
   - `forbidden-callers`: when set, only calls by these functions are reported (matched like
     `allowed-callers`); `allowed-callers` and `exempt-methods` stay exceptions inside them. A
     call is in scope when the reporting function or one of the private helpers it hands the call
@@ -6466,7 +6479,8 @@ No automatic fix.
     `pkg.model.Model.*`).
   - `allowed-writers`: functions allowed to write the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`Store.*`,
-    `pkg.parser.generation.*`).
+    `pkg.parser.generation.*`). A module part names one module without its submodules:
+    `pkg.model:*` allows what `pkg/model/__init__.py` defines, not `pkg.model.io.save`.
   - `forbidden-writers`: when set, only writes by these functions are reported (matched like
     `allowed-writers`, `pkg.render.*`); `allowed-writers` and `exempt-methods` stay exceptions
     inside them. A write is in scope when a function on its chain (the reporting function, the

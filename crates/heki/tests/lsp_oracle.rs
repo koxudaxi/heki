@@ -97,6 +97,11 @@ name = "index"
 targets = ["Node.kids"]
 invalidators = ["Index.refresh"]
 
+[[tool.heki.invalidation]]
+name = "dial"
+targets = ["pkg.dials:*.level"]
+invalidators = ["pkg.dials:recalibrate"]
+
 [[tool.heki.effect-boundaries]]
 name = "rack-view"
 scopes = ["pkg.rack_view"]
@@ -376,6 +381,14 @@ const GLYPHS_RECORDING: &str = "from functools import lru_cache\n\n\nclass Glyph
 const GLYPH_USER: &str = "from pkg.glyphs import shared_glyphs\n\n\ndef measure(text):\n    return sum(shared_glyphs().width(ch) for ch in text)\n\n\ndef first(text):\n    return shared_glyphs().width(text[0])\n";
 const TAGGER: &str = "from pkg.catalog import Catalog\nfrom pkg.lookup import find\n\n\ndef tag(c: Catalog):\n    find(c, \"k\")[\"tag\"] = 1\n";
 const NODES: &str = "class Node:\n    def __init__(self):\n        self.kids = []\n\n\nclass Index:\n    def refresh(self):\n        self.stale = False\n\n\ndef attach(node: Node, kid):\n    node.kids.append(kid)\n";
+// A class an `invalidation` target names by its module (`pkg.dials:*.level`): written in
+// another module directly and through an untyped helper of a third.
+const DIALS: &str = "class Gauge:\n    def __init__(self) -> None:\n        self.level = 0\n\n\ndef recalibrate() -> None: ...\n";
+const DIALS_REEXPORT: &str =
+    "from pkg.dials_impl import Gauge\n\n\ndef recalibrate() -> None: ...\n";
+const DIALS_IMPL: &str = "class Gauge:\n    def __init__(self) -> None:\n        self.level = 0\n";
+const DIAL_OPS: &str = "def set_level(obj) -> None:\n    obj.level = 2\n";
+const DIAL_USER: &str = "from pkg.dial_ops import set_level\nfrom pkg.dials import Gauge\n\n\ndef turn(g: Gauge) -> None:\n    g.level = 1\n\n\ndef push(g: Gauge) -> None:\n    set_level(g)\n";
 const ANNOUNCE: &str =
     "from pkg.nodes import Index\n\n\ndef announce(index: Index):\n    index.refresh()\n";
 const ANNOUNCE_SILENT: &str =
@@ -677,6 +690,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/glyph_user.py", GLYPH_USER),
         ("pkg/nodes.py", NODES),
         ("pkg/announce.py", ANNOUNCE),
+        ("pkg/dials.py", DIALS),
+        ("pkg/dial_ops.py", DIAL_OPS),
+        ("pkg/dial_user.py", DIAL_USER),
         ("pkg/grow.py", GROW),
         ("pkg/graft.py", GRAFT),
         ("pkg/relay.py", RELAY),
@@ -1853,6 +1869,24 @@ fn steps_mut202_mut109() -> Vec<Step> {
     ]
 }
 
+/// An `invalidation` target names a class by its module (`pkg.dials:*.level`): the writes of a
+/// class that moves to another module behind a re-export are no longer its target, directly or
+/// through a helper (`MUT109`).
+fn steps_module_patterns() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a class a module pattern names moves to another module behind a re-export",
+            vec![
+                Action::Write("pkg/dials_impl.py", DIALS_IMPL.to_owned()),
+                save("pkg/dials.py", DIALS_REEXPORT),
+            ],
+        )
+        .absent(&[("pkg/dial_user.py", "MUT109")]),
+        Step::new("the class moves back", vec![save("pkg/dials.py", DIALS)])
+            .present(&[("pkg/dial_user.py", "MUT109")]),
+    ]
+}
+
 /// A helper handed a typed field starts changing it itself, besides through the allowed
 /// callee, while its final summary stays the same: the writes the boundary and the owner
 /// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`).
@@ -2380,6 +2414,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_task_arguments());
     steps.extend(steps_small_displays());
     steps.extend(steps_mut202_mut109());
+    steps.extend(steps_module_patterns());
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());
     steps.extend(steps_hash_writers());

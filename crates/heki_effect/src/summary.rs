@@ -19,10 +19,11 @@ use crate::resolver::{
 };
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
-    CallTarget, Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey,
-    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, OptInFacts, PerItem,
-    ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite,
-    TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
+    CallTarget, Construction, ContractClass, Contracts, Dispatch, EffectSummary, FileSummary,
+    FuncKey, GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, OptInFacts,
+    PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot,
+    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite,
+    WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
@@ -1673,13 +1674,9 @@ impl<'a> Extractor<'a> {
         instances: &[&String],
     ) -> Option<Box<ArgTargets>> {
         let c = self.contracts.filter(|_| self.events.is_some())?;
-        let with_bases = |class: &str| {
-            let mut classes = vec![class.to_owned()];
-            classes.extend(self.cx.project.ancestors_of(class));
-            classes
-        };
+        let with_bases = |class: &str| ContractClass::lineage(c, self.cx.project, class);
         let field = field.map_or(0, |(class, attr)| c.target_of(&with_bases(class), attr));
-        let classes: Vec<Vec<String>> = instances.iter().map(|c| with_bases(c)).collect();
+        let classes: Vec<Vec<ContractClass>> = instances.iter().map(|c| with_bases(c)).collect();
         let classes = if classes.iter().any(|line| c.names_class(line)) {
             classes
         } else {
@@ -2744,8 +2741,9 @@ impl<'a> Extractor<'a> {
                     && let Some(Val::Inst(class)) = self.val(*obj)
                     && let Some(c) = self.contracts
                 {
-                    let fqn = format!("{class}.{attr}");
-                    if let Some(deep) = c.readonly_producer(&fqn) {
+                    let class = ContractClass::new(c, self.cx.project, class.clone());
+                    let (fqn, qualname) = class.member(attr);
+                    if let Some(deep) = c.readonly_producer(&fqn, &qualname) {
                         self.seed_protected(fqn, deep, step, span);
                     }
                 }
@@ -3227,9 +3225,7 @@ impl<'a> Extractor<'a> {
             let initializer = invalidation::is_initializer(self.key);
             let own_init = invalidation::builds_written_object(initializer, reach, obj.params);
             // The class and its project bases: a target class covers its subclasses.
-            let mut classes = vec![class.clone()];
-            classes.extend(self.cx.project.ancestors_of(&class));
-            let mut mask = c.target_of(&classes, attr);
+            let mut mask = c.target_of(&ContractClass::lineage(c, self.cx.project, &class), attr);
             if mask != 0 {
                 let key = self.key;
                 mask &= !*self
@@ -3994,7 +3990,7 @@ impl<'a> Extractor<'a> {
             Callee::External(symbol) => {
                 if let Some(c) = self.contracts {
                     if let Some(step) = self.returned.get(&call.dst).copied()
-                        && let Some(deep) = c.readonly_producer(symbol)
+                        && let Some(deep) = c.readonly_producer(symbol, symbol)
                     {
                         self.seed_protected(symbol.clone(), deep, step, call.span);
                     }

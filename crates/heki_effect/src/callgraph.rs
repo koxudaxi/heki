@@ -495,7 +495,9 @@ fn return_flow_edge(
     let fqn = bc.callee.fqn();
     let (producer, produced, tail) = if callee.is_lru_cache {
         (fqn, Shared::produced(true), Vec::new())
-    } else if let Some(deep) = contracts.and_then(|c| c.readonly_producer(&fqn)) {
+    } else if let Some(deep) =
+        contracts.and_then(|c| c.readonly_producer(&fqn, &bc.callee.qualname))
+    {
         (fqn, Shared::produced(deep), Vec::new())
     } else if let Some(r) = &callee.returns_protected {
         (r.producer.clone(), r.shared, r.chain.clone())

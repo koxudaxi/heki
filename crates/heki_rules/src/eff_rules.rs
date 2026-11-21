@@ -9,6 +9,7 @@ use crate::mut_rules::{
 use crate::opt_rules::Sizes;
 use crate::{
     CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
+    split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
@@ -462,19 +463,10 @@ struct Boundary<'r> {
     allow_fresh: bool,
 }
 
-/// `name` and each of its dotted prefixes (`pkg.mod.f`, then `pkg` and `pkg.mod`).
-fn with_prefixes(name: &str) -> impl Iterator<Item = &str> {
-    std::iter::once(name).chain(name.match_indices('.').map(|(i, _)| &name[..i]))
-}
-
 /// Whether a pattern names `key`, its qualname, or a module / class / function containing it.
 fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
     let fqn = key.fqn();
-    patterns.iter().any(|p| {
-        with_prefixes(&fqn)
-            .chain(with_prefixes(&key.qualname))
-            .any(|n| p.matches(n))
-    })
+    patterns.iter().any(|p| p.names_within(&fqn, &key.qualname))
 }
 
 impl Boundary<'_> {
@@ -483,23 +475,28 @@ impl Boundary<'_> {
         key.qualname != "<module>" && names_function(&self.scopes, key)
     }
 
-    /// A Layer 2 symbol or a project class (or one of its modules / classes) that
-    /// `allowed-callees` names.
+    /// A Layer 2 symbol (or one of its modules / classes) that `allowed-callees` names.
     fn allows_symbol(&self, symbol: &str) -> bool {
         self.allowed_callees
             .iter()
-            .any(|p| with_prefixes(symbol).any(|n| p.matches(n)))
+            .any(|p| p.names_within(symbol, symbol))
     }
 
     /// Whether `allowed-callees` names everything `site` calls: the method the protocol typing
     /// the receiver declares ([`CallSite::declared`], what the call targets judge the call by),
-    /// the class it constructs, or each of its project callees.
-    fn allows_call(&self, site: &CallSite) -> bool {
+    /// the class it constructs (or one of its modules / classes), or each of its project
+    /// callees.
+    fn allows_call(&self, cx: &CheckContext<'_>, site: &CallSite) -> bool {
         if let Some(declared) = site.declared() {
             return names_function(&self.allowed_callees, declared);
         }
         match &site.constructs {
-            Some(class) => self.allows_symbol(class),
+            Some(class) => {
+                let qualname = cx.decls.class_qualname(class).unwrap_or(class);
+                self.allowed_callees
+                    .iter()
+                    .any(|p| p.names_within(class, qualname))
+            }
             None => site
                 .project_callees()
                 .iter()
@@ -706,7 +703,7 @@ fn note<K: Ord>(
 /// attribute part replaced by the written attribute (`DataModel.*` -> `DataModel.fields`), so
 /// writes to a subclass instance keep the class the configuration names.
 fn undeclared_text(entry: &str, attr: &str) -> String {
-    match entry.rsplit_once('.') {
+    match split_last_dot(entry) {
         Some((class, pattern)) if has_glob_syntax(pattern) => {
             format!("{class}.{attr}")
         }
@@ -786,7 +783,7 @@ impl<'a> Reach<'a> {
                     span: site.span,
                     path: path.to_path_buf(),
                 };
-                if b.calls && runs_body && !b.allows_call(site) {
+                if b.calls && runs_body && !b.allows_call(cx, site) {
                     for group in b.call_targets.called(site) {
                         let nodes = &reach.nodes;
                         note(&mut reach.calls, group, (func.fqn(), site.span), || {
