@@ -102,8 +102,8 @@ pub struct OptCandidate {
     pub not_profitable: Option<String>,
     /// What proves the quadratic / linear cost (`None`: nothing does, e.g. `x in param`).
     pub cost_evidence: Option<String>,
-    /// The most times the loop runs, when the code fixes it (`FnIndex::fixed_trips`), for a
-    /// size-dependent rewrite; `None` for the others.
+    /// The most times the loop runs, when the code fixes or caps it (`FnIndex::fixed_trips`),
+    /// for a size-dependent rewrite; `None` for the others.
     pub fixed_trips: Option<u32>,
     pub edits: Vec<TextEdit>,
 }
@@ -935,7 +935,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             not_profitable,
             cost_evidence,
             fixed_trips: lp.and_then(|lp| match self.ix.fixed_trips(lp, &mut |_| None) {
-                Answer::Known(n) => Some(n),
+                Answer::Known(trips) => Some(trips.at_most()),
                 Answer::Open => None,
             }),
             edits,
