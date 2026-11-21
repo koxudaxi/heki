@@ -1131,6 +1131,79 @@ fn mut112_reports_a_loop_value_a_raising_sentinel_test_guards() {
     );
 }
 
+/// What a callee returns, followed back through a `get` default (an element of the parameter, or
+/// the new default), a slice (a copy of a list or of an unknown value, a view of a NumPy array),
+/// and a display unpacking a parameter (a new dict).
+const RETURNED_PARTS: &str = r#"import numpy as np
+
+
+def rows_of(table, key):
+    return table.get(key, [])
+
+
+def add(table, key, row):
+    rows = rows_of(table, key)
+    rows.append(row)
+
+
+def tail(rows):
+    return rows[1:]
+
+
+def use_tail(rows, flag):
+    x = tail(rows) if flag else rows
+    x.append(1)
+
+
+def use_tail_only(rows):
+    x = tail(rows)
+    x.append(1)
+
+
+def window(arr: np.ndarray):
+    return arr[1:]
+
+
+def use_window(arr: np.ndarray, flag):
+    x = window(arr) if flag else []
+    x[0] = 1
+
+
+def use_window_only(arr: np.ndarray, flag):
+    x = window(arr) if flag else arr
+    x[0] = 1
+
+
+def merged(base, k):
+    return {**base, k: 1}
+
+
+def use_merged(base, k, flag):
+    x = merged(base, k) if flag else base
+    x["y"] = 2
+"#;
+
+#[test]
+fn mut112_follows_returned_defaults_slices_and_unpacking_displays() {
+    let p = Project::new("mut112_returned_parts");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/returns.py", RETURNED_PARTS);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let f = "pkg/returns.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(f, 10, "add", "rows"),
+            d(f, 19, "use_tail", "x"),
+            d(f, 33, "use_window", "x"),
+            d(f, 47, "use_merged", "x"),
+        ],
+        "{diags:#?}"
+    );
+    assert!(message(at(&diags, f, 10)).ends_with("an element of the parameter `table` on another"));
+    assert!(message(at(&diags, f, 33)).ends_with("the parameter `arr` on another"));
+}
+
 /// Two definitions of one function under a condition, each returning through a phi: what the
 /// second returns through a call of a phi's value refers to its own phis, after the first's.
 const CONDITIONAL_DEFINITIONS: &str = r#"FAST = True
