@@ -1256,14 +1256,16 @@ an annotation, or a constructor call produces), and the `heki_kb` unit tests pin
 
 339 repositories (118 mature open-source repositories with 12.42 million lines and 221 new GitHub
 repositories of 2026 with 5.68 million lines; 56,629 files, 18,108,143 lines in total) were
-scanned with 8 workers (62.8 s), and all 171 samples of the 8 rules were reviewed by hand:
+scanned with 8 workers (62.8 s), and all 171 samples of the 8 rules were reviewed by hand.
+These figures describe that analysis. Each rule's certainty and its current shape-right and
+real-harm rates are in [docs/precision.md](precision.md).
 
-| Rule | Hit rate by domain | Indirect share | Conclusion of the 171-sample review | Decision in Baseline v4.0 |
+| Rule | Hit rate by domain | Indirect share | Conclusion of the 171-sample review (analysis of 2026-11-19) | Decision in Baseline v4.0 |
 |---|---|---|---|---|
 | **EFF101** | Web/async **37.6%** (35/93) / DB 29.1% | **82.3%** (436/530) | **68% real harm** (including the real `time.sleep` in redis-py `cluster.py:1613`, reached in 4–5 hops) | **Core** (awaited calls and `Popen` excluded) |
 | **EFF102** | Web/async **44.1%** (41/93) / DB **48.5%** (50/103) | **90–93%** | **About 75–80% real harm** after the `for.iter` fix (NeMo, OmniAgent, luigi, ...) | **Core** (`for.iter` and `DaemonPolling` handled) |
 | **EFF103** | DB **47.6%** (49/103) / web 31.2% | **74.2%** (630/849) | Many N+1 queries; DDL, migrations, and ORM internals cause noise | **Core** (`for.iter`, DDL, ORM internals excluded) |
-| **DATA101** | Data/ML **19.5%** (24/123) | — | All 60% false positives of a naive AST check were non-`LoopCarried` padding; with `LoopCarried` **about 90% precise** | **Core** (SSA `LoopCarried` required) |
+| **DATA101** | Data/ML **19.5%** (24/123) | — | All 60% false positives of a naive AST check were non-`LoopCarried` padding; with `LoopCarried` **about 90% of reports were right about the shape** in that review | **Core** (SSA `LoopCarried` required) |
 | **MUT101** | Mature **16.1%** (19/118) / new 0.9% | — | Hit a real bug in datamodel-code-generator 0.86.0, and in mkdocs, wagtail, textual, ...; the about 64% noise of the naive version came from 3 causes | **Adopted in its strict form** (two-phase initialization, memo dicts, disjoint dict keys excluded) |
 | **MUT102a/b** | Mature 4.2% / new 0.5–1.4% | — | Sparse and mostly deliberate idioms (zero-copy `Sequence`, `frozen` accumulating lists) | **Rejected by measurement** (datamodel-code-generator's **`MUT201` / `MUT202`** adopted instead) |
 | **DATA102** | Data/ML 12.2% / mature 2.5% | — | A single-expression syntax check that duplicates Ruff / pandas-vet | **Rejected** |

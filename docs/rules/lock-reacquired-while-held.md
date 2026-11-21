@@ -2,9 +2,13 @@
 
 # lock-reacquired-while-held (EFF109)
 
-Family: Execution Effects (EFF) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 
@@ -61,6 +65,25 @@ It does not report:
 - `acquire(blocking=False)` and `acquire(timeout=...)`, which return;
 - locks whose class is not known, a lock in a local variable handed to a helper, and the same
   lock reached under two different names.
+
+## What a report states
+
+A report states that a function holding a non-reentrant lock takes the same lock again, itself
+or through the calls it makes on its thread or task, so the thread or task waits for itself.
+
+Its premises:
+
+- **Non-reentrant**: the lock is an instance of a class the catalog or the configuration flags,
+  by the value inferred or an annotation (assumptions R2, R3).
+- **Held**: a `with` over it, or an awaited or blocking `acquire()`, holds it on every path to the
+  inner acquisition, and nothing gives it back or binds its name again on the way. Established.
+- **Same object**: both sides name the lock the same way, through the arguments of each call, and
+  no function on the way may bind that name. Established, as long as no other thread binds it.
+- **Resolves**: each call on the chain is to the function shown (assumption R1). Open through a
+  method call: one candidate implementation that takes the lock is enough.
+- **Reaches**: each function on the chain reaches the next call on its thread or task. Open: one
+  path is enough, and a branch heki cannot decide counts as taken; only the branches the caller's
+  arguments switch off, and those behind a test of state the holder changes, are left out.
 
 ## Why is this bad?
 A thread that takes a `threading.Lock` it already holds waits for itself forever, and so does an

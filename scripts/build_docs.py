@@ -6,11 +6,13 @@
 - `docs/cli-reference.md`: the `--help` output of every command.
 - `docs/experimental.md`: the experimental features (`crates/heki_rules/src/experimental.rs`).
 
-The hand-written pages are checked against the rules: the guides' lists of opt-in rules, and
-the experimental features (in the README, `ARCHITECTURE.md`, and the site's pages, a table row
-that names a rule in a cell of its own says "experimental" exactly when the rule is; the
-`CHANGELOG.md` section of the release an entry names as `since` calls its target
-experimental).
+The hand-written pages are checked against the rules: the guides' lists of opt-in rules, the
+experimental features and the heuristic rules (in the README, `ARCHITECTURE.md`, and the site's
+pages, a table row that names a rule in a cell of its own says "experimental" exactly when the
+rule is, and "heuristic" exactly when it is; the `CHANGELOG.md` section of the release an entry
+names as `since` calls its target experimental), the certifications of `docs/precision.md`
+(every exact rule has a row there whose census and holdout run found no false claim), and the
+rule documentation (every rule says what a report states).
 
 Usage:
     python scripts/build_docs.py --heki target/release/heki
@@ -33,6 +35,11 @@ RULES_DIR = DOCS / "rules"
 CLI_PAGE = DOCS / "cli-reference.md"
 EXPERIMENTAL_PAGE = DOCS / "experimental.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
+PRECISION_PAGE = DOCS / "precision.md"
+# What a rule's default severity says, by the consequence of the code it reports.
+CONSEQUENCES = {"bug": "a bug", "slowdown": "slower code"}
+# The section of every rule's documentation that lists the premises of its claim (ADR-018).
+CLAIM_SECTION = "## What a report states"
 
 FAMILIES = {
     "Mut": (
@@ -65,6 +72,20 @@ TABLE_CELL_SEPARATOR = re.compile(r"(?<!\\)\|")
 LINK = re.compile(r"\[([^\]]+)]\([^)]+\)")
 CHANGELOG_SECTION = re.compile(r"^## \[([^\]]+)]", re.MULTILINE)
 LIST_ITEM = re.compile(r"^\s*[-*] ")
+# A row of the measurements table of `docs/precision.md`: rule, certainty, when and where it
+# was measured, sample size, C / P / B / F counts, the share right about the code, its
+# interval, and the share of real harm.
+MEASUREMENT = re.compile(
+    r"^\| `(?P<code>[A-Z]+\d+)` \| (?P<certainty>exact|heuristic) \| (?P<measured>[^|]+) \| "
+    r"(?P<sample>\d+) \| (?P<c>\d+) / (?P<p>\d+) / (?P<b>\d+) / (?P<f>\d+) \| "
+    r"(?P<right>\d+%) \| [^|]+ \| [^|]+ \|$"
+)
+# A row of the certifications table of `docs/precision.md`: rule, the release that certified
+# it, and the reports of its census and of its holdout run with the false claims among them.
+CERTIFICATION = re.compile(
+    r"^\| `(?P<code>[A-Z]+\d+)` \| (?P<release>[^|]+) \| "
+    r"(?P<census>\d+) / (?P<census_false>\d+) \| (?P<holdout>\d+) / (?P<holdout_false>\d+) \|$"
+)
 
 CLI_COMMANDS = [
     ([], "heki"),
@@ -74,6 +95,11 @@ CLI_COMMANDS = [
     (["snapshot"], "heki snapshot"),
     (["assumptions"], "heki assumptions"),
 ]
+
+
+def shown(path: Path) -> str:
+    """A file of the repository as the messages name it: relative, with `/` on every platform."""
+    return path.relative_to(ROOT).as_posix()
 
 
 def run(heki: Path, *args: str) -> str:
@@ -97,11 +123,25 @@ def badges(rule: dict) -> str:
         marks.append("🛠️")
     elif rule["size_dependent_fix"]:
         marks.append("🔧")
-    if not rule["default_enabled"]:
+    if rule["certainty"] == "heuristic":
+        marks.append("≈")
+    if rule["activation"] == "opt-in":
         marks.append("🔌")
+    elif rule["activation"] == "contract":
+        marks.append("📜")
     if rule["experimental"]:
         marks.append("🧪")
     return " ".join(marks)
+
+
+def activation_label(rule: dict) -> str:
+    if rule["activation"] == "opt-in":
+        return "Opt-in"
+    if rule["activation"] == "contract":
+        return "Runs when its contract is declared"
+    if rule["default_enabled"]:
+        return "Enabled by default"
+    return "Off by default"
 
 
 def rules_index(rules: list[dict], policy: str) -> str:
@@ -109,16 +149,31 @@ def rules_index(rules: list[dict], policy: str) -> str:
         GENERATED,
         "# Rules",
         "",
-        f"heki has {len(rules)} rules in four families. Every rule is enabled by default except "
-        "the opt-in rules marked 🔌, which need their exact code or name in `select` / "
-        "`extend-select` (a prefix such as `EFF` does not enable them).",
+        f"heki has {len(rules)} rules in four families. A rule is exact when it reports only "
+        "what it established and was certified on the corpus, and heuristic (≈) when a report "
+        "can be wrong about the code: [Rule Precision](../precision.md) says how a rule is "
+        "certified and what each one measured. Each rule's page says what a report states.",
+        "",
+        "- The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report "
+        "of an exact rule that did not establish every premise (an `OPT` report whose rewrite "
+        "is not proven) is shown where a heuristic rule would run.",
+        "- A heuristic rule runs when `select` / `extend-select` names its code or name. With "
+        "`lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also "
+        "run by default and for a prefix or `ALL`.",
+        "- The opt-in rules marked 🔌 run only when `select` / `extend-select` names their exact "
+        "code or name.",
+        "- The contract rules marked 📜 run when their contract is declared, whatever their "
+        "certainty.",
         "",
         "## Legend",
         "",
         "- 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.",
         "- 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in "
         "functions a `--profile` dump shows hot (it can be slower for tiny inputs).",
+        "- ≈ Heuristic rule: a report can be wrong about the code. Every output labels its "
+        "reports `heuristic`.",
         "- 🔌 Opt-in rule.",
+        "- 📜 Contract rule: it reports only what a declared contract asks for.",
         f"- 🧪 Experimental rule. {policy} See [Experimental Features](../experimental.md).",
         "",
     ]
@@ -134,13 +189,31 @@ def rules_index(rules: list[dict], policy: str) -> str:
     return "\n".join(lines)
 
 
-def rule_page(rule: dict, policy: str) -> str:
+def measured(measurement: dict | None) -> str:
+    """What the latest measurement of a rule found, as its page says it."""
+    if measurement is None:
+        return "It has not been measured yet."
+    return (
+        f"Of {measurement['sample']} sampled reports ({measurement['measured'].strip()}), "
+        f"{measurement['right']} were right about the code."
+    )
+
+
+def rule_page(rule: dict, policy: str, measurement: dict | None) -> str:
     title, _ = FAMILIES[rule["family"]]
-    state = ["Enabled by default" if rule["default_enabled"] else "Opt-in"]
+    state = [rule["certainty"].capitalize(), activation_label(rule)]
     note = []
+    if rule["heuristic_note"]:
+        note += [
+            '!!! note "Heuristic"',
+            "",
+            f"    {rule['heuristic_note']} {measured(measurement)} See "
+            "[Rule Precision](../precision.md).",
+            "",
+        ]
     if rule["experimental"]:
         state.append("Experimental")
-        note = [
+        note += [
             '!!! warning "Experimental"',
             "",
             f"    {rule['experimental']['reason']} {policy} See "
@@ -152,7 +225,8 @@ def rule_page(rule: dict, policy: str) -> str:
             GENERATED,
             f"# {rule['slug']} ({rule['code']})",
             "",
-            f"Family: {title} · {' · '.join(state)} · Severity `{rule['default_severity']}` · {fix_label(rule)}",
+            f"Family: {title} · {' · '.join(state)} · Severity `{rule['default_severity']}` "
+            f"({CONSEQUENCES[rule['consequence']]}) · {fix_label(rule)}",
             "",
             rule["summary"],
             "",
@@ -222,20 +296,59 @@ def cli_page(heki: Path) -> str:
     return "\n".join(lines)
 
 
-def outputs(heki: Path, rules: list[dict], registry: dict) -> dict[Path, str]:
+def outputs(
+    heki: Path, rules: list[dict], registry: dict, measurements: dict[str, dict]
+) -> dict[Path, str]:
     files = {
         RULES_DIR / "index.md": rules_index(rules, registry["policy"]),
         CLI_PAGE: cli_page(heki),
         EXPERIMENTAL_PAGE: experimental_page(registry, rules),
     }
     for r in rules:
-        files[RULES_DIR / f"{r['slug']}.md"] = rule_page(r, registry["policy"])
+        page = rule_page(r, registry["policy"], measurements.get(r["code"]))
+        files[RULES_DIR / f"{r['slug']}.md"] = page
     return files
+
+
+def precision_rows(pattern: re.Pattern) -> dict[str, dict]:
+    """The rows of a table of `docs/precision.md` that `pattern` matches, by rule code."""
+    rows = {}
+    for line in PRECISION_PAGE.read_text(encoding="utf-8").splitlines():
+        if m := pattern.match(line):
+            rows[m["code"]] = m.groupdict()
+    return rows
+
+
+def uncertified_exact_rules(rules: list[dict], certifications: dict[str, dict]) -> list[str]:
+    """The exact rules without a certification in `docs/precision.md`: a row whose census and
+    holdout run found no false claim."""
+    stale = []
+    for r in rules:
+        row = certifications.get(r["code"])
+        if r["certainty"] != "exact":
+            continue
+        if row is None:
+            stale.append(f"{r['code']}: no row")
+        elif int(row["census_false"]) > 0 or int(row["holdout_false"]) > 0:
+            stale.append(
+                f"{r['code']}: {row['census_false']} false claim(s) in the census and "
+                f"{row['holdout_false']} in the holdout run (exact needs none)"
+            )
+    return stale
+
+
+def rules_without_claims(rules: list[dict]) -> list[str]:
+    """The rules whose documentation does not say what a report states."""
+    return [
+        f"{r['code']}: no `{CLAIM_SECTION}` section"
+        for r in rules
+        if not any(line.strip() == CLAIM_SECTION for line in r["doc"].splitlines())
+    ]
 
 
 def stale_opt_in_lists(rules: list[dict]) -> list[str]:
     """The guides' opt-in rule lists that do not name exactly the opt-in rules."""
-    opt_in = {r["code"] for r in rules if not r["default_enabled"]}
+    opt_in = {r["code"] for r in rules if r["activation"] == "opt-in"}
     stale = []
     for page in sorted(DOCS.glob("*.md")):
         text = page.read_text(encoding="utf-8")
@@ -245,7 +358,7 @@ def stale_opt_in_lists(rules: list[dict]) -> list[str]:
                 line = text.count("\n", 0, m.start()) + 1
                 missing = ", ".join(sorted(opt_in - listed)) or "-"
                 extra = ", ".join(sorted(listed - opt_in)) or "-"
-                stale.append(f"{page.relative_to(ROOT)}:{line}: missing {missing}; not opt-in {extra}")
+                stale.append(f"{shown(page)}:{line}: missing {missing}; not opt-in {extra}")
     return stale
 
 
@@ -288,19 +401,26 @@ def list_items(text: str):
         yield " ".join(item)
 
 
-def stale_experimental_marks(rules: list[dict], registry: dict) -> list[str]:
-    """The hand-written pages' marks of experimental features that disagree with the registry."""
+def stale_row_marks(rules: list[dict], word: str, marked_codes: set[str]) -> list[str]:
+    """The hand-written pages' table rows that name rules in cells of their own and say `word`
+    other than exactly when one of them is in `marked_codes`."""
     codes = {r["code"] for r in rules}
-    experimental = {r["code"]: r["experimental"] for r in rules if r["experimental"]}
     stale = []
     for page in hand_written_pages():
         for number, row in enumerate(page.read_text(encoding="utf-8").splitlines(), 1):
             named = rule_cell_codes(row, codes) if row.lstrip().startswith("|") else set()
-            marked = "experimental" in row.lower()
-            if named and marked != bool(named & experimental.keys()):
+            marked = word in row.lower()
+            if named and marked != bool(named & marked_codes):
                 listed = ", ".join(sorted(named))
-                wrong = "says experimental" if marked else "does not say experimental"
-                stale.append(f"{page.relative_to(ROOT)}:{number}: the row of {listed} {wrong}")
+                wrong = f"says {word}" if marked else f"does not say {word}"
+                stale.append(f"{shown(page)}:{number}: the row of {listed} {wrong}")
+    return stale
+
+
+def stale_experimental_marks(rules: list[dict], registry: dict) -> list[str]:
+    """The hand-written pages' marks of experimental features that disagree with the registry."""
+    experimental = {r["code"] for r in rules if r["experimental"]}
+    stale = stale_row_marks(rules, "experimental", experimental)
     text = CHANGELOG.read_text(encoding="utf-8")
     starts = list(CHANGELOG_SECTION.finditer(text)) + [None]
     sections = {
@@ -314,7 +434,7 @@ def stale_experimental_marks(rules: list[dict], registry: dict) -> list[str]:
             target.search(item) and "experimental" in item.lower() for item in list_items(section)
         ):
             stale.append(
-                f"{CHANGELOG.relative_to(ROOT)}: [{feature['since']}] does not call "
+                f"{shown(CHANGELOG)}: [{feature['since']}] does not call "
                 f"{feature['target']} experimental"
             )
     return stale
@@ -332,11 +452,20 @@ def main() -> int:
     args = parser.parse_args()
     rules = json.loads(run(args.heki, "rule", "--all", "--output-format", "json"))
     registry = json.loads(run(args.heki, "dump-experimental"))
+    measurements = precision_rows(MEASUREMENT)
+    heuristic = {r["code"] for r in rules if r["certainty"] == "heuristic"}
     disagreements = {
         "Opt-in rule lists in the guides disagree with the rules": stale_opt_in_lists(rules),
         "Experimental features are marked differently from the registry": (
             stale_experimental_marks(rules, registry)
         ),
+        "Heuristic rules are marked differently from the rules": (
+            stale_row_marks(rules, "heuristic", heuristic)
+        ),
+        f"Exact rules lack their certification in {shown(PRECISION_PAGE)}": (
+            uncertified_exact_rules(rules, precision_rows(CERTIFICATION))
+        ),
+        "Rules do not say what a report states": rules_without_claims(rules),
     }
     if any(disagreements.values()):
         for heading, entries in disagreements.items():
@@ -345,15 +474,15 @@ def main() -> int:
                 for entry in entries:
                     print(f"  {entry}")
         return 1
-    files = outputs(args.heki, rules, registry)
+    files = outputs(args.heki, rules, registry, measurements)
     stale = sorted(
-        str(p.relative_to(ROOT))
+        shown(p)
         for p, text in files.items()
         if not p.exists() or p.read_text(encoding="utf-8") != text
     )
     expected = {p.name for p in files if p.parent == RULES_DIR}
     extra = sorted(
-        str(p.relative_to(ROOT))
+        shown(p)
         for p in RULES_DIR.glob("*.md")
         if p.name not in expected
     ) if RULES_DIR.exists() else []

@@ -2,9 +2,13 @@
 
 # exclusive-object-fanout (EFF110)
 
-Family: Execution Effects (EFF) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 
@@ -65,6 +69,28 @@ It does not report:
 - a fan-out no run reaches;
 - objects whose class is not known, tasks heki cannot resolve, and the same object reached
   under two different names.
+
+## What a report states
+
+A report states that two tasks a function starts together, or one it starts for every item, use
+the same object that allows one operation at a time, so one of them can raise while the other is
+inside an operation.
+
+Its premises:
+
+- **One at a time**: the object is an instance of a class whose method the catalog or the
+  configuration flags, by the value inferred or an annotation (assumptions R2, R3); for an
+  `AsyncSession`, the fan-out can be its first operation since it was made or gave its connection
+  back. Established for the paths described above.
+- **Together**: the tasks are started by one `asyncio.gather`, `asyncio.wait`, or task group, and
+  run until the fan-out ends. Established.
+- **Same object**: each task's function names the object the same way, through the arguments of
+  its call, and may not bind that name. Established, as long as no other code binds it while the
+  tasks run.
+- **Resolves**: each call on the chain is to the function shown (assumption R1). Open through a
+  method call: one candidate implementation that uses the object is enough.
+- **Reaches**: each task reaches the use outside any lock it holds. Open: one path is enough, and
+  a branch heki cannot decide counts as taken.
 
 ## Why is this bad?
 These objects keep the state of one operation in progress: a stream reader one pending read,
