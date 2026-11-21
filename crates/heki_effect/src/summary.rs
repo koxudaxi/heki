@@ -18,7 +18,7 @@ use crate::iterations::{
 use crate::locks::{self, LockStep, ObjRef};
 use crate::one_at_a_time;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
-use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
+use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
@@ -48,28 +48,6 @@ use std::sync::Arc;
 
 mod imports;
 mod statements;
-
-/// Methods that mutate their receiver in place (section 2.4; shared by MUT101/201/202).
-pub const CONTAINER_MUTATORS: &[&str] = &[
-    "append",
-    "extend",
-    "insert",
-    "pop",
-    "remove",
-    "clear",
-    "sort",
-    "reverse",
-    "add",
-    "discard",
-    "update",
-    "popitem",
-    "setdefault",
-    "difference_update",
-    "intersection_update",
-    "symmetric_difference_update",
-    "__setitem__",
-    "__delitem__",
-];
 
 /// The (value, place) pairs the store walk of `return_origins` may take per byte of a function's
 /// source, above a floor: a function past it returns objects of unknown origin.
@@ -3219,7 +3197,7 @@ impl<'a> Extractor<'a> {
         let mutated = |var: &VarId| {
             self.uses.get(var).into_iter().flatten().any(|u| match u {
                 InstKind::MethodCall { recv, method, .. } => {
-                    recv == var && CONTAINER_MUTATORS.contains(&method.as_str())
+                    recv == var && container_mutator(method)
                 }
                 InstKind::SubscriptStore { obj, .. }
                 | InstKind::SubscriptDelete { obj, .. }
@@ -3462,9 +3440,7 @@ impl<'a> Extractor<'a> {
                 // A container method changes its receiver in place, unless the receiver's
                 // class defines the method itself: then what that method does is in its
                 // summary (`Stats.clear()` may change nothing).
-                if CONTAINER_MUTATORS.contains(&method.as_str())
-                    && !matches!(callee, Callee::Project(..))
-                {
+                if container_mutator(method) && !matches!(callee, Callee::Project(..)) {
                     self.container_method(*recv, method, args, span);
                     for a in args {
                         if matches!(method.as_str(), "append" | "insert" | "add" | "setdefault") {

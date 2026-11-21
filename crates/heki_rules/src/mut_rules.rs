@@ -9,10 +9,10 @@ use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CacheEvent, CacheFlow, CallHop, CallSite, Callee,
-    Construction, ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS,
-    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
-    TypedFieldWriteSite, Val, WriteKind, attr_writes, self_attr_writes,
+    AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, Callee, Construction,
+    ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS, ProjectDecls,
+    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
+    WriteKind, attr_writes, container_mutator, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Budget, FnShape, Visit, reach};
@@ -3049,7 +3049,7 @@ impl<'a> Mut202Fn<'a> {
             | InstKind::SubscriptStore { obj, .. }
             | InstKind::SubscriptDelete { obj, .. } => self.guarded(*obj),
             InstKind::MethodCall { recv, method, .. }
-                if CONTAINER_MUTATORS.contains(&method.as_str()) =>
+                if container_mutator(method) =>
             {
                 self.guarded(*recv)
             }

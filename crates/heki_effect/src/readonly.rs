@@ -254,9 +254,12 @@ impl ContainerKind {
         }
     }
 
-    /// Whether `method` changes a container of this kind in place.
-    pub fn mutator(self, method: &str) -> bool {
-        let mutators: &[&str] = match self {
+    pub const ALL: [Self; 3] = [Self::List, Self::Dict, Self::Set];
+
+    /// The methods that change a container of this kind in place: the one table of the builtin
+    /// containers' changing methods ([`container_mutator`] reads it too).
+    pub fn mutators(self) -> &'static [&'static str] {
+        match self {
             Self::List => &[
                 "append", "extend", "insert", "pop", "remove", "clear", "sort", "reverse",
             ],
@@ -272,8 +275,12 @@ impl ContainerKind {
                 "intersection_update",
                 "symmetric_difference_update",
             ],
-        };
-        mutators.contains(&method)
+        }
+    }
+
+    /// Whether `method` changes a container of this kind in place.
+    pub fn mutator(self, method: &str) -> bool {
+        self.mutators().contains(&method)
     }
 
     /// Whether an item store or delete (`x[k] = v`, `del x[k]`) changes a container of this kind.
@@ -290,6 +297,14 @@ impl ContainerKind {
             Self::Set => matches!(op, BitOr | BitAnd | Sub | BitXor),
         }
     }
+}
+
+/// Whether `method` changes a builtin list, dict, or set in place when the receiver's kind is
+/// not known: a changing method of some kind ([`ContainerKind::mutators`]), or the item store or
+/// delete an assignment calls (`__setitem__`, `__delitem__`).
+pub fn container_mutator(method: &str) -> bool {
+    ContainerKind::ALL.iter().any(|k| k.mutator(method))
+        || matches!(method, "__setitem__" | "__delitem__")
 }
 
 /// A function whose results a `functools` cache keeps and hands to every later call with the

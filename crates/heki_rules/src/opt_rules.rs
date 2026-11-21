@@ -17,7 +17,7 @@ use crate::mut_rules::{CallInst, site_call};
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, TextEdit};
-use heki_effect::{CONTAINER_MUTATORS, CallSite, Items, ProjectDecls, TypeCtx, Val};
+use heki_effect::{CallSite, Items, ProjectDecls, TypeCtx, Val, container_mutator};
 use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
@@ -445,7 +445,7 @@ impl<'d, 'a> ListUse<'d, 'a> {
     fn changed(&self) -> bool {
         self.insts().any(|i| match &i.kind {
             InstKind::MethodCall { recv, method, .. } => {
-                self.is_list(*recv) && CONTAINER_MUTATORS.contains(&method.as_str())
+                self.is_list(*recv) && container_mutator(method)
             }
             InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
                 self.is_list(*obj)
