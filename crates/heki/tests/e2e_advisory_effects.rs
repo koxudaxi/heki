@@ -1440,6 +1440,155 @@ fn a_property_read_may_raise_before_the_wait() {
     assert_eq!(got, vec![(32, "EFF111"), (36, "EFF101")], "{diags:#?}");
 }
 
+const HOOKED_READS: &str = r#"import time
+
+
+class Hooked:
+    def ready(self):
+        return True
+
+    def __getattribute__(self, name):
+        return object.__getattribute__(self, name)
+
+
+class Base:
+    def ready(self):
+        return True
+
+
+class Shadow(Base):
+    @property
+    def ready(self):
+        raise ValueError("not ready")
+
+
+class GetterMixin:
+    @property
+    def ready(self):
+        raise ValueError("not ready")
+
+
+class Kept:
+    def ready(self):
+        return True
+
+
+class Mixed(GetterMixin, Kept):
+    pass
+
+
+class Meta(type):
+    pass
+
+
+class Made(metaclass=Meta):
+    def ready(self):
+        return True
+
+
+class Steady:
+    def ready(self):
+        return True
+
+
+class Override(Steady):
+    def ready(self):
+        return False
+
+
+def hooked(h: Hooked):
+    try:
+        h.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+def shadowed(b: Base):
+    try:
+        b.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+def mixed(k: Kept):
+    try:
+        k.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+def made(m: Made):
+    try:
+        m.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+def overridden(s: Steady):
+    try:
+        s.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+async def tn_hooked(h: Hooked):
+    hooked(h)
+
+
+async def tn_shadowed(b: Base):
+    shadowed(b)
+
+
+async def tn_mixed(k: Kept):
+    mixed(k)
+
+
+async def tn_made(m: Made):
+    made(m)
+
+
+async def tp_overridden(s: Steady):
+    overridden(s)
+"#;
+
+/// Looking up a method runs no code only when no class the value may be (R2: a project
+/// subclass, and the other bases it derives from) can run code on the read: a
+/// `__getattribute__`, a property or other binding of the name in a subclass or its mixin, or a
+/// metaclass heki does not know. A subclass overriding the method with another method keeps the
+/// lookup safe.
+#[test]
+fn a_method_lookup_runs_the_hooks_of_every_class_the_value_may_be() {
+    let p = Project::new("exact_hooked_reads");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/reads.py", HOOKED_READS);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let got: Vec<(u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (98, "EFF111"),
+            (102, "EFF111"),
+            (106, "EFF111"),
+            (110, "EFF111"),
+            (114, "EFF101")
+        ],
+        "{diags:#?}"
+    );
+}
+
 const HELPER_OVER_DISPATCH: &str = r#"import requests
 
 

@@ -13,7 +13,7 @@ use crate::{
     split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Certainty, Diagnostic};
 use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::with_paths;
 use heki_effect::{
@@ -85,7 +85,11 @@ pub(crate) fn is_test_code(qualname: &str, rel_path: &str) -> bool {
 fn boundary_code(r: &BoundaryReport) -> &'static str {
     if r.effect == ExecEffectKind::BlockingFs {
         "EFF105"
-    } else if r.must.is_some() && r.effect.wait_kind() == Some(WaitKind::Io) {
+    } else if crate::premises::tier(
+        "EFF101",
+        r.must.is_some() && r.effect.wait_kind() == Some(WaitKind::Io),
+    ) == Certainty::Exact
+    {
         "EFF101"
     } else {
         "EFF111"
@@ -471,7 +475,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         let exact = established_queries(cx, unit, &tcx, f, origins, &queries);
         for (q, exact) in queries.iter().zip(exact) {
             let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
-            match exact {
+            let tier = crate::premises::tier("EFF103", exact.is_some());
+            match exact.filter(|_| tier == Certainty::Exact) {
                 // An exact report names and keys the call it claims.
                 Some(e) if cx.enabled("EFF103", unit) => cx.emit(
                     out,

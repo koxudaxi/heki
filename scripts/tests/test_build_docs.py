@@ -65,3 +65,37 @@ def test_the_tables_of_the_real_page_are_read() -> None:
     assert certified["OPT103"]["census"] == "128" and certified["OPT103"]["holdout_false"] == "0"
     assert certified["EFF101"]["census"] == "287" and certified["EFF101"]["holdout_false"] == "0"
     assert certified["MUT114"]["census"] == "5" and certified["MUT114"]["holdout_false"] == "0"
+
+
+def page(premises: list[str]) -> str:
+    bullets = "\n".join(f"- **{name}**: what it states." for name in premises)
+    return f"## What it does\nx\n\n## What a report states\n\nIts premises:\n\n{bullets}\n\n## Why\ny\n"
+
+
+@pytest.mark.parametrize(
+    ("listed", "stale"),
+    [
+        (["Every return", "Waits"], []),
+        (
+            ["Waits", "Every return"],
+            ["EFF101: the page lists ['Waits', 'Every return'], the premise table ['Every return', 'Waits']"],
+        ),
+        (
+            ["Every return"],
+            ["EFF101: the page lists ['Every return'], the premise table ['Every return', 'Waits']"],
+        ),
+    ],
+)
+def test_a_rule_page_lists_the_premises_of_the_table(listed: list[str], stale: list[str]) -> None:
+    rule = {
+        "code": "EFF101",
+        "certainty": "exact",
+        "doc": page(listed),
+        "premises": [{"name": "Every return"}, {"name": "Waits"}],
+    }
+    assert build_docs.premises_disagreeing([rule]) == stale
+
+
+def test_a_heuristic_rule_without_premises_needs_none() -> None:
+    rule = {"code": "EFF111", "certainty": "heuristic", "doc": page(["On every path"]), "premises": []}
+    assert build_docs.premises_disagreeing([rule]) == []

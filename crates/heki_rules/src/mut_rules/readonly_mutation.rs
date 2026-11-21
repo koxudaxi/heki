@@ -13,7 +13,7 @@
 use super::{Allowance, facts_run_at, initializes_itself, runs_inside_allowed};
 use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic, RelatedLocation};
+use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::{
     BoundCallee, CallHop, CallSite, CallsByCaller, EffectSummary, FuncKey, ParamChange,
     ProjectIndex, ReadOnlyAttr, ReadOnlyKind, SiteRole, Slot, WriteKind,
@@ -321,9 +321,10 @@ impl Rule<'_, '_> {
             if let Some(d) = self.emit(
                 out, "MUT110", unit, caller, span, target, h.message, &h.help, &h.chain,
             ) {
-                match h.witness {
-                    Some(w) => d.related.push(w),
-                    None => d.certainty = Certainty::Heuristic.at_most(d.certainty),
+                d.certainty =
+                    crate::premises::tier("MUT110", h.witness.is_some()).at_most(d.certainty);
+                if let Some(w) = h.witness {
+                    d.related.push(w);
                 }
             }
         }

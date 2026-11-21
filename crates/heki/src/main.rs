@@ -252,6 +252,9 @@ struct RuleRecord {
     heuristic_note: Option<String>,
     experimental: Option<&'static ExperimentalFeature>,
     default_severity: heki_env::Severity,
+    /// The premises of the rule's exact claim (`heki_rules::premises`), empty for a rule
+    /// without one.
+    premises: &'static [&'static heki_rules::premises::Premise],
 }
 
 impl RuleRecord {
@@ -262,6 +265,7 @@ impl RuleRecord {
             heuristic_note: rule.heuristic_note(),
             experimental: experimental_rule(rule.code),
             default_severity: rule.default_severity(),
+            premises: heki_rules::premises::of_rule(rule.code),
         }
     }
 }

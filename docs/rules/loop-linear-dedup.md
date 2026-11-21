@@ -20,7 +20,7 @@ runs.
 
 Its premises:
 
-- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+- **Builtin type by construction**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.

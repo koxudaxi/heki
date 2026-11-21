@@ -26,6 +26,7 @@ pub use paths::with_paths;
 mod construction;
 pub mod consumption;
 mod contracts;
+pub(crate) mod decorators;
 mod environment;
 pub mod guards;
 pub mod held;
@@ -61,6 +62,7 @@ pub use locks::{LockAcquire, LockFacts, ObjRef, SiteLock, StateTests};
 pub use one_at_a_time::ExclusiveUse;
 pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
+pub use readonly::container_mutator;
 pub use readonly::{
     CacheDecorator, CachedResult, ContainerKind, ProtectedReturn, ReturnStep, Shared,
 };
@@ -71,7 +73,7 @@ pub use resolver::{
     detect_source_roots, func_qualname, module_name_for_path, resolve_relative_module,
     self_aliases,
 };
-pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
+pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
 
 use heki_ast::Span;
 use heki_ir::ModuleIr;
