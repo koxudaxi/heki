@@ -2365,7 +2365,8 @@ const READING_DICT_METHODS: &[&str] = &[
     "__iter__",
 ];
 
-/// Builtins that only read the dict they are handed (`len(globals())`, `sorted(globals())`).
+/// Builtins that only read the dict they are handed as their first argument (`len(globals())`,
+/// `sorted(globals())`).
 const READING_BUILTINS: &[&str] = &[
     "len",
     "list",
@@ -2381,13 +2382,16 @@ const READING_BUILTINS: &[&str] = &[
 ];
 
 /// Whether `f` may bind a module global behind the IR through the dict `globals()` returns
-/// (`vars()` and `locals()` are A1 hazards of their own). Storing or deleting an item, calling
-/// a method that changes the dict, or handing it on where other code may change it (an
-/// argument of a call that only reads it is no such hand-off; a stored, returned, or merged
-/// value is) may bind any name, also one declared `Final`, which the runtime does not
-/// enforce. Reading the dict (`globals().get(name)`, `name in globals()`, iterating it) binds
-/// nothing. The builtin `globals` itself handed on (`g = globals`) may be called anywhere.
-fn writes_globals(f: &IrFunction) -> bool {
+/// (`vars()` and `locals()` are A1 hazards of their own), when the builtins `module` trusts are
+/// the real ones. Storing or deleting an item, calling a method that changes the dict, or
+/// handing it on where other code may change it (a stored, returned, or merged value, an
+/// argument of a call other than the object a real reading builtin reads, or an operand whose
+/// operation runs another object's method) may bind any name, also one declared `Final`, which
+/// the runtime does not enforce. Reading the dict (`globals().get(name)`, `globals()[name]`,
+/// `name in globals()`, iterating it) binds nothing. The builtin `globals` itself handed on (`g
+/// = globals`) may be called anywhere, and a call of whatever the code binds to that name may
+/// return the dict.
+fn writes_globals(f: &IrFunction, module: &ModuleConstants) -> bool {
     let dict_call = |kind: &InstKind| match kind {
         InstKind::Call {
             dst,
@@ -2408,8 +2412,8 @@ fn writes_globals(f: &IrFunction) -> bool {
     if dicts.is_empty() && !insts().any(|i| names_globals(&i.kind)) {
         return false;
     }
-    let shape = FnShape::new(f);
-    let is_dict = |v: VarId| dicts.contains(&shape.copy_root(v));
+    let ix = FnIndex::new(f, module);
+    let is_dict = |v: VarId| dicts.contains(&ix.shape.copy_root(v));
     let callees: FxHashSet<VarId> = insts()
         .filter_map(|i| match &i.kind {
             InstKind::Call {
@@ -2420,10 +2424,17 @@ fn writes_globals(f: &IrFunction) -> bool {
         })
         .collect();
     let reads_only = |kind: &InstKind| match kind {
-        InstKind::Copy { .. }
-        | InstKind::SubscriptLoad { .. }
-        | InstKind::Compare { .. }
-        | InstKind::MakeIter { .. } => true,
+        InstKind::Copy { .. } | InstKind::MakeIter { .. } => true,
+        // `obj[d]` hands the dict to `obj.__getitem__`.
+        InstKind::SubscriptLoad { obj, .. } => is_dict(*obj),
+        // `d in obj` runs `obj.__contains__(d)`, and a rich comparison runs the other operand's
+        // method (reflected, when the dict's own returns `NotImplemented`) unless that is the
+        // dict too.
+        InstKind::Compare { op, lhs, rhs, .. } => match op {
+            CompareOpKind::Is | CompareOpKind::IsNot => true,
+            CompareOpKind::In | CompareOpKind::NotIn => is_dict(*rhs),
+            _ => is_dict(*lhs) && is_dict(*rhs),
+        },
         InstKind::MethodCall {
             recv,
             method,
@@ -2438,12 +2449,20 @@ fn writes_globals(f: &IrFunction) -> bool {
                     .chain(kwargs.iter().map(|(_, v)| v))
                     .any(|v| is_dict(*v))
         }
+        // Past the first argument the dict is no object read: `iter(f, d)` compares every item
+        // `f` returns with it, through the item's `__eq__`.
         InstKind::Call {
             callee,
-            callee_var: Some(_),
+            callee_var,
+            args,
             kwargs,
             ..
-        } => READING_BUILTINS.contains(&callee.as_str()) && kwargs.is_empty(),
+        } => {
+            ix.builtin(*callee_var, callee)
+                .is_some_and(|b| READING_BUILTINS.contains(&b))
+                && kwargs.is_empty()
+                && !args.iter().skip(1).any(|a| is_dict(*a))
+        }
         _ => false,
     };
     f.blocks.iter().any(|bb| {
@@ -2475,7 +2494,6 @@ fn module_constants(
     let module = &functions[module_fn.0 as usize];
     let mut stores: FxHashMap<&str, u32> = FxHashMap::default();
     let mut deleted: FxHashSet<&str> = FxHashSet::default();
-    let mut dynamic = !module.a1_hazards.is_empty();
     for f in functions {
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             match &inst.kind {
@@ -2489,7 +2507,6 @@ fn module_constants(
                 _ => {}
             }
         }
-        dynamic = dynamic || writes_globals(f);
     }
     let shadowed: BTreeSet<String> = READ_ONLY_BUILTINS
         .iter()
@@ -2498,11 +2515,15 @@ fn module_constants(
         .collect();
     let mut out = ModuleConstants {
         shadowed,
-        dynamic,
         comprehensions,
         ..ModuleConstants::default()
     };
-    if dynamic {
+    // A builtin the module does not rebind is the real one unless some function changes the
+    // globals behind the IR, which is what this decides: when no function does so with the
+    // builtins taken as real, none does.
+    out.dynamic =
+        !module.a1_hazards.is_empty() || functions.iter().any(|f| writes_globals(f, &out));
+    if out.dynamic {
         return out;
     }
     // Ints first: displays and later ints may use them (`range(N)` only through loads).
