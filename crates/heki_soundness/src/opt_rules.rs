@@ -10,7 +10,7 @@ use crate::edits::{
     ends_statement, header_colon_follows, indentation, is_identifier, is_plain_assign, line_start,
     slice, squash, starts_statement, strip_token, trim_element,
 };
-use crate::interpreter::{Analysis, BuiltinScope, FnCtx, UseSite};
+use crate::interpreter::{Analysis, BuiltinScope, Def, FnCtx, UseSite};
 use crate::liveness::Liveness;
 use crate::obligations::{Checker, ObligationKind, ProofObligation, SafetyVerdict};
 use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTier};
@@ -20,10 +20,11 @@ use heki_ir::{
     LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
 };
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::cmp::Reverse;
+use std::rc::Rc;
 
 use BuiltinKind::{Bytes, Dict, List, Set, Str, Tuple};
 use ObligationKind as K;
@@ -383,6 +384,7 @@ pub fn analyze_module(
             ck: &ck,
             ix: &ix,
             hoisted_names: RefCell::new(FxHashSet::default()),
+            set_order: RefCell::default(),
         };
         for site in &sites {
             if let Some(c) = rules.evaluate(site) {
@@ -730,6 +732,68 @@ fn dedup_append(
         .map(|i| (*then_bb, i))
 }
 
+/// What one use of a value holding an accumulated set does with the set's iteration order.
+enum SetUse {
+    /// Its result does not depend on the order: `x in s`, `len(s)`, truthiness, `s == t` with
+    /// a builtin `t`, `del s`.
+    OrderFree,
+    /// The set passes on to this value, whose uses count too: a copy, the result of a set
+    /// operator.
+    PassesOn(VarId),
+    /// It may observe the order: how, and on which line.
+    Observes(String),
+}
+
+/// One value of a `SetOrderUnobserved` walk not yet decided: its depth-first index and
+/// lowlink, its own observing use, and the values it passes the set on to.
+struct SetOrderNode {
+    index: usize,
+    low: usize,
+    own: Option<Rc<str>>,
+    next: Vec<VarId>,
+}
+
+/// The state of one depth-first `SetOrderUnobserved` walk: its undecided values, the stack of
+/// the components still open, and the path with the next successor of each value on it.
+#[derive(Default)]
+struct SetOrderWalk {
+    nodes: FxHashMap<VarId, SetOrderNode>,
+    stack: Vec<VarId>,
+    path: Vec<(VarId, usize)>,
+}
+
+impl SetOrderWalk {
+    fn open(&mut self, v: VarId, (own, next): (Option<Rc<str>>, Vec<VarId>)) {
+        let index = self.nodes.len();
+        let low = index;
+        self.nodes.insert(
+            v,
+            SetOrderNode {
+                index,
+                low,
+                own,
+                next,
+            },
+        );
+        self.stack.push(v);
+        self.path.push((v, 0));
+    }
+
+    fn lower(&mut self, v: VarId, low: usize) {
+        let node = self.nodes.get_mut(&v).expect("in the walk");
+        node.low = node.low.min(low);
+    }
+}
+
+/// What `SetOrderUnobserved` has decided in one function: the observing use of each value it
+/// visited (`None`: none), and the exact types of the values of the blocks it stepped through.
+#[derive(Default)]
+struct SetOrderFacts {
+    observers: FxHashMap<VarId, Option<Rc<str>>>,
+    types: FxHashMap<VarId, Option<BuiltinKind>>,
+    typed_blocks: FxHashSet<BlockId>,
+}
+
 // ============================================================================ evaluation
 
 struct Rules<'a, 'c> {
@@ -740,6 +804,7 @@ struct Rules<'a, 'c> {
     /// Names the function's proven hoists bind: two fixes applied in one pass must not bind
     /// the same name.
     hoisted_names: RefCell<FxHashSet<String>>,
+    set_order: RefCell<SetOrderFacts>,
 }
 
 fn established(evidence: &str) -> ObligationStatus {
@@ -1294,6 +1359,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .exception_state_safe(&name, &st, acc, at.0, &name, &[dst]),
         );
         obs.push(self.partial_update(&name, at.0, self.single_item_display(rhs)));
+        // A dict iterates in insertion order, which updating it in place keeps.
+        if kind != Some(Dict) {
+            obs.push(self.set_order_unobserved(&name, kind, dst));
+        }
         let stmt = self.assignment_span(copy, binop.span);
         let span = stmt.unwrap_or(binop.span);
         let mut edits = Vec::new();
@@ -1320,6 +1389,255 @@ impl<'a, 'c> Rules<'a, 'c> {
             self.init_evidence(&st, acc, &[Set, Dict]),
             edits,
         ))
+    }
+
+    /// `SetOrderUnobserved`: `s | t` copies `s` into a new table sized for the copy, while
+    /// `s |= t` grows the table of `s`, so the two sets can iterate in different orders.
+    /// `Unique` and `ExclusiveAccessAtWrite` leave the write's result `dst` the only reference
+    /// to the set, so every later use is of a value the set passes on to from it.
+    fn set_order_unobserved(
+        &self,
+        name: &str,
+        kind: Option<BuiltinKind>,
+        dst: VarId,
+    ) -> ProofObligation {
+        let status = match kind {
+            Some(Set) => match self.set_order_observer(dst) {
+                Some(why) => blocked(format!(
+                    "{why}: `{name} |= ...` grows the set in place where `{name} | ...` builds a new one, and the two can iterate in different orders"
+                )),
+                None => established(
+                    "the set is only tested (`in`, `len`, truthiness, `==`), never iterated or handed on",
+                ),
+            },
+            _ => {
+                blocked("it may be a set, whose iteration order can change when it grows in place")
+            }
+        };
+        self.ck.ob(K::SetOrderUnobserved, name, status)
+    }
+
+    /// The first use that may observe the iteration order of a set `v` holds, through every
+    /// value the set passes on to (`None`: no use can). Each value is decided once per
+    /// function, and the values a loop passes around in a cycle share one answer: a depth-first
+    /// walk that closes each strongly connected component (Tarjan) before the values reaching
+    /// it.
+    fn set_order_observer(&self, v: VarId) -> Option<Rc<str>> {
+        let facts = &mut *self.set_order.borrow_mut();
+        if let Some(answer) = facts.observers.get(&v) {
+            return answer.clone();
+        }
+        let mut walk = SetOrderWalk::default();
+        walk.open(v, self.set_value_uses(v, facts));
+        while let Some(&(w, i)) = walk.path.last() {
+            if let Some(&x) = walk.nodes[&w].next.get(i) {
+                walk.path.last_mut().expect("on the path").1 += 1;
+                if facts.observers.contains_key(&x) {
+                    continue;
+                }
+                match walk.nodes.get(&x).map(|n| n.index) {
+                    // Still on the stack: in the component of `w`.
+                    Some(index) => walk.lower(w, index),
+                    None => walk.open(x, self.set_value_uses(x, facts)),
+                }
+                continue;
+            }
+            walk.path.pop();
+            let (index, low) = (walk.nodes[&w].index, walk.nodes[&w].low);
+            if let Some(&(parent, _)) = walk.path.last() {
+                walk.lower(parent, low);
+            }
+            if low == index {
+                let at = walk
+                    .stack
+                    .iter()
+                    .rposition(|m| *m == w)
+                    .expect("on the stack");
+                let members = walk.stack.split_off(at);
+                let nodes = &walk.nodes;
+                let answer = members
+                    .iter()
+                    .find_map(|m| nodes[m].own.clone())
+                    .or_else(|| {
+                        members
+                            .iter()
+                            .flat_map(|m| &nodes[m].next)
+                            .find_map(|x| facts.observers.get(x).cloned().flatten())
+                    });
+                for m in members {
+                    facts.observers.insert(m, answer.clone());
+                }
+            }
+        }
+        facts.observers[&v].clone()
+    }
+
+    /// The first use of `v` that may observe the order of a set it holds, and the values its
+    /// uses pass the set on to; after an observing use the rest no longer matter.
+    fn set_value_uses(&self, v: VarId, facts: &mut SetOrderFacts) -> (Option<Rc<str>>, Vec<VarId>) {
+        let f = self.f();
+        let mut next = Vec::new();
+        for &site in self.cx().uses(v) {
+            let at = match site {
+                UseSite::Phi { block, pred } => {
+                    let phis = f.block(block).phis.iter();
+                    next.extend(
+                        phis.filter(|phi| phi.incoming.contains(&(pred, v)))
+                            .map(|phi| phi.dst),
+                    );
+                    continue;
+                }
+                UseSite::Term(b) => match &f.block(b).terminator {
+                    Terminator::Return(_) => {
+                        let line = self.line(crate::interpreter::term_span(f, b).start);
+                        let why = format!("{} is returned (line {line})", self.ck.name(v));
+                        return (Some(why.into()), next);
+                    }
+                    // A branch tests the set's truthiness, and `raise` of a set raises
+                    // `TypeError` whatever its order.
+                    _ => continue,
+                },
+                UseSite::Inst(b, i) => (b, i),
+            };
+            match self.set_use(v, at, facts) {
+                SetUse::OrderFree => {}
+                SetUse::PassesOn(to) => next.push(to),
+                SetUse::Observes(why) => return (Some(why.into()), next),
+            }
+        }
+        (None, next)
+    }
+
+    /// The exact type `v` gets where it is defined, which an SSA value keeps; the values of a
+    /// block are typed in one step through it.
+    fn defined_type(&self, v: VarId, facts: &mut SetOrderFacts) -> Option<BuiltinKind> {
+        match self.cx().def(v) {
+            Def::Inst(b, _) => {
+                if facts.typed_blocks.insert(b) {
+                    let types = self.cx().defined_types(self.an(), b);
+                    facts.types.extend(types);
+                }
+                facts.types.get(&v).copied().flatten()
+            }
+            Def::Phi(b) => self.an().block_in[b.0 as usize]
+                .as_ref()
+                .and_then(|st| st.exact_type(v)),
+            Def::Param | Def::Undefined => None,
+        }
+    }
+
+    /// What the instruction at `at` does with the iteration order of `u`, a value holding the
+    /// accumulated set.
+    fn set_use(&self, u: VarId, at: (BlockId, usize), facts: &mut SetOrderFacts) -> SetUse {
+        let inst = inst_at(self.f(), at);
+        let who = self.ck.name(u);
+        let line = self.line(inst.span.start);
+        let other = |lhs: VarId, rhs: VarId| if lhs == u { rhs } else { lhs };
+        match &inst.kind {
+            InstKind::Copy { dst, .. } => SetUse::PassesOn(*dst),
+            // `t |= s` puts the set's elements, in its order, into an object other names may
+            // hold too.
+            InstKind::BinOp {
+                lhs,
+                in_place: true,
+                ..
+            } if *lhs != u => SetUse::Observes(format!(
+                "{} is updated in place from {who} (line {line})",
+                self.ck.name(*lhs)
+            )),
+            // A set operator's result takes the set's order; an operand that is not an exact
+            // set would hand the set to its reflected operator.
+            InstKind::BinOp {
+                dst,
+                op: BinOpKind::BitOr | BinOpKind::BitAnd | BinOpKind::BitXor | BinOpKind::Sub,
+                lhs,
+                rhs,
+                ..
+            } => match self.defined_type(other(*lhs, *rhs), facts) {
+                Some(Set) => SetUse::PassesOn(*dst),
+                _ => SetUse::Observes(format!(
+                    "{who} is combined with an operand that may not be a set (line {line}), whose reflected operator would receive it"
+                )),
+            },
+            InstKind::Delete { .. }
+            | InstKind::UnaryOp {
+                op: heki_ir::UnaryOpKind::Not,
+                ..
+            } => SetUse::OrderFree,
+            InstKind::Compare {
+                op: CompareOpKind::In | CompareOpKind::NotIn,
+                lhs,
+                rhs,
+                ..
+            } if *rhs == u && *lhs != u => SetUse::OrderFree,
+            // The `__eq__` of a builtin value runs no code with the set.
+            InstKind::Compare {
+                op: CompareOpKind::Eq | CompareOpKind::NotEq,
+                lhs,
+                rhs,
+                ..
+            } => match self.defined_type(other(*lhs, *rhs), facts) {
+                Some(_) => SetUse::OrderFree,
+                None => SetUse::Observes(format!(
+                    "{who} is compared with a value of unknown type (line {line}), whose `__eq__` would receive it"
+                )),
+            },
+            InstKind::Call {
+                callee_var,
+                callee,
+                args,
+                kwargs,
+                star_from: None,
+                ..
+            } if kwargs.is_empty()
+                && args.as_slice() == [u]
+                && matches!(
+                    self.cx().builtin_callee(*callee_var, callee),
+                    Some("len" | "bool")
+                ) =>
+            {
+                SetUse::OrderFree
+            }
+            InstKind::Call {
+                callee_var,
+                callee,
+                args,
+                ..
+            } if heki_ir::comprehension_id(*callee_var, callee).is_some()
+                && args.first() == Some(&u) =>
+            {
+                SetUse::Observes(format!("{who} is iterated (line {line})"))
+            }
+            InstKind::Call { callee, .. } => {
+                SetUse::Observes(format!("{who} is passed to `{callee}(...)` (line {line})"))
+            }
+            InstKind::MethodCall { recv, method, .. } if *recv == u => {
+                SetUse::Observes(format!("`.{method}(...)` is called on {who} (line {line})"))
+            }
+            InstKind::MethodCall { method, .. } => {
+                SetUse::Observes(format!("{who} is passed to `.{method}(...)` (line {line})"))
+            }
+            InstKind::MakeIter { .. } | InstKind::YieldFrom { .. } => {
+                SetUse::Observes(format!("{who} is iterated (line {line})"))
+            }
+            InstKind::MakeGenExpr { outer_iter, .. } if *outer_iter == u => {
+                SetUse::Observes(format!("{who} is iterated (line {line})"))
+            }
+            InstKind::Yield { .. } => SetUse::Observes(format!("{who} is yielded (line {line})")),
+            InstKind::AllocBuiltin { .. }
+            | InstKind::DictLiteral { .. }
+            | InstKind::AttrStore { .. }
+            | InstKind::SubscriptStore { .. }
+            | InstKind::StoreGlobal { .. }
+            | InstKind::StoreDeref { .. }
+            | InstKind::MakeGenExpr { .. }
+            | InstKind::MakeClosure { .. } => {
+                SetUse::Observes(format!("{who} is stored (line {line})"))
+            }
+            _ => SetUse::Observes(format!(
+                "{who} is used beyond `in`, `len`, truthiness, and `==` (line {line})"
+            )),
+        }
     }
 
     // ------------------------------------------------------------------------ OPT103
