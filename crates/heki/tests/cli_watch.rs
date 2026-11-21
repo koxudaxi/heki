@@ -33,7 +33,13 @@ fn watch_rechecks_changed_files_and_affected_callers() {
             "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n",
         );
     let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch", "--output-format", "concise"])
+        .args([
+            "check",
+            "--heuristic",
+            "--watch",
+            "--output-format",
+            "concise",
+        ])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "4")
         .stdout(Stdio::piped())
@@ -85,7 +91,14 @@ fn watch_exits_with_the_last_reports_status() {
         "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n",
     );
     let out = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch", "--fix", "--output-format", "json"])
+        .args([
+            "check",
+            "--heuristic",
+            "--watch",
+            "--fix",
+            "--output-format",
+            "json",
+        ])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
         .output()
@@ -99,7 +112,7 @@ fn watch_exits_with_the_last_reports_status() {
     // Invalid configuration is reported before watching starts.
     p.write("heki.toml", "[lint]\nselect = [\"NOPE1\"]\n");
     let out = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch"])
+        .args(["check", "--heuristic", "--watch"])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
         .output()
@@ -107,15 +120,15 @@ fn watch_exits_with_the_last_reports_status() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-/// `heki check --watch <args>` with `HEKI_WATCH_MAX_RUNS=<max_runs>`; stderr lines arrive on
-/// the channel.
+/// `heki check --heuristic --watch <args>` with `HEKI_WATCH_MAX_RUNS=<max_runs>`; stderr lines
+/// arrive on the channel.
 fn spawn_watch(
     p: &Project,
     args: &[&str],
     max_runs: &str,
 ) -> (std::process::Child, Receiver<String>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch"])
+        .args(["check", "--heuristic", "--watch"])
         .args(args)
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", max_runs)
@@ -152,7 +165,7 @@ fn watch_full_output_idle_polls_and_a_clean_exit() {
     assert_eq!(out.status.code(), Some(0), "the last report is clean");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [error]")
+        stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [warning, heuristic]")
             && stdout.contains("5 |     time.sleep(1)")
             && stdout.contains("\n  = help: use `await asyncio.sleep(...)`"),
         "full output with the source line:\n{stdout}"
@@ -182,7 +195,9 @@ fn watch_rechecks_a_coroutine_that_stops_being_sync_driven() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.contains("pkg/jobs.py:17:5: EFF101 `_job` reaches the blocking call `time.sleep`"),
+        stdout.contains(
+            "pkg/jobs.py:17:5: EFF101 [heuristic] `_job` reaches the blocking call `time.sleep`"
+        ),
         "{stdout}"
     );
 }
@@ -313,7 +328,7 @@ fn watch_fails_like_check_on_invalid_rule_options() {
             "[[write-owners]]\nname = \"store\"\ntargets = [\"fields\"]\n",
         );
     let out = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch"])
+        .args(["check", "--heuristic", "--watch"])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
         .output()
@@ -355,12 +370,12 @@ fn watch_validates_severities_and_loads_the_summary_snapshot() {
     assert!(
         String::from_utf8(out.stdout)
             .unwrap()
-            .starts_with("pkg/api.py:1:1: MUT103 `add` gained side effects"),
+            .starts_with("pkg/api.py:1:1: MUT103 [heuristic] `add` gained side effects"),
     );
     // An unknown `lint.severity` key is a configuration error before watching starts.
     p.write("heki.toml", "[lint.severity]\nNOPE1 = \"warning\"\n");
     let out = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch"])
+        .args(["check", "--heuristic", "--watch"])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
         .output()
@@ -390,7 +405,7 @@ fn watch_reports_what_check_reports() {
     let (code, check, _) = p.check(&["--output-format", "json"]);
     assert_eq!(code, 1);
     let watch = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch", "--output-format", "json"])
+        .args(["check", "--heuristic", "--watch", "--output-format", "json"])
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
         .output()
@@ -663,7 +678,7 @@ fn watch_marks_the_functions_a_profile_shows_hot_like_check() {
         "{check}"
     );
     let watch = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch"])
+        .args(["check", "--heuristic", "--watch"])
         .args(args)
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", "0")
