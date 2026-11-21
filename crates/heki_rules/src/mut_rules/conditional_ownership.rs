@@ -468,8 +468,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         if tests.is_empty() {
             return;
         }
-        let idom =
-            ownership::immediate_dominators(self.f, &self.preds, |p, b| self.live.edge(p, b));
+        let idom = heki_ir::immediate_dominators(self.f, &self.preds, |p, b| self.live.edge(p, b));
         let test_at: FxHashMap<BlockId, usize> =
             tests.iter().enumerate().map(|(i, t)| (t.at, i)).collect();
         let mut heads: FxHashMap<BlockId, (usize, bool)> = FxHashMap::default();

@@ -630,7 +630,7 @@ struct Extractor<'a> {
     /// The value each copy copies ([`Self::copied_from`]), built on first use.
     copy_roots: OnceCell<FxHashMap<VarId, VarId>>,
     /// The function's dominator tree over all its edges, built on first use.
-    dominators: OnceCell<ownership::DominatorTree>,
+    dominators: OnceCell<heki_ir::DominatorTree>,
     /// [`KeyFacts`], built on first use.
     key_facts: OnceCell<KeyFacts<'a>>,
     /// The changes of checked containers of `self` the visit finds, recorded after it
@@ -651,7 +651,7 @@ enum KeyOf<'a> {
 struct KeyFacts<'a> {
     /// Per key, the blocks dominated by a side of a branch on which the container holds the key,
     /// when the branch alone enters that side.
-    sides: FxHashMap<String, FxHashMap<KeyOf<'a>, ownership::Dominated>>,
+    sides: FxHashMap<String, FxHashMap<KeyOf<'a>, heki_ir::Dominated>>,
     /// The index of the first read of each key in each block.
     reads: FxHashMap<String, FxHashMap<(BlockId, KeyOf<'a>), usize>>,
 }
@@ -679,7 +679,7 @@ struct Rebinding {
     /// The index of the first store in each block.
     first_in_block: FxHashMap<BlockId, usize>,
     /// The blocks the stores' blocks dominate.
-    dominated: ownership::Dominated,
+    dominated: heki_ir::Dominated,
 }
 
 /// A project call, for the sites of the object it returns (`SiteRole`).
@@ -3428,9 +3428,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// The function's dominator tree over all its edges.
-    fn dominators(&self) -> &ownership::DominatorTree {
+    fn dominators(&self) -> &heki_ir::DominatorTree {
         self.dominators
-            .get_or_init(|| ownership::DominatorTree::of(self.f))
+            .get_or_init(|| heki_ir::DominatorTree::of(self.f))
     }
 
     /// The attribute of `self` whose checked container (`MUT113`) `var` holds.
