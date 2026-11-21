@@ -34,13 +34,14 @@ use heki_ir::{
     FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode, Progress,
     Terminator, UnaryOpKind, VarId,
 };
-use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
+use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+mod imports;
 mod statements;
 
 /// Methods that mutate their receiver in place (section 2.4; shared by MUT101/201/202).
@@ -2121,6 +2122,7 @@ impl<'a> Extractor<'a> {
                 kind: AccessKind::Read,
                 name: fqn.clone(),
                 span,
+                imports_project_module: false,
             });
         }
     }
@@ -2143,6 +2145,7 @@ impl<'a> Extractor<'a> {
                 kind: AccessKind::ImportProbe,
                 name,
                 span,
+                imports_project_module: false,
             });
         }
     }
@@ -4315,10 +4318,15 @@ impl<'a> Extractor<'a> {
             Callee::External(symbol) => {
                 if let Some(c) = self.contracts {
                     if c.external_call(symbol) {
+                        let imports = self.cx.catalog(symbol).and_then(|e| e.environment_access())
+                            == Some(EnvironmentAccess::Import);
                         self.external.push(ExternalAccess {
                             kind: AccessKind::Call,
                             name: symbol.clone(),
                             span: call.span,
+                            imports_project_module: imports
+                                && !environment::guarded_against_import_errors(self.f, bb)
+                                && self.imports_project_module(&call.passed()),
                         });
                     }
                     if let Some(step) = self.returned.get(&call.dst).copied()
