@@ -833,6 +833,8 @@ impl<'p, 'a> Paths<'p, 'a> {
     fn immediate_dominators(&self, preds: &[SmallVec<[u32; 2]>]) -> Option<Vec<u32>> {
         let mut idom = vec![UNREACHED; preds.len()];
         idom[0] = 0;
+        let nodes = preds.len();
+        let mut reducible = true;
         let mut settled = false;
         for _ in 0..MAX_PASSES {
             let mut changed = false;
@@ -848,17 +850,23 @@ impl<'p, 'a> Paths<'p, 'a> {
                         found = p;
                         continue;
                     }
+                    // A dominator comes before what it dominates, so each walk up ends within
+                    // the nodes; one that would not (a graph that is not reducible) leaves the
+                    // dominators undecided.
                     let (mut a, mut b) = (p, found);
-                    while a != b {
-                        while a > b {
+                    let mut walked = 0;
+                    while a != b && walked <= nodes {
+                        while a > b && walked <= nodes {
                             a = idom[a as usize];
-                            steps += 1;
+                            walked += 1;
                         }
-                        while b > a {
+                        while b > a && walked <= nodes {
                             b = idom[b as usize];
-                            steps += 1;
+                            walked += 1;
                         }
                     }
+                    steps += walked;
+                    reducible &= a == b;
                     found = a;
                 }
                 steps += preds[x].len();
@@ -875,7 +883,7 @@ impl<'p, 'a> Paths<'p, 'a> {
                 break;
             }
         }
-        settled.then_some(idom)
+        (settled && reducible).then_some(idom)
     }
 }
 
