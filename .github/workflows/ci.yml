@@ -175,13 +175,13 @@ jobs:
       - name: Counterexamples of the shapes the IR models
         if: matrix.python == '3.15'
         run: python tests/difftest/ir_counterexamples.py
-      # `sys.monitoring` is CPython 3.12 or newer. The smoke run checks that the oracle works
-      # end to end; it does not fail on a refutation until the known ones are fixed.
-      - name: Run-time oracle (checker tests and a smoke run)
+      # `sys.monitoring` is CPython 3.12 or newer. A false exact claim on the first 200 seeds
+      # fails the run.
+      - name: Run-time oracle (checker tests and 200 seeds)
         if: matrix.python != '3.11'
         run: |
           python tests/oracle/test_checkers.py
-          python tests/oracle/run_oracle.py --heki target/debug/heki --seeds 200 --jobs 4 --time-limit 300 --out "$RUNNER_TEMP/oracle"
+          python tests/oracle/run_oracle.py --heki target/debug/heki --seeds 200 --jobs 4 --time-limit 300 --out "$RUNNER_TEMP/oracle" --fail-on-refutation
 
   memory:
     name: peak memory
