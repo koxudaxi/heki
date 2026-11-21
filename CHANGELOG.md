@@ -55,7 +55,7 @@ release can change rules, configuration keys, diagnostics, and output formats.
   rule measured.
 - `EFF111` (`async-possibly-blocking-call`) and `EFF113` (`loop-possible-db-query`), heuristic: the
   reports `EFF101` and `EFF103` made before, where the new exact claims are not established. See the
-  first entry under Changed.
+  `EFF101` and `EFF103` entry under Changed.
 - `sqlite3.connect` of an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`) does not
   wait, and neither do the statements on that connection. A connection waits only where heki
   establishes that it was opened on a file (a literal or a module constant without an in-memory
