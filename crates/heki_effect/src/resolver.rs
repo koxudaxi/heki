@@ -1559,21 +1559,25 @@ impl ProjectDecls {
     /// class before an external base does (heki does not know what an external class defines),
     /// or when a class binds `__hash__` otherwise (`__hash__ = Base.__hash__`).
     pub fn hash_owner(&self, class: &str) -> Option<String> {
-        for c in self.mro(class) {
-            self.read(|k| note(&mut k.class_facts, &c));
-            let members = &self.class(&c)?.members;
-            let defines = || {
-                self.methods_of(&c)
-                    .iter()
-                    .any(|k| k.qualname.rsplit('.').next() == Some("__hash__"))
-            };
-            match (members.contains("__hash__"), members.contains("__eq__")) {
-                (true, _) => return defines().then_some(c),
-                (false, true) => return Some(c),
-                (false, false) => {}
-            }
-        }
-        None
+        self.mro(class)
+            .into_iter()
+            .find_map(|c| {
+                self.read(|k| note(&mut k.class_facts, &c));
+                let binds =
+                    |d: &ClassDecl| (d.members.contains("__hash__"), d.members.contains("__eq__"));
+                let defines = || {
+                    self.methods_of(&c)
+                        .iter()
+                        .any(|k| k.qualname.rsplit('.').next() == Some("__hash__"))
+                };
+                match self.class(&c).map(binds) {
+                    None => Some(None),
+                    Some((true, _)) => Some(defines().then_some(c)),
+                    Some((false, true)) => Some(Some(c)),
+                    Some((false, false)) => None,
+                }
+            })
+            .flatten()
     }
 
     /// Every project class that (transitively) inherits from `class`, sorted.

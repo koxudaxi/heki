@@ -361,7 +361,9 @@ class MetaField(Field):
         )
         .write(
             "pkg/keys.py",
-            r#"from pkg.fields import Field, MetaField
+            r#"import threading
+
+from pkg.fields import Field, MetaField
 
 
 class CompositeKey(MetaField):
@@ -398,6 +400,11 @@ class Restored(Field):
         self.name = name
 
 
+class Worker(threading.Thread, Field):
+    def rename(self, name):
+        self.name = name
+
+
 class Labeled(MetaField):
     def __hash__(self):
         return hash(("labeled", self.name))
@@ -410,14 +417,16 @@ class Tagged(MetaField):
         );
     // `CompositeKey` instances hash with their own `__hash__`, and `Identity` instances (an
     // `__eq__` without `__hash__`) cannot be hashed: neither writer changes a `Field` hash.
-    // `Restored` hashes with `Field.__hash__` again. `Field.relabel` runs on instances of every
+    // `Restored` hashes with `Field.__hash__` again, and so does `Worker` (heki does not read
+    // what the external class before `Field` defines). `Field.relabel` runs on instances of every
     // class here, and is reported once.
     assert_eq!(
         reports(&p, "MUT107"),
         vec![
             at("pkg/fields.py", 9, "Field.relabel"),
-            at("pkg/keys.py", 25, "Column.rename"),
-            at("pkg/keys.py", 35, "Restored.rename"),
+            at("pkg/keys.py", 27, "Column.rename"),
+            at("pkg/keys.py", 37, "Restored.rename"),
+            at("pkg/keys.py", 42, "Worker.rename"),
         ]
     );
 }
