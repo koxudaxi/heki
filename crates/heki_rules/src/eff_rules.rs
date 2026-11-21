@@ -468,7 +468,7 @@ fn with_prefixes(name: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Whether a pattern names `key`, its qualname, or a module / class / function containing it.
-fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
+pub(crate) fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
     let fqn = key.fqn();
     patterns.iter().any(|p| {
         with_prefixes(&fqn)

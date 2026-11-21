@@ -1615,3 +1615,134 @@ fn many_reports_into_one_module_share_its_index_of_calls() {
         .collect();
     assert_eq!(hops.iter().filter(|&&n| n == 2).count(), 8_000);
 }
+
+/// `heki inspect <args> --output-format json` of the project, which must finish within
+/// `limit`.
+fn inspect_within(p: &Project, args: &[&str], limit: Duration) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .arg("inspect")
+        .args(args)
+        .args(["--output-format", "json"])
+        .current_dir(&p.dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).unwrap();
+        out
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill().unwrap();
+            panic!("heki inspect ran past {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0));
+    serde_json::from_slice(&reader.join().unwrap()).unwrap()
+}
+
+/// A lattice thirty levels deep, two functions a level, each calling both of the level below
+/// (2^30 paths up from the bottom): the callers' walk lists each call once.
+#[test]
+fn callers_of_a_diamond_lattice_are_walked_once_each() {
+    let mut lines = vec!["def bottom():".to_owned(), "    return 1".to_owned()];
+    let below = |level: usize| {
+        if level == 0 {
+            vec!["bottom".to_owned()]
+        } else {
+            vec![format!("a{}", level - 1), format!("b{}", level - 1)]
+        }
+    };
+    for level in 0..30 {
+        for side in ["a", "b"] {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def {side}{level}():"),
+            ]);
+            lines.extend(below(level).iter().map(|f| format!("    {f}()")));
+        }
+    }
+    let p = Project::new("bounds_caller_lattice");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let r = inspect_within(
+        &p,
+        &["m.bottom", "--callers", "--depth", "64"],
+        Duration::from_secs(20),
+    );
+    // Two calls of `bottom`, then four calls into each later level.
+    assert_eq!(r["callers"]["count"], 2 + 4 * 29);
+    assert_eq!(r["callers"]["truncated"], false);
+}
+
+/// Five thousand methods of one class, each calling the next on `self`, the last changing a
+/// `self` attribute; the call chain of the change, and the walks to an unresolved call and to
+/// a changed module global through as many functions, are walked once.
+#[test]
+fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
+    let mut lines = vec![
+        "G = 0".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.items = []".to_owned(),
+    ];
+    for i in 0..4_999 {
+        lines.extend([
+            String::new(),
+            format!("    def m{i}(self):"),
+            format!("        self.m{}()", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        "    def m4999(self):".to_owned(),
+        "        self.items.append(1)".to_owned(),
+    ]);
+    for i in 0..4_999 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def f{i}(x):"),
+            format!("    return f{}(x)", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def f4999(x):".to_owned(),
+        "    global G".to_owned(),
+        "    G = 1".to_owned(),
+        "    return x.anything()".to_owned(),
+    ]);
+    let p = Project::new("bounds_inspect_chains");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let r = inspect_within(&p, &["m.C.m0"], Duration::from_secs(20));
+    let items = &r["changes"]["self_attrs"][0];
+    assert_eq!(items["chain"].as_array().unwrap().len(), 4_999);
+    let f = inspect_within(&p, &["m.f0"], Duration::from_secs(20));
+    assert_eq!(
+        f["changes"]["globals"][0]["chain"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4_999
+    );
+    // Impure: the unknown call does not decide the verdict, but `--callers` walks the module.
+    assert_eq!(f["purity"]["verdict"], "impure");
+    let last = inspect_within(
+        &p,
+        &["m.f4999", "--callers", "--depth", "100"],
+        Duration::from_secs(20),
+    );
+    assert_eq!(last["callers"]["count"], 100);
+}

@@ -13,13 +13,14 @@ mod contracts;
 mod data_rules;
 mod eff_rules;
 pub mod experimental;
+pub mod inspect;
 mod mut_rules;
 mod opt_rules;
 pub mod project;
 pub mod selection;
 pub mod snapshot;
 
-pub use contracts::{MAX_INVALIDATIONS, summary_contracts, typed_writes};
+pub use contracts::{MAX_INVALIDATIONS, declares_ownership, summary_contracts, typed_writes};
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, StaleWriteKey, chain_facts, family_readers, stale_writes_by_file,
@@ -507,11 +508,11 @@ pub struct CheckExtras<'a> {
     pub project_patches_builtins: Option<bool>,
     /// The text of a file that is not checked, for the positions of the call-chain hops in it
     /// (the LSP engine checks one file).
-    pub text_of: Option<&'a TextOf>,
+    pub text_of: Option<&'a TextOf<'a>>,
 }
 
 /// Reads the text of a file by path.
-pub type TextOf = dyn Fn(&Path) -> Option<String> + Sync;
+pub type TextOf<'a> = dyn Fn(&Path) -> Option<String> + Sync + 'a;
 
 /// `caller -> [(defining file, call site)]` (see [`CheckContext::sites_by_caller`]).
 pub(crate) type SitesByCaller<'a> = FxHashMap<&'a FuncKey, Vec<(&'a Path, &'a CallSite)>>;
@@ -526,7 +527,7 @@ pub(crate) struct CheckContext<'a> {
     pub units: &'a [ModuleUnit<'a>],
     pub selection: &'a RuleSelection,
     unit_by_path: FxHashMap<&'a Path, usize>,
-    text_of: Option<&'a TextOf>,
+    text_of: Option<&'a TextOf<'a>>,
 }
 
 /// Run every enabled rule over an analyzed project.
@@ -608,6 +609,31 @@ pub fn check_project(
         a.path == b.path && a.span == b.span && a.rule_code == b.rule_code && a.target == b.target
     });
     Ok(out)
+}
+
+/// The roles `key` has in the contracts of `config` and in the ecosystem catalog
+/// (`heki inspect`), from the matchers the rules compile.
+pub fn contract_roles(
+    config: &HekiConfig,
+    kb: &EffectiveEcosystemKb,
+    soundness_kb: &EffectiveSoundnessKb,
+    index: &ProjectIndex,
+    decls: &ProjectDecls,
+    selection: &RuleSelection,
+    key: &FuncKey,
+) -> Result<Vec<inspect::ContractRole>, RuleConfigError> {
+    let cx = CheckContext {
+        config,
+        kb,
+        soundness: soundness_kb,
+        index,
+        decls,
+        units: &[],
+        selection,
+        unit_by_path: FxHashMap::default(),
+        text_of: None,
+    };
+    contracts::roles_of(&cx, key)
 }
 
 impl<'a> CheckContext<'a> {

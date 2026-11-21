@@ -8,6 +8,7 @@ macro_rules! log {
 }
 
 mod check;
+mod inspect;
 mod watch;
 
 use anyhow::Result;
@@ -56,6 +57,9 @@ enum Commands {
     /// List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too
     /// large to model) in a project.
     Assumptions(AssumptionsArgs),
+    /// Experimental: what heki knows about one function (its effects, what it changes, keeps, and
+    /// returns, whether it is pure, its callers, reports, and contracts).
+    Inspect(InspectArgs),
     /// Internal/testing: dump `heki_semantic` scope tree as JSON for CPython `symtable` verification.
     #[command(hide = true)]
     DumpSemantic(DumpSemanticArgs),
@@ -126,6 +130,27 @@ struct AnalysisArgs {
 }
 
 #[derive(Debug, Args)]
+struct InspectArgs {
+    /// A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a
+    /// glob), `path.py:LINE`, or `path.py::NAME`.
+    symbol: String,
+    /// The project to analyze, as for `heki check`.
+    #[arg(default_value = ".")]
+    paths: Vec<PathBuf>,
+    /// `text`, or `json`.
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    output_format: ReportFormat,
+    /// List the callers transitively, and the reports above the function.
+    #[arg(long)]
+    callers: bool,
+    /// How many caller levels `--callers` lists.
+    #[arg(long, requires = "callers", default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=100))]
+    depth: u16,
+    #[command(flatten)]
+    analysis: AnalysisArgs,
+}
+
+#[derive(Debug, Args)]
 struct ServerArgs {
     /// Use stdio transport (default LSP mode).
     #[arg(long, default_value_t = true)]
@@ -139,12 +164,12 @@ struct RuleArgs {
     #[arg(long)]
     all: bool,
     /// `text`, or `json` with each rule's metadata and documentation.
-    #[arg(long, value_enum, default_value_t = RuleFormat::Text)]
-    output_format: RuleFormat,
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    output_format: ReportFormat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum RuleFormat {
+enum ReportFormat {
     Text,
     Json,
 }
@@ -214,7 +239,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             ExitCode::from(1)
         }),
         Commands::Rule(args) => {
-            let json = args.output_format == RuleFormat::Json;
+            let json = args.output_format == ReportFormat::Json;
             let Some(q) = args.rule.as_deref().filter(|_| !args.all) else {
                 if json {
                     let records: Vec<_> = CORE_RULES.iter().map(RuleRecord::new).collect();
@@ -255,6 +280,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Commands::Snapshot(args) => check::run_snapshot(&args),
         Commands::Assumptions(args) => run_assumptions(args),
+        Commands::Inspect(args) => inspect::run(&args),
         Commands::DumpSemantic(args) => {
             let src = heki_ast::read_source(&args.file)?;
             let parsed = heki_ast::parse_module(&src)
@@ -387,8 +413,8 @@ mod tests {
         }
     }
 
-    /// What an entry can name: the rule codes, `heki <command> --<option>`, and the
-    /// configuration keys. Output fields are not listed yet: an entry of that kind fails until
+    /// What an entry can name: the rule codes, `heki <command>`, `heki <command> --<option>`,
+    /// and the configuration keys. Output fields are not listed yet: an entry of that kind fails until
     /// they are.
     fn existing_targets() -> BTreeSet<Target> {
         let mut out: BTreeSet<Target> = CORE_RULES
@@ -396,6 +422,8 @@ mod tests {
             .map(|r| (ExperimentalKind::Rule, r.code.to_owned()))
             .collect();
         for command in Cli::command().get_subcommands() {
+            let name = format!("heki {}", command.get_name());
+            out.insert((ExperimentalKind::Command, name));
             for long in command.get_arguments().filter_map(|a| a.get_long()) {
                 let option = format!("heki {} --{long}", command.get_name());
                 out.insert((ExperimentalKind::CliOption, option));

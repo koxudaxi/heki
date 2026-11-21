@@ -17,6 +17,8 @@ pub const EXPERIMENTAL_POLICY: &str = "Experimental features can still change in
 pub enum ExperimentalKind {
     /// A rule code (`MUT101`).
     Rule,
+    /// A command (`heki inspect`), its options and output included.
+    Command,
     /// A command and one of its options (`heki check --profile`).
     CliOption,
     /// A key below `[tool.heki]`, with its tables (`lint.relax-async-in-tests`).
@@ -67,6 +69,16 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         since: "0.2.0",
         reason: "Its precision on real code bases is still low: much of what it reports is code \
             that changes a borrowed container on purpose.",
+        tracking: None,
+    },
+    ExperimentalFeature {
+        id: "command.inspect",
+        kind: ExperimentalKind::Command,
+        target: "heki inspect",
+        since: "0.2.0",
+        reason: "The facts it shows, its purity verdict, and its JSON object can still change as \
+            heki's summaries close gaps; the object's `version` changes when a field is removed \
+            or changes meaning.",
         tracking: None,
     },
     ExperimentalFeature {

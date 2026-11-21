@@ -15,8 +15,8 @@ use heki_rules::project::{
     FileError, ParsedFile, Project, ProjectOptions, canonical, retain_unsuppressed,
 };
 use heki_rules::{
-    CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
-    fold_root_causes,
+    CheckExtras, ModuleUnit, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project,
+    find_rule, fold_root_causes,
 };
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -133,24 +133,38 @@ pub(crate) fn load_and_index(
 impl Indexed {
     /// The diagnostics of every enabled rule in the project's files, after inline suppressions.
     pub(crate) fn diagnose(&self) -> Result<Vec<Diagnostic>> {
+        self.diagnose_units(&self.project.units())
+    }
+
+    /// The diagnostics `heki check` reports in `units` (some or all of the project's files),
+    /// after inline suppressions: the rules read the other files through the index only.
+    pub(crate) fn diagnose_units(&self, units: &[ModuleUnit<'_>]) -> Result<Vec<Diagnostic>> {
         let env = &self.project.env;
-        let units = self.project.units();
+        let decls = self.index.project_decls();
+        let sources: FxHashMap<&Path, &str> = self
+            .project
+            .files
+            .iter()
+            .map(|f| (f.path.as_path(), f.source.as_str()))
+            .collect();
+        let text_of = |p: &Path| sources.get(p).map(|t| (*t).to_owned());
         let extras = CheckExtras {
             soundness_kb: &env.soundness_kb,
             snapshot: self.snapshot.as_ref(),
-            decls: None,
-            project_patches_builtins: None,
-            text_of: None,
+            decls: Some(&decls),
+            project_patches_builtins: Some(
+                self.project.files.iter().any(ParsedFile::patches_builtins),
+            ),
+            text_of: Some(&text_of),
         };
         let mut diags = check_project(
-            &units,
+            units,
             &env.cfg,
             &env.kb,
             &self.index,
             &self.selection,
             &extras,
         )?;
-        drop(units);
         retain_unsuppressed(&mut diags, &self.project.files);
         Ok(diags)
     }

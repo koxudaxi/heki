@@ -9,6 +9,18 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Added
 
+- `heki inspect <SYMBOL> [PATHS]...` (experimental) says what heki knows about one function,
+  from the analysis `heki check` runs for the same configuration and selection: the effects it
+  reaches with their call chains and guards, the parameters, `self` attributes, other objects,
+  module globals, and closure cells it changes (with the chain to the body that changes them),
+  the parameters it keeps, what it returns, whether it is pure in heki's sense (`pure`,
+  `impure` with the reasons, or `unknown` with the first function whose calls heki cannot
+  resolve, and what the verdict assumes), its callers (`--callers --depth N` transitively), the
+  reports `heki check` makes in it, and the contracts naming it. The symbol is a dotted name, a
+  dotted suffix, or a glob, `path.py:LINE`, or `path.py::NAME`; `--output-format json` writes
+  one versioned object, and a symbol naming no single function exits with 2 and an error
+  object listing the candidates.
+
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of

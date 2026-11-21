@@ -73,6 +73,7 @@ CLI_COMMANDS = [
     (["rule"], "heki rule"),
     (["snapshot"], "heki snapshot"),
     (["assumptions"], "heki assumptions"),
+    (["inspect"], "heki inspect"),
 ]
 
 

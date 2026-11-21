@@ -896,6 +896,14 @@ pub(crate) fn patterns(
         .collect()
 }
 
+/// Whether a pattern names `key` by its fully qualified name or its qualname.
+fn names(patterns: &[DottedPattern], key: &FuncKey) -> bool {
+    let fqn = key.fqn();
+    patterns
+        .iter()
+        .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+}
+
 /// The functions a contract lets touch its targets: `allowed-*` patterns (matched against the
 /// fqn and the qualname) and `exempt-methods` (a plain name matches the last qualname
 /// component; an entry with a dot or a glob is a pattern like `allowed-*`). `forbidden-*`
@@ -905,6 +913,8 @@ pub(crate) fn patterns(
 pub(crate) struct Allowance {
     allowed: Vec<DottedPattern>,
     exempt_names: FxHashSet<String>,
+    /// `exempt-methods` entries with a dot or a glob.
+    exempt_patterns: Vec<DottedPattern>,
     forbidden: Vec<DottedPattern>,
     /// Functions the contract guards (`call-owners` targets): they are part of the guarded
     /// operation, whose calls are checked where they are made, so they may use each other.
@@ -978,12 +988,14 @@ impl Allowance {
         let mut out = Self {
             allowed: patterns(keys.allowed.0, keys.allowed.1)?,
             exempt_names: FxHashSet::default(),
+            exempt_patterns: Vec::new(),
             forbidden: patterns(keys.forbidden.0, keys.forbidden.1)?,
             targets: Vec::new(),
         };
         for e in keys.exempt.0 {
             if e.contains('.') || has_glob_syntax(e) {
-                out.allowed.push(DottedPattern::new(e, keys.exempt.1)?);
+                out.exempt_patterns
+                    .push(DottedPattern::new(e, keys.exempt.1)?);
             } else {
                 out.exempt_names.insert(e.clone());
             }
@@ -992,15 +1004,18 @@ impl Allowance {
     }
 
     pub(crate) fn allows(&self, key: &FuncKey) -> bool {
+        self.exempts(key) || self.names_allowed(key) || self.targets.iter().any(|t| t.matches(key))
+    }
+
+    /// Whether `exempt-methods` names `key`.
+    pub(crate) fn exempts(&self, key: &FuncKey) -> bool {
         let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
-        if self.exempt_names.contains(name) {
-            return true;
-        }
-        let fqn = key.fqn();
-        self.allowed
-            .iter()
-            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
-            || self.targets.iter().any(|t| t.matches(key))
+        self.exempt_names.contains(name) || names(&self.exempt_patterns, key)
+    }
+
+    /// Whether an `allowed-*` pattern names `key`.
+    pub(crate) fn names_allowed(&self, key: &FuncKey) -> bool {
+        names(&self.allowed, key)
     }
 
     /// The same allowance, with the guarded functions `targets` allowed too.
@@ -1016,13 +1031,7 @@ impl Allowance {
     /// Whether an access by `key` falls under the contract: every function without
     /// `forbidden-*`, else the functions they name.
     pub(crate) fn in_scope(&self, key: &FuncKey) -> bool {
-        if self.forbidden.is_empty() {
-            return true;
-        }
-        let fqn = key.fqn();
-        self.forbidden
-            .iter()
-            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+        self.forbidden.is_empty() || names(&self.forbidden, key)
     }
 
     /// `outside the <owners> of `name``, or `inside the forbidden <who> of `name`` for a contract

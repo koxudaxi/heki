@@ -1,7 +1,10 @@
 //! Walks over the index that answer a question about one function: IR-free, each with a visited
 //! set per question and linear in the states it visits (docs/development.md, "Analysis cost").
 
-use crate::{CallHop, CallSite, EffectSummary, FuncKey, ProjectIndex, SiteRole, Slot};
+use crate::{
+    AttrKeyPath, BoundCallee, CallHop, CallSite, CellChange, EffectSummary, Facts, FuncKey,
+    ProjectIndex, SharedState, SiteRole, Slot,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 
@@ -53,6 +56,31 @@ impl<'i> CallsByCaller<'i> {
     }
 }
 
+/// A call of a function [`ProjectIndex::callers_within`] found.
+#[derive(Debug, Clone)]
+pub struct CallerSite<'i> {
+    /// The calling function.
+    pub caller: &'i FuncKey,
+    /// The function it calls here: the start, or a caller found one level below.
+    pub callee: &'i FuncKey,
+    /// 1 for a direct caller of the start.
+    pub depth: usize,
+    /// The caller's file.
+    pub path: &'i Path,
+    /// The sites at the call's position: the call, then the uses of its result (iterated,
+    /// returned, handed on).
+    pub sites: Vec<&'i CallSite>,
+}
+
+/// [`ProjectIndex::callers_within`].
+#[derive(Debug, Clone, Default)]
+pub struct Callers<'i> {
+    /// Level by level, each level by callee, caller, and position.
+    pub sites: Vec<CallerSite<'i>>,
+    /// The walk stopped at its limit of sites.
+    pub truncated: bool,
+}
+
 /// One state of [`ProjectIndex::param_change_chain`]'s breadth-first walk: a function whose
 /// parameter changes `what`, the state it was reached from, and the call into it.
 struct ChainState {
@@ -72,6 +100,8 @@ pub struct ChangeChain {
     /// The function whose own body makes the change (the start function when `hops` is
     /// empty), `None` when no function on the way makes it in its own body.
     pub changed_in: Option<FuncKey>,
+    /// [`ProjectIndex::param_change_chain`]: the parameter of `changed_in` whose change it is.
+    pub param: Option<u8>,
 }
 
 impl ProjectIndex {
@@ -175,6 +205,295 @@ impl ProjectIndex {
         ChangeChain {
             hops,
             changed_in: found.map(|i| states[i].func.clone()),
+            param: found.map(|i| states[i].param),
         }
+    }
+}
+
+impl ProjectIndex {
+    /// The calls of `func` and, breadth first up to `depth` levels, of the callers found: each
+    /// function expanded once, at most `limit` calls (the sites at one position are one call).
+    pub fn callers_within<'i>(
+        &'i self,
+        calls: &mut CallsByCaller<'i>,
+        func: &FuncKey,
+        depth: usize,
+        limit: usize,
+    ) -> Callers<'i> {
+        let mut out = Callers::default();
+        let (start, _) = self
+            .func_files
+            .get_key_value(func)
+            .expect("callers are asked of summarized functions");
+        let mut visited: FxHashSet<&FuncKey> = FxHashSet::from_iter([start]);
+        let mut level = vec![start];
+        for d in 1..=depth {
+            let mut next = Vec::new();
+            for &callee in &level {
+                let mut callers: Vec<&FuncKey> = self
+                    .reverse_call_graph
+                    .get(callee)
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                callers.sort();
+                for caller in callers {
+                    let path = self.func_files[caller].as_path();
+                    let calling = calls
+                        .of(caller)
+                        .iter()
+                        .filter(|s| s.project_callees().iter().any(|bc| bc.callee == *callee));
+                    let first = out.sites.len();
+                    for &site in calling {
+                        if let Some(c) = out.sites[first..]
+                            .iter_mut()
+                            .find(|c| c.sites[0].span == site.span)
+                        {
+                            c.sites.push(site);
+                            continue;
+                        }
+                        if out.sites.len() == limit {
+                            out.truncated = true;
+                            return out;
+                        }
+                        out.sites.push(CallerSite {
+                            caller,
+                            callee,
+                            depth: d,
+                            path,
+                            sites: vec![site],
+                        });
+                    }
+                    if visited.insert(caller) {
+                        next.push(caller);
+                    }
+                }
+            }
+            level = next;
+        }
+        out
+    }
+
+    /// The chain from the method `start`, whose final summary changes `self.<attr>`, down to
+    /// the function whose own body makes the change: breadth first over calls on `self` that
+    /// change it, to a method that changes it itself or that hands `self.<attr>` to a call
+    /// changing it, followed down through [`Self::param_change_chain`].
+    pub fn self_attr_chain(
+        &self,
+        calls: &mut CallsByCaller<'_>,
+        start: &FuncKey,
+        attr: &AttrKeyPath,
+    ) -> ChangeChain {
+        let runs_here = |site: &CallSite, callee: &EffectSummary| {
+            self.delivery(site, callee)
+                .is_some_and(|d| d.into == Facts::Body)
+        };
+        let found = self.nearest(
+            calls,
+            start,
+            |site, callee| {
+                site.recv_is_self
+                    && callee.mutates_self_attrs.contains(attr)
+                    && runs_here(site, callee)
+            },
+            |key, sites| {
+                self.local_summary(key)
+                    .is_some_and(|l| l.mutates_self_attrs.contains(attr))
+                    || sites.iter().any(|s| self.hands_on(s, attr).is_some())
+            },
+        );
+        // A function handing the object on: the hop into the callee, then the callee's chain.
+        let changes_itself = |f: &FuncKey| {
+            self.local_summary(f)
+                .is_some_and(|l| l.mutates_self_attrs.contains(attr))
+        };
+        let through = found
+            .changed_in
+            .clone()
+            .filter(|f| !changes_itself(f))
+            .and_then(|f| {
+                let path = self.file_of(&f)?;
+                let sites = calls.of(&f).to_vec();
+                let (site, (bc, j, what)) = sites
+                    .iter()
+                    .find_map(|s| Some((s, self.hands_on(s, attr)?)))?;
+                let hop = CallHop {
+                    caller: f.clone(),
+                    callee: bc.callee.fqn(),
+                    span: site.span,
+                    path: path.to_path_buf(),
+                };
+                let below = self.param_change_chain(calls, &bc.callee, j, &what);
+                let mut hops = found.hops.clone();
+                hops.push(hop);
+                hops.extend(below.hops);
+                Some(ChangeChain {
+                    hops,
+                    changed_in: below.changed_in.or_else(|| Some(bc.callee.clone())),
+                    param: below.param.or(Some(j)),
+                })
+            });
+        through.unwrap_or(found)
+    }
+
+    /// A callee of `site` handed `self.<attr>` of the calling method that changes it
+    /// (`helper(self.items)`), with the parameter and the change its chain follows.
+    fn hands_on<'s>(
+        &self,
+        site: &'s CallSite,
+        attr: &AttrKeyPath,
+    ) -> Option<(&'s BoundCallee, u8, ParamChange)> {
+        site.project_callees().iter().find_map(|bc| {
+            let callee = self.summary(&bc.callee).filter(|c| {
+                self.delivery(site, c)
+                    .is_some_and(|d| d.into == Facts::Body)
+            })?;
+            bc.params.iter().enumerate().take(64).find_map(|(j, o)| {
+                let j = u8::try_from(j).expect("at most 64 parameters");
+                let paths = callee.mutated_param_paths.get(&j)?;
+                if o.self_attr.as_deref() != Some(attr.attr.as_str()) {
+                    return None;
+                }
+                // The argument is the attribute's object: changed itself, or a slot of it.
+                let what = if paths.contains("") {
+                    None
+                } else {
+                    callee
+                        .inplace_param_slots
+                        .get(&j)
+                        .and_then(|slots| slots.first().cloned())
+                };
+                Some((bc, j, what))
+            })
+        })
+    }
+
+    /// The nearest function whose own calls heki cannot all resolve (`unknown_calls`) among
+    /// `start` and the callees whose facts run in it (in its body, or in what iterating its
+    /// result runs), with the chain to it. A call cycle stopped at its recomputation budget is
+    /// unknown as a whole: its functions are their own nearest.
+    pub fn first_unknown(&self, calls: &mut CallsByCaller<'_>, start: &FuncKey) -> ChangeChain {
+        self.nearest(
+            calls,
+            start,
+            |site, callee| self.delivery(site, callee).is_some(),
+            |key, _| self.summary(key).is_some_and(|s| s.unknown_calls),
+        )
+    }
+
+    /// The nearest function whose own body changes a module global (`cell` `None`) or the
+    /// closure cell `cell`, among `start` and the callees whose facts run in it and hand that
+    /// change on, with the chain to it.
+    pub fn first_state_change(
+        &self,
+        calls: &mut CallsByCaller<'_>,
+        start: &FuncKey,
+        cell: Option<&CellChange>,
+    ) -> ChangeChain {
+        let hands_on = |s: &EffectSummary| match cell {
+            Some(c) => s.changes_cells.contains(c),
+            None => s.changes_globals,
+        };
+        self.nearest(
+            calls,
+            start,
+            |site, callee| hands_on(callee) && self.delivery(site, callee).is_some(),
+            |key, _| {
+                self.local_summary(key).is_some_and(|local| match cell {
+                    Some(c) => local
+                        .changed_state
+                        .contains_key(&SharedState::Cell(c.clone())),
+                    None => local
+                        .changed_state
+                        .keys()
+                        .any(|k| matches!(k, SharedState::Global(_))),
+                })
+            },
+        )
+    }
+
+    /// The nearest function, among `start` and the callees whose facts run in it, whose own
+    /// typed writes include one on an object that none of its parameters is and that it does
+    /// not construct: with typed writes left where they are made, its callers do not see it.
+    pub fn first_object_write(
+        &self,
+        calls: &mut CallsByCaller<'_>,
+        start: &FuncKey,
+    ) -> ChangeChain {
+        self.nearest(
+            calls,
+            start,
+            |site, callee| self.delivery(site, callee).is_some(),
+            |key, _| {
+                self.local_summary(key).is_some_and(|local| {
+                    local
+                        .typed_field_write_sites
+                        .iter()
+                        .any(|w| w.obj_params == 0 && !w.fresh)
+                })
+            },
+        )
+    }
+
+    /// The summary of `func` before propagation (its own body's facts).
+    pub fn local_summary(&self, func: &FuncKey) -> Option<&EffectSummary> {
+        let path = self.file_of(func)?;
+        self.files[path].local_functions.get(func).map(|s| &**s)
+    }
+
+    /// Breadth first from `start` over the calls `enters` accepts (given the site and the
+    /// callee's final summary), the first function `found` accepts, with the hops to it (an
+    /// empty chain without `changed_in` when there is none).
+    fn nearest(
+        &self,
+        calls: &mut CallsByCaller<'_>,
+        start: &FuncKey,
+        enters: impl Fn(&CallSite, &EffectSummary) -> bool,
+        found: impl Fn(&FuncKey, &[&CallSite]) -> bool,
+    ) -> ChangeChain {
+        // (function, parent state, hop into it)
+        let mut states: Vec<(FuncKey, Option<usize>, Option<CallHop>)> =
+            vec![(start.clone(), None, None)];
+        let mut visited: FxHashSet<FuncKey> = FxHashSet::from_iter([start.clone()]);
+        let mut i = 0;
+        while i < states.len() {
+            let func = states[i].0.clone();
+            let path = self
+                .file_of(&func)
+                .expect("states are summarized functions");
+            let sites = calls.of(&func);
+            if found(&func, sites) {
+                let mut hops = Vec::new();
+                let mut at = Some(i);
+                while let Some(j) = at {
+                    hops.extend(states[j].2.clone());
+                    at = states[j].1;
+                }
+                hops.reverse();
+                return ChangeChain {
+                    hops,
+                    changed_in: Some(func),
+                    param: None,
+                };
+            }
+            for &site in sites {
+                for bc in site.project_callees() {
+                    let entered = self
+                        .summary(&bc.callee)
+                        .is_some_and(|callee| enters(site, callee));
+                    if entered && visited.insert(bc.callee.clone()) {
+                        let hop = CallHop {
+                            caller: func.clone(),
+                            callee: bc.callee.fqn(),
+                            span: site.span,
+                            path: path.to_path_buf(),
+                        };
+                        states.push((bc.callee.clone(), Some(i), Some(hop)));
+                    }
+                }
+            }
+            i += 1;
+        }
+        ChangeChain::default()
     }
 }

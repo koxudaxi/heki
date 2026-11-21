@@ -17,6 +17,7 @@ Commands:
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
   assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
+  inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -129,6 +130,40 @@ Options:
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --json
           Output machine-readable JSON
+  -h, --help
+          Print help
+```
+
+## `heki inspect`
+
+```text
+Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
+
+Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
+
+Arguments:
+  <SYMBOL>    A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+  [PATHS]...  The project to analyze, as for `heki check` [default: .]
+
+Options:
+      --output-format <OUTPUT_FORMAT>
+          `text`, or `json` [default: text] [possible values: text, json]
+      --callers
+          List the callers transitively, and the reports above the function
+      --depth <DEPTH>
+          How many caller levels `--callers` lists [default: 3]
+      --select <SELECT>
+          Comma-separated rule codes, prefixes, or slugs to enable
+      --extend-select <EXTEND_SELECT>
+          Additional rules to enable on top of defaults/config
+      --ignore <IGNORE>
+          Comma-separated rule codes or slugs to ignore
+      --config <CONFIG>
+          Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+      --target-version <TARGET_VERSION>
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+      --baseline <BASELINE>
+          Ratchet baseline TOML file (line-number-independent)
   -h, --help
           Print help
 ```
