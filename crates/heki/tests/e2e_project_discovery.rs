@@ -65,11 +65,18 @@ fn src_directories_are_source_roots_unless_they_are_packages() {
     assert_eq!(concise(&p), (0, String::new()));
 }
 
-/// `heki check --heuristic --output-format concise <args>` run from `dir`, as `Project::check`
-/// runs it: `(exit code, stdout)`.
+/// `heki check --heuristic --fail-on warning --output-format concise <args>` run from `dir`, as
+/// `Project::check` runs it: `(exit code, stdout)`.
 fn concise_in(dir: &Path, args: &[&str]) -> (i32, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--heuristic", "--output-format", "concise"])
+        .args([
+            "check",
+            "--heuristic",
+            "--fail-on",
+            "warning",
+            "--output-format",
+            "concise",
+        ])
         .args(args)
         .current_dir(dir)
         .output()

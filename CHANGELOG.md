@@ -24,6 +24,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   current directory, not in `pkg`. Module names, the `path`s of a `--baseline` file, and the
   place of `.heki-summary-snapshot.json` move with the root; a configuration file keeps the
   root where it is.
+- Warnings no longer make `heki check` fail: a run that reports only `warning` diagnostics
+  (slower code, by default) prints them and exits 0; an `error` (a bug) still exits 1. The new
+  `[tool.heki.lint] fail-on = "warning"` and `heki check --fail-on warning` make warnings fail
+  the run again (`--fail-on error` overrides the configuration the other way), in every output
+  format and in `--watch`. With a baseline, the same threshold applies to the Ratchet
+  regressions; a refused `--update-baseline` and pending `--diff` changes still exit 1.
 
 ### Added
 
@@ -93,11 +99,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - A rule's default severity follows what happens in the code it reports, not its family: a bug
   (a wrong result, an exception, a lost update, a deadlock, or a broken contract) is an
   `error`, slower code a `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the
-  `OPT` rules default to `warning` instead of `error`; the other rules stay `error`. The exit
-  code does not change (a warning still makes `heki check` exit 1), only the output label, the
-  SARIF level, and the language server's severity. `[tool.heki.lint.severity]` still overrides
-  it. Each rule page shows its default severity, and `heki rule --output-format json` gives each
-  rule's `consequence` (`bug` or `slowdown`).
+  `OPT` rules default to `warning` instead of `error`; the other rules stay `error`. This
+  changes the output label, the SARIF level, the language server's severity, and the exit code
+  (see Breaking changes: a warning no longer fails the run). `[tool.heki.lint.severity]` still
+  overrides it. Each rule page shows its default severity, and `heki rule --output-format json`
+  gives each rule's `consequence` (`bug` or `slowdown`).
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and

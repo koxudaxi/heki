@@ -286,8 +286,11 @@ def cli_page(heki: Path) -> str:
         GENERATED,
         "# CLI Reference",
         "",
-        "Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pending "
-        "`--diff` changes), `2` configuration / I/O / syntax errors.",
+        "Exit codes: `0` no diagnostic that fails the run (warnings are reported without failing "
+        "it), `1` an `error` diagnostic, or a `warning` with `--fail-on warning` "
+        "(`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused "
+        "`--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax "
+        "errors.",
         "",
     ]
     for args, title in CLI_COMMANDS:

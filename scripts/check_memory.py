@@ -230,7 +230,7 @@ def run(heki: str, mode: str, root: Path, timed: bool) -> tuple[str, os.struct_r
     # `wait4` reaps the child and reports its own resource usage.
     _, status, usage = os.wait4(proc.pid, 0)
     code = os.waitstatus_to_exitcode(status)
-    # 0: clean, 1: diagnostics (the generated project has some); anything else is a failure.
+    # 0 or 1: the reports of the generated project, warnings or errors; anything else is a failure.
     if code not in (0, 1):
         sys.exit(f"heki {' '.join(args)} exited with {code}:\n{stderr}")
     return stderr, usage

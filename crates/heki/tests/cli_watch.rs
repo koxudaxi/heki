@@ -103,12 +103,29 @@ fn watch_exits_with_the_last_reports_status() {
         .env("HEKI_WATCH_MAX_RUNS", "0")
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    // A warning is reported without failing the run, as in `heki check`.
+    assert_eq!(out.status.code(), Some(0));
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("`--fix`, `--diff`, and `--update-baseline`")
     );
     let diags: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(diags[0]["rule_code"], "OPT101");
+    assert_eq!(diags[0]["severity"], "warning");
+    let watch_status = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_heki"))
+            .args(["check", "--heuristic", "--watch"])
+            .args(args)
+            .current_dir(&p.dir)
+            .env("HEKI_WATCH_MAX_RUNS", "0")
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    assert_eq!(watch_status(&["--fail-on", "warning"]), Some(1));
+    p.write("heki.toml", "[lint]\nfail-on = \"warning\"\n");
+    assert_eq!(watch_status(&[]), Some(1));
+    assert_eq!(watch_status(&["--fail-on", "error"]), Some(0));
     // Invalid configuration is reported before watching starts.
     p.write("heki.toml", "[lint]\nselect = [\"NOPE1\"]\n");
     let out = Command::new(env!("CARGO_BIN_EXE_heki"))
@@ -120,15 +137,15 @@ fn watch_exits_with_the_last_reports_status() {
     assert_eq!(out.status.code(), Some(2));
 }
 
-/// `heki check --heuristic --watch <args>` with `HEKI_WATCH_MAX_RUNS=<max_runs>`; stderr lines
-/// arrive on the channel.
+/// `heki check --heuristic --fail-on warning --watch <args>` (as `Project::check` runs it) with
+/// `HEKI_WATCH_MAX_RUNS=<max_runs>`; stderr lines arrive on the channel.
 fn spawn_watch(
     p: &Project,
     args: &[&str],
     max_runs: &str,
 ) -> (std::process::Child, Receiver<String>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--heuristic", "--watch"])
+        .args(["check", "--heuristic", "--fail-on", "warning", "--watch"])
         .args(args)
         .current_dir(&p.dir)
         .env("HEKI_WATCH_MAX_RUNS", max_runs)

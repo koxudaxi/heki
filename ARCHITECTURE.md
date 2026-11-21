@@ -652,7 +652,7 @@ heki/
 
 ## 9. CLI, configuration, Ratchet baseline, and profile dumps (one interface with Ruff and `t-linter`)
 
-### 9.1 Commands (exit codes: `0` clean / `1` diagnostics / `2` errors)
+### 9.1 Commands (exit codes: `0` clean or only warnings / `1` errors, and warnings with `--fail-on warning` / `2` configuration, I/O, or syntax errors)
 ```bash
 heki check [PATHS...]                         # semantic diagnostics (MUT, EFF / DATA, OPT)
 heki check --fix [PATHS...]                   # apply safe and unconditional fixes (OPT101 / OPT102)
@@ -660,6 +660,7 @@ heki check --fix --include-size-dependent     # also the proven size-dependent r
 heki check --diff [PATHS...]                  # preview the fixes
 heki check --select EFF,MUT --ignore MUT101   # rule selection (codes, prefixes, or names)
 heki check --heuristic                        # also the heuristic rules (lint.heuristic = true)
+heki check --fail-on warning                  # warnings fail the run too (lint.fail-on = "warning")
 heki check --output-format full|concise|json|github|sarif
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
@@ -685,6 +686,7 @@ select = ["EFF", "DATA", "MUT", "OPT"]
 extend-select = ["EFF105"]
 ignore = []
 heuristic = true                     # prefixes and the defaults also select the heuristic rules
+fail-on = "warning"                  # warnings fail heki check too (default: "error")
 
 [tool.heki.lint.severity]
 MUT101 = "warning"

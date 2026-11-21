@@ -41,6 +41,22 @@ enum OutputFormat {
     Sarif,
 }
 
+/// `--fail-on`: the least severity whose reports make `heki check` fail.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum FailOn {
+    Error,
+    Warning,
+}
+
+impl From<FailOn> for heki_env::Severity {
+    fn from(f: FailOn) -> Self {
+        match f {
+            FailOn::Error => Self::Error,
+            FailOn::Warning => Self::Warning,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Run semantic checks across Python files or directories (Ruff-aligned).
@@ -92,6 +108,10 @@ struct CheckArgs {
     ignore: Vec<String>,
     #[command(flatten)]
     heuristic: HeuristicArgs,
+    /// Exit with code 1 on reports of this severity or higher: `error` (the default), or
+    /// `warning` to fail on warnings too (`lint.fail-on`).
+    #[arg(long, value_enum)]
+    fail_on: Option<FailOn>,
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Full)]
     output_format: OutputFormat,
