@@ -4,6 +4,7 @@ site_description = "Experimental static checker for Python that tracks side effe
 site_url = "https://heki.koxudaxi.dev"
 repo_name = "koxudaxi/heki"
 repo_url = "https://github.com/koxudaxi/heki"
+extra_css = ["stylesheets/heki.css"]
 
 nav = [
   { "Overview" = "index.md" },
@@ -50,15 +51,15 @@ features = [
 
 [[project.theme.palette]]
 scheme = "slate"
-primary = "deep orange"
-accent = "deep orange"
+primary = "custom"
+accent = "custom"
 toggle.icon = "material/brightness-4"
 toggle.name = "Switch to light mode"
 
 [[project.theme.palette]]
 scheme = "default"
-primary = "deep orange"
-accent = "deep orange"
+primary = "custom"
+accent = "custom"
 toggle.icon = "material/brightness-7"
 toggle.name = "Switch to dark mode"
 
