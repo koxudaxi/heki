@@ -283,8 +283,8 @@ jobs:
           printf 'import time\n\n\nasync def handler() -> None:\n    time.sleep(1)\n' > app/handler.py
           git init --quiet
           git add .
-          # `--verbose` prints the output of a hook that passes: a warning does not fail it.
-          uvx --from "pre-commit==4.7.0" pre-commit try-repo "$HOOK_REPOSITORY" heki --all-files --verbose | tee output.txt
+          # The hook sets `verbose: true`, so a passing run with a warning still prints it.
+          uvx --from "pre-commit==4.7.0" pre-commit try-repo "$HOOK_REPOSITORY" heki --all-files | tee output.txt
           grep -q "app/handler.py:5:5: EFF101 " output.txt
 
   gate:

@@ -12,3 +12,5 @@
   types: [python]
   pass_filenames: false
   require_serial: true
+  # Warnings do not fail `heki check`, and pre-commit hides the output of a hook that passes.
+  verbose: true
