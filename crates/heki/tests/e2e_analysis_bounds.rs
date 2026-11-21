@@ -1663,9 +1663,10 @@ fn a_loop_with_many_branches_finds_the_blocks_reaching_its_header_once() {
     lines.push("    def scan_keys(self):".to_owned());
     lines.push("        for k in self._keys():".to_owned());
     body(&mut lines);
-    let p = Project::new("bounds_loop_branches");
-    p.write("m.py", &(lines.join("\n") + "\n"));
-    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+    assert_eq!(
+        iterated_mutations("bounds_loop_branches", &(lines.join("\n") + "\n")),
+        0
+    );
 }
 
 /// A function consuming a private generator's result `consumptions` times in a row
@@ -1759,6 +1760,49 @@ fn a_loop_over_many_self_containers_is_one_fact() {
     assert_eq!(
         iterated_mutations("bounds_zipped_containers", &(lines.join("\n") + "\n")),
         1
+    );
+}
+
+/// One `zip` of `containers` dicts of `self` stepped by as many `yield from`s in a private
+/// generator, and a method changing the first dict while the generator is suspended: each
+/// `yield from` steps every container, so past ten of them the iterations' facts pass their
+/// budget and the generator has none. Ten give ten reports, two thousand none.
+#[test]
+fn iterations_past_the_fact_budget_are_unknown() {
+    let zipped = |containers: usize| {
+        let mut lines = vec![
+            "class Table:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+        ];
+        lines.extend((0..containers).map(|i| format!("        self.d{i}: dict[str, int] = {{}}")));
+        lines.extend(
+            [
+                "",
+                "    def drop(self) -> None:",
+                "        self.d0.pop(\"x\", None)",
+                "",
+                "    def pump(self) -> None:",
+                "        g = self._rows()",
+                "        next(g)",
+                "        self.drop()",
+                "        next(g)",
+                "",
+                "    def _rows(self):",
+            ]
+            .map(str::to_owned),
+        );
+        let attrs: Vec<String> = (0..containers).map(|i| format!("self.d{i}")).collect();
+        lines.push(format!("        z = zip({})", attrs.join(", ")));
+        lines.extend((0..containers).map(|_| "        yield from z".to_owned()));
+        lines.join("\n") + "\n"
+    };
+    assert_eq!(
+        iterated_mutations("bounds_iteration_facts_few", &zipped(10)),
+        10
+    );
+    assert_eq!(
+        iterated_mutations("bounds_iteration_facts", &zipped(2_000)),
+        0
     );
 }
 

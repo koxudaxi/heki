@@ -2497,7 +2497,8 @@ impl<'a> Extractor<'a> {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
                 // Reading a missing key of a `defaultdict` inserts it.
-                if !is_slice
+                if self.opt_in.iterations
+                    && !is_slice
                     && !crate::consumption::is_unpacking(self.f, *index, span)
                     && matches!(self.val(*obj), Some(Val::Inst(c)) if c == "collections.defaultdict")
                     && !self.reads_present_key(bb, *obj, *index)

@@ -622,7 +622,8 @@ fn resumed(f: &IrFunction, resume: Resume, uses: &[(BlockId, usize)]) -> bool {
 
 /// The iterations of the method `f` over the checked containers of its own instance
 /// (`self_attrs` maps the variables holding `self.<attr>` to the attribute) that a generator
-/// suspends in or whose body makes calls. `site_spans` are the spans of `f`'s call sites.
+/// suspends in or whose body makes calls. `site_spans` are the spans of `f`'s call sites. The
+/// `(iteration, container)` facts share the budget of [`live_containers`]' facts.
 pub(crate) fn container_iterations(
     f: &IrFunction,
     tcx: &TypeCtx<'_>,
@@ -638,6 +639,9 @@ pub(crate) fn container_iterations(
     if live.is_empty() {
         return Vec::new();
     }
+    // One `zip` of many containers stepped by many `yield from`s gives each iteration every
+    // container: past the budget of facts the method has no iterations, as past the live ones.
+    let mut budget = live_facts_budget(f);
     let mut out = Vec::new();
     for inst in f.blocks.iter().flat_map(|b| &b.insts) {
         let iterated = match &inst.kind {
@@ -653,6 +657,10 @@ pub(crate) fn container_iterations(
         let (Some(iterated), Some(between)) = (iterated, between.filter(|b| !b.is_empty())) else {
             continue;
         };
+        let Some(left) = budget.checked_sub(iterated.len()) else {
+            return Vec::new();
+        };
+        budget = left;
         out.push(ContainerIteration {
             iterated: iterated.iter().cloned().collect(),
             span: inst.span,
@@ -671,7 +679,8 @@ type Live = FxHashMap<VarId, BTreeSet<(String, IteratedContainer)>>;
 /// of copies takes one pass per link, and real code takes a few.
 const MAX_LIVE_PASSES: usize = 24;
 
-/// The `(value, container)` facts [`live_containers`] keeps at most: a multiple of the
+/// The `(value, container)` facts [`live_containers`] keeps at most, and the
+/// `(iteration, container)` facts [`container_iterations`] keeps at most: a multiple of the
 /// function's source size, within bounds, far above what real code keeps. A loop rotating
 /// aliases of many containers, or a chain of merges of them, gives each value every container.
 const LIVE_FACTS_PER_SOURCE_BYTE: usize = 1;

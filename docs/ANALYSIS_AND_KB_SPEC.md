@@ -678,9 +678,11 @@ them; a run without the rule computes none of them.
    `yield from` itself), and the spans of the call sites in such blocks
    (`iterations::BetweenSteps`), once for all the containers. The containers each value may iterate are a
    fixpoint over copies, phis, views, and wrappers, with a pass limit (24) and a budget of
-   `(value, container)` facts (one per source byte, at least 4,096, at most 100,000): past either,
-   as for a loop rotating aliases of hundreds of containers, the method has no iterations, and no
-   report comes from them.
+   `(value, container)` facts (one per source byte, at least 4,096, at most 100,000), and the
+   iterations take a budget of `(iteration, container)` facts of the same size: past any of them,
+   as for a loop rotating aliases of hundreds of containers or one `zip` of thousands of
+   containers stepped by as many `yield from`s, the method has no iterations, and no report comes
+   from them.
 3. Changes of such containers (`changes_self_containers`, propagated through the calls on
    `self`, `super()` included, the property reads, and the helpers changing the container of the
    parameter bound to `self.<attr>`, with the helper's own change of it): `Resizes` for the
