@@ -2248,25 +2248,28 @@ impl ProjectDecls {
         let class = self.canonical(class);
         let mut seen = FxHashSet::default();
         let mut out = Vec::new();
-        let mut add = |c: String, out: &mut Vec<String>| {
+        let mut add = |c: String, seen: &mut FxHashSet<String>| {
             if self.is_project_class(&c) && seen.insert(c.clone()) {
                 out.push(c);
             }
         };
         for c in self.mro(&class) {
-            add(c, &mut out);
+            add(c, &mut seen);
         }
         let subclasses = self.subclasses_of(&class);
         for sub in &subclasses {
-            add(sub.clone(), &mut out);
+            add(sub.clone(), &mut seen);
         }
+        // A base already seen needs no walk: the MRO of each class along an MRO is part of it,
+        // and a subclass's own bases are walked as its turn comes. So each class's MRO is
+        // linearized once, whatever the depth of the hierarchy below `class`.
         for sub in &subclasses {
             self.read(|k| note(&mut k.class_facts, sub));
             let bases = self.class(sub).map(|d| d.bases.clone()).unwrap_or_default();
             for base in bases.iter().map(|b| self.canonical(b)) {
-                if self.is_project_class(&base) {
+                if !seen.contains(&base) && self.is_project_class(&base) {
                     for c in self.mro(&base) {
-                        add(c, &mut out);
+                        add(c, &mut seen);
                     }
                 }
             }

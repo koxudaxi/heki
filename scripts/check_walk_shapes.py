@@ -10,7 +10,7 @@ in one function is placed three ways (a function, a method, and a module body) a
 largest n whose function the IR budget still models: n doubles, then bisects, with
 `heki assumptions --json` telling a modeled function from an unmodeled one, so a change to the
 builder moves the size with it. A family spread over a project (a wide class hierarchy, a chain
-of private helpers) has a fixed size.
+of private helpers, a chain of container subclasses) has a fixed size.
 
 Each shape is checked with every rule selected and one contract of each kind naming the classes
 and functions the shapes define, through `heki check` and through the `--watch` engine. The cost
@@ -349,6 +349,44 @@ def helper_chain(n: int) -> str:
     return "\n".join(lines)
 
 
+def container_subclass_chain(n: int) -> str:
+    """A chain of subclasses of `list`, each deriving from the one before: the classes a list or
+    the chain's first class may be under R2, read by a read-only parameter handed to a helper
+    that appends, a cached list changed in place, and a method looked up before a wait."""
+    lines = ["import functools", "import time", "from collections.abc import Sequence", ""]
+    lines += ["class L0(list):", "    def keep(self):", "        return 0", ""]
+    for i in range(1, n):
+        lines += [f"class L{i}(L{i - 1}):", "    pass", ""]
+    lines += [
+        "def _grow(xs):",
+        "    if isinstance(xs, list):",
+        "        xs.append(1)",
+        "",
+        "def hand(values: Sequence[int]):",
+        "    _grow(values)",
+        "",
+        "@functools.lru_cache(maxsize=None)",
+        "def table(k) -> list[str]:",
+        "    return [k]",
+        "",
+        "def changed(k):",
+        "    r = table(k)",
+        "    r.append('x')",
+        "",
+        "def lookup(c: L0):",
+        "    try:",
+        "        c.keep",
+        "        time.sleep(1)",
+        "    except ValueError:",
+        "        pass",
+        "",
+        "async def serve(c: L0):",
+        "    lookup(c)",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 @dataclass(frozen=True)
 class Family:
     name: str
@@ -383,6 +421,9 @@ FAMILIES = [
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
+    Family(
+        "container_subclass_chain", project=container_subclass_chain, placements=("project",), size=1400
+    ),
 ]
 
 
