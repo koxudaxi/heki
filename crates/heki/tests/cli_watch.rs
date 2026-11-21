@@ -196,7 +196,7 @@ fn watch_rechecks_a_coroutine_that_stops_being_sync_driven() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains(
-            "pkg/jobs.py:17:5: EFF101 [heuristic] `_job` reaches the blocking call `time.sleep`"
+            "pkg/jobs.py:17:5: EFF101 [heuristic] `_job` runs the waiting call `time.sleep`"
         ),
         "{stdout}"
     );

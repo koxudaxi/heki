@@ -48,7 +48,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `app.users.load_user` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^

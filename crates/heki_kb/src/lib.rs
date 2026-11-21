@@ -221,6 +221,9 @@ pub enum Emits {
     /// Only when no open connection is at hand (a pool checkout, Django's
     /// `connection.cursor()`).
     UnlessConnected,
+    /// Only when the connection's database is on disk: one opened from a parameter may be in
+    /// memory (`sqlite3.connect(path)` with `path=":memory:"` passed in).
+    IfOnDisk,
 }
 
 /// What the items of a call's result are when the environment decides how many there are
@@ -319,6 +322,11 @@ pub struct ArgCase {
     pub one_of: Vec<String>,
     /// A string literal that is an IPv4 address in dotted-decimal form or an IPv6 address.
     pub numeric_address: bool,
+    /// A string literal containing one of these.
+    pub contains: Vec<String>,
+    /// A value the calling function may compute from one of its parameters (the parameter, or
+    /// `str()`, an f-string, or a concatenation of it), which its callers decide.
+    pub from_parameter: bool,
     pub effects: Option<Vec<ExecEffectKind>>,
     pub return_type: Option<String>,
 }
@@ -335,6 +343,9 @@ pub enum ArgLiteral {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ArgFact {
     pub literal: Option<LiteralValue>,
+    /// The value may be computed from a parameter of the calling function
+    /// ([`ArgCase::from_parameter`]).
+    pub from_parameter: bool,
     /// The class of the value, when it is an instance of a known one.
     pub class: Option<String>,
     /// The named constants the value sets with `|` (one name alone sets itself): each flag is
@@ -375,9 +386,20 @@ impl ArgCase {
         let flag = self.flag.is_empty() || fact.flags.iter().any(|f| self.flag.contains(f));
         let one_of =
             self.one_of.is_empty() || text.is_some_and(|t| self.one_of.iter().any(|o| o == t));
+        let contains = self.contains.is_empty()
+            || text.is_some_and(|t| self.contains.iter().any(|c| t.contains(c.as_str())));
+        let parameter = !self.from_parameter || fact.from_parameter;
         let numeric =
             !self.numeric_address || text.is_some_and(|t| t.parse::<std::net::IpAddr>().is_ok());
-        equals && prefix && nonempty && instance && flag && one_of && numeric
+        equals
+            && prefix
+            && nonempty
+            && instance
+            && flag
+            && one_of
+            && numeric
+            && contains
+            && parameter
     }
 }
 
@@ -1266,10 +1288,81 @@ mod tests {
             ),
             (
                 s(&["sqlite3.connect"]),
-                returning(
-                    "sqlite3.Connection",
-                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                with_cases(
+                    {
+                        let in_memory = |case: ArgCase| ArgCase {
+                            arg: Some(0),
+                            param: Some("database".into()),
+                            effects: Some(vec![UnpooledClientAlloc]),
+                            return_type: Some(SQLITE3_MEMORY.into()),
+                            ..case
+                        };
+                        vec![
+                            in_memory(ArgCase {
+                                one_of: s(&[":memory:"]),
+                                ..ArgCase::default()
+                            }),
+                            in_memory(ArgCase {
+                                prefix: s(&["file::memory:"]),
+                                ..ArgCase::default()
+                            }),
+                            in_memory(ArgCase {
+                                contains: s(&["mode=memory"]),
+                                ..ArgCase::default()
+                            }),
+                            ArgCase {
+                                arg: Some(0),
+                                param: Some("database".into()),
+                                from_parameter: true,
+                                return_type: Some(SQLITE3_PARAMETER.into()),
+                                ..ArgCase::default()
+                            },
+                        ]
+                    },
+                    returning(
+                        "sqlite3.Connection",
+                        entry(&[BlockingDb, UnpooledClientAlloc]),
+                    ),
                 ),
+            ),
+            // The connections of an in-memory database and of one named by a parameter.
+            (
+                [
+                    with_prefix(SQLITE3_MEMORY, SQLITE3_EXECUTES),
+                    with_prefix(&format!("{SQLITE3_MEMORY}.cursor()"), SQLITE3_EXECUTES),
+                ]
+                .concat(),
+                returning(&format!("{SQLITE3_MEMORY}.cursor()"), entry(&[DbQuery])),
+            ),
+            (
+                s(&[&format!("{SQLITE3_MEMORY}.cursor")]),
+                returning(&format!("{SQLITE3_MEMORY}.cursor()"), entry(&[])),
+            ),
+            (
+                [
+                    with_prefix(SQLITE3_PARAMETER, SQLITE3_EXECUTES),
+                    with_prefix(&format!("{SQLITE3_PARAMETER}.cursor()"), SQLITE3_EXECUTES),
+                ]
+                .concat(),
+                returning(
+                    &format!("{SQLITE3_PARAMETER}.cursor()"),
+                    entry(&[BlockingDb, DbQuery]),
+                ),
+            ),
+            (
+                s(&[&format!("{SQLITE3_PARAMETER}.cursor")]),
+                returning(&format!("{SQLITE3_PARAMETER}.cursor()"), entry(&[])),
+            ),
+            (
+                [
+                    with_prefix(SQLITE3_PARAMETER, COMMIT_ROLLBACK),
+                    with_prefix(
+                        &format!("{SQLITE3_PARAMETER}.cursor()"),
+                        &["fetchone", "fetchmany", "fetchall"],
+                    ),
+                ]
+                .concat(),
+                entry(&[BlockingDb]),
             ),
             (
                 s(&["sqlite3.Connection.cursor"]),
@@ -2124,6 +2217,11 @@ mod tests {
         "channels",
     ];
 
+    /// The classes of the connections `sqlite3.connect` opens on an in-memory database and on
+    /// one a parameter names.
+    const SQLITE3_MEMORY: &str = "sqlite3.connect(\":memory:\")";
+    const SQLITE3_PARAMETER: &str = "sqlite3.connect(parameter)";
+
     /// The database calls that wait only in a state the call does not show.
     const CONDITIONAL_EMITTERS: &[(Emits, &[&str])] = &[
         (
@@ -2159,6 +2257,22 @@ mod tests {
                 "psycopg.Connection.rollback",
                 "psycopg2.extensions.connection.commit",
                 "psycopg2.extensions.connection.rollback",
+                "sqlite3.connect(parameter).commit",
+                "sqlite3.connect(parameter).rollback",
+            ],
+        ),
+        (
+            Emits::IfOnDisk,
+            &[
+                "sqlite3.connect(parameter).execute",
+                "sqlite3.connect(parameter).executemany",
+                "sqlite3.connect(parameter).executescript",
+                "sqlite3.connect(parameter).cursor().execute",
+                "sqlite3.connect(parameter).cursor().executemany",
+                "sqlite3.connect(parameter).cursor().executescript",
+                "sqlite3.connect(parameter).cursor().fetchone",
+                "sqlite3.connect(parameter).cursor().fetchmany",
+                "sqlite3.connect(parameter).cursor().fetchall",
             ],
         ),
         (
@@ -2208,6 +2322,20 @@ mod tests {
                 "psycopg.Cursor.execute",
                 "pymongo.collection.Collection.find",
                 "pymongo.collection.Collection.aggregate",
+                "sqlite3.connect(\":memory:\").execute",
+                "sqlite3.connect(\":memory:\").executemany",
+                "sqlite3.connect(\":memory:\").executescript",
+                "sqlite3.connect(\":memory:\").cursor().execute",
+                "sqlite3.connect(\":memory:\").cursor().executemany",
+                "sqlite3.connect(\":memory:\").cursor().executescript",
+                "sqlite3.connect(parameter).execute",
+                "sqlite3.connect(parameter).executemany",
+                "sqlite3.connect(parameter).executescript",
+                "sqlite3.connect(parameter).cursor().execute",
+                "sqlite3.connect(parameter).cursor().executemany",
+                "sqlite3.connect(parameter).cursor().executescript",
+                "sqlite3.connect(parameter).cursor().fetchmany",
+                "sqlite3.connect(parameter).cursor().fetchall",
             ],
         ),
         (
@@ -2368,7 +2496,9 @@ mod tests {
                         || !case.instance_of.is_empty()
                         || !case.flag.is_empty()
                         || !case.one_of.is_empty()
-                        || case.numeric_address,
+                        || case.numeric_address
+                        || !case.contains.is_empty()
+                        || case.from_parameter,
                     "{symbol}"
                 );
                 assert!(

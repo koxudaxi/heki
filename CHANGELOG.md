@@ -27,6 +27,14 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - `EFF111` (`async-possibly-blocking-call`) and `EFF113` (`loop-possible-db-query`), heuristic:
   the reports `EFF101` and `EFF103` made before, where the new exact claims are not established.
   See the first entry under Changed.
+- `sqlite3.connect` of an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`) does
+  not wait, and neither do the statements on that connection; a connection opened from a
+  parameter of the function may be in memory, so its waits are not established (`EFF111`). A
+  pragma that only reads or sets an option of the connection (`PRAGMA busy_timeout = 5000`)
+  does not wait.
+- Test code, which `lint.relax-async-in-tests` leaves out of `EFF101`, `EFF111`, `EFF105`, and
+  `EFF106`, is what pytest discovers: `test_*` functions and the functions nested in them,
+  `test_*.py` and `*_test.py` files at any depth, and files under `test/` or `tests/`.
 - The ecosystem catalog says when a call waits. A blocking effect waits for input or output or
   for another thread (`blocking_sync`), which can have done its part already. Every wait entry
   lists the arguments that end it at once: `time.sleep(0)`, `Popen.wait(timeout=0)`, a numeric

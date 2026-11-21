@@ -670,7 +670,7 @@ import sqlalchemy
 
 
 def via_sqlite(ids):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect("app.db")
     cur = conn.cursor()
     for i in ids:
         conn.execute("SELECT 1 WHERE id = ?", (i,))
@@ -791,12 +791,12 @@ fn each_effect_has_its_own_help() {
         vec![
             (
                 12,
-                "`sleeps` reaches the blocking call `time.sleep` on the event loop",
+                "`sleeps` runs the waiting call `time.sleep` on the event loop",
                 "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`"
             ),
             (
                 16,
-                "`fetches` reaches the blocking call `requests.get` on the event loop",
+                "`fetches` runs the waiting call `requests.get` on the event loop",
                 &format!("{offload} use an async client")
             ),
             (
@@ -806,7 +806,7 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 24,
-                "`runs` reaches the blocking call `subprocess.run` on the event loop",
+                "`runs` runs the waiting call `subprocess.run` on the event loop",
                 &format!("{offload} use `asyncio.create_subprocess_exec`")
             ),
             (
@@ -1091,37 +1091,37 @@ fn exact_claims_establish_each_premise() {
             (
                 72,
                 "EFF101",
-                "`get` always runs a blocking call on the event loop: `requests.get` (in `pkg.premises.Child.get`) or `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
+                "`get` always runs a waiting call on the event loop: `requests.get` (in `pkg.premises.Child.get`) or `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
             ),
             (
                 76,
                 "EFF101",
-                "`pkg.premises.Factory.make` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)"
+                "`pkg.premises.Factory.make` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)"
             ),
             (
                 80,
                 "EFF101",
-                "`pkg.premises.Caller.__call__` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.Caller.__call__` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 84,
                 "EFF101",
-                "`pkg.premises.Child.get` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)"
+                "`pkg.premises.Child.get` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)"
             ),
             (
                 88,
                 "EFF101",
-                "`pkg.premises.with_lock` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.with_lock` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 89,
                 "EFF101",
-                "`pkg.premises.with_file` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.with_file` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 90,
                 "EFF101",
-                "`pkg.premises.with_client` always runs the blocking call `requests.get` on the event loop (1 call down, on every path)"
+                "`pkg.premises.with_client` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)"
             ),
             (
                 91,
@@ -1161,7 +1161,7 @@ fn exact_claims_establish_each_premise() {
             (
                 141,
                 "EFF101",
-                "`get` always runs a blocking call on the event loop: `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Child.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
+                "`get` always runs a waiting call on the event loop: `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Child.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
             ),
             (
                 154,
@@ -1171,12 +1171,12 @@ fn exact_claims_establish_each_premise() {
             (
                 167,
                 "EFF101",
-                "`pkg.premises.PlainSub.run` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.PlainSub.run` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 177,
                 "EFF101",
-                "`pkg.premises.with_connection` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.with_connection` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 177,
@@ -1206,7 +1206,7 @@ fn exact_claims_establish_each_premise() {
             (
                 215,
                 "EFF101",
-                "`pkg.premises.Mailer.send` always runs the blocking call `requests.post` on the event loop (1 call down, on every path)"
+                "`pkg.premises.Mailer.send` always runs the waiting call `requests.post` on the event loop (1 call down, on every path)"
             ),
         ]
     );

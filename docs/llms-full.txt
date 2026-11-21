@@ -57,7 +57,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `app.users.load_user` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -88,13 +88,12 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 
 ```console
 $ heki check --heuristic
-app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute`
+app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
   = related: app/orders.py:11:37: `order_summaries` calls `app.orders.customer_name`
   = related: app/orders.py:5:5: `customer_name` calls `sqlite3.Cursor.execute`
-  = help: load what it needs once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
 ```
@@ -951,7 +950,7 @@ supported version that every clause admits:
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
 | `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
-| `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
+| `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
@@ -2837,8 +2836,8 @@ heki cannot decide, a call it cannot resolve to all its implementations.
 The rule reports the boundary: the call inside the `async def` that leads to the waiting call,
 with the chain as related information. Several boundaries reaching the same waiting call are
 shown as one report with a count once more than ten of them are shown. Calls offloaded to a
-thread, `async` APIs, CLI commands, ASGI lifespan handlers, and tests are not reported, as for
-`EFF111`.
+thread, `async` APIs, CLI commands, ASGI lifespan handlers, and tests (as pytest finds them) are not
+reported, as for `EFF111`.
 
 ## What a report states
 
@@ -3071,7 +3070,8 @@ It does not report:
   (`.send(None)`, a `run_sync` function); `asyncio.run(...)` runs its coroutine on an event loop,
   where blocking stops the tasks it starts;
 - CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests
-  (`test_*` functions and files under `tests/`, see the option below).
+  (as pytest finds them: `test_*` functions and the functions nested in them, `test_*.py` and
+  `*_test.py` files, and files under `test/` or `tests/`; see the option below).
 
 ## What a report states
 

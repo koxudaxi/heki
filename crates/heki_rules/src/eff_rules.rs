@@ -55,7 +55,28 @@ fn relaxed(s: &EffectSummary, key: &FuncKey, unit: &ModuleUnit<'_>, relax_tests:
     if has_decorator(s, "asynccontextmanager") && name.contains("lifespan") {
         return true;
     }
-    relax_tests && (name.starts_with("test_") || unit.rel_path.split('/').any(|c| c == "tests"))
+    relax_tests && is_test_code(&key.qualname, &unit.rel_path)
+}
+
+/// Test code as pytest discovers it by default: a `test_*` function (a method of a test class
+/// included) and the functions nested in one, and every function of a `test_*.py` or
+/// `*_test.py` file or of a file under a `test/` or `tests/` directory.
+pub(crate) fn is_test_code(qualname: &str, rel_path: &str) -> bool {
+    let mut components = rel_path.split('/').peekable();
+    let mut in_tests = false;
+    let mut file = "";
+    while let Some(c) = components.next() {
+        if components.peek().is_some() {
+            in_tests |= c == "tests" || c == "test";
+        } else {
+            file = c;
+        }
+    }
+    let stem = file.strip_suffix(".py").unwrap_or(file);
+    in_tests
+        || stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || qualname.split('.').any(|part| part.starts_with("test_"))
 }
 
 /// The code of a boundary report: `EFF105` for the file system, `EFF101` when whenever the call
@@ -70,14 +91,17 @@ fn boundary_code(r: &BoundaryReport) -> &'static str {
     }
 }
 
-/// The message of an `EFF101` report through helpers: the waiting call, or the one each
-/// implementation reaches (a direct call keeps the words every boundary report has).
-fn always_blocks(must: &SiteMust) -> Option<String> {
+/// The message of an `EFF101` report: the waiting call the reported call is, the one it always
+/// runs through helpers, or the one each implementation runs.
+fn always_waits(function: &str, must: &SiteMust) -> String {
     let sinks = must.sinks();
-    Some(match (must.chain.as_slice(), sinks.len()) {
-        ([] | [_], _) => return None,
+    match (must.chain.as_slice(), sinks.len()) {
+        ([] | [_], _) => format!(
+            "`{function}` runs the waiting call `{}` on the event loop",
+            sinks.first().copied().unwrap_or_default()
+        ),
         ([first, ..], 1) => format!(
-            "`{}` always runs the blocking call `{}` on the event loop ({} down, on every path)",
+            "`{}` always runs the waiting call `{}` on the event loop ({} down, on every path)",
             first.callee,
             sinks.first().copied().unwrap_or_default(),
             match must.chain.len() - 1 {
@@ -93,11 +117,11 @@ fn always_blocks(must: &SiteMust) -> Option<String> {
                 .map(|(implementation, sink)| format!("`{sink}` (in `{implementation}`)"))
                 .collect();
             format!(
-                "`{method}` always runs a blocking call on the event loop: {}",
+                "`{method}` always runs a waiting call on the event loop: {}",
                 each.join(" or ")
             )
         }
-    })
+    }
 }
 
 pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
@@ -144,32 +168,38 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 Some(h) if r.iterates => format!(" by iterating `{}`", h.callee),
                 _ => String::new(),
             };
-            let message = match &r.must {
-                Some(must) if code == "EFF101" => always_blocks(must),
-                _ => None,
-            }
-            .unwrap_or_else(|| {
-                format!(
-                    "`{}` reaches {what} `{}` on the event loop{iterating}",
-                    r.function.qualname, r.root_cause
-                )
-            });
-            let chain = match &r.must {
-                Some(must) if code == "EFF101" => &must.chain,
-                _ => &r.chain,
+            // An exact report names, keys, and folds by the call it claims: the end of the chain
+            // every implementation runs, not of the shortest chain the heuristic tier found.
+            let (message, chain, target) = match &r.must {
+                Some(must) if code == "EFF101" => (
+                    always_waits(&r.function.qualname, must),
+                    &must.chain,
+                    must.chain
+                        .last()
+                        .map_or_else(|| r.root_cause.clone(), |h| h.callee.clone()),
+                ),
+                _ => (
+                    format!(
+                        "`{}` reaches {what} `{}` on the event loop{iterating}",
+                        r.function.qualname, r.root_cause
+                    ),
+                    &r.chain,
+                    r.root_cause.clone(),
+                ),
             };
+            let fold_key = format!("{target}|{}", effect_name(r.effect));
             if let Some(d) = cx.emit(
                 out,
                 code,
                 unit,
                 r.span,
                 &r.function.qualname,
-                r.root_cause.clone(),
+                target,
                 message,
                 Some(unblocking_help(r.effect).to_owned()),
                 chain,
             ) {
-                d.fold_key = Some(format!("{}|{}", r.root_cause, effect_name(r.effect)));
+                d.fold_key = Some(fold_key);
             }
         }
     }
@@ -204,10 +234,18 @@ pub fn fold_root_causes(diags: &mut Vec<Diagnostic>) {
     }
     for (&i, &more) in &folded {
         let d = &mut diags[i];
-        d.message = format!(
-            "{} (+{more} more async call sites reaching the same blocking root cause)",
-            d.message
-        );
+        // An exact report's group shares the call each of its reports claims.
+        d.message = if d.rule_code == "EFF101" {
+            format!(
+                "{} (+{more} more async call sites that always run `{}`)",
+                d.message, d.target
+            )
+        } else {
+            format!(
+                "{} (+{more} more async call sites reaching the same blocking root cause)",
+                d.message
+            )
+        };
     }
     *diags = std::mem::take(diags)
         .into_iter()

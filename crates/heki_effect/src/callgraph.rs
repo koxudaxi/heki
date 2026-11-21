@@ -396,10 +396,7 @@ pub(crate) fn site_must_chain(
                 {
                     return None;
                 }
-                let chain = callee.must_exec.as_deref().and_then(|m| m.chain(e));
-                let Some(chain) = chain else {
-                    return None;
-                };
+                let chain = callee.must_exec.as_deref().and_then(|m| m.chain(e))?;
                 let Some(sink) = chain.last() else {
                     continue;
                 };
