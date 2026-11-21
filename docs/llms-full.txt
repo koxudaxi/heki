@@ -9,6 +9,10 @@ Source: https://heki.koxudaxi.dev/
 
 # heki
 
+<p align="center">
+  <img src="assets/heki-banner.png" alt="heki: a snake in front of a brick wall" width="600">
+</p>
+
 🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
@@ -891,7 +895,7 @@ $ heki check --output-format json
 | ------ | ------ |
 | `full` (default) | each diagnostic with its source line, call chain, and help |
 | `concise` | one line per diagnostic: the message, without the help |
-| `json` | every field: also the help, the evidence, the blocker that stops a fix, and the fix edits ([fields](https://heki.koxudaxi.dev/coding-agents/#use-the-cli-in-the-agents-loop)) |
+| `json` | every field: also the help, the evidence, the blocker that stops a fix, and the fix edits ([fields](https://heki.koxudaxi.dev/coding-agents/#after-an-edit-heki-check)) |
 | `github` | GitHub Actions annotations with the message ([CI](https://heki.koxudaxi.dev/adoption/#continuous-integration)) |
 | `sarif` | the message, the location, the call chain, and the help (`properties.help`), for code-scanning dashboards (no evidence or blocker) |
 
@@ -1856,7 +1860,7 @@ With SARIF:
   the object it is about).
 
 For custom tooling, `--output-format json` gives every field: see
-[Coding Agents](https://heki.koxudaxi.dev/coding-agents/#use-the-cli-in-the-agents-loop).
+[Coding Agents](https://heki.koxudaxi.dev/coding-agents/#after-an-edit-heki-check).
 
 ## Rolling out rules
 
