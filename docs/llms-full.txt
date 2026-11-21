@@ -1003,8 +1003,8 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT101`,
-  `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact code or
-  name. In `ignore`, a prefix covers every rule it matches.
+  `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact
+  code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -1934,7 +1934,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | ≈ 🔌 🧪 |
 | MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | ≈ 🔌 |
 | MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | ≈ 🔌 |
-| MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). | ≈ |
+| MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
 | MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
 | MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). | ≈ |
@@ -3752,21 +3752,22 @@ Source: https://heki.koxudaxi.dev/rules/hash-attr-mutation/
 
 # hash-attr-mutation (MUT107)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
-Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).
+Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
-Checks methods that rebind or mutate an attribute that the class's `__hash__` reads (directly,
-through a `self.helper()` call, or through the getter of a property it reads, such as
+Checks methods that rebind or mutate an attribute that the `__hash__` of their instances reads
+(directly, through a `self.helper()` call, or through the getter of a property it reads, such as
 `hash(self.key)` where the `@property` `key` reads `self.name`), when the class, one of its
 subclasses, or a base-class method it inherits without overriding changes the attribute after
-initialization. A property that also defines a setter
-or deleter is not followed.
+initialization. Each `self` call in the hash runs the definition the writer's class finds along
+its MRO, not an override in another subclass. A property that also defines a setter or deleter
+is not followed. The rule is opt-in: it runs when `select` or `extend-select` names it.
 
 The rule reports the write itself, once per method and attribute. It does not report:
 
@@ -3784,8 +3785,14 @@ The rule reports the write itself, once per method and attribute. It does not re
   there cannot be hashed at all, and a value of a project class answers for its own hash
   (`MUT107` checks its class). Rebinding the attribute is reported;
 - classes with a metaclass other than `type` / `abc.ABCMeta` along their MRO (also one heki
-  cannot resolve): the metaclass may turn attribute writes into descriptor calls (a generated
-  property whose setter invalidates the cached value), which heki does not see;
+  cannot resolve), and classes with a base heki names no class for (`with_metaclass(Meta)`, a
+  module variable such as `Base = declarative_base()`), whose metaclass is unknown: the
+  metaclass may turn attribute writes into descriptor calls (a generated property whose setter
+  invalidates the cached value), which heki does not see;
+- writes that are no plain store: an attribute that a class along the MRO binds to a property
+  (`@property`, `@x.setter`, `@x.deleter`, `x = property(...)`), whose setter or deleter runs
+  instead, or which raises without one, and any write on a class whose MRO defines
+  `__setattr__` or `__delattr__`;
 - lazy initialization: a write under a `None` / falsy check of the same attribute
   (`if self._key is None: self._key = ...`, `if not self._parts: ...`);
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
@@ -3800,22 +3807,22 @@ The rule reports the write itself, once per method and attribute. It does not re
 
 ## What a report states
 
-A report states that a method that can run after initialization rebinds or changes in place an
-attribute that the class's `__hash__` reads.
+A report states that a method other than the initializers rebinds or changes in place, with a
+plain store, an attribute that the `__hash__` of its instances reads.
 
 Its premises:
 
-- **Hash reads**: `__hash__` reads the attribute, directly, through a helper, or through a property
-  getter. Open: the reads of the hashes of the class family are joined, so a subclass's `__hash__`
-  can count.
-- **After initialization**: the method is not an initializer. Open: initializers are recognized by
-  their names and by who calls them (listed above).
-- **Writes**: the method stores to the attribute or changes it in place. Open: a metaclass given
-  through a call among the bases, or a property with a setter or deleter, can turn the write into
-  something else.
+- **Hash reads**: the `__hash__` the writer's class finds along its MRO reads the attribute,
+  directly, through a `self` method, or through a property getter, each the definition that
+  class finds along its MRO. Open: a `self` call heki does not resolve is not followed.
+- **Outside initialization**: the method is not an initializer. Open: initializers are
+  recognized by their names and by who calls them (listed above).
+- **Plain store**: the method stores to the attribute, deletes it, or changes it in place, and no
+  class along the MRO turns the write into a call (a property, `__setattr__`, `__delattr__`, a
+  metaclass other than `type`). Open: a base outside the project can define any of them.
 
-Not part of the claim: the end of the message, that stored instances can no longer be found. That is
-the harm, which needs an instance in a set or dict when the write runs.
+Not part of the claim: that an instance is in a set or dict when the write runs. That is the
+harm: the set or dict files the instance under its old hash.
 
 ## Why is this bad?
 A `set` or a `dict` files an object under the hash it had when it was added. Once an attribute
@@ -3836,7 +3843,7 @@ class Tag:
         return hash(self.name)
 
     def rename(self, name: str) -> None:
-        self.name = name  # a `Tag` in a set can no longer be found
+        self.name = name  # a `Tag` already in a set is filed under its old hash
 ```
 
 Use instead:

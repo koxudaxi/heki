@@ -41,7 +41,7 @@
 - [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [conditional-ownership-mutation (MUT112)](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
-- [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Heuristic · Off by default · Severity error (a bug) · No automatic fix
+- [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [iterated-container-mutation (MUT113)](https://heki.koxudaxi.dev/rules/iterated-container-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [iterator-double-consumption (MUT106)](https://heki.koxudaxi.dev/rules/iterator-double-consumption/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix

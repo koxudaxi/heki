@@ -202,11 +202,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "hash-attr-mutation",
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).",
+        summary: "Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads.",
         doc: include_str!("../rule-docs/MUT107.md"),
     },
     RuleMeta {

@@ -302,11 +302,13 @@ class Remote(Tagged):
 fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
     let p = Project::new("v1x_mut107");
     p.write("shapes.py", SHAPES).write("other.py", REMOTE);
-    // Default-enabled: no `--select`.
-    let diags: Vec<Value> = diagnostics(&p, &[])
-        .into_iter()
-        .filter(|d| d["rule_code"] == "MUT107")
-        .collect();
+    // Opt-in: it runs when `select` names it.
+    assert!(
+        diagnostics(&p, &[])
+            .iter()
+            .all(|d| d["rule_code"] != "MUT107")
+    );
+    let diags: Vec<Value> = diagnostics(&p, &["--select", "MUT107"]);
     let s = "shapes.py";
     // Reported: a direct write, a write through a local alias, a fall-through after an
     // `is not None` check, the second (unguarded) write after a lazy one, subclass methods
@@ -361,7 +363,7 @@ fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
     );
     assert_eq!(
         diags[1]["message"],
-        "`Tagged.rename` mutates `self.name`, which `Tagged.__hash__` reads, so instances already stored in a `set` or used as `dict` keys can no longer be found"
+        "`Tagged.rename` rebinds `self.name` outside initialization, and `Tagged.__hash__` reads it"
     );
     assert_eq!(diags[1]["rule_slug"], "hash-attr-mutation");
     assert_no_fix(&diags);
@@ -369,9 +371,11 @@ fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
     // `--select` / `--ignore` and per-file ignores turn it off.
     assert!(diagnostics(&p, &["--select", "MUT101"]).is_empty());
     assert!(
-        diagnostics(&p, &["--ignore", "hash-attr-mutation"])
-            .iter()
-            .all(|d| d["rule_code"] != "MUT107")
+        diagnostics(
+            &p,
+            &["--select", "MUT107", "--ignore", "hash-attr-mutation"]
+        )
+        .is_empty()
     );
     p.write(
         "pyproject.toml",
@@ -1259,6 +1263,8 @@ fn v1x_rules_take_part_in_the_ratchet_baseline() {
     let (code, stdout, _) = p.check(&[
         "--baseline",
         "heki-baseline.toml",
+        "--extend-select",
+        "MUT107",
         "--output-format",
         "concise",
     ]);
@@ -1274,7 +1280,7 @@ fn heki_rule_prints_the_v1x_rule_docs() {
         (
             "MUT107",
             "hash-attr-mutation",
-            "Checks methods that rebind or mutate an attribute that the class's `__hash__` reads",
+            "Checks methods that rebind or mutate an attribute that the `__hash__` of their instances reads",
         ),
         (
             "OPT112",

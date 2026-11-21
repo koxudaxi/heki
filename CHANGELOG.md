@@ -114,6 +114,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
   fixed number. Its body runs at the call for every rule, so `EFF101` sees its blocking calls
   too. A `functools.partial` handed to such a builtin is followed to the function it calls.
+- `MUT107` (`hash-attr-mutation`) is opt-in: it runs only when `select` or `extend-select`
+  names it, also with `lint.heuristic = true`. Its message states the claim only:
+  "`Tag.rename` rebinds `self.name` outside initialization, and `Tag.__hash__` reads it".
 
 ### Fixed
 
@@ -188,6 +191,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   attribute (`self.xref = {}`, then `self.xref[k] = v`), nor a store or a `defaultdict` read under
   a key the container holds (past `if self.items.get(k) is None: raise KeyError(k)`, inside
   `if k in self.items:` at any depth).
+- `MUT107` reads the `__hash__` of the writer's instances: each `self` method and property the
+  hash calls is the one the writer's class finds along its MRO, not an override in another
+  subclass (`Expression.__hash__` reading `self.identity` reads `self.lhs` only on the
+  instances of the subclass whose `identity` reads it).
+- `MUT101` and `MUT107` no longer report a write that is no plain store: to an attribute that a
+  class along the MRO binds to a property (`@property`, `@x.setter`, `@x.deleter`,
+  `x = property(...)`; a raising deleter changes nothing), on a class whose MRO defines
+  `__setattr__` or `__delattr__`, and on a class with a base heki names no class for
+  (`class Proxy(with_metaclass(Meta))`, `Base = declarative_base()`), whose metaclass may
+  install descriptors.
 - `MUT107` (`hash-attr-mutation`) no longer reports a write that cannot change a hash a `set` or
   `dict` has filed: an in-place change (an item store, `append`) of an attribute `__hash__`
   hands whole to `hash()` (`hash(self.items)`: a list or `bytearray` there cannot be hashed, and
