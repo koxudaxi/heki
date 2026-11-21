@@ -2,7 +2,7 @@
 //! Rule wiring (codes, severities) and Root-Cause Grouping of the output are in `heki_rules`.
 
 use crate::summary::BLOCKING_EFFECTS;
-use crate::{CallHop, FuncKey, ProjectIndex, SiteRole};
+use crate::{CallHop, FuncKey, ProjectIndex, SiteMust, SiteRole};
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use std::collections::BTreeMap;
@@ -23,6 +23,10 @@ pub struct BoundaryReport {
     /// The chain starts where the async function iterates a generator (`SiteRole::Iterate`, or
     /// a project generator iterating what it is handed), not at a call.
     pub iterates: bool,
+    /// Whenever the call returns, the effect has run on the event loop's thread: every
+    /// implementation the call can run is a synchronous function or a Layer 2 call that has run
+    /// it ([`ProjectIndex::site_must`]). `None` when that is not established.
+    pub must: Option<SiteMust>,
 }
 
 /// Boundary-Only Reporting: in `async A -> await async B -> sync C -> time.sleep()` only `B`
@@ -40,8 +44,10 @@ pub fn boundary_reports_in<'p>(
     index: &ProjectIndex,
     paths: impl IntoIterator<Item = &'p Path>,
 ) -> Vec<BoundaryReport> {
-    // `(file, span, function, effect) -> (shortest chain, it starts at an iteration)`.
-    type Best = BTreeMap<(PathBuf, Span, FuncKey, ExecEffectKind), (Vec<CallHop>, bool)>;
+    // `(file, span, function, effect) -> (shortest chain, it starts at an iteration, what the
+    // call has run whenever it returns)`.
+    type Best =
+        BTreeMap<(PathBuf, Span, FuncKey, ExecEffectKind), (Vec<CallHop>, bool, Option<SiteMust>)>;
     let mut best = Best::new();
     for (path, file) in paths
         .into_iter()
@@ -64,18 +70,32 @@ pub fn boundary_reports_in<'p>(
                 .into_iter()
                 .filter(|se| !se.callee_is_async && BLOCKING_EFFECTS.contains(&se.effect))
                 .map(|se| (se.effect, se.chain));
+            // An `async def` target runs its blocking calls under its own boundary; a call the
+            // code never reaches establishes nothing.
+            let synchronous = site.on_every_return.live
+                && site
+                    .project_callees()
+                    .iter()
+                    .all(|bc| index.summary(&bc.callee).is_some_and(|c| !c.is_async));
             for (effect, chain) in found {
                 let key = (path.clone(), site.span, site.caller.clone(), effect);
+                let must = synchronous
+                    .then(|| index.site_must(path, site, effect))
+                    .flatten();
                 let slot = best.entry(key).or_default();
                 if slot.0.is_empty() || chain.len() < slot.0.len() {
-                    *slot = (chain, iterates);
+                    slot.0 = chain;
+                    slot.1 = iterates;
+                }
+                if slot.2.is_none() {
+                    slot.2 = must;
                 }
             }
         }
     }
     best.into_iter()
         .map(
-            |((path, span, function, effect), (chain, iterates))| BoundaryReport {
+            |((path, span, function, effect), (chain, iterates, must))| BoundaryReport {
                 root_cause: chain.last().map(|h| h.callee.clone()).unwrap_or_default(),
                 path,
                 span,
@@ -83,6 +103,7 @@ pub fn boundary_reports_in<'p>(
                 effect,
                 chain,
                 iterates,
+                must,
             },
         )
         .collect()
