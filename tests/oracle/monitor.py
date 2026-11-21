@@ -129,6 +129,7 @@ class CodeInfo:
         "lines",
         "returns",
         "watched",
+        "body_offs",
         "_instructions",
     )
 
@@ -143,6 +144,7 @@ class CodeInfo:
         self.get_iters = {}
         self.lines = {}
         self.returns = []
+        self.body_offs = {}
         instructions = list(dis.get_instructions(code))
         for i, ins in enumerate(instructions):
             pos = ins.positions
@@ -168,13 +170,14 @@ class CodeInfo:
             if chosen is not None:
                 self.sites.setdefault(chosen.offset, []).append(site)
         for loop in plan_loops.get(self.path, ()):
-            candidates = by_pos.get(tuple(loop["pos"]), [])
-            fors = [ins for ins in candidates if ins.opname.startswith("FOR_ITER")]
-            gets = [ins for ins in candidates if ins.opname in ("GET_ITER", "GET_AITER")]
-            if fors:
-                self.for_iters.setdefault(fors[0].offset, []).append(loop)
-                for ins in gets[:1]:
-                    self.get_iters.setdefault(ins.offset, []).append(loop)
+            found = match_loop(instructions, self.pos_of, loop)
+            if found is not None:
+                get_iter, for_iter, body = found
+                self.for_iters.setdefault(for_iter, []).append(loop)
+                if get_iter is not None:
+                    self.get_iters.setdefault(get_iter, []).append(loop)
+                if body is not None:
+                    self.body_offs[loop["id"]] = body
         lines_here = {self.line_of[ins.offset] for ins in instructions}
         for line in plan_lines.get(self.path, ()):
             if line["line"] in lines_here:
@@ -184,6 +187,48 @@ class CodeInfo:
                 self.returns.append(ret)
         self.watched = bool(self.sites or self.for_iters or self.lines)
         return self.watched
+
+
+_TARGET_STORES = frozenset(
+    "STORE_FAST STORE_FAST_LOAD_FAST STORE_FAST_STORE_FAST STORE_NAME STORE_DEREF STORE_GLOBAL "
+    "UNPACK_SEQUENCE UNPACK_EX".split()
+)
+
+
+def match_loop(instructions, pos_of, loop):
+    """The `GET_ITER`, `FOR_ITER`, and first body instruction of the plan's loop in a code object:
+    `(get_iter, for_iter, body)` offsets, or `None` when the code object has no such loop.
+
+    CPython gives the loop's instructions the position of its iterable (3.12.4 and later, 3.13,
+    3.14, 3.15) or of the whole `for` statement or comprehension (earlier 3.12 releases): each is
+    tried in turn. The body starts at the first instruction after the stores that bind the loop's
+    target, so that a capture there reads this iteration's item, also when the target and the
+    body share one line (a comprehension).
+    """
+    for pos in [loop["pos"], *loop.get("alt_pos", ())]:
+        fors = [
+            i
+            for i, ins in enumerate(instructions)
+            if ins.opname.startswith("FOR_ITER") and pos_of.get(ins.offset) == tuple(pos)
+        ]
+        if fors:
+            break
+    else:
+        return None
+    index = fors[0]
+    get_iter = None
+    for ins in reversed(instructions[:index]):
+        if ins.opname in ("GET_ITER", "GET_AITER"):
+            get_iter = ins.offset
+            break
+        if ins.opname not in ("LOAD_FAST_AND_CLEAR", "SWAP", "NOP", "CACHE", "EXTENDED_ARG"):
+            break
+    body = None
+    for ins in instructions[index + 1 :]:
+        if ins.opname not in _TARGET_STORES:
+            body = ins.offset
+            break
+    return get_iter, instructions[index].offset, body
 
 
 def _choose_site_instruction(candidates):
@@ -401,7 +446,8 @@ class Recorder:
             value = static_eval(key, local)
             if value is not UNKNOWN:
                 self.keep.append(value)
-            out[key] = UNKNOWN_TEXT if value is UNKNOWN else [snapshot(value), _is_plain_key(value)]
+            # Apart from the captured names: a key may be an item itself (`a == b`).
+            out["key:" + key] = UNKNOWN_TEXT if value is UNKNOWN else [snapshot(value), _is_plain_key(value)]
         return out
 
     def _stack(self):
@@ -581,11 +627,12 @@ class Recorder:
                     continue
                 if it.loop.get("track_lines"):
                     it.lines.add(line)
-                if it.body_caps is None and line != it.loop["for_line"]:
-                    it.body_caps = self._eval_keys(frame, it.loop.get("keys")) or {}
-                    caps = self._capture(frame, it.loop.get("capture_body"))
-                    if caps:
-                        it.body_caps.update(caps)
+        for loop_id, it in fs.loops.items():
+            if it is not None and it.body_caps is None and offset == info.body_offs.get(loop_id):
+                it.body_caps = self._eval_keys(frame, it.loop.get("keys")) or {}
+                caps = self._capture(frame, it.loop.get("capture_body"))
+                if caps:
+                    it.body_caps.update(caps)
         for loop in info.get_iters.get(offset, ()):
             it = fs.loops.get(loop["id"])
             if it is not None:
