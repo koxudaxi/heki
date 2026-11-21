@@ -18,10 +18,11 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, TextEdit};
 use heki_effect::{CONTAINER_MUTATORS, CallSite, Items, TypeCtx, Val};
+use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
-    LoopBound, ModuleConstants, NaturalLoop, PhiNode, SMALL_MAX, SmallDisplay, Terminator,
-    UnaryOpKind, VarId,
+    ItemOrigins, ItemSource, LoopBound, ModuleConstants, NaturalLoop, PhiNode, SMALL_MAX,
+    SmallDisplay, Terminator, UnaryOpKind, VarId,
 };
 use heki_soundness::{
     AnalysisOptions, OptCandidate, ProfitabilityTier, SafetyTier, analyze_module,
@@ -646,12 +647,14 @@ impl<'a> Defs<'a> {
 
     // ------------------------------------------------------------------------------ OPT113
 
-    /// The `for` loop `lp` (its header advances an iterator); `None` for a `while` loop.
-    fn for_loop(&self, lp: &'a NaturalLoop) -> Option<ForLoop<'a>> {
+    /// The `for` loop `lp`, `f.loops[index]` (its header advances an iterator); `None` for a
+    /// `while` loop.
+    fn for_loop(&self, index: usize, lp: &'a NaturalLoop) -> Option<ForLoop<'a>> {
         let (elem, iter) = self.next_of(lp)?;
         let &(iterable, iter_span) = self.iterables.get(&iter)?;
         Some(ForLoop {
             lp,
+            index,
             iter_span,
             iterable,
             element: self.derived(elem),
@@ -884,6 +887,30 @@ impl<'a> Defs<'a> {
         matches!(self.kind(var), Some(InstKind::IterNext { .. }))
     }
 
+    /// Whether the key `var` is known to be hashable: its inferred type, or every class of an
+    /// inferred union, is a builtin whose instances hash by value (`str`, `int`, `float`,
+    /// `bool`, `bytes`, `complex`, `frozenset`, `None`), or it is a class object. A `tuple`
+    /// hashes only when its items do, and a project class may set `__hash__ = None`.
+    fn hashable(&self, var: VarId, types: &FxHashMap<VarId, Val>) -> bool {
+        const HASHABLE: &[&str] = &[
+            "builtins.str",
+            "builtins.int",
+            "builtins.float",
+            "builtins.bool",
+            "builtins.bytes",
+            "builtins.complex",
+            "builtins.frozenset",
+            "builtins.NoneType",
+        ];
+        match types.get(&var) {
+            Some(Val::Inst(class)) => HASHABLE.contains(&class.as_str()),
+            Some(Val::Union(classes)) => classes.iter().all(|c| HASHABLE.contains(&c.as_str())),
+            // A class object hashes by identity.
+            Some(Val::Class(_)) => true,
+            _ => false,
+        }
+    }
+
     /// The unhashable builtin type (`list`, `dict`, `set`, `bytearray`) the key `var` is known
     /// to have: its inferred type, or every class of an inferred union (the first one names
     /// it). A loop element over displays has the type of their elements.
@@ -934,6 +961,8 @@ impl<'a> Defs<'a> {
 /// One data-sized `for` loop of a function.
 struct ForLoop<'a> {
     lp: &'a NaturalLoop,
+    /// Its index in the function's loops.
+    index: usize,
     /// The iterable expression.
     iter_span: Span,
     iterable: VarId,
@@ -963,20 +992,24 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
+    // Asked only for a reported join.
+    let origins = ItemOrigins::new(unit.input.ir);
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loops.len() < 2 {
             continue;
         }
         let defs = Defs::new(f);
         let sizes = Sizes::new(cx, &tcx, &no_types, f, unit, &constants);
-        // Inferred only for a function with a report.
+        // Inferred only for a function with a report, and the premises' walks spend one budget.
         let mut types: Option<FxHashMap<VarId, Val>> = None;
+        let mut budget: Option<Budget> = None;
         // Both loops are data-sized `for` loops (inlined comprehensions included).
         let fors: Vec<ForLoop<'_>> = f
             .loops
             .iter()
-            .filter(|lp| sizes.data_sized(lp))
-            .filter_map(|lp| defs.for_loop(lp))
+            .enumerate()
+            .filter(|(_, lp)| sizes.data_sized(lp))
+            .filter_map(|(i, lp)| defs.for_loop(i, lp))
             .collect();
         for inner in &fors {
             let mut hit: Option<Join<'_, '_>> = None;
@@ -1030,7 +1063,34 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 ]
                 .into_iter()
                 .find_map(|k| Some((k, defs.unhashable(k, types)?)));
-                let index = if let Some((k, kind)) = unhashable {
+                let premises = JoinPremises {
+                    defs: &defs,
+                    sizes: &sizes,
+                    origins: &origins,
+                    budget: budget.get_or_insert_with(|| Budget::of_function("OPT113", f)),
+                };
+                let same_collection = premises.same_collection_each_time(inner, j.outer);
+                let exact = same_collection
+                    && premises.steps_through_inputs(j.outer)
+                    && premises.steps_through_inputs(inner)
+                    && premises.trips_open(j.outer)
+                    && premises.trips_open(inner)
+                    && premises.idle_on_mismatch(inner, j.outer, j.cmp)
+                    && premises.steps_run_no_code(inner);
+                // The advice names a `set` or a `dict` only for keys known to be hashable, and
+                // an index built before the outer loop only for an inner collection that is the
+                // same on every outer iteration.
+                let mut conditions = Vec::new();
+                if !same_collection {
+                    conditions.push(format!(
+                        "`{inner_iter}` is the same collection on every iteration of the outer loop"
+                    ));
+                }
+                // The index holds the inner keys.
+                if unhashable.is_none() && !defs.hashable(j.inner_side, types) {
+                    conditions.push("the keys are hashable".to_owned());
+                }
+                let advice = if let Some((k, kind)) = unhashable {
                     let key = defs.element_text(unit.source, k);
                     format!(
                         "`{key}` is an unhashable `{kind}`, so index `{inner_iter}` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
@@ -1056,20 +1116,338 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     let key = defs.element_text(unit.source, j.inner_side);
                     format!("index `{inner_iter}` by `{key}` in a `dict` before the outer loop")
                 };
-                cx.emit(
+                let help = if conditions.is_empty() {
+                    advice
+                } else {
+                    format!("if {}, {advice}", conditions.join(" and "))
+                };
+                // An exact report states its claim: what a pair that does not match runs.
+                let message = if exact {
+                    format!(
+                        "for each item of `{outer_iter}`, the loop over `{inner_iter}` compares `{lhs} == {rhs}` and does nothing else for an item that does not match"
+                    )
+                } else {
+                    format!(
+                        "nested loops join `{outer_iter}` and `{inner_iter}` on `{lhs} == {rhs}`"
+                    )
+                };
+                let Some(d) = cx.emit(
                     out,
                     "OPT113",
                     unit,
                     j.span,
                     heki_effect::func_qualname(f),
                     format!("{lhs}=={rhs}"),
-                    format!(
-                        "nested loops join `{outer_iter}` and `{inner_iter}` on `{lhs} == {rhs}`"
-                    ),
-                    Some(index),
+                    message,
+                    Some(help),
                     &[],
-                );
+                ) else {
+                    continue;
+                };
+                if exact {
+                    d.evidence = Some(format!(
+                        "established: both loops step through inputs and their trip counts are not fixed, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection on every outer iteration"
+                    ));
+                } else {
+                    d.certainty = Certainty::Heuristic;
+                }
             }
         }
+    }
+}
+
+/// Collection methods that only read their receiver.
+const READING_METHODS: &[&str] = &[
+    "items",
+    "keys",
+    "values",
+    "get",
+    "index",
+    "count",
+    "copy",
+    "split",
+    "rsplit",
+    "splitlines",
+    "strip",
+    "lower",
+    "upper",
+    "startswith",
+    "endswith",
+];
+
+/// Methods whose result steps through their receiver's items or text (dict views, pieces of a
+/// string) without running code of the receiver's.
+const VIEW_METHODS: &[&str] = &["items", "keys", "values", "split", "rsplit", "splitlines"];
+
+/// The premises of an `OPT113` report's exact tier (ADR-018) besides the comparison of keys,
+/// each established or not; a walk that runs out of its budget establishes nothing.
+struct JoinPremises<'p, 'a, 'c> {
+    defs: &'p Defs<'a>,
+    sizes: &'p Sizes<'a, 'c>,
+    origins: &'p ItemOrigins<'a>,
+    budget: &'p Budget,
+}
+
+impl JoinPremises<'_, '_, '_> {
+    /// The loop steps through items of the function's inputs: every source of its items is a
+    /// parameter, an attribute or an item of one (a call result needs the catalog to say what
+    /// it yields, and a method's receiver, a module constant, or a display is not an input).
+    fn steps_through_inputs(&self, lp: &ForLoop<'_>) -> bool {
+        match self.origins.of_loop(self.budget, self.defs.f.id, lp.index) {
+            Answer::Known(origins) => {
+                !origins.is_empty()
+                    && origins.iter().all(|o| {
+                        matches!(o.source, ItemSource::Param(_) | ItemSource::ParamPart(_))
+                    })
+            }
+            Answer::Open => false,
+        }
+    }
+
+    /// The code fixes no trip count of the loop: a fixed count past 16 is no evidence either
+    /// way, so the exact tier leaves it out (a smaller one is not reported at all).
+    fn trips_open(&self, lp: &ForLoop<'_>) -> bool {
+        self.sizes
+            .ix
+            .fixed_trips(lp.lp, &mut |inst| self.sizes.leaf_len(inst))
+            .is_open()
+    }
+
+    /// A pair whose keys differ runs nothing but the comparison: from the inner loop's header,
+    /// every block a pair runs until the next pair, taking the false side of the comparison's
+    /// branch, holds only the loads of the two items' keys and the comparison, and no other
+    /// branch (an earlier `and` operand, an `if` around the test), `return`, `raise`, or way
+    /// out of the inner loop.
+    fn idle_on_mismatch(&self, inner: &ForLoop<'_>, outer: &ForLoop<'_>, cmp: VarId) -> bool {
+        let f = self.defs.f;
+        let shape = self.sizes.ix.shape();
+        let alias = forward_aliases(f, &[cmp]);
+        let header = inner.lp.header;
+        let key = |v: &VarId| inner.element.contains(v) || outer.element.contains(v);
+        // A constant read only as the index of a key (`row["id"]`) runs no code either.
+        let index_of_key = |c: &VarId| {
+            shape.readers(*c).iter().all(|u| match *u {
+                Use::Inst(b, i) => matches!(
+                    &f.block(b).insts[i as usize].kind,
+                    InstKind::SubscriptLoad { dst, index, .. } if index == c && key(dst)
+                ),
+                Use::Phi(..) | Use::Terminator(_) => false,
+            })
+        };
+        let key_work = |inst: &Inst| match &inst.kind {
+            InstKind::IterNext { .. } => true,
+            InstKind::Const { dst, .. } => index_of_key(dst),
+            InstKind::Copy { dst, .. }
+            | InstKind::AttrLoad { dst, .. }
+            | InstKind::SubscriptLoad { dst, .. } => key(dst),
+            InstKind::Compare { dst, .. } => *dst == cmp,
+            _ => false,
+        };
+        let found = walk::reach(
+            self.budget,
+            [header],
+            |b, out| {
+                match f.block(b).terminator {
+                    Terminator::Branch { cond, else_bb, .. } if alias.contains(&cond) => {
+                        out.push(else_bb);
+                    }
+                    ref t => out.extend(t.successors()),
+                }
+                // The next pair starts at the header again; its exit ends the loop.
+                out.retain(|s| *s != header && (b != header || shape.in_loop(inner.index, *s)));
+            },
+            |b| {
+                let block = f.block(b);
+                let other_branch = b != header
+                    && matches!(block.terminator, Terminator::Branch { cond, .. } if !alias.contains(&cond));
+                let leaves = matches!(
+                    block.terminator,
+                    Terminator::Return(_) | Terminator::Raise(_) | Terminator::Unreachable
+                );
+                if !shape.in_loop(inner.index, b)
+                    || other_branch
+                    || leaves
+                    || !block.insts.iter().all(key_work)
+                {
+                    walk::Visit::Stop(())
+                } else {
+                    walk::Visit::Expand
+                }
+            },
+        );
+        matches!(found, Answer::Known(None))
+    }
+
+    /// Advancing the inner loop runs no code of the project: its iterable is an input, an
+    /// attribute or an item of one, a display or a comprehension's result, a builtin that
+    /// builds a container (`sorted`, `list`, `range`, ...), a dict view or the pieces of a
+    /// string, or `enumerate` / `zip` / `reversed` / `iter` of such iterables. A generator, a
+    /// `map` or `filter` call, or any other call may run code for every pair.
+    fn steps_run_no_code(&self, inner: &ForLoop<'_>) -> bool {
+        let shape = self.sizes.ix.shape();
+        let ix = &self.sizes.ix;
+        fn lazy<'i>(ix: &FnIndex<'_>, shape: &FnShape<'_>, inst: &'i Inst) -> Option<&'i [VarId]> {
+            match &inst.kind {
+                InstKind::Call {
+                    dst,
+                    callee_var,
+                    callee,
+                    args,
+                    ..
+                } if matches!(
+                    ix.builtin(*callee_var, callee),
+                    Some("enumerate" | "zip" | "reversed" | "iter")
+                ) =>
+                {
+                    (0..args.len())
+                        .all(|i| !shape.is_starred(*dst, i))
+                        .then_some(args.as_slice())
+                }
+                _ => None,
+            }
+        }
+        let found = walk::reach(
+            self.budget,
+            [inner.iterable],
+            |v, out| {
+                if let Some(args) = shape
+                    .inst(shape.copy_root(v))
+                    .and_then(|i| lazy(ix, shape, i))
+                {
+                    out.extend(args.iter().copied());
+                }
+            },
+            |v| {
+                let v = shape.copy_root(v);
+                let Some(inst) = shape.inst(v) else {
+                    return match shape.def(v) {
+                        Def::Param => walk::Visit::Prune,
+                        _ => walk::Visit::Stop(()),
+                    };
+                };
+                if lazy(ix, shape, inst).is_some() {
+                    return walk::Visit::Expand;
+                }
+                let builds = match &inst.kind {
+                    InstKind::AttrLoad { .. }
+                    | InstKind::SubscriptLoad { .. }
+                    | InstKind::LoadGlobal { .. }
+                    | InstKind::AllocBuiltin { .. }
+                    | InstKind::DictLiteral { .. } => true,
+                    InstKind::Call {
+                        callee_var, callee, ..
+                    } => matches!(
+                        ix.builtin(*callee_var, callee),
+                        Some("sorted" | "list" | "tuple" | "set" | "frozenset" | "dict" | "range")
+                    ),
+                    InstKind::MethodCall { method, .. } => VIEW_METHODS.contains(&method.as_str()),
+                    _ => false,
+                };
+                if builds {
+                    walk::Visit::Prune
+                } else {
+                    walk::Visit::Stop(())
+                }
+            },
+        );
+        matches!(found, Answer::Known(None))
+    }
+
+    /// The inner loop steps through the same collection on every iteration of the outer one:
+    /// its iterable is bound before the outer loop, or computed inside it only from constants,
+    /// module names, and values bound before it (through copies, attribute and item loads,
+    /// operators, displays, read-only builtins, and reading methods), and nothing in the outer
+    /// loop changes one of those values through its names: no changing method, store, or
+    /// deletion, no call that receives it, and no `yield` or `await`, after which other code
+    /// may run.
+    fn same_collection_each_time(&self, inner: &ForLoop<'_>, outer: &ForLoop<'_>) -> bool {
+        let f = self.defs.f;
+        let shape = self.sizes.ix.shape();
+        let ix = &self.sizes.ix;
+        let in_outer = |b: BlockId| shape.in_loop(outer.index, b);
+        // A string built in the loop is not followed: an f-string's IR drops its operands.
+        let pure_step = |inst: &Inst| match &inst.kind {
+            InstKind::Copy { .. }
+            | InstKind::AttrLoad { .. }
+            | InstKind::SubscriptLoad { .. }
+            | InstKind::BinOp { .. } => true,
+            InstKind::AllocBuiltin { kind, .. } => *kind != BuiltinKind::Str,
+            InstKind::Call {
+                callee_var, callee, ..
+            } => ix.builtin(*callee_var, callee).is_some(),
+            InstKind::MethodCall { method, .. } => READING_METHODS.contains(&method.as_str()),
+            _ => false,
+        };
+        let mut read = Vec::new();
+        let found = walk::reach(
+            self.budget,
+            [inner.iterable],
+            |v, out| {
+                if let Some((b, inst)) = shape.defining(v)
+                    && in_outer(b)
+                {
+                    out.extend(inst.kind.operands());
+                }
+            },
+            |v| {
+                read.push(v);
+                match shape.def(v) {
+                    Def::Param => walk::Visit::Prune,
+                    Def::Phi(b, _) if !in_outer(b) => walk::Visit::Prune,
+                    Def::Inst(b, _) if !in_outer(b) => walk::Visit::Prune,
+                    Def::Inst(..) => match shape.inst(v) {
+                        Some(inst)
+                            if matches!(
+                                inst.kind,
+                                InstKind::Const { .. } | InstKind::LoadGlobal { .. }
+                            ) =>
+                        {
+                            walk::Visit::Prune
+                        }
+                        Some(inst) if pure_step(inst) => walk::Visit::Expand,
+                        _ => walk::Visit::Stop(()),
+                    },
+                    Def::Phi(..) | Def::None => walk::Visit::Stop(()),
+                }
+            },
+        );
+        if !matches!(found, Answer::Known(None)) {
+            return false;
+        }
+        let names = forward_aliases(f, &read);
+        let named = |v: &VarId| names.contains(v);
+        let changes = |inst: &Inst| match &inst.kind {
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            } => {
+                (named(recv) && !READING_METHODS.contains(&method.as_str()))
+                    || args.iter().any(named)
+                    || kwargs.iter().any(|(_, v)| named(v))
+            }
+            InstKind::Call {
+                callee_var,
+                callee,
+                args,
+                kwargs,
+                ..
+            } => {
+                ix.builtin(*callee_var, callee).is_none()
+                    && (args.iter().any(named) || kwargs.iter().any(|(_, v)| named(v)))
+            }
+            InstKind::AttrStore { obj, .. }
+            | InstKind::AttrDelete { obj, .. }
+            | InstKind::SubscriptStore { obj, .. }
+            | InstKind::SubscriptDelete { obj, .. } => named(obj),
+            InstKind::Yield { .. } | InstKind::YieldFrom { .. } | InstKind::Await { .. } => true,
+            _ => false,
+        };
+        !f.blocks
+            .iter()
+            .filter(|b| in_outer(b.id))
+            .any(|b| b.insts.iter().any(changes))
     }
 }

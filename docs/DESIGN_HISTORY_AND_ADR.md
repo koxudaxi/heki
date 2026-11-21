@@ -425,7 +425,9 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
      most (`Certainty::at_most`). One claim is one code: an effect rule's heuristic side is a
      code of its own (`EFF101` "reaches on every path" beside `EFF111` "can reach", `EFF103`
      beside `EFF113`). An `OPT` rule keeps one code with a certainty per report: a report whose
-     rewrite is proven safe is the rule's exact tier, the others are heuristic. A demoted rule
+     rewrite is proven safe, in a loop whose trip count the code does not fix, is the rule's
+     exact tier (for `OPT113`, a join whose rule page premises all hold), the others are
+     heuristic. A demoted rule
      keeps `Default`, so `lint.heuristic = true` restores the earlier default set and a
      promotion is a one-field change. Experimental stays its own axis and implies `OptIn`.
      *Rejected*: a second list of heuristic codes; one code with a per-report tier for the

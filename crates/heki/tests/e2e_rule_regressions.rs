@@ -213,8 +213,10 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
         messages,
         vec![
             "nested loops join `A` and `rows` on `a == r`",
-            "nested loops join `A` and `B` on `a.tags == tags`",
-            "nested loops join `expected` and `actual` on `actual_item == expected_item`",
+            // Both loops step through parameters, and a pair that does not match runs only the
+            // comparison (`tags = b.tags` loads the inner item's key): the exact claim.
+            "for each item of `A`, the loop over `B` compares `a.tags == tags` and does nothing else for an item that does not match",
+            "for each item of `expected`, the loop over `actual` compares `actual_item == expected_item` and does nothing else for an item that does not match",
             "nested loops join `A` and `rows + rows` on `a == r`",
         ],
         "{found:#?}"
@@ -226,8 +228,8 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
         vec![
             "`r` is an unhashable `dict`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
             "`tags` is an unhashable `list`, so index `B` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
-            "build a `set` of `actual` before the outer loop",
-            "group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list",
+            "if the keys are hashable, build a `set` of `actual` before the outer loop",
+            "if the keys are hashable, group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list",
         ],
         "{found:#?}"
     );
@@ -1112,18 +1114,20 @@ fn opt113_unhashable_display_elements() {
                 14,
                 "`r` is an unhashable `set`, so index `alias` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
             ),
+            // Lists among the elements: a `set` or `dict` holds them only if they are hashable.
             (
                 22,
-                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+                "if the keys are hashable, group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
             ),
             // Elements of two unhashable classes; class objects are hashable.
             (
                 30,
                 "`r` is an unhashable `list`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
             ),
+            // heki does not type the items of a display of classes.
             (
                 38,
-                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+                "if the keys are hashable, group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
             ),
         ],
         "{found:#?}"
@@ -1206,4 +1210,163 @@ fn starred_elements_keep_the_names_in_blockers() {
             .ends_with("[not auto-fixable: DequeEquivalentOps(work): `work` : this use has no `deque` equivalent (line 5)]"),
         "{found:#?}"
     );
+}
+
+/// `OPT113`'s exact claim, and the shapes that leave a premise of it open: the outer loop over a
+/// module constant of 20 items, work before the test or after the `if` for every pair, an earlier `and`
+/// operand, a generator as the inner iterable, an inner collection the outer loop changes, and a
+/// trip count the code fixes.
+const PREMISES: &str = r#"RUNNERS = (
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+    "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
+)
+
+
+def exact_join(orders, customers):
+    out = []
+    for order in orders:
+        for customer in customers:
+            if order.customer_id == customer.id:
+                out.append((order, customer))
+    return out
+
+
+def outer_constant(jobs):
+    out = []
+    for kind in RUNNERS:
+        for j in jobs:
+            if j["kind"] == kind:
+                out.append(j)
+    return out
+
+
+def work_before_test(xs, ys, check):
+    out = []
+    for c1 in xs:
+        for c2 in ys:
+            skip = check(c2)
+            if c1.type_var == c2.type_var and skip:
+                out.append(c1)
+    return out
+
+
+def inner_changed(records, events):
+    for record in records:
+        for event in events:
+            if event.key == record.key:
+                events.remove(event)
+                break
+
+
+def lazy_inner(names, calls, receiver_of):
+    out = []
+    for name in names:
+        for r in (receiver_of(c) for c in calls):
+            if r == name:
+                out.append(r)
+    return out
+
+
+def and_filter(xs, ys):
+    out = []
+    for a in xs:
+        for b in ys:
+            if b.active and a.k == b.k:
+                out.append(a)
+    return out
+
+
+def sorted_inner(xs, ys):
+    out = []
+    for a in xs:
+        for b in sorted(ys):
+            if a.k == b.k:
+                out.append(a)
+    return out
+
+
+def sliced(xs, ys):
+    out = []
+    for a in xs:
+        for b in ys[:100]:
+            if a.k == b.k:
+                out.append(a)
+    return out
+
+
+def str_keys(xs: list[str], ys: list[str]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a == b:
+                out.append(a)
+    return out
+
+
+def after_if_work(xs, ys, log):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(a)
+            log(b)
+    return out
+"#;
+
+#[test]
+fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
+    let p = Project::new("regr_opt113_premises");
+    p.write("app.py", PREMISES);
+    let (_, rule, _) = p.heki(&["rule", "OPT113", "--output-format", "json"]);
+    let rule: serde_json::Value = serde_json::from_str(&rule).unwrap();
+    let (_, json, stderr) = p.heki(&["check", "--select", "OPT113", "--output-format", "json"]);
+    let diags: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    let exact = "does nothing else for an item that does not match";
+    let tiers: Vec<(&str, bool, &serde_json::Value)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["message"].as_str().unwrap().ends_with(exact),
+                &d["certainty"],
+            )
+        })
+        .collect();
+    let heuristic = serde_json::json!("heuristic");
+    let tier = |exact: bool| {
+        if exact {
+            &rule["certainty"]
+        } else {
+            &heuristic
+        }
+    };
+    assert_eq!(
+        tiers,
+        [
+            ("exact_join", true, tier(true)),
+            ("outer_constant", false, tier(false)),
+            ("work_before_test", false, tier(false)),
+            ("inner_changed", false, tier(false)),
+            ("lazy_inner", false, tier(false)),
+            ("and_filter", false, tier(false)),
+            ("sorted_inner", true, tier(true)),
+            ("sliced", false, tier(false)),
+            ("str_keys", true, tier(true)),
+            ("after_if_work", false, tier(false)),
+        ],
+        "{json}{stderr}"
+    );
+    let help = |name: &str| {
+        diags.iter().find(|d| d["qualname"] == name).unwrap()["help"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // The advice names a `set` or a `dict` only for keys known to be hashable, and an index
+    // built once only for an inner collection that is the same on every outer iteration.
+    assert!(help("str_keys").starts_with("group the elements of `ys`"));
+    assert!(help("exact_join").starts_with("if the keys are hashable, index `customers`"));
+    assert!(help("inner_changed").starts_with(
+        "if `events` is the same collection on every iteration of the outer loop and the keys are hashable,"
+    ));
 }

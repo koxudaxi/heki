@@ -10,8 +10,10 @@ Every heki report is **exact** or **heuristic**:
   without ruling it out. It can be wrong about the code, and every output labels it `heuristic`.
 
 A rule is exact once it is certified (below), and heuristic until then. An exact rule's reports
-are exact, with one exception: an `OPT` rule's report whose rewrite heki could not prove safe
-is heuristic, as that premise is open. Only exact reports are shown by default.
+are exact, with one exception: an `OPT` rule's report that did not establish a premise of the
+rule's exact tier is heuristic, as that premise is open: a rewrite heki could not prove safe, a
+loop whose trip count the code fixes, or an `OPT113` join whose rule page premises do not all
+hold. Only exact reports are shown by default.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
   `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by

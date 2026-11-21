@@ -28,8 +28,8 @@ its first matching comparison. It does not report:
   (`if a == b: continue` in an all-pairs loop), or a comparison whose false side does work:
   an `else` / `elif` body, the failure of an `assert a == b`, a `break` / `return` on a
   mismatch, or statements that only the mismatches run because a match `break`s. They run for
-  the pairs an index would skip, so every pair is needed; statements after the `if` that every
-  pair runs do not count;
+  the pairs an index would skip, so every pair is needed. Statements after the `if` that every
+  pair runs do not stop a report, but it is then heuristic (below);
 - joins where the code fixes the size of either loop, so that the cost grows with one side
   only: a display of at most 16 items (`for b in ("x", "y")`, also through a name or a module
   constant of this or another module (`NAME`, `module.NAME`, also read in a module body) when
@@ -40,18 +40,39 @@ its first matching comparison. It does not report:
 
 ## What a report states
 
-A report states that, for every pair of items of the nested loops, the code tests an equality
-between a key of the outer item and a key of the inner item.
+A report of the rule's exact tier states that, for each item of the outer loop, the inner loop
+compares a key of the outer item with a key of the inner item and does nothing else for an inner
+item that does not match. Its message says so: "for each item of `orders`, the loop over
+`customers` compares `order.customer_id == customer.id` and does nothing else for an item that
+does not match".
 
 Its premises:
 
 - **Equality of keys**: the comparison is `==` between keys of the two items (the items, their
   components, attributes, or constant subscripts). Established.
-- **Independent loops**: the inner iterable is not computed from the outer item. Established.
-- **Every pair**: the comparison runs for every pair. Open: a comparison under a branch of the inner
-  loop counts, and so does other work for each pair besides it.
-- **Data-sized**: the code does not fix the size of either loop at 16 or fewer. Open: a size heki
-  cannot bound counts as data-sized.
+- **Steps through inputs**: each loop steps through items of the function's inputs: every source
+  of its items is a parameter, or an attribute or an item of one (`orders`, `req.rows`,
+  `sorted(customers)`). A call's result, a method's receiver (`self.rows`), a module constant,
+  or a display leaves it open.
+- **Idle on a mismatch**: an inner item whose key differs runs only the loads of the two keys and
+  the comparison: no statement before the test or after the `if`, no `else` or `elif`, no
+  earlier `and` operand (`b.active and a.k == b.k`), and no code of the project to advance the
+  inner loop (a generator, `map`, `filter`, or another call as its iterable).
+- **Same collection**: the inner loop steps through the same collection on every iteration of the
+  outer loop: its iterable is bound before the outer loop, or computed inside it only from
+  values bound before it, and the outer loop does not change those values through their names
+  (a changing method, a store, `del`, a call that receives one, `yield`, or `await`).
+- **Trip counts not fixed**: the code fixes neither loop's trip count. A count of 16 or fewer is
+  not reported at all; a larger one is no evidence either way.
+
+A report without one of these premises is heuristic, and its message says only "nested loops
+join `orders` and `customers` on `order.customer_id == customer.id`". It rests on the open
+premise that both loops are data-sized: the code does not fix the size of either loop at 16 or
+fewer, and a size heki cannot bound counts as data-sized.
+
+No message claims a size or a cost. The help names a `set` or a `dict` only for keys known to be
+hashable, and an index built before the outer loop only for an inner collection that is the same
+on every outer iteration; otherwise it states the condition ("if the keys are hashable, ...").
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.

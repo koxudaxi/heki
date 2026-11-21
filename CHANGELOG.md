@@ -112,6 +112,17 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop, and, for a rule's exact tier, the proven rewrite; no size is claimed. A proven report of
   a size-dependent `OPT` rule in a loop whose trip count the code fixes past 16 (`range(50)`,
   `rows[:100]`, a display of 20 items) is heuristic: true, but no evidence either way.
+- `OPT113` reports carry a tier. A report is in the exact tier when both loops step through the
+  function's inputs (parameters, or attributes or items of them), an inner item whose key differs
+  runs nothing but the comparison (no statement before the test or after the `if`, no earlier
+  `and` operand, no generator, `map`, `filter`, or other call as the inner iterable), the inner
+  loop steps through the same collection on every outer iteration, and the code fixes neither
+  trip count. Its message states that claim ("for each item of `orders`, the loop over
+  `customers` compares `order.customer_id == customer.id` and does nothing else for an item that
+  does not match"); the other reports are heuristic. The help names a `set` or `dict` only for
+  keys known to be hashable, and an index built before the outer loop only for an inner
+  collection that stays the same; otherwise it states the condition ("if the keys are hashable,
+  ...").
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
