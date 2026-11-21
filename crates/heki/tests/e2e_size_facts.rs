@@ -355,6 +355,14 @@ def named_test(conn: sqlite3.Connection, xs):
         raise ValueError
     for x in xs:
         conn.execute("SELECT ?", (x,))
+
+
+def grown_while_iterated(conn: sqlite3.Connection, xs, children):
+    if len(xs) > 6:
+        return
+    for x in xs:
+        xs.extend(children(x))
+        conn.execute("SELECT ?", (x,))
 "#;
 
 #[test]
@@ -363,8 +371,8 @@ fn a_length_test_on_every_path_to_a_loop_caps_it() {
     // and across later branches), the list filled once per capped item, an `assert`, a `while`
     // loop that shrinks the list to its cap, an exact length (on either side), a test bound to
     // a name first, and a list the function returns after the loop. Reported: a cap that needs another condition (`and`), a
-    // test that does not leave, a list grown after the test or handed to other code before the
-    // loop, a name rebound after the test, and a cap past 16.
+    // test that does not leave, a list grown after the test, while the loop iterates it, or
+    // handed to other code before the loop, a name rebound after the test, and a cap past 16.
     let p = Project::new("sizes_guards");
     p.write("guarded.py", GUARDED);
     let g = |line: u32| format!("guarded.py:{line}");
@@ -377,6 +385,7 @@ fn a_length_test_on_every_path_to_a_loop_caps_it() {
         (g(83), "EFF103"),
         (g(90), "EFF103"),
         (g(126), "EFF103"),
+        (g(142), "EFF103"),
     ];
     let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
     assert_both_versions(&p, "EFF103,OPT112", &expected);
@@ -527,6 +536,7 @@ fn a_new_list_grows_only_by_the_items_a_fixed_loop_adds() {
 const DEFS: &str = r#"STATUS_ORDER = ["available", "caveated", "approximate", "unavailable"]
 QUEUE = ["a", "b"]
 STATEMENTS = ("CREATE TABLE a (x)", "CREATE TABLE b (y)")
+REBOUND = ("CREATE TABLE c (z)",)
 "#;
 
 const GROWERS: &str = r#"from pkg.defs import QUEUE, STATEMENTS
@@ -563,9 +573,10 @@ def through_a_generator(pages):
 
 const MIGRATE: &str = r#"import sqlite3
 
-from pkg.defs import STATEMENTS
+from pkg.defs import REBOUND, STATEMENTS
 
 LOCAL_STATEMENTS = ("CREATE TABLE c (z)", "CREATE TABLE d (w)")
+LOCAL_QUEUE = ["a", "b"]
 
 
 def migrate(path):
@@ -580,6 +591,17 @@ def chain():
     out = []
     out.append(LOCAL_STATEMENTS)
     return out
+
+
+def rebound_elsewhere(conn: sqlite3.Connection):
+    for statement in REBOUND:
+        conn.execute(statement)
+
+
+def queued(conn: sqlite3.Connection):
+    items = [q.upper() for q in LOCAL_QUEUE]
+    for item in items:
+        conn.execute("SELECT ?", (item,))
 "#;
 
 #[test]
@@ -587,15 +609,32 @@ fn module_constants_through_imports_module_bodies_and_tuples() {
     // Not reported: a module body's comprehension and loop over an imported list, the same
     // comprehension in a function, a generator expression over it, and loops over tuples that
     // other functions (in this module or another) put in a list. Reported: an imported list
-    // another module grows.
+    // another module grows, a comprehension over a list of this module another module grows,
+    // and a tuple another module rebinds.
     let p = Project::new("sizes_modules");
     p.write("pkg/__init__.py", "")
         .write("pkg/defs.py", DEFS)
         .write("pkg/growers.py", GROWERS)
         .write("pkg/metrics.py", "METRICS = load()\n")
         .write("pkg/gen_docs.py", GEN_DOCS)
-        .write("pkg/migrate.py", MIGRATE);
-    assert_both_versions(&p, "EFF103,OPT113", &[("pkg/gen_docs.py:5", "OPT113")]);
+        .write("pkg/migrate.py", MIGRATE)
+        .write(
+            "pkg/reload.py",
+            "from pkg import defs\n\n\ndef reload(rows):\n    defs.REBOUND = tuple(rows)\n",
+        )
+        .write(
+            "pkg/feed.py",
+            "from pkg.migrate import LOCAL_QUEUE\n\n\ndef feed(x):\n    LOCAL_QUEUE.append(x)\n",
+        );
+    assert_both_versions(
+        &p,
+        "EFF103,OPT113",
+        &[
+            ("pkg/gen_docs.py:5", "OPT113"),
+            ("pkg/migrate.py:25", "EFF103"),
+            ("pkg/migrate.py:31", "EFF103"),
+        ],
+    );
 }
 
 const SLICED: &str = r#"import sqlite3

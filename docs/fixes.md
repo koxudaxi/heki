@@ -55,7 +55,8 @@ A size-dependent rule reports nothing when the code fixes the size:
   iterables (`[c for c in LABELS if c in wanted]`). Shrinking it (`expected.pop(0)` on
   `expected = [b"a", b""]`) and read-only builtins are fine, and so is filling a new list a
   fixed number of times (`ids.append(card["id"])` in a loop over at most 6 cards). A tuple or
-  a string stays fixed whatever other code does with it. This holds also through local names,
+  a string stays fixed whatever other code does with it, unless other code rebinds its name
+  (`cfg.STATEMENTS = tuple(rows)`). This holds also through local names,
   module constants, and other modules' module-level displays and class attributes, read in a
   function or in a module body;
 - the loop runs a fixed number of times: over such a container, a `range` of constants with at

@@ -1329,15 +1329,16 @@ impl<'a> FnIndex<'a> {
         // The `MakeIter` of the header's `IterNext`, before the loop.
         let (at, _) = self.f.def_inst(*made_iter.first()?)?;
         self.iter_bound(iterable, leaf)
-            .or_else(|| self.guarded_len(iterable, at))
+            .or_else(|| self.guarded_len(iterable, at, &lp.body))
     }
 
-    /// The most items `v` holds in the block `at` by the tests before it: the smallest `N` of
-    /// a `len(v) <= N` (or `< N + 1`, `== N`, the negation of `>` / `>=`) that every path to
-    /// `at` passes, also through `not`, `and`, `or`, and comparison chains (`if not 1 <=
-    /// len(v) <= 6: raise ...`), when nothing on the way to `at` grows `v` (what happens to it
-    /// after, `return {"cards": cards}`, leaves the length there as it is).
-    pub fn guarded_len(&self, v: VarId, at: BlockId) -> Option<u32> {
+    /// The most items `v` holds in the block `at`, and while the blocks `during` run, by the
+    /// tests before it: the smallest `N` of a `len(v) <= N` (or `< N + 1`, `== N`, the negation
+    /// of `>` / `>=`) that every path to `at` passes, also through `not`, `and`, `or`, and
+    /// comparison chains (`if not 1 <= len(v) <= 6: raise ...`), when nothing on the way to `at`
+    /// or in `during` (a loop over `v`, whose iterator sees what the body appends) grows `v`;
+    /// what happens to it after (`return {"cards": cards}`) leaves the length there as it is.
+    fn guarded_len(&self, v: VarId, at: BlockId, during: &[BlockId]) -> Option<u32> {
         let v = self.copied_from(v);
         let measured = self.measured.get_or_init(|| {
             self.f
@@ -1356,7 +1357,10 @@ impl<'a> FnIndex<'a> {
             .filter(|g| g.var == v && g.bound <= SMALL_MAX && self.dominates(g.edge_to, at))
             .map(|g| g.bound)
             .min()?;
-        let on_the_way = self.reaching(at);
+        let mut on_the_way = self.reaching(at);
+        for b in during {
+            on_the_way[b.0 as usize] = true;
+        }
         let origins = Origins {
             roots: vec![v],
             shared: true,

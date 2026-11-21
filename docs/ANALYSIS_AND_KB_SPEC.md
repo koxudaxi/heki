@@ -180,7 +180,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     loop around it that the object outlives (it is made outside the loop, or a header phi
     carries it), so a comprehension or a list filled in a fixed loop is small. A module
     constant's object gains none (every call shares it). Tuples and strings are fixed whatever
-    their uses, also in other modules.
+    their uses, also in other modules, unless another module rebinds or deletes the name
+    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
   - `IrFunction.starred` marks starred display elements, `BasicBlock.term_span` the source of a

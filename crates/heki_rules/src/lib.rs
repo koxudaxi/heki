@@ -579,29 +579,28 @@ pub fn check_project(
 }
 
 impl<'a> CheckContext<'a> {
-    /// The unit's module constants without the displays another project module may grow or
-    /// rebinds (`ProjectDecls::grown_elsewhere`): the constants the Advisory rules take as
-    /// fixed.
+    /// The unit's module constants without the displays another project module may change
+    /// (`ProjectDecls::changed_elsewhere`): the constants the Advisory rules take as fixed.
+    /// What its comprehension functions return goes with them, as it may rest on one.
     pub fn fixed_constants<'u>(&self, unit: &'u ModuleUnit<'_>) -> Cow<'u, ModuleConstants> {
         let own = &unit.input.ir.constants;
-        let grown: Vec<&String> = own
+        let changed: Vec<&String> = own
             .displays
             .iter()
             .filter(|(n, d)| {
-                !d.is_immutable()
-                    && self
-                        .decls
-                        .grown_elsewhere(&format!("{}.{n}", unit.input.module_name))
+                self.decls
+                    .changed_elsewhere(&format!("{}.{n}", unit.input.module_name), d)
             })
             .map(|(n, _)| n)
             .collect();
-        if grown.is_empty() {
+        if changed.is_empty() {
             return Cow::Borrowed(own);
         }
         let mut fixed = own.clone();
-        for n in grown {
+        for n in changed {
             fixed.displays.remove(n);
         }
+        fixed.comprehensions.clear();
         Cow::Owned(fixed)
     }
 
