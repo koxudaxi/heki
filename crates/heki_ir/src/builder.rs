@@ -213,6 +213,7 @@ fn release_spare_capacity(f: &mut IrFunction) {
     f.var_names.shrink_to_fit();
     f.captured_vars.shrink_to_fit();
     f.starred.shrink_to_fit();
+    f.class_bases.shrink_to_fit();
     f.str_heads.shrink_to_fit();
     for bb in &mut f.blocks {
         bb.insts.shrink_to_fit();
@@ -415,6 +416,7 @@ impl<'a> ModuleLowerer<'a> {
             var_names: Vec::new(),
             captured_vars: Vec::new(),
             starred: Vec::new(),
+            class_bases: Vec::new(),
             str_heads: Vec::new(),
             blocks: Vec::new(),
             loops: Vec::new(),
@@ -642,6 +644,8 @@ struct FnBuilder<'m, 'a> {
     a1_hazards: Vec<A1Hazard>,
     /// `*x` operands of displays and calls (`IrFunction::starred`).
     starred: Vec<(VarId, u32)>,
+    /// `IrFunction::class_bases`.
+    class_bases: Vec<(VarId, u32)>,
     /// `IrFunction::str_heads`.
     str_heads: Vec<(VarId, String)>,
     /// Local names bound by importing a frame-introspection function, with its kind.
@@ -723,6 +727,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             finished_hints: Vec::new(),
             a1_hazards: Vec::new(),
             starred: Vec::new(),
+            class_bases: Vec::new(),
             str_heads: Vec::new(),
             introspection_locals: FxHashMap::default(),
             comp_target_renames: Vec::new(),
@@ -1654,8 +1659,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let mut captured_names = self.collect_child_captures(child_id);
         captured_names.extend(self.capture_type_param_reads(cls.type_params.as_deref()));
         let mut captured = self.read_captured_vars(&captured_names, span);
+        let first_base = captured.len();
         captured.extend(retained);
         let dst = self.fresh_var(Some(cls.name.to_string()));
+        if let Some(args) = &cls.arguments {
+            for (i, arg) in args.args.iter().enumerate() {
+                if !matches!(arg, Expr::Starred(_)) {
+                    self.class_bases.push((dst, (first_base + i) as u32));
+                }
+            }
+        }
         self.emit(
             InstKind::MakeClosure {
                 dst,
@@ -3821,6 +3834,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.finished_loops.clear();
         self.finished_hints.clear();
         self.starred.clear();
+        self.class_bases.clear();
         self.str_heads.clear();
         self.a1_hazards.push(A1Hazard {
             kind: crate::UNMODELED.to_owned(),
@@ -3907,6 +3921,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             var_names: self.var_names,
             captured_vars,
             starred: self.starred,
+            class_bases: self.class_bases,
             str_heads: self.str_heads,
             blocks: self.blocks,
             loops: self.finished_loops,

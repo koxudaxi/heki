@@ -3107,3 +3107,46 @@ fn many_reports_into_one_module_share_its_index_of_calls() {
         .collect();
     assert_eq!(hops.iter().filter(|&&n| n == 2).count(), 8_000);
 }
+
+/// A package function holding its `__path__` through a chain of merges, each merging the one
+/// before with a new read of it and counting an item of it, ending with `end`.
+fn path_alias_chain(aliases: usize, end: &str) -> String {
+    let mut lines = vec![
+        "def scan(flag, x):".to_owned(),
+        "    p0 = __path__".to_owned(),
+    ];
+    for i in 1..=aliases {
+        lines.push(format!("    p{i} = p{} if flag else __path__", i - 1));
+        lines.push(format!("    c{i} = p{i}.count(x)"));
+    }
+    lines.push(format!("    {end}"));
+    lines.join("\n") + "\n"
+}
+
+/// What the uses of a package's `__path__` do to it is decided once per value holding it: a
+/// function holding it through as many merges as the IR budget models only reads it, or inserts
+/// a directory before its own at the end, which takes `f"pkg.{name}"` outside the project.
+#[test]
+fn the_values_holding_a_package_path_are_each_decided_once() {
+    for (end, reported) in [
+        ("return c1".to_owned(), false),
+        ("p1500.insert(0, x)".to_owned(), true),
+    ] {
+        let p = Project::new(&format!("bounds_package_path_{reported}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"env\"\nscopes = [\"probe.*\"]\nforbid = [\"reads-environment\"]\n",
+        )
+        .write("pkg/__init__.py", &path_alias_chain(1_500, &end))
+        .write(
+            "probe.py",
+            "from importlib import import_module\n\n\ndef load(name):\n    return import_module(f\"pkg.{name}\")\n",
+        );
+        let found = check_within(&p, Duration::from_secs(20));
+        assert_eq!(
+            found.iter().any(|d| d["rule_code"] == "EFF201"),
+            reported,
+            "{found:?}"
+        );
+    }
+}

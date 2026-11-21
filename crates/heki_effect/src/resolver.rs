@@ -27,9 +27,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+
+mod package_paths;
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -42,6 +45,7 @@ struct Indexes {
     protocols: FxHashMap<String, Option<Vec<String>>>,
     grown_elsewhere: FxHashSet<String>,
     rebound_elsewhere: FxHashSet<String>,
+    changed_paths: BTreeMap<String, PathChange>,
 }
 
 /// Names every class has, which a protocol's body defines without requiring them.
@@ -503,6 +507,12 @@ pub struct ModuleDecls {
     /// longer the string constant their own module binds ([`ProjectDecls::rebound_elsewhere`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_globals: BTreeSet<String>,
+    /// The packages whose `__path__` the module changes, by the fqn its imports give them
+    /// (`plugins.__path__.append(d)`), or by its own name when it is a package changing its own
+    /// (`__path__ = extend_path(__path__, __name__)`), and how
+    /// ([`ProjectDecls::holds_modules_starting_with`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub path_changes: BTreeMap<String, PathChange>,
     /// String constants, by name: module-level names bound once (`KEY = "_key"`,
     /// `KEY: Final = "_key"`), and class-body names declared `ClassVar` or `Final` and bound
     /// once (`KEY: ClassVar[str] = "_key"`), under `Class.KEY`. A constant names an attribute in
@@ -523,6 +533,23 @@ pub struct ModuleDecls {
     /// knows nothing it defines ([`Self::unread_module`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unread: bool,
+}
+
+/// How a module changes the `__path__` of a package, the directories Python finds the modules
+/// under the package in, which start as the package's own directory
+/// ([`ModuleDecls::path_changes`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathChange {
+    /// Directories after the package's own (`__path__.append(d)`, `__path__ += [d]`,
+    /// `pkgutil.extend_path`, `pkg_resources.declare_namespace`): a module the package's own
+    /// directory holds is still found there first; any other name may be found outside the
+    /// project.
+    Appended,
+    /// Any other change, or a use heki does not follow (`__path__.insert(0, d)`, `__path__ =
+    /// [d]`, the list handed to a function): any module under the package may be found outside
+    /// the project.
+    Replaced,
 }
 
 /// A number or boolean constant of a module ([`ModuleDecls::literal_constants`]).
@@ -1147,6 +1174,12 @@ pub struct DeclKeys {
     /// growing any module's global).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub grown_globals: BTreeSet<String>,
+    /// Packages asked how a module changes their `__path__`, or the path of a package under them
+    /// (a module can start or stop changing any package's, and a package can appear under
+    /// another): a change of one package's is a change of the package and of each package above
+    /// it.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub package_paths: BTreeSet<String>,
 }
 
 impl DeclKeys {
@@ -1158,6 +1191,7 @@ impl DeclKeys {
             && self.class_facts.is_empty()
             && self.protocols.is_empty()
             && self.grown_globals.is_empty()
+            && self.package_paths.is_empty()
     }
 
     pub fn extend(&mut self, other: Self) {
@@ -1168,6 +1202,7 @@ impl DeclKeys {
         self.class_facts.extend(other.class_facts);
         self.protocols.extend(other.protocols);
         self.grown_globals.extend(other.grown_globals);
+        self.package_paths.extend(other.package_paths);
     }
 
     /// Whether the two share a key (an analysis that read `self` is affected by the change
@@ -1180,6 +1215,7 @@ impl DeclKeys {
             || !self.class_facts.is_disjoint(&other.class_facts)
             || !self.protocols.is_disjoint(&other.protocols)
             || !self.grown_globals.is_disjoint(&other.grown_globals)
+            || !self.package_paths.is_disjoint(&other.package_paths)
     }
 }
 
@@ -1287,6 +1323,10 @@ pub struct ProjectDecls {
     grown_elsewhere: FxHashSet<String>,
     /// Those another project module rebinds or deletes (`ModuleDecls::rebound_globals`).
     rebound_elsewhere: FxHashSet<String>,
+    /// The packages whose `__path__` a project module changes (`ModuleDecls::path_changes`, the
+    /// changes joined), and the packages heki could not read, as `PathChange::Replaced`; sorted,
+    /// so the packages under a name are one range.
+    changed_paths: BTreeMap<String, PathChange>,
     recorder: Recorder,
     /// The C3 linearizations computed so far of classes with multiple inheritance along their
     /// bases (`Self::mro`); cleared with the indexes.
@@ -1316,6 +1356,26 @@ pub enum ReadOnlyKind {
 pub struct ReadOnlyAttr {
     pub class: String,
     pub kind: ReadOnlyKind,
+}
+
+/// Where an import looks for the modules under a package ([`ProjectDecls::search_under`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Search {
+    /// Only in directories of the project: a name under the package is a module of the project,
+    /// or no module.
+    Project,
+    /// In directories of the project first, then in others: a module the project has is found
+    /// in the project, any other name may be found outside it.
+    ProjectFirst,
+    /// In directories that may be outside the project, in any order.
+    Anywhere,
+}
+
+/// `a`, `a.b`, and `a.b.c` of `a.b.c`.
+fn dotted_prefixes(name: &str) -> impl Iterator<Item = &str> {
+    name.match_indices('.')
+        .map(|(dot, _)| &name[..dot])
+        .chain(std::iter::once(name))
 }
 
 /// What a dotted fqn names inside the project.
@@ -1412,6 +1472,12 @@ impl ProjectDecls {
         out.grown_globals = differ(&before.grown_elsewhere, &self.grown_elsewhere);
         out.grown_globals
             .extend(differ(&before.rebound_elsewhere, &self.rebound_elsewhere));
+        for package in before.changed_paths.keys().chain(self.changed_paths.keys()) {
+            if before.changed_paths.get(package) != self.changed_paths.get(package) {
+                out.package_paths
+                    .extend(dotted_prefixes(package).map(str::to_owned));
+            }
+        }
         out
     }
 
@@ -1426,6 +1492,7 @@ impl ProjectDecls {
             protocols: self.protocols.clone(),
             grown_elsewhere: self.grown_elsewhere.clone(),
             rebound_elsewhere: self.rebound_elsewhere.clone(),
+            changed_paths: self.changed_paths.clone(),
         }
     }
 
@@ -1492,6 +1559,25 @@ impl ProjectDecls {
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
+        self.changed_paths = self.package_path_changes();
+    }
+
+    /// [`Self::changed_paths`].
+    fn package_path_changes(&self) -> BTreeMap<String, PathChange> {
+        let mut out: BTreeMap<String, PathChange> = BTreeMap::new();
+        let mut join = |package: String, change: PathChange| {
+            let joined = out.entry(package).or_insert(change);
+            *joined = (*joined).max(change);
+        };
+        for m in self.modules.values() {
+            if m.unread && m.is_package {
+                join(m.module_name.clone(), PathChange::Replaced);
+            }
+            for (package, change) in &m.path_changes {
+                join(self.canonical(package), *change);
+            }
+        }
+        out
     }
 
     /// The canonical fqns of the globals that another module than their owner lists in
@@ -1715,15 +1801,56 @@ impl ProjectDecls {
         self.modules.get(name).map(Arc::as_ref)
     }
 
+    /// Whether importing `name` (`pkg.config`) loads the project's module of that name: the
+    /// project has it, and the packages along the name lead the import to it before any
+    /// directory outside the project ([`Self::search_under`] its package).
+    pub fn holds_module(&self, name: &str) -> bool {
+        self.module(name).is_some()
+            && name
+                .rsplit_once('.')
+                .is_none_or(|(package, _)| self.search_under(package) != Search::Anywhere)
+    }
+
     /// Whether every module whose name starts with `head` (`pkg.parser.`) is one of the
-    /// project's: the longest project module `head` names before a dot, whose `__path__` the
-    /// rest of the name is found on, is a regular package whose `__init__` heki read and does
-    /// not rebind `__path__` (`pkgutil.extend_path` lets installed distributions add modules to
-    /// it). A directory without `__init__.py` inside it is found on that path too.
+    /// project's: the import looks for the rest of the name under the package `head` names
+    /// before its last dot only in directories of the project ([`Self::search_under`]), and no
+    /// project module changes the `__path__` of a package the rest of the name may go through.
     pub fn holds_modules_starting_with(&self, head: &str) -> bool {
-        head.rmatch_indices('.')
-            .find_map(|(dot, _)| self.module(&head[..dot]))
-            .is_some_and(|m| m.is_package && !m.unread && !m.unknown_globals.contains("__path__"))
+        // The key of `package` that `search_under` notes changes with the path of any package
+        // under it (`DeclKeys::package_paths`).
+        head.rsplit_once('.').is_some_and(|(package, _)| {
+            self.search_under(package) == Search::Project
+                && self
+                    .changed_paths
+                    .range::<str, _>((Bound::Included(head), Bound::Unbounded))
+                    .next()
+                    .is_none_or(|(below, _)| !below.starts_with(head))
+        })
+    }
+
+    /// Where an import looks for the modules directly under `package`, from the packages along
+    /// its name: Python finds `a.b.c` on the `__path__` of `a.b`, which it found on the path of
+    /// `a`, and `a` on `sys.path`, where heki takes the project's own top-level names to be found
+    /// in the project. A regular package of the project is found before anything after the
+    /// project's directories; a directory without `__init__.py` is a namespace package, with a
+    /// portion in each directory of its parent's path, in that order. A module that is not a
+    /// package is not followed (binding `__path__` makes it one).
+    fn search_under(&self, package: &str) -> Search {
+        let mut search = Search::ProjectFirst;
+        for name in dotted_prefixes(package) {
+            match self.module(name) {
+                Some(m) if !m.is_package => return Search::Anywhere,
+                Some(_) => search = Search::Project,
+                None => {}
+            }
+            self.read(|k| note(&mut k.package_paths, name));
+            search = match self.changed_paths.get(name) {
+                None => search,
+                Some(PathChange::Appended) => search.max(Search::ProjectFirst),
+                Some(PathChange::Replaced) => return Search::Anywhere,
+            };
+        }
+        search
     }
 
     /// Longest project-module prefix of `fqn` and the remaining dotted part.
@@ -2347,13 +2474,6 @@ impl ProjectDecls {
         }
         out.sort();
         out
-    }
-
-    /// The bases the class statement of the project class `class` names, canonical, in order.
-    pub fn bases_of(&self, class: &str) -> Vec<String> {
-        self.class(class).map_or_else(Vec::new, |c| {
-            c.bases.iter().map(|b| self.canonical(b)).collect()
-        })
     }
 
     /// The project classes `class` inherits from (its MRO without itself and external bases).
@@ -3353,6 +3473,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
+    decls.path_changes = package_paths::path_changes(input, &decls);
     attr_displays(input, &mut decls);
     code_attrs(input, &mut decls);
     let rebound: Vec<(String, String)> = class_attrs_rebound(input, &decls)
@@ -5039,6 +5160,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
+    path_changes: BTreeMap::new(),
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),
     global_capacities: BTreeMap::new(),

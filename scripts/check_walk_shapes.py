@@ -322,6 +322,15 @@ def attribute_chain(n: int) -> Body:
     return Body(("p",), [*lines, f"return a{n}"])
 
 
+def path_aliases(n: int) -> Body:
+    """Merges each joining the previous alias of a package's `__path__` and a new read of it,
+    each alias read."""
+    lines = ["p0 = requests.__path__"]
+    for i in range(1, n + 1):
+        lines += [f"p{i} = p{i - 1} if flag else requests.__path__", f"use(p{i}.count(x))"]
+    return Body(("flag", "x"), lines)
+
+
 def wide_hierarchy(n: int) -> str:
     """Many subclasses overriding one method, and as many functions calling it on the base."""
     lines = []
@@ -412,6 +421,7 @@ FAMILIES = [
     Family("match_pass_through", match_pass_through),
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
+    Family("path_aliases", path_aliases),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),

@@ -1291,12 +1291,13 @@ The call side of `write-owners`.
   matches. A target with an argument list names no symbol outside the project; `unresolved =
   "report"` matches its last name before the list, whatever the arguments of a call on an object
   of unknown class.
-- With `references = "calls-and-bases"`, a class statement whose declaration resolves a base to a
-  class target is reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the
-  class statement for a name an import or the module body binds: the class it makes holds the
-  base, and constructing it runs the base's initialization unless it overrides it. A base is
-  matched as a construction is (with `subclasses = false`, the class itself only), and a keyword
-  (`metaclass=Base`) is no base.
+- With `references = "calls-and-bases"`, a class statement passing a class target as a base is
+  reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the class statement
+  for a name an import or the module body binds: the class it makes holds the base, and
+  constructing it runs the base's initialization unless it overrides it. A base is the value the
+  statement passes, typed where the statement runs as any value is (a parameter, a local, or a
+  class-body name of the imported class's name is another value), and matched as a construction
+  is (with `subclasses = false`, the class itself only); a keyword (`metaclass=Base`) is no base.
 
 ### Allowed and forbidden functions
 
@@ -1407,14 +1408,39 @@ names the first read it reaches and counts every one.
 environment unless the module they import is established to be the project's own:
 
 - every text `name` may hold names a module of the project (`"pkg.config"`, a module constant,
-  either of two such texts), or starts with a package of the project and a dot
-  (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`). The longest project
-  module before that dot must be a regular package whose `__init__.py` heki reads and does not
-  rebind `__path__` (`pkgutil.extend_path` lets installed distributions add modules to it);
+  either of two such texts) that the import finds in the project, or starts with a package of
+  the project and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`)
+  under which it finds only modules of the project (below);
 - a relative name (`".config"`, `f"..parser.{name}"`) is anchored at `package`: a text the code
   fixes, or the module's own `__package__` or `__name__`;
 - the call is not inside a `try` with an `except` clause naming `ImportError` or
   `ModuleNotFoundError`: the code expects the import to fail.
+
+Python finds the modules under a package on its `__path__`, the package's own directory unless
+code changes it. heki follows what the modules of the project do to the `__path__` of a package,
+its own in its `__init__.py` or another's through an import (`plugins.__path__`, `from plugins
+import __path__`):
+
+- adding directories after the package's own (`__path__.append(d)`, `__path__.extend(ds)`,
+  `__path__ += ds`, `__path__ = __path__ + ds`, `__path__ = pkgutil.extend_path(__path__,
+  __name__)`, also on `__import__("pkgutil")`, and `pkg_resources.declare_namespace`) leaves the
+  package's own modules found first, but any other name under the package may be an installed
+  module;
+- any other change (`__path__ = [d]`, `__path__.insert(0, d)`, a slice store, `del __path__`), or
+  a use heki does not follow (the list handed to a function other than a builtin that only reads
+  it and `pkgutil.iter_modules`, `walk_packages`, or `extend_path`, returned, or stored
+  elsewhere), may take any name under the package elsewhere, its own modules included. So may a
+  package whose `__init__.py` heki cannot read.
+
+Reading the path (iterating it, `__path__[0]`, `len(__path__)`, `pkgutil.iter_modules(__path__)`)
+changes nothing. A module is found in the project when each package along its name leads the
+import there first: heki takes the project's top-level packages to be found in the project, a
+regular package of the project is found before the directories added after its parent's own,
+and a directory without `__init__.py` is a namespace package with a portion in each directory of
+its parent's path, in that order. A name under a package holds only modules of the project when
+the packages along it lead to the project's directories alone and no package under it changes
+its path: `f"pkg.{name}"` reads the environment once a package anywhere under `pkg` changes its
+`__path__`, while a change in another package does not affect it.
 
 A name heki cannot tell (a parameter, `"pkg" + name`, a namespace package without
 `__init__.py`) stays a read of the environment, and so does an import of a module the project
@@ -1675,7 +1701,7 @@ deliberately conservative:
 | The object is created in the function and never escapes | heki counts anything it cannot see as shared: parameters, globals, attributes, values passed to unknown functions, names captured by closures | `sink(rows)` inside the loop blocks `rows.append(...)` |
 | Access is exclusive: no other variable, iterator, or view still refers to the old object after the statement | an in-place update would change what they see | `for v in x: x = x + [v]` ends, but `x.append(v)` would loop forever, so heki reports nothing |
 | Evaluation order and exceptions are kept | a rewrite must not call anything earlier or later | `{**d, f(): g()}` becomes `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first |
-| Builtin names are the builtins | the module can rebind them | trusted only while nothing rebinds them: an assignment, a `global` store, `from m import *`, a change through `globals()` (storing or deleting an item, a method that changes the dict, the dict handed on; reading it rebinds nothing), or a module that patches `builtins` (a `.pyi` stub never runs, so its `import builtins` does not count) |
+| Builtin names are the builtins | the module can rebind them | trusted only while nothing rebinds them: an assignment, a `global` store, `from m import *`, any call of `globals()`, or a module that patches `builtins` (a `.pyi` stub never runs, so its `import builtins` does not count) |
 | Locals change only through the code | `eval`, `exec`, `locals()`, `sys._getframe`, and frame attributes can change them behind any analysis | candidates in such functions are always blocked; `heki assumptions` lists these places in a project |
 
 The scope analysis is checked against CPython's `symtable`, and adversarial programs that break a
@@ -3980,12 +4006,14 @@ running the class statement (`<module>` for a class at module level).
 With `references = "calls-and-bases"`, a class statement naming a class target among its bases
 counts too ("`<module>` subclasses `pkg.core.Base`"): the class it makes holds the base, and
 constructing it runs the base's initialization unless it overrides it. A base is a positional
-argument of the class statement that its declaration resolves to the class (`Base`,
-`core.Base`, `Base[int]`, also through an import alias), matched as a construction is, so a base
-that is a subclass of the target counts unless `subclasses = false`; a keyword
-(`metaclass=Base`) is no base. It is reported at the base where the statement loads it, and at
-the class statement for a name an import or the module body binds, for the function running the
-class statement (a nested class: the function running the outer one).
+argument of the class statement whose value is the class where the statement runs (`Base`,
+`core.Base`, `Base[int]`, also through an import alias, a local alias, or a closure cell holding
+it; a parameter, a local, or a class-body name of the imported class's name is another value),
+matched as a construction is, so a base that is a subclass of the target counts unless
+`subclasses = false`; a keyword (`metaclass=Base`) is no base. It is reported at the base where
+the statement loads it, and at the class statement for a name an import or the module body
+binds, for the function running the class statement (a nested class: the function running the
+outer one).
 
 A call through a value typed with a project `Protocol` that declares the method is judged by the
 protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
@@ -4051,9 +4079,10 @@ Its premises:
   copies and displays, an argument, a store, a `return`, a `yield`, or a `raise`. Open: a value
   merged from several paths is enough. Whether the code it is handed to calls it is not part of
   the claim.
-- **Subclasses** (`references = "calls-and-bases"`): the class statement's declaration resolves
-  a base to the target class. Established from the declarations. Whether the subclass is
-  constructed is not part of the claim.
+- **Subclasses** (`references = "calls-and-bases"`): the value the class statement passes as a
+  base is the target class, typed where the statement runs. Established: a base heki cannot type
+  (a parameter, a call's result, a value merged from paths that disagree) is no match. Whether
+  the subclass is constructed is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
   its constant, as Python binds the call. Established: an argument heki cannot tell is no match,
   and a call that raises `TypeError` instead of running the function binds nothing.
@@ -4337,9 +4366,12 @@ count for a read.
     `importlib.util.find_spec` that imports a module of the project reads no environment: every
     text its name may hold names a project module (`"pkg.config"`, a module constant), or
     starts with a project package and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`),
-    a package whose `__init__` does not rebind `__path__`; a relative name is anchored at
-    `package` (a text, or the module's own `__package__` or `__name__`). Inside a `try` that
-    takes an `ImportError`, such a call still counts;
+    and the packages along the name lead the import to the project's module, or under the
+    package to the project's directories alone: a package whose `__path__` a module of the
+    project changes (`__path__.append(d)`, `pkgutil.extend_path`, `__path__ = [d]`), or whose
+    `__init__` heki cannot read, may lead it to an installed module. A relative name is
+    anchored at `package` (a text, or the module's own `__package__` or `__name__`). Inside a
+    `try` that takes an `ImportError`, such a call still counts;
   - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
     parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
@@ -4407,9 +4439,9 @@ Its premises:
   importing a module, open: the module is not established to be the project's. With
   `references = "calls"`, a target handed on is one for `calls`: the value is the target, and it
   reaches a use handing it on. Established; whether the code it is handed to calls it is not
-  part of the claim. With `"calls-and-bases"`, so is a class statement whose declaration
-  resolves a base to a class target; whether the subclass is constructed is not part of the
-  claim.
+  part of the claim. With `"calls-and-bases"`, so is a class statement passing a class target
+  as a base, typed where the statement runs; whether the subclass is constructed is not part of
+  the claim.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
