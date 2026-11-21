@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="927" height="532" viewBox="0 0 927 532" role="img">
+<title>heki check on the examples of the README</title>
+<style>
+text{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;font-size:15px;white-space:pre;fill:#d6e1e4}
+.b{font-weight:700}
+.f1{fill:#f47174}
+.f3{fill:#f2c45a}
+.f6{fill:#5fd8c8}
+.f12{fill:#7cc0ff}
+.f14{fill:#91ede1}
+</style>
+<rect width="927" height="532" rx="10" fill="#22323a"/>
+<path d="M0 34H927V522A10 10 0 0 1 917 532H10A10 10 0 0 1 0 522Z" fill="#172328"/>
+<circle cx="20" cy="17" r="6" fill="#ff5f57"/>
+<circle cx="40" cy="17" r="6" fill="#febc2e"/>
+<circle cx="60" cy="17" r="6" fill="#28c840"/>
+<text y="68" xml:space="preserve"><tspan x="18" textLength="9" class="f6">$</tspan><tspan x="27" textLength="99"> heki check</tspan></text>
+<text y="89" xml:space="preserve"><tspan x="18" textLength="90" class="b">app/api.py</tspan><tspan x="108" textLength="9" class="f6">:</tspan><tspan x="117" textLength="9">5</tspan><tspan x="126" textLength="9" class="f6">:</tspan><tspan x="135" textLength="18">12</tspan><tspan x="153" textLength="9" class="f6">:</tspan><tspan x="171" textLength="54" class="b f1">EFF101</tspan><tspan x="225" textLength="216"> (async-blocking-call) [</tspan><tspan x="441" textLength="63" class="b f3">warning</tspan><tspan x="504" textLength="351">] `app.users.load_user` always runs the</tspan></text>
+<text y="110" xml:space="preserve"><tspan x="18" textLength="675">waiting call `requests.get` on the event loop (2 calls down, on every path)</tspan></text>
+<text y="131" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan></text>
+<text y="152" xml:space="preserve"><tspan x="18" textLength="27" class="b f12">5 |</tspan><tspan x="45" textLength="270">     return load_user(user_id)</tspan></text>
+<text y="173" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">|</tspan><tspan x="153" textLength="9" class="b f3">^</tspan></text>
+<text y="194" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="90" class="b">app/api.py</tspan><tspan x="225" textLength="9" class="f6">:</tspan><tspan x="234" textLength="9">5</tspan><tspan x="243" textLength="9" class="f6">:</tspan><tspan x="252" textLength="18">12</tspan><tspan x="270" textLength="9" class="f6">:</tspan><tspan x="279" textLength="351"> `get_user` calls `app.users.load_user`</tspan></text>
+<text y="215" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="108" class="b">app/users.py</tspan><tspan x="243" textLength="9" class="f6">:</tspan><tspan x="252" textLength="9">8</tspan><tspan x="261" textLength="9" class="f6">:</tspan><tspan x="270" textLength="18">41</tspan><tspan x="288" textLength="9" class="f6">:</tspan><tspan x="297" textLength="369"> `load_user` calls `app.users.fetch_name`</tspan></text>
+<text y="236" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="108" class="b">app/users.py</tspan><tspan x="243" textLength="9" class="f6">:</tspan><tspan x="252" textLength="9">5</tspan><tspan x="261" textLength="9" class="f6">:</tspan><tspan x="270" textLength="18">12</tspan><tspan x="288" textLength="9" class="f6">:</tspan><tspan x="297" textLength="306"> `fetch_name` calls `requests.get`</tspan></text>
+<text y="257" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="36" class="b f14">help</tspan><tspan x="90" textLength="549">: offload it with `asyncio.to_thread`, or use an async client</tspan></text>
+<text y="299" xml:space="preserve"><tspan x="18" textLength="117" class="b">app/orders.py</tspan><tspan x="135" textLength="9" class="f6">:</tspan><tspan x="144" textLength="18">11</tspan><tspan x="162" textLength="9" class="f6">:</tspan><tspan x="171" textLength="18">37</tspan><tspan x="189" textLength="9" class="f6">:</tspan><tspan x="207" textLength="54" class="b f1">EFF103</tspan><tspan x="261" textLength="162"> (loop-db-query) [</tspan><tspan x="423" textLength="63" class="b f3">warning</tspan><tspan x="486" textLength="423">] every iteration over parameter `orders` sends</tspan></text>
+<text y="320" xml:space="preserve"><tspan x="18" textLength="747">a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)</tspan></text>
+<text y="341" xml:space="preserve"><tspan x="45" textLength="9" class="b f12">|</tspan></text>
+<text y="362" xml:space="preserve"><tspan x="18" textLength="36" class="b f12">11 |</tspan><tspan x="54" textLength="666">         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")</tspan></text>
+<text y="383" xml:space="preserve"><tspan x="45" textLength="9" class="b f12">|</tspan><tspan x="387" textLength="9" class="b f3">^</tspan></text>
+<text y="404" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="117" class="b">app/orders.py</tspan><tspan x="252" textLength="9" class="f6">:</tspan><tspan x="261" textLength="18">11</tspan><tspan x="279" textLength="9" class="f6">:</tspan><tspan x="288" textLength="18">37</tspan><tspan x="306" textLength="9" class="f6">:</tspan><tspan x="315" textLength="459"> `order_summaries` calls `app.orders.customer_name`</tspan></text>
+<text y="425" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="63" class="b f12">related</tspan><tspan x="117" textLength="18">: </tspan><tspan x="135" textLength="117" class="b">app/orders.py</tspan><tspan x="252" textLength="9" class="f6">:</tspan><tspan x="261" textLength="9">5</tspan><tspan x="270" textLength="9" class="f6">:</tspan><tspan x="279" textLength="9">5</tspan><tspan x="288" textLength="9" class="f6">:</tspan><tspan x="297" textLength="423"> `customer_name` calls `sqlite3.Cursor.execute`</tspan></text>
+<text y="446" xml:space="preserve"><tspan x="36" textLength="9" class="b f12">=</tspan><tspan x="54" textLength="36" class="b f14">help</tspan><tspan x="90" textLength="522">: batch the queries, or load the data once before the loop</tspan></text>
+<text y="488" xml:space="preserve"><tspan x="18" textLength="315">Found 2 diagnostic(s) in 3 file(s).</tspan></text>
+<text y="509" xml:space="preserve"><tspan x="18" textLength="828">note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`</tspan></text>
+</svg>
