@@ -53,18 +53,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   heuristic report may not have established. `docs/precision.md` defines exact and heuristic
   reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
   rule measured.
-- The ecosystem catalog says when a call waits. A blocking effect waits for input or output or
-  for another thread (`blocking_sync`), which can have done its part already. Every wait entry
-  lists the arguments that end it at once: `time.sleep(0)`, `Popen.wait(timeout=0)`, a numeric
-  host or `localhost` for `socket.getaddrinfo` and `socket.gethostbyname`, a `data:` URL for
-  `urlopen`; no rule reports those calls as waiting. Database entries
-  carry `emits` (`always`, `on-identity-map-miss` for `Session.get`, `if-pending` for
-  `Session.flush` / `commit` and a driver's `commit()` / `rollback()`, `unless-cached` for
-  Django's `QuerySet.count()` / `exists()` / `first()` / `last()`, `unless-connected` for a pool
-  checkout), and context managers `exit_suppresses` (`false` for files, locks, HTTP sessions,
-  and database connections; `true` for `contextlib.suppress`), and calls whose results the
-  environment sizes `items` (`rows`, `lines`, `entries`, `text`). New argument tests: `one_of`
-  and `numeric_address`.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of
