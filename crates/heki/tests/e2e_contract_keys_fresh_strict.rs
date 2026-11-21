@@ -2558,6 +2558,28 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
         "",
     ),
     ("read_items", "    return sorted(globals().items())", ""),
+    ("read_is", "    return globals() is value", ""),
+    (
+        "read_self_compared",
+        "    return globals() == globals()",
+        "",
+    ),
+    (
+        "read_module_level",
+        "    return None",
+        "SIZE = len(globals())\n",
+    ),
+    (
+        "read_local_elsewhere",
+        "    return len(globals())",
+        "def measure(len: int) -> int:\n    return len\n",
+    ),
+    (
+        "read_class_attribute",
+        "    return None",
+        "class Sized:\n    len = staticmethod(register)\n\n    \
+         def size(self) -> int:\n        return len(globals())\n",
+    ),
     (
         "write_item",
         "    globals()[name] = value\n    return None",
@@ -2590,12 +2612,47 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
         "    found = globals()\n    found[name] = value\n    return None",
         "",
     ),
+    (
+        "write_own_len",
+        "    return len(globals())",
+        "def len(ns: dict) -> int:\n    ns[\"KEY\"] = \"other\"\n    return 0\n",
+    ),
+    (
+        "write_imported_len",
+        "    return len(globals())",
+        "from pkg.writer import len\n",
+    ),
+    (
+        "write_parameter_len",
+        "    def apply(len):\n        return len(globals())\n\n    return apply(register)",
+        "",
+    ),
+    (
+        "write_local_len",
+        "    len = register\n    return len(globals())",
+        "",
+    ),
+    ("write_index", "    return value[globals()]", ""),
+    ("write_contained", "    return globals() in value", ""),
+    ("write_compared", "    return value == globals()", ""),
+    ("write_sentinel", "    return iter(register, globals())", ""),
+    (
+        "write_own_globals",
+        "    globals()[name] = value\n    return None",
+        "def globals() -> dict:\n    return {}\n",
+    ),
 ];
 
-/// Reading the dict of module globals (`globals().get(name)`, `name in globals()`, iterating it)
-/// binds no name, so the module's constants still name keys;
-/// storing into it, deleting from it, a method changing it, or handing it on (also the builtin
-/// `globals` itself) may bind any name, even one declared `Final`.
+/// Reading the dict of module globals (`globals().get(name)`, `globals()[name]`, `name in
+/// globals()`, iterating it, `len(globals())` with the real builtin) binds no name, so the
+/// module's constants still name keys; storing into it, deleting from it, a method changing it,
+/// or handing it on may bind any name, even one declared `Final`. Handing it on includes the
+/// builtin `globals` itself, a call of a reading builtin's name that the module, an import, a
+/// parameter, or a local rebinds (`def len(ns)`; a class attribute does not rebind it for the
+/// methods), and a place where another object's method receives the dict: an index
+/// (`obj[globals()]`), a container tested (`globals() in obj`), a comparison (`obj ==
+/// globals()`), the sentinel of `iter`. A call of a function the module names `globals` may
+/// return the dict too.
 #[test]
 fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     let p = Project::new("keys_globals_uses");
@@ -2609,6 +2666,10 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     .write(
         "pkg/model.py",
         "class Node:\n    def __init__(self) -> None:\n        self.kind = \"a\"\n",
+    )
+    .write(
+        "pkg/writer.py",
+        "def len(ns: dict) -> int:\n    ns[\"KEY\"] = \"other\"\n    return 0\n",
     );
     for (module, body, tail) in GLOBALS_USES {
         p.write(
