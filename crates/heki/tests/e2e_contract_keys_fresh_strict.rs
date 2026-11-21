@@ -2062,6 +2062,72 @@ unresolved = "report"
     );
 }
 
+// A copy handed to a helper by a position past its positional parameters: the tuple `*args`
+// holds it, so the helper keeps it only by keeping that parameter, never through a keyword-only
+// parameter after `*args`.
+const PACKED: &str = r#"import copy
+
+REGISTRY: list[object] = []
+
+
+def _log(*objs: object) -> None:
+    print(*objs)
+
+
+def _keep_all(*objs: object) -> None:
+    REGISTRY.extend(objs)
+
+
+def _keep_label(first: object, *rest: object, label: object = None) -> None:
+    REGISTRY.append(label)
+
+
+def logged_second(obj) -> None:
+    dup = copy.copy(obj)
+    _log(1, dup)
+    dup.name = "x"
+
+
+def kept_second(obj) -> None:
+    dup = copy.copy(obj)
+    _keep_all(1, dup)
+    dup.name = "x"
+
+
+def beside_keyword_only(obj) -> None:
+    dup = copy.copy(obj)
+    _keep_label(1, dup)
+    dup.name = "x"
+"#;
+
+#[test]
+fn construction_through_arguments_star_args_holds() {
+    let p = Project::new("fresh_packed_arguments");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataModelFieldBase.name"]
+allowed-writers = ["pkg.store.*"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/packed.py", PACKED);
+    // Only the copy a helper keeps through `*objs` is written outside its construction.
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![d("pkg/packed.py", 27, "MUT205", "kept_second", "name")]
+    );
+}
+
 // ================================================== strict mode and entries: more shapes
 
 const STRICT_SHAPES: &str = r#"from pkg.model import DataModel, DataModelFieldBase

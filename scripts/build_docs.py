@@ -5,6 +5,8 @@
   `heki rule <CODE>` prints, kept in `crates/heki_rules/rule-docs/<CODE>.md`).
 - `docs/cli-reference.md`: the `--help` output of every command.
 - `docs/experimental.md`: the experimental features (`crates/heki_rules/src/experimental.rs`).
+- `docs/assets/example-check.svg`: `heki check --color always` on the README's examples, drawn
+  as a terminal shows it (`scripts/ansi_svg.py`).
 
 The hand-written pages are checked against the rules: the guides' lists of opt-in rules, the
 experimental features and the heuristic rules (in the README, `ARCHITECTURE.md`, and the site's
@@ -26,8 +28,11 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
+
+import ansi_svg
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
@@ -36,6 +41,15 @@ CLI_PAGE = DOCS / "cli-reference.md"
 EXPERIMENTAL_PAGE = DOCS / "experimental.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 PRECISION_PAGE = DOCS / "precision.md"
+README = ROOT / "README.md"
+EXAMPLE_IMAGE = DOCS / "assets" / "example-check.svg"
+# The examples at the top of the README, as `crates/heki/tests/e2e_readme_examples.rs` reads
+# them: from the first `### ` heading to the sentence after the last one.
+EXAMPLES_END = "\nRuff, ty, Pyrefly, pyright, and mypy"
+FENCED_BLOCK = re.compile(r"^```(\w+)\n(.*?)^```$", re.MULTILINE | re.DOTALL)
+# The width of the terminal the image shows: longer lines wrap at a space.
+TERMINAL_COLUMNS = 100
+EXAMPLE_IMAGE_TITLE = "heki check on the examples of the README"
 # What a rule's default severity says, by the consequence of the code it reports.
 CONSEQUENCES = {"bug": "a bug", "minor-bug": "a bug that is rarely harmful", "slowdown": "slower code"}
 # The section of every rule's documentation that lists the premises of its claim (ADR-018).
@@ -308,6 +322,50 @@ def cli_page(heki: Path) -> str:
     return "\n".join(lines)
 
 
+def readme_examples(readme: str) -> tuple[str, dict[str, str]]:
+    """The command the README's examples run, and the files of all of them: each Python block
+    names its file on its first line (`# app/users.py`)."""
+    start = readme.index("\n### ")
+    examples = readme[start : readme.index(EXAMPLES_END, start)]
+    commands = set()
+    files: dict[str, str] = {}
+    for language, text in FENCED_BLOCK.findall(examples):
+        if language == "python":
+            path = text.splitlines()[0].removeprefix("# ")
+            if path in files:
+                sys.exit(f"README.md: two examples write `{path}`")
+            files[path] = text
+        elif language == "console":
+            commands.add(text.splitlines()[0].removeprefix("$ "))
+    if len(commands) != 1:
+        sys.exit(f"README.md: the examples run different commands: {sorted(commands)}")
+    return commands.pop(), files
+
+
+def example_image(heki: Path) -> str:
+    """The command of the README's examples, run with `--color always` in one project holding
+    the files of all of them, drawn as a terminal shows what it prints."""
+    command, files = readme_examples(README.read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory() as directory:
+        project = Path(directory)
+        files = {"pyproject.toml": '[project]\nname = "t"\n', **files}
+        for path, text in files.items():
+            (project / path).parent.mkdir(parents=True, exist_ok=True)
+            (project / path).write_text(text, encoding="utf-8", newline="\n")
+        out = subprocess.run(
+            [str(heki), *command.split()[1:], "--color", "always"],
+            capture_output=True,
+            cwd=project,
+            encoding="utf-8",
+            check=False,
+        )
+    # The examples report warnings: printed, and the run passes.
+    if out.returncode != 0:
+        sys.exit(f"`{command}` on the README's examples failed ({out.returncode}):\n{out.stderr}")
+    prompt = f"\x1b[36m$\x1b[0m {command}\n"
+    return ansi_svg.render(prompt + out.stdout + out.stderr, TERMINAL_COLUMNS, EXAMPLE_IMAGE_TITLE)
+
+
 def outputs(
     heki: Path, rules: list[dict], registry: dict, measurements: dict[str, dict]
 ) -> dict[Path, str]:
@@ -315,6 +373,7 @@ def outputs(
         RULES_DIR / "index.md": rules_index(rules, registry["policy"]),
         CLI_PAGE: cli_page(heki),
         EXPERIMENTAL_PAGE: experimental_page(registry, rules),
+        EXAMPLE_IMAGE: example_image(heki),
     }
     for r in rules:
         page = rule_page(r, registry["policy"], measurements.get(r["code"]))
@@ -506,10 +565,10 @@ def main() -> int:
             return 1
         print(f"Generated docs are up to date ({len(files)} files).")
         return 0
-    RULES_DIR.mkdir(parents=True, exist_ok=True)
     for p in extra:
         (ROOT / p).unlink()
     for p, text in files.items():
+        p.parent.mkdir(parents=True, exist_ok=True)
         # LF on every platform, as the checkout keeps them (`.gitattributes`): Python would
         # write CRLF on Windows.
         p.write_text(text, encoding="utf-8", newline="\n")
