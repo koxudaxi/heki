@@ -63,7 +63,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         }
         let types = tcx.infer(f);
         let shape = FnShape::new(f);
-        let held = held_managers(cx, &tcx, &shape, &types);
+        let held = held_managers(&tcx, &shape, &types);
         if held.is_empty() {
             continue;
         }
@@ -196,13 +196,12 @@ fn describe(qualname: &str, held: &Held, line: u32, offense: Offense) -> Report 
 
 /// Managers of non-async `with` items that hold a flagged lock or transaction.
 fn held_managers(
-    cx: &CheckContext<'_>,
     tcx: &TypeCtx<'_>,
     shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
 ) -> FxHashMap<VarId, Held> {
     let f = shape.f;
-    let flagged = |symbol: &str| cx.kb.lookup(symbol).is_some_and(|e| e.sync_lock_or_tx);
+    let flagged = |symbol: &str| tcx.catalog(symbol).is_some_and(|e| e.sync_lock_or_tx);
     let mut out = FxHashMap::default();
     for inst in f.blocks.iter().flat_map(|b| &b.insts) {
         let InstKind::EnterWith {

@@ -30,8 +30,8 @@ When a document and the implementation disagree, update the document in the same
      standard library or packages registered in Layer 2 (`opaque_packages`).
 4. **Safety × Profitability orthogonality (ADR-007 / ADR-011)**:
    - The default `heki check --fix` applies only fixes that are `safe` and `unconditional`
-     (`OPT101`, and `OPT102`: `{**d, ...}` with the accumulator leading, and `s = s | t` /
-     `d = d | other` on exact operands).
+     (`OPT101`, and `OPT102`: `{**d, ...}` with the accumulator leading, `d = d | other` on
+     exact operands, and `s = s | t` on exact sets whose iteration order nothing observes).
    - Custom decorators, custom contract APIs, Lean 4, native extensions, a general import-cycle
      checker (tach's domain), and framework-specific heuristic rules are non-goals: do not add
      them.

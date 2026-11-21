@@ -2114,3 +2114,139 @@ fn many_key_tests_of_a_container_of_self_find_their_sides_once() {
         vec![lines.len() as u64]
     );
 }
+
+/// `heki dump-facts` of the project's `m.py`, which must finish within `limit`.
+fn dump_facts_within(p: &Project, limit: Duration) -> Value {
+    let started = Instant::now();
+    let (code, stdout, stderr) = p.heki(&["dump-facts", "m.py"]);
+    assert!(
+        started.elapsed() < limit,
+        "heki dump-facts ran {:?}",
+        started.elapsed()
+    );
+    assert_eq!(code, 0, "{stderr}");
+    serde_json::from_str(&stdout).unwrap()
+}
+
+/// The path facts of a function decide dominance once per region, over two nodes per block: a
+/// `try` body of thousands of calls whose handler returns (thousands of exception edges into one
+/// block), loops nested twenty deep with a call at each depth (each asked for every loop around
+/// it), many loops one after another, and a long chain of `and` tests of module constants.
+#[test]
+fn path_facts_decide_each_region_once() {
+    let calls = 3000;
+    let mut lines = vec![
+        "_IS_SYNC = False".to_owned(),
+        String::new(),
+        "def body(db):".to_owned(),
+        "    try:".to_owned(),
+    ];
+    lines.extend((0..calls).map(|i| format!("        db.fetch({i})")));
+    lines.extend(
+        [
+            "    except Exception:",
+            "        return None",
+            "    db.done()",
+        ]
+        .map(str::to_owned),
+    );
+    lines.push(String::new());
+    lines.push("def nested(rows, db):".to_owned());
+    for depth in 0..20 {
+        let pad = "    ".repeat(depth + 1);
+        lines.push(format!("{pad}db.at({depth})"));
+        lines.push(format!("{pad}for x{depth} in rows:"));
+    }
+    lines.push(format!("{}db.inner()", "    ".repeat(21)));
+    lines.push(String::new());
+    lines.push("def sequential(rows, db):".to_owned());
+    for i in 0..1000 {
+        lines.push("    for row in rows:".to_owned());
+        lines.push(format!("        db.each({i})"));
+    }
+    lines.push(String::new());
+    lines.push("def tests(sock):".to_owned());
+    lines.push(format!(
+        "    if {}:",
+        vec!["not _IS_SYNC"; 500].join(" and ")
+    ));
+    lines.push("        sock.recv()".to_owned());
+    let p = Project::new("bounds_path_facts");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let facts = dump_facts_within(&p, Duration::from_secs(20));
+    let call = |qualname: &str, text: &str| -> Value {
+        facts["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["qualname"] == qualname)
+            .unwrap()["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["text"] == text)
+            .unwrap()
+            .clone()
+    };
+    let called =
+        |qualname: &str, text: &str| call(qualname, text)["on_every_return"]["called"].clone();
+    assert_eq!(called("body", "db.fetch(1)"), json!({"known": "not_every"}));
+    assert_eq!(called("body", "db.done()"), json!({"known": "not_every"}));
+    assert_eq!(called("tests", "sock.recv()"), json!({"known": "every"}));
+    let inner = call("nested", "db.inner()")["on_every_iteration"].clone();
+    assert_eq!(inner.as_array().unwrap().len(), 20);
+    assert_eq!(inner[19]["called"], json!({"known": "every"}));
+    assert_eq!(inner[0]["called"], json!({"known": "not_every"}));
+    let each = call("sequential", "db.each(999)")["on_every_iteration"][0].clone();
+    assert_eq!(each["called"], json!({"known": "every"}));
+}
+
+/// The origin walk decides each question once: a chain of thousands of wrappers each of the one
+/// before, a list filled by appends in each of a thousand loops, and a phi of sixty branches each
+/// choosing a different parameter (as many as the IR budget models with their phis).
+#[test]
+fn item_origins_decide_each_question_once() {
+    let wrappers = 3000;
+    let mut lines = vec!["def chain(rows):".to_owned(), "    x0 = rows".to_owned()];
+    lines.extend((1..=wrappers).map(|i| format!("    x{i} = sorted(x{})", i - 1)));
+    lines.push(format!("    for y in x{wrappers}:"));
+    lines.push("        pass".to_owned());
+    lines.push(String::new());
+    lines.push("def filled(rows):".to_owned());
+    lines.push("    out = []".to_owned());
+    for _ in 0..1000 {
+        lines.push("    for r in rows:".to_owned());
+        lines.push("        out.append(r)".to_owned());
+    }
+    lines.push("    for y in out:".to_owned());
+    lines.push("        pass".to_owned());
+    lines.push(String::new());
+    let params: Vec<String> = (0..60).map(|i| format!("p{i}")).collect();
+    lines.push(format!("def chosen(flag, {}):", params.join(", ")));
+    lines.push("    xs = p0".to_owned());
+    for (i, p) in params[1..].iter().enumerate() {
+        lines.push(format!("    if flag == {i}:"));
+        lines.push(format!("        xs = {p}"));
+    }
+    lines.push("    for y in xs:".to_owned());
+    lines.push("        pass".to_owned());
+    let p = Project::new("bounds_item_origins");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let facts = dump_facts_within(&p, Duration::from_secs(20));
+    let last_origin = |qualname: &str| -> Value {
+        let f = facts["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["qualname"] == qualname)
+            .unwrap();
+        f["loops"].as_array().unwrap().last().unwrap()["origin"].clone()
+    };
+    let one = |source: &str| json!({"known": [{"source": source, "carries": "items"}]});
+    assert_eq!(last_origin("chain"), one("param 0"));
+    assert_eq!(last_origin("filled"), one("param 0"));
+    assert_eq!(
+        last_origin("chosen")["known"].as_array().map(Vec::len),
+        Some(60)
+    );
+}
