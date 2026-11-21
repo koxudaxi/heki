@@ -33,6 +33,8 @@ DESIGN_HISTORY_AND_ADR.md
 """
 
 [project.theme]
+logo = "assets/heki-icon.png"
+favicon = "assets/favicon.png"
 features = [
   "content.code.copy",
   "content.code.annotate",
