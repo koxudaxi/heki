@@ -903,3 +903,338 @@ fn each_effect_has_its_own_help() {
         ]
     );
 }
+
+/// Each premise of the exact claims, established and not: every implementation of a call (two
+/// sinks, a class object, an instance's `__call__`, `super()`, a union, subclasses that alone
+/// define the method, a constructor through `cls`), the `with` statements whose managers never
+/// suppress (an instance of a catalogued class, the result of a catalogued function or method)
+/// and one that may, and the origins of a loop's items (a part of a parameter, the rows of a
+/// query, the lines of a file or of its text, directory entries, a count; a receiver's attribute
+/// and the target of a `with` are not established).
+const PREMISES: &str = r#"import os
+import sqlite3
+import threading
+import time
+from pathlib import Path
+
+import httpx
+import requests
+from sqlalchemy.engine import Engine
+
+
+class Repo:
+    def get(self, key):
+        raise NotImplementedError
+
+
+class Remote(Repo):
+    def get(self, key):
+        return requests.get(key)
+
+
+class Local(Repo):
+    def get(self, key):
+        return requests.post(key)
+
+
+class Factory:
+    @classmethod
+    def make(cls):
+        return cls.load()
+
+    @classmethod
+    def load(cls):
+        return requests.get("https://example.com")
+
+
+class Caller:
+    def __call__(self):
+        time.sleep(1)
+
+
+class Child(Remote):
+    def get(self, key):
+        return super().get(key)
+
+
+def with_lock(lock: threading.Lock):
+    with lock:
+        print("held")
+        time.sleep(1)
+
+
+def with_file(p):
+    with open(p) as f:
+        f.read()
+        time.sleep(1)
+
+
+def with_client(url):
+    with httpx.Client() as client:
+        print(client)
+        return requests.get(url)
+
+
+def with_unknown(manager):
+    with manager:
+        print("entered")
+        time.sleep(1)
+
+
+async def tp_two_sinks(r: Repo):
+    r.get("k")
+
+
+async def tp_class_object():
+    Factory.make()
+
+
+async def tp_instance_call(c: Caller):
+    c()
+
+
+async def tp_super(c: Child):
+    c.get("k")
+
+
+async def tp_managers(lock: threading.Lock, manager):
+    with_lock(lock)
+    with_file("x")
+    with_client("u")
+    with_unknown(manager)
+
+
+def per_part(conn: sqlite3.Connection, req):
+    for i in req.ids:
+        conn.execute("SELECT ?", (i,))
+
+
+def per_line(conn: sqlite3.Connection, p):
+    with open(p) as f:
+        for line in f:
+            conn.execute("SELECT ?", (line,))
+
+
+def per_entry(conn: sqlite3.Connection, root):
+    for name in os.listdir(root):
+        conn.execute("SELECT ?", (name,))
+
+
+def per_text_line(conn: sqlite3.Connection, p: Path):
+    for line in p.read_text().splitlines():
+        conn.execute("SELECT ?", (line,))
+
+
+def per_count(conn: sqlite3.Connection, ids):
+    for i in map(str, ids):
+        conn.execute("SELECT ?", (i,))
+
+
+class Store:
+    def save(self, conn, x):
+        raise NotImplementedError
+
+
+class SqlStore(Store):
+    def save(self, conn: sqlite3.Connection, x):
+        conn.execute("INSERT INTO a VALUES (?)", (x,))
+
+
+class OtherStore(Store):
+    def save(self, conn: sqlite3.Connection, x):
+        conn.executemany("INSERT INTO b VALUES (?)", [(x,)])
+
+
+def per_store(store: Store, conn, xs):
+    for x in xs:
+        store.save(conn, x)
+
+
+async def tp_union(r: Remote | Local):
+    r.get("k")
+
+
+class Built:
+    def __init__(self):
+        time.sleep(1)
+
+    @classmethod
+    def create(cls):
+        return cls()
+
+
+async def tn_subclass_constructed():
+    Built.create()
+
+
+class Plain:
+    pass
+
+
+class PlainSub(Plain):
+    def run(self):
+        time.sleep(1)
+
+
+async def tp_method_only_subclasses_define(p: Plain):
+    p.run()
+
+
+def with_connection(engine: Engine):
+    with engine.connect() as conn:
+        print(conn)
+        time.sleep(1)
+
+
+async def tp_method_manager(engine):
+    with_connection(engine)
+
+
+class Batch:
+    def run(self, conn: sqlite3.Connection):
+        for x in self.items:
+            conn.execute("SELECT ?", (x,))
+
+
+def per_row(conn: sqlite3.Connection):
+    for (i,) in conn.execute("SELECT id FROM t").fetchall():
+        conn.execute("SELECT ?", (i,))
+
+
+def per_open_line(conn: sqlite3.Connection, p):
+    for line in open(p):
+        conn.execute("SELECT ?", (line,))
+"#;
+
+#[test]
+fn exact_claims_establish_each_premise() {
+    let p = Project::new("exact_premises");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/premises.py", PREMISES);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111,EFF103,EFF113"]);
+    let got: Vec<(u64, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+                d["message"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (
+                72,
+                "EFF101",
+                "`get` always runs a blocking call on the event loop: `requests.get` (in `pkg.premises.Child.get`) or `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
+            ),
+            (
+                76,
+                "EFF101",
+                "`pkg.premises.Factory.make` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)"
+            ),
+            (
+                80,
+                "EFF101",
+                "`pkg.premises.Caller.__call__` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                84,
+                "EFF101",
+                "`pkg.premises.Child.get` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)"
+            ),
+            (
+                88,
+                "EFF101",
+                "`pkg.premises.with_lock` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                89,
+                "EFF101",
+                "`pkg.premises.with_file` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                90,
+                "EFF101",
+                "`pkg.premises.with_client` always runs the blocking call `requests.get` on the event loop (1 call down, on every path)"
+            ),
+            (
+                91,
+                "EFF111",
+                "`tp_managers` reaches the blocking call `time.sleep` on the event loop"
+            ),
+            (
+                96,
+                "EFF103",
+                "every iteration over a part of parameter `req` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                102,
+                "EFF113",
+                "`sqlite3.Connection.execute` runs a database query on every loop iteration"
+            ),
+            (
+                107,
+                "EFF103",
+                "every iteration over the entries of `os.listdir` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                112,
+                "EFF103",
+                "every iteration over the lines of the text of `pathlib.Path.read_text` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                117,
+                "EFF103",
+                "every iteration over parameter `ids` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                137,
+                "EFF103",
+                "every iteration over parameter `xs` sends a database statement: `sqlite3.Connection.executemany` (in `pkg.premises.OtherStore.save`) or `sqlite3.Connection.execute` (in `pkg.premises.SqlStore.save`)"
+            ),
+            (
+                141,
+                "EFF101",
+                "`get` always runs a blocking call on the event loop: `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Child.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
+            ),
+            (
+                154,
+                "EFF111",
+                "`tn_subclass_constructed` reaches the blocking call `time.sleep` on the event loop"
+            ),
+            (
+                167,
+                "EFF101",
+                "`pkg.premises.PlainSub.run` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                177,
+                "EFF101",
+                "`pkg.premises.with_connection` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                177,
+                "EFF111",
+                "`tp_method_manager` reaches the blocking call `sqlalchemy.engine.Engine.connect` on the event loop"
+            ),
+            (
+                183,
+                "EFF113",
+                "`sqlite3.Connection.execute` runs a database query on every loop iteration"
+            ),
+            (
+                188,
+                "EFF103",
+                "every iteration over the rows of `sqlite3.Cursor.fetchall` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                193,
+                "EFF103",
+                "every iteration over the lines of `builtins.open` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+        ]
+    );
+}
