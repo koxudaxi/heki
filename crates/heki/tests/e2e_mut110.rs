@@ -326,6 +326,12 @@ fn mut110_names_a_line_that_changes_the_callers_object_whenever_it_runs() {
     );
     assert_eq!(diags[1]["certainty"], "heuristic");
     assert_eq!(chain(&diags[1]), vec![(a.into(), 47)]);
+    // A per-file ignore leaves the file without reports.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"pkg/anchored.py\" = [\"MUT110\"] }\n",
+    );
+    assert!(diagnostics(&p, &[]).is_empty());
 }
 
 // ============================================================== defaults and `heki rule`

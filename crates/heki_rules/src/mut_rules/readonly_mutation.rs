@@ -447,14 +447,16 @@ impl Rule<'_, '_> {
         help: &str,
         chain: &[CallHop],
     ) -> Option<&'o mut Diagnostic> {
-        if !self.seen.insert((code, func.clone(), span, target.clone())) {
-            return None;
-        }
+        let first = self.seen.insert((code, func.clone(), span, target.clone()));
         let qualname = &func.qualname;
         let help = Some(help.to_owned());
-        self.cx.emit(
-            out, code, unit, span, qualname, target, message, help, chain,
-        )
+        first
+            .then(|| {
+                self.cx.emit(
+                    out, code, unit, span, qualname, target, message, help, chain,
+                )
+            })
+            .flatten()
     }
 }
 
