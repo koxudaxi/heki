@@ -604,3 +604,35 @@ fn many_shared_values_read_their_memo_writes_in_one_walk() {
     let reported = found.iter().filter(|d| d["rule_code"] == "MUT202").count();
     assert_eq!(reported, 3000, "{found:#?}");
 }
+
+/// A helper initializing thousands of attributes of its argument lazily, each under its own
+/// test (`if p.a0 is None: p.a0 = 0`): the walks that find what each test guards share the
+/// function's budget, past which no lazy initialization is recognized and the changes count.
+#[test]
+fn lazy_initializations_past_the_budget_count_as_changes() {
+    let mut lines = vec![
+        "from functools import lru_cache".to_owned(),
+        String::new(),
+        String::new(),
+        "@lru_cache(maxsize=None)".to_owned(),
+        "def config(name):".to_owned(),
+        "    return object()".to_owned(),
+        String::new(),
+        String::new(),
+        "def fill(p):".to_owned(),
+    ];
+    for i in 0..3000 {
+        lines.push(format!("    if p.a{i} is None:"));
+        lines.push(format!("        p.a{i} = {i}"));
+    }
+    lines.extend(["", "", "def use(name):", "    fill(config(name))"].map(str::to_owned));
+    let p = Project::new("bounds_many_lazy_initializations");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT202")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["use"], "{found:#?}");
+}

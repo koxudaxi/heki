@@ -292,40 +292,28 @@ pub fn attr_writes<'f>(
 
 /// The attributes of the objects `objects` holds that `f` initializes lazily, among the
 /// `written` ones, each with the blocks (by id) that only the "unset" outcome of one of its
-/// `None` / falsy tests leads to ([`guards::lazy_init_branches`]): every path from the entry to
-/// such a block runs through the branch (normal and exception edges).
+/// `None` / falsy tests leads to ([`guards::lazy_init_branches`], [`guards::dominated`]): every
+/// path from the entry to such a block runs through the branch (normal and exception edges).
+/// The walks share the function's budget ([`guards::Cells`]); past it none is kept.
 fn lazy_init_blocks<'f>(
     f: &IrFunction,
     objects: &FxHashMap<VarId, u32>,
     written: &FxHashMap<&'f str, FxHashSet<u32>>,
 ) -> Vec<((u32, &'f str), Vec<bool>)> {
-    guards::lazy_init_branches(f)
-        .into_iter()
-        .filter_map(|b| {
-            let o = *objects.get(&b.obj)?;
-            let (attr, by) = written.get_key_value(b.attr.as_str())?;
-            by.contains(&o).then(|| {
-                let blocks = avoidable_from_entry(f, b.init).into_iter().map(|a| !a);
-                ((o, *attr), blocks.collect())
-            })
-        })
-        .collect()
-}
-
-/// Membership (by block id) of the blocks a path from the entry of `f` reaches without running
-/// through `d` (normal and exception edges).
-fn avoidable_from_entry(f: &IrFunction, d: BlockId) -> Vec<bool> {
-    let mut seen = vec![false; f.blocks.len()];
-    let mut stack = vec![BlockId(0)];
-    while let Some(cur) = stack.pop() {
-        if cur == d || std::mem::replace(&mut seen[cur.0 as usize], true) {
-            continue;
+    let mut cells = guards::Cells::of(f);
+    let mut found = Vec::new();
+    let branches = guards::lazy_init_branches(f).into_iter().filter_map(|b| {
+        let o = *objects.get(&b.obj)?;
+        let (attr, by) = written.get_key_value(b.attr.as_str())?;
+        by.contains(&o).then_some(((o, *attr), b.init))
+    });
+    for (held, init) in branches {
+        found.push((held, guards::dominated(f, init, &mut cells)));
+        if cells.spent() {
+            return Vec::new();
         }
-        let block = f.block(cur);
-        stack.extend(block.terminator.successors());
-        stack.extend(block.exc_target);
     }
-    seen
+    found
 }
 
 /// The blocks of `f` with the points that invalidate or read a cached property of its own

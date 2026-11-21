@@ -618,10 +618,10 @@ const MAX_REGION_CELLS: usize = 250_000;
 
 /// The cells left of a function's budget ([`REGION_CELLS_PER_SOURCE_BYTE`]); `None` once a
 /// walk needed more.
-struct Cells(Option<usize>);
+pub(crate) struct Cells(Option<usize>);
 
 impl Cells {
-    fn of(f: &IrFunction) -> Self {
+    pub(crate) fn of(f: &IrFunction) -> Self {
         let source_bytes = f.span.end.saturating_sub(f.span.start) as usize;
         Self(Some(
             (source_bytes * REGION_CELLS_PER_SOURCE_BYTE).clamp(MIN_REGION_CELLS, MAX_REGION_CELLS),
@@ -629,12 +629,12 @@ impl Cells {
     }
 
     /// Take `n` cells; `false` once the budget is spent.
-    fn take(&mut self, n: usize) -> bool {
+    pub(crate) fn take(&mut self, n: usize) -> bool {
         self.0 = self.0.and_then(|left| left.checked_sub(n));
         self.0.is_some()
     }
 
-    fn spent(&self) -> bool {
+    pub(crate) fn spent(&self) -> bool {
         self.0.is_none()
     }
 }
@@ -1326,7 +1326,7 @@ fn same_values(f: &IrFunction, root: VarId) -> FxHashSet<VarId> {
 /// Membership (by block id) of the blocks every path from the entry to which runs through `d`
 /// (normal and exception edges); it takes two cells per block of the function, for its walks
 /// and the membership kept.
-fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
+pub(crate) fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
     cells.take(2 * f.blocks.len());
     let reach = |start: BlockId, avoid: Option<BlockId>| {
         let mut seen = vec![false; f.blocks.len()];
