@@ -1279,7 +1279,9 @@ The call side of `write-owners`.
   passes it when heki establishes that the argument bound to the parameter is that constant (a
   literal, a string constant bound once, such as a module's `Final` name, or a module's number or
   boolean bound once, as `EFF101` evaluates them: `LIMIT = 0`, also imported, unless a module
-  rebinds it): passed by keyword (also to a class without a project `__init__`, a dataclass or a
+  rebinds it; an imported name the importing module binds again in a function declaring it
+  `global`, in another module-level store, or with `del`, or that a star import may rebind, is no
+  constant there): passed by keyword (also to a class without a project `__init__`, a dataclass or a
   pydantic model), by position where every function the call may run binds that position to the
   parameter, or left out where every such function's default is the value and only `True`,
   `False`, `None`, `0`, or `""` (heki keeps defaults by class and truthiness). A keyword binds as
@@ -3378,7 +3380,9 @@ Each step of the chain is established, not assumed:
   changes does not), and no argument that may come from the caller can make it return at once
   (`time.sleep(delay)` with `delay` a parameter is not established). A literal argument, and
   a module constant bound once to one (`PAUSE = 0`, also imported from another module, unless
-  a module rebinds it), is evaluated: `time.sleep(PAUSE)` does not wait. An argument heki cannot
+  a module rebinds it or the importing module binds the name again: a `global` store or `del`
+  in a function, another module-level store, a star import), is evaluated: `time.sleep(PAUSE)`
+  does not wait. An argument heki cannot
   evaluate counts as one the call waits on (assumption R6), the URL or name a database
   connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
   connection opened from a value heki does not know waits. `sqlite3.connect` is the one
@@ -4064,7 +4068,8 @@ A target ending in an argument list names only the calls passing those constants
 `container_flags(kind="dict")` is `container_flags(dt, "dict")`, not `container_flags(dt, "list")`.
 A call passes a constant when heki establishes it: the argument is a literal, a string constant
 bound once (a module's `Final` name), or a module's number or boolean bound once (`LIMIT = 0`),
-passed by keyword, by position where every function the call may run binds that position to the
+also imported unless the importing module binds the name again (a `global` store or `del` in a
+function, another module-level store, a star import), passed by keyword, by position where every function the call may run binds that position to the
 parameter, or left out where every such function's default is `True`, `False`, `None`, `0`, or
 `""` and the value. A keyword binds as Python binds it: never a positional-only parameter, and one
 naming no parameter passes its value under its name into `**kwargs`. A call that raises

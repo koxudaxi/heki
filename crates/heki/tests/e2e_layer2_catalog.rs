@@ -2910,3 +2910,53 @@ fn catalog_argument_cases_read_module_constants_bound_once() {
         ]
     );
 }
+
+/// A module constant imported by a module that binds the name again: in a function declaring it
+/// `global`, in a second module-level store, or by deleting it. The import no longer decides
+/// the value, so the call waits on it; another module binding a global of the same name of its
+/// own changes nothing.
+#[test]
+fn catalog_argument_cases_read_no_imported_constant_the_module_binds_again() {
+    let sleeps = |head: &str| {
+        format!(
+            "import time\n\nfrom app.settings import QUIET\n{head}\n\nasync def handler():\n    time.sleep(QUIET)\n"
+        )
+    };
+    let p = Project::new("cat_rebound_imports");
+    p.write("app/__init__.py", "")
+        .write("app/settings.py", SETTINGS)
+        .write(
+            "app/unrelated.py",
+            "QUIET = 3\n\n\ndef louder():\n    global QUIET\n    QUIET = 4\n",
+        )
+        .write(
+            "app/flips.py",
+            &sleeps("\n\ndef louder():\n    global QUIET\n    QUIET = 1\n"),
+        )
+        .write(
+            "app/twice.py",
+            &sleeps("import os\n\nif os.environ.get(\"X\"):\n    QUIET = 1\n"),
+        )
+        .write(
+            "app/deleted.py",
+            &sleeps("\n\ndef drop():\n    global QUIET\n    del QUIET\n"),
+        )
+        .write("app/kept.py", &sleeps(""));
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<(String, String)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let at = |path: &str| (path.to_owned(), "EFF101".to_owned());
+    assert_eq!(
+        got,
+        vec![at("app/deleted.py"), at("app/flips.py"), at("app/twice.py")]
+    );
+}

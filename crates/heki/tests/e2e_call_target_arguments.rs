@@ -612,3 +612,108 @@ fn a_module_constant_passes_its_value() {
         ]
     );
 }
+
+const REBINDING_FLIPPED: &str = r#"from pkg.settings import FLAG
+from pkg.sig import levels
+
+
+def flip():
+    global FLAG
+    FLAG = False
+
+
+def caller():
+    flip()
+    levels(kind=FLAG)
+"#;
+
+const REBINDING_TWICE: &str = r#"import os
+
+from pkg.settings import LIMIT
+from pkg.sig import levels
+
+if os.environ.get("X"):
+    LIMIT = 1
+
+
+def caller():
+    levels(level=LIMIT)
+"#;
+
+const REBINDING_DELETED: &str = r#"from pkg.settings import LIMIT
+from pkg.sig import levels
+
+
+def drop():
+    global LIMIT
+    del LIMIT
+
+
+def caller():
+    levels(level=LIMIT)
+"#;
+
+const REBINDING_STARRED: &str = r#"from pkg.settings import LIMIT
+from pkg.other import *
+from pkg.sig import levels
+
+
+def caller():
+    levels(level=LIMIT)
+"#;
+
+#[test]
+fn an_imported_constant_its_module_binds_again_passes_nothing() {
+    let user = |module: &str, name: &str, argument: &str| {
+        format!(
+            "from {module} import {name}\nfrom pkg.sig import levels\n\n\ndef caller():\n    levels({argument}={name})\n"
+        )
+    };
+    let p = Project::new("call_target_arguments_rebound_imports");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"levels(kind=True)\", \"levels(level=0)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/sig.py",
+        "def levels(kind=None, level=None):\n    return level\n",
+    )
+    .write("pkg/settings.py", "FLAG = True\nLIMIT = 0\n")
+    .write(
+        "pkg/other.py",
+        "LIMIT = 5\n\n\ndef bump():\n    global LIMIT\n    LIMIT = 6\n",
+    )
+    .write("pkg/flipped.py", REBINDING_FLIPPED)
+    .write("pkg/twice.py", REBINDING_TWICE)
+    .write("pkg/deleted.py", REBINDING_DELETED)
+    .write("pkg/starred.py", REBINDING_STARRED)
+    .write("pkg/kept.py", &user("pkg.settings", "LIMIT", "level"))
+    .write(
+        "pkg/relay/__init__.py",
+        "from pkg.settings import FLAG\n\n\ndef reset():\n    global FLAG\n    FLAG = False\n",
+    )
+    .write("pkg/relayed.py", &user("pkg.relay", "FLAG", "kind"))
+    .write("pkg/plain_relay/__init__.py", "from pkg.settings import FLAG\n")
+    .write("pkg/plain_relayed.py", &user("pkg.plain_relay", "FLAG", "kind"));
+    let call = |path: &str, target: &str| {
+        report(
+            path,
+            6,
+            5,
+            "MUT204",
+            &format!("`caller` calls `levels({target})` outside the call owners of `c`"),
+        )
+    };
+    // Not matched: a name the importing module binds again in a function (`global`), in a second
+    // module-level store, or deletes, one a star import may rebind, and one a module re-exporting
+    // it binds again. Another module binding a global of the same name of its own changes
+    // nothing here.
+    assert_eq!(
+        reports(&p),
+        vec![
+            call("pkg/kept.py", "level=0"),
+            call("pkg/plain_relayed.py", "kind=True"),
+        ]
+    );
+}

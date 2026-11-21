@@ -4706,3 +4706,48 @@ fn lsp_diagnostics_equal_a_full_check_while_package_paths_change() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     s.lsp.stop(true);
 }
+
+// A constant passed by keyword through a package re-exporting it: whether the package binds the
+// name again (`ModuleDecls::rebound_imports`) decides whether the import still holds the
+// constant there.
+const RELAYED_USE: &str = "from pkg.relay import LIMIT\nfrom pkg.sig import levels\n\n\ndef use():\n    return levels(level=LIMIT)\n";
+const RELAY_REBINDS: &str =
+    "from pkg.limits import LIMIT\n\n\ndef reset():\n    global LIMIT\n    LIMIT = 3\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_a_re_export_its_package_binds_again() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/sig.py", MARKED_LEVELS.to_owned()),
+        ("pkg/limits.py", "LIMIT = 0\n".to_owned()),
+        (
+            "pkg/relay/__init__.py",
+            "from pkg.limits import LIMIT\n".to_owned(),
+        ),
+        ("pkg/use.py", RELAYED_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_rebound_imports", MARKED_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the package re-exporting the constant binds the name again",
+            vec![save("pkg/relay/__init__.py", RELAY_REBINDS)],
+        )
+        .absent(reported),
+        Step::new(
+            "it only re-exports it again",
+            vec![save(
+                "pkg/relay/__init__.py",
+                "from pkg.limits import LIMIT\n",
+            )],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}

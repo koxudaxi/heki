@@ -647,6 +647,27 @@ fn module_constants_through_imports_module_bodies_and_tuples() {
     );
 }
 
+#[test]
+fn an_imported_display_its_module_binds_again_is_no_constant() {
+    // Reported: a list another module fixes, read where the importing module binds the name
+    // again in a function. Not reported: the same read in a module that does not.
+    let user = |extra: &str| {
+        format!(
+            "from pkg.defs import STATUS_ORDER\nfrom pkg.metrics import METRICS\n{extra}\n\ndef by_status():\n    return [m.name for s in STATUS_ORDER for m in METRICS if m.status == s]\n"
+        )
+    };
+    let p = Project::new("sizes_rebound_imports");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/defs.py", DEFS)
+        .write("pkg/metrics.py", "METRICS = load()\n")
+        .write(
+            "pkg/reorders.py",
+            &user("\n\ndef reorder(order):\n    global STATUS_ORDER\n    STATUS_ORDER = order\n"),
+        )
+        .write("pkg/keeps.py", &user(""));
+    assert_both_versions(&p, "OPT113", &[("pkg/reorders.py:11", "OPT113")]);
+}
+
 const SLICED: &str = r#"import sqlite3
 
 NAMES = ("b", "a", "c")
