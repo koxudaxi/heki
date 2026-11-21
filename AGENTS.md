@@ -44,6 +44,14 @@ When a document and the implementation disagree, update the document in the same
      `# heki: ignore[...]` (primary) and `# noqa:` (compatible); exit codes are `0 / 1 / 2`.
 7. **English only**: everything in the repository (code, comments, documentation, tests, and
    commit messages) is written in English.
+8. **Bounded walks (`heki_ir::walk`)**:
+   - Walks over IR ids, the call graph, or the class hierarchy go through `heki_ir::walk`: its
+     engines keep each answer per value, join facts with a pass limit, end on cycles, and spend
+     one budget per owner.
+   - A question an analysis cannot decide answers `Answer::Open`, and each use states what that
+     means to it: a rewrite takes it as "no rewrite", an exact report as "no finding".
+   - `crates/heki/tests/walks.allow`, checked by `crates/heki/tests/architecture_walks.rs`, only
+     shrinks.
 
 ## 3. Required verification commands
 ```bash
@@ -95,9 +103,9 @@ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonsche
   rule and every new cross-file fact gets a step in `crates/heki/tests/lsp_oracle.rs`, which
   compares the server with `heki check` after each step of an editing session.
 - A new walk, fixpoint, or per-function state follows "Analysis cost" in
-  `docs/development.md`: answers kept per value, fixpoints that join and have a pass limit,
-  budgets proportional to the source, and a shape in `crates/heki/tests/e2e_analysis_bounds.rs`
-  for each bound. Such a change is also run over a large corpus under a memory cap and a timeout
+  `docs/development.md`: it goes through the engines of `heki_ir::walk` (answers kept per value,
+  fixpoints that join and have a pass limit, a budget per owner), and comes with a shape in
+  `crates/heki/tests/e2e_analysis_bounds.rs` for each bound. Such a change is also run over a large corpus under a memory cap and a timeout
   before it is merged.
 - Rules the Stage 0-A measurements rejected (`MUT102a/b`, `DATA102`, `EFF104`, `MUT104` for
   `ALL_CAPS` constants, `MUT105`, `EFF108`) are not revived without new evidence.

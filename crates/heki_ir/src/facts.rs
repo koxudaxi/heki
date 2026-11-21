@@ -21,6 +21,13 @@
 //! - `while len(acc) < N` (also one `and` operand) with a constant `N` of at most
 //!   [`LEN_CAP_MAX`] caps `acc` ([`crate::NaturalLoop::len_caps`]).
 
+mod origin;
+mod paths;
+
+pub use origin::{Carries, ItemOrigin, ItemOrigins, ItemSource};
+pub use paths::{Decided, ModuleBindings, Must, PathReader, Paths, Progress};
+
+use crate::walk::{Answer, FnShape};
 use crate::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator,
@@ -120,6 +127,23 @@ const SAME_ITEMS: &[&str] = &[
     "dict",
 ];
 
+/// What a builtin wrapper of iterables yields ([`FnIndex::item_step`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemStep {
+    /// `range(...)` of these (unstarred) arguments.
+    Range(Vec<VarId>),
+    /// The items of one iterable, or pairs holding them: `list`, `tuple`, `set`, `frozenset`,
+    /// `dict`, `iter`, `reversed`, `sorted`, `enumerate`, and `.items()` / `.keys()` /
+    /// `.values()`.
+    Same(VarId),
+    /// Some of the items of one iterable: `filter`.
+    Kept(VarId),
+    /// One result per item of one iterable: `map` of one.
+    Mapped(VarId),
+    /// Tuples of the items of these (unstarred) iterables, as many as the shortest yields: `zip`.
+    Zip(Vec<VarId>),
+}
+
 /// A display (or several, merged by control flow) that nothing grows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmallDisplay {
@@ -170,6 +194,11 @@ pub struct ModuleConstants {
     /// ...)`): a tuple is immutable too. Aliases and items share the texts.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub str_tuples: BTreeMap<String, Arc<[Arc<str>]>>,
+    /// Boolean constants (`_IS_SYNC = False`), and `typing.TYPE_CHECKING`, which is false
+    /// whenever the code runs: a name bound to it by `from typing import TYPE_CHECKING`, and
+    /// `t.TYPE_CHECKING` for a name `t` bound to `import typing` (the dotted key).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bools: BTreeMap<String, bool>,
     /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
@@ -232,6 +261,10 @@ pub struct FnIndex<'a> {
     measured: OnceCell<FxHashSet<VarId>>,
     /// The length caps the branches of `f` establish ([`Self::guarded_len`]).
     guards: OnceCell<Vec<LenGuard>>,
+    /// The branches the code of `f` decides ([`Self::decided`]).
+    decided: OnceCell<Decided>,
+    /// The tables of `f` the walks of these facts read.
+    shape: FnShape<'a>,
     /// The fixed trip counts `f.loops` record were decided with these constants (see
     /// [`Self::redeciding_trips`]).
     recorded_trips: bool,
@@ -370,8 +403,15 @@ impl<'a> FnIndex<'a> {
             preds: OnceCell::new(),
             measured: OnceCell::new(),
             guards: OnceCell::new(),
+            decided: OnceCell::new(),
+            shape: FnShape::new(f),
             recorded_trips: true,
         }
+    }
+
+    /// The tables of the function the walks of these facts read, for the owner to share.
+    pub fn shape(&self) -> &FnShape<'a> {
+        &self.shape
     }
 
     /// This index with the fixed trip counts `f.loops` record decided again from its
@@ -706,7 +746,7 @@ impl<'a> FnIndex<'a> {
         let [arg] = args else {
             return (args.is_empty() && name != "sorted").then_some((kind, 0));
         };
-        let n = self.iter_bound_depth(*arg, &mut |_| None, depth + 1)?;
+        let n = self.iter_bound_depth(*arg, &mut |_| None, depth + 1, SMALL_MAX)?;
         Some((kind, n))
     }
 
@@ -1155,14 +1195,18 @@ impl<'a> FnIndex<'a> {
     /// iterable, `.items()` / `.keys()` / `.values()`). `leaf` decides a load of a global or an
     /// attribute this module's constants do not cover (the Advisory lane knows other modules).
     pub fn iter_bound(&self, v: VarId, leaf: &mut dyn FnMut(&Inst) -> Option<u32>) -> Option<u32> {
-        self.iter_bound_depth(v, leaf, 0)
+        self.iter_bound_depth(v, leaf, 0, SMALL_MAX)
     }
 
+    /// [`Self::iter_bound`] up to `cap` items. Past [`SMALL_MAX`] it also counts what holds any
+    /// number of items the code fixes: a slice by constant bounds, a tuple display, a list or set
+    /// display nothing grows, and a module's string and string-tuple constants.
     fn iter_bound_depth(
         &self,
         v: VarId,
         leaf: &mut dyn FnMut(&Inst) -> Option<u32>,
         depth: u32,
+        cap: u32,
     ) -> Option<u32> {
         if depth > MAX_NESTED_SIZES {
             return None;
@@ -1171,13 +1215,74 @@ impl<'a> FnIndex<'a> {
             return Some(n);
         }
         let inst = self.def_inst(v)?;
-        let small = |n: usize| u32::try_from(n).ok().filter(|n| *n <= SMALL_MAX);
+        let within = |n: usize| u32::try_from(n).ok().filter(|n| *n <= cap);
+        if let Some((step, built)) = self.item_step(inst) {
+            if let (Some(constructor), Some(dst)) = (built, inst.kind.dst()) {
+                self.not_grown(dst, constructor)?;
+            }
+            return match step {
+                ItemStep::Range(args) => {
+                    let ints: Option<Vec<i64>> = args.iter().map(|a| self.const_int(*a)).collect();
+                    range_len(&ints?).and_then(|n| within(n as usize))
+                }
+                ItemStep::Same(x) | ItemStep::Kept(x) | ItemStep::Mapped(x) => {
+                    self.iter_bound_depth(x, leaf, depth + 1, cap)
+                }
+                ItemStep::Zip(args) => args
+                    .into_iter()
+                    .filter_map(|a| self.iter_bound_depth(a, leaf, depth + 1, cap))
+                    .min(),
+            };
+        }
+        let past_small = cap > SMALL_MAX;
         match &inst.kind {
-            InstKind::Copy { src, .. } => self.iter_bound_depth(*src, leaf, depth + 1),
+            InstKind::Copy { src, .. } => self.iter_bound_depth(*src, leaf, depth + 1, cap),
             InstKind::Const {
                 literal: ConstLiteral::Str(s),
                 ..
-            } => small(s.chars().count()),
+            } => within(s.chars().count()),
+            InstKind::SubscriptLoad {
+                index,
+                is_slice: true,
+                ..
+            } if past_small && !self.grows(&[v], &[], None) => self.slice_len(*index),
+            InstKind::AllocBuiltin { dst, kind, elems }
+                if past_small
+                    && (0..elems.len()).all(|i| !self.f.is_starred(*dst, i))
+                    && (is_immutable_kind(*kind) || !self.grows(&[v], &[*kind], None)) =>
+            {
+                within(elems.len())
+            }
+            InstKind::LoadGlobal {
+                name,
+                is_lazy_import: false,
+                ..
+            } if past_small
+                && !self.module.dynamic
+                && (self.module.strs.contains_key(name)
+                    || self.module.str_tuples.contains_key(name)) =>
+            {
+                let n = self.module.strs.get(name).map_or_else(
+                    || self.module.str_tuples.get(name).map_or(0, |t| t.len()),
+                    |s| s.chars().count(),
+                );
+                within(n)
+            }
+            // A module body reads an imported name as a copy of its `Import`.
+            InstKind::LoadGlobal { .. }
+            | InstKind::LoadName { .. }
+            | InstKind::AttrLoad { .. }
+            | InstKind::Import { .. } => leaf(inst).filter(|n| *n <= cap),
+            _ => None,
+        }
+    }
+
+    /// The builtin wrapper `inst` calls on iterables, with what it takes of them: the builtin
+    /// that the module does not rebind, called in a form whose items the result follows. The
+    /// constructor named second builds a new container whose items stay its input's only while
+    /// nothing grows it ([`Self::not_grown`]).
+    fn item_step(&self, inst: &Inst) -> Option<(ItemStep, Option<&'static str>)> {
+        match &inst.kind {
             InstKind::Call {
                 dst,
                 callee_var,
@@ -1193,33 +1298,28 @@ impl<'a> FnIndex<'a> {
                         .iter()
                         .all(|(k, _)| k.as_deref().is_some_and(|k| allowed.contains(&k)))
                 };
-                match name {
+                let step = match name {
                     "range" if kwargs.is_empty() && (1..=3).contains(&args.len()) => {
-                        let ints: Option<Vec<i64>> = (0..args.len())
-                            .map(|i| plain(i).and_then(|a| self.const_int(a)))
-                            .collect();
-                        range_len(&ints?).and_then(|n| small(n as usize))
+                        ItemStep::Range((0..args.len()).map(plain).collect::<Option<_>>()?)
                     }
                     "enumerate" if args.len() <= 2 && keywords(&["start"]) => {
-                        self.iter_bound_depth(plain(0)?, leaf, depth + 1)
+                        ItemStep::Same(plain(0)?)
                     }
                     "sorted" if args.len() == 1 && keywords(&["key", "reverse"]) => {
-                        self.not_grown(*dst, "sorted")?;
-                        self.iter_bound_depth(plain(0)?, leaf, depth + 1)
+                        return Some((ItemStep::Same(plain(0)?), Some("sorted")));
                     }
                     n if SAME_ITEMS.contains(&n) && args.len() == 1 && kwargs.is_empty() => {
-                        self.not_grown(*dst, n)?;
-                        self.iter_bound_depth(plain(0)?, leaf, depth + 1)
+                        let constructor = SAME_ITEMS.iter().find(|c| **c == n).copied();
+                        return Some((ItemStep::Same(plain(0)?), constructor));
                     }
-                    "map" | "filter" if args.len() == 2 && kwargs.is_empty() => {
-                        self.iter_bound_depth(plain(1)?, leaf, depth + 1)
+                    "map" if args.len() == 2 && kwargs.is_empty() => ItemStep::Mapped(plain(1)?),
+                    "filter" if args.len() == 2 && kwargs.is_empty() => ItemStep::Kept(plain(1)?),
+                    "zip" if keywords(&["strict"]) => {
+                        ItemStep::Zip((0..args.len()).filter_map(plain).collect())
                     }
-                    "zip" if keywords(&["strict"]) => (0..args.len())
-                        .filter_map(plain)
-                        .filter_map(|a| self.iter_bound_depth(a, leaf, depth + 1))
-                        .min(),
-                    _ => None,
-                }
+                    _ => return None,
+                };
+                Some((step, None))
             }
             InstKind::MethodCall {
                 recv,
@@ -1231,13 +1331,8 @@ impl<'a> FnIndex<'a> {
                 && kwargs.is_empty()
                 && matches!(method.as_str(), "items" | "keys" | "values") =>
             {
-                self.iter_bound_depth(*recv, leaf, depth + 1)
+                Some((ItemStep::Same(*recv), None))
             }
-            // A module body reads an imported name as a copy of its `Import`.
-            InstKind::LoadGlobal { .. }
-            | InstKind::LoadName { .. }
-            | InstKind::AttrLoad { .. }
-            | InstKind::Import { .. } => leaf(inst).filter(|n| *n <= SMALL_MAX),
             _ => None,
         }
     }
@@ -1337,12 +1432,12 @@ impl<'a> FnIndex<'a> {
     }
 
     /// How many times the `while` loop `lp` runs at most when it counts with an integer the code
-    /// fixes, if at most [`SMALL_MAX`] times: its test compares the counter with a constant
+    /// fixes, if at most `cap` times: its test compares the counter with a constant
     /// (`while i < 6:`, `while 0 <= n:`) or tests the counter itself (`while tries:`, counting
     /// down to zero), the counter starts at a constant, and every iteration that goes on steps it
     /// by one constant (`i += 1` on each path back to the test). The test's false side leaves the
     /// loop, so an operand of `and` bounds the loop and one of `or` does not.
-    pub fn counted_trips(&self, lp: &NaturalLoop) -> Option<u32> {
+    pub fn counted_trips(&self, lp: &NaturalLoop, cap: u32) -> Option<u32> {
         let header = self.f.block(lp.header);
         let cond = match header.terminator {
             Terminator::Branch {
@@ -1365,7 +1460,8 @@ impl<'a> FnIndex<'a> {
             _ => return None,
         };
         let body: FxHashSet<BlockId> = lp.body.iter().copied().collect();
-        let (mut value, step) = self.counter(&body, lp.header, counter)?;
+        let (start, step) = self.counter(&body, lp.header, counter)?;
+        let mut value = start;
         // Run the test and the step as the loop does, up to one trip past a small count.
         for trips in 0..=SMALL_MAX {
             let order = if counter_first {
@@ -1378,7 +1474,12 @@ impl<'a> FnIndex<'a> {
             }
             value = value.checked_add(step)?;
         }
-        None
+        if cap <= SMALL_MAX {
+            return None;
+        }
+        // The counter as the left operand: `limit < i` tests `i > limit`.
+        let op = if counter_first { op } else { mirrored(op) };
+        counted_trips_past(start, step, limit, op).filter(|n| *n <= cap)
     }
 
     /// The start and the step of the counter `v` of the loop with `header` and `body`: a phi of
@@ -1453,27 +1554,53 @@ impl<'a> FnIndex<'a> {
             // A retry loop over a fixed range records no count.
             LoopBound::ConstSmall(_) | LoopBound::RetryPattern | LoopBound::Unbounded => {
                 self.trips.borrow_mut().insert(li, None);
-                self.fixed_trip(lp, &mut |_| None)
+                self.fixed_trip(lp, &mut |_| None, SMALL_MAX)
             }
         };
         self.trips.borrow_mut().insert(li, trips);
         trips
     }
 
-    /// The trip count the code fixes for the `for` loop `lp`: what its iterable yields
-    /// ([`Self::iter_bound`], `leaf` deciding loads of globals and attributes), or the length a
-    /// test every path to the loop passes caps it at ([`Self::guarded_len`]).
+    /// The trip count the code fixes for the `for` loop `lp`, up to `cap`: what its iterable
+    /// yields ([`Self::iter_bound`], `leaf` deciding loads of globals and attributes), or the
+    /// length a test every path to the loop passes caps it at ([`Self::guarded_len`]).
     pub fn fixed_trip(
         &self,
         lp: &NaturalLoop,
         leaf: &mut dyn FnMut(&Inst) -> Option<u32>,
+        cap: u32,
     ) -> Option<u32> {
         let iterable = self.loop_iterable(lp)?;
         let made_iter = self.f.block(lp.header).insts.first()?.kind.operands();
         // The `MakeIter` of the header's `IterNext`, before the loop.
         let (at, _) = self.f.def_inst(*made_iter.first()?)?;
-        self.iter_bound(iterable, leaf)
-            .or_else(|| self.guarded_len(iterable, at, &lp.body))
+        self.iter_bound_depth(iterable, leaf, 0, cap)
+            .or_else(|| self.guarded_len(iterable, at, &lp.body, cap))
+    }
+
+    /// The most times the loop `lp` runs, when the code fixes it at any count: what its
+    /// iterable yields (past [`SMALL_MAX`] too: `range(1000)`, `rows[:100]`, `zip(rows,
+    /// range(50))`, a display or string constant of any length), a length test every path to
+    /// the loop passes (up to [`LEN_CAP_MAX`]), or the counter a `while` loop steps
+    /// ([`Self::counted_trips`]). `Open` when nothing these facts read fixes it. No claim rests
+    /// on a size: an open count only leaves the loop data-sized to the rules that read it so.
+    /// `leaf` decides loads of globals and attributes.
+    pub fn fixed_trips(
+        &self,
+        lp: &NaturalLoop,
+        leaf: &mut dyn FnMut(&Inst) -> Option<u32>,
+    ) -> Answer<u32> {
+        if let LoopBound::ConstSmall(n) = lp.bound
+            && self.recorded_trips
+        {
+            return Answer::Known(n);
+        }
+        let found = if self.loop_iterable(lp).is_some() {
+            self.fixed_trip(lp, leaf, u32::MAX)
+        } else {
+            self.counted_trips(lp, u32::MAX)
+        };
+        found.map_or(Answer::Open, Answer::Known)
     }
 
     /// The most items `v` holds in the block `at`, and while the blocks `during` run, by the
@@ -1482,7 +1609,7 @@ impl<'a> FnIndex<'a> {
     /// comparison chains (`if not 1 <= len(v) <= 6: raise ...`), when nothing on the way to `at`
     /// or in `during` (a loop over `v`, whose iterator sees what the body appends) grows `v`;
     /// what happens to it after (`return {"cards": cards}`) leaves the length there as it is.
-    fn guarded_len(&self, v: VarId, at: BlockId, during: &[BlockId]) -> Option<u32> {
+    fn guarded_len(&self, v: VarId, at: BlockId, during: &[BlockId], cap: u32) -> Option<u32> {
         let v = self.copied_from(v);
         let measured = self.measured.get_or_init(|| {
             self.f
@@ -1498,7 +1625,7 @@ impl<'a> FnIndex<'a> {
         let bound = self
             .len_guards()
             .iter()
-            .filter(|g| g.var == v && g.bound <= SMALL_MAX && self.dominates(g.edge_to, at))
+            .filter(|g| g.var == v && g.bound <= cap && self.dominates(g.edge_to, at))
             .map(|g| g.bound)
             .min()?;
         let mut on_the_way = self.reaching(at);
@@ -1901,6 +2028,39 @@ fn waits_for_time(f: &IrFunction, inst: &Inst) -> bool {
 
 /// Whether integers in `order` pass the comparison `op` (`None` for a test of identity or
 /// membership).
+/// The operator that tests `b <op'> a` exactly when `a <op> b` holds.
+fn mirrored(op: CompareOpKind) -> CompareOpKind {
+    match op {
+        CompareOpKind::Lt => CompareOpKind::Gt,
+        CompareOpKind::LtE => CompareOpKind::GtE,
+        CompareOpKind::Gt => CompareOpKind::Lt,
+        CompareOpKind::GtE => CompareOpKind::LtE,
+        symmetric => symmetric,
+    }
+}
+
+/// How many times a test `i <op> limit` holds for `i` = `start`, `start + step`, ... before it
+/// first fails, when the counter moves towards the limit so that it fails once and for all:
+/// `None` when it never fails or the operator does not order the counter.
+fn counted_trips_past(start: i64, step: i64, limit: i64, op: CompareOpKind) -> Option<u32> {
+    let (start, step, limit) = (i128::from(start), i128::from(step), i128::from(limit));
+    // The trips while `distance` stays at least zero, shrinking by `by` (> 0) per trip.
+    let while_non_negative = |distance: i128, by: i128| {
+        if distance < 0 { 0 } else { distance / by + 1 }
+    };
+    let trips = match op {
+        CompareOpKind::Lt if step > 0 => while_non_negative(limit - 1 - start, step),
+        CompareOpKind::LtE if step > 0 => while_non_negative(limit - start, step),
+        CompareOpKind::Gt if step < 0 => while_non_negative(start - limit - 1, -step),
+        CompareOpKind::GtE if step < 0 => while_non_negative(start - limit, -step),
+        CompareOpKind::NotEq if (limit - start) % step == 0 && (limit - start) / step >= 0 => {
+            (limit - start) / step
+        }
+        _ => return None,
+    };
+    u32::try_from(trips).ok()
+}
+
 fn compare_holds(op: CompareOpKind, order: std::cmp::Ordering) -> Option<bool> {
     Some(match op {
         CompareOpKind::Eq => order.is_eq(),
@@ -2056,6 +2216,7 @@ fn module_constants(
     let mut ints = BTreeMap::new();
     let mut strs = BTreeMap::new();
     let mut str_tuples = BTreeMap::new();
+    let mut bools = BTreeMap::new();
     let mut shared = SharedTexts::default();
     let mut candidates: Vec<(String, SmallDisplay)> = Vec::new();
     for bb in &module.blocks {
@@ -2078,6 +2239,8 @@ fn module_constants(
             // size (both are immutable, whatever their uses).
             if let Some(n) = ix.const_int(*value) {
                 ints.insert(name.clone(), n);
+            } else if let Some((key, b)) = bool_constant(&ix, name, *value) {
+                bools.insert(key, b);
             } else if let Some(text) = shared.text(&ix, *value) {
                 candidates.extend(
                     immutable_display(BuiltinKind::Str, text.chars().count())
@@ -2097,6 +2260,7 @@ fn module_constants(
     out.ints = ints;
     out.strs = strs;
     out.str_tuples = str_tuples;
+    out.bools = bools;
     if candidates.is_empty() {
         return out;
     }
@@ -2140,6 +2304,34 @@ fn module_constants(
         .filter(|(n, _)| !changed.contains(n))
         .collect();
     out
+}
+
+/// The entry of [`ModuleConstants::bools`] the module global `name` bound to `value` makes: a
+/// `True` / `False` literal, `TYPE_CHECKING` imported from `typing` (or `typing_extensions`), or
+/// the module `typing` itself, whose `TYPE_CHECKING` the dotted key holds.
+fn bool_constant(ix: &FnIndex<'_>, name: &str, value: VarId) -> Option<(String, bool)> {
+    const TYPING: [&str; 2] = ["typing", "typing_extensions"];
+    match &ix.source(value)?.kind {
+        InstKind::Const {
+            literal: ConstLiteral::Bool(b),
+            ..
+        } => Some((name.to_owned(), *b)),
+        InstKind::Import {
+            module: Some(module),
+            name: imported,
+            is_lazy: false,
+            ..
+        } if TYPING.contains(&module.as_str()) && imported == "TYPE_CHECKING" => {
+            Some((name.to_owned(), false))
+        }
+        InstKind::Import {
+            module: None,
+            name: imported,
+            is_lazy: false,
+            ..
+        } if TYPING.contains(&imported.as_str()) => Some((format!("{name}.TYPE_CHECKING"), false)),
+        _ => None,
+    }
 }
 
 /// The functions that receive their first iterable from the function creating them (a
@@ -2265,7 +2457,7 @@ fn refine_round(
             let mut bound = lp.bound;
             if bound == LoopBound::Unbounded
                 && let Some(n) = ix
-                    .fixed_trip(lp, &mut |_| None)
+                    .fixed_trip(lp, &mut |_| None, SMALL_MAX)
                     .or_else(|| ix.loop_iterable(lp).and_then(passed_bound))
             {
                 bound = if hint.retry_body {
@@ -2275,7 +2467,7 @@ fn refine_round(
                 };
             }
             if bound == LoopBound::Unbounded {
-                bound = if let Some(n) = ix.counted_trips(lp) {
+                bound = if let Some(n) = ix.counted_trips(lp, SMALL_MAX) {
                     LoopBound::ConstSmall(n)
                 } else if hint.repeats && waits_every_iteration(f, lp) {
                     if hint.forever {
@@ -2317,7 +2509,7 @@ fn refine_round(
 
 #[cfg(test)]
 mod tests {
-    use super::range_len;
+    use super::{CompareOpKind, compare_holds, counted_trips_past, mirrored, range_len};
 
     #[test]
     fn range_len_matches_python() {
@@ -2334,5 +2526,55 @@ mod tests {
         }
         assert_eq!(range_len(&[0, 1, 0]), None);
         assert_eq!(range_len(&[]), None);
+    }
+
+    #[test]
+    fn a_mirrored_comparison_holds_for_the_operands_swapped() {
+        use CompareOpKind::{Eq, Gt, GtE, Lt, LtE, NotEq};
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        for op in [Lt, LtE, Gt, GtE, Eq, NotEq] {
+            for order in [Less, Equal, Greater] {
+                assert_eq!(
+                    compare_holds(op, order),
+                    compare_holds(mirrored(op), order.reverse()),
+                    "{op:?} {order:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn counted_trips_past_matches_running_the_loop() {
+        use CompareOpKind::{Gt, GtE, Lt, LtE, NotEq};
+        let run = |start: i64, step: i64, limit: i64, op: CompareOpKind| {
+            let mut value = start;
+            for trips in 0..10_000u32 {
+                let order = value.cmp(&limit);
+                if !compare_holds(op, order)? {
+                    return Some(trips);
+                }
+                value += step;
+            }
+            None
+        };
+        for (start, step, limit, op) in [
+            (0, 1, 1000, Lt),
+            (0, 3, 1000, Lt),
+            (5, 1, 0, Lt),
+            (0, 2, 999, LtE),
+            (1000, -1, 0, Gt),
+            (1000, -7, 3, Gt),
+            (1000, -1, 0, GtE),
+            (0, 4, 1000, NotEq),
+            (0, 3, 1000, NotEq),
+            (0, -1, 10, NotEq),
+            (0, -1, 10, Lt),
+        ] {
+            assert_eq!(
+                counted_trips_past(start, step, limit, op),
+                run(start, step, limit, op),
+                "{start} {step} {limit} {op:?}"
+            );
+        }
     }
 }

@@ -2526,6 +2526,33 @@ follows these rules:
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
 
+The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
+the call graph, or the class hierarchy goes through them:
+
+- `Memo` keeps one answer per key, a value and a question. `Closure` joins the facts of every
+  node a node reaches, the members of a cycle sharing one. `reach` walks with a visited set.
+  `fixpoint` joins the facts of nodes that read each other, and visits a node again only when a
+  fact it reads grows, up to a visit limit.
+- A `Budget` per owner (a rule run on one function, the summary of one function) counts the
+  steps of all the owner's walks, and the weight of every fact they join, which bounds both the
+  work of joining and the memory of the facts kept: 64 per IR unit, at least 4,096. Past it every
+  walk of the owner answers open.
+- `FnShape` holds the tables of one function that walks read instead of scanning it:
+  definitions, readers, copy roots, predecessors, reverse postorder, dominators, and loops.
+- `SharedMemo` keeps answers over the project declarations across functions, and replays what
+  deciding each one read, so the language server's recorded dependencies stay complete. The
+  other engines hold per-analysis state and are not `Sync`, so none can be stored in the shared
+  `ProjectIndex`.
+
+`crates/heki/tests/architecture_walks.rs` finds walks written by hand in the analysis crates:
+recursion over IR ids (W1), worklists (W2), passes over every block until nothing changes (W3),
+and the linear lookups `FnShape` answers from a table (W4). `crates/heki/tests/walks.allow` lists
+the functions it still allows, each with its reason. The test fails on a finding the list does
+not allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
+
+`heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took per function as
+JSON: growth across sizes of a shape is then checked without timing noise.
+
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
 slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many `continue`s and
@@ -2555,7 +2582,11 @@ many `yield from`s, a generator handed on through thousands of private wrappers,
 one before's result, an edit through the language server changing every method of a class of
 thousands of methods, methods changing a typed dict of `self` thousands of times, a method storing
 under a key after each of hundreds of tests that such a dict holds the key, and a function reading
-attributes down a chain ten thousand deep (`x = x.child`).
+attributes down a chain ten thousand deep (`x = x.child`), and the path facts of a `try` body of
+thousands of calls whose handler returns, of loops nested twenty deep with a call at each depth, of
+a thousand loops one after another, and of a chain of hundreds of `and` tests of module constants,
+and the item origins of a chain of thousands of wrappers, of a list filled by appends in a thousand
+loops, and of a phi of sixty branches each choosing a different parameter.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
