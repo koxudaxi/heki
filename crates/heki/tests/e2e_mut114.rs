@@ -452,3 +452,107 @@ fn mut114_knows_each_container_kind_by_annotation_or_construction() {
         "{diags:#?}"
     );
 }
+
+/// Under R2 a cached function annotated `-> list` may hand out an instance of a project subclass
+/// of `list`; when a project subclass overrides the changing method or operator (`sort`,
+/// `setdefault`, `__ior__`), the change may change nothing, so the report states no exact claim.
+#[test]
+fn mut114_leaves_open_a_project_subclass_overriding_the_change() {
+    for (name, subclass, producer, change) in [
+        (
+            "list_sort",
+            "class Frozen(list):\n    def sort(self, *args, **kwargs):\n        pass\n",
+            "@lru_cache(maxsize=8)\ndef get(name) -> list:\n    return Frozen([name, \"id\"])\n",
+            "    result.sort()\n",
+        ),
+        (
+            "dict_setdefault",
+            "class FrozenDict(dict):\n    def setdefault(self, key, default=None):\n        pass\n",
+            "@cache\ndef get(name) -> dict[str, object]:\n    return FrozenDict(dict(name=name))\n",
+            "    result.setdefault(\"x\", 1)\n",
+        ),
+        (
+            "set_ior",
+            "class FrozenSet(set):\n    def __ior__(self, other):\n        pass\n",
+            "@lru_cache\ndef get(name) -> set[str]:\n    return FrozenSet({name, \"id\"})\n",
+            "    result |= {\"x\"}\n",
+        ),
+        // A base of the subclass outside `list` (a mixin) defines the method.
+        (
+            "list_mixin",
+            "class NoSort:\n    def sort(self, *args, **kwargs):\n        pass\n\n\nclass Mixed(NoSort, list):\n    pass\n",
+            "@lru_cache\ndef get(name) -> list:\n    return Mixed([name])\n",
+            "    result.sort()\n",
+        ),
+        // A metaclass may install the method when it creates the subclass.
+        (
+            "list_metaclass",
+            "class Meta(type):\n    pass\n\n\nclass Made(list, metaclass=Meta):\n    pass\n",
+            "@lru_cache\ndef get(name) -> list:\n    return Made([name])\n",
+            "    result.sort()\n",
+        ),
+        // `__getattribute__` decides what `result.sort` is.
+        (
+            "list_getattribute",
+            "class Lazy(list):\n    def __getattribute__(self, name):\n        return object.__getattribute__(self, name)\n",
+            "@lru_cache\ndef get(name) -> list:\n    return Lazy([name])\n",
+            "    result.sort()\n",
+        ),
+    ] {
+        let p = Project::new(&format!("mut114_override_{name}"));
+        let source = format!(
+            "from functools import cache, lru_cache\n\n\n{subclass}\n\n{producer}\n\ndef use(name):\n    result = get(name)\n{change}"
+        );
+        p.write("m.py", &source);
+        let diags = diagnostics(&p, &["--select", "MUT114"]);
+        // The change is the last line.
+        let line = source.lines().count() as u64;
+        assert_eq!(claims(&diags), vec![(line, false)], "{name}: {diags:#?}");
+        assert_eq!(diags[0]["certainty"], "heuristic", "{name}");
+    }
+}
+
+/// `__getattribute__` does not decide the method an operator calls (`result += [...]` calls
+/// `list.__iadd__` directly), and a list the cached function builds itself is no subclass's, so
+/// its `append` and item delete stay the builtin's.
+#[test]
+fn mut114_keeps_operators_and_built_lists_exact_beside_overrides() {
+    let p = Project::new("mut114_operators_and_built");
+    p.write(
+        "m.py",
+        r#"from functools import lru_cache
+
+
+class Lazy(list):
+    def __getattribute__(self, name):
+        return object.__getattribute__(self, name)
+
+    def append(self, item):
+        pass
+
+
+@lru_cache
+def annotated(name) -> list:
+    return Lazy([name])
+
+
+@lru_cache
+def built(name):
+    return [name, "id"]
+
+
+def use(name):
+    result = annotated(name)
+    result += ["x"]
+    fields = built(name)
+    fields.append("extra")
+    del fields[0]
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "MUT114"]);
+    assert_eq!(
+        claims(&diags),
+        vec![(24, true), (26, true), (27, true)],
+        "{diags:#?}"
+    );
+}

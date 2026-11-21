@@ -2260,6 +2260,39 @@ impl ProjectDecls {
             .flatten()
     }
 
+    /// Whether `method` of `class` (a builtin container, say) runs on every instance of `class`
+    /// the project can make: under R2 a value of type `class` may be an instance of a project
+    /// subclass. No project class along the MRO of a project subclass binds `method`, has a
+    /// metaclass other than `type` (which may install it), or, when the method is looked up by
+    /// name (`xs.sort()`, not the operator or item store that calls it implicitly, which skips
+    /// it), defines `__getattribute__`. Each class is read once: the subclasses, then the MROs
+    /// of their project bases that derive from no subclass (mixins).
+    pub fn method_not_overridden(&self, class: &str, method: &str, by_name: bool) -> bool {
+        let subclasses = self.subclasses_of(class);
+        let mut seen: FxHashSet<String> = subclasses.iter().cloned().collect();
+        let mut classes = subclasses.clone();
+        for sub in &subclasses {
+            self.read(|k| note(&mut k.class_facts, sub));
+            let bases = self.class(sub).map(|d| d.bases.clone()).unwrap_or_default();
+            for base in bases.iter().map(|b| self.canonical(b)) {
+                if !seen.contains(&base) && self.is_project_class(&base) {
+                    let mixin = self.mro(&base).into_iter();
+                    classes.extend(
+                        mixin.filter(|c| self.is_project_class(c) && seen.insert(c.clone())),
+                    );
+                }
+            }
+        }
+        classes.iter().all(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c).is_none_or(|d| {
+                !d.members.contains(method)
+                    && !d.custom_metaclass
+                    && !(by_name && d.members.contains("__getattribute__"))
+            })
+        })
+    }
+
     /// Every project class that (transitively) inherits from `class`, sorted.
     pub fn subclasses_of(&self, class: &str) -> Vec<String> {
         let mut out = Vec::new();
