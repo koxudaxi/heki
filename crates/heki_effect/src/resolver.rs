@@ -3476,15 +3476,12 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             }
             continue;
         }
-        let Some(owner) = &f.owner_class_qualname else {
-            continue;
-        };
-        let Some(name) = f
-            .qualname
-            .strip_prefix(owner.as_str())
-            .and_then(|q| q.strip_prefix('.'))
-            .filter(|n| !n.contains('.'))
-        else {
+        // A method defined directly in its class (`C.m`, not `C.m.<locals>.f`).
+        let method = f.owner_class_qualname.as_deref().and_then(|owner| {
+            let name = f.qualname.strip_prefix(owner)?.strip_prefix('.')?;
+            (!name.contains('.')).then_some((owner, name))
+        });
+        let Some((owner, name)) = method else {
             continue;
         };
         let is_property = f.decorators.iter().any(|d| {
@@ -3495,7 +3492,7 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                     .is_some_and(|(_, a)| matches!(a, "setter" | "deleter" | "getter"))
         });
         if is_property {
-            found.push((owner.clone(), name.to_owned()));
+            found.push((owner.to_owned(), name.to_owned()));
         }
     }
     for (class, name) in found {

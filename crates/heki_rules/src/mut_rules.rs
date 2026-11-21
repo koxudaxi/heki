@@ -2721,13 +2721,13 @@ fn self_reads_on<'s>(
             .file_of(&k)
             .and_then(|p| cx.index.files.get(p))
             .and_then(|f| f.local_functions.get(&k));
-        if let Some(local) = local {
-            reads.extend(local.reads_self_attrs.iter().map(|r| r.attr.as_str()));
-        }
-        for (_, site) in sites.get(&k).into_iter().flatten() {
-            if !site.recv_is_self {
-                continue;
-            }
+        reads.extend(
+            local
+                .into_iter()
+                .flat_map(|l| l.reads_self_attrs.iter().map(|r| r.attr.as_str())),
+        );
+        let self_calls = sites.get(&k).into_iter().flatten();
+        for (_, site) in self_calls.filter(|(_, s)| s.recv_is_self) {
             let runs = site
                 .project_callees()
                 .iter()
