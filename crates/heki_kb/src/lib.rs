@@ -169,12 +169,79 @@ impl ExecEffectKind {
         Self::BLOCKING.contains(&self)
     }
 
+    /// What a blocking effect waits for; `None` for the loop-sensitive costs.
+    pub const fn wait_kind(self) -> Option<WaitKind> {
+        match self {
+            Self::BlockingNet
+            | Self::BlockingDb
+            | Self::BlockingSubprocess
+            | Self::Sleep
+            | Self::BlockingFs => Some(WaitKind::Io),
+            Self::BlockingSync => Some(WaitKind::Thread),
+            Self::UnpooledClientAlloc | Self::DbQuery | Self::QuadraticRealloc => None,
+        }
+    }
+
     /// Parse an effect name spelled as in `kb/ecosystem/*.toml` (snake_case, e.g. `"blocking_net"`).
     pub fn from_kb_name(name: &str) -> Result<Self, KbError> {
         let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
             name.into_deserializer();
         Self::deserialize(de).map_err(|_| KbError::InvalidEffect(name.to_owned()))
     }
+}
+
+/// What a blocking call waits for ([`ExecEffectKind::wait_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WaitKind {
+    /// Input or output the call performs: the network, a database, a child process, a sleep,
+    /// the file system. The call waits whatever other threads do.
+    Io,
+    /// Another thread's progress (`blocking_sync`: a lock, an event, a condition, a barrier, a
+    /// thread, a queue, a future). The call returns at once when that thread has already done
+    /// its part, which is state at run time.
+    Thread,
+}
+
+/// When a database call sends a statement or otherwise waits on the database
+/// ([`EcosystemEntry::emits`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Emits {
+    /// On every call.
+    #[default]
+    Always,
+    /// Only when the session's identity map does not hold the object (`Session.get`).
+    OnIdentityMapMiss,
+    /// Only when the session or connection holds pending changes or an open transaction
+    /// (`Session.flush`, a driver's `commit()`).
+    IfPending,
+    /// Only when the receiver has not loaded its results (Django's `QuerySet.count()` on an
+    /// evaluated query set counts its cache).
+    UnlessCached,
+    /// Only when no open connection is at hand (a pool checkout, Django's
+    /// `connection.cursor()`).
+    UnlessConnected,
+    /// Its waits (`blocking_db`) only when the connection's database is on disk, which heki did
+    /// not see opened: one opened from a parameter (`sqlite3.connect(path)` with
+    /// `path=":memory:"` passed in) or only named by an annotation may be in memory. It sends
+    /// its statements either way.
+    IfOnDisk,
+}
+
+/// What the items of a call's result are when the environment decides how many there are
+/// ([`EcosystemEntry::items`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultItems {
+    /// The rows of a query.
+    Rows,
+    /// The lines of a file or of a child process's output.
+    Lines,
+    /// The entries of a directory.
+    Entries,
+    /// Text read from a file or a child process: the pieces `str.splitlines` cuts are its
+    /// lines (iterated as it is, a string gives characters).
+    Text,
 }
 
 /// How much of its operand a copy sanitizer copies (`MUT202`): the object only, so the values
@@ -219,6 +286,24 @@ pub struct EcosystemEntry {
     /// Awaiting the object the call returns completes only once the future passed at this
     /// position is done (`asyncio.wrap_future(f)`).
     pub done_when_awaited: Option<u8>,
+    /// When the call's database effects (`blocking_db`, `db_query`) happen: on every call, or
+    /// only in a state of the session, connection, or receiver the call does not show.
+    pub emits: Emits,
+    /// What the items of the call's result are, when the environment decides how many there
+    /// are (the origin of a loop's items: `EFF103`).
+    pub items: Option<ResultItems>,
+    /// The library API a method of a catalog class is, as reports name it: the class of what a
+    /// call returns in one case (`sqlite3.connect(":memory:")`) has the methods of a library
+    /// class (`sqlite3.Connection.execute`).
+    pub api: Option<String>,
+    /// Whether a `with` statement over an instance of this class, or over the result of this
+    /// call, can suppress the exception its body raises: `Some(false)` when `__exit__` /
+    /// `__aexit__` returns a false value on every path, `Some(true)` when it can return a true
+    /// one (`contextlib.suppress`), `None` when the catalog does not say.
+    pub exit_suppresses: Option<bool>,
+    /// Calling the symbol (`os.getenv`) or reading it (`sys.platform`) depends on the
+    /// environment the program runs in: the `reads-environment` effect boundaries forbid it.
+    pub environment: Option<EnvironmentAccess>,
     /// An instance of this class is a queue that the argument passed here bounds
     /// (`queue.Queue(maxsize)`): a positive integer limits how many items it holds; leaving it
     /// out, zero, or a negative integer leaves it unbounded.
@@ -227,6 +312,16 @@ pub struct EcosystemEntry {
     /// (`queue.Queue.put`): it blocks only where the receiver is known to be bounded
     /// ([`Self::bounded_by`]).
     pub waits_while_full: bool,
+}
+
+/// How a symbol tagged `environment` reads the environment (`EcosystemEntry::environment`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentAccess {
+    /// Calling the function reads it (`os.getenv`, `platform.system`).
+    Call,
+    /// Reading the module attribute does (`os.environ`, `sys.platform`).
+    Read,
 }
 
 /// An argument of a catalogued call: the one at position `arg` (the receiver not counted), or
@@ -259,8 +354,18 @@ pub struct ArgCase {
     /// An integer that sets one of these named flags: the flag itself, or a `|` with it as an
     /// operand (`socket.AI_PASSIVE | socket.AI_NUMERICHOST`).
     pub flag: Vec<String>,
+    /// A string literal equal to one of these.
+    pub one_of: Vec<String>,
+    /// A string literal that is an IPv4 address in dotted-decimal form or an IPv6 address.
+    pub numeric_address: bool,
+    /// A string literal containing one of these.
+    pub contains: Vec<String>,
+    /// A value established to name a file ([`ArgFact::names_file`]).
+    pub names_file: bool,
     pub effects: Option<Vec<ExecEffectKind>>,
     pub return_type: Option<String>,
+    /// When the call waits in this case, instead of the entry's `emits`.
+    pub emits: Option<Emits>,
 }
 
 /// A literal `ArgCase::equals` compares with.
@@ -275,6 +380,10 @@ pub enum ArgLiteral {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ArgFact {
     pub literal: Option<LiteralValue>,
+    /// The value is established to name a file: a literal or a module constant bound once with
+    /// no in-memory form (`":memory:"`, `file::memory:`, `mode=memory`), `__file__`, or a path
+    /// built only from such parts.
+    pub names_file: bool,
     /// The class of the value, when it is an instance of a known one.
     pub class: Option<String>,
     /// The named constants the value sets with `|` (one name alone sets itself): each flag is
@@ -313,7 +422,14 @@ impl ArgCase {
                 .as_ref()
                 .is_some_and(|c| self.instance_of.contains(c));
         let flag = self.flag.is_empty() || fact.flags.iter().any(|f| self.flag.contains(f));
-        equals && prefix && nonempty && instance && flag
+        let one_of =
+            self.one_of.is_empty() || text.is_some_and(|t| self.one_of.iter().any(|o| o == t));
+        let contains = self.contains.is_empty()
+            || text.is_some_and(|t| self.contains.iter().any(|c| t.contains(c.as_str())));
+        let file = !self.names_file || fact.names_file;
+        let numeric =
+            !self.numeric_address || text.is_some_and(|t| t.parse::<std::net::IpAddr>().is_ok());
+        equals && prefix && nonempty && instance && flag && one_of && numeric && contains && file
     }
 }
 
@@ -343,9 +459,20 @@ impl EcosystemEntry {
             .find(|case| arg(case.arg, case.param.as_deref()).is_some_and(|fact| case.holds(&fact)))
     }
 
+    /// How calling or reading the symbol reads the environment, as `reads-environment`
+    /// boundaries forbid it: never for an `excluded` entry, which is never reported.
+    pub fn environment_access(&self) -> Option<EnvironmentAccess> {
+        self.environment.filter(|_| !self.excluded)
+    }
+
     pub fn effects_in<'e>(&'e self, case: Option<&'e ArgCase>) -> &'e [ExecEffectKind] {
         case.and_then(|c| c.effects.as_deref())
             .unwrap_or(&self.effects)
+    }
+
+    /// When the call waits: its case's `emits`, or the entry's.
+    pub fn emits_in(&self, case: Option<&ArgCase>) -> Emits {
+        case.and_then(|c| c.emits).unwrap_or(self.emits)
     }
 
     pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
@@ -963,10 +1090,78 @@ mod tests {
             pandas_url_readers(),
             synchronous_waits(),
             lazy_iterators(),
+            environment_reads(),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// The calls and module attributes `reads-environment` effect boundaries forbid; they carry
+    /// no other fact.
+    fn environment_reads() -> Vec<(Vec<String>, EcosystemEntry)> {
+        const PLATFORM: &[&str] = &[
+            "architecture",
+            "machine",
+            "node",
+            "platform",
+            "processor",
+            "python_build",
+            "python_compiler",
+            "python_branch",
+            "python_implementation",
+            "python_revision",
+            "python_version",
+            "python_version_tuple",
+            "release",
+            "system",
+            "version",
+            "uname",
+            "win32_ver",
+            "win32_edition",
+            "win32_is_iot",
+            "mac_ver",
+            "libc_ver",
+            "freedesktop_os_release",
+            "android_ver",
+            "ios_ver",
+        ];
+        let tagged = |access| EcosystemEntry {
+            environment: Some(access),
+            ..entry(&[])
+        };
+        vec![
+            (
+                [
+                    s(&["os.getenv", "os.getenvb"]),
+                    with_prefix("platform", PLATFORM),
+                    s(&[
+                        "importlib.util.find_spec",
+                        "importlib.import_module",
+                        "importlib.metadata.version",
+                        "importlib.metadata.distribution",
+                        "shutil.which",
+                        "sysconfig.get_config_var",
+                    ]),
+                ]
+                .concat(),
+                tagged(EnvironmentAccess::Call),
+            ),
+            (
+                s(&[
+                    "os.environ",
+                    "os.environb",
+                    "os.name",
+                    "sys.platform",
+                    "sys.version",
+                    "sys.version_info",
+                    "sys.hexversion",
+                    "sys.implementation",
+                    "sys.flags",
+                ]),
+                tagged(EnvironmentAccess::Read),
+            ),
+        ]
     }
 
     fn standard_library() -> Vec<(Vec<String>, EcosystemEntry)> {
@@ -982,8 +1177,42 @@ mod tests {
             copy_sanitizer: Some(depth),
             ..entry(&[])
         };
+        // The case of an argument that ends the wait at once.
+        let ends_wait = |arg: u8, param: Option<&str>, case: ArgCase| ArgCase {
+            arg: Some(arg),
+            param: param.map(Into::into),
+            effects: Some(Vec::new()),
+            ..case
+        };
+        let zero = ArgCase {
+            equals: Some(ArgLiteral::Int(0)),
+            ..ArgCase::default()
+        };
+        let local_host = |param: Option<&str>| {
+            vec![
+                ends_wait(
+                    0,
+                    param,
+                    ArgCase {
+                        numeric_address: true,
+                        ..ArgCase::default()
+                    },
+                ),
+                ends_wait(
+                    0,
+                    param,
+                    ArgCase {
+                        one_of: s(&["localhost"]),
+                        ..ArgCase::default()
+                    },
+                ),
+            ]
+        };
         vec![
-            (s(&["time.sleep"]), entry(&[Sleep])),
+            (
+                s(&["time.sleep"]),
+                with_cases(vec![ends_wait(0, None, zero.clone())], entry(&[Sleep])),
+            ),
             (
                 with_prefix(
                     "subprocess",
@@ -992,11 +1221,24 @@ mod tests {
                         "call",
                         "check_call",
                         "check_output",
-                        "Popen.wait",
                         "Popen.communicate",
                     ],
                 ),
                 entry(&[BlockingSubprocess]),
+            ),
+            (
+                s(&["subprocess.Popen.wait"]),
+                with_cases(
+                    vec![ends_wait(0, Some("timeout"), zero)],
+                    entry(&[BlockingSubprocess]),
+                ),
+            ),
+            (
+                s(&["contextlib.suppress"]),
+                EcosystemEntry {
+                    exit_suppresses: Some(true),
+                    ..entry(&[])
+                },
             ),
             (
                 s(&[
@@ -1028,21 +1270,29 @@ mod tests {
                 ]),
                 entry(&[BlockingFs]),
             ),
+            (s(&["socket.getfqdn"]), entry(&[BlockingNet])),
             (
-                with_prefix("socket", &["gethostbyname", "getfqdn"]),
-                entry(&[BlockingNet]),
+                s(&["socket.gethostbyname"]),
+                with_cases(local_host(None), entry(&[BlockingNet])),
             ),
             // A numeric host is parsed, never resolved.
             (
                 s(&["socket.getaddrinfo"]),
                 with_cases(
-                    vec![ArgCase {
-                        arg: Some(5),
-                        param: Some("flags".into()),
-                        flag: s(&["socket.AI_NUMERICHOST", "socket.AddressInfo.AI_NUMERICHOST"]),
-                        effects: Some(Vec::new()),
-                        ..ArgCase::default()
-                    }],
+                    [
+                        local_host(Some("host")),
+                        vec![ArgCase {
+                            arg: Some(5),
+                            param: Some("flags".into()),
+                            flag: s(&[
+                                "socket.AI_NUMERICHOST",
+                                "socket.AddressInfo.AI_NUMERICHOST",
+                            ]),
+                            effects: Some(Vec::new()),
+                            ..ArgCase::default()
+                        }],
+                    ]
+                    .concat(),
                     entry(&[BlockingNet]),
                 ),
             ),
@@ -1147,10 +1397,82 @@ mod tests {
             ),
             (
                 s(&["sqlite3.connect"]),
-                returning(
-                    "sqlite3.Connection",
-                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                with_cases(
+                    {
+                        let in_memory = |case: ArgCase| ArgCase {
+                            arg: Some(0),
+                            param: Some("database".into()),
+                            effects: Some(vec![UnpooledClientAlloc]),
+                            return_type: Some(SQLITE3_MEMORY.into()),
+                            ..case
+                        };
+                        vec![
+                            in_memory(ArgCase {
+                                one_of: s(&[":memory:"]),
+                                ..ArgCase::default()
+                            }),
+                            in_memory(ArgCase {
+                                prefix: s(&["file::memory:"]),
+                                ..ArgCase::default()
+                            }),
+                            in_memory(ArgCase {
+                                contains: s(&["mode=memory"]),
+                                ..ArgCase::default()
+                            }),
+                            ArgCase {
+                                arg: Some(0),
+                                param: Some("database".into()),
+                                names_file: true,
+                                return_type: Some(SQLITE3_FILE.into()),
+                                emits: Some(Emits::Always),
+                                ..ArgCase::default()
+                            },
+                        ]
+                    },
+                    returning(
+                        "sqlite3.Connection",
+                        entry(&[BlockingDb, UnpooledClientAlloc]),
+                    ),
                 ),
+            ),
+            // The connections of an in-memory database and of one named by a parameter.
+            (
+                [
+                    with_prefix(SQLITE3_MEMORY, SQLITE3_EXECUTES),
+                    with_prefix(&format!("{SQLITE3_MEMORY}.cursor()"), SQLITE3_EXECUTES),
+                ]
+                .concat(),
+                returning(&format!("{SQLITE3_MEMORY}.cursor()"), entry(&[DbQuery])),
+            ),
+            (
+                s(&[&format!("{SQLITE3_MEMORY}.cursor")]),
+                returning(&format!("{SQLITE3_MEMORY}.cursor()"), entry(&[])),
+            ),
+            (
+                [
+                    with_prefix(SQLITE3_FILE, SQLITE3_EXECUTES),
+                    with_prefix(&format!("{SQLITE3_FILE}.cursor()"), SQLITE3_EXECUTES),
+                ]
+                .concat(),
+                returning(
+                    &format!("{SQLITE3_FILE}.cursor()"),
+                    entry(&[BlockingDb, DbQuery]),
+                ),
+            ),
+            (
+                s(&[&format!("{SQLITE3_FILE}.cursor")]),
+                returning(&format!("{SQLITE3_FILE}.cursor()"), entry(&[])),
+            ),
+            (
+                [
+                    with_prefix(SQLITE3_FILE, COMMIT_ROLLBACK),
+                    with_prefix(
+                        &format!("{SQLITE3_FILE}.cursor()"),
+                        &["fetchone", "fetchmany", "fetchall"],
+                    ),
+                ]
+                .concat(),
+                entry(&[BlockingDb]),
             ),
             (
                 s(&["sqlite3.Connection.cursor"]),
@@ -1180,12 +1502,26 @@ mod tests {
         vec![
             (
                 [
-                    s(&["urllib.request.urlopen", "httpx.stream"]),
+                    s(&["httpx.stream"]),
                     with_prefix("requests", VERBS8),
                     with_prefix("httpx", VERBS8),
                 ]
                 .concat(),
                 entry(&[BlockingNet, UnpooledClientAlloc]),
+            ),
+            // A `data:` URL is decoded in memory.
+            (
+                s(&["urllib.request.urlopen"]),
+                with_cases(
+                    vec![ArgCase {
+                        arg: Some(0),
+                        param: Some("url".into()),
+                        prefix: s(&["data:"]),
+                        effects: Some(Vec::new()),
+                        ..ArgCase::default()
+                    }],
+                    entry(&[BlockingNet, UnpooledClientAlloc]),
+                ),
             ),
             (
                 [
@@ -2004,14 +2340,207 @@ mod tests {
         "channels",
     ];
 
+    /// The classes of the connections `sqlite3.connect` opens on an in-memory database and on
+    /// one a parameter names.
+    const SQLITE3_MEMORY: &str = "sqlite3.connect(\":memory:\")";
+    const SQLITE3_FILE: &str = "sqlite3.connect(file)";
+
+    /// The database calls that wait only in a state the call does not show.
+    const CONDITIONAL_EMITTERS: &[(Emits, &[&str])] = &[
+        (
+            Emits::OnIdentityMapMiss,
+            &[
+                "sqlalchemy.orm.Session.get",
+                "sqlalchemy.orm.Session.get_one",
+                "sqlalchemy.orm.Query.get",
+                "sqlalchemy.ext.asyncio.AsyncSession.get",
+                "sqlalchemy.ext.asyncio.AsyncSession.get_one",
+                "sqlmodel.Session.get",
+                "sqlmodel.Session.get_one",
+                "sqlmodel.ext.asyncio.session.AsyncSession.get",
+                "sqlmodel.ext.asyncio.session.AsyncSession.get_one",
+            ],
+        ),
+        (
+            Emits::IfPending,
+            &[
+                "sqlalchemy.orm.Session.flush",
+                "sqlalchemy.orm.Session.commit",
+                "sqlalchemy.ext.asyncio.AsyncSession.flush",
+                "sqlalchemy.ext.asyncio.AsyncSession.commit",
+                "sqlmodel.Session.flush",
+                "sqlmodel.Session.commit",
+                "sqlmodel.ext.asyncio.session.AsyncSession.flush",
+                "sqlmodel.ext.asyncio.session.AsyncSession.commit",
+                "sqlalchemy.engine.Connection.commit",
+                "sqlalchemy.engine.Connection.rollback",
+                "sqlite3.Connection.commit",
+                "sqlite3.Connection.rollback",
+                "psycopg.Connection.commit",
+                "psycopg.Connection.rollback",
+                "psycopg2.extensions.connection.commit",
+                "psycopg2.extensions.connection.rollback",
+                "sqlite3.connect(file).commit",
+                "sqlite3.connect(file).rollback",
+            ],
+        ),
+        (
+            Emits::IfOnDisk,
+            &[
+                "sqlite3.connect",
+                "sqlite3.Connection.execute",
+                "sqlite3.Connection.executemany",
+                "sqlite3.Connection.executescript",
+                "sqlite3.Cursor.execute",
+                "sqlite3.Cursor.executemany",
+                "sqlite3.Cursor.executescript",
+                "sqlite3.Cursor.fetchone",
+                "sqlite3.Cursor.fetchmany",
+                "sqlite3.Cursor.fetchall",
+            ],
+        ),
+        (
+            Emits::UnlessCached,
+            &[
+                "django.db.models.query.QuerySet.first",
+                "django.db.models.query.QuerySet.last",
+                "django.db.models.query.QuerySet.exists",
+                "django.db.models.query.QuerySet.count",
+                "django.db.models.query.QuerySet.afirst",
+                "django.db.models.query.QuerySet.alast",
+                "django.db.models.query.QuerySet.aexists",
+                "django.db.models.query.QuerySet.acount",
+            ],
+        ),
+        (
+            Emits::UnlessConnected,
+            &[
+                "sqlalchemy.engine.Engine.connect",
+                "sqlalchemy.engine.Engine.begin",
+                "psycopg_pool.ConnectionPool.connection",
+                "django.db.connection.cursor",
+            ],
+        ),
+    ];
+
+    /// The calls whose results' items the environment decides the number of.
+    const RESULT_ITEMS: &[(ResultItems, &[&str])] = &[
+        (
+            ResultItems::Rows,
+            &[
+                "sqlite3.Connection.execute",
+                "sqlite3.Cursor.execute",
+                "sqlite3.Cursor.fetchall",
+                "sqlite3.Cursor.fetchmany",
+                "sqlalchemy.orm.Session.execute",
+                "sqlalchemy.orm.Session.scalars",
+                "sqlalchemy.orm.Query.all",
+                "sqlalchemy.engine.Connection.execute",
+                "sqlalchemy.engine.Connection.scalars",
+                "sqlalchemy.ext.asyncio.AsyncSession.execute",
+                "sqlalchemy.ext.asyncio.AsyncSession.scalars",
+                "sqlmodel.Session.exec",
+                "sqlmodel.Session.execute",
+                "sqlmodel.Session.scalars",
+                "psycopg.Connection.execute",
+                "psycopg.Cursor.execute",
+                "pymongo.collection.Collection.find",
+                "pymongo.collection.Collection.aggregate",
+                "sqlite3.connect(\":memory:\").execute",
+                "sqlite3.connect(\":memory:\").executemany",
+                "sqlite3.connect(\":memory:\").executescript",
+                "sqlite3.connect(\":memory:\").cursor().execute",
+                "sqlite3.connect(\":memory:\").cursor().executemany",
+                "sqlite3.connect(\":memory:\").cursor().executescript",
+                "sqlite3.connect(file).execute",
+                "sqlite3.connect(file).executemany",
+                "sqlite3.connect(file).executescript",
+                "sqlite3.connect(file).cursor().execute",
+                "sqlite3.connect(file).cursor().executemany",
+                "sqlite3.connect(file).cursor().executescript",
+                "sqlite3.connect(file).cursor().fetchmany",
+                "sqlite3.connect(file).cursor().fetchall",
+            ],
+        ),
+        (
+            ResultItems::Lines,
+            &["builtins.open", "io.open", "pathlib.Path.open"],
+        ),
+        (ResultItems::Text, &["pathlib.Path.read_text"]),
+        (
+            ResultItems::Entries,
+            &["os.listdir", "os.scandir", "os.walk"],
+        ),
+    ];
+
+    /// The classes and factories whose context manager's exit returns a false value on every
+    /// path.
+    const EXITS_NEVER_SUPPRESS: &[&str] = &[
+        "builtins.open",
+        "threading.Lock",
+        "threading.RLock",
+        "threading.Semaphore",
+        "threading.BoundedSemaphore",
+        "threading.Condition",
+        "urllib.request.urlopen",
+        "sqlite3.connect",
+        "requests.Session",
+        "httpx.Client",
+        "httpx.AsyncClient",
+        "aiohttp.ClientSession",
+        "urllib3.PoolManager",
+        "urllib3.ProxyManager",
+        "urllib3.HTTPConnectionPool",
+        "urllib3.HTTPSConnectionPool",
+        "psycopg_pool.ConnectionPool",
+        "psycopg_pool.AsyncConnectionPool",
+        "redis.Redis",
+        "redis.StrictRedis",
+        "redis.asyncio.Redis",
+        "pymongo.MongoClient",
+        "pymongo.AsyncMongoClient",
+        "psycopg.connect",
+        "psycopg2.connect",
+        "pymysql.connect",
+        "sqlalchemy.engine.Engine.connect",
+        "sqlalchemy.engine.Engine.begin",
+        "sqlalchemy.orm.Session.begin",
+        "psycopg_pool.ConnectionPool.connection",
+    ];
+
     #[test]
     fn layer2_load_builtin_contains_exactly_the_required_entries() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let mut required = BTreeSet::new();
         for (symbols, expected) in layer2_required() {
             for symbol in symbols {
+                let emits = CONDITIONAL_EMITTERS
+                    .iter()
+                    .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
+                    .map_or(Emits::Always, |(emits, _)| *emits);
+                let exit_suppresses = if EXITS_NEVER_SUPPRESS.contains(&symbol.as_str()) {
+                    Some(false)
+                } else {
+                    expected.exit_suppresses
+                };
+                let items = RESULT_ITEMS
+                    .iter()
+                    .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
+                    .map(|(items, _)| *items);
+                // The methods of the classes of what `sqlite3.connect` returns are the library's.
+                let api = [SQLITE3_MEMORY, SQLITE3_FILE].iter().find_map(|class| {
+                    let method = symbol.strip_prefix(&format!("{class}."))?;
+                    Some(match method.strip_prefix("cursor().") {
+                        Some(m) => format!("sqlite3.Cursor.{m}"),
+                        None => format!("sqlite3.Connection.{method}"),
+                    })
+                });
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
+                    emits,
+                    exit_suppresses,
+                    items,
+                    api,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -2098,7 +2627,11 @@ mod tests {
                         || !case.prefix.is_empty()
                         || case.nonempty
                         || !case.instance_of.is_empty()
-                        || !case.flag.is_empty(),
+                        || !case.flag.is_empty()
+                        || !case.one_of.is_empty()
+                        || case.numeric_address
+                        || !case.contains.is_empty()
+                        || case.names_file,
                     "{symbol}"
                 );
                 assert!(
@@ -2113,6 +2646,100 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The thread waits are told apart from input and output by their effect; the database
+    /// calls that wait only in a state the call does not show say so, and so do the context
+    /// managers whose exit never suppresses an exception.
+    #[test]
+    fn layer2_wait_kinds_emitters_and_exits() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        assert_eq!(BlockingSync.wait_kind(), Some(WaitKind::Thread));
+        for e in [
+            BlockingNet,
+            BlockingDb,
+            BlockingSubprocess,
+            Sleep,
+            BlockingFs,
+        ] {
+            assert_eq!(e.wait_kind(), Some(WaitKind::Io), "{e:?}");
+        }
+        for e in [UnpooledClientAlloc, DbQuery, QuadraticRealloc] {
+            assert_eq!(e.wait_kind(), None, "{e:?}");
+        }
+        assert!(
+            ExecEffectKind::BLOCKING
+                .iter()
+                .all(|e| e.wait_kind().is_some())
+        );
+        let emits = |symbol: &str| kb.lookup(symbol).unwrap().emits;
+        assert_eq!(emits("sqlalchemy.orm.Session.execute"), Emits::Always);
+        assert_eq!(
+            emits("sqlalchemy.orm.Session.get"),
+            Emits::OnIdentityMapMiss
+        );
+        assert_eq!(emits("sqlalchemy.orm.Session.flush"), Emits::IfPending);
+        assert_eq!(emits("sqlite3.Connection.commit"), Emits::IfPending);
+        assert_eq!(
+            emits("pymysql.connections.Connection.commit"),
+            Emits::Always
+        );
+        assert_eq!(
+            emits("django.db.models.query.QuerySet.count"),
+            Emits::UnlessCached
+        );
+        assert_eq!(emits("django.db.models.query.QuerySet.get"), Emits::Always);
+        assert_eq!(
+            emits("sqlalchemy.engine.Engine.connect"),
+            Emits::UnlessConnected
+        );
+        // Only database calls carry a condition on their database effects.
+        for (symbol, e) in &kb.entries {
+            if e.emits != Emits::Always {
+                assert!(
+                    e.effects.iter().any(|k| matches!(k, BlockingDb | DbQuery)),
+                    "{symbol}"
+                );
+            }
+        }
+        let exits = |symbol: &str| kb.lookup(symbol).unwrap().exit_suppresses;
+        assert_eq!(exits("contextlib.suppress"), Some(true));
+        assert_eq!(exits("builtins.open"), Some(false));
+        assert_eq!(exits("threading.Lock"), Some(false));
+        assert_eq!(exits("sqlite3.connect"), Some(false));
+        assert_eq!(exits("requests.Session"), Some(false));
+        assert_eq!(exits("sqlite3.Connection.execute"), None);
+    }
+
+    /// A wait the arguments end at once: no sleep, a polled child, a numeric or local host, a
+    /// `data:` URL.
+    #[test]
+    fn layer2_waits_that_arguments_end_at_once() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let text = |t: &str| ArgFact {
+            literal: Some(LiteralValue::Str(t.into())),
+            ..ArgFact::default()
+        };
+        let zero = ArgFact {
+            literal: Some(LiteralValue::Int(0)),
+            ..ArgFact::default()
+        };
+        for (symbol, fact, waits) in [
+            ("time.sleep", zero.clone(), false),
+            ("time.sleep", ArgFact::default(), true),
+            ("subprocess.Popen.wait", zero.clone(), false),
+            ("socket.getaddrinfo", text("127.0.0.1"), false),
+            ("socket.getaddrinfo", text("localhost"), false),
+            ("socket.getaddrinfo", text("example.com"), true),
+            ("socket.gethostbyname", text("::1"), false),
+            ("socket.gethostbyname", text("example.com"), true),
+            ("urllib.request.urlopen", text("data:,hello"), false),
+            ("urllib.request.urlopen", text("https://example.com"), true),
+        ] {
+            let e = kb.lookup(symbol).unwrap();
+            let case = e.case_for(|i, _| (i == Some(0)).then(|| fact.clone()));
+            assert_eq!(!e.effects_in(case).is_empty(), waits, "{symbol} {fact:?}");
         }
     }
 
@@ -2262,7 +2889,29 @@ mod tests {
             flags: s(names),
             ..ArgFact::default()
         };
+        let local = ArgCase {
+            arg: Some(0),
+            one_of: s(&["localhost"]),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let address = ArgCase {
+            arg: Some(0),
+            numeric_address: true,
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let text = |t: &str| lit(LiteralValue::Str(t.into()));
         for (case, fact, holds) in [
+            (&local, text("localhost"), true),
+            (&local, text("localhost.example.com"), false),
+            (&local, inst("builtins.str"), false),
+            (&address, text("127.0.0.1"), true),
+            (&address, text("::1"), true),
+            (&address, text("2001:db8::8a2e:370:7334"), true),
+            (&address, text("example.com"), false),
+            (&address, text("10.0.0"), false),
+            (&address, lit(LiteralValue::Int(0)), false),
             (&off, lit(LiteralValue::Int(0)), true),
             (&off, lit(LiteralValue::Float(0.0)), true),
             (&off, lit(LiteralValue::Int(1)), false),
@@ -2370,16 +3019,15 @@ mod tests {
         assert_eq!(
             got("time.sleep"),
             EcosystemEntry {
-                symbol: "time.sleep".into(),
                 excluded: true,
-                ..entry(&[Sleep])
+                ..builtin.lookup("time.sleep").cloned().unwrap()
             }
         );
         assert_eq!(
             got("sqlite3.connect"),
             EcosystemEntry {
-                symbol: "sqlite3.connect".into(),
-                ..returning("sqlite3.Connection", entry(&[BlockingDb]))
+                effects: vec![BlockingDb],
+                ..builtin.lookup("sqlite3.connect").cloned().unwrap()
             }
         );
         assert_eq!(

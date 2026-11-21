@@ -146,7 +146,7 @@ fn analyze(
     let snapshot = snapshot_for(&selection, &project.env.root, args.output_format)?;
     let env = &project.env;
     let inputs = project.inputs();
-    let contracts = heki_rules::summary_contracts(&env.cfg)?;
+    let contracts = heki_rules::summary_contracts(&env.cfg, &env.kb)?;
     let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
     let opt_in = heki_rules::opt_in_facts(&selection);
     let index = analyze_project_for(

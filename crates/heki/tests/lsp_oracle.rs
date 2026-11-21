@@ -37,7 +37,7 @@ message = "add entries through `Store`"
 
 [[tool.heki.read-owners]]
 name = "vault"
-targets = ["Vault.secret"]
+targets = ["Vault.secret", "Locker.secret"]
 allowed-readers = ["Store.*"]
 
 [[tool.heki.read-owners]]
@@ -83,6 +83,10 @@ name = "render"
 scopes = ["pkg.gate.render", "pkg.walk_b.walk"]
 forbid = ["blocking-net", "sleep"]
 allowed-callees = ["requests.get"]
+[[tool.heki.ecosystem]]
+symbol = "pkg.natives.fetch"
+effects = ["blocking_net"]
+
 [[tool.heki.readonly-returns]]
 name = "catalog"
 producers = ["pkg.catalog.Catalog.entry"]
@@ -92,6 +96,16 @@ deep = true
 name = "index"
 targets = ["Node.kids"]
 invalidators = ["Index.refresh"]
+
+[[tool.heki.invalidation]]
+name = "dial"
+targets = ["pkg.dials:*.level"]
+invalidators = ["pkg.dials:recalibrate"]
+
+[[tool.heki.effect-boundaries]]
+name = "portable"
+scopes = ["pkg.portable"]
+forbid = ["reads-environment"]
 
 [[tool.heki.effect-boundaries]]
 name = "rack-view"
@@ -177,6 +191,10 @@ const ACCT_OPS: &str =
     "from pkg.ledger import Ledger, Receipt\n\n\ndef _record(l: Ledger):\n    return None\n";
 const ACCOUNTS: &str = "from pkg.acct_ops import _record\nfrom pkg.ledger import Ledger\n\n\ndef settle(l: Ledger):\n    return _record(l)\n";
 const PURE_OPS: &str = "from pkg.ledger import Ledger, Receipt\nfrom pkg.model import Vault\n\n\ndef helper(v: Vault, l: Ledger):\n    return None\n\n\ndef grow(l: Ledger):\n    l.rows.append(1)\n";
+// A scope function of `reads-environment` and the helper below it, in another module.
+const PORTABLE_OPS: &str = "import os\nimport sys\n\n\ndef choose():\n    return \"posix\"\n";
+const PORTABLE: &str =
+    "from pkg.portable_ops import choose\n\n\ndef build():\n    return choose()\n";
 const PURE: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Vault\nfrom pkg.pure_ops import grow, helper\n\n\ndef decide(v: Vault, l: Ledger):\n    return helper(v, l)\n\n\ndef tidy(l: Ledger):\n    grow(l)\n";
 const LAYER_OPS: &str = "from pkg.ledger import Ledger\n\n\ndef _bal(l: Ledger):\n    return 0\n";
 const LAYER_VIEW: &str = "from pkg.layer_ops import _bal\nfrom pkg.ledger import Ledger\n\n\ndef show(l: Ledger):\n    return _bal(l)\n";
@@ -215,6 +233,29 @@ const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
 // A class constant names the guarded attribute for the class's own methods.
 const KEY_CLASS: &str = "from typing import ClassVar\n\nfrom pkg.model import Registry\n\n\nclass Keys:\n    KEY: ClassVar[str] = \"entries\"\n\n    def mark(self, r: Registry):\n        r.__dict__[self.KEY] = []\n";
+// Module aliases and getters: a module alias of `object.__setattr__`, imported by another
+// module, writes the guarded attribute; a function returning the guarded container hands it to
+// the caller changing it.
+const ALIAS_SRC: &str = "_set = object.__setattr__\n";
+const ALIAS_USE: &str = "from pkg.alias_src import _set\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    _set(r, \"entries\", [])\n";
+const ALIAS_REBIND: &str = "from pkg import alias_src\n\nalias_src._set = print\n";
+// A read through a protocol declaring the attribute is judged by the protocol; once the
+// protocol no longer declares it, by the class implementing it.
+const PROTO: &str = "from typing import Protocol\n\n\nclass Safe(Protocol):\n    secret: str\n\n\nclass Locker:\n    def __init__(self):\n        self.secret = \"\"\n        self.size = 0\n";
+const PROTO_USE: &str = "from pkg.proto import Safe\n\n\ndef peek(s: Safe):\n    return s.secret\n";
+const GETTER_SRC: &str =
+    "from pkg.model import Registry\n\n\ndef entries_of(r: Registry):\n    return r.entries\n";
+const GETTER_USE: &str = "from pkg.getter_src import entries_of\nfrom pkg.model import Registry\n\n\ndef grow(r: Registry):\n    entries_of(r).append(1)\n";
+// A getter of a base class hands out the guarded container on a subclass, until the subclass
+// binds the name itself.
+const LISTING_BASE: &str = "from pkg.model import Registry\n\n\nclass ListingBase(Registry):\n    @property\n    def listing(self):\n        return self.entries\n";
+const LISTING_CLS: &str =
+    "from pkg.listing_base import ListingBase\n\n\nclass Listing(ListingBase):\n    pass\n";
+const LISTING_USE: &str =
+    "from pkg.listing_cls import Listing\n\n\ndef grow(l: Listing):\n    l.listing.append(1)\n";
+// A name the package does not bind (a compiled submodule would bind it) is what the
+// configuration's catalog entry says; bound by a re-export, it is the function re-exported.
+const NATIVES_USE: &str = "from pkg.natives import fetch\n\n\nasync def pull():\n    fetch()\n";
 const KEY_REBIND: &str =
     "from pkg import key_consts\n\n\ndef reset():\n    key_consts.KEY = \"other\"\n";
 const KEY_SUBCLASS: &str =
@@ -354,6 +395,14 @@ const GLYPHS_RECORDING: &str = "from functools import lru_cache\n\n\nclass Glyph
 const GLYPH_USER: &str = "from pkg.glyphs import shared_glyphs\n\n\ndef measure(text):\n    return sum(shared_glyphs().width(ch) for ch in text)\n\n\ndef first(text):\n    return shared_glyphs().width(text[0])\n";
 const TAGGER: &str = "from pkg.catalog import Catalog\nfrom pkg.lookup import find\n\n\ndef tag(c: Catalog):\n    find(c, \"k\")[\"tag\"] = 1\n";
 const NODES: &str = "class Node:\n    def __init__(self):\n        self.kids = []\n\n\nclass Index:\n    def refresh(self):\n        self.stale = False\n\n\ndef attach(node: Node, kid):\n    node.kids.append(kid)\n";
+// A class an `invalidation` target names by its module (`pkg.dials:*.level`): written in
+// another module directly and through an untyped helper of a third.
+const DIALS: &str = "class Gauge:\n    def __init__(self) -> None:\n        self.level = 0\n\n\ndef recalibrate() -> None: ...\n";
+const DIALS_REEXPORT: &str =
+    "from pkg.dials_impl import Gauge\n\n\ndef recalibrate() -> None: ...\n";
+const DIALS_IMPL: &str = "class Gauge:\n    def __init__(self) -> None:\n        self.level = 0\n";
+const DIAL_OPS: &str = "def set_level(obj) -> None:\n    obj.level = 2\n";
+const DIAL_USER: &str = "from pkg.dial_ops import set_level\nfrom pkg.dials import Gauge\n\n\ndef turn(g: Gauge) -> None:\n    g.level = 1\n\n\ndef push(g: Gauge) -> None:\n    set_level(g)\n";
 const ANNOUNCE: &str =
     "from pkg.nodes import Index\n\n\ndef announce(index: Index):\n    index.refresh()\n";
 const ANNOUNCE_SILENT: &str =
@@ -436,6 +485,14 @@ const SCHEMA_REBINDING: &str =
     "from pkg import schema\n\n\ndef reconfigure():\n    schema.SQL = \"SELECT 1\"\n";
 const QUEUE_READER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    for item in QUEUE:\n        httpx.Client()\n";
 const QUEUE_MAPPER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    return list(map(lambda item: httpx.Client(), QUEUE))\n";
+// `OPT113`'s exact tier needs advancing the inner loop to run no project code: a project
+// subclass of `list` with its own `__iter__`, which an argument annotated `list` may be (R2),
+// leaves it open.
+const JOIN_USER: &str = "from pkg.rows import Row\n\n\ndef join(xs: list[Row], ys: list[Row]):\n    out = []\n    for a in xs:\n        for b in ys:\n            if a.k == b.k:\n                out.append(b)\n    return out\n";
+// The compared key is a plain field of a class in another module, then a property.
+const ROWS: &str = "from dataclasses import dataclass\n\n\n@dataclass\nclass Row:\n    k: int\n";
+const ROWS_PROPERTY: &str = "class Row:\n    @property\n    def k(self):\n        return 1\n";
+const LOUD_LIST: &str = "class LoudList(list):\n    def __iter__(self):\n        print(\"next\")\n        return super().__iter__()\n";
 const LEVELS_USER: &str = "from pkg.levels import LEVELS\n\n\ndef ranks(xs):\n    out = []\n    for x in xs:\n        out.append(LEVELS.index(x))\n    return out\n";
 // A module body reads an imported name as a copy of its `Import`: its loop over the list is
 // fixed while the list is.
@@ -540,7 +597,18 @@ const TALLY: &str = "class Tally:\n    def __init__(self):\n        self.counts 
 const TALLY_USE: &str = "from pkg.tally import Tally\n\n\ndef total(t: Tally):\n    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n";
 const TALLY_COUNTING: &str = "from pkg.tally import Tally\n\n\ndef _counting(t: Tally):\n    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n\n\ndef start(t: Tally):\n    t.cursor = _counting(t)\n";
 
-// Queue capacities (`EFF101` on `queue.Queue.put`): a queue one module builds and another
+// Exact effect reports (`EFF101` / `EFF111`): an `async def` calls a method on a base class whose
+// implementation always blocks; a subclass in a third module starts overriding it without the
+// blocking call, then with another one, and the base's call becomes conditional.
+const EXACT_BASE: &str = "import requests\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n";
+const EXACT_BASE_CONDITIONAL: &str = "import requests\n\n\nclass Base:\n    def fetch(self, url):\n        if url:\n            return requests.get(url)\n        return None\n";
+const EXACT_SUB: &str = "class Quiet:\n    def fetch(self, url):\n        return url\n";
+const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return url\n";
+const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
+const EXACT_USE: &str =
+    "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
+
+// Queue capacities (`EFF111` on `queue.Queue.put`, a wait on another thread): a queue one module builds and another
 // module's class stores, an `async def` putting on its parameter whose caller is in another
 // module, and a class constant bounding a queue that a subclass in another module may define
 // again.
@@ -634,6 +702,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/accounts.py", ACCOUNTS),
         ("pkg/pure_ops.py", PURE_OPS),
         ("pkg/pure.py", PURE),
+        ("pkg/portable_ops.py", PORTABLE_OPS),
+        ("pkg/portable.py", PORTABLE),
         ("pkg/layer_ops.py", LAYER_OPS),
         ("pkg/layer/__init__.py", ""),
         ("pkg/layer/view.py", LAYER_VIEW),
@@ -656,6 +726,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/handoff.py", HANDOFF),
         ("pkg/levels.py", LEVELS),
         ("pkg/levels_user.py", LEVELS_USER),
+        ("pkg/rows.py", ROWS),
+        ("pkg/join_user.py", JOIN_USER),
         ("pkg/levels_docs.py", LEVELS_DOCS),
         ("pkg/stmts.py", STMTS),
         ("pkg/stmts_chain.py", STMTS_CHAIN),
@@ -676,6 +748,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/glyph_user.py", GLYPH_USER),
         ("pkg/nodes.py", NODES),
         ("pkg/announce.py", ANNOUNCE),
+        ("pkg/dials.py", DIALS),
+        ("pkg/dial_ops.py", DIAL_OPS),
+        ("pkg/dial_user.py", DIAL_USER),
         ("pkg/grow.py", GROW),
         ("pkg/graft.py", GRAFT),
         ("pkg/relay.py", RELAY),
@@ -718,6 +793,17 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/async_user.py", ASYNC_USER),
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
+        ("pkg/alias_src.py", ALIAS_SRC),
+        ("pkg/alias_use.py", ALIAS_USE),
+        ("pkg/getter_src.py", GETTER_SRC),
+        ("pkg/getter_use.py", GETTER_USE),
+        ("pkg/proto.py", PROTO),
+        ("pkg/proto_use.py", PROTO_USE),
+        ("pkg/listing_base.py", LISTING_BASE),
+        ("pkg/listing_cls.py", LISTING_CLS),
+        ("pkg/listing_use.py", LISTING_USE),
+        ("pkg/natives/__init__.py", ""),
+        ("pkg/natives_use.py", NATIVES_USE),
         ("pkg/key_class.py", KEY_CLASS),
         ("pkg/key_class_reader.py", KEY_CLASS_READER),
         ("pkg/field_deco.py", FIELD_DECO),
@@ -751,6 +837,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/sub_ops.py", SUB_OPS),
         ("pkg/tally.py", TALLY),
         ("pkg/tally_use.py", TALLY_USE),
+        ("pkg/exact_base.py", EXACT_BASE),
+        ("pkg/exact_sub.py", EXACT_SUB),
+        ("pkg/exact_use.py", EXACT_USE),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -815,8 +904,114 @@ impl Step {
     }
 }
 
+/// Exact effect reports follow every implementation of a call across modules (the targets of
+/// `CallSite::complete` read the subclasses of another file) and the must-facts of the callees
+/// (`EffectSummary::must_exec`, compared by Early Cutoff).
+fn steps_exact_effects() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a subclass in another file overrides the method without blocking",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_OVERRIDING)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the override blocks too",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_BLOCKING)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        Step::new(
+            "the base method blocks only on some paths",
+            vec![save("pkg/exact_base.py", EXACT_BASE_CONDITIONAL)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the base method blocks on every path again, and the override stops overriding",
+            vec![
+                save("pkg/exact_base.py", EXACT_BASE),
+                save("pkg/exact_sub.py", EXACT_SUB),
+            ],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+    ]
+}
+
 fn save(rel: &'static str, text: &str) -> Action {
     Action::Save(rel, text.to_owned())
+}
+
+/// `references = "calls"` on the `ledger` call contract and the `pure` boundary: a private
+/// helper's reference handing a guarded class on is reported at its caller in another module,
+/// and below the boundary, while no summary changes; it turns into a call and back, and the key
+/// leaves the configuration again (the summaries then carry no reference sites).
+fn steps_references() -> Vec<Step> {
+    let counting = CONFIG
+        .replace(
+            "targets = [\"Ledger.post\", \"Receipt\"]\nallowed-callers = [\"Store.*\"]\n",
+            "targets = [\"Ledger.post\", \"Receipt\"]\nallowed-callers = [\"Store.*\"]\nreferences = \"calls\"\n",
+        )
+        .replace(
+            "call-targets = [\"Ledger.post\", \"Receipt\"]\n",
+            "call-targets = [\"Ledger.post\", \"Receipt\"]\nreferences = \"calls\"\n",
+        );
+    let record = |body: &str| ACCT_OPS.replace("    return None\n", body);
+    let helper = |body: &str| PURE_OPS.replace("    return None\n", body);
+    vec![
+        Step::new(
+            "the call contracts count references as calls, and a private helper hands a guarded dataclass on",
+            vec![
+                Action::Configure(counting),
+                save("pkg/acct_ops.py", &record("    return Receipt\n")),
+            ],
+        )
+        .present(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "the helper constructs it instead",
+            vec![save("pkg/acct_ops.py", &record("    return Receipt(1)\n"))],
+        )
+        .present(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "the helper hands it on again, from a display",
+            vec![save("pkg/acct_ops.py", &record("    return [Receipt]\n"))],
+        )
+        .present(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "a helper below the boundary hands the dataclass on",
+            vec![save("pkg/pure_ops.py", &helper("    return Receipt\n"))],
+        )
+        .present(&[("pkg/pure.py", "EFF201"), ("pkg/pure_ops.py", "MUT204")]),
+        Step::new(
+            "the helper below the boundary only tests an instance of it",
+            vec![save(
+                "pkg/pure_ops.py",
+                &helper("    return isinstance(v, Receipt)\n"),
+            )],
+        )
+        .absent(&[("pkg/pure.py", "EFF201"), ("pkg/pure_ops.py", "MUT204")]),
+        Step::new(
+            "the helper hands it on again, and the key leaves the configuration",
+            vec![
+                save("pkg/pure_ops.py", &helper("    return Receipt\n")),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(&[
+            ("pkg/accounts.py", "MUT204"),
+            ("pkg/pure.py", "EFF201"),
+            ("pkg/pure_ops.py", "MUT204"),
+        ]),
+        Step::new(
+            "the helpers are restored",
+            vec![
+                save("pkg/acct_ops.py", ACCT_OPS),
+                save("pkg/pure_ops.py", PURE_OPS),
+            ],
+        )
+        .absent(&[("pkg/accounts.py", "MUT204")]),
+    ]
 }
 
 /// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
@@ -1121,6 +1316,45 @@ fn steps_contract_extensions() -> Vec<Step> {
     ]
 }
 
+/// Step 5c: environment reads below an effect boundary. No summary records them, so the report
+/// of the scope function above follows the helper's own accesses: a read of `sys.platform`, a
+/// call of `os.getenv` (whose call site the report's chain shows), the call moving down a line,
+/// and none.
+fn steps_environment() -> Vec<Step> {
+    let choose = |body: &str| PORTABLE_OPS.replace("    return \"posix\"\n", body);
+    vec![
+        Step::new(
+            "a helper below a boundary starts reading `sys.platform`",
+            vec![Action::Save(
+                "pkg/portable_ops.py",
+                choose("    return sys.platform\n"),
+            )],
+        )
+        .present(&[("pkg/portable.py", "EFF201")]),
+        Step::new(
+            "the helper calls `os.getenv` instead",
+            vec![Action::Save(
+                "pkg/portable_ops.py",
+                choose("    return os.getenv(\"OS\")\n"),
+            )],
+        )
+        .present(&[("pkg/portable.py", "EFF201")]),
+        Step::new(
+            "the call moves down a line",
+            vec![Action::Save(
+                "pkg/portable_ops.py",
+                choose("    name = \"OS\"\n    return os.getenv(name)\n"),
+            )],
+        )
+        .present(&[("pkg/portable.py", "EFF201")]),
+        Step::new(
+            "the helper stops reading the environment",
+            vec![save("pkg/portable_ops.py", PORTABLE_OPS)],
+        )
+        .absent(&[("pkg/portable.py", "EFF201")]),
+    ]
+}
+
 /// Where a body runs (`EFF101`): an offloading decorator added to and removed from a function
 /// another module awaits, and a helper turned into a generator and back.
 fn steps_body_runs() -> Vec<Step> {
@@ -1142,13 +1376,13 @@ fn steps_body_runs() -> Vec<Step> {
                 WORKER_OPS.replace("    return i\n", "    return session.execute(i)\n"),
             )],
         )
-        .present(&[("pkg/worker_view.py", "EFF103")])
-        .absent(&[("pkg/worker_view.py", "EFF101")]),
+        .present(&[("pkg/worker_view.py", "EFF113")])
+        .absent(&[("pkg/worker_view.py", "EFF111")]),
         Step::new(
             "the worker's query is removed",
             vec![save("pkg/worker_ops.py", WORKER_OPS)],
         )
-        .absent(&[("pkg/worker_view.py", "EFF103")]),
+        .absent(&[("pkg/worker_view.py", "EFF113")]),
         // A function a builtin calls once per item: its caller is re-checked when the
         // function in another module starts or stops querying.
         Step::new(
@@ -1158,17 +1392,17 @@ fn steps_body_runs() -> Vec<Step> {
                 RANK_KEY.replace("    return i\n", "    return session.execute(i)\n"),
             )],
         )
-        .present(&[("pkg/rank_user.py", "EFF103")]),
+        .present(&[("pkg/rank_user.py", "EFF113")]),
         Step::new(
             "the sort key's query is removed",
             vec![save("pkg/rank_key.py", RANK_KEY)],
         )
-        .absent(&[("pkg/rank_user.py", "EFF103")]),
+        .absent(&[("pkg/rank_user.py", "EFF113")]),
         Step::new(
             "a helper becomes a generator: the report moves to the iteration",
             vec![save("pkg/feed.py", FEED_GENERATOR)],
         )
-        .present(&[("pkg/feed_user.py", "EFF101")]),
+        .present(&[("pkg/feed_user.py", "EFF111")]),
         Step::new(
             "the generator becomes a helper again",
             vec![save("pkg/feed.py", FEED)],
@@ -1225,6 +1459,31 @@ fn steps_task_arguments() -> Vec<Step> {
 /// item, and over a tuple, which nothing grows.
 fn steps_small_displays() -> Vec<Step> {
     vec![
+        // `ProjectDecls::subclasses_of` and `mro_method`: a join over an argument annotated
+        // `list` changes tier when another module defines or removes a subclass of `list` that
+        // iterates its own way.
+        Step::new(
+            "another module defines a subclass of list with its own __iter__",
+            vec![Action::Create("pkg/loud.py", LOUD_LIST.to_owned())],
+        )
+        .present(&[("pkg/join_user.py", "OPT113")]),
+        Step::new(
+            "the module with the subclass is deleted",
+            vec![Action::Delete("pkg/loud.py")],
+        )
+        .present(&[("pkg/join_user.py", "OPT113")]),
+        // `ProjectDecls::plain_attr`: the compared key turns into a property in another module
+        // and back.
+        Step::new(
+            "the class of the joined items makes the key a property",
+            vec![save("pkg/rows.py", ROWS_PROPERTY)],
+        )
+        .present(&[("pkg/join_user.py", "OPT113")]),
+        Step::new(
+            "the key is a dataclass field again",
+            vec![save("pkg/rows.py", ROWS)],
+        )
+        .present(&[("pkg/join_user.py", "OPT113")]),
         Step::new(
             "a module-level list another file scans in a loop starts growing",
             vec![save("pkg/levels.py", LEVELS_GROWN)],
@@ -1531,6 +1790,97 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
 /// (`heki_rules::ChainFacts`): a helper that moves the change to or from a function it calls
 /// keeps its summary but changes the chain. The callers' annotations change in their own file
 /// only (Early Cutoff); a helper is also reached through a package re-export.
+fn steps_aliases_and_getters() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the module alias is bound to another function",
+            vec![save("pkg/alias_src.py", "_set = print\n")],
+        )
+        .absent(&[("pkg/alias_use.py", "MUT201")]),
+        Step::new(
+            "the module alias names `object.__setattr__` again",
+            vec![save("pkg/alias_src.py", ALIAS_SRC)],
+        )
+        .present(&[("pkg/alias_use.py", "MUT201")]),
+        Step::new(
+            "another module rebinds the alias",
+            vec![Action::Create(
+                "pkg/alias_rebind.py",
+                ALIAS_REBIND.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/alias_use.py", "MUT201")]),
+        Step::new(
+            "the module rebinding it is deleted",
+            vec![Action::Delete("pkg/alias_rebind.py")],
+        )
+        .present(&[("pkg/alias_use.py", "MUT201")]),
+        Step::new(
+            "the getter returns a copy of the container",
+            vec![Action::Save(
+                "pkg/getter_src.py",
+                GETTER_SRC.replace("return r.entries", "return list(r.entries)"),
+            )],
+        )
+        .absent(&[("pkg/getter_use.py", "MUT201")]),
+        Step::new(
+            "the getter returns the container again",
+            vec![save("pkg/getter_src.py", GETTER_SRC)],
+        )
+        .present(&[("pkg/getter_use.py", "MUT201")]),
+        Step::new(
+            "the subclass binds the getter's name as a class attribute",
+            vec![save(
+                "pkg/listing_cls.py",
+                &LISTING_CLS.replace("    pass\n", "    listing = []\n"),
+            )],
+        )
+        .absent(&[("pkg/listing_use.py", "MUT201")]),
+        Step::new(
+            "the subclass binds the name no more",
+            vec![save("pkg/listing_cls.py", LISTING_CLS)],
+        )
+        .present(&[("pkg/listing_use.py", "MUT201")]),
+        Step::new(
+            "the package re-exports a project function under the catalogued name",
+            vec![
+                Action::Create(
+                    "pkg/natives/impl.py",
+                    "def fetch():\n    return None\n".to_owned(),
+                ),
+                save(
+                    "pkg/natives/__init__.py",
+                    "from pkg.natives.impl import fetch\n",
+                ),
+            ],
+        )
+        .absent(&[("pkg/natives_use.py", "EFF101")]),
+        Step::new(
+            "the package binds the name no more",
+            vec![save("pkg/natives/__init__.py", "")],
+        )
+        .present(&[("pkg/natives_use.py", "EFF101")]),
+    ]
+}
+
+fn steps_protocol_reads() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the protocol no longer declares the attribute read through it",
+            vec![Action::Save(
+                "pkg/proto.py",
+                PROTO.replace("    secret: str\n", "    size: int\n"),
+            )],
+        )
+        .present(&[("pkg/proto_use.py", "MUT203")]),
+        Step::new(
+            "the protocol declares the attribute again",
+            vec![save("pkg/proto.py", PROTO)],
+        )
+        .absent(&[("pkg/proto_use.py", "MUT203")]),
+    ]
+}
+
 fn steps_mut110() -> Vec<Step> {
     let callers_mutable = RO_CALLERS
         .replace("items: Sequence[int]", "items: list[int]")
@@ -1758,6 +2108,24 @@ fn steps_mut202_mut109() -> Vec<Step> {
             vec![save("pkg/kid_count.py", KID_COUNT)],
         )
         .absent(&[("pkg/kid_stock.py", "MUT109")]),
+    ]
+}
+
+/// An `invalidation` target names a class by its module (`pkg.dials:*.level`): the writes of a
+/// class that moves to another module behind a re-export are no longer its target, directly or
+/// through a helper (`MUT109`).
+fn steps_module_patterns() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a class a module pattern names moves to another module behind a re-export",
+            vec![
+                Action::Write("pkg/dials_impl.py", DIALS_IMPL.to_owned()),
+                save("pkg/dials.py", DIALS_REEXPORT),
+            ],
+        )
+        .absent(&[("pkg/dial_user.py", "MUT109")]),
+        Step::new("the class moves back", vec![save("pkg/dials.py", DIALS)])
+            .present(&[("pkg/dial_user.py", "MUT109")]),
     ]
 }
 
@@ -1993,12 +2361,12 @@ fn steps_queue_capacity() -> Vec<Step> {
                 &Q_OWNER.replace("queue.Queue()", "queue.Queue(maxsize=8)"),
             )],
         )
-        .present(&[("pkg/q_publish.py", "EFF101")]),
+        .present(&[("pkg/q_publish.py", "EFF111")]),
         Step::new(
             "it builds the queue unbounded again",
             vec![save("pkg/q_owner.py", Q_OWNER)],
         )
-        .absent(&[("pkg/q_publish.py", "EFF101")]),
+        .absent(&[("pkg/q_publish.py", "EFF111")]),
         Step::new(
             "the caller of an async def putting on its parameter passes an unbounded queue",
             vec![save(
@@ -2006,12 +2374,12 @@ fn steps_queue_capacity() -> Vec<Step> {
                 &Q_RUN.replace("queue.Queue(5)", "queue.Queue()"),
             )],
         )
-        .absent(&[("pkg/q_drain.py", "EFF101")]),
+        .absent(&[("pkg/q_drain.py", "EFF111")]),
         Step::new(
             "it passes a bounded queue again",
             vec![save("pkg/q_run.py", Q_RUN)],
         )
-        .present(&[("pkg/q_drain.py", "EFF101")]),
+        .present(&[("pkg/q_drain.py", "EFF111")]),
         Step::new(
             "a subclass in another module defines the constant bounding the queue again",
             vec![save(
@@ -2019,12 +2387,12 @@ fn steps_queue_capacity() -> Vec<Step> {
                 &Q_SMALL.replace("label = \"small\"", "_MAX = 0"),
             )],
         )
-        .absent(&[("pkg/q_halt.py", "EFF101")]),
+        .absent(&[("pkg/q_halt.py", "EFF111")]),
         Step::new(
             "the subclass leaves the constant to its base again",
             vec![save("pkg/q_small.py", Q_SMALL)],
         )
-        .present(&[("pkg/q_halt.py", "EFF101")]),
+        .present(&[("pkg/q_halt.py", "EFF111")]),
         Step::new(
             "the module a global copies its queue from, and a function imports it from, bounds it",
             vec![save(
@@ -2032,12 +2400,12 @@ fn steps_queue_capacity() -> Vec<Step> {
                 &Q_EVENTS.replace("queue.Queue()", "queue.Queue(4)"),
             )],
         )
-        .present(&[("pkg/q_mirror.py", "EFF101"), ("pkg/q_local.py", "EFF101")]),
+        .present(&[("pkg/q_mirror.py", "EFF111"), ("pkg/q_local.py", "EFF111")]),
         Step::new(
             "it builds the queue unbounded again",
             vec![save("pkg/q_events.py", Q_EVENTS)],
         )
-        .absent(&[("pkg/q_mirror.py", "EFF101"), ("pkg/q_local.py", "EFF101")]),
+        .absent(&[("pkg/q_mirror.py", "EFF111"), ("pkg/q_local.py", "EFF111")]),
     ]
 }
 
@@ -2153,12 +2521,16 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_use.py", "EFF102"),
             ("pkg/guard_default_use.py", "EFF102"),
             ("pkg/guard_conn_use.py", "EFF102"),
-            ("pkg/buf_use.py", "EFF101"),
-            ("pkg/buf_default_use.py", "EFF101"),
+            ("pkg/buf_use.py", "EFF111"),
+            ("pkg/buf_default_use.py", "EFF111"),
             ("pkg/guard_global_use.py", "EFF102"),
             ("pkg/fill.py", "MUT201"),
             ("pkg/fill_main.py", "MUT201"),
             ("pkg/views.py", "MUT201"),
+            ("pkg/alias_use.py", "MUT201"),
+            ("pkg/getter_use.py", "MUT201"),
+            ("pkg/listing_use.py", "MUT201"),
+            ("pkg/natives_use.py", "EFF101"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(
@@ -2266,12 +2638,12 @@ fn steps() -> Vec<Step> {
             "a getter read from an async def in another file starts blocking",
             vec![save("pkg/remote.py", REMOTE_BLOCKING)],
         )
-        .present(&[("pkg/reader.py", "EFF101")]),
+        .present(&[("pkg/reader.py", "EFF111")]),
         Step::new(
             "the getter stops blocking",
             vec![save("pkg/remote.py", REMOTE)],
         )
-        .absent(&[("pkg/reader.py", "EFF101")]),
+        .absent(&[("pkg/reader.py", "EFF111")]),
         // Guarded effects across modules.
         Step::new(
             "a helper in another file gains the guard its caller's constant switches off",
@@ -2328,8 +2700,8 @@ fn steps() -> Vec<Step> {
             "a reader in another file gains the `hasattr` test a buffer argument decides",
             vec![save("pkg/buf_read.py", BUF_READ_HASATTR)],
         )
-        .present(&[("pkg/buf_default_use.py", "EFF101")])
-        .absent(&[("pkg/buf_use.py", "EFF101")]),
+        .present(&[("pkg/buf_default_use.py", "EFF111")])
+        .absent(&[("pkg/buf_use.py", "EFF111")]),
         Step::new(
             "the reader tests an attribute a buffer may lack",
             vec![save(
@@ -2337,22 +2709,22 @@ fn steps() -> Vec<Step> {
                 &BUF_READ_HASATTR.replace("\"read\")", "\"name\")"),
             )],
         )
-        .present(&[("pkg/buf_use.py", "EFF101")]),
+        .present(&[("pkg/buf_use.py", "EFF111")]),
         Step::new(
             "the reader rebinds a missing argument to a buffer before its `isinstance` test",
             vec![save("pkg/buf_read.py", BUF_READ_REBINDING)],
         )
         .absent(&[
-            ("pkg/buf_use.py", "EFF101"),
-            ("pkg/buf_default_use.py", "EFF101"),
+            ("pkg/buf_use.py", "EFF111"),
+            ("pkg/buf_default_use.py", "EFF111"),
         ]),
         Step::new(
             "the reader loses its tests",
             vec![save("pkg/buf_read.py", BUF_READ)],
         )
         .present(&[
-            ("pkg/buf_use.py", "EFF101"),
-            ("pkg/buf_default_use.py", "EFF101"),
+            ("pkg/buf_use.py", "EFF111"),
+            ("pkg/buf_default_use.py", "EFF111"),
         ]),
         Step::new(
             "a helper in another file keeps its connection in a module global",
@@ -2374,11 +2746,14 @@ fn steps() -> Vec<Step> {
     // 4. `MUT108`, `MUT110`, then where bodies run.
     steps.extend(steps_mut108());
     steps.extend(steps_mut110());
+    steps.extend(steps_aliases_and_getters());
+    steps.extend(steps_protocol_reads());
     steps.extend(steps_body_runs());
     steps.extend(steps_task_arguments());
     steps.extend(steps_small_displays());
     steps.extend(steps_queue_capacity());
     steps.extend(steps_mut202_mut109());
+    steps.extend(steps_module_patterns());
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());
     steps.extend(steps_hash_writers());
@@ -2387,6 +2762,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut113());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
+    steps.extend(steps_exact_effects());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(
@@ -2411,6 +2787,8 @@ fn steps() -> Vec<Step> {
         .present(&[("pkg/ops.py", "MUT201"), ("pkg/ops.py", "MUT203")]),
     ]);
     steps.extend(steps_contract_extensions());
+    steps.extend(steps_references());
+    steps.extend(steps_environment());
     steps.extend(steps_keys_fresh_strict());
     steps.extend([
         // 7. Files.
@@ -2596,12 +2974,12 @@ fn steps() -> Vec<Step> {
                 &SQUARE.replace("def side", "def area"),
             )],
         )
-        .present(&[("pkg/draw.py", "EFF101")]),
+        .present(&[("pkg/draw.py", "EFF111")]),
         Step::new(
             "the override is removed",
             vec![save("pkg/square.py", SQUARE)],
         )
-        .absent(&[("pkg/draw.py", "EFF101")]),
+        .absent(&[("pkg/draw.py", "EFF111")]),
         // Declarations reached through a re-export.
         Step::new(
             "a re-exported class's method becomes a property getter that blocks",
@@ -2610,7 +2988,7 @@ fn steps() -> Vec<Step> {
                 &UI_IMPL.replace("    def data", "    @property\n    def data"),
             )],
         )
-        .present(&[("pkg/consumer.py", "EFF101")]),
+        .present(&[("pkg/consumer.py", "EFF111")]),
         Step::new(
             "the getter `__hash__` reads becomes a property reading a mutated attribute",
             vec![save(
@@ -2634,7 +3012,7 @@ fn steps() -> Vec<Step> {
             "the re-exported classes are plain again",
             vec![save("pkg/ui/impl.py", UI_IMPL)],
         )
-        .absent(&[("pkg/consumer.py", "EFF101"), ("pkg/consumer.py", "MUT107")]),
+        .absent(&[("pkg/consumer.py", "EFF111"), ("pkg/consumer.py", "MUT107")]),
     ]);
     steps
 }

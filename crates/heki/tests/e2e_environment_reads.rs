@@ -1,0 +1,553 @@
+//! Effect boundaries on what a function takes from the environment it runs in, end to end
+//! through the real binary: `call-targets` naming functions outside the project by their full
+//! name (`os.getenv`), `read-targets` naming module attributes (`sys.platform`), the
+//! `reads-environment` token with the ecosystem catalog's list, and import probes
+//! (`import-probes = "report"`).
+
+mod common;
+
+use common::Project;
+use serde_json::Value;
+
+const GENERATE: &str = r#"from __future__ import annotations
+
+import importlib.util
+import os
+import platform
+import sys
+from importlib import import_module
+from importlib.metadata import version
+
+
+def by_getenv() -> str | None:
+    return os.getenv("X")
+
+
+def by_environ() -> str | None:
+    return os.environ.get("X")
+
+
+def by_environ_item() -> str:
+    return os.environ["X"]
+
+
+def by_version_info() -> bool:
+    return sys.version_info >= (3, 14)
+
+
+def by_platform() -> bool:
+    return sys.platform == "win32"
+
+
+def by_os_name() -> bool:
+    return os.name == "nt"
+
+
+def by_platform_system() -> str:
+    return platform.system()
+
+
+def by_find_spec() -> bool:
+    return importlib.util.find_spec("yaml") is not None
+
+
+def by_import_module() -> object:
+    return import_module("yaml")
+
+
+def by_metadata() -> str:
+    return version("pydantic")
+
+
+def by_guarded_import() -> bool:
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def pure(x: int) -> int:
+    return x + 1
+"#;
+
+/// Line, target, message, and sites of each `EFF201` report of `tree` under `boundary`.
+fn reports(name: &str, boundary: &str, tree: &[(&str, &str)]) -> Vec<(u64, String, String, u64)> {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"env\"\nscopes = [\"pkg.generate.*\"]\n{boundary}"
+        ),
+    )
+    .write("pkg/__init__.py", "");
+    for (path, text) in tree {
+        p.write(path, text);
+    }
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["target"].as_str().unwrap().to_owned(),
+                d["message"].as_str().unwrap().to_owned(),
+                d["sites"].as_u64().unwrap_or(1),
+            )
+        })
+        .collect()
+}
+
+fn lines_and_messages(found: &[(u64, String, String, u64)]) -> Vec<(u64, &str)> {
+    found.iter().map(|(l, _, m, _)| (*l, m.as_str())).collect()
+}
+
+#[test]
+fn reads_environment_reports_each_read_once_per_scope_function() {
+    let found = reports(
+        "env_token_shapes",
+        "forbid = [\"reads-environment\"]\nimport-probes = \"report\"\n",
+        &[("pkg/generate.py", GENERATE)],
+    );
+    let says = |f: &str, what: &str| {
+        format!("`{f}` reads the environment ({what}), which effect boundary `env` forbids")
+    };
+    let expected = [
+        (12, says("by_getenv", "calls `os.getenv`")),
+        (16, says("by_environ", "reads `os.environ`")),
+        (20, says("by_environ_item", "reads `os.environ`")),
+        (24, says("by_version_info", "reads `sys.version_info`")),
+        (28, says("by_platform", "reads `sys.platform`")),
+        (32, says("by_os_name", "reads `os.name`")),
+        (36, says("by_platform_system", "calls `platform.system`")),
+        (40, says("by_find_spec", "calls `importlib.util.find_spec`")),
+        (
+            44,
+            says("by_import_module", "calls `importlib.import_module`"),
+        ),
+        (
+            48,
+            says("by_metadata", "calls `importlib.metadata.version`"),
+        ),
+        (53, says("by_guarded_import", "probes the import of `yaml`")),
+    ];
+    let expected: Vec<(u64, &str)> = expected.iter().map(|(l, m)| (*l, m.as_str())).collect();
+    assert_eq!(lines_and_messages(&found), expected);
+    assert!(
+        found
+            .iter()
+            .all(|(_, target, _, sites)| target == "env:reads-environment" && *sites == 1)
+    );
+}
+
+#[test]
+fn import_probes_are_reported_only_when_asked() {
+    let found = reports(
+        "env_token_no_probes",
+        "forbid = [\"reads-environment\"]\n",
+        &[("pkg/generate.py", GENERATE)],
+    );
+    assert_eq!(found.len(), 10);
+    assert!(found.iter().all(|(line, ..)| *line != 53));
+}
+
+#[test]
+fn an_excluded_catalog_entry_is_never_reported() {
+    let found = reports(
+        "env_token_excluded",
+        "forbid = [\"reads-environment\"]\n\n[[tool.heki.ecosystem]]\nsymbol = \"os.getenv\"\nexcluded = true\n\n[[tool.heki.ecosystem]]\nsymbol = \"sys.platform\"\nexcluded = true\n",
+        &[("pkg/generate.py", GENERATE)],
+    );
+    let lines: Vec<u64> = found.iter().map(|(line, ..)| *line).collect();
+    assert_eq!(lines, [16, 20, 24, 32, 36, 40, 44, 48]);
+}
+
+#[test]
+fn external_targets_match_calls_and_module_reads_by_their_full_names() {
+    let found = reports(
+        "env_explicit_targets",
+        "forbid = [\"calls\", \"reads-targets\"]\nread-targets = [\"sys.version_info\", \"sys.platform\", \"os.name\", \"os.environ\"]\ncall-targets = [\"os.getenv\", \"importlib.util.find_spec\", \"platform.*\", \"importlib.import_module\", \"importlib.metadata.version\"]\n",
+        &[("pkg/generate.py", GENERATE)],
+    );
+    let expected = [
+        (12, "env:calls:os.getenv", "`by_getenv` calls `os.getenv`"),
+        (
+            16,
+            "env:reads:os.environ",
+            "`by_environ` reads `os.environ` (module_attr)",
+        ),
+        (
+            20,
+            "env:reads:os.environ",
+            "`by_environ_item` reads `os.environ` (module_attr)",
+        ),
+        (
+            24,
+            "env:reads:sys.version_info",
+            "`by_version_info` reads `sys.version_info` (module_attr)",
+        ),
+        (
+            28,
+            "env:reads:sys.platform",
+            "`by_platform` reads `sys.platform` (module_attr)",
+        ),
+        (
+            32,
+            "env:reads:os.name",
+            "`by_os_name` reads `os.name` (module_attr)",
+        ),
+        (
+            36,
+            "env:calls:platform.*",
+            "`by_platform_system` calls `platform.*`",
+        ),
+        (
+            40,
+            "env:calls:importlib.util.find_spec",
+            "`by_find_spec` calls `importlib.util.find_spec`",
+        ),
+        (
+            44,
+            "env:calls:importlib.import_module",
+            "`by_import_module` calls `importlib.import_module`",
+        ),
+        (
+            48,
+            "env:calls:importlib.metadata.version",
+            "`by_metadata` calls `importlib.metadata.version`",
+        ),
+    ];
+    let got: Vec<(u64, &str, &str)> = found
+        .iter()
+        .map(|(l, t, m, _)| (*l, t.as_str(), m.as_str()))
+        .collect();
+    let want: Vec<(u64, &str, String)> = expected
+        .iter()
+        .map(|(l, t, m)| (*l, *t, format!("{m}, which effect boundary `env` forbids")))
+        .collect();
+    let want: Vec<(u64, &str, &str)> = want.iter().map(|(l, t, m)| (*l, *t, m.as_str())).collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn entries_naming_project_functions_by_a_suffix_name_nothing_outside() {
+    // `getenv`, `*.getenv`, and `*.platform` name project functions or attributes by a
+    // suffix, `os:getenv` names project definitions by a module part, and `os.*.getenv` and
+    // `version_info.major` name no external symbol by its full name.
+    let found = reports(
+        "env_suffix_entries",
+        "forbid = [\"calls\", \"reads-targets\"]\nread-targets = [\"*.platform\", \"version_info.major\"]\ncall-targets = [\"getenv\", \"*.getenv\", \"os.*.getenv\", \"*.find_spec\", \"os:getenv\", \"importlib.util:find_spec\"]\n",
+        &[("pkg/generate.py", GENERATE)],
+    );
+    assert_eq!(found, Vec::new());
+}
+
+#[test]
+fn without_a_boundary_on_the_environment_nothing_changes() {
+    for boundary in [
+        "forbid = [\"blocking\"]\n",
+        "forbid = [\"calls\"]\ncall-targets = [\"pkg.generate.pure\"]\n",
+    ] {
+        let found = reports(
+            &format!("env_unrelated_{}", boundary.len()),
+            boundary,
+            &[("pkg/generate.py", GENERATE)],
+        );
+        assert_eq!(found, Vec::new(), "{boundary}");
+    }
+}
+
+#[test]
+fn reads_through_aliases_imported_names_and_helpers() {
+    let generate = r#"import importlib.util as u
+import sys
+from os import environ
+from sys import platform
+
+from pkg import helpers
+
+
+def by_imported_environ() -> str | None:
+    return environ.get("X")
+
+
+def by_module_alias() -> bool:
+    return u.find_spec("yaml") is not None
+
+
+def by_imported_platform() -> bool:
+    return platform == "darwin"
+
+
+def by_version_part() -> int:
+    return sys.version_info.major
+
+
+def through_helper() -> bool:
+    return helpers.is_windows() and helpers.is_mac()
+
+
+def local_import() -> str:
+    from os import getenv
+
+    return getenv("HOME") or ""
+
+
+def by_class_body() -> type:
+    class Settings:
+        home = sys.platform
+
+    return Settings
+
+
+def unknown(module: object) -> object:
+    return getattr(sys, "platform"), module
+
+
+def by_class_copy() -> type:
+    class Settings:
+        platform = platform
+
+    return Settings
+"#;
+    let helpers = r#"import sys
+
+
+def is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def is_mac() -> bool:
+    return sys.platform == "darwin"
+"#;
+    let found = reports(
+        "env_aliases",
+        "forbid = [\"reads-environment\"]\n",
+        &[("pkg/generate.py", generate), ("pkg/helpers.py", helpers)],
+    );
+    let says = |f: &str, what: &str| {
+        format!("`{f}` reads the environment ({what}), which effect boundary `env` forbids")
+    };
+    let expected = [
+        (10, says("by_imported_environ", "reads `os.environ`"), 1),
+        (
+            14,
+            says("by_module_alias", "calls `importlib.util.find_spec`"),
+            1,
+        ),
+        (18, says("by_imported_platform", "reads `sys.platform`"), 1),
+        (22, says("by_version_part", "reads `sys.version_info`"), 1),
+        (
+            26,
+            says(
+                "through_helper",
+                "reads `sys.platform` via `pkg.helpers.is_windows`",
+            ),
+            2,
+        ),
+        (32, says("local_import", "calls `os.getenv`"), 1),
+        (37, says("by_class_body", "reads `sys.platform`"), 1),
+        // The class body reads the module's `platform` before it binds its own.
+        (48, says("by_class_copy", "reads `sys.platform`"), 1),
+    ];
+    let got: Vec<(u64, &str, u64)> = found
+        .iter()
+        .map(|(l, _, m, sites)| (*l, m.as_str(), *sites))
+        .collect();
+    let want: Vec<(u64, &str, u64)> = expected
+        .iter()
+        .map(|(l, m, sites)| (*l, m.as_str(), *sites))
+        .collect();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn a_call_through_a_helper_names_the_helper() {
+    let generate = r#"from pkg import helpers
+
+
+def settings() -> str:
+    return helpers.home()
+"#;
+    let helpers = r#"import os
+
+
+def home() -> str:
+    return os.getenv("HOME") or ""
+"#;
+    let tree = [("pkg/generate.py", generate), ("pkg/helpers.py", helpers)];
+    let found = reports(
+        "env_call_helper",
+        "forbid = [\"reads-environment\"]\n",
+        &tree,
+    );
+    assert_eq!(
+        lines_and_messages(&found),
+        [(
+            5,
+            "`settings` reads the environment (calls `os.getenv` via `pkg.helpers.home`), which effect boundary `env` forbids"
+        )]
+    );
+    // An allowed callee's calls are allowed.
+    let allowed = reports(
+        "env_call_allowed",
+        "forbid = [\"reads-environment\"]\nallowed-callees = [\"os.getenv\"]\n",
+        &tree,
+    );
+    assert_eq!(allowed, Vec::new());
+}
+
+#[test]
+fn import_probes_need_an_except_clause_naming_an_import_error() {
+    let generate = r#"def plain() -> bool:
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def among_others() -> bool:
+    try:
+        from yaml import CSafeLoader  # noqa: F401
+    except (OSError, ModuleNotFoundError):
+        return False
+    return True
+
+
+def dotted() -> bool:
+    try:
+        import black.mode  # noqa: F401
+    except ValueError:
+        return False
+    except ImportError:
+        return False
+    return True
+
+
+def nested() -> bool:
+    try:
+        try:
+            import ryaml  # noqa: F401
+        except ValueError:
+            return False
+    except ImportError:
+        return False
+    return True
+
+
+def broad() -> bool:
+    try:
+        import tomllib  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def cleanup() -> bool:
+    try:
+        import json  # noqa: F401
+    finally:
+        print("done")
+    return True
+
+
+def guarded(lock: object) -> bool:
+    try:
+        with lock:  # type: ignore[attr-defined]
+            import csv  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def guarded_then_tested(lock: object, flag: bool) -> bool:
+    try:
+        with lock:  # type: ignore[attr-defined]
+            import csv  # noqa: F401
+        if flag:
+            return True
+    except ImportError:
+        return False
+    return False
+
+
+def unguarded() -> object:
+    import pickle
+
+    return pickle
+"#;
+    let found = reports(
+        "env_probes",
+        "forbid = [\"reads-environment\"]\nimport-probes = \"report\"\n",
+        &[("pkg/generate.py", generate)],
+    );
+    let probes = |f: &str, module: &str| {
+        format!(
+            "`{f}` reads the environment (probes the import of `{module}`), which effect boundary `env` forbids"
+        )
+    };
+    let expected = [
+        (3, probes("plain", "yaml")),
+        (11, probes("among_others", "yaml.CSafeLoader")),
+        (19, probes("dotted", "black.mode")),
+        (30, probes("nested", "ryaml")),
+    ];
+    let expected: Vec<(u64, &str)> = expected.iter().map(|(l, m)| (*l, m.as_str())).collect();
+    assert_eq!(lines_and_messages(&found), expected);
+}
+
+/// Read targets whose globs each compile but are too many to match together in one set.
+fn many_globs() -> String {
+    let globs: Vec<String> = (0..20_000)
+        .map(|i| format!("\"*X{i}?[ab]*{{c,d}}*._*\""))
+        .collect();
+    globs.join(", ")
+}
+
+#[test]
+fn import_probes_without_reads_environment_is_a_configuration_error() {
+    for (boundary, error) in [
+        (
+            "forbid = [\"blocking\"]\nimport-probes = \"report\"\n",
+            "effect-boundaries `env` sets `import-probes = \"report\"` but does not forbid `reads-environment`",
+        ),
+        (
+            "forbid = [\"reads-environment\"]\nimport-probes = \"always\"\n",
+            "unknown `import-probes` value `always` in effect-boundaries `env` (expected `allow` or `report`)",
+        ),
+        (
+            "forbid = [\"reads-targets\"]\nread-targets = [\"sys.[x\"]\n",
+            "invalid glob `sys.[x` in effect-boundaries.read-targets",
+        ),
+        (
+            "forbid = [\"calls\"]\ncall-targets = [\"os.[g\"]\n",
+            "invalid glob `os.[g` in effect-boundaries.call-targets",
+        ),
+        (
+            &format!(
+                "forbid = [\"reads-targets\"]\nread-targets = [{}]\n",
+                many_globs()
+            ),
+            "the globs of effect-boundaries.read-targets are too many to match together",
+        ),
+    ] {
+        let p = Project::new(&format!("env_config_error_{}", boundary.len()));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"env\"\nscopes = [\"pkg.*\"]\n{boundary}"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/generate.py", GENERATE);
+        let (code, stdout, stderr) = p.check(&[]);
+        assert_eq!(code, 2, "{stdout}{stderr}");
+        assert!(stderr.contains(error), "{stderr}");
+        // A boundary whose rule does not run is not validated, as for the other contracts.
+        let (code, stdout, stderr) = p.check(&["--select", "MUT201"]);
+        assert_eq!(code, 0, "{stdout}{stderr}");
+    }
+}

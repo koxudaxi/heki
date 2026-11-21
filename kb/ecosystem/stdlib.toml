@@ -7,7 +7,7 @@ opaque_packages = [
     "builtins", "asyncio", "socket", "ssl", "subprocess", "time", "io", "os",
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
-    "queue",
+    "queue", "contextlib", "importlib", "platform", "sys", "sysconfig",
 ]
 
 # --- Sleep ---
@@ -15,6 +15,10 @@ opaque_packages = [
 [[entries]]
 symbol = "time.sleep"
 effects = ["sleep"]
+# A sleep of no length returns at once.
+cases = [
+    { arg = 0, equals = 0, effects = [] },
+]
 opaque_to_layer3 = true
 
 # --- Subprocess ---
@@ -44,6 +48,10 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "subprocess.Popen.wait"
 effects = ["blocking_subprocess"]
+# With no time left, it polls the child once and returns or raises `TimeoutExpired`.
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -58,16 +66,20 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "builtins.open"
 effects = ["blocking_fs"]
+exit_suppresses = false
+items = "lines"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.open"
 effects = ["blocking_fs"]
+items = "lines"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.read_text"
 effects = ["blocking_fs"]
+items = "text"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -88,21 +100,25 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pathlib.Path.open"
 effects = ["blocking_fs"]
+items = "lines"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.listdir"
 effects = ["blocking_fs"]
+items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.scandir"
 effects = ["blocking_fs"]
+items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.walk"
 return_type = "os.walk()"
+items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -185,12 +201,16 @@ opaque_to_layer3 = true
 
 # --- Name resolution ---
 # A host name lookup waits for the resolver (DNS); the event loop has `loop.getaddrinfo()`.
+# A numeric address is parsed, not looked up, and `localhost` is answered by the hosts file or
+# the resolver's own entry, without the network.
 
 [[entries]]
 symbol = "socket.getaddrinfo"
 effects = ["blocking_net"]
 # `AI_NUMERICHOST` takes only a numeric address and never asks a resolver.
 cases = [
+    { arg = 0, param = "host", numeric_address = true, effects = [] },
+    { arg = 0, param = "host", one_of = ["localhost"], effects = [] },
     { arg = 5, param = "flags", flag = ["socket.AI_NUMERICHOST", "socket.AddressInfo.AI_NUMERICHOST"], effects = [] },
 ]
 opaque_to_layer3 = true
@@ -198,11 +218,22 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "socket.gethostbyname"
 effects = ["blocking_net"]
+cases = [
+    { arg = 0, numeric_address = true, effects = [] },
+    { arg = 0, one_of = ["localhost"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "socket.getfqdn"
 effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+# --- Context managers that can suppress the exception of the `with` body ---
+
+[[entries]]
+symbol = "contextlib.suppress"
+exit_suppresses = true
 opaque_to_layer3 = true
 
 # --- Async-safe ---
@@ -266,26 +297,31 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "threading.Lock"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.RLock"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.Semaphore"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.BoundedSemaphore"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.Condition"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 # --- Blocking synchronization (waits on the calling thread) ---
@@ -701,16 +737,35 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "urllib.request.urlopen"
 effects = ["blocking_net", "unpooled_client_alloc"]
+# A `data:` URL is decoded in memory.
+cases = [
+    { arg = 0, param = "url", prefix = ["data:"], effects = [] },
+]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 # --- DB (sqlite3) ---
 # The `execute*` methods return the cursor. `fetch*` step the statement already executed: they
 # read the database file (blocking) but send no new query, so a fetch loop is not `EFF103`.
+# `commit()` and `rollback()` do nothing without an open transaction.
 
 [[entries]]
 symbol = "sqlite3.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
+# A connection waits on a file only when heki establishes that the argument names one (a
+# literal or a constant without an in-memory form, or a path built from such parts); an
+# in-memory database is opened without I/O, and its statements run without waiting. Any other
+# argument (a parameter, an f-string, an environment lookup) may be in memory: such a
+# connection, like one only an annotation names (`sqlite3.Connection`), may not wait.
 return_type = "sqlite3.Connection"
+emits = "if-on-disk"
+cases = [
+    { arg = 0, param = "database", one_of = [":memory:"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
+    { arg = 0, param = "database", prefix = ["file::memory:"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
+    { arg = 0, param = "database", contains = ["mode=memory"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
+    { arg = 0, param = "database", names_file = true, return_type = "sqlite3.connect(file)", emits = "always" },
+]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -722,59 +777,429 @@ opaque_to_layer3 = true
 symbol = "sqlite3.Connection.execute"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+items = "rows"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Connection.executemany"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Connection.executescript"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Connection.commit"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Connection.rollback"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.execute"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+items = "rows"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.executemany"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.executescript"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.fetchone"
 effects = ["blocking_db"]
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.fetchmany"
 effects = ["blocking_db"]
+items = "rows"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.fetchall"
 effects = ["blocking_db"]
+items = "rows"
+emits = "if-on-disk"
+opaque_to_layer3 = true
+
+# The connections `sqlite3.connect` returns for an in-memory database (statements run without
+# waiting) and for a file it is seen to open, and their cursors: catalog classes whose methods
+# are those of `sqlite3.Connection` and `sqlite3.Cursor` (`api`).
+
+[[entries]]
+symbol = 'sqlite3.connect(":memory:").execute'
+effects = ["db_query"]
+return_type = 'sqlite3.connect(":memory:").cursor()'
+items = "rows"
+api = "sqlite3.Connection.execute"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(":memory:").executemany'
+effects = ["db_query"]
+return_type = 'sqlite3.connect(":memory:").cursor()'
+items = "rows"
+api = "sqlite3.Connection.executemany"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(":memory:").executescript'
+effects = ["db_query"]
+return_type = 'sqlite3.connect(":memory:").cursor()'
+items = "rows"
+api = "sqlite3.Connection.executescript"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(":memory:").cursor'
+return_type = 'sqlite3.connect(":memory:").cursor()'
+api = "sqlite3.Connection.cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(":memory:").cursor().execute'
+effects = ["db_query"]
+return_type = 'sqlite3.connect(":memory:").cursor()'
+items = "rows"
+api = "sqlite3.Cursor.execute"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(":memory:").cursor().executemany'
+effects = ["db_query"]
+return_type = 'sqlite3.connect(":memory:").cursor()'
+items = "rows"
+api = "sqlite3.Cursor.executemany"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(":memory:").cursor().executescript'
+effects = ["db_query"]
+return_type = 'sqlite3.connect(":memory:").cursor()'
+items = "rows"
+api = "sqlite3.Cursor.executescript"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).execute'
+effects = ["blocking_db", "db_query"]
+return_type = 'sqlite3.connect(file).cursor()'
+items = "rows"
+api = "sqlite3.Connection.execute"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).executemany'
+effects = ["blocking_db", "db_query"]
+return_type = 'sqlite3.connect(file).cursor()'
+items = "rows"
+api = "sqlite3.Connection.executemany"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).executescript'
+effects = ["blocking_db", "db_query"]
+return_type = 'sqlite3.connect(file).cursor()'
+items = "rows"
+api = "sqlite3.Connection.executescript"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).cursor'
+return_type = 'sqlite3.connect(file).cursor()'
+api = "sqlite3.Connection.cursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).commit'
+effects = ["blocking_db"]
+emits = "if-pending"
+api = "sqlite3.Connection.commit"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).rollback'
+effects = ["blocking_db"]
+emits = "if-pending"
+api = "sqlite3.Connection.rollback"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).cursor().execute'
+effects = ["blocking_db", "db_query"]
+return_type = 'sqlite3.connect(file).cursor()'
+items = "rows"
+api = "sqlite3.Cursor.execute"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).cursor().executemany'
+effects = ["blocking_db", "db_query"]
+return_type = 'sqlite3.connect(file).cursor()'
+items = "rows"
+api = "sqlite3.Cursor.executemany"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).cursor().executescript'
+effects = ["blocking_db", "db_query"]
+return_type = 'sqlite3.connect(file).cursor()'
+items = "rows"
+api = "sqlite3.Cursor.executescript"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).cursor().fetchone'
+effects = ["blocking_db"]
+api = "sqlite3.Cursor.fetchone"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).cursor().fetchmany'
+effects = ["blocking_db"]
+items = "rows"
+api = "sqlite3.Cursor.fetchmany"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = 'sqlite3.connect(file).cursor().fetchall'
+effects = ["blocking_db"]
+items = "rows"
+api = "sqlite3.Cursor.fetchall"
+opaque_to_layer3 = true
+
+# --- Environment reads ---
+# What the program finds where it runs: `reads-environment` effect boundaries forbid calling the
+# functions (`environment = "call"`) and reading the module attributes (`environment = "read"`).
+
+[[entries]]
+symbol = "os.getenv"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.getenvb"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.architecture"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.machine"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.node"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.platform"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.processor"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_build"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_compiler"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_branch"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_implementation"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_revision"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_version"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_version_tuple"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.release"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.system"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.version"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.uname"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.win32_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.win32_edition"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.win32_is_iot"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.mac_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.libc_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.freedesktop_os_release"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.android_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.ios_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "importlib.util.find_spec"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "importlib.import_module"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "importlib.metadata.version"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "importlib.metadata.distribution"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.which"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sysconfig.get_config_var"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.environ"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.environb"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.name"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.platform"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.version"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.version_info"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.hexversion"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.implementation"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.flags"
+environment = "read"
 opaque_to_layer3 = true

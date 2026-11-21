@@ -23,7 +23,34 @@ the allowed callers and resolves to a target:
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
   `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
-  its own.
+  its own; with `subclasses = false`, constructing exactly the class.
+
+With `references = "calls"`, a reference handing a target on to be called later counts as a call
+of it, reported where the target is named ("`f` hands on `pkg.core.decide`"; a name an import or
+the module body binds is read without a position of its own, so it is reported at the statement
+handing it on): passed to a call
+(`partial(decide)`, `register(self.decide)`, `field(default_factory=Rule)`), stored in an
+attribute, an item, or a global, returned, yielded, raised, or held by a display that is
+(`[decide]`, `{"a": decide}`), also through an import alias (`from pkg.core import decide as
+chosen`), a module alias (`run = core.decide`), or a module attribute (`core.decide`). A use that
+only names a class is no reference: an argument of `isinstance`, `issubclass`, another builtin that
+only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`,
+`typing.NewType`, or `contextlib.suppress`; an `except` clause, a class's bases and keywords, a
+function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
+receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
+per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
+`functools.partial` object handed to one. A reference in a class body counts for the function
+running the class statement (`<module>` for a class at module level).
+
+A call through a value typed with a project `Protocol` that declares the method is judged by the
+protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
+implementations it runs, and what an implementation's private method calls inside stays with it
+(also when other callers call the method through the class and take its calls over).
+
+A target's last segment names the function, method, or class: a glob there matches within that
+name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,
+and `pkg.api_*` is `pkg.api_commit`, not `pkg.api_helpers.api_reset`), and the report names the
+function the call reaches.
 
 A call is reported only when every function it may call is a target: when the receiver's class
 hierarchy also offers a method that is no target (a receiver typed with a base class whose own
@@ -45,7 +72,8 @@ coroutine's where it is awaited. Not reported either:
   callers above it starts in an allowed caller, an exempt method, or a class's own
   initialization (as for `MUT201`);
 - a class's own initialization: an initializer (`__init__`, `__post_init__`, ...) of a class of
-  the target's family calling a guarded method on its own `self` (for a target naming no class,
+  the target's family calling a guarded method on its own `self`, or handing it on with
+  `references = "calls"`, directly or through a private helper (for a target naming no class,
   `reset`, the family is the classes defining the methods it names and their subclasses);
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
@@ -54,7 +82,8 @@ coroutine's where it is awaited. Not reported either:
 ## What a report states
 
 A report states that the function calls a function or method, or constructs a class, that a
-`call-owners` contract reserves, outside the contract's call owners.
+`call-owners` contract reserves, outside the contract's call owners; with `references = "calls"`,
+that it hands one on.
 
 Its premises:
 
@@ -65,6 +94,10 @@ Its premises:
   inside allowed contexts. Established from the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller. Open: one path of the
   helper is enough.
+- **Hands on** (`references = "calls"`): the value named is the target, and it reaches, through
+  copies and displays, an argument, a store, a `return`, a `yield`, or a `raise`. Open: a value
+  merged from several paths is enough. Whether the code it is handed to calls it is not part of
+  the claim.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
@@ -116,7 +149,9 @@ No automatic fix.
     subclasses; a class target covers constructing the class and its subclasses; a target
     naming no class (`reset`) covers every project function and method of that name.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
-    against the function's qualified name and its `Class.method` qualname (`pkg.store.*`).
+    against the function's qualified name and its `Class.method` qualname (`pkg.store.*`). A
+    module part names one module without its submodules: `pkg:*` allows what `pkg/__init__.py`
+    defines, not `pkg.sub.user.sub_user`.
   - `forbidden-callers`: when set, only calls by these functions are reported (matched like
     `allowed-callers`); `allowed-callers` and `exempt-methods` stay exceptions inside them. A
     call is in scope when the reporting function or one of the private helpers it hands the call
@@ -128,3 +163,5 @@ No automatic fix.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
     tie to a class, under `MUT207`.
+  - `references`: `"ignore"` (default) or `"calls"`: a reference handing a target on to be
+    called later counts as a call of it.
