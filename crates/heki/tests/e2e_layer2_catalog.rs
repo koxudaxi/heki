@@ -1360,7 +1360,7 @@ fn only_a_named_file_makes_a_sqlite_connection_wait() {
         .collect();
     got.dedup();
     let file = |line: u64| ("ondisk.py".to_owned(), line);
-    assert_eq!(got, vec![file(10), file(14), file(18)]);
+    assert_eq!(got, vec![file(10), file(14), file(18), file(26), file(30)]);
 }
 
 const MEMORY_SHAPES: &str = r#"import contextlib
@@ -1575,6 +1575,26 @@ async def tp_path() -> None:
 
 async def tp_joined() -> None:
     sqlite3.connect(os.path.join(HERE, "data.db")).execute("SELECT 1")
+
+
+async def tp_suffixed() -> None:
+    sqlite3.connect(Path(__file__).with_suffix(".db")).execute("SELECT 1")
+
+
+async def tp_joined_to_a_literal() -> None:
+    sqlite3.connect(os.path.join("data", "app.db")).execute("SELECT 1")
+
+
+def join(*parts: str) -> str:
+    return ":memory:"
+
+
+async def tn_project_function_named_like_a_path_function() -> None:
+    sqlite3.connect(join("data", "app.db")).execute("SELECT 1")
+
+
+async def tn_path_method_on_a_parameter(base: Path) -> None:
+    sqlite3.connect(base.with_suffix(".db")).execute("SELECT 1")
 "#;
 
 /// A connection whose opening heki does not see, a parameter or a value only an annotation

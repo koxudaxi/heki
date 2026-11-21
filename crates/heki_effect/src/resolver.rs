@@ -3635,7 +3635,7 @@ pub(crate) fn arg_fact<'i>(
 ) -> ArgFact {
     ArgFact {
         literal: literal(&def, var),
-        names_file: names_a_file(&def, global_str, var),
+        names_file: names_a_file(&def, &name_of, global_str, var),
         class: class_of(var),
         flags: set_flags(&def, &name_of, var),
     }
@@ -3650,8 +3650,19 @@ fn in_memory_name(text: &str) -> bool {
         || text.contains("mode=memory")
 }
 
-/// `os.path` functions whose result is a path made from their arguments.
-const OS_PATH_BUILDERS: &[&str] = &["join", "abspath", "dirname", "realpath", "normpath"];
+/// Functions whose result is a path or text made only from their arguments, by the name the
+/// module resolves them to.
+const PATH_FUNCTIONS: &[&str] = &[
+    "builtins.str",
+    "os.fspath",
+    "os.path.join",
+    "os.path.abspath",
+    "os.path.dirname",
+    "os.path.realpath",
+    "os.path.normpath",
+    "pathlib.Path",
+    "pathlib.PurePath",
+];
 
 /// `pathlib.Path` methods whose result is a path made from the receiver and the arguments.
 const PATH_METHODS: &[&str] = &[
@@ -3662,79 +3673,93 @@ const PATH_METHODS: &[&str] = &[
     "absolute",
 ];
 
-/// Builtins and constructors whose result is a path or text made from their arguments.
-const PATH_CONSTRUCTORS: &[&str] = &["Path", "pathlib.Path", "PurePath", "str", "os.fspath"];
+/// How a value is built, as far as [`names_a_file`] reads it.
+enum FilePart {
+    /// A part that names a file by itself (`true`), or one that may not.
+    Leaf(bool),
+    /// A value made only from these parts.
+    Made(Vec<VarId>),
+}
+
+/// What `var` is built from: a string literal or a module string constant bound once
+/// (`global_str`) names a file unless it has an in-memory form ([`in_memory_name`]), and so does
+/// `__file__`; a copy, `+`, `/`, and `.parent` are made from their operands, a [`PATH_FUNCTIONS`]
+/// call (the called object or receiver resolved by `name_of`) from its arguments, and a
+/// [`PATH_METHODS`] call from its receiver and arguments. Anything else (a parameter, a phi, an
+/// f-string, an environment lookup, another attribute or call) may name an in-memory database.
+fn file_part<'i>(
+    def: &impl Fn(VarId) -> Option<&'i Inst>,
+    name_of: &impl Fn(VarId) -> Option<String>,
+    global_str: &dyn Fn(&str) -> Option<String>,
+    var: VarId,
+) -> FilePart {
+    let path_function =
+        |name: Option<String>| name.is_some_and(|n| PATH_FUNCTIONS.contains(&n.as_str()));
+    match def(var).map(|i| &i.kind) {
+        Some(InstKind::Const {
+            literal: ConstLiteral::Str(text),
+            ..
+        }) => FilePart::Leaf(!in_memory_name(text)),
+        Some(InstKind::LoadGlobal { name, .. }) => FilePart::Leaf(
+            name == "__file__" || global_str(name).is_some_and(|text| !in_memory_name(&text)),
+        ),
+        Some(InstKind::Copy { src, .. }) => FilePart::Made(vec![*src]),
+        Some(InstKind::BinOp {
+            op: BinOpKind::Add | BinOpKind::Div,
+            lhs,
+            rhs,
+            ..
+        }) => FilePart::Made(vec![*lhs, *rhs]),
+        Some(InstKind::AttrLoad { obj, attr, .. }) if attr == "parent" => {
+            FilePart::Made(vec![*obj])
+        }
+        Some(InstKind::Call {
+            callee_var, args, ..
+        }) if path_function(callee_var.and_then(name_of)) => FilePart::Made(args.clone()),
+        Some(InstKind::MethodCall {
+            recv, method, args, ..
+        }) if path_function(name_of(*recv).map(|m| format!("{m}.{method}"))) => {
+            FilePart::Made(args.clone())
+        }
+        Some(InstKind::MethodCall {
+            recv, method, args, ..
+        }) if PATH_METHODS.contains(&method.as_str()) => {
+            FilePart::Made(std::iter::once(*recv).chain(args.iter().copied()).collect())
+        }
+        _ => FilePart::Leaf(false),
+    }
+}
 
 /// Whether `var` is established to name a file (`ArgFact::names_file`): every part it is built
-/// from is a string literal or a module string constant bound once (`global_str`) with no
-/// in-memory form ([`in_memory_name`]), or `__file__`, through copies, `+` and `/`,
-/// [`PATH_CONSTRUCTORS`], [`OS_PATH_BUILDERS`], [`PATH_METHODS`], and `.parent`. Anything else
-/// (a parameter, a phi, an f-string, an environment lookup, an attribute) may name an in-memory
-/// database.
+/// from ([`file_part`]) names one, within [`MAX_PARAMETER_STEPS`] values.
 pub(crate) fn names_a_file<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
+    name_of: &impl Fn(VarId) -> Option<String>,
     global_str: &dyn Fn(&str) -> Option<String>,
     var: VarId,
 ) -> bool {
     let budget = Budget::unmetered("heki_effect::resolver::names_a_file");
     let mut steps = 0usize;
     let mut leaves = 0usize;
+    let part = |v| file_part(def, name_of, global_str, v);
     let not_a_file = reach(
         &budget,
         [var],
-        |v, next| match def(v).map(|i| &i.kind) {
-            Some(InstKind::Copy { src, .. }) => next.push(*src),
-            Some(InstKind::BinOp { lhs, rhs, .. }) => next.extend([*lhs, *rhs]),
-            Some(InstKind::AttrLoad { obj, .. }) => next.push(*obj),
-            Some(InstKind::Call { args, .. }) => next.extend(args.iter().copied()),
-            Some(InstKind::MethodCall {
-                recv, method, args, ..
-            }) => {
-                if PATH_METHODS.contains(&method.as_str()) {
-                    next.push(*recv);
-                }
-                next.extend(args.iter().copied());
+        |v, next| {
+            if let FilePart::Made(parts) = part(v) {
+                next.extend(parts);
             }
-            _ => {}
         },
         |v| {
             steps += 1;
-            let part = match def(v).map(|i| &i.kind) {
-                Some(InstKind::Const {
-                    literal: ConstLiteral::Str(text),
-                    ..
-                }) => Some(!in_memory_name(text)),
-                Some(InstKind::LoadGlobal { name, .. }) if name == "__file__" => Some(true),
-                Some(InstKind::LoadGlobal { name, .. }) => {
-                    Some(global_str(name).is_some_and(|text| !in_memory_name(&text)))
-                }
-                Some(InstKind::Copy { .. }) => None,
-                Some(InstKind::BinOp {
-                    op: BinOpKind::Add | BinOpKind::Div,
-                    ..
-                }) => None,
-                Some(InstKind::AttrLoad { attr, .. }) if attr == "parent" => None,
-                Some(InstKind::Call { callee, .. })
-                    if PATH_CONSTRUCTORS.contains(&callee.as_str()) =>
-                {
-                    None
-                }
-                Some(InstKind::MethodCall { method, .. })
-                    if OS_PATH_BUILDERS.contains(&method.as_str())
-                        || PATH_METHODS.contains(&method.as_str()) =>
-                {
-                    None
-                }
-                _ => Some(false),
-            };
-            match part {
+            match part(v) {
                 _ if steps > MAX_PARAMETER_STEPS => Visit::Stop(()),
-                Some(true) => {
+                FilePart::Leaf(true) => {
                     leaves += 1;
                     Visit::Prune
                 }
-                Some(false) => Visit::Stop(()),
-                None => Visit::Expand,
+                FilePart::Leaf(false) => Visit::Stop(()),
+                FilePart::Made(_) => Visit::Expand,
             }
         },
     );
@@ -3787,7 +3812,8 @@ pub(crate) fn from_parameter<'i>(
     found != Answer::Known(None)
 }
 
-/// The values [`from_parameter`] looks at, at most: past them the value may come from one.
+/// The values [`from_parameter`] and [`names_a_file`] look at, at most: past them the value may
+/// come from a parameter, or name an in-memory database.
 const MAX_PARAMETER_STEPS: usize = 64;
 
 /// The named objects `var` sets with `|` (`ArgFact::flags`), through copies. Each value is
