@@ -38,9 +38,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -432,44 +434,59 @@ class Runner:
     def write(self, text: str) -> None:
         (self.root / "m.py").write_text(text)
 
-    def modeled(self, text: str) -> bool | None:
-        """Whether the IR budget models every function of `text` (`None`: heki crashed)."""
+    def modeled(self, text: str) -> bool | str:
+        """Whether the IR budget models every function of `text`, or why building the IR failed
+        (a crash, or a run past `TIMEOUT_SECONDS`, which is stopped with its process group)."""
         self.write(text)
         args = [self.heki, "assumptions", "--json", "m.py"]
-        done = subprocess.run(args, cwd=self.root, capture_output=True, text=True)
-        if done.returncode not in (0, 1):
-            return None
-        return not any(h["kind"] == "unmodeled" for h in json.loads(done.stdout))
+        proc = subprocess.Popen(
+            args,
+            cwd=self.root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, _ = proc.communicate(timeout=TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            return f"ran past {TIMEOUT_SECONDS:.0f} s"
+        if proc.returncode not in (0, 1):
+            return f"crashed (exit code {proc.returncode})"
+        return not any(h["kind"] == "unmodeled" for h in json.loads(stdout))
 
-    def largest_modeled(self, family: Family, placement: str) -> tuple[int, bool]:
-        """The largest n the IR budget models, and whether building the IR crashed on the way
-        (then n is the size it crashed at)."""
+    def largest_modeled(self, family: Family, placement: str) -> tuple[int, str | None]:
+        """The largest n the IR budget models, or the size at which building the IR failed and
+        why."""
         sizes = [FIRST_N]
         while sizes[-1] * 2 <= MAX_N:
             sizes.append(sizes[-1] * 2)
         low = 0
         for n in sizes:
             modeled = self.modeled(source(family, placement, n))
-            if modeled is None:
-                return n, True
+            if isinstance(modeled, str):
+                return n, modeled
             if not modeled:
                 break
             low = n
         else:
-            return low, False
+            return low, None
         if low == 0:
             sys.exit(f"{family.name}/{placement}: unmodeled at n = {FIRST_N}")
         high = low * 2
         while high - low > max(1, low // 64):
             mid = (low + high) // 2
             modeled = self.modeled(source(family, placement, mid))
-            if modeled is None:
-                return mid, True
+            if isinstance(modeled, str):
+                return mid, modeled
             if modeled:
                 low = mid
             else:
                 high = mid
-        return low, False
+        return low, None
 
     def check(
         self, text: str, watch: bool, steps: Path | None = None, timeout: float = TIMEOUT_SECONDS
@@ -487,9 +504,14 @@ class Runner:
         seconds, code, stderr, usage = execute(self.heki, args, self.root, env, darwin, timeout)
         return seconds, peak_mib(stderr, usage), code
 
-    def steps(self, text: str) -> dict[tuple[str, str], tuple[int, bool]]:
+    def steps(self, text: str) -> dict[tuple[str, str], tuple[int, bool]] | None:
+        """The steps of each owner and function, `None` when the run failed: only a run that
+        ends cleanly (exit code 0 or 1) writes records to trust."""
         path = self.root / "steps.json"
-        self.check(text, watch=False, steps=path)
+        path.unlink(missing_ok=True)
+        _, _, code = self.check(text, watch=False, steps=path)
+        if code not in (0, 1) or not path.exists():
+            return None
         records = json.loads(path.read_text())
         out: dict[tuple[str, str], tuple[int, bool]] = {}
         for r in records:
@@ -510,14 +532,28 @@ def main() -> int:
     problems: list[str] = []
     with tempfile.TemporaryDirectory(prefix="heki-walk-shapes-") as tmp:
         runner = Runner(heki, Path(tmp))
+        # Only runs that end cleanly measure anything: a crash or a stopped run would make the
+        # baseline or a reference say nothing, or inflate the limit.
         empty = [runner.check(HELPERS, watch=False) for _ in range(3)]
+        empty = [run for run in empty if run[2] in (0, 1)]
+        if not empty:
+            print("calibration failed: no run of the empty module ended cleanly", file=sys.stderr)
+            return 1
         base_seconds = min(run[0] for run in empty)
         base_peak = min(run[1] for run in empty)
         print(f"empty module: {base_seconds:.2f} s, {base_peak:.0f} MiB", flush=True)
         factor = 1.0
         for name, placement, n, seconds in REFERENCES:
             reference = source(next(f for f in FAMILIES if f.name == name), placement, n)
-            took = min(runner.check(reference, watch=False)[0] for _ in range(3)) - base_seconds
+            runs = [runner.check(reference, watch=False) for _ in range(3)]
+            runs = [run for run in runs if run[2] in (0, 1)]
+            if not runs:
+                print(
+                    f"calibration failed: no run of {name}/{placement} ended cleanly",
+                    file=sys.stderr,
+                )
+                return 1
+            took = min(run[0] for run in runs) - base_seconds
             print(f"reference {name}/{placement} n={n}: {took:.2f} s ({seconds:.2f} s on the "
                   "machine of the limits)", flush=True)
             factor = max(factor, took / seconds)
@@ -527,18 +563,18 @@ def main() -> int:
             for placement in family.placements:
                 shape = (family.name, placement)
                 if family.project is not None:
-                    n, crashed = family.size, False
+                    n, failed = family.size, None
                 else:
-                    n, crashed = runner.largest_modeled(family, placement)
+                    n, failed = runner.largest_modeled(family, placement)
                 text = source(family, placement, n)
                 listed = shape in KNOWN_OVER
                 over = []
                 # Whether a listed shape costs clearly less than the limits.
-                well_under = not crashed
-                if crashed:
-                    print(f"{family.name}/{placement} n={n}: building the IR crashed", flush=True)
+                well_under = failed is None
+                if failed is not None:
+                    print(f"{family.name}/{placement} n={n}: building the IR {failed}", flush=True)
                     over.append("build")
-                for watch in () if crashed else (False,) if listed else (False, True):
+                for watch in () if failed is not None else (False,) if listed else (False, True):
                     # A listed shape only has to show when it drops under the limits.
                     timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
                     seconds, peak, code = runner.check(text, watch, timeout=timeout)
@@ -582,6 +618,8 @@ def step_growth(runner: Runner, family: Family, placement: str, n: int, text: st
     budgets spent on a family shaped like real code."""
     full = runner.steps(text)
     half = runner.steps(source(family, placement, n // 2))
+    if full is None or half is None:
+        return [f"{family.name}/{placement}: the steps could not be counted (a run failed)"]
     out = []
     for key, (taken, spent) in sorted(full.items()):
         before = half.get(key, (0, False))[0]
