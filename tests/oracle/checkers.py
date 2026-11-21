@@ -363,6 +363,7 @@ def check_mut114(claim, runs, sources=None):
             for m in line[9]:
                 types.setdefault(m[0], m[2])
             changed = operated(claim, line)
+            after_of = {i: snap for i, _t, snap in line[8]}
             hits = [i for i in changed if i in cached]
             if not hits:
                 premise = (
@@ -371,7 +372,13 @@ def check_mut114(claim, runs, sources=None):
                     else "Changed in place: the line ran and changed nothing it names"
                 )
                 result.refute(
-                    "not-cached-object", premise, run, {"changed": sorted(types.get(i, "?") for i in changed)}
+                    "not-cached-object",
+                    premise,
+                    run,
+                    {
+                        "changed": sorted(types.get(i, "?") for i in changed),
+                        "line_objects": [[t, snap, after_of.get(i)] for i, t, snap in line[7]],
+                    },
                 )
                 continue
             if not any(cached[i] in CONTAINER_KINDS for i in hits):
