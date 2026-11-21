@@ -1507,15 +1507,11 @@ impl<'a> Extractor<'a> {
     /// capture it), by qualname.
     fn cell_owner(&self, name: &str) -> Option<String> {
         let qualname = func_qualname(self.f);
-        let mut end = qualname.len();
-        while let Some(i) = qualname[..end].rfind(".<locals>.") {
-            let outer = &qualname[..i];
-            if self.cx.captures(outer, name) {
-                return Some(outer.to_owned());
-            }
-            end = i;
-        }
-        None
+        qualname
+            .rmatch_indices(".<locals>.")
+            .map(|(i, _)| &qualname[..i])
+            .find(|outer| self.cx.captures(outer, name))
+            .map(str::to_owned)
     }
 
     /// The shared state the call at `site` hands to its project callee `callee`: the receiver
@@ -1527,9 +1523,6 @@ impl<'a> Extractor<'a> {
         recv: Option<VarId>,
         bound: &[(u8, VarId)],
     ) -> Vec<HandedState> {
-        let Ok(callee) = u8::try_from(callee) else {
-            return Vec::new();
-        };
         let args = recv
             .map(|r| (0, r))
             .into_iter()
@@ -5592,15 +5585,12 @@ impl<'a> RootSet<'a> {
 
     /// Add the roots of `other`; whether the set grew.
     fn join(&mut self, other: &Self) -> bool {
-        let mut grew = false;
+        let before = (self.roots.len(), self.more);
         for root in &other.roots {
-            grew |= self.add(*root);
+            self.add(*root);
         }
-        if other.more && !self.more {
-            self.more = true;
-            grew = true;
-        }
-        grew
+        self.more |= other.more;
+        (self.roots.len(), self.more) != before
     }
 }
 

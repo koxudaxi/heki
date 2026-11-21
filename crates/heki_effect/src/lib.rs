@@ -702,7 +702,7 @@ impl SharedStateFacts {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct HandedState {
     pub site: Span,
-    pub callee: u8,
+    pub callee: usize,
     pub param: u8,
     pub state: SharedState,
 }
@@ -850,7 +850,7 @@ impl EffectSummary {
         handed[from..]
             .iter()
             .take_while(move |h| h.site.start == site.start)
-            .filter(move |h| h.site == site && usize::from(h.callee) == callee)
+            .filter(move |h| h.site == site && h.callee == callee)
     }
 
     /// Whether the function changes the object its parameter `j` is: in place, an attribute

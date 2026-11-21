@@ -759,13 +759,11 @@ fn add_handed_changes(
     if local.shared_state.is_none() {
         return;
     }
-    let Some(ci) = site
+    let ci = site
         .project_callees()
         .iter()
         .position(|b| std::ptr::eq(b, bc))
-    else {
-        return;
-    };
+        .expect("an edge's callee is one of its call site's callees");
     let changed: Vec<&SharedState> = local
         .handed_at(site.span, ci)
         .filter(|h| facts.changes_argument(h.param))
