@@ -325,7 +325,7 @@ pub struct ArgCase {
     /// A string literal containing one of these.
     pub contains: Vec<String>,
     /// A value the calling function may compute from one of its parameters (the parameter, or
-    /// `str()`, an f-string, or a concatenation of it), which its callers decide.
+    /// `str()` or a concatenation of it), which its callers decide.
     pub from_parameter: bool,
     pub effects: Option<Vec<ExecEffectKind>>,
     pub return_type: Option<String>,

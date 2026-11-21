@@ -1371,6 +1371,28 @@ async def tn_connection_options(conn: sqlite3.Connection):
 
 async def tp_journal(conn: sqlite3.Connection):
     conn.execute("PRAGMA journal_mode=WAL")
+
+
+def open_named(name):
+    return sqlite3.connect(f"{name}.db").execute("SELECT 1")
+
+
+def open_joined(name):
+    return sqlite3.connect(name + ".db").execute("SELECT 1")
+
+
+async def tn_paths_from_parameters():
+    open_named("app")
+    open_joined("app")
+
+
+async def tn_option_reads_and_values(conn: sqlite3.Connection, ms):
+    conn.execute("PRAGMA foreign_keys")
+    conn.execute(f"PRAGMA busy_timeout = {ms}")
+
+
+async def tp_pragma_named_at_run_time(conn: sqlite3.Connection, name):
+    conn.execute(f"PRAGMA {name}")
 "#,
             "EFF101,EFF111",
         ),
@@ -1383,6 +1405,25 @@ async def tp_journal(conn: sqlite3.Connection):
             ),
             d(24, "EFF101", "tp_file", "sqlite3.connect"),
             d(33, "EFF101", "tp_journal", "sqlite3.Connection.execute"),
+            d(
+                // An f-string is opaque (R6): a file name ending in `.db`, here.
+                45,
+                "EFF101",
+                "tn_paths_from_parameters",
+                "sqlite3.connect"
+            ),
+            d(
+                46,
+                "EFF111",
+                "tn_paths_from_parameters",
+                "sqlite3.connect(parameter).execute"
+            ),
+            d(
+                55,
+                "EFF101",
+                "tp_pragma_named_at_run_time",
+                "sqlite3.Connection.execute"
+            ),
         ]
     );
 }

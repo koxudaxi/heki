@@ -17,8 +17,8 @@ use heki_ast::Span;
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, Visit, reach};
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind,
-    IrFunction, ModuleIr, SmallDisplay, VarId,
+    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
+    SmallDisplay, VarId,
 };
 use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
@@ -3603,9 +3603,9 @@ const TEXT_OF_ARGUMENT: &[&str] = &["str", "os.fspath", "Path", "pathlib.Path"];
 
 /// Whether `var` may hold a value its function computes from one of its parameters (`is_param`):
 /// the parameter, through copies, the phis `phi_inputs` lists the inputs of (it returns whether
-/// the value is a phi), concatenations, f-strings, and [`TEXT_OF_ARGUMENT`]. Any other value
-/// is opaque: an argument heki cannot evaluate is one the call waits on (R6). Past its budget
-/// the value may be.
+/// the value is a phi), operators (`name + ".db"`), and [`TEXT_OF_ARGUMENT`]. Any other value,
+/// an f-string included, is opaque: an argument heki cannot evaluate is one the call waits on
+/// (R6). Past its budget the value may be.
 pub(crate) fn from_parameter<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     phi_inputs: &dyn Fn(VarId, &mut Vec<VarId>) -> bool,
@@ -3624,11 +3624,6 @@ pub(crate) fn from_parameter<'i>(
             match def(v).map(|i| &i.kind) {
                 Some(InstKind::Copy { src, .. }) => next.push(*src),
                 Some(InstKind::BinOp { lhs, rhs, .. }) => next.extend([*lhs, *rhs]),
-                Some(InstKind::AllocBuiltin {
-                    kind: BuiltinKind::Str,
-                    elems,
-                    ..
-                }) => next.extend(elems.iter().copied()),
                 Some(InstKind::Call { callee, args, .. })
                     if TEXT_OF_ARGUMENT.contains(&callee.as_str()) =>
                 {
