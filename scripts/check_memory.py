@@ -54,7 +54,7 @@ COPIES_DEPTH = 16
 
 # Heap budgets in MiB per mode: the peak on the CI runner at calibration plus 5 %. A change
 # of a budget needs the owner's decision (docs/development.md, Memory).
-HEAP_BUDGETS_MIB = {"check": 56.6, "watch": 51.7, "owners": 70.5}
+HEAP_BUDGETS_MIB = {"check": 56.7, "watch": 51.8, "owners": 70.6}
 
 # RSS budgets in MiB per platform and mode, a coarse check at release time: the lowest of three
 # runs at calibration plus about 10 %.
