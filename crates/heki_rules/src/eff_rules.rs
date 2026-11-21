@@ -483,7 +483,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     &key.qualname,
                     e.must.target(),
                     e.message(),
-                    None,
+                    Some(query_help(&q.repeats)),
                     &e.must.related(),
                 ),
                 Some(_) => None,
@@ -500,10 +500,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                         through_helpers(&q.chain),
                         q.repeats.every()
                     ),
-                    Some(format!(
-                        "load what it needs once before the {}",
-                        q.repeats.ahead_of()
-                    )),
+                    Some(query_help(&q.repeats)),
                     &q.chain,
                 ),
                 None => None,
@@ -691,6 +688,14 @@ pub(crate) fn data_origin(
         ItemSource::Receiver | ItemSource::Fixed => return None,
     };
     Some(named)
+}
+
+/// The advice of an `EFF103` / `EFF113` report, which its message leaves out.
+fn query_help(repeats: &Repeats<'_>) -> String {
+    format!(
+        "batch the queries, or load the data once before the {}",
+        repeats.ahead_of()
+    )
 }
 
 /// What repeats an effect `EFF102` / `EFF103` report: a data-sized loop around the call, or the

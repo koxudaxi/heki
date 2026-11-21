@@ -1572,7 +1572,10 @@ fn builtins_call_a_callable_once_per_item() {
         "`pkg.per_item.lambda_sorted.<locals>.<lambda>` runs a database query \
          (`sqlite3.Connection.execute`) for every item `sorted` calls it with"
     );
-    assert_eq!(help(sorted), "load what it needs once before the call");
+    assert_eq!(
+        help(sorted),
+        "batch the queries, or load the data once before the call"
+    );
     assert_eq!(
         first_hop(&diags, "pkg/per_item.py", sorted),
         "`lambda_sorted` calls `pkg.per_item.lambda_sorted.<locals>.<lambda>`"
@@ -1589,7 +1592,10 @@ fn builtins_call_a_callable_once_per_item() {
         "`pkg.per_item.every_outer_iteration.<locals>.<lambda>` runs a database query \
          (`sqlite3.Connection.execute`) on every loop iteration"
     );
-    assert_eq!(help(outer), "load what it needs once before the loop");
+    assert_eq!(
+        help(outer),
+        "batch the queries, or load the data once before the loop"
+    );
     assert_eq!(
         message(&diags, "pkg/per_item.py", at("sorted(batch, key=lambda")),
         "`pkg.per_item.items_of_the_first_batch.<locals>.<lambda>` runs a database query \
