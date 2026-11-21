@@ -419,7 +419,8 @@ origin is not reported.
 `importlib.util.find_spec`, `importlib.import_module`, `importlib.metadata.version`,
 `importlib.metadata.distribution`, `shutil.which`, and `sysconfig.get_config_var`; and these
 reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
-`sys.version_info`, `sys.hexversion`, `sys.implementation`, and `sys.flags`. A call on
+`sys.version_info`, `sys.hexversion`, `sys.implementation`, and `sys.flags`. An entry set
+`excluded = true` (`[[tool.heki.ecosystem]]`, below) is never reported. A call on
 `os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
 names the first read it reaches and counts every one.
 

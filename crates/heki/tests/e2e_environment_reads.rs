@@ -154,6 +154,17 @@ fn import_probes_are_reported_only_when_asked() {
 }
 
 #[test]
+fn an_excluded_catalog_entry_is_never_reported() {
+    let found = reports(
+        "env_token_excluded",
+        "forbid = [\"reads-environment\"]\n\n[[tool.heki.ecosystem]]\nsymbol = \"os.getenv\"\nexcluded = true\n\n[[tool.heki.ecosystem]]\nsymbol = \"sys.platform\"\nexcluded = true\n",
+        &[("pkg/generate.py", GENERATE)],
+    );
+    let lines: Vec<u64> = found.iter().map(|(line, ..)| *line).collect();
+    assert_eq!(lines, [16, 20, 24, 32, 36, 40, 44, 48]);
+}
+
+#[test]
 fn external_targets_match_calls_and_module_reads_by_their_full_names() {
     let found = reports(
         "env_explicit_targets",

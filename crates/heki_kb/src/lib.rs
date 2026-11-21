@@ -339,6 +339,12 @@ impl EcosystemEntry {
             .find(|case| arg(case.arg, case.param.as_deref()).is_some_and(|fact| case.holds(&fact)))
     }
 
+    /// How calling or reading the symbol reads the environment, as `reads-environment`
+    /// boundaries forbid it: never for an `excluded` entry, which is never reported.
+    pub fn environment_access(&self) -> Option<EnvironmentAccess> {
+        self.environment.filter(|_| !self.excluded)
+    }
+
     pub fn effects_in<'e>(&'e self, case: Option<&'e ArgCase>) -> &'e [ExecEffectKind] {
         case.and_then(|c| c.effects.as_deref())
             .unwrap_or(&self.effects)
