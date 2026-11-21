@@ -210,6 +210,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (no final newline) is checked: its function was taken for the module body, which has the same
   span, so it was never analyzed, and `heki check` panicked on such a generator expression
   (`(x async for x in xs)`).
+- `heki check` no longer overflows its stack on a loop no path enters (after a `return`,
+  `raise`, or `break`) that computes a value from itself (`d = d.x`, `d = d[mask]`): the value
+  was defined by itself, and the walks along definitions went around it forever.
 
 ## [0.1.2] - 2026-11-21
 
