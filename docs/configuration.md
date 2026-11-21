@@ -437,6 +437,23 @@ reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
 `os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
 names the first read it reaches and counts every one.
 
+`importlib.import_module(name, package)` and `importlib.util.find_spec(name, package)` read the
+environment unless the module they import is established to be the project's own:
+
+- every text `name` may hold names a module of the project (`"pkg.config"`, a module constant,
+  either of two such texts), or starts with a package of the project and a dot
+  (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`). The longest project
+  module before that dot must be a regular package whose `__init__.py` heki reads and does not
+  rebind `__path__` (`pkgutil.extend_path` lets installed distributions add modules to it);
+- a relative name (`".config"`, `f"..parser.{name}"`) is anchored at `package`: a text the code
+  fixes, or the module's own `__package__` or `__name__`;
+- the call is not inside a `try` with an `except` clause naming `ImportError` or
+  `ModuleNotFoundError`: the code expects the import to fail.
+
+A name heki cannot tell (a parameter, `"pkg" + name`, a namespace package without
+`__init__.py`) stays a read of the environment, and so does an import of a module the project
+does not have. A `call-targets` entry naming `importlib.import_module` matches every call of it.
+
 - Each scope function is checked through any number of calls.
 - A violation inside another scope function is reported there only, once.
 - One report per scope function and forbidden kind (or target) stands for every distinct site of

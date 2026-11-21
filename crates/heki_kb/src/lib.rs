@@ -359,6 +359,11 @@ pub enum EnvironmentAccess {
     Call,
     /// Reading the module attribute does (`os.environ`, `sys.platform`).
     Read,
+    /// Calling the function imports or finds the module its argument `name` (position 0) names,
+    /// a relative name anchored at its argument `package` (position 1), as
+    /// `importlib.import_module` does: it reads the environment unless the module is the
+    /// project's own.
+    Import,
 }
 
 /// An argument of a catalogued call: the one at position `arg` (the receiver not counted), or
@@ -1295,8 +1300,6 @@ mod tests {
                     s(&["os.getenv", "os.getenvb"]),
                     with_prefix("platform", PLATFORM),
                     s(&[
-                        "importlib.util.find_spec",
-                        "importlib.import_module",
                         "importlib.metadata.version",
                         "importlib.metadata.distribution",
                         "shutil.which",
@@ -1319,6 +1322,10 @@ mod tests {
                     "sys.flags",
                 ]),
                 tagged(EnvironmentAccess::Read),
+            ),
+            (
+                s(&["importlib.util.find_spec", "importlib.import_module"]),
+                tagged(EnvironmentAccess::Import),
             ),
         ]
     }

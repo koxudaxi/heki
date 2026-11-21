@@ -51,7 +51,13 @@ count for a read.
     attribute read the ecosystem catalog tags `environment` (`os.getenv`, `platform.system`,
     `importlib.util.find_spec`, `os.environ`, `sys.platform`, `sys.version_info`, ...), and,
     with `import-probes = "report"`, an `import` inside a `try` with an `except` clause naming
-    `ImportError` or `ModuleNotFoundError`;
+    `ImportError` or `ModuleNotFoundError`. A call of `importlib.import_module` or
+    `importlib.util.find_spec` that imports a module of the project reads no environment: every
+    text its name may hold names a project module (`"pkg.config"`, a module constant), or
+    starts with a project package and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`),
+    a package whose `__init__` does not rebind `__path__`; a relative name is anchored at
+    `package` (a text, or the module's own `__package__` or `__name__`). Inside a `try` that
+    takes an `ImportError`, such a call still counts;
   - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
     parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
@@ -114,7 +120,8 @@ Its premises:
 - **Forbidden effect**: the last call has an effect `forbid` lists, as the ecosystem catalog or the
   boundary's own entries describe it; or the last function makes the call, the read, or the import
   probe `forbid` lists. Established for a read and an import probe: the module attribute is named
-  through the module's imports, and the `except` clause names the import error. With
+  through the module's imports, and the `except` clause names the import error. For a call
+  importing a module, open: the module is not established to be the project's. With
   `references = "calls"`, a target handed on is one for `calls`: the value is the target, and it
   reaches a use handing it on. Established; whether the code it is handed to calls it is not
   part of the claim.

@@ -1687,6 +1687,17 @@ impl ProjectDecls {
         self.modules.get(name).map(Arc::as_ref)
     }
 
+    /// Whether every module whose name starts with `head` (`pkg.parser.`) is one of the
+    /// project's: the longest project module `head` names before a dot, whose `__path__` the
+    /// rest of the name is found on, is a regular package whose `__init__` heki read and does
+    /// not rebind `__path__` (`pkgutil.extend_path` lets installed distributions add modules to
+    /// it). A directory without `__init__.py` inside it is found on that path too.
+    pub fn holds_modules_starting_with(&self, head: &str) -> bool {
+        head.rmatch_indices('.')
+            .find_map(|(dot, _)| self.module(&head[..dot]))
+            .is_some_and(|m| m.is_package && !m.unread && !m.unknown_globals.contains("__path__"))
+    }
+
     /// Longest project-module prefix of `fqn` and the remaining dotted part.
     fn split_module<'s>(&self, fqn: &'s str) -> Option<(&ModuleDecls, &'s str)> {
         let mut end = fqn.len();

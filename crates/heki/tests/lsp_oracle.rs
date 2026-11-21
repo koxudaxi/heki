@@ -1453,7 +1453,7 @@ fn steps_contract_extensions() -> Vec<Step> {
 /// Step 5c: environment reads below an effect boundary. No summary records them, so the report
 /// of the scope function above follows the helper's own accesses: a read of `sys.platform`, a
 /// call of `os.getenv` (whose call site the report's chain shows), the call moving down a line,
-/// and none.
+/// an import of a module that is the project's only while its file exists, and none.
 fn steps_environment() -> Vec<Step> {
     let choose = |body: &str| PORTABLE_OPS.replace("    return \"posix\"\n", body);
     vec![
@@ -1479,6 +1479,29 @@ fn steps_environment() -> Vec<Step> {
                 "pkg/portable_ops.py",
                 choose("    name = \"OS\"\n    return os.getenv(name)\n"),
             )],
+        )
+        .present(&[("pkg/portable.py", "EFF201")]),
+        Step::new(
+            "the helper imports a module the project does not have",
+            vec![Action::Save(
+                "pkg/portable_ops.py",
+                choose(
+                    "    from importlib import import_module\n\n    return import_module(\"pkg.portable_plugin\")\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/portable.py", "EFF201")]),
+        Step::new(
+            "the module it imports is created in the project",
+            vec![Action::Create(
+                "pkg/portable_plugin.py",
+                "VALUE = 1\n".to_owned(),
+            )],
+        )
+        .absent(&[("pkg/portable.py", "EFF201")]),
+        Step::new(
+            "the module is deleted again",
+            vec![Action::Delete("pkg/portable_plugin.py")],
         )
         .present(&[("pkg/portable.py", "EFF201")]),
         Step::new(

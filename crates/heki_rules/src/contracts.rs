@@ -313,6 +313,7 @@ impl Contracts for ConfigContracts {
 
     fn external_call(&self, symbol: &str) -> bool {
         self.external.environment(symbol, EnvironmentAccess::Call)
+            || self.external.environment(symbol, EnvironmentAccess::Import)
             || self
                 .external
                 .calls

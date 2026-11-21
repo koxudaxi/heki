@@ -890,7 +890,8 @@ impl Boundary<'_> {
     }
 
     /// Whether `reads-environment` forbids `access`: a call or a read the ecosystem catalog
-    /// tags as one of the environment, or an import probe with `import-probes = "report"`.
+    /// tags as one of the environment, an import of a module not established to be the
+    /// project's, or an import probe with `import-probes = "report"`.
     fn forbids_environment(&self, cx: &CheckContext<'_>, access: &ExternalAccess) -> bool {
         let tagged = |kind| {
             cx.kb
@@ -900,7 +901,10 @@ impl Boundary<'_> {
         };
         self.reads_environment
             && match access.kind {
-                AccessKind::Call => tagged(EnvironmentAccess::Call),
+                AccessKind::Call => {
+                    tagged(EnvironmentAccess::Call)
+                        || tagged(EnvironmentAccess::Import) && !access.imports_project_module
+                }
                 AccessKind::Read => tagged(EnvironmentAccess::Read),
                 AccessKind::ImportProbe => self.import_probes,
             }

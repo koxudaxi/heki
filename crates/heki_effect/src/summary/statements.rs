@@ -50,7 +50,7 @@ const MAX_DEPTH: u32 = 64;
 
 /// What the code fixes of one text a statement may be.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Text {
+pub(super) enum Text {
     /// The whole text.
     Whole(Arc<str>),
     /// How the text starts: a literal followed by values only known at run time (`f"ALTER
@@ -103,6 +103,21 @@ impl Text {
             .any(|p| name.eq_ignore_ascii_case(p))
     }
 
+    /// The text, or how it starts.
+    pub(super) fn text(&self) -> &str {
+        match self {
+            Text::Whole(t) | Text::Head(t) => t,
+        }
+    }
+
+    /// The whole text: `None` for a head.
+    pub(super) fn whole(self) -> Option<Arc<str>> {
+        match self {
+            Text::Whole(t) => Some(t),
+            Text::Head(_) => None,
+        }
+    }
+
     /// The same text as the head of a longer one.
     fn into_head(self) -> Text {
         match self {
@@ -113,7 +128,11 @@ impl Text {
 
 /// The state of one walk from a statement ([`Extractor::statement_texts`]).
 #[derive(Default)]
-struct Walk {
+pub(super) struct Walk {
+    /// Whether only the texts the value holds exactly count: a `str` method that changes the
+    /// case or the blanks gives no text then. A SQL keyword matches in any case; a module name
+    /// does not.
+    exact: bool,
     /// The phis the steps of the walk under way merge.
     merging: FxHashSet<VarId>,
     /// The steps from the statement to the value the walk is at.
@@ -124,6 +143,14 @@ struct Walk {
 }
 
 impl Walk {
+    /// A walk taking only the texts the value holds exactly ([`Self::exact`]).
+    pub(super) fn exact() -> Self {
+        Self {
+            exact: true,
+            ..Self::default()
+        }
+    }
+
     /// `step` one step further from the statement, unless that passes [`MAX_DEPTH`].
     fn deeper<T>(&mut self, step: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
         if self.depth >= MAX_DEPTH {
@@ -166,7 +193,7 @@ impl Extractor<'_> {
     /// ([`Self::source_texts`]), each phi once, so a cycle of copies and phis adds no text. A
     /// phi that an earlier step of the walk merges makes the texts unknown: the text may go
     /// around a cycle that changes it (`sql = sql + ", y"` in a loop).
-    fn statement_texts(&self, v: VarId, walk: &mut Walk) -> Option<Vec<Text>> {
+    pub(super) fn statement_texts(&self, v: VarId, walk: &mut Walk) -> Option<Vec<Text>> {
         if let Some(decided) = walk.decided.get(&v) {
             return decided.clone();
         }
@@ -249,7 +276,11 @@ impl Extractor<'_> {
                 ..
             } => match method.as_str() {
                 "format" => self.head_texts(*recv, walk),
-                m if SAME_WORDS.contains(&m) && args.is_empty() && kwargs.is_empty() => {
+                m if !walk.exact
+                    && SAME_WORDS.contains(&m)
+                    && args.is_empty()
+                    && kwargs.is_empty() =>
+                {
                     self.statement_texts(*recv, walk)
                 }
                 _ => {
