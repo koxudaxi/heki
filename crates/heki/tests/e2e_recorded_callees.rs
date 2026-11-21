@@ -1,6 +1,6 @@
 //! Rules reading the project calls the summaries resolved, end to end through the real binary:
 //! a call on a value an `isinstance` test narrows runs the narrowed class's method (`DATA101`,
-//! `MUT202`, `MUT106`), and a callable an offloading API runs on a worker thread is a call of it
+//! `MUT114`, `MUT106`), and a callable an offloading API runs on a worker thread is a call of it
 //! with the arguments after it (`acc = await asyncio.to_thread(grow, acc)`).
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
@@ -101,7 +101,7 @@ def narrowed_keeper(items, g):
 
 def shared(c):
     if isinstance(c, Catalog):
-        c.entries().clear()  # MUT202
+        c.entries().clear()  # MUT114
 
 
 def consumed(lines, t):
@@ -117,7 +117,7 @@ fn a_call_on_a_narrowed_value_runs_the_narrowed_class_method() {
     check_marks(
         "narrowed_callees",
         &[("pkg/narrowed.py", NARROWED)],
-        &["DATA101", "MUT202", "MUT106"],
+        &["DATA101", "MUT114", "MUT106"],
     );
 }
 
@@ -154,7 +154,7 @@ fn a_callable_run_on_a_worker_takes_the_arguments_after_it() {
     check_marks("worker_callees", &[("pkg/worker.py", WORKER)], &["DATA101"]);
 }
 
-/// A worker's callable binds the arguments after it in the call (`MUT202` reads them so): a
+/// A worker's callable binds the arguments after it in the call (`MUT114` reads them so): a
 /// `functools.partial` handed to an offloading API is not followed, as the arguments it holds
 /// would come first.
 const WORKER_PARTIAL: &str = r#"import asyncio
@@ -180,7 +180,7 @@ async def list_after_the_callable():
 
 
 async def cached_list_changed():
-    await asyncio.to_thread(change_first, cached(), [])  # MUT202
+    await asyncio.to_thread(change_first, cached(), [])  # MUT114
 "#;
 
 #[test]
@@ -188,6 +188,6 @@ fn a_partial_run_on_a_worker_is_not_bound_to_the_arguments_after_it() {
     check_marks(
         "worker_partial",
         &[("pkg/worker_partial.py", WORKER_PARTIAL)],
-        &["MUT202"],
+        &["MUT114"],
     );
 }

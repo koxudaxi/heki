@@ -37,7 +37,7 @@ EXPERIMENTAL_PAGE = DOCS / "experimental.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 PRECISION_PAGE = DOCS / "precision.md"
 # What a rule's default severity says, by the consequence of the code it reports.
-CONSEQUENCES = {"bug": "a bug", "slowdown": "slower code"}
+CONSEQUENCES = {"bug": "a bug", "minor-bug": "a bug that is rarely harmful", "slowdown": "slower code"}
 # The section of every rule's documentation that lists the premises of its claim (ADR-018).
 CLAIM_SECTION = "## What a report states"
 

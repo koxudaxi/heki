@@ -22,6 +22,9 @@ machine by a fixed linear shape.
 at most 2.5 times from n / 2 to n (quadratic growth inside the budget shows without timing
 noise), and no budget may be spent on a family shaped like real code.
 
+`KNOWN_STEPS` lists, the same way, the shapes whose steps are known to grow faster than linearly
+or to spend a budget.
+
 `KNOWN_OVER` lists the shapes known to cost more than the limits; the list only shrinks: a shape
 listed there that costs less than a quarter of the limits fails the gate until it is removed. The
 band between keeps a shape near the limit from failing on one machine and passing on another
@@ -100,6 +103,16 @@ KNOWN_OVER: dict[tuple[str, str], str] = {
     ("wide_hierarchy", "project"): "each method call walks the whole subclass family of its "
     "receiver's class (`ProjectDecls::definitions`)",
     ("callers_of_one_helper", "project"): "MUT201 walks the helper's callers again per caller",
+}
+
+# Shapes known to take steps that grow faster than linearly or to spend a budget, with the walk:
+# (family, placement). The list only shrinks: a listed shape that does neither fails the gate.
+KNOWN_STEPS: dict[tuple[str, str], str] = {
+    **{
+        ("isinstance_continue", p): "the path facts of a loop header with many `continue`s "
+        "(`Extractor::path_facts`, module bindings) grow quadratically and spend their budget"
+        for p in PLACED
+    },
 }
 
 HELPERS = '''import requests
@@ -546,7 +559,12 @@ def main() -> int:
                     problems.append(f"{family.name}/{placement} costs less than a quarter of the limits: "
                                     "remove it from KNOWN_OVER")
                 if family.project is None and not over:
-                    problems += step_growth(runner, family, placement, n, text)
+                    steps = step_growth(runner, family, placement, n, text)
+                    if shape not in KNOWN_STEPS:
+                        problems += steps
+                    elif not steps:
+                        problems.append(f"{family.name}/{placement} takes linear steps and spends no "
+                                        "budget: remove it from KNOWN_STEPS")
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems and not args.report else 0

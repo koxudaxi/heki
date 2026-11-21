@@ -1,4 +1,4 @@
-//! What the mutation rules (`MUT101`, `MUT107`, `MUT110`, `MUT202`) take as a cache, an
+//! What the mutation rules (`MUT101`, `MUT107`, `MUT110`, `MUT114`, `MUT202`) take as a cache, an
 //! invalidation, a shared value, and a change: decorators known by their binding, invalidation on
 //! every path, inherited writers, copies, and generator bodies (end to end, through the real
 //! binary).
@@ -93,7 +93,7 @@ def use() -> None:
     assert_eq!(reports(&p, "MUT101"), vec![at("aliased.py", 13, "C.set_n")]);
     // `cache` is the module's own identity decorator: `fresh()` returns a new list.
     assert_eq!(
-        reports(&p, "MUT202"),
+        reports(&p, "MUT114"),
         vec![at("memo.py", 26, "use"), at("memo.py", 27, "use")]
     );
 }
@@ -684,7 +684,7 @@ def retitle(name):
     // changing the new container's own items does not. A dict adding values of its own is not
     // followed (`t["extra"]` is its own list, and so are `u["fields"]` and `w["fields"]`).
     assert_eq!(
-        reports(&p, "MUT202"),
+        reports(&p, "MUT114"),
         vec![
             at("app.py", 24, "extend"),
             at("app.py", 29, "splat"),
@@ -748,7 +748,7 @@ def extend_info(name):
     );
     // `Image.copy` gives the copy a new `info`; a dict's `copy` shares the lists it holds.
     assert_eq!(
-        reports(&p, "MUT202"),
+        reports(&p, "MUT114"),
         vec![
             at("app.py", 37, "mark_cached"),
             at("app.py", 42, "extend_info"),
@@ -826,7 +826,7 @@ def use(name):
     // The copy holds the cached post's tag list; its own title is its own, and so is a tag list
     // it is given before it changes it.
     assert_eq!(
-        reports(&p, "MUT202"),
+        reports(&p, "MUT114"),
         vec![at("app.py", 55, "use"), at("app.py", 56, "use")]
     );
 }
@@ -973,7 +973,7 @@ def render_logged(width):
     // setting an attribute that a test of another object found unset, appending to its history,
     // or replacing a memo changes it.
     assert_eq!(
-        reports(&p, "MUT202"),
+        reports(&p, "MUT114"),
         vec![
             at("pkg/render.py", 26, "render_logged"),
             at("pkg/render.py", 27, "render_logged"),
@@ -1139,15 +1139,19 @@ async def handler() -> bool:
     return any(slow())
 "#,
     );
-    let (code, stdout, stderr) =
-        p.check(&["--select", "MUT106,EFF101", "--output-format", "concise"]);
+    let (code, stdout, stderr) = p.check(&[
+        "--select",
+        "MUT106,EFF101,EFF111",
+        "--output-format",
+        "concise",
+    ]);
     assert_eq!(code, 1, "{stdout}{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     // `any` still runs the generator's body on the event loop.
     assert_eq!(lines.len(), 3, "{stdout}");
     assert!(lines[0].starts_with("app.py:20:12: MUT106"), "{stdout}");
     assert!(lines[1].starts_with("app.py:26:12: MUT106"), "{stdout}");
-    assert!(lines[2].starts_with("app.py:35:12: EFF101"), "{stdout}");
+    assert!(lines[2].starts_with("app.py:35:12: EFF111"), "{stdout}");
 }
 
 #[test]

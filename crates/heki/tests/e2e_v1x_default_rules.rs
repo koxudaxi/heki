@@ -302,11 +302,13 @@ class Remote(Tagged):
 fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
     let p = Project::new("v1x_mut107");
     p.write("shapes.py", SHAPES).write("other.py", REMOTE);
-    // Default-enabled: no `--select`.
-    let diags: Vec<Value> = diagnostics(&p, &[])
-        .into_iter()
-        .filter(|d| d["rule_code"] == "MUT107")
-        .collect();
+    // Opt-in: it runs when `select` names it.
+    assert!(
+        diagnostics(&p, &[])
+            .iter()
+            .all(|d| d["rule_code"] != "MUT107")
+    );
+    let diags: Vec<Value> = diagnostics(&p, &["--select", "MUT107"]);
     let s = "shapes.py";
     // Reported: a direct write, a write through a local alias, a fall-through after an
     // `is not None` check, the second (unguarded) write after a lazy one, subclass methods
@@ -361,7 +363,7 @@ fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
     );
     assert_eq!(
         diags[1]["message"],
-        "`Tagged.rename` mutates `self.name`, which `Tagged.__hash__` reads, so instances already stored in a `set` or used as `dict` keys can no longer be found"
+        "`Tagged.rename` rebinds `self.name` outside initialization, and `Tagged.__hash__` reads it"
     );
     assert_eq!(diags[1]["rule_slug"], "hash-attr-mutation");
     assert_no_fix(&diags);
@@ -369,9 +371,11 @@ fn mut107_reports_writes_after_initialization_and_keeps_every_filter() {
     // `--select` / `--ignore` and per-file ignores turn it off.
     assert!(diagnostics(&p, &["--select", "MUT101"]).is_empty());
     assert!(
-        diagnostics(&p, &["--ignore", "hash-attr-mutation"])
-            .iter()
-            .all(|d| d["rule_code"] != "MUT107")
+        diagnostics(
+            &p,
+            &["--select", "MUT107", "--ignore", "hash-attr-mutation"]
+        )
+        .is_empty()
     );
     p.write(
         "pyproject.toml",
@@ -737,21 +741,21 @@ fn opt112_reports_linear_scans_of_long_lived_lists_in_data_sized_loops() {
     assert_eq!(
         (message(0), help(0)),
         (
-            "`names.index()` scans the whole list on every iteration of the loop (O(n²))",
+            "`names.index()` scans the list each time it runs in the loop",
             "build a `dict` (value → index) or a `set` once before the loop"
         )
     );
     assert_eq!(
         (message(1), help(1)),
         (
-            "`alias.remove()` scans the whole list on every iteration of the loop (O(n²))",
+            "`alias.remove()` scans the list each time it runs in the loop",
             "collect the values to drop in a `set` and rebuild the list once with a comprehension"
         )
     );
     assert_eq!(
         (message(2), help(2)),
         (
-            "`items.count()` scans the whole list on every iteration of the loop (O(n²))",
+            "`items.count()` scans the list each time it runs in the loop",
             "count once before the loop with `collections.Counter(items)`"
         )
     );
@@ -1102,22 +1106,22 @@ fn opt113_reports_nested_loop_equijoins_but_not_traversals_or_all_pairs_loops() 
     assert_eq!(
         (message(0), help(0)),
         (
-            "nested loops join `orders` and `customers` on `order.customer_id == customer.id` (O(n·m))",
-            "index `customers` by `customer.id` in a `dict` before the outer loop"
+            "nested loops join `orders` and `customers` on `order.customer_id == customer.id`",
+            "if the keys are hashable, index `customers` by `customer.id` in a `dict` before the outer loop"
         )
     );
     assert_eq!(
         (message(6), help(6)),
         (
-            "nested loops join `xs` and `ys` on `x == y` (O(n·m))",
-            "group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+            "nested loops join `xs` and `ys` on `x == y`",
+            "if the keys are hashable, group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
         )
     );
     assert_eq!(
         (message(8), help(8)),
         (
-            "nested loops join `A` and `C` on `c.k == a.k` (O(n·m))",
-            "index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+            "nested loops join `A` and `C` on `c.k == a.k`",
+            "if the keys are hashable, index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
         )
     );
     assert_eq!(diags[0]["column"], 16);
@@ -1221,11 +1225,11 @@ fn opt113_skips_joins_whose_loop_size_the_code_fixes() {
     let native = &diags[4];
     assert_eq!(
         native["message"],
-        "nested loops join `operations` and `config[\"calls\"]` on `call[\"op\"] == name` (O(n·m))"
+        "nested loops join `operations` and `config[\"calls\"]` on `call[\"op\"] == name`"
     );
     assert_eq!(
         native["help"],
-        "index `config[\"calls\"]` in a `dict` from `call[\"op\"]` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+        "if the keys are hashable, index `config[\"calls\"]` in a `dict` from `call[\"op\"]` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
     );
 }
 
@@ -1259,6 +1263,8 @@ fn v1x_rules_take_part_in_the_ratchet_baseline() {
     let (code, stdout, _) = p.check(&[
         "--baseline",
         "heki-baseline.toml",
+        "--extend-select",
+        "MUT107",
         "--output-format",
         "concise",
     ]);
@@ -1274,7 +1280,7 @@ fn heki_rule_prints_the_v1x_rule_docs() {
         (
             "MUT107",
             "hash-attr-mutation",
-            "Checks methods that rebind or mutate an attribute that the class's `__hash__` reads",
+            "Checks methods that rebind or mutate an attribute that the `__hash__` of their instances reads",
         ),
         (
             "OPT112",

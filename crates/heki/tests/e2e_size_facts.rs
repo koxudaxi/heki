@@ -11,11 +11,12 @@ use serde_json::Value;
 
 /// `(file:line, rule)` of every diagnostic `heki check --select <select>` reports, sorted.
 fn reported(p: &Project, select: &str, version: &str) -> Vec<(String, String)> {
+    let select = common::select_with_siblings(select);
     let (code, stdout, stderr) = p.check(&[
         "--output-format",
         "json",
         "--select",
-        select,
+        &select,
         "--target-version",
         version,
     ]);
@@ -382,9 +383,9 @@ fn a_length_test_on_every_path_to_a_loop_caps_it() {
         (g(60), "EFF103"),
         (g(67), "EFF103"),
         (g(75), "EFF103"),
-        (g(83), "EFF103"),
-        (g(90), "EFF103"),
-        (g(126), "EFF103"),
+        (g(83), "EFF113"),
+        (g(90), "EFF113"),
+        (g(126), "EFF113"),
         (g(142), "EFF103"),
     ];
     let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
@@ -519,18 +520,27 @@ fn a_new_list_grows_only_by_the_items_a_fixed_loop_adds() {
     let f = |line: u32| format!("filled.py:{line}");
     let expected: Vec<(String, &str)> = vec![
         (f(14), "EFF103"),
-        (f(22), "EFF103"),
-        (f(32), "EFF103"),
-        (f(39), "EFF103"),
-        (f(50), "EFF103"),
-        (f(52), "EFF103"),
-        (f(57), "EFF103"),
-        (f(69), "EFF103"),
-        (f(92), "EFF103"),
-        (f(112), "EFF103"),
+        (f(22), "EFF113"),
+        (f(32), "EFF113"),
+        (f(39), "EFF113"),
+        (f(50), "EFF113"),
+        (f(52), "EFF113"),
+        (f(57), "EFF113"),
+        (f(92), "EFF113"),
+        (f(112), "EFF113"),
     ];
-    let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
-    assert_both_versions(&p, "EFF103", &expected);
+    // The items of a comprehension with a data clause are the parameter's when Python 3.12
+    // inlines it; Python 3.11 builds it in a frame of its own, whose items have no origin.
+    for (version, comprehension) in [("py311", "EFF113"), ("py312", "EFF103")] {
+        let mut expected = expected.clone();
+        expected.push((f(69), comprehension));
+        let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
+        assert_eq!(
+            reported(&p, "EFF103", version),
+            pairs(&expected),
+            "{version}"
+        );
+    }
 }
 
 const DEFS: &str = r#"STATUS_ORDER = ["available", "caveated", "approximate", "unavailable"]
@@ -628,11 +638,11 @@ fn module_constants_through_imports_module_bodies_and_tuples() {
         );
     assert_both_versions(
         &p,
-        "EFF103,OPT113",
+        "EFF103,EFF113,OPT113",
         &[
             ("pkg/gen_docs.py:5", "OPT113"),
-            ("pkg/migrate.py:25", "EFF103"),
-            ("pkg/migrate.py:31", "EFF103"),
+            ("pkg/migrate.py:25", "EFF113"),
+            ("pkg/migrate.py:31", "EFF113"),
         ],
     );
 }
@@ -729,9 +739,10 @@ fn slices_constructors_and_additions_by_fixed_counts() {
     let p = Project::new("sizes_sliced");
     p.write("sliced.py", SLICED);
     let s = |line: u32| format!("sliced.py:{line}");
-    let expected: Vec<(String, &str)> = [24, 26, 28, 30, 32, 55, 68, 70, 74]
+    let expected: Vec<(String, &str)> = [24, 26, 28, 30, 70]
         .into_iter()
         .map(|line| (s(line), "EFF103"))
+        .chain([32, 55, 68, 74].into_iter().map(|line| (s(line), "EFF113")))
         .collect();
     let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
     assert_both_versions(&p, "EFF103", &expected);
