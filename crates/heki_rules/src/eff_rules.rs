@@ -2,7 +2,7 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, SiteId, Subclasses,
+    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
     allows_fresh, call_verb, counts_references, group_texts, helper_changes_field,
     initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
     project_classes, reports_import_probes, site_callee, write_hits,
@@ -780,8 +780,8 @@ struct Boundary<'r> {
     external_reads: FunctionMatchers,
     calls: bool,
     call_targets: CallTargets,
-    /// `references = "calls"`: a reference handing a call target on counts for `calls`.
-    counts_references: bool,
+    /// The references that count for `calls` (`references`).
+    references: References,
     allowed_callees: Vec<DottedPattern>,
     note: Option<&'r str>,
     /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
@@ -971,11 +971,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
                 "effect-boundaries.call-targets",
                 Subclasses::Covered,
             )?,
-            counts_references: counts_references(
-                b.references.as_deref(),
-                "effect-boundaries",
-                &b.name,
-            )?,
+            references: counts_references(b.references.as_deref(), "effect-boundaries", &b.name)?,
             allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
             note: b.message.as_deref(),
             allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
@@ -1000,7 +996,10 @@ pub(crate) fn eff201(
     }
     let boundaries = boundaries(cx)?;
     let sites = cx.sites_by_caller();
-    let references = if boundaries.iter().any(|b| b.calls && b.counts_references) {
+    let references = if boundaries
+        .iter()
+        .any(|b| b.calls && b.references != References::Ignored)
+    {
         cx.reference_sites_by_caller()
     } else {
         SitesByCaller::default()
@@ -1231,9 +1230,12 @@ impl<'a> Reach<'a> {
                     }
                 }
             }
-            if b.calls && b.counts_references && runs_body {
+            if b.calls && runs_body {
                 let handed = references.get(&func).map_or(&[][..], Vec::as_slice);
-                for &entry in handed.iter().filter(|(_, site)| !b.allows_call(cx, site)) {
+                let counted = handed
+                    .iter()
+                    .filter(|(_, site)| b.references.counts(site) && !b.allows_call(cx, site));
+                for &entry in counted {
                     reach.note_calls(b, i, &func, entry, true);
                 }
             }

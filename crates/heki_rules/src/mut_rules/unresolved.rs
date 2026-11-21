@@ -88,14 +88,26 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                         w.kind.as_str()
                     ),
                 };
-                add(cx, &mut reports, key, w.span, &target, rule.note, || {
-                    format!(
-                        "`{}` {what} {}: heki cannot tell whether it writes {guarded}",
-                        key.qualname,
-                        rule.allowance
-                            .where_text("write owners", "forbidden writers", rule.name)
-                    )
-                });
+                let judged = rule.allowance.judged(cx.decls, key);
+                add(
+                    cx,
+                    &mut reports,
+                    &judged,
+                    w.span,
+                    &target,
+                    rule.note,
+                    || {
+                        format!(
+                            "`{}` {what} {}: heki cannot tell whether it writes {guarded}",
+                            judged.qualname,
+                            rule.allowance.where_text(
+                                "write owners",
+                                "forbidden writers",
+                                rule.name
+                            )
+                        )
+                    },
+                );
             }
         }
     }
@@ -164,16 +176,28 @@ pub(super) fn mut206(
                     continue;
                 }
                 let guarded = listed(hits.iter().map(|t| t.text.as_str()));
-                add(cx, &mut reports, key, a.span, &a.name, rule.note, || {
-                    format!(
-                        "`{}` reads `{}` ({}) on an object of unknown class {}: heki cannot tell whether it reads {guarded}",
-                        key.qualname,
-                        a.name,
-                        kind.as_str(),
-                        rule.allowance
-                            .where_text("read owners", "forbidden readers", rule.name)
-                    )
-                });
+                let judged = rule.allowance.judged(cx.decls, key);
+                add(
+                    cx,
+                    &mut reports,
+                    &judged,
+                    a.span,
+                    &a.name,
+                    rule.note,
+                    || {
+                        format!(
+                            "`{}` reads `{}` ({}) on an object of unknown class {}: heki cannot tell whether it reads {guarded}",
+                            judged.qualname,
+                            a.name,
+                            kind.as_str(),
+                            rule.allowance.where_text(
+                                "read owners",
+                                "forbidden readers",
+                                rule.name
+                            )
+                        )
+                    },
+                );
             }
         }
     }
@@ -225,15 +249,27 @@ pub(super) fn mut207(
                     continue;
                 }
                 let guarded = listed(hits.iter().map(|&i| rule.targets.patterns[i].text.as_str()));
-                add(cx, &mut reports, key, a.span, &a.name, rule.note, || {
-                    format!(
-                        "`{}` calls `{}` on an object of unknown class {}: heki cannot tell whether it calls {guarded}",
-                        key.qualname,
-                        a.name,
-                        rule.allowance
-                            .where_text("call owners", "forbidden callers", rule.name)
-                    )
-                });
+                let judged = rule.allowance.judged(cx.decls, key);
+                add(
+                    cx,
+                    &mut reports,
+                    &judged,
+                    a.span,
+                    &a.name,
+                    rule.note,
+                    || {
+                        format!(
+                            "`{}` calls `{}` on an object of unknown class {}: heki cannot tell whether it calls {guarded}",
+                            judged.qualname,
+                            a.name,
+                            rule.allowance.where_text(
+                                "call owners",
+                                "forbidden callers",
+                                rule.name
+                            )
+                        )
+                    },
+                );
             }
         }
     }
@@ -299,8 +335,9 @@ struct Unseen<'k> {
 impl Unseen<'_> {
     /// Whether the access is a finding of the strict rule, under `MUT201`'s rules for what is
     /// allowed: allowed functions and exempt methods, `forbidden-*`, a class's own
-    /// initialization (of `family`), a function that only runs inside allowed functions, and
-    /// what the callers bind to the object.
+    /// initialization (of `family`), a function that only runs inside allowed functions (not
+    /// with `attribution = "lexical"`, which judges the function holding the access), and what
+    /// the callers bind to the object.
     fn counts(
         &self,
         cx: &CheckContext<'_>,
@@ -309,10 +346,14 @@ impl Unseen<'_> {
         family: &FxHashSet<String>,
         callers: Callers<'_>,
     ) -> bool {
-        if allowance.allows(self.func)
-            || !allowance.in_scope(self.func)
-            || initializes_itself(cx, self.func, family, self.obj)
-            || runs_inside_allowed(cx, sites, allowance, family, self.func, self.obj)
+        let judged = allowance.judged(cx.decls, self.func);
+        // The parameters of a scope a function holds are none of the function's.
+        let obj = if *judged == *self.func { self.obj } else { 0 };
+        if allowance.allows(&judged)
+            || !allowance.in_scope(&judged)
+            || initializes_itself(cx, &judged, family, obj)
+            || !allowance.is_lexical()
+                && runs_inside_allowed(cx, sites, allowance, family, self.func, self.obj)
         {
             return false;
         }
@@ -326,7 +367,8 @@ impl Unseen<'_> {
 }
 
 /// Whether the object of `func`'s parameters `obj` comes, on some path of project callers
-/// (outside the contract's allowed functions), from an object heki cannot rule out: one of
+/// (outside the contract's allowed functions, unless it judges lexically), from an object heki
+/// cannot rule out: one of
 /// unknown class (a caller passes one that is not its own parameter, typed with a protocol
 /// whose implementations heki cannot list, or the path ends in a function without project
 /// callers), or an instance of a class `leave` accepts. Arguments of other project classes end
@@ -354,7 +396,9 @@ fn unknown_above(
         let mut callers: Vec<&FuncKey> = callers.iter().collect();
         callers.sort();
         for caller in callers {
-            if allowance.allows(caller) {
+            // A path through an allowed caller runs inside it; judged lexically, the access stays
+            // the function's own, and the caller only tells the object's class.
+            if !allowance.is_lexical() && allowance.allows(caller) {
                 continue;
             }
             for (_, site) in sites.get(caller).into_iter().flatten() {

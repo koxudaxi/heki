@@ -1079,6 +1079,61 @@ fn steps_references() -> Vec<Step> {
     ]
 }
 
+/// `references = "calls-and-bases"` and `attribution = "lexical"` on the `ledger` call contract:
+/// a class of another module derives from the guarded dataclass, whose renaming and restoring
+/// in its own module turns the base off and on; then the private helper's construction is
+/// judged at the helper instead of its caller, until the keys leave the configuration.
+fn steps_bases_and_attribution() -> Vec<Step> {
+    let contract = "targets = [\"Ledger.post\", \"Receipt\"]\nallowed-callers = [\"Store.*\"]\n";
+    let bases = CONFIG.replace(
+        contract,
+        &format!("{contract}references = \"calls-and-bases\"\n"),
+    );
+    let lexical = CONFIG.replace(
+        contract,
+        &format!("{contract}references = \"calls-and-bases\"\nattribution = \"lexical\"\n"),
+    );
+    let derived = format!("{ACCT_OPS}\n\nclass Late(Receipt):\n    pass\n");
+    let constructs = ACCT_OPS.replace("    return None\n", "    return Receipt(1)\n");
+    vec![
+        Step::new(
+            "the ledger contract counts class bases, and another module derives from the guarded dataclass",
+            vec![Action::Configure(bases), save("pkg/acct_ops.py", &derived)],
+        )
+        .present(&[("pkg/acct_ops.py", "MUT204")]),
+        Step::new(
+            "the guarded dataclass is renamed",
+            vec![save("pkg/ledger.py", &LEDGER.replace("class Receipt", "class Slip"))],
+        )
+        .absent(&[("pkg/acct_ops.py", "MUT204")]),
+        Step::new(
+            "the guarded dataclass is restored",
+            vec![save("pkg/ledger.py", LEDGER)],
+        )
+        .present(&[("pkg/acct_ops.py", "MUT204")]),
+        Step::new(
+            "the contract judges lexically, and the private helper constructs the dataclass",
+            vec![
+                Action::Configure(lexical),
+                save("pkg/acct_ops.py", &constructs),
+            ],
+        )
+        .present(&[("pkg/acct_ops.py", "MUT204")])
+        .absent(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "the keys leave the configuration",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .present(&[("pkg/accounts.py", "MUT204")])
+        .absent(&[("pkg/acct_ops.py", "MUT204")]),
+        Step::new(
+            "the helper is restored",
+            vec![save("pkg/acct_ops.py", ACCT_OPS)],
+        )
+        .absent(&[("pkg/accounts.py", "MUT204")]),
+    ]
+}
+
 /// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
 /// comes from a decorator in another module, and the in-place change from a helper in a third.
 /// The helper then moves the change of the field to a function of its own and back while its
@@ -2877,6 +2932,7 @@ fn steps() -> Vec<Step> {
     ]);
     steps.extend(steps_contract_extensions());
     steps.extend(steps_references());
+    steps.extend(steps_bases_and_attribution());
     steps.extend(steps_environment());
     steps.extend(steps_keys_fresh_strict());
     steps.extend([

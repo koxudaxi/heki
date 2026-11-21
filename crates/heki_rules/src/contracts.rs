@@ -8,7 +8,7 @@
 //! invalidator reached through calls are known across files without IR.
 
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers,
+    Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers, References,
 };
 use crate::{DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot};
 use heki_effect::{ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
@@ -71,8 +71,8 @@ pub(crate) struct ConfigContracts {
     unresolved_reads: Vec<DottedPattern>,
     /// The last names of the `call-owners` targets with `unresolved = "report"`.
     unresolved_calls: Vec<DottedPattern>,
-    /// [`Contracts::references`].
-    references: bool,
+    /// [`Contracts::references`] and [`Contracts::reference_bases`].
+    references: References,
     external: ExternalNames,
 }
 
@@ -340,18 +340,29 @@ impl Contracts for ConfigContracts {
     }
 
     fn references(&self) -> bool {
-        self.references
+        self.references != References::Ignored
+    }
+
+    fn reference_bases(&self) -> bool {
+        self.references == References::CallsAndBases
     }
 }
 
-/// [`Contracts::references`] of `config` (the value is checked where the rules parse it).
-fn counts_references(config: &HekiConfig) -> bool {
-    let calls = |references: &Option<String>| references.as_deref() == Some("calls");
-    config.call_owners.iter().any(|r| calls(&r.references))
-        || config
-            .effect_boundaries
-            .iter()
-            .any(|b| calls(&b.references) && b.forbid.iter().any(|t| t == "calls"))
+/// The most a contract of `config` counts as calls ([`Contracts::references`],
+/// [`Contracts::reference_bases`]; the values are checked where the rules parse them).
+fn counts_references(config: &HekiConfig) -> References {
+    let counted = |references: &Option<String>| match references.as_deref() {
+        Some("calls") => References::Calls,
+        Some("calls-and-bases") => References::CallsAndBases,
+        _ => References::Ignored,
+    };
+    let calls = config.call_owners.iter().map(|r| counted(&r.references));
+    let boundaries = config
+        .effect_boundaries
+        .iter()
+        .filter(|b| b.forbid.iter().any(|t| t == "calls"))
+        .map(|b| counted(&b.references));
+    calls.chain(boundaries).max().unwrap_or(References::Ignored)
 }
 
 /// Bit `i` set for every contract `i` that `has` holds for.
@@ -375,7 +386,7 @@ pub fn summary_contracts(
         && !contracts.ownership
         && contracts.unresolved_reads.is_empty()
         && contracts.unresolved_calls.is_empty()
-        && !contracts.references
+        && contracts.references == References::Ignored
     {
         return Ok(None);
     }

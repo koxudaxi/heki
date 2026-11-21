@@ -1336,6 +1336,11 @@ pub struct CallSite {
     /// suspended (`MUT113`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_held: bool,
+    /// A reference site that is a base of a class statement (`class Derived(Base)`): the class
+    /// it makes holds the base, and constructing that class runs the base's initialization
+    /// unless it overrides it ([`Contracts::reference_bases`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_base: bool,
     /// The targets are every implementation the call can run under R2 and R5: the receiver
     /// is no protocol, every member of a union resolves, and no project subclass's
     /// implementation is missing. Computed with [`Self::on_every_return`].

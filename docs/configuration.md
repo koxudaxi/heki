@@ -194,7 +194,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), or an
-  unknown value of `forbid`, `fresh-objects`, `unresolved`, or `references`.
+  unknown value of `forbid`, `fresh-objects`, `unresolved`, `references`, or `attribution`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -228,6 +228,7 @@ unresolved = "report"
 | `message` | none | The help of every report of the contract: where to write instead. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md). |
+| `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
 
 A container entry (`Class.attr["key"]`):
 
@@ -284,6 +285,7 @@ a value still writes the implementations' attribute.
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). |
+| `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 
 `MUT203` does not see a read through a parameter without a project-class annotation; with
 `unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
@@ -313,7 +315,8 @@ The call side of `write-owners`.
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
-| `references` | `"ignore"` | `"ignore"` or `"calls"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`). |
+| `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), and with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`). |
+| `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -332,6 +335,12 @@ The call side of `write-owners`.
   annotation of a function; a subscript (`Optional[Rule]`), a comparison, a receiver
   (`Rule.of(...)`), and a module binding another name to it (an import, `run = core.decide`). A
   callable a builtin calls once per item (`sorted(xs, key=decide)`) is a call already.
+- With `references = "calls-and-bases"`, a class statement whose declaration resolves a base to a
+  class target is reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the
+  class statement for a name an import or the module body binds: the class it makes holds the
+  base, and constructing it runs the base's initialization unless it overrides it. A base is
+  matched as a construction is (with `subclasses = false`, the class itself only), and a keyword
+  (`metaclass=Base`) is no base.
 
 ### Allowed and forbidden functions
 
@@ -356,7 +365,8 @@ allowed-readers = ["pkg.parser.index.*"]
 | set | set | accesses by the forbidden functions, except the allowed ones |
 
 - An access counts as one by a forbidden function when the function that is reported, a private
-  helper it hands the access through, or the function making the access is forbidden.
+  helper it hands the access through, or the function making the access is forbidden (with
+  `attribution = "lexical"`, the function holding the access).
 - `allowed-*` and `exempt-methods` win wherever they apply on that path, as does the rule for
   functions that [only run inside allowed functions](#how-contracts-report).
 
@@ -403,7 +413,7 @@ import-probes = "report"
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
-| `references` | `"ignore"` | `"ignore"` or `"calls"`, as for `call-owners`: whether a reference handing a `call-targets` entry on counts for `calls`. |
+| `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `message` | none | The help of every report of the boundary. |
 
@@ -513,6 +523,16 @@ holds for `invalidation` too:
 - **A private helper reports at its callers.** An access in a private helper (`_name`) with
   project callers is reported at the call sites of its first non-private callers. A private
   function called only by its own recursion reports its accesses itself.
+- **`attribution = "lexical"` judges the code where it is written.** The two rules above do not
+  apply: an access is judged in the function whose code holds it, whoever calls that function.
+  A lambda, comprehension, or generator expression is part of the function it is written in, a
+  class body's code part of the function running the class statement, and a nested `def` a
+  function of its own. For `write-owners`, a call handing a typed object to a helper that
+  changes it without knowing its class is the caller's write. With `unresolved = "report"`, the
+  callers binding a parameter only tell its object's class, allowed callers included. A class's
+  own initialization, `exempt-methods`, `fresh-objects`, and the targets of a call contract
+  calling each other stay allowed. Effect boundaries have no such key: they judge what their
+  scope functions reach through any number of calls.
 - **One report stands for every site behind it.** A report at a call stands for every access
   behind the call, and an effect boundary's report for every site its scope function reaches.
   JSON output gives their number as `sites`, and a
