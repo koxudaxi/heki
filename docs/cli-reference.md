@@ -2,7 +2,7 @@
 
 # CLI Reference
 
-Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
+Exit codes: `0` no diagnostic that fails the run (warnings are reported without failing it), `1` an `error` diagnostic, or a `warning` with `--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
 
 A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
 
@@ -60,6 +60,8 @@ Options:
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+      --fail-on <FAIL_ON>
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
       --output-format <OUTPUT_FORMAT>
           Output format [default: full] [possible values: full, concise, json, github, sarif]
       --update-baseline

@@ -12,6 +12,7 @@ use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
 use heki_effect::ModuleLayout;
+use heki_env::LintConfig;
 use heki_lsp::{CONFIG_FILES, EditOutcome, Workspace};
 use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{
@@ -224,6 +225,8 @@ impl Watcher<'_> {
         Ok(stamps_of(&files, earlier))
     }
 
+    /// Print `report`; returns whether its reports would make the run fail (exit code 1), as
+    /// they make `heki check` fail.
     fn print(&self, report: &Report, ws: Option<&Workspace>) -> bool {
         let mut all: Vec<Diagnostic> = report.diags.values().flatten().cloned().collect();
         // The index keeps no definition lines: a frame is told apart by its names only.
@@ -282,7 +285,9 @@ impl Watcher<'_> {
             });
             crate::check::heuristic_hint(rules_off, withheld);
         }
-        !all.is_empty()
+        let no_config = LintConfig::default();
+        let lint = ws.map_or(&no_config, |ws| &ws.env.cfg.lint);
+        crate::check::any_failing(&all, crate::check::fail_on(self.args, lint))
     }
 }
 
@@ -383,10 +388,10 @@ impl Report {
         }
     }
 
-    fn exit_code(&self, dirty: bool) -> ExitCode {
+    fn exit_code(&self, failing: bool) -> ExitCode {
         if self.failure.is_some() || !self.errors.is_empty() {
             ExitCode::from(2)
-        } else if dirty {
+        } else if failing {
             ExitCode::from(1)
         } else {
             ExitCode::SUCCESS
@@ -411,7 +416,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         (loaded.files, loaded.config_files, loaded.config);
     let mut ws = Some(loaded.ws);
     let mut report = Report::of(ws.as_mut().expect("just loaded"), loaded.errors);
-    let mut dirty = w.print(&report, ws.as_ref());
+    let mut failing = w.print(&report, ws.as_ref());
     let mut runs = 0;
     while max_runs.is_none_or(|m| runs < m) {
         std::thread::sleep(POLL);
@@ -446,7 +451,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
                     if report.failure != failure {
                         report.failure = failure;
                         runs += 1;
-                        dirty = w.print(&report, Some(&*ws));
+                        failing = w.print(&report, Some(&*ws));
                     }
                     continue;
                 }
@@ -471,9 +476,9 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
             continue;
         }
         runs += 1;
-        dirty = w.print(&report, ws.as_ref());
+        failing = w.print(&report, ws.as_ref());
     }
-    Ok(report.exit_code(dirty))
+    Ok(report.exit_code(failing))
 }
 
 #[cfg(test)]

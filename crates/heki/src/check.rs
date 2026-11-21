@@ -1,6 +1,8 @@
 //! `heki check`: discover -> parse / IR (parallel) -> effect summaries -> rules -> inline
-//! suppressions -> fixes -> Ratchet baseline -> output. Exit codes: 0 clean, 1 violations (or
-//! Ratchet regressions / pending `--diff`), 2 configuration / I/O / unknown rule / syntax errors.
+//! suppressions -> fixes -> Ratchet baseline -> output. Exit codes: 0 nothing that fails the run,
+//! 1 a report at the `fail-on` severity (an error by default; with a baseline, only regressions
+//! are reported), a baseline update refused, or pending `--diff` changes, 2 configuration / I/O /
+//! unknown rule / syntax errors.
 
 use crate::{AnalysisArgs, CheckArgs, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
@@ -10,6 +12,7 @@ use heki_diagnostics::{
     fix_python_source, github_escape, path_text, render, unified_diff,
 };
 use heki_effect::{OptInFacts, ProjectIndex, TypedWrites, analyze_project_for, func_qualname};
+use heki_env::{LintConfig, Severity};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     FileError, ParsedFile, Project, ProjectOptions, canonical, retain_unsuppressed,
@@ -44,6 +47,21 @@ fn selection(args: &AnalysisArgs, project: &Project) -> Result<RuleSelection> {
         }
     }
     Ok(selection)
+}
+
+/// `--fail-on` over `lint.fail-on`: the least severity whose reports make the run fail.
+pub(crate) fn fail_on(args: &CheckArgs, lint: &LintConfig) -> Severity {
+    args.fail_on
+        .map(Severity::from)
+        .or(lint.fail_on)
+        .unwrap_or(Severity::Error)
+}
+
+/// Whether one of the reports `diags` makes the run fail (exit code 1) at `fail_on`.
+pub(crate) fn any_failing(diags: &[Diagnostic], fail_on: Severity) -> bool {
+    diags
+        .iter()
+        .any(|d| d.severity == Severity::Error || fail_on == Severity::Warning)
 }
 
 /// The saved summary snapshot when `MUT103` is enabled (`None` with a warning if missing).
@@ -522,6 +540,8 @@ pub(crate) fn report(
     let current = baseline_counts(&diags, &key_path, CountUnit::Sites);
     let found = diags.len();
     let mut regressions = 0;
+    // The update the run was asked for did not happen: it fails whatever the reports' severity.
+    let mut refused_update = false;
     if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
         let unit = baseline.unit;
         if unit == CountUnit::Diagnostics && !args.update_baseline {
@@ -569,6 +589,7 @@ pub(crate) fn report(
                 "error: baseline {} not updated: {regressions} entry(ies) grew, and a Ratchet baseline only shrinks (delete it to record the current findings)",
                 bp.display()
             );
+            refused_update = true;
         } else {
             let baseline = RatchetBaseline::from_counts(current);
             baseline.save(bp)?;
@@ -623,10 +644,10 @@ pub(crate) fn report(
         summary(&diags, project.files.len(), baseline_path.is_some());
         heuristic_hint(heuristic_off, withheld);
     }
-    let code = if diags.is_empty() {
-        ExitCode::SUCCESS
-    } else {
+    let code = if refused_update || any_failing(&diags, fail_on(args, &project.env.cfg.lint)) {
         ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     };
     finish(args.output_format, &shown_errors(&project.errors), code)
 }
