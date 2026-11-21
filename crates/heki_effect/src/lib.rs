@@ -1168,6 +1168,8 @@ pub enum CallTarget {
     Project(Vec<BoundCallee>),
     /// A Layer 2 catalog API (only recorded when it carries effects or offloads).
     Layer2 {
+        /// The catalog symbol, or the library API a catalog class's method is
+        /// (`heki_kb::EcosystemEntry::api`).
         symbol: String,
         /// Effects after the `is_awaited` filter.
         effects: BTreeSet<ExecEffectKind>,

@@ -732,14 +732,15 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlite3.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
-return_type = "sqlite3.Connection"
-# An in-memory database is opened without I/O, and its statements run without waiting. One
-# opened from a parameter may be in memory, whatever its callers pass.
+# A connection heki sees opened on a file (`sqlite3.connect(file)`) waits on it; an in-memory
+# database is opened without I/O, and its statements run without waiting. One opened from a
+# parameter may be in memory, as may one only an annotation names (`sqlite3.Connection`).
+return_type = "sqlite3.connect(file)"
 cases = [
     { arg = 0, param = "database", one_of = [":memory:"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
     { arg = 0, param = "database", prefix = ["file::memory:"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
     { arg = 0, param = "database", contains = ["mode=memory"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
-    { arg = 0, param = "database", from_parameter = true, return_type = "sqlite3.connect(parameter)" },
+    { arg = 0, param = "database", from_parameter = true, return_type = "sqlite3.Connection" },
 ]
 exit_suppresses = false
 opaque_to_layer3 = true
@@ -754,18 +755,21 @@ symbol = "sqlite3.Connection.execute"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
 items = "rows"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Connection.executemany"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Connection.executescript"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -785,46 +789,53 @@ symbol = "sqlite3.Cursor.execute"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
 items = "rows"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.executemany"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.executescript"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.fetchone"
 effects = ["blocking_db"]
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.fetchmany"
 effects = ["blocking_db"]
 items = "rows"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.fetchall"
 effects = ["blocking_db"]
 items = "rows"
+emits = "if-on-disk"
 opaque_to_layer3 = true
 
 # The connections `sqlite3.connect` returns for an in-memory database (statements run without
-# waiting) and for a database named by a parameter (it waits only when the database is on
-# disk), and their cursors.
+# waiting) and for a file it is seen to open, and their cursors: catalog classes whose methods
+# are those of `sqlite3.Connection` and `sqlite3.Cursor` (`api`).
 
 [[entries]]
 symbol = 'sqlite3.connect(":memory:").execute'
 effects = ["db_query"]
 return_type = 'sqlite3.connect(":memory:").cursor()'
 items = "rows"
+api = "sqlite3.Connection.execute"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -832,6 +843,7 @@ symbol = 'sqlite3.connect(":memory:").executemany'
 effects = ["db_query"]
 return_type = 'sqlite3.connect(":memory:").cursor()'
 items = "rows"
+api = "sqlite3.Connection.executemany"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -839,11 +851,13 @@ symbol = 'sqlite3.connect(":memory:").executescript'
 effects = ["db_query"]
 return_type = 'sqlite3.connect(":memory:").cursor()'
 items = "rows"
+api = "sqlite3.Connection.executescript"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = 'sqlite3.connect(":memory:").cursor'
 return_type = 'sqlite3.connect(":memory:").cursor()'
+api = "sqlite3.Connection.cursor"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -851,6 +865,7 @@ symbol = 'sqlite3.connect(":memory:").cursor().execute'
 effects = ["db_query"]
 return_type = 'sqlite3.connect(":memory:").cursor()'
 items = "rows"
+api = "sqlite3.Cursor.execute"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -858,6 +873,7 @@ symbol = 'sqlite3.connect(":memory:").cursor().executemany'
 effects = ["db_query"]
 return_type = 'sqlite3.connect(":memory:").cursor()'
 items = "rows"
+api = "sqlite3.Cursor.executemany"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -865,89 +881,93 @@ symbol = 'sqlite3.connect(":memory:").cursor().executescript'
 effects = ["db_query"]
 return_type = 'sqlite3.connect(":memory:").cursor()'
 items = "rows"
+api = "sqlite3.Cursor.executescript"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).execute'
+symbol = 'sqlite3.connect(file).execute'
 effects = ["blocking_db", "db_query"]
-return_type = 'sqlite3.connect(parameter).cursor()'
-emits = "if-on-disk"
+return_type = 'sqlite3.connect(file).cursor()'
 items = "rows"
+api = "sqlite3.Connection.execute"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).executemany'
+symbol = 'sqlite3.connect(file).executemany'
 effects = ["blocking_db", "db_query"]
-return_type = 'sqlite3.connect(parameter).cursor()'
-emits = "if-on-disk"
+return_type = 'sqlite3.connect(file).cursor()'
 items = "rows"
+api = "sqlite3.Connection.executemany"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).executescript'
+symbol = 'sqlite3.connect(file).executescript'
 effects = ["blocking_db", "db_query"]
-return_type = 'sqlite3.connect(parameter).cursor()'
-emits = "if-on-disk"
+return_type = 'sqlite3.connect(file).cursor()'
 items = "rows"
+api = "sqlite3.Connection.executescript"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).cursor'
-return_type = 'sqlite3.connect(parameter).cursor()'
+symbol = 'sqlite3.connect(file).cursor'
+return_type = 'sqlite3.connect(file).cursor()'
+api = "sqlite3.Connection.cursor"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).commit'
+symbol = 'sqlite3.connect(file).commit'
 effects = ["blocking_db"]
 emits = "if-pending"
+api = "sqlite3.Connection.commit"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).rollback'
+symbol = 'sqlite3.connect(file).rollback'
 effects = ["blocking_db"]
 emits = "if-pending"
+api = "sqlite3.Connection.rollback"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).cursor().execute'
+symbol = 'sqlite3.connect(file).cursor().execute'
 effects = ["blocking_db", "db_query"]
-return_type = 'sqlite3.connect(parameter).cursor()'
-emits = "if-on-disk"
+return_type = 'sqlite3.connect(file).cursor()'
 items = "rows"
+api = "sqlite3.Cursor.execute"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).cursor().executemany'
+symbol = 'sqlite3.connect(file).cursor().executemany'
 effects = ["blocking_db", "db_query"]
-return_type = 'sqlite3.connect(parameter).cursor()'
-emits = "if-on-disk"
+return_type = 'sqlite3.connect(file).cursor()'
 items = "rows"
+api = "sqlite3.Cursor.executemany"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).cursor().executescript'
+symbol = 'sqlite3.connect(file).cursor().executescript'
 effects = ["blocking_db", "db_query"]
-return_type = 'sqlite3.connect(parameter).cursor()'
-emits = "if-on-disk"
+return_type = 'sqlite3.connect(file).cursor()'
 items = "rows"
+api = "sqlite3.Cursor.executescript"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).cursor().fetchone'
+symbol = 'sqlite3.connect(file).cursor().fetchone'
 effects = ["blocking_db"]
-emits = "if-on-disk"
+api = "sqlite3.Cursor.fetchone"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).cursor().fetchmany'
+symbol = 'sqlite3.connect(file).cursor().fetchmany'
 effects = ["blocking_db"]
-emits = "if-on-disk"
 items = "rows"
+api = "sqlite3.Cursor.fetchmany"
 opaque_to_layer3 = true
 
 [[entries]]
-symbol = 'sqlite3.connect(parameter).cursor().fetchall'
+symbol = 'sqlite3.connect(file).cursor().fetchall'
 effects = ["blocking_db"]
-emits = "if-on-disk"
 items = "rows"
+api = "sqlite3.Cursor.fetchall"
 opaque_to_layer3 = true

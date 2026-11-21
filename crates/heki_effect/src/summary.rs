@@ -4860,6 +4860,8 @@ impl<'a> Extractor<'a> {
             return;
         }
         let occurrence = self.guards.occurrence(&self.guard_inputs(), bb);
+        // Reports and contracts name the library API a catalog class's method is.
+        let api = entry.api.clone().unwrap_or_else(|| symbol.clone());
         let flagged = match case {
             Some(_) => None,
             None => self.forwarded_flag(entry, passed),
@@ -4879,7 +4881,7 @@ impl<'a> Extractor<'a> {
                 _ => occurrence.clone(),
             };
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &occurrence);
-            let chain = vec![Arc::new(self.hop(symbol.clone(), span))];
+            let chain = vec![Arc::new(self.hop(api.clone(), span))];
             self.summary.exec_chains.insert(*e, chain);
         }
         // The catalog describes the library's class: a project subclass may override the
@@ -4895,7 +4897,7 @@ impl<'a> Extractor<'a> {
             .filter(|e| unconditional & crate::effect_bit(*e) != 0)
             .collect();
         if !must.is_empty() && self.must_run.get(&self.pos).is_some_and(|r| r.called) {
-            let hop = Arc::new(self.hop(symbol.clone(), span));
+            let hop = Arc::new(self.hop(api.clone(), span));
             let facts = self.summary.must_exec.get_or_insert_with(Box::default);
             for e in must {
                 facts
@@ -4905,7 +4907,7 @@ impl<'a> Extractor<'a> {
             }
         }
         let target = CallTarget::Layer2 {
-            symbol,
+            symbol: api,
             effects,
             offloads_blocking_arg: entry.offloads_blocking_arg,
             async_safe: entry.async_safe,
@@ -4949,9 +4951,11 @@ impl<'a> Extractor<'a> {
         }
         effects
             .iter()
-            .filter(|e| {
-                entry.emits == heki_kb::Emits::Always
-                    || !matches!(e, ExecEffectKind::BlockingDb | ExecEffectKind::DbQuery)
+            .filter(|e| match entry.emits {
+                heki_kb::Emits::Always => true,
+                // A connection that may be in memory sends its statements without waiting.
+                heki_kb::Emits::IfOnDisk => **e != ExecEffectKind::BlockingDb,
+                _ => !matches!(e, ExecEffectKind::BlockingDb | ExecEffectKind::DbQuery),
             })
             .fold(0, |mask, e| mask | crate::effect_bit(*e))
     }
