@@ -87,9 +87,9 @@ Each of these passes, because each tool sees one step:
 heki follows the call into `load_user` and the alias into `add_default`:
 
 ```console
-$ heki check --output-format concise
-app/api.py:5:12: EFF101 `handler` reaches the blocking call `requests.get` on the event loop
-app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
+$ heki check --heuristic --output-format concise
+app/api.py:5:12: EFF101 [heuristic] `handler` reaches the blocking call `requests.get` on the event loop
+app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
 ```
 
@@ -149,13 +149,17 @@ It also follows container item types (`list[Model]`), return annotations along t
 
 ## When heki cannot tell
 
-The two kinds of rules make opposite choices when information is missing:
+A rewrite and an exact report make the same choice when information is missing, in opposite
+directions; a heuristic report makes it only for some premises:
 
-| | A rewrite (`OPT` fix) | A report (checking rules) |
-| - | --------------------- | ------------------------- |
-| Needs | a proof | evidence |
-| What heki cannot see | counts as shared and blocks the fix | is not followed |
-| What you get | the diagnostic names the failed obligation: `[not auto-fixable: ...]` | no report: a missed finding, never a guess |
+| | A rewrite (`OPT` fix) | An exact report | A heuristic report |
+| - | --------------------- | --------------- | ------------------ |
+| Needs | a proof | every premise of its claim established | evidence, with some premises open |
+| What heki cannot see | counts as shared and blocks the fix | stops the report | stops it for an unresolved call; does not stop it for the premises its rule page marks open |
+| What you get | the diagnostic names the failed obligation: `[not auto-fixable: ...]` | no report: a missed finding, never a guess | a report labelled `heuristic`, which can be wrong about the code |
+
+Each rule page lists the premises of its claim under "What a report states", and which of them
+a heuristic report may not have established ([Rule Precision](precision.md)).
 
 A report that crosses functions shows its call chain as related locations. A call heki cannot
 resolve is not followed:
@@ -183,7 +187,18 @@ and treats its body as one call it cannot resolve. `heki assumptions` lists it w
 byte of its source, at most 250,000, gets no `OPT` finding: heki does not try to prove a rewrite
 in it. A function whose lazy initializations (the blocks each covers, and the walks that find
 them) would take more than 8 cells per byte of its source, at most 250,000, has none of them
-recognized: its clients and queries count as made on every iteration.
+recognized: in a heuristic report its clients and queries count as made on every iteration,
+and an exact report stops there.
+
+A heuristic report goes the other way for the premises its rule page marks open: a branch heki
+cannot decide counts as taken, a loop in which heki cannot show that a call runs once counts as
+running it on every iteration, and a size heki cannot bound counts as data-sized (the code does
+not fix it at 16 items or fewer). A loop over a list that is small by its nature (the columns of
+a table, a handful of options) is reported: the report states a loop whose size the code does
+not bound, and whether the loop is slow is the harm, which the rule cannot see. When an open
+premise is false (a bound the code states that heki does not read, a call that cannot run on
+every iteration), the report is wrong about the code, which is why it is heuristic. An exact
+report never claims a size: it names the input a loop steps through.
 
 Missed findings close as heki learns more:
 
