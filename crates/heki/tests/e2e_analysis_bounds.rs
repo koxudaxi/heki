@@ -1,7 +1,7 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
-//! narrowing through phis, the passes of the type inference, the size of the Soundness lane's
-//! proof state, the values `EFF107` follows from a task factory, and the walk to the callable a
-//! builtin calls once per item.
+//! narrowing through phis, the passes of the type inference and of the classes of merged values,
+//! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
+//! and the walk to the callable a builtin calls once per item.
 
 mod common;
 
@@ -153,6 +153,55 @@ fn types_past_the_inference_pass_bound_are_unknown() {
     };
     assert_eq!(blocking(4), 1);
     assert_eq!(blocking(30), 0);
+}
+
+/// An `async def` handing a buffer it keeps in a loop to a reader that downloads only what has
+/// no `read` method, after the loop passes a value back through `links` assignments, one link
+/// per pass of the fixpoint of the values' classes.
+fn chain_before_buffer_read(links: usize) -> String {
+    let mut out = vec![
+        "from io import BytesIO".to_owned(),
+        "from urllib.request import urlopen".to_owned(),
+        String::new(),
+        String::new(),
+        "def fetch(src):".to_owned(),
+        "    if hasattr(src, \"read\"):".to_owned(),
+        "        return src.read()".to_owned(),
+        "    return urlopen(src).read()".to_owned(),
+        String::new(),
+        String::new(),
+        "async def chain(items):".to_owned(),
+        "    buf = BytesIO()".to_owned(),
+    ];
+    for k in 0..=links {
+        out.push(format!("    v{k} = None"));
+    }
+    out.push("    for i in items:".to_owned());
+    out.push("        if i:".to_owned());
+    out.push("            buf = BytesIO()".to_owned());
+    for k in 0..links {
+        out.push(format!("        v{k} = v{}", k + 1));
+    }
+    out.push(format!("        v{links} = 1"));
+    out.push("    fetch(buf)".to_owned());
+    out.push("    return v0".to_owned());
+    out.join("\n") + "\n"
+}
+
+/// The classes of the values a function merges take a bounded number of passes: past them no
+/// merged value has a class, so the buffer the loop keeps no longer decides the reader's test.
+#[test]
+fn classes_past_the_pass_bound_are_unknown() {
+    let blocking = |links: usize| -> usize {
+        let p = Project::new(&format!("bounds_classes_{links}"));
+        p.write("m.py", &chain_before_buffer_read(links));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF101")
+            .count()
+    };
+    assert_eq!(blocking(4), 0);
+    assert_eq!(blocking(12), 1);
 }
 
 /// A loop after a `return` has only its back edge: the names it passes around through copies
@@ -615,6 +664,59 @@ fn a_branch_on_a_value_many_cases_pass_through_is_decided_once_per_depth() {
     );
 }
 
+/// Operators whose two operands are one value (`t1 = t0 + t0`), thirty deep, in a loop that
+/// reallocates the result: whether each operand is computed entry by entry from the previous
+/// value, and so whether `DATA101` reads the previous value through it, is decided once per
+/// value.
+#[test]
+fn operators_sharing_operands_decide_each_derivation_once() {
+    let mut lines = vec!["import numpy as np".to_owned()];
+    for (name, first, last) in [
+        ("rebuilt", "acc[1:]", "(t30, row)"),
+        ("grown", "[acc]", "t30"),
+    ] {
+        lines.extend(["", ""].map(str::to_owned));
+        lines.push(format!("def {name}(rows):"));
+        lines.push("    acc = np.empty(0)".to_owned());
+        lines.push("    for row in rows:".to_owned());
+        lines.push(format!("        t0 = {first}"));
+        for i in 1..=30 {
+            lines.push(format!("        t{i} = t{} + t{}", i - 1, i - 1));
+        }
+        lines.push(format!("        acc = np.concatenate({last})"));
+        lines.push("    return acc".to_owned());
+    }
+    let p = Project::new("bounds_shared_operators");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    // Arithmetic on a slice of the previous array builds a new one; a list doubled thirty times
+    // holds the previous array.
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "DATA101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["grown"], "{found:#?}");
+}
+
+/// An item of a display taken at a constant index far past its end (`[acc][10**12]`): the
+/// display's own length bounds the look for starred elements before the index.
+#[test]
+fn an_index_past_a_display_is_read_without_counting_up_to_it() {
+    let p = Project::new("bounds_display_index");
+    p.write(
+        "m.py",
+        "import numpy as np\n\n\ndef grown(rows):\n    acc = np.empty(0)\n    for row in rows:\n        acc = np.concatenate(([acc][1000000000000] + [row],))\n    return acc\n",
+    );
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "DATA101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["grown"], "{found:#?}");
+}
+
 /// A function of `loops` loops one after another, each with its own first-iteration flag.
 fn flagged_loops(loops: usize) -> String {
     let mut lines = vec![
@@ -771,6 +873,96 @@ fn task_factories_at_the_end_of_a_copy_chain_take_linear_time() {
     assert_eq!(tasks[0]["target"], "asyncio.create_task->t0");
 }
 
+/// A shared value copied along a long chain of assignments (`v1 = v0`, `v2 = v1`, ...) before
+/// `MUT202` reads which object each copy is: each copy's origin is found once.
+#[test]
+fn a_long_copy_chain_of_a_shared_value_finds_each_origin_once() {
+    let mut lines = vec![
+        "from functools import lru_cache".to_owned(),
+        String::new(),
+        String::new(),
+        "@lru_cache(maxsize=None)".to_owned(),
+        "def rows(name):".to_owned(),
+        "    return [[name]]".to_owned(),
+        String::new(),
+        String::new(),
+        "def extend(name):".to_owned(),
+        "    v0 = rows(name)".to_owned(),
+    ];
+    for i in 1..=4000 {
+        lines.push(format!("    v{i} = v{}", i - 1));
+    }
+    lines.push("    v4000.append([name])".to_owned());
+    let p = Project::new("bounds_shared_copy_chain");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT202")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["extend"], "{found:#?}");
+}
+
+/// Many attributes read from one shared value, each a value of its own, and changed after: the
+/// memo and lazy-initialization writes of all of them are read in one walk of the function.
+#[test]
+fn many_shared_values_read_their_memo_writes_in_one_walk() {
+    let mut lines = vec![
+        "from functools import lru_cache".to_owned(),
+        String::new(),
+        String::new(),
+        "@lru_cache(maxsize=None)".to_owned(),
+        "def config(name):".to_owned(),
+        "    return object()".to_owned(),
+        String::new(),
+        String::new(),
+        "def touch(name):".to_owned(),
+        "    root = config(name)".to_owned(),
+    ];
+    for i in 0..3000 {
+        lines.push(format!("    a{i} = root.a{i}"));
+        lines.push(format!("    a{i}.cache_size = {i}"));
+    }
+    let p = Project::new("bounds_many_shared_values");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT202").count();
+    assert_eq!(reported, 3000, "{found:#?}");
+}
+
+/// A helper initializing thousands of attributes of its argument lazily, each under its own
+/// test (`if p.a0 is None: p.a0 = 0`): the walks that find what each test guards share the
+/// function's budget, past which no lazy initialization is recognized and the changes count.
+#[test]
+fn lazy_initializations_past_the_budget_count_as_changes() {
+    let mut lines = vec![
+        "from functools import lru_cache".to_owned(),
+        String::new(),
+        String::new(),
+        "@lru_cache(maxsize=None)".to_owned(),
+        "def config(name):".to_owned(),
+        "    return object()".to_owned(),
+        String::new(),
+        String::new(),
+        "def fill(p):".to_owned(),
+    ];
+    for i in 0..3000 {
+        lines.push(format!("    if p.a{i} is None:"));
+        lines.push(format!("        p.a{i} = {i}"));
+    }
+    lines.extend(["", "", "def use(name):", "    fill(config(name))"].map(str::to_owned));
+    let p = Project::new("bounds_many_lazy_initializations");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT202")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["use"], "{found:#?}");
+}
+
 /// Each list copies the one before (`x1 = list(x0)`): the size of the last is not followed
 /// past a few constructors, and each is decided once.
 #[test]
@@ -893,6 +1085,45 @@ fn callables_past_the_partial_and_copy_bounds_are_not_followed() {
     assert_eq!(queries(3, 30), 0);
 }
 
+/// Thousands of names unpacked from one display of the previous value
+/// (`a0, a1, ... = acc, acc, ...`), each rebuilt entry by entry, in a function with as many
+/// starred elements elsewhere: where each display starts unpacking is indexed once.
+#[test]
+fn names_unpacked_from_one_display_find_its_starred_elements_once() {
+    let n = 3000;
+    let names: Vec<String> = (0..n).map(|i| format!("a{i}")).collect();
+    let mut lines = vec![
+        "import numpy as np".to_owned(),
+        String::new(),
+        String::new(),
+        "def rebuilt(rows):".to_owned(),
+        "    acc = np.empty(0)".to_owned(),
+        "    for row in rows:".to_owned(),
+    ];
+    for i in 0..n {
+        lines.push(format!("        b{i} = [*row]"));
+    }
+    lines.push(format!(
+        "        {} = {}",
+        names.join(", "),
+        vec!["acc"; n].join(", ")
+    ));
+    let scaled: Vec<String> = names.iter().map(|a| format!("{a} * 2")).collect();
+    lines.push(format!(
+        "        acc = np.concatenate(({}, [row]))",
+        scaled.join(", ")
+    ));
+    lines.push("    return acc".to_owned());
+    let p = Project::new("bounds_unpacked_display");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    // Every operand is computed entry by entry from the previous array.
+    assert!(
+        !found.iter().any(|d| d["rule_code"] == "DATA101"),
+        "{found:#?}"
+    );
+}
+
 /// A string constant of `bytes` bytes and `aliases` names bound one to the next, the last run
 /// as a statement in a loop.
 fn aliased_schema(bytes: usize, aliases: usize) -> String {
@@ -923,6 +1154,38 @@ fn aliases_of_a_large_string_constant_share_its_text() {
     // The statement is DDL: no query runs per row.
     let diags = check_within(&p, Duration::from_secs(20));
     assert!(diags.is_empty(), "{diags:#?}");
+}
+
+/// A helper filling thousands of items of its argument's attribute, each in a branch of its own
+/// (`if flag: p.items[0] = 0`): the `not in` tests that would make a store a memo fill are found
+/// in one walk of the blocks.
+#[test]
+fn item_stores_in_many_branches_find_membership_tests_once() {
+    let mut lines = vec![
+        "from functools import lru_cache".to_owned(),
+        String::new(),
+        String::new(),
+        "@lru_cache(maxsize=None)".to_owned(),
+        "def config(name):".to_owned(),
+        "    return object()".to_owned(),
+        String::new(),
+        String::new(),
+        "def fill(p, flag):".to_owned(),
+    ];
+    for i in 0..3000 {
+        lines.push("    if flag:".to_owned());
+        lines.push(format!("        p.items[{i}] = {i}"));
+    }
+    lines.extend(["", "", "def use(name):", "    fill(config(name), True)"].map(str::to_owned));
+    let p = Project::new("bounds_branch_item_stores");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT202")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["use"], "{found:#?}");
 }
 
 /// A function with a long chain of aliases of a class and as many attribute stores through the
@@ -1219,4 +1482,47 @@ fn strict_writes_of_one_name_in_a_helper_walk_its_callers_once() {
         4_000,
     );
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// A value one `if` / `elif` chain of thousands of arms assigns, then tested as many times
+/// (`isinstance(src, str)`): the edges the tests of the merged value keep share the function's
+/// budget, past which a test is no guard and the effect it guards is kept.
+#[test]
+fn tests_of_a_wide_merge_keep_their_edges_within_a_budget() {
+    let n = 2000;
+    let mut lines = vec![
+        "import io".to_owned(),
+        "from urllib.request import urlopen".to_owned(),
+        String::new(),
+        String::new(),
+        "def fetch(src, kind):".to_owned(),
+        "    if kind == 0:".to_owned(),
+        "        src = io.StringIO()".to_owned(),
+    ];
+    for i in 1..n {
+        lines.push(format!("    elif kind == {i}:"));
+        lines.push("        src = io.StringIO()".to_owned());
+    }
+    for _ in 0..n {
+        lines.push("    if isinstance(src, str):".to_owned());
+        lines.push("        urlopen(src).close()".to_owned());
+    }
+    lines.extend(
+        [
+            "",
+            "",
+            "async def load(kind):",
+            "    fetch(\"https://example.com\", kind)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_wide_merge_tests");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["load"], "{found:#?}");
 }

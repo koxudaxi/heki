@@ -60,6 +60,10 @@ chain is a shortest one. The search does not enter:
 - functions an offloading decorator or API runs on another thread (`@sync_to_async`,
   `asyncio.to_thread(f)`, ...).
 
+Unlike `EFF101`, the search does not read the callees' guards: a reached function's effects
+count whatever its arguments are, so `__repr__` calling `save(text, io.StringIO())` reaches the
+`open` that `save` runs only for a path.
+
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope
 function that starts the shortest chain (or at the blocking call, write, read, or call itself),
