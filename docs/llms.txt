@@ -19,7 +19,7 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 38 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 39 rules in four families
 - [Rule Precision](https://heki.koxudaxi.dev/precision/): A rule is exact once it is certified (below), and heuristic until then
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 
@@ -51,6 +51,7 @@
 - [list-front-pop (OPT120)](https://heki.koxudaxi.dev/rules/list-front-pop/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)
 - [list-quadratic-concat (OPT101)](https://heki.koxudaxi.dev/rules/list-quadratic-concat/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · Safe fix (--fix)
 - [lock-or-tx-held-across-io (EFF106)](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
+- [lock-reacquired-while-held (EFF109)](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [loop-carried-concat (DATA101)](https://heki.koxudaxi.dev/rules/loop-carried-concat/): Family: Data Pipelines (DATA) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
 - [loop-db-query (EFF103)](https://heki.koxudaxi.dev/rules/loop-db-query/): Family: Execution Effects (EFF) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
 - [loop-invariant-container-rebuild (OPT130)](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)

@@ -13,6 +13,7 @@ use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::iterations::{
     self, BetweenSteps, ContainerChange, IteratedContainer, IteratedResult, ResultIteration,
 };
+use crate::locks::{self, LockStep, ObjRef};
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -310,6 +311,7 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
     into.private_calls.extend(body.private_calls);
     into.unknown_calls |= body.unknown_calls;
     into.capacity_waits.extend(body.capacity_waits);
+    into.absorb_lock_facts(body.locks);
     into.refresh_typed_field_writes();
 }
 
@@ -469,6 +471,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     into.unresolved_access_sites
         .extend(other.unresolved_access_sites);
     into.capacity_waits.extend(other.capacity_waits);
+    into.absorb_lock_facts(other.locks);
     into.refresh_typed_field_writes();
 }
 
@@ -644,6 +647,10 @@ struct Extractor<'a> {
     capacity_walks: RefCell<capacity::Walks>,
     /// The loops around each block.
     around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
+    /// The blocks acquiring each lock (`locks::BlockTests::common`).
+    lock_blocks: std::collections::BTreeMap<ObjRef, BTreeSet<BlockId>>,
+    /// The tests of state on every path to each block (`EFF109`).
+    state_tests: OnceCell<locks::BlockTests>,
     guards: LocalGuards,
     summary: EffectSummary,
     sites: Vec<CallSite>,
@@ -984,6 +991,8 @@ impl<'a> Extractor<'a> {
             ints: OnceCell::new(),
             capacity_walks: RefCell::default(),
             around: OnceCell::new(),
+            lock_blocks: std::collections::BTreeMap::new(),
+            state_tests: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
             sites: Vec::new(),
@@ -1931,6 +1940,7 @@ impl<'a> Extractor<'a> {
             Vec::new()
         };
         self.self_container_changes();
+        self.lock_owner_tests();
         self.resolve_construction();
         if self.opt_in.return_origins {
             self.returned_origins();
@@ -2078,6 +2088,7 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             result_held: false,
             queues: None,
+            state_tests: None,
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
@@ -3014,6 +3025,10 @@ impl<'a> Extractor<'a> {
         // (The subscript instructions bind `index` to their key.)
         let index_in_block = index;
         self.store_escapes(kind);
+        if self.opt_in.locks {
+            self.lock_acquired(bb, kind, span);
+            self.name_rebound(kind);
+        }
         match kind {
             InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
                 if self.self_vars.contains(obj) {
@@ -3271,6 +3286,93 @@ impl<'a> Extractor<'a> {
                 self.iteration(bb, *iterable, *is_async, span)
             }
             _ => {}
+        }
+    }
+
+    /// A non-reentrant lock `kind` takes (`LockFacts::acquires`), with the guards on the
+    /// function's inputs (the tests of state on every path to it are added once every
+    /// acquisition is known, [`Self::lock_owner_tests`]).
+    fn lock_acquired(&mut self, bb: BlockId, kind: &InstKind, span: Span) {
+        // A branch on a constant never takes the lock its dead side would.
+        if !matches!(
+            kind,
+            InstKind::EnterWith { .. } | InstKind::MethodCall { .. }
+        ) || !self.live.block(bb)
+        {
+            return;
+        }
+        let def = |v: VarId| self.defs.get(&v).copied();
+        let class_of = |v: VarId| locks::lock_class(self.cx, self.f, &self.types, &def, v);
+        let Some(LockStep::Acquire(var)) = locks::lock_step(self.cx, kind, &def, &class_of) else {
+            return;
+        };
+        let (Some(class), Some(lock)) = (
+            class_of(var),
+            locks::obj_ref(self.cx, self.f, self.key, &self.types, &def, var),
+        ) else {
+            return;
+        };
+        let guards = self.guards.occurrence(&self.guard_inputs(), bb);
+        self.lock_blocks.entry(lock.clone()).or_default().insert(bb);
+        let acq = locks::own_acquisition(self.key, self.path, class, span, guards);
+        locks::add_acquisition(&mut self.summary.lock_facts_mut().acquires, lock, acq);
+    }
+
+    /// A module global or a closure variable `kind` binds or deletes (`LockFacts::rebinds`;
+    /// the attributes of parameters are in `mutated_param_paths`).
+    fn name_rebound(&mut self, kind: &InstKind) {
+        if self.f.is_module_body {
+            return;
+        }
+        let def = |v: VarId| self.defs.get(&v).copied();
+        let name = locks::rebound_name(self.cx, self.f, self.key, &self.types, &def, kind);
+        if let Some(name @ (ObjRef::Global(_) | ObjRef::Cell { .. })) = name {
+            self.summary.lock_facts_mut().rebinds.insert(name);
+        }
+    }
+
+    /// The tests of state on every path to each block a run reaches, over the edges it can
+    /// take.
+    fn state_tests(&self) -> &locks::BlockTests {
+        self.state_tests.get_or_init(|| {
+            let dom = heki_ir::DominatorTree::over(self.shape, |p, b| self.live.edge(p, b));
+            let def = |v: VarId| self.defs.get(&v).copied();
+            let resolve = |recv: VarId, method: &str| match self
+                .cx
+                .resolve_method(self.types.get(&recv), method)
+            {
+                Callee::Project(keys, _) => keys,
+                _ => Vec::new(),
+            };
+            let global = |name: &str| self.cx.global_fqn(name);
+            locks::BlockTests::of(self.shape, dom, &def, &resolve, &global)
+        })
+    }
+
+    /// The tests of state on every path to every acquisition of each lock
+    /// (`LockAcquire::tests`).
+    fn lock_owner_tests(&mut self) {
+        if self.lock_blocks.is_empty() {
+            return;
+        }
+        let blocks = std::mem::take(&mut self.lock_blocks);
+        let tests = self.state_tests();
+        let found: Vec<_> = blocks
+            .into_iter()
+            .map(|(lock, blocks)| {
+                let t = tests
+                    .common(&blocks)
+                    .expect("a lock with acquiring blocks a run reaches");
+                let owner = locks::owner_tests(&lock, t);
+                (lock, owner)
+            })
+            .collect();
+        let acquires = &mut self.summary.lock_facts_mut().acquires;
+        for (lock, tests) in found {
+            let acq = acquires
+                .get_mut(&lock)
+                .expect("a lock with acquiring blocks was taken");
+            acq.tests = tests;
         }
     }
 
@@ -4336,6 +4438,7 @@ impl<'a> Extractor<'a> {
                         result_discarded: false,
                         queues: None,
                         result_held: false,
+                        state_tests: None,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
                     });
@@ -5037,6 +5140,11 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             queues: None,
             result_held: false,
+            state_tests: if self.opt_in.locks {
+                self.state_tests().of_site(bb)
+            } else {
+                None
+            },
             complete,
             on_every_return,
         }
@@ -5955,6 +6063,7 @@ fn role_site(
         result_discarded: false,
         queues: site.queues.clone(),
         result_held: false,
+        state_tests: site.state_tests.clone(),
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     }

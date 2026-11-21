@@ -1,8 +1,8 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
-//! the walk to the callable a builtin calls once per item, contracts with many call targets, and
-//! the walk to the uses handing a reference to a call target on.
+//! the walk to the callable a builtin calls once per item, contracts with many call targets, the
+//! walk to the uses handing a reference to a call target on, and the locks `EFF109` follows.
 
 mod common;
 
@@ -2632,4 +2632,79 @@ fn implementations_past_the_class_bound_are_not_complete() {
     };
     assert_eq!(blocking(3), ["EFF101"]);
     assert_eq!(blocking(300), ["EFF111"]);
+}
+
+/// A project selecting `EFF109` with the class `C` (a helper `helper` taking `self._lock`, and
+/// `count` locks of its own), then the method `body` of `C`.
+fn locked_class(name: &str, count: usize, body: Vec<String>) -> Project {
+    let mut lines = vec![
+        "import threading".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._lock = threading.Lock()".to_owned(),
+    ];
+    lines.extend((0..count).map(|i| format!("        self._l{i} = threading.Lock()")));
+    lines.extend(
+        [
+            "",
+            "    def helper(self):",
+            "        with self._lock:",
+            "            pass",
+            "",
+        ]
+        .map(str::to_owned),
+    );
+    lines.extend(body);
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"EFF109\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of tests of `self`'s state before thousands of acquisitions of one lock and as many
+/// calls: the tests on every path to each block come from one pass over the dominator tree, not
+/// from a walk per acquisition or per call site.
+#[test]
+fn state_tests_before_many_acquisitions_and_calls_take_one_pass() {
+    let n = 2_000;
+    let mut body = vec!["    def run(self):".to_owned()];
+    for i in 0..n {
+        body.push(format!("        if self.f{i}:"));
+        body.push("            return".to_owned());
+    }
+    for _ in 0..n {
+        body.push("        with self._lock:".to_owned());
+        body.push("            self.helper()".to_owned());
+    }
+    let p = locked_class("bounds_lock_tests", 0, body);
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "EFF109").count(),
+        n
+    );
+}
+
+/// Thousands of locks held at once over thousands of blocks: a block's state is a bit per
+/// acquisition of the function.
+#[test]
+fn many_locks_held_at_once_keep_a_bit_each() {
+    let n = 2_000;
+    let mut body = vec!["    def run(self, xs):".to_owned()];
+    body.extend((0..n).map(|i| format!("        self._l{i}.acquire()")));
+    body.push("        self._lock.acquire()".to_owned());
+    for i in 0..n {
+        body.push(format!("        if xs[{i}]:"));
+        body.push("            self.helper()".to_owned());
+    }
+    let p = locked_class("bounds_many_locks", n, body);
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "EFF109").count(),
+        n
+    );
 }

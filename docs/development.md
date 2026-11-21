@@ -192,7 +192,9 @@ behind as many tests, a function making twenty thousand calls of eight operands 
 types nothing making thousands of strict accesses of one name that one caller calls as many times, a
 helper that types nothing reading, calling, or writing one strict target name thousands of times,
 which a caller calls as many times, many `is` tests each followed by a conditional expression on the
-tested parameter, many branches on a long chain of copies of one `is` test, a long chain of returned
+tested parameter, many branches on a long chain of copies of one `is` test,
+thousands of tests of an object's state before thousands of acquisitions of its lock, thousands of
+locks held at once over thousands of blocks, a long chain of returned
 calls each handed the previous call's result as two of its arguments, a function of twelve thousand
 calls each handed the previous call's result, with every rule selected, a long chain of returned
 aliases each appended to one list or to a new list of its own, a long chain of conditional

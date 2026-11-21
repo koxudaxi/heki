@@ -422,6 +422,14 @@ EffectSummary(f) = {
     // What iterating the returned object runs (a plain function returning a generator)
     iterated:                 Option<EffectSummary>,       // in the function's own parameters
 
+    // Locks (EFF109; propagated; only with EFF109 selected, OptInFacts::locks)
+    locks:                    Option<LockFacts>,           // acquires: non-reentrant locks taken on the
+                                                           // function's thread or task (ObjRef =
+                                                           // parameter i or its attribute, a global, a
+                                                           // closure variable; chain, input guards,
+                                                           // tests of state on the way); rebinds: the
+                                                           // globals and closure variables it may bind
+
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
@@ -1083,7 +1091,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1171,7 +1179,52 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    that no decorator replaces, `FunctionDecl::called_as_defined`; never a class's `__init__`),
    or a value typed as one of `heki_kb::FUTURE_CLASSES` (an annotation, or a Layer 2
    `return_type` such as `loop.run_in_executor` / `asyncio.gather` → `asyncio.Future`).
-8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+8. **`EFF109`** (opt-in): a non-reentrant lock taken again while it is held.
+   - A lock is an instance of a Layer 2 class flagged `non_reentrant_lock` (`threading.Lock`,
+     `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`), named by where the function
+     reaches it (`heki_effect::locks::ObjRef`): parameter `i` or its attribute (`self._lock`), a
+     module global (by fully qualified name, read by name, through imports, or on its module),
+     or a variable of an enclosing function its closures capture (typed from what that function
+     binds to it, `TypeCtx::captured`). An acquisition is a `with` / `async with` over
+     it, an awaited `acquire()` without arguments, or a blocking `acquire()` the catalog lists
+     (`threading.Lock.acquire`) without a timeout or `blocking=False`.
+   - The facts are in `EffectSummary::locks` (`locks::LockFacts`, absent for the many functions
+     with none) and `CallSite::state_tests`; the summaries carry them only with `EFF109` selected
+     (`OptInFacts::locks`), and a run without the rule computes none of them.
+   - The tests of state on every path to a block (`locks::BlockTests`, one pass over the
+     dominator tree of the edges a run can take): the attributes of the parameters, the project
+     methods called on a parameter, and the module globals that the conditions of the branches
+     ending its dominators read; at most 16 tests, past that the answer is open
+     (`heki_ir::walk::Answer`) and every test may be one. Each call site keeps those of its block
+     (`CallSite::state_tests`).
+   - `LockFacts::acquires` holds the function's own acquisitions (a hop to the lock's class at
+     the acquisition), each with the input guards every acquisition needs and the tests of state
+     on every path to every acquisition of the lock (those of the acquisitions' common
+     dominator): the module globals, and, for a lock a parameter holds, the attributes of that
+     object and the project methods called on it (`LockAcquire::tests`; open past 16 tests,
+     where the acquisition counts as guarded). Propagation adds the acquisitions of each callee whose body runs at the call on
+     the caller's thread or task (not on a worker), with the lock mapped through the argument
+     bound to the parameter, the call in front of the chain, the guards mapped by
+     `guards::through_call` (a constant argument deciding one against it drops it), and the
+     tests of state of the call site added; several acquisitions of one lock keep the guards and
+     tests all of them have and the shortest chain.
+   - `LockFacts::rebinds` holds the module globals and closure variables the function may bind
+     or delete (`global`, `nonlocal`, an attribute of a module, a variable its closures capture),
+     itself or through its calls; `mutated_param_paths` has the attributes of parameters. A
+     callee that may bind a lock's name takes no lock under that name at the call
+     (`locks::may_rebind`): the name may reach another object by then.
+   - The rule runs a forward must-hold dataflow (`heki_effect::held`, shared with `EFF106`: a bit
+     per acquisition, an `ExitWith` giving back those of its statement, a `release()` the
+     acquisitions of its lock, also a `with`'s, and binding a lock's name, by the holder or by a
+     call whose callees may bind it (`ProjectIndex::site_rebinds`), those of that name) and
+     reports, while a lock is held, its own acquisition again and a call site whose callees take
+     it (`ProjectIndex::site_locks`), unless that acquisition is behind a test of state the
+     holder changes (an attribute of the lock's owner, tested by the acquiring function or by a
+     function on the way, that the holder's summary changes, `mutated_param_paths`,
+     `mutates_self_attrs`, a tested method counting with the attributes it reads; a module global
+     the holder stores; the holder's own tests do not count), or some function of the module
+     releases the lock where it does not hold it (a signal between threads).
+9. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
    bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
@@ -1308,6 +1361,7 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
+`non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `importlib.util.find_spec`; `"read"`: reading the module
@@ -1327,7 +1381,8 @@ through `*` / `**` unpacking, selects none. A boolean flag case (`equals = false
 is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: the effects it
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
-`offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`): an
+`offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
+`non-reentrant-lock`): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),
