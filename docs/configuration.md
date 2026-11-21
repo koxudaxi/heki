@@ -131,8 +131,8 @@ supported version that every clause admits:
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
 - A prefix or `ALL` enables only the default rules. The opt-in rules (`EFF105`, `EFF106`,
-  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`) need their exact code or
-  name. In `ignore`, a prefix covers every rule it matches.
+  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`) need their
+  exact code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, and `--extend-select` and `--ignore` add
   to the configured lists.
 

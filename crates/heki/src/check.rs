@@ -117,7 +117,8 @@ fn analyze(
     let inputs = project.inputs();
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
     let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
-    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes);
+    let opt_in = heki_rules::opt_in_facts(&selection);
+    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes, opt_in);
     let units = project.units();
     let extras = CheckExtras {
         soundness_kb: &env.soundness_kb,

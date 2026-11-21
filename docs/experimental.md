@@ -12,6 +12,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
+| `rule.MUT113` | rule | [`MUT113`](rules/iterated-container-mutation.md) | 0.2.0 | - |
 
 ## `cli-option.profile`
 
@@ -44,3 +45,11 @@ It reports the readers of the stale writes `MUT101` finds, so it shares `MUT101`
 - **Since:** 0.2.0
 
 Its precision on real code bases is still low: much of what it reports is code that changes a borrowed container on purpose.
+
+## `rule.MUT113`
+
+- **Kind:** rule
+- **Target:** [`MUT113`](rules/iterated-container-mutation.md)
+- **Since:** 0.2.0
+
+It has few reports, and most of them are still false.
