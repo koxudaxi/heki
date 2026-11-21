@@ -1953,7 +1953,8 @@ fn rule_and_explain_commands() {
     for (code, state) in [
         ("OPT101", "[heuristic off      fix=true ]"),
         ("EFF105", "[heuristic opt-in   fix=false]"),
-        ("MUT114", "[heuristic off      fix=false]"),
+        ("MUT114", "[exact     on       fix=false]"),
+        ("MUT110", "[exact     on       fix=false]"),
         ("MUT201", "[heuristic contract fix=false]"),
         ("MUT202", "[heuristic contract fix=false]"),
     ] {

@@ -38,7 +38,7 @@
 - [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity warning (slower code) · No automatic fix
 - [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
-- [cached-result-mutation (MUT114)](https://heki.koxudaxi.dev/rules/cached-result-mutation/): Family: Mutation & State (MUT) · Heuristic · Off by default · Severity error (a bug) · No automatic fix
+- [cached-result-mutation (MUT114)](https://heki.koxudaxi.dev/rules/cached-result-mutation/): Family: Mutation & State (MUT) · Exact · Enabled by default · Severity error (a bug) · No automatic fix
 - [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [conditional-ownership-mutation (MUT112)](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
@@ -59,7 +59,7 @@
 - [loop-unpooled-client (EFF102)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/): Family: Execution Effects (EFF) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [nested-loop-equijoin (OPT113)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [read-owner-violation (MUT203)](https://heki.koxudaxi.dev/rules/read-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
-- [readonly-param-mutation (MUT110)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/): Family: Mutation & State (MUT) · Heuristic · Off by default · Severity warning (a bug that is rarely harmful) · No automatic fix
+- [readonly-param-mutation (MUT110)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/): Family: Mutation & State (MUT) · Exact · Enabled by default · Severity warning (a bug that is rarely harmful) · No automatic fix
 - [readonly-return-mutation (MUT202)](https://heki.koxudaxi.dev/rules/readonly-return-mutation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [readonly-type-mutation (MUT108)](https://heki.koxudaxi.dev/rules/readonly-type-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [set-dict-quadratic-merge (OPT102)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · Safe fix (--fix)

@@ -130,7 +130,7 @@ Each report shows the chain of calls that leads to the bug.
 | A blocking call several helpers below an `async def` | `EFF101` | heuristic |
 | A database query, or a new HTTP client, on every loop iteration | `EFF103`, `EFF102` | heuristic |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | `MUT107` | heuristic |
-| A `Sequence` / `Mapping` argument changed in place by a helper | `MUT110` | heuristic |
+| A `Sequence` / `Mapping` argument changed in place by a helper | `MUT110` | exact |
 | Opt-in: a frozen or `ReadOnly` field changed in place | `MUT108` | heuristic |
 | Opt-in: I/O while a lock or a database transaction is held | `EFF106` | heuristic |
 | Opt-in: a generator consumed twice | `MUT106` | heuristic |

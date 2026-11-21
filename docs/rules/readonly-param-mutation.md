@@ -2,13 +2,9 @@
 
 # readonly-param-mutation (MUT110)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `warning` (a bug that is rarely harmful) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Enabled by default · Severity `warning` (a bug that is rarely harmful) · No automatic fix
 
 Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 4 sampled reports (round 3, 2026-11-21), 100% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks functions that hand a parameter annotated as a read-only container to code that changes
