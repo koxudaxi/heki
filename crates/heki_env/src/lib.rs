@@ -169,6 +169,10 @@ pub struct CallOwnerRule {
     /// it); `true` (default) covers its subclasses. `Class.method` targets cover the method's
     /// overrides either way.
     pub subclasses: Option<bool>,
+    /// `"calls"`: a reference to a target that hands it on to be called later (`[decide]`,
+    /// `return decide`, `partial(decide)`, `field(default_factory=Rule)`) counts as a call of
+    /// it; `"ignore"` (default) does not.
+    pub references: Option<String>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -202,6 +206,9 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
     /// the object they write count as writes of the boundary.
     pub fresh_objects: Option<String>,
+    /// `"calls"` or `"ignore"` (default), as for `call-owners`: whether a reference handing a
+    /// `call-targets` entry on counts as a call of it for `calls`.
+    pub references: Option<String>,
     /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
     /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
     pub import_probes: Option<String>,
@@ -724,6 +731,7 @@ exempt-methods = ["__deepcopy__"]
 message = "use a GenerationStore operation instead"
 unresolved = "ignore"
 subclasses = false
+references = "calls"
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
@@ -749,6 +757,7 @@ write-universe = ["DataModel.*"]
 allowed-callees = ["pkg.logging.*"]
 message = "render must not mutate model state"
 fresh-objects = "allow"
+references = "calls"
 import-probes = "report"
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
@@ -787,6 +796,7 @@ import-probes = "report"
                 message: Some("use a GenerationStore operation instead".into()),
                 unresolved: Some("ignore".into()),
                 subclasses: Some(false),
+                references: Some("calls".into()),
             }
         );
         assert_eq!(
@@ -808,6 +818,7 @@ import-probes = "report"
                 allowed_callees: vec!["pkg.logging.*".into()],
                 message: Some("render must not mutate model state".into()),
                 fresh_objects: Some("allow".into()),
+                references: Some("calls".into()),
                 import_probes: Some("report".into()),
             }
         );

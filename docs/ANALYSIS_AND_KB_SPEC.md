@@ -460,6 +460,26 @@ its module, read from the declarations, only when an `invalidation` target's cla
 `readonly-returns` producer has a module part (`Contracts::names_class_modules`): such a pattern
 compares the module and the qualname, which the fqn alone does not tell apart.
 
+`FileSummary.reference_sites` holds, only when a call contract sets `references = "calls"`
+(`Contracts::references`), the references handing a project function, method, or class on to
+be called later: a load of one (a name, a module or class attribute, a bound method; for a name
+an import or the module body binds, which is read without a load of its own, each use handing
+it on) whose value
+reaches, through copies, phis, and the displays holding it, an argument of a call, a stored
+attribute, item, or global, a `return`, a `yield`, or a `raise`. Each is a `CallSite` of what
+calling the value calls (the class it constructs, or its project callees, without bindings),
+at the load, and none is in `call_sites`: no call edge, effect, or binding comes from them.
+Uses that only name the value hand nothing on: the callee of a call (a call site of its own), a
+callable a library API runs at the call (`CallSite::handed_callable`, also through the
+`functools.partial` object it is), an argument of a builtin that only inspects its arguments,
+of `super`, of the typing forms `cast`, `TypeVar`, and `NewType`, and of `contextlib.suppress`; a
+receiver, an operand, a subscript, a dict key, a closure's captures (defaults and eagerly
+evaluated annotations are not told apart, nor a class's bases and keywords), and a module
+binding a name to the value itself (an import, a module alias). The class bodies a module runs
+add their references to the module body's (their other facts are not the module's). Like
+`call_sites`, they are local facts: the language server compares a function's references with
+its call sites (`Workspace::caller_view`) and shows them in call chains.
+
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
 the call on every normal path, and the next call; set on `Iterate` / `Through` sites too), with

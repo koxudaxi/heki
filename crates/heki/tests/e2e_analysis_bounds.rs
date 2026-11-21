@@ -1,7 +1,8 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
-//! the walk to the callable a builtin calls once per item, and contracts with many call targets.
+//! the walk to the callable a builtin calls once per item, contracts with many call targets, and
+//! the walk to the uses handing a reference to a call target on.
 
 mod common;
 
@@ -2154,6 +2155,40 @@ fn call_targets_are_looked_up_not_tried_one_by_one() {
         assert_eq!(diags.len(), 10, "{name}: {diags:#?}");
         assert!(diags.iter().all(|d| d["qualname"] == "f0"), "{name}");
     }
+}
+
+/// Thousands of references to a `call-owners` target, each a rebinding of one name that a long
+/// chain of phis carries to one `return` (`references = "calls"`): which values reach a use
+/// handing them on is found in one walk of the function, not once per reference (a function
+/// twice as long passes the IR's size budget).
+#[test]
+fn references_carried_by_a_long_phi_chain_are_found_in_one_walk() {
+    let rebindings = 2000;
+    let mut lines = vec![
+        "def decide():".to_owned(),
+        "    return 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def pick(flags):".to_owned(),
+        "    chosen = None".to_owned(),
+    ];
+    for i in 0..rebindings {
+        lines.push(format!("    if flags[{i}]:"));
+        lines.push("        chosen = decide".to_owned());
+    }
+    lines.push("    return chosen".to_owned());
+    let p = Project::new("bounds_reference_phi_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"m.decide\"]\nallowed-callers = [\"m.decide\"]\nreferences = \"calls\"\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let handed = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT204" && d["qualname"] == "pick")
+        .count();
+    assert_eq!(handed, rebindings);
 }
 
 /// Puts after each of many branches that may build a new unbounded queue: the queue of each put

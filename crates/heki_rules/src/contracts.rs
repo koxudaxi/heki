@@ -2,7 +2,8 @@
 //! configuration: the `readonly-returns` producers (`MUT202`), the `invalidation` contracts
 //! (`MUT109`), whether any ownership contract is declared, the names the strict
 //! `read-owners` and `call-owners` contracts count unresolved accesses of (`MUT206`, `MUT207`),
-//! and what the effect boundaries forbid outside the project (`EFF201`).
+//! whether a call contract counts references as calls (`MUT204`, `EFF201`), and what the effect
+//! boundaries forbid outside the project (`EFF201`).
 //! `heki check` and the LSP engine hand them to the analysis, so a wrapper of a producer and an
 //! invalidator reached through calls are known across files without IR.
 
@@ -70,6 +71,8 @@ pub(crate) struct ConfigContracts {
     unresolved_reads: Vec<DottedPattern>,
     /// The last names of the `call-owners` targets with `unresolved = "report"`.
     unresolved_calls: Vec<DottedPattern>,
+    /// [`Contracts::references`].
+    references: bool,
     external: ExternalNames,
 }
 
@@ -229,6 +232,7 @@ impl ConfigContracts {
             writer_contexts: NameMasks::default(),
             unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
             unresolved_calls: last_names(calls.flat_map(|r| &r.targets), "call-owners.targets")?,
+            references: counts_references(config),
             external: ExternalNames::new(config, kb),
         })
     }
@@ -334,6 +338,20 @@ impl Contracts for ConfigContracts {
     fn import_probes(&self) -> bool {
         self.external.probes
     }
+
+    fn references(&self) -> bool {
+        self.references
+    }
+}
+
+/// [`Contracts::references`] of `config` (the value is checked where the rules parse it).
+fn counts_references(config: &HekiConfig) -> bool {
+    let calls = |references: &Option<String>| references.as_deref() == Some("calls");
+    config.call_owners.iter().any(|r| calls(&r.references))
+        || config
+            .effect_boundaries
+            .iter()
+            .any(|b| calls(&b.references) && b.forbid.iter().any(|t| t == "calls"))
 }
 
 /// Bit `i` set for every contract `i` that `has` holds for.
@@ -346,7 +364,8 @@ fn mask(contracts: &[InvalidationNames], has: impl Fn(&InvalidationNames) -> boo
 }
 
 /// The contracts of `config` the summaries depend on (`None` when it declares no producer, no
-/// ownership contract, and no strict `call-owners` contract, so nothing is computed for them).
+/// ownership contract, no strict `call-owners` contract, and no call contract counting
+/// references, so nothing is computed for them).
 pub fn summary_contracts(
     config: &HekiConfig,
     kb: &EffectiveEcosystemKb,
@@ -356,6 +375,7 @@ pub fn summary_contracts(
         && !contracts.ownership
         && contracts.unresolved_reads.is_empty()
         && contracts.unresolved_calls.is_empty()
+        && !contracts.references
     {
         return Ok(None);
     }

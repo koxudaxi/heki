@@ -32,8 +32,8 @@ use globset::{Glob, GlobMatcher};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::{
-    CallHop, CallSite, ContractClass, EffectSummary, FuncKey, ModuleInput, ProjectDecls,
-    ProjectIndex,
+    CallHop, CallSite, ContractClass, EffectSummary, FileSummary, FuncKey, ModuleInput,
+    ProjectDecls, ProjectIndex,
 };
 use heki_env::{HekiConfig, Severity};
 use heki_ir::{IrFunction, ModuleConstants};
@@ -869,9 +869,19 @@ impl<'a> CheckContext<'a> {
     /// Call sites of every summarized function with their file, keyed by caller, from its
     /// defining file and in source order (the IR-free call graph the contract rules walk).
     pub fn sites_by_caller(&self) -> SitesByCaller<'a> {
+        self.by_caller(|file| &file.call_sites)
+    }
+
+    /// The reference sites of every summarized function (`FileSummary::reference_sites`), as
+    /// [`Self::sites_by_caller`] keeps the call sites.
+    pub fn reference_sites_by_caller(&self) -> SitesByCaller<'a> {
+        self.by_caller(|file| &file.reference_sites)
+    }
+
+    fn by_caller(&self, sites: impl Fn(&'a FileSummary) -> &'a [CallSite]) -> SitesByCaller<'a> {
         let mut out = SitesByCaller::default();
         for (path, file) in &self.index.files {
-            for site in &file.call_sites {
+            for site in sites(file) {
                 if self.index.file_of(&site.caller) == Some(path.as_path()) {
                     out.entry(&site.caller)
                         .or_default()

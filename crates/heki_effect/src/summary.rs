@@ -182,21 +182,35 @@ fn extract_module(
             module: input.module_name.clone(),
             qualname: func_qualname(f).to_owned(),
         };
-        let (mut summary, mut sites, flow, mut external) =
-            Extractor::new(f, &key, &cx, &input.path, contracts, opt_in).run();
+        let Extracted {
+            mut summary,
+            mut sites,
+            flow,
+            mut references,
+            mut external,
+        } = Extractor::new(f, &key, &cx, &input.path, contracts, opt_in).run();
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
         if !f.is_module_body {
             for body in class_bodies_run_by(input.ir, f) {
-                let (s, body_sites, _, body_external) =
-                    Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
-                absorb_class_body(&mut summary, s);
-                external.extend(body_external);
+                let facts = Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
+                absorb_class_body(&mut summary, facts.summary);
+                external.extend(facts.external);
                 sites.extend(
-                    body_sites
+                    facts
+                        .sites
                         .into_iter()
                         .map(|site| CallSite { flow: None, ..site }),
                 );
+                references.extend(facts.references);
+            }
+        } else if contracts.is_some_and(|c| c.references()) {
+            // The module body runs the bodies of its classes: what they hand on (a dataclass
+            // field's `default_factory`) is handed on by the module. Their other facts are not
+            // the module's.
+            for body in class_bodies_run_by(input.ir, f) {
+                let facts = Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
+                references.extend(facts.references);
             }
         }
         if let Some(mut flow) = flow {
@@ -232,6 +246,7 @@ fn extract_module(
             );
         }
         file.call_sites.extend(sites);
+        file.reference_sites.extend(references);
         if !external.is_empty() {
             file.external_accesses
                 .entry(key.clone())
@@ -312,6 +327,7 @@ fn release_spare_capacity(file: &mut FileSummary) {
         }
     }
     file.call_sites.shrink_to_fit();
+    file.reference_sites.shrink_to_fit();
 }
 
 /// Shift the origin nodes a definition refers to (in its own nodes, its returns, and its call
@@ -540,21 +556,23 @@ impl ItemOf {
     }
 }
 
+/// The local facts of one function, or of a class body it runs ([`Extractor::run`]).
+struct Extracted {
+    summary: EffectSummary,
+    sites: Vec<CallSite>,
+    flow: Option<FuncFlow>,
+    /// [`FileSummary::reference_sites`].
+    references: Vec<CallSite>,
+    /// [`FileSummary::external_accesses`].
+    external: Vec<ExternalAccess>,
+}
+
 /// A typed write site waiting for the answer of its construction query.
 struct PendingSite {
     site: TypedFieldWriteSite,
     query: usize,
     rebinds: bool,
 }
-
-/// What [`Extractor::run`] finds in one function: its local summary, its call sites, its
-/// `MUT109` flow, and its accesses outside the project that effect boundaries forbid.
-type Extracted = (
-    EffectSummary,
-    Vec<CallSite>,
-    Option<FuncFlow>,
-    Vec<ExternalAccess>,
-);
 
 struct Extractor<'a> {
     f: &'a IrFunction,
@@ -671,6 +689,11 @@ struct Extractor<'a> {
     /// The changes of checked containers of `self` the visit finds, recorded after it
     /// ([`Self::self_container_changes`]).
     self_changes: Vec<SelfChange>,
+    /// [`Contracts::references`]: the references handing a target on are extracted.
+    references: bool,
+    /// `(call, argument)`: a callable a library API runs (`Self::handed_callable`), and the one
+    /// each `functools.partial` object it is holds, by the call handing it over.
+    handed: FxHashSet<(VarId, VarId)>,
     /// The accesses outside the project that effect boundaries forbid
     /// (`FileSummary::external_accesses`).
     external: Vec<ExternalAccess>,
@@ -984,6 +1007,8 @@ impl<'a> Extractor<'a> {
             dominators: OnceCell::new(),
             key_facts: OnceCell::new(),
             self_changes: Vec::new(),
+            references: contracts.is_some_and(|c| c.references()),
+            handed: FxHashSet::default(),
             external: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
@@ -1881,6 +1906,11 @@ impl<'a> Extractor<'a> {
         if self.contracts.is_some_and(|c| c.import_probes()) {
             self.import_probes();
         }
+        let references = if self.references {
+            self.reference_sites()
+        } else {
+            Vec::new()
+        };
         self.self_container_changes();
         self.resolve_construction();
         if self.opt_in.return_origins {
@@ -1923,7 +1953,113 @@ impl<'a> Extractor<'a> {
                 writes,
             }
         });
-        (self.summary, self.sites, flow, self.external)
+        Extracted {
+            summary: self.summary,
+            sites: self.sites,
+            flow,
+            references,
+            external: self.external,
+        }
+    }
+
+    /// The function's references handing a project function, method, or class on
+    /// ([`FileSummary::reference_sites`]): a load of one whose value reaches, through copies,
+    /// phis, and the displays holding it, an argument of a call, a stored attribute, item, or
+    /// global, a `return`, a `yield`, or a `raise`. The value as a callee is a call (its own
+    /// site), and so is a callable a library API runs (`Self::handed_callable`). Not handed on
+    /// either: an argument of a call that only inspects or names it ([`names_only`]), a
+    /// receiver, an operand, a subscript, a dict key, a closure's captures (its defaults and
+    /// its annotations are not told apart, nor a class's bases and keywords), and the name a
+    /// module binds to the object (an import, a module alias), which is the object. A site is
+    /// at the load; a name an import or the module body binds is read without a load of its own
+    /// (the bound value), so its sites are at the uses handing it on.
+    fn reference_sites(&mut self) -> Vec<CallSite> {
+        let flow = HandedValues::of(
+            self.f,
+            |at| self.callees.get(&at).is_some_and(names_only),
+            &self.handed,
+        );
+        let reaching = flow.reaching();
+        let mut out = Vec::new();
+        for &(at, var, span, imported) in &flow.loads {
+            if !reaching.contains(&var) {
+                continue;
+            }
+            self.pos = at;
+            let Some(site) = self.reference_site(var, at.0, span) else {
+                continue;
+            };
+            let spans = if imported || flow.bound_by_module(var) {
+                flow.handed_at(var)
+            } else {
+                vec![span]
+            };
+            out.extend(spans.into_iter().map(|span| CallSite {
+                span,
+                ..site.clone()
+            }));
+        }
+        out
+    }
+
+    /// The site at `span` of what calling `var`, loaded in block `bb`, calls: a project class it
+    /// constructs, or the project functions it calls (a bound method's included, with its
+    /// receiver's origin bound to `self`). An instance of a class defining `__call__` is no
+    /// function or class handed on.
+    fn reference_site(&self, var: VarId, bb: BlockId, span: Span) -> Option<CallSite> {
+        let constructs = self.class_called(var);
+        let (callee, recv) = self.callable_callee(var);
+        if constructs.is_none() && recv.is_none() && !matches!(self.val(var), Some(Val::Ref(_))) {
+            return None;
+        }
+        // A bound method binds its receiver to the method's `self`, as calling it does: the
+        // ownership exemptions (a class's own initialization) read where that object comes from.
+        let receiver = recv.map(|r| self.receiver(r, bb).0);
+        let binds_self = |key: &FuncKey| {
+            let decl = self.cx.project.function_decl(key);
+            decl.is_some_and(|d| !d.is_staticmethod && !d.is_classmethod)
+        };
+        let callees: Vec<BoundCallee> = match callee {
+            Callee::Project(keys, binds) => keys
+                .into_iter()
+                .map(|callee| BoundCallee {
+                    params: receiver
+                        .iter()
+                        .filter(|_| binds && binds_self(&callee))
+                        .cloned()
+                        .collect(),
+                    callee,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if constructs.is_none() && callees.is_empty() {
+            return None;
+        }
+        Some(CallSite {
+            caller: self.key.clone(),
+            target: CallTarget::Project(callees),
+            is_awaited: false,
+            span,
+            loop_depth: self.f.block_loop_depth(bb),
+            recv_is_self: false,
+            drives_coroutine_manually: false,
+            constructs,
+            role: SiteRole::Call,
+            returned: None,
+            flow: None,
+            guards: Vec::new(),
+            once_per: None,
+            once_loops: 0,
+            runner: Runner::Caller,
+            binds_recv: false,
+            handed_callable: None,
+            per_item: None,
+            dispatch: None,
+            result_discarded: false,
+            result_held: false,
+            queues: None,
+        })
     }
 
     /// Record `inst` when it reads an attribute of a module outside the project that an effect
@@ -3238,6 +3374,15 @@ impl<'a> Extractor<'a> {
                 (!getter).then_some((obj, attr))
             }
             _ => Some((obj, attr)),
+        }
+    }
+
+    /// What calling `var` calls, and the receiver a bound method binds (`obj.method`, a
+    /// method alias, `getattr(obj, "method")`).
+    fn callable_callee(&self, var: VarId) -> (Callee, Option<VarId>) {
+        match self.bound_method(var) {
+            Some((recv, method)) => (self.cx.resolve_method(self.val(recv), &method), Some(recv)),
+            None => (self.cx.resolve_call(self.val(var)), None),
         }
     }
 
@@ -4581,17 +4726,24 @@ impl<'a> Extractor<'a> {
         {
             return;
         }
-        let (callee, recv, recv_var, recv_is_self) = match self.bound_method(target) {
-            Some((recv, method)) => {
-                let callee = self.cx.resolve_method(self.val(recv), &method);
-                let (origin, is_self) = self.receiver(recv, bb);
-                (callee, Some(origin), Some(recv), is_self)
-            }
-            None => (self.cx.resolve_call(self.val(target)), None, None, false),
-        };
+        let (callee, recv_var) = self.callable_callee(target);
         let Callee::Project(..) = &callee else {
             return;
         };
+        let (recv, recv_is_self) = match recv_var {
+            Some(r) => {
+                let (origin, is_self) = self.receiver(r, bb);
+                (Some(origin), is_self)
+            }
+            None => (None, false),
+        };
+        if self.references {
+            // The API calls the callable, and a partial object the one it holds: their sites
+            // are calls, not references (`Self::reference_sites`).
+            self.handed.insert((call.dst, callable));
+            self.handed
+                .extend(partial.iter().flat_map(|p| p.calls.iter().copied()));
+        }
         let (held, kwargs, open) = partial.map_or((Vec::new(), Vec::new(), false), |p| {
             (p.args, p.kwargs, p.open)
         });
@@ -4733,20 +4885,23 @@ impl<'a> Extractor<'a> {
         let mut found: Option<Partial> = None;
         let mut cur = var;
         for _ in 0..16 {
+            let made = self.copied(cur);
             let Some((inner, held, kwargs, open)) = self
                 .defs
-                .get(&self.copied(cur))
+                .get(&made)
                 .and_then(|i| self.partial_call(&i.kind))
             else {
                 break;
             };
             let p = found.get_or_insert_with(|| Partial {
                 callable: inner,
+                calls: Vec::new(),
                 args: Vec::new(),
                 kwargs: Vec::new(),
                 open: false,
             });
             p.callable = inner;
+            p.calls.push((made, inner));
             // The outer partials' arguments come after what this one unpacks with `*`.
             if open {
                 p.args.clear();
@@ -5331,12 +5486,181 @@ impl<'c> Call<'c> {
 /// What calling a `functools.partial` object calls ([`Extractor::partial`]).
 struct Partial {
     callable: VarId,
+    /// Each nested `functools.partial` call: the object it makes and the callable it holds.
+    calls: Vec<(VarId, VarId)>,
     /// The positional arguments it passes first, up to the first one `*` unpacks.
     args: Vec<VarId>,
     /// Its keywords (`**` unpacking is a `None` keyword).
     kwargs: Vec<(Option<String>, VarId)>,
     /// It unpacks positional arguments with `*`: the positions after `args` are not known.
     open: bool,
+}
+
+/// How the values of a function reach the uses handing them on ([`Extractor::reference_sites`]).
+struct HandedValues {
+    /// Where each value comes from: the values it copies, or the phi inputs it merges.
+    from: FxHashMap<VarId, Vec<VarId>>,
+    /// The values each display holds (a dict display's values, not its keys).
+    held: FxHashMap<VarId, Vec<VarId>>,
+    /// The uses handing each value on, and whether only a display is handed on there: a module
+    /// binding a name to a function or class binds the name to the object, and binding it to
+    /// a display stores what the display holds.
+    uses: FxHashMap<VarId, Vec<(Span, bool)>>,
+    /// The loads: where, the value, its span, and whether it is an import.
+    loads: Vec<(Position, VarId, Span, bool)>,
+    /// What each value flows to (a copy, a phi, or a display holding it: `true`), built on
+    /// first use.
+    onward: OnceCell<FxHashMap<VarId, Vec<(VarId, bool)>>>,
+}
+
+impl HandedValues {
+    /// The flow of `f`'s values; `names_only_at` tells the calls that hand nothing on, and
+    /// `handed` the callables library APIs run (`(call, argument)`).
+    fn of(
+        f: &IrFunction,
+        names_only_at: impl Fn(Position) -> bool,
+        handed: &FxHashSet<(VarId, VarId)>,
+    ) -> Self {
+        let mut flow = Self {
+            from: FxHashMap::default(),
+            held: FxHashMap::default(),
+            uses: FxHashMap::default(),
+            loads: Vec::new(),
+            onward: OnceCell::new(),
+        };
+        for bb in &f.blocks {
+            for phi in &bb.phis {
+                let inputs = phi.incoming.iter().map(|(_, v)| *v);
+                flow.from.entry(phi.dst).or_default().extend(inputs);
+            }
+            for (index, inst) in bb.insts.iter().enumerate() {
+                let (at, span) = ((bb.id, index), inst.span);
+                match &inst.kind {
+                    InstKind::LoadGlobal { dst, .. }
+                    | InstKind::LoadName { dst, .. }
+                    | InstKind::AttrLoad { dst, .. } => flow.loads.push((at, *dst, span, false)),
+                    InstKind::Import { dst, .. } => flow.loads.push((at, *dst, span, true)),
+                    InstKind::Copy { dst, src } => flow.from.entry(*dst).or_default().push(*src),
+                    InstKind::AllocBuiltin { dst, elems, .. } => {
+                        flow.held.entry(*dst).or_default().extend(elems);
+                    }
+                    InstKind::DictLiteral { dst, entries } => {
+                        let values = entries.iter().filter_map(|e| match e {
+                            DictEntry::KeyValue { value, .. } => Some(*value),
+                            DictEntry::Unpack { .. } => None,
+                        });
+                        flow.held.entry(*dst).or_default().extend(values);
+                    }
+                    // A comprehension frame's arguments are its captures.
+                    InstKind::Call {
+                        dst,
+                        callee_var: Some(_),
+                        args,
+                        kwargs,
+                        ..
+                    }
+                    | InstKind::MethodCall {
+                        dst, args, kwargs, ..
+                    } if !names_only_at(at) => {
+                        let passed = args.iter().chain(kwargs.iter().map(|(_, v)| v));
+                        for v in passed.filter(|v| !handed.contains(&(*dst, **v))) {
+                            flow.hand_on(*v, span, false);
+                        }
+                    }
+                    InstKind::AttrStore { value, .. }
+                    | InstKind::SubscriptStore { value, .. }
+                    | InstKind::Yield {
+                        value: Some(value), ..
+                    } => flow.hand_on(*value, span, false),
+                    InstKind::StoreGlobal { value, .. } => {
+                        flow.hand_on(*value, span, f.is_module_body);
+                    }
+                    _ => {}
+                }
+            }
+            // The builder gives every `return` and `raise` of a value its statement's span.
+            if let (Terminator::Return(Some(v)) | Terminator::Raise(Some(v)), Some(span)) =
+                (&bb.terminator, bb.term_span)
+            {
+                flow.hand_on(*v, span, false);
+            }
+        }
+        flow
+    }
+
+    fn hand_on(&mut self, var: VarId, span: Span, display_only: bool) {
+        self.uses.entry(var).or_default().push((span, display_only));
+    }
+
+    /// Whether the module body binds a name to `var` itself.
+    fn bound_by_module(&self, var: VarId) -> bool {
+        self.uses
+            .get(&var)
+            .is_some_and(|uses| uses.iter().any(|(_, display_only)| *display_only))
+    }
+
+    /// The values whose objects reach a use handing them on: through copies and phis, and as
+    /// what a display reaching one holds.
+    fn reaching(&self) -> FxHashSet<VarId> {
+        let walk = |start: Vec<VarId>, displays: bool| {
+            let mut seen: FxHashSet<VarId> = start.iter().copied().collect();
+            let mut stack = start;
+            while let Some(v) = stack.pop() {
+                let inside = displays.then(|| self.held.get(&v)).flatten();
+                for &w in self.from.get(&v).into_iter().chain(inside).flatten() {
+                    if seen.insert(w) {
+                        stack.push(w);
+                    }
+                }
+            }
+            seen
+        };
+        let in_display = walk(self.uses.keys().copied().collect(), true);
+        let mut start: Vec<VarId> = self
+            .uses
+            .iter()
+            .filter(|(_, uses)| uses.iter().any(|(_, display_only)| !display_only))
+            .map(|(v, _)| *v)
+            .collect();
+        start.extend(in_display.iter().filter_map(|d| self.held.get(d)).flatten());
+        walk(start, false)
+    }
+
+    /// Where `var`'s object is handed on: the spans of the uses it reaches, in order.
+    fn handed_at(&self, var: VarId) -> Vec<Span> {
+        let onward = self.onward.get_or_init(|| {
+            let mut onward: FxHashMap<VarId, Vec<(VarId, bool)>> = FxHashMap::default();
+            for (to, sources) in &self.from {
+                for s in sources {
+                    onward.entry(*s).or_default().push((*to, false));
+                }
+            }
+            for (display, values) in &self.held {
+                for v in values {
+                    onward.entry(*v).or_default().push((*display, true));
+                }
+            }
+            onward
+        });
+        let mut seen: FxHashSet<(VarId, bool)> = FxHashSet::from_iter([(var, false)]);
+        let mut stack = vec![(var, false)];
+        let mut out = Vec::new();
+        while let Some((v, in_display)) = stack.pop() {
+            let uses = self.uses.get(&v).into_iter().flatten();
+            out.extend(
+                uses.filter(|(_, only)| in_display || !only)
+                    .map(|(s, _)| *s),
+            );
+            for &(w, into) in onward.get(&v).into_iter().flatten() {
+                if seen.insert((w, in_display || into)) {
+                    stack.push((w, in_display || into));
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
 }
 
 /// What a builtin calling a callable once per item passes it ([`Extractor::passed_items`]).
@@ -5489,6 +5813,31 @@ const INSPECTING_BUILTINS: &[&str] = &[
     "print",
     "format",
 ];
+
+/// Calls that only name what they are handed: typing forms, `super`, and the call form of an
+/// `except` clause.
+const NAMING_CALLS: &[&str] = &[
+    "builtins.super",
+    "contextlib.suppress",
+    "typing.NewType",
+    "typing.TypeVar",
+    "typing.cast",
+    "typing_extensions.NewType",
+    "typing_extensions.TypeVar",
+    "typing_extensions.cast",
+];
+
+/// Whether calling `callee` hands none of its arguments on: a builtin that only inspects them
+/// ([`INSPECTING_BUILTINS`]), or a call of [`NAMING_CALLS`].
+fn names_only(callee: &Callee) -> bool {
+    let Callee::External(symbol) = callee else {
+        return false;
+    };
+    NAMING_CALLS.contains(&symbol.as_str())
+        || symbol
+            .strip_prefix("builtins.")
+            .is_some_and(|n| INSPECTING_BUILTINS.contains(&n))
+}
 
 /// The construction of a write (`rebinds`: it rebinds an attribute) of an object the answer
 /// describes: a shallow copy's containers are the original's.

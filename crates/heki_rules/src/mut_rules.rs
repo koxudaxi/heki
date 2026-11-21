@@ -1764,6 +1764,25 @@ pub(crate) fn allows_fresh(
     )? == "allow")
 }
 
+/// `references` values; the first is the default (a reference handing a target on is no call).
+const REFERENCES: &[&str] = &["ignore", "calls"];
+
+/// Whether a call contract counts a reference handing a target on as a call (`references`).
+pub(crate) fn counts_references(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        REFERENCES,
+        "`ignore` or `calls`",
+        section,
+        contract,
+        "references",
+    )? == "calls")
+}
+
 /// Whether an effect boundary's `reads-environment` forbids import probes (`import-probes`).
 pub(crate) fn reports_import_probes(
     value: Option<&str>,
@@ -3241,5 +3260,6 @@ pub(crate) fn delegated_reports(
 mod call_owners;
 
 pub(crate) use call_owners::{
-    CallTargets, FunctionMatchers, Subclasses, group_texts, mut204, parse_call_targets, site_callee,
+    CallTargets, FunctionMatchers, Subclasses, call_verb, group_texts, mut204, parse_call_targets,
+    site_callee,
 };
