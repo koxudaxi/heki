@@ -65,10 +65,11 @@ fn src_directories_are_source_roots_unless_they_are_packages() {
     assert_eq!(concise(&p), (0, String::new()));
 }
 
-/// `heki check --output-format concise <args>` run from `dir`: `(exit code, stdout)`.
+/// `heki check --heuristic --output-format concise <args>` run from `dir`, as `Project::check`
+/// runs it: `(exit code, stdout)`.
 fn concise_in(dir: &Path, args: &[&str]) -> (i32, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--output-format", "concise"])
+        .args(["check", "--heuristic", "--output-format", "concise"])
         .args(args)
         .current_dir(dir)
         .output()
@@ -152,7 +153,7 @@ fn src_lists_the_source_roots() {
     let (code, stdout) = concise(&p);
     assert_eq!(code, 1);
     assert!(
-        stdout.contains("backend/server.py:6:9: EFF102 `config.net.client` allocates"),
+        stdout.contains("backend/server.py:6:9: EFF102 [heuristic] `config.net.client` allocates"),
         "{stdout}"
     );
 
@@ -166,7 +167,7 @@ fn src_lists_the_source_roots() {
     let (code, stdout) = concise(&p);
     assert_eq!(code, 1);
     assert!(
-        stdout.contains("lib/pkg/server.py:6:9: EFF102 `pkg.net.client` allocates"),
+        stdout.contains("lib/pkg/server.py:6:9: EFF102 [heuristic] `pkg.net.client` allocates"),
         "{stdout}"
     );
 }
