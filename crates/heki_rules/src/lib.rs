@@ -125,7 +125,8 @@ impl RuleMeta {
             Activation::Contract => "It runs when its contract is declared.",
         };
         Some(format!(
-            "This rule is heuristic: a report can be wrong about the code. {runs}"
+            "This rule is heuristic: a premise of its claim can be open (\"What a report \
+             states\" lists them), so a report can be wrong about the code. {runs}"
         ))
     }
 

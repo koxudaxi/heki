@@ -206,4 +206,13 @@ fn every_output_labels_a_heuristic_rule_and_only_that() {
             "{rule}"
         );
     }
+    let results = sarif["runs"][0]["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "{sarif}");
+    for result in results {
+        assert_eq!(
+            result["properties"]["tags"],
+            serde_json::json!(["heuristic"]),
+            "{result}"
+        );
+    }
 }

@@ -8,7 +8,7 @@ Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an a
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 The strict mode of a `[[tool.heki.write-owners]]` contract that sets `unresolved = "report"`:
@@ -39,6 +39,20 @@ writers, `forbidden-writers`, and, with `fresh-objects = "allow"`, writes that c
 they write. A parameter that every caller path binds to an object of a project class is not
 reported: `MUT201` reports the write at those callers. A computed name written on an object of
 unknown class is not reported (neither the class nor the attribute is known).
+
+## What a report states
+
+A report states that, outside the write owners, the function writes an attribute named like a target
+of the `write-owners` contract on an object whose class heki does not know, or a computed attribute
+name on a guarded class.
+
+Its premises:
+
+- **Named like a target**: the attribute's name matches a target's. Established.
+- **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
+  heki's own resolution.
+- **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
+  inside allowed contexts. Established from the contract.
 
 ## Why is this bad?
 `MUT201` reports what it can back with a class: a write through an object it cannot type is not

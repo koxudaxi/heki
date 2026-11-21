@@ -8,7 +8,7 @@ Mutating an attribute read by `__hash__` after initialization (stored `set` / `d
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks methods that rebind or mutate an attribute that the class's `__hash__` reads (directly,
@@ -47,6 +47,25 @@ The rule reports the write itself, once per method and attribute. It does not re
 - the hash's own cache: an attribute the hash computation writes itself (`self._hash = ...`
   in `__hash__` or a `self.helper()` it calls), which other methods reset, and a stored hash
   value (`self._hash`, `self._hashcode`) that a deserialization hook recomputes.
+
+## What a report states
+
+A report states that a method that can run after initialization rebinds or changes in place an
+attribute that the class's `__hash__` reads.
+
+Its premises:
+
+- **Hash reads**: `__hash__` reads the attribute, directly, through a helper, or through a property
+  getter. Open: the reads of the hashes of the class family are joined, so a subclass's `__hash__`
+  can count.
+- **After initialization**: the method is not an initializer. Open: initializers are recognized by
+  their names and by who calls them (listed above).
+- **Writes**: the method stores to the attribute or changes it in place. Open: a metaclass given
+  through a call among the bases, or a property with a setter or deleter, can turn the write into
+  something else.
+
+Not part of the claim: the end of the message, that stored instances can no longer be found. That is
+the harm, which needs an instance in a set or dict when the write runs.
 
 ## Why is this bad?
 A `set` or a `dict` files an object under the hash it had when it was added. Once an attribute

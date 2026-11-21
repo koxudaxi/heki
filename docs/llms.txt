@@ -19,8 +19,8 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 34 rules in four families
-- [Rule Precision](https://heki.koxudaxi.dev/precision/): Only the exact rules run by default
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 35 rules in four families
+- [Rule Precision](https://heki.koxudaxi.dev/precision/): A rule is exact once it is certified (below), and heuristic until then
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 
 ## Integrations
@@ -43,6 +43,7 @@
 - [effect-boundary-violation (EFF201)](https://heki.koxudaxi.dev/rules/effect-boundary-violation/): Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity error · No automatic fix
 - [hash-attr-mutation (MUT107)](https://heki.koxudaxi.dev/rules/hash-attr-mutation/): Family: Mutation & State (MUT) · Heuristic · Off by default · Severity error · No automatic fix
 - [immutable-quadratic-concat (OPT103)](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning · No automatic fix
+- [iterated-container-mutation (MUT113)](https://heki.koxudaxi.dev/rules/iterated-container-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error · No automatic fix
 - [iterator-double-consumption (MUT106)](https://heki.koxudaxi.dev/rules/iterator-double-consumption/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error · No automatic fix
 - [list-front-insert (OPT121)](https://heki.koxudaxi.dev/rules/list-front-insert/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)
 - [list-front-pop (OPT120)](https://heki.koxudaxi.dev/rules/list-front-pop/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning · Proven-safe suggestion (--fix --include-size-dependent)

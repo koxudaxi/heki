@@ -8,7 +8,7 @@ Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
@@ -23,6 +23,25 @@ docstring and `__future__` imports of a module without other imports.
 Not reported: a small display that the loop only drains (`expected = [b"a", b""]` and
 `expected.pop(0)` in the loop: it never holds more than its items), and a list rebuilt in every
 iteration of the loop.
+
+## What a report states
+
+A report states that removing the first element of the list (`lst.pop(0)`, `del lst[0]`, `lst =
+lst[1:]`) shifts or copies every other element, on every iteration of the loop.
+
+Its premises:
+
+- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+  `list(...)`). Established: the Soundness lane takes types from constructions only, never from
+  annotations.
+- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
+  a branch inside the loop counts.
+- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
+  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
+  `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
+  ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
+  the rule's exact tier.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is

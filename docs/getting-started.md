@@ -41,7 +41,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error, heuristic] `handler` reach
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[error, heuristic]` | its severity: `error`, or `warning` for the `OPT` rules (slower code, not wrong code); both make `heki check` fail. `heuristic` marks a rule whose reports can be wrong about the code |
+| `[error, heuristic]` | its severity: `error`, or `warning` for the `OPT` rules (slower code, not wrong code); both make `heki check` fail. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
 | the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |

@@ -116,7 +116,11 @@ supported version that every clause admits:
 - Every rule is exact or heuristic ([Rule Precision](precision.md)). The defaults, a prefix, and
   `ALL` enable the exact rules and the contract rules; with `heuristic = true` they also enable
   the heuristic rules that are not opt-in, as Ruff's `preview` does. Its code or name enables a
-  heuristic rule either way. A run of `full` or `concise` output that leaves heuristic rules off
+  heuristic rule either way.
+- An exact rule's report that did not establish every premise of its claim (an `OPT` report
+  whose rewrite is not proven) is heuristic, and is shown where a heuristic rule would run: with
+  `heuristic = true`, or when its code or name is selected.
+- A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT101`,
   `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact code or

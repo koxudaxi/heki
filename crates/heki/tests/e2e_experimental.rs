@@ -19,8 +19,9 @@ fn rule_command_says_that_a_rule_is_experimental() {
     assert_eq!(code, 0);
     let summary = "# cached-property-stale-mutation (MUT101)\n\nMutating an attribute read by \
         `@cached_property` without invalidating the cache.\n\n";
-    let heuristic = "This rule is heuristic: a report can be wrong about the code. It runs only \
-        when `select` or `extend-select` names its code or name.\n\n";
+    let heuristic = "This rule is heuristic: a premise of its claim can be open (\"What a report \
+        states\" lists them), so a report can be wrong about the code. It runs only when `select` \
+        or `extend-select` names its code or name.\n\n";
     let note = "This rule is experimental. Its precision outside a few code bases is still low.";
     assert!(
         doc.starts_with(&format!(

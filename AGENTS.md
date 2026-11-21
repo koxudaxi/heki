@@ -80,8 +80,10 @@ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonsche
   or an import-graph checker can decide belongs to Ruff, ty, or tach; heki takes only what needs
   control flow, the call graph, or alias facts. It is also measured on a corpus and reviewed by
   hand before it is enabled by default (ADR-010). A new rule is heuristic: it runs by default
-  only once it is exact, with at least 100 hand-checked reports and none wrong about the code
-  (ADR-018, `docs/precision.md`).
+  only once it is exact, its reports built from established premises only and its certification
+  passed (ADR-018, release gate 3). Its page says what a report states: the premises of its
+  claim, and which of them a heuristic report may not have established. A false claim of an
+  exact rule is fixed in the fact of the premise behind it, never by an exclusion in the rule.
 - Every new rule and every filter change comes with true-positive and true-negative regression
   tests: end-to-end tests through the real binary in `crates/heki/tests/`, plus
   `tests/semantic/fixtures.py` or `tests/difftest/` where they apply.

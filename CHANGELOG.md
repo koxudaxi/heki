@@ -9,17 +9,21 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Added
 
-- The JSON output gives every diagnostic its rule's `certainty`, `"exact"` or `"heuristic"`.
-  SARIF gives every rule descriptor `properties.precision` (`very-high` for an exact rule,
-  `medium` for a heuristic one) and, for a heuristic rule, the tag `heuristic`, both read by
-  GitHub code scanning. The language server sets `data.certainty` on every diagnostic and links
-  its code to the rule's page (`codeDescription`). `heki rule --output-format json` gives each
+- The JSON output gives every diagnostic its `certainty`, `"exact"` or `"heuristic"`. SARIF
+  gives every rule descriptor `properties.precision` (`very-high` when all its reports are
+  exact, `medium` otherwise) and the tag `heuristic` to a heuristic descriptor and to every
+  heuristic result, read by GitHub code scanning. The language server sets `data.certainty` on
+  every diagnostic and links its code to the rule's page (`codeDescription`). `heki rule --output-format json` gives each
   rule's `certainty`, `activation` (`default`, `opt-in`, or `contract`), `heuristic_note`, and
   `default_enabled` (whether it runs with no configuration).
 - `[tool.heki.lint] heuristic`, `heki check --heuristic` / `--no-heuristic`, and
   `heki server --heuristic` / `--no-heuristic`: see the first entry under Changed. A `full` or
-  `concise` run that leaves heuristic rules off says how many, and how to run them.
-- `docs/precision.md` publishes how each rule is measured and what it measured.
+  `concise` run that leaves heuristic rules off, or heuristic reports out, says how many, and
+  how to show them.
+- Every rule page says what a report states: the premises of its claim, and which of them a
+  heuristic report may not have established. `docs/precision.md` defines exact and heuristic
+  reports, the assumptions R1-R6 exact claims rest on, how a rule is certified, and what each
+  rule measured.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of
@@ -45,19 +49,20 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Changed
 
-- Only exact rules run by default. Every rule now has a certainty: *exact*, when hand-checked
-  samples of at least 100 of its reports found none wrong about the code (a wrong report found
-  later is a bug), or *heuristic*, when a report can be wrong about the code. A heuristic rule
-  runs when `select` or `extend-select` names its code or name, and with the new
+- Only exact reports are shown by default. A report is *exact* when every premise of its claim
+  was established and its rule was certified (a false exact report is a bug), and *heuristic*
+  when a premise can be open, so that it can be wrong about the code. A heuristic rule runs
+  when `select` or `extend-select` names its code or name, and with the new
   `[tool.heki.lint] heuristic = true` (`--heuristic`) also by default and for every prefix and
-  `ALL`, as Ruff's `preview` does. A contract rule runs when its contract is declared, whatever
-  its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
+  `ALL`, as Ruff's `preview` does. An exact rule's heuristic reports (an `OPT` report whose
+  rewrite is not proven) are shown under the same conditions. A contract rule runs when its
+  contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
   rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
   a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
   without a contract, is selected like the other heuristic rules, so a `readonly-returns`
   contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
   of 0.1; baselines keep their keys.
-- Every output labels the reports of a heuristic rule: `[error, heuristic]` in `full`,
+- Every output labels heuristic reports: `[error, heuristic]` in `full`,
   `EFF102 [heuristic] ...` in `concise`, `title=heki EFF102 (heuristic)` in `github`, and
   ` [heuristic]` after the language server's message. `heki rule --all` lists each rule's
   certainty and when it runs (`on`, `off`, `opt-in`, or `contract`) instead of

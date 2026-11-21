@@ -1,23 +1,30 @@
 # Rule Precision
 
-Every heki rule is **exact** or **heuristic**:
+Every heki report is **exact** or **heuristic**:
 
-- An exact rule had at least 100 of its reports checked by hand, at most 3 from one package,
-  and none was wrong about the code. A wrong report found later is a bug: it is fixed before the
-  next release, or the rule becomes heuristic in that release.
-- A heuristic rule's report can be wrong about the code. Every output labels its reports
-  `heuristic`.
+- An exact report is built only from facts heki established. Its claim, what its message states
+  about the code, is a set of premises (its rule page lists them under "What a report states"),
+  and each premise was established: where heki cannot tell, it does not report. A false exact
+  report is a bug.
+- A heuristic report states the same kind of claim, but some premise may be open: heki reported
+  without ruling it out. It can be wrong about the code, and every output labels it `heuristic`.
 
-Only the exact rules run by default. A heuristic rule runs when `select` or `extend-select` names
-its code or name; with `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not
-opt-in also run by default and for their prefixes and `ALL`. A contract rule runs when its
-contract is declared, whatever its certainty. See
-[Rule selection](configuration.md#rule-selection-toolhekilint).
+A rule is exact once it is certified (below), and heuristic until then. An exact rule's reports
+are exact, with one exception: an `OPT` rule's report whose rewrite heki could not prove safe
+is heuristic, as that premise is open. Only exact reports are shown by default.
 
-No rule is exact yet: no rule has had 100 of its reports checked, and every rule measured so far
-had reports that were wrong about the code.
+- A heuristic rule runs when `select` or `extend-select` names its code or name. With
+  `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by
+  default and for their prefixes and `ALL`.
+- The heuristic reports of an exact rule are shown under the same conditions: with
+  `lint.heuristic = true`, or when its code or name is selected.
+- A contract rule runs when its contract is declared, whatever its certainty.
+- A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
+  ends with a note saying how many.
 
-## What counts as wrong
+See [Rule selection](configuration.md#rule-selection-toolhekilint). No rule is exact yet.
+
+## What a report states
 
 A report states what its message says about the code, in the terms its rule page defines. It is
 wrong when that statement is false. Whether the code does harm is a separate question, and so is
@@ -26,6 +33,45 @@ whether a rewrite of it would be valid:
 - A query in a loop over three items has the shape the rule reports; the harm is small.
 - A write the author meant, or a memo heki does not recognize, still changes the object.
 - A rewrite that a fact heki cannot prove blocks is a question of [fix safety](fixes.md).
+
+The premises the rules use:
+
+- **Resolves**: a call is to the function shown, through the calls heki resolves ([How a call is
+  resolved](scope.md#how-a-call-is-resolved)). Through a method call, every implementation the
+  call can reach counts. A receiver typed by a `Protocol` is not resolved for an exact report:
+  its implementers are never a complete set.
+- **Reaches on every path**: whenever the reported call returns, the effect has run: each
+  function on the chain reaches the next call on every path on which it returns. The claim is
+  anchored at the reported call, so a branch around that call in its own function does not
+  matter.
+- **On every iteration**: the statement runs on every iteration of the loop that completes.
+  It does not when every way on from it leaves the loop, or when a first-iteration flag, a flag
+  set once, or a lazy initialization the loop tests guards it.
+- **Steps through an input**: the loop iterates a named input, such as a parameter, an
+  attribute of one, the rows of a query, or the lines of a file.
+- **Data-sized** (heuristic reports only): the code does not fix the size or the number of
+  iterations at 16 or fewer. heki counts a size it cannot bound as data-sized, so this premise
+  is open whenever no bound is found. An exact report never claims a size: a bound of 16 or
+  fewer only removes reports, and a larger fixed bound is no evidence either way.
+
+An exact report's message states its claim and the witnesses of its premises, nothing else: no
+cost estimate such as "(N+1)", and no advice (that goes into the help).
+
+Exact claims hold in every run consistent with six assumptions
+([ARCHITECTURE.md, section 3.4](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md)):
+
+- **R1**: the functions and classes on a call chain are not replaced at run time.
+- **R2**: a value annotated `C` is an instance of `C` or of a project subclass. A premise that
+  goes through a method call holds only when every implementation in such a subclass has it.
+  Rewrites never rely on annotations.
+- **R3**: the ecosystem catalog describes the library, an effect with its condition.
+- **R4**: imports resolve as configured.
+- **R5**: the checked files are the project.
+- **R6**: a library call's argument is a value it waits on (a nonzero sleep, a host name to look
+  up) unless heki establishes otherwise.
+
+"A branch heki cannot decide can go both ways" is not an assumption: a report that needs it is
+heuristic.
 
 Each checked report gets one class:
 
@@ -37,44 +83,45 @@ Each checked report gets one class:
 | F (false) | The report is wrong about the code. |
 
 "Right about the code" is C, P, and B together; "real harm" is C and P. Real harm is published
-for each rule but decides nothing about its certainty.
+for each rule. It decides only whether an exact rule runs by default: it does when its share of
+real harm is worth the line it prints, and is opt-in otherwise.
 
-The terms the rules use:
+## How a rule becomes exact
 
-- **Data-sized**: the code does not fix the size or the number of iterations at 16 or fewer. A
-  bound stated anywhere heki reads counts: a literal, a constant, `range(K)`, a slice, a `len`
-  test or cap, a counted `while`, or a comprehension over such a value. For a function that only
-  the checked files can call, the arguments its callers pass count too. A bound past 16 is
-  data-sized.
-- **On every iteration**: the statement runs on at least two iterations of some run of the loop.
-  It does not when every way on from it leaves the loop, or when a first-iteration flag, a flag
-  set once, or a lazy initialization the loop tests guards it.
-- **Reaches**: through the calls heki resolves ([How a call is
-  resolved](scope.md#how-a-call-is-resolved)), along branches the code does not rule out.
+A rule is certified exact when all four hold:
 
-A rule becomes exact only once its page and its message state its claim in these terms.
+1. **Premise stripping**: for each premise of its claim, the tests hold a counterexample that
+   the rule reports once that premise is taken as established, and does not report otherwise.
+2. **Census**: every report the rule has on the development corpus (the 378 packages of Stage
+   0-A, 30.75 million lines, and the packages added for the rules with few reports) is checked
+   by hand by two reviewers. A false claim needs a minimal reproduction, and is fixed as a
+   defect of a premise's fact, never by a list of exclusions.
+3. **Holdout**: one run on a frozen holdout corpus of 100 packages, never looked at while the
+   rule was designed or fixed, finds no false claim outside a violation of R1-R6.
+4. **Run-time oracle**: the claimed events (the call that runs, the statement executed on each
+   iteration) happen where the code ran, checked with `sys.monitoring` on the differential test
+   suite and on datamodel-code-generator.
 
-## How a rule is measured
+Every release then runs the corpus with the release candidate and checks every report it adds
+or changes in an exact rule. A false claim found later is a bug: it is fixed before the next
+release, or the rule becomes heuristic in that release and needs a new certification.
 
-1. **Corpus**: the 378 packages of Stage 0-A (30.75 million lines), frozen, and packages chosen
-   for the rules with few reports, frozen for each release cycle.
-2. **Sample**: 100 reports per rule, or all of them when it has fewer: one report per package in
-   each round, at most 3 per package, mature and young packages alternating, reports in tests
-   marked.
-3. **Review**: at least two reviewers per rule, on one rubric. A wrong report needs a minimal
-   reproduction on the measured build, and a second reviewer confirms it.
-4. **Exact**: no wrong report among 100 or more. No wrong report in 100 puts the rate of wrong
-   reports below 3% (one-sided, 95%).
-5. **Every release**: a corpus run of the release candidate, a check of every report it adds or
-   changes in an exact rule, and a fresh sample of 30 reports per exact rule.
+## Certifications
+
+A certified rule has a row here: the release that certified it, and the reports of its census
+and of its holdout run with the false claims among them. No rule is certified yet.
+
+| Rule | Certified | Census: reports / false | Holdout: reports / false |
+| ---- | --------- | ----------------------: | -----------------------: |
 
 ## Measurements
 
 Round 3 sampled up to 50 reports per rule on the Stage 0-A corpus, with the build of 2026-11-21.
-Its reviewers also counted as wrong a bound past 16 that the code states and an exclusion a rule
-page documents but heki does not recognize; under the terms above those reports are right, so
-these figures are lower bounds. For `OPT101` and `OPT102` the table keeps the reviewers' verdicts:
-four of their samples loop a fixed 4 times, which is not data-sized.
+These are measurements of heuristic rules, not certifications. Its reviewers also counted as
+wrong a bound past 16 that the code states and an exclusion a rule page documents but heki does
+not recognize; under the terms above those reports are right, so these figures are lower
+bounds. For `OPT101` and `OPT102` the table keeps the reviewers' verdicts: four of their samples
+loop a fixed 4 times, which is not data-sized.
 
 | Rule | Certainty | Measured | Sample | C / P / B / F | Right about the code | 95% interval | Real harm |
 | ---- | --------- | -------- | -----: | ------------- | -------------------: | ------------ | --------: |

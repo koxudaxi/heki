@@ -8,7 +8,7 @@ Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` f
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that rebuild a dict or set every iteration and rewrites them in place:
@@ -17,6 +17,26 @@ Checks loops that rebuild a dict or set every iteration and rewrites them in pla
   effects;
 - `d = {**d, **other}` → `d.update(other)`;
 - `s = s | {e}` → `s |= {e}` (also `d = d | other` for dicts).
+
+## What a report states
+
+A report states that the merge (`{**d, ...}` with the accumulator first, `s = s | t`, `d = d |
+other`) builds a new set or dict from the whole accumulated one on every iteration of the loop,
+where updating it would change it in place.
+
+Its premises:
+
+- **Builtin set or dict**: the value is a builtin `set` or `dict` by its construction. Established:
+  the Soundness lane takes types from constructions only.
+- **Loop-carried**: the result is the accumulator of the next iteration. Established by the IR.
+- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
+  a branch inside the loop counts.
+- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
+  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
+  `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
+  ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
+  the rule's exact tier.
 
 ## Why is this bad?
 Each rebuild copies the whole container, so the loop is quadratic. The in-place update is never

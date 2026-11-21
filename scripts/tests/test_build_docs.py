@@ -1,7 +1,8 @@
-"""Tests of `build_docs.py`'s check that every exact rule has its measurement in `docs/precision.md`.
+"""Tests of `build_docs.py`'s checks of the rule certainties: every exact rule has a
+certification in `docs/precision.md`, and every rule says what a report states.
 
 The other checks run end to end in `crates/heki/tests/e2e_experimental.rs`; no rule is exact
-yet, so this one is tested on rules given here.
+yet, so these are tested on rules given here.
 """
 
 from __future__ import annotations
@@ -9,45 +10,55 @@ from __future__ import annotations
 import build_docs
 import pytest
 
-ROW = "| `{code}` | {certainty} | round 4, 2026-12-01 | {n} | 0 / 10 / {b} / {f} | 99% | 95-100% | 10% |"
+ROW = "| `{code}` | 0.3.0 | {census} / {census_false} | {holdout} / {holdout_false} |"
 
 
-def measurement(code: str, certainty: str, n: int, f: int) -> dict:
-    match = build_docs.MEASUREMENT.match(
-        ROW.format(code=code, certainty=certainty, n=n, b=n - 10 - f, f=f)
+def certification(code: str, census_false: int, holdout_false: int) -> dict:
+    match = build_docs.CERTIFICATION.match(
+        ROW.format(
+            code=code, census=240, census_false=census_false, holdout=31, holdout_false=holdout_false
+        )
     )
     assert match, code
     return match.groupdict()
 
 
 @pytest.mark.parametrize(
-    ("n", "f", "stale"),
+    ("census_false", "holdout_false", "stale"),
     [
-        (100, 0, []),
-        (250, 0, []),
-        (99, 0, ["OPT110: 99 sampled reports with 0 wrong (exact needs at least 100 and none wrong)"]),
-        (100, 1, ["OPT110: 100 sampled reports with 1 wrong (exact needs at least 100 and none wrong)"]),
+        (0, 0, []),
+        (1, 0, ["OPT110: 1 false claim(s) in the census and 0 in the holdout run (exact needs none)"]),
+        (0, 2, ["OPT110: 0 false claim(s) in the census and 2 in the holdout run (exact needs none)"]),
     ],
 )
-def test_an_exact_rule_needs_100_sampled_reports_and_none_wrong(
-    n: int, f: int, stale: list[str]
+def test_an_exact_rule_needs_no_false_claim_in_its_census_and_holdout_run(
+    census_false: int, holdout_false: int, stale: list[str]
 ) -> None:
     rules = [{"code": "OPT110", "certainty": "exact"}]
-    measurements = {"OPT110": measurement("OPT110", "exact", n, f)}
-    assert build_docs.unmeasured_exact_rules(rules, measurements) == stale
+    certifications = {"OPT110": certification("OPT110", census_false, holdout_false)}
+    assert build_docs.uncertified_exact_rules(rules, certifications) == stale
 
 
 def test_an_exact_rule_without_a_row_fails_and_a_heuristic_one_needs_none() -> None:
     rules = [
         {"code": "OPT110", "certainty": "exact"},
         {"code": "EFF102", "certainty": "heuristic"},
-        {"code": "EFF103", "certainty": "heuristic"},
     ]
-    measurements = {"EFF103": measurement("EFF103", "heuristic", 50, 13)}
-    assert build_docs.unmeasured_exact_rules(rules, measurements) == ["OPT110: no row"]
+    assert build_docs.uncertified_exact_rules(rules, {}) == ["OPT110: no row"]
 
 
-def test_the_measurements_of_the_real_page_are_read() -> None:
-    rows = build_docs.precision_measurements()
+def test_every_rule_says_what_a_report_states() -> None:
+    rules = [
+        {"code": "EFF101", "doc": "## What it does\nx\n\n## What a report states\ny\n"},
+        {"code": "EFF102", "doc": "## What it does\nx\n"},
+    ]
+    assert build_docs.rules_without_claims(rules) == [
+        "EFF102: no `## What a report states` section"
+    ]
+
+
+def test_the_tables_of_the_real_page_are_read() -> None:
+    rows = build_docs.precision_rows(build_docs.MEASUREMENT)
     assert rows["EFF101"]["sample"] == "50" and rows["EFF101"]["f"] == "9"
     assert rows["EFF101"]["right"] == "82%"
+    assert build_docs.precision_rows(build_docs.CERTIFICATION) == {}

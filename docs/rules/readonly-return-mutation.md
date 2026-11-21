@@ -8,7 +8,7 @@ Mutating a shared object returned by a declared `readonly-returns` producer or `
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 20 sampled reports (round 3, 2026-11-21), 70% were right about the code. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 20 sampled reports (round 3, 2026-11-21), 70% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks mutations of objects returned by a shared producer:
@@ -46,6 +46,23 @@ v`, also through the methods of a cache object held there), a store under
 `if k not in self._decoders:` or through `setdefault`, and a lazy
 initialization (`if self._runtime is None: self._runtime = load()`) leave what the object
 computes as it was.
+
+## What a report states
+
+A report states that the function changes in place an object that a shared producer returned: a
+function decorated with `@functools.lru_cache` / `@functools.cache`, a producer declared in
+`readonly-returns`, or a function returning a producer's value.
+
+Its premises:
+
+- **Producer**: the decorator, known by what its name is bound to, or the declaration. Established.
+- **Returned through wrappers**: a function returning a producer's value on some path is a producer.
+  Open: one path is enough.
+- **Same object**: the changed object is the returned one, or an object below it, not a copy. Open:
+  a value that is the shared one on one path counts.
+- **Changed in place**: a store, a mutator, an in-place operator, or a helper changing its argument.
+  The memo fills listed above are left out; a memo fill heki does not recognize does change the
+  object.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone

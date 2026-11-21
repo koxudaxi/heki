@@ -7,9 +7,10 @@ It catches blocking I/O in `async` code, database queries and HTTP clients in lo
 quadratic loops. You can also add rules in `pyproject.toml` to restrict which functions may
 mutate state or reach I/O.
 
-A rule is *exact* once hand-checked samples of its reports found none wrong about the code, and
-only exact rules run by default. The others are *heuristic*: their reports can be wrong, every
-output labels them, and `heki check --heuristic` runs them too. No rule is exact yet.
+A report is *exact* when heki established every premise of its claim and its rule was
+certified, and only exact reports are shown by default. The others are *heuristic*: they can be
+wrong, every output labels them, and `heki check --heuristic` shows them too. No rule is exact
+yet.
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>

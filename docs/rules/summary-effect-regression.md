@@ -8,7 +8,7 @@ Interprocedural mutation/escape/effect regression against saved summary snapshot
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Compares the interprocedural side effects of every public function with the summary snapshot
@@ -23,6 +23,18 @@ functions that gained one of:
   client allocation, database queries), including effects reached through callees.
 
 This rule is opt-in: enable it with `--extend-select MUT103` or `extend-select = ["MUT103"]`.
+
+## What a report states
+
+A report states that a public function now has a side effect (a changed or escaping parameter, a
+changed `self` attribute, or an execution effect) that its summary in the saved snapshot does not
+have.
+
+Its premises:
+
+- **Has the effect**: the function's current summary has it. Open: a summary counts an effect on any
+  path, and of any candidate implementation of a call.
+- **New**: the snapshot's summary of the function lacks it. Established.
 
 ## Why is this bad?
 A pull request that makes a widely used helper start mutating its argument, or start doing

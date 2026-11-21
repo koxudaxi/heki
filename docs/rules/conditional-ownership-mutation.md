@@ -8,7 +8,7 @@ Opt-in: changing in place a value that is a new object on one path and borrowed 
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 
@@ -78,6 +78,19 @@ It does not report:
 - attribute assignments, and changes of a value below the borrowed one (`x[0].append(1)`): a
   copy of `x` shares those too;
 - `self` in its own methods, and paths a branch on a constant never takes (`while True:`).
+
+## What a report states
+
+A report states that a value that is a new object on one path and borrowed state (a parameter, an
+attribute, a global, or what a function returns of such state) on another is changed in place.
+
+Its premises:
+
+- **New on one path**: a display, comprehension, copy, constructor, operator, or a project function
+  returning a new object. Established.
+- **Borrowed on another**: the value comes from such state on another path. Established.
+- **Changed in place**: directly, through a helper, or in a closure, after the paths meet. Open
+  through a helper: a change on one of its paths is enough.
 
 ## Why is this bad?
 The function treats the value as its own on one path and changes a shared object on the other.

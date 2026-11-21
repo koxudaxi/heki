@@ -8,7 +8,7 @@ Opt-in: consuming a single-pass iterator or generator a second time (the second 
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks for a single-pass iterator or generator that is consumed a second time. Once an
@@ -57,6 +57,20 @@ It does not report:
 - loops that run at most once (`for _ in range(1)`), and a consumption followed by leaving the
   loop (`data = list(it)` then `break`);
 - consuming the rest of an iterator inside a loop over that iterator itself.
+
+## What a report states
+
+A report states that a single-pass iterator is consumed a second time after a full first pass, so
+the second pass sees no items.
+
+Its premises:
+
+- **Single-pass**: the value is one of the iterators listed above. Established from its construction
+  or annotation.
+- **Full first pass**: the first consumption exhausts it. Established: partial passes (`break`,
+  `any` / `all`, `next()`) do not count.
+- **Second pass after it**: the second consumption is reachable from the first. Open: reachable
+  means some path of the control flow, which the code may never take.
 
 ## Why is this bad?
 The second pass silently gets an empty iterator: totals become zero, a second report is empty,

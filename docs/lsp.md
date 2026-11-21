@@ -64,7 +64,7 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   `async def` to `time.sleep`) as related information you can jump to. The message is the
   report's one sentence; its help, what to do about it, is the last related-information entry
   (`help: ...`) at the diagnostic's own range, the way rust-analyzer shows a `help:` note.
-- The message of a [heuristic](precision.md) rule ends in `[heuristic]`, and every diagnostic's
+- The message of a [heuristic](precision.md) report ends in `[heuristic]`, and every diagnostic's
   `data.certainty` is `"exact"` or `"heuristic"`. The rule code links to the rule's page
   (`codeDescription`).
 - `heki server --heuristic` (or `--no-heuristic`) overrides `lint.heuristic` of the

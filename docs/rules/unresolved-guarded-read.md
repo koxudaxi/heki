@@ -8,7 +8,7 @@ Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an at
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 The strict mode of a `[[tool.heki.read-owners]]` contract that sets `unresolved = "report"`:
@@ -28,6 +28,19 @@ only run inside allowed readers, and `forbidden-readers` (the reading function m
 decide for such a parameter: the read is reported unless every caller path binds an instance of
 a project class outside the targets' classes to it. A parameter some caller binds to an instance
 of a target class is reported here: that read is a read of the target that no other rule sees.
+
+## What a report states
+
+A report states that, outside the read owners, the function reads an attribute named like a target
+of the `read-owners` contract on an object whose class heki does not know.
+
+Its premises:
+
+- **Named like a target**: the attribute's name matches a target's. Established.
+- **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
+  heki's own resolution.
+- **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
+  inside allowed contexts. Established from the contract.
 
 ## Why is this bad?
 `MUT203` reports what it can back with a class: a read through an object it cannot type is not

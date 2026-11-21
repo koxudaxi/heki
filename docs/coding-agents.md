@@ -24,7 +24,7 @@ Each diagnostic has:
 | ----- | ------- |
 | `path`, `line`, `column`, `span` | location (byte span in the file) |
 | `rule_code`, `rule_slug`, `severity`, `message` | the finding: `message` is one sentence saying what happens |
-| `certainty` | `exact`, or `heuristic` when the report can be wrong about the code ([Rule Precision](precision.md)) |
+| `certainty` | `exact`, or `heuristic` when a premise of the report's claim can be open, so that it can be wrong about the code ([Rule Precision](precision.md)) |
 | `help` | what to do about it (`null` when the rule has no advice for the report) |
 | `qualname`, `target` | the function and the object involved |
 | `related` | every hop of the call chain behind the finding |

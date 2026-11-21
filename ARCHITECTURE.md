@@ -186,6 +186,55 @@ Automatic rewrites (family 3, `OPT`) are judged on two orthogonal axes: **behavi
   generator's 196,000 lines). heki's everyday CI value is in **family 1 (mutation, state, and
   ownership), family 2 (execution effects), and the proven suggestions of family 3**.
 
+
+### 3.4 Exact and heuristic reports (assumptions R1–R6)
+
+A report's claim is what its message states about the code, in the terms its rule page defines
+under "What a report states" ([ADR-018](docs/DESIGN_HISTORY_AND_ADR.md#adr-018)). The claim is a
+conjunction of **premises**: a call resolves to the function shown; a function reaches the next
+call on every path on which it returns; a statement runs on every iteration of a loop that
+completes; a loop steps through a named input (a parameter, an attribute of one, the rows of a
+query); a library call has its effect under its condition; a store is a plain store; two names
+hold the same object. Whether the code does harm, and whether a rewrite of it is valid, are not
+premises.
+
+- **Exact**: a report is built only from established premises. A premise that is open, a budget
+  that runs out, or a fact heki lacks stops the report. A wrong exact report is a defect of one
+  premise's fact, fixed in that fact with a counterexample, never by a list of exclusions in the
+  rule.
+- **Heuristic**: some premise can be open without stopping the report: a branch heki cannot
+  decide counts as taken, a loop not shown to run a call once counts as running it on every
+  iteration, a size heki cannot bound counts as data-sized (not fixed at 16 or fewer). The rule
+  page names the premises a heuristic report may not have established.
+- **Codes and tiers**: a claim is one code. An effect rule whose claim needs a premise heki
+  cannot always establish gets a heuristic sibling code with the weaker claim ("can reach"
+  beside "reaches on every path"). An `OPT` rule keeps one code and a certainty per report: a
+  report whose rewrite is proven safe is the rule's exact tier, the others are heuristic. A
+  report is exact only when its rule is (`Certainty::at_most`).
+- **Size is never claimed by an exact report.** A bound of 16 or fewer that the code states
+  only removes reports. A larger fixed bound, or a size heki cannot bound, is no evidence: an
+  exact loop claim names the input the loop steps through instead.
+- **Messages**: an exact report's message states its claim and the witnesses of its premises
+  (the calls of the chain, the input the loop steps through), nothing else: no cost estimate
+  such as "(N+1)", and no advice, which goes into the help.
+- **Default**: a rule runs by default when it is exact and its share of real harm is worth the
+  line it prints; an exact rule with little harm is opt-in.
+
+An exact claim holds in every run consistent with these assumptions, as A1–A5 are those of a
+rewrite:
+
+| ID | Assumption | How exact rules treat it |
+|---|---|---|
+| **R1** | Static bindings: the functions and classes on a call chain are not replaced at run time (no monkeypatching) | Where the project rebinds a name heki can see (a definition chosen by a test, a module-level `setattr`, a `mock.patch` target outside tests, a module `__getattr__`), the call does not resolve for an exact premise |
+| **R2** | A value annotated `C` is an instance of `C` or of a project subclass | Assumed by the reporting rules only; the Soundness lane and `--fix` never assume it (ADR-004, A4). A must-fact through a method call holds only when every candidate implementation has it: a project subclass that overrides the method (of a project class or of a library class, such as `post` on a subclass of `httpx.Client`) leaves the premise open. A type fact keeps its provenance (constructed here, or an annotation under R2), so that a report resting on R2 can be dropped where annotations are not trusted |
+| **R3** | The ecosystem catalog (Layer 2) describes the library: an entry's effect, and the condition under which it has it | An effect with a condition (`queue.Queue.put` waits only on a bounded queue) is established only when its condition is |
+| **R4** | Imports resolve as configured (`src`, `known-first-party`, the layout) | An import that does not resolve gives no fact |
+| **R5** | The checked files are the project: code outside them reaches a module only through its public names | A fact about the callers of a private function counts only the checked files. A receiver typed by a `Protocol`, or by a union with a `Protocol` member, stays unresolved: its structural implementers are never a complete set |
+| **R6** | A library call's argument is a waiting value unless heki establishes otherwise | A catalog entry that waits lists the argument values for which it returns at once (`time.sleep(0)`, a numeric host for `getaddrinfo`); a call whose argument is established as one of them is silent, and an argument heki cannot evaluate counts as waiting |
+
+"A branch heki cannot decide can go both ways" is not an assumption: it is what makes a report
+heuristic.
+
 ---
 
 ## 4. Analysis theory and engine design
@@ -708,12 +757,20 @@ message = "render entry points must not mutate model state"
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.
 2. **Zero unsafe rewrites**: no `safe` rewrite changes behavior (manual review and differential
    tests; every counterexample S1–S28 and `{**other, **d}` passes).
-3. **Rule certainty** ([ADR-018](docs/DESIGN_HISTORY_AND_ADR.md#adr-018)): every exact rule has
-   at least 100 hand-checked reports on the measurement corpus with no report wrong about the
-   code, and every report a release adds or changes in an exact rule is checked. A wrong report
-   found later is a bug, fixed before the next release, or the rule becomes heuristic in that
-   release. The shape-right and real-harm rates of every rule are published in
-   [docs/precision.md](docs/precision.md). Real harm is not a gate.
+3. **Rule certainty** ([ADR-018](docs/DESIGN_HISTORY_AND_ADR.md#adr-018)): an exact rule builds
+   its reports from established premises only (section 3.4), and is certified by:
+   (a) premise-stripping tests: for each premise, a counterexample in the tests that the rule
+   reports once that premise is taken as established, and that it does not report otherwise;
+   (b) a census of every report it has on the development corpus, each checked by hand, with
+   every false claim fixed as a defect of a premise's fact, never by a list of exclusions;
+   (c) one run on the frozen holdout corpus (100 packages never looked at while the rule was
+   designed or fixed) with no false claim outside a violation of R1–R6; and (d) the run-time
+   oracle (`sys.monitoring`) on the differential test suite and on datamodel-code-generator,
+   finding every claimed event where the code ran. Every report a release adds or changes in an
+   exact rule is checked. A false claim found later is a bug, fixed before the next release, or
+   the rule becomes heuristic in that release. The shape-right and real-harm rates of every
+   rule are published in [docs/precision.md](docs/precision.md); real harm decides only whether
+   an exact rule runs by default.
    - Published as a measure of value, not a gate: **at least one convincing finding in 30% or
      more** of the target projects (the contract rules `MUT201` / `MUT202` show at least the
      coverage of datamodel-code-generator's own checker on its code).

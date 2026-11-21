@@ -155,8 +155,9 @@ $ uvx --from "zensical==0.1.2" zensical serve
   `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`. The generator marks the
   heuristic rules on the generated pages, copies each rule's measurement from
   [Rule Precision](precision.md) into its page, and fails when a hand-written table row says
-  "heuristic" other than exactly when a rule it names is heuristic, or when an exact rule lacks a
-  row there with at least 100 sampled reports and none wrong.
+  "heuristic" other than exactly when a rule it names is heuristic, when an exact rule lacks a
+  certification there with no false claim in its census and holdout run, or when a rule's
+  documentation has no "What a report states" section.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -225,9 +226,9 @@ release come from `CHANGELOG.md`.
 
 ### Publishing a release
 
-The measurements of [Rule Precision](precision.md) must hold for the release candidate first
-(release gate 3 in `ARCHITECTURE.md`): a corpus run, a check of every report it adds or changes in
-an exact rule, and a fresh sample of 30 reports per exact rule.
+The certifications of [Rule Precision](precision.md) must hold for the release candidate first
+(release gate 3 in `ARCHITECTURE.md`): a corpus run, and a check of every report it adds or
+changes in an exact rule.
 
 1. Check that the first unreleased section of `CHANGELOG.md` is headed
    `## [<version>] - Unreleased`, with the version of the draft's tag: the sync dates that

@@ -10,8 +10,9 @@ The hand-written pages are checked against the rules: the guides' lists of opt-i
 experimental features and the heuristic rules (in the README, `ARCHITECTURE.md`, and the site's
 pages, a table row that names a rule in a cell of its own says "experimental" exactly when the
 rule is, and "heuristic" exactly when it is; the `CHANGELOG.md` section of the release an entry
-names as `since` calls its target experimental), and the measurements of `docs/precision.md`
-(every exact rule has a row there with at least 100 sampled reports and no wrong one).
+names as `since` calls its target experimental), the certifications of `docs/precision.md`
+(every exact rule has a row there whose census and holdout run found no false claim), and the
+rule documentation (every rule says what a report states).
 
 Usage:
     python scripts/build_docs.py --heki target/release/heki
@@ -35,8 +36,8 @@ CLI_PAGE = DOCS / "cli-reference.md"
 EXPERIMENTAL_PAGE = DOCS / "experimental.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 PRECISION_PAGE = DOCS / "precision.md"
-# An exact rule's measurement: at least this many hand-checked reports, none wrong.
-EXACT_SAMPLE = 100
+# The section of every rule's documentation that lists the premises of its claim (ADR-018).
+CLAIM_SECTION = "## What a report states"
 
 FAMILIES = {
     "Mut": (
@@ -76,6 +77,12 @@ MEASUREMENT = re.compile(
     r"^\| `(?P<code>[A-Z]+\d+)` \| (?P<certainty>exact|heuristic) \| (?P<measured>[^|]+) \| "
     r"(?P<sample>\d+) \| (?P<c>\d+) / (?P<p>\d+) / (?P<b>\d+) / (?P<f>\d+) \| "
     r"(?P<right>\d+%) \| [^|]+ \| [^|]+ \|$"
+)
+# A row of the certifications table of `docs/precision.md`: rule, the release that certified
+# it, and the reports of its census and of its holdout run with the false claims among them.
+CERTIFICATION = re.compile(
+    r"^\| `(?P<code>[A-Z]+\d+)` \| (?P<release>[^|]+) \| "
+    r"(?P<census>\d+) / (?P<census_false>\d+) \| (?P<holdout>\d+) / (?P<holdout_false>\d+) \|$"
 )
 
 CLI_COMMANDS = [
@@ -140,12 +147,14 @@ def rules_index(rules: list[dict], policy: str) -> str:
         GENERATED,
         "# Rules",
         "",
-        f"heki has {len(rules)} rules in four families. A rule is exact when hand-checked "
-        f"samples of at least {EXACT_SAMPLE} of its reports found none wrong about the code, "
-        "and heuristic (≈) when a report can be wrong about it: "
-        "[Rule Precision](../precision.md) has the measurements.",
+        f"heki has {len(rules)} rules in four families. A rule is exact when it reports only "
+        "what it established and was certified on the corpus, and heuristic (≈) when a report "
+        "can be wrong about the code: [Rule Precision](../precision.md) says how a rule is "
+        "certified and what each one measured. Each rule's page says what a report states.",
         "",
-        "- The exact rules run by default, and for a prefix such as `EFF` or `ALL`.",
+        "- The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report "
+        "of an exact rule that did not establish every premise (an `OPT` report whose rewrite "
+        "is not proven) is shown where a heuristic rule would run.",
         "- A heuristic rule runs when `select` / `extend-select` names its code or name. With "
         "`lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also "
         "run by default and for a prefix or `ALL`.",
@@ -298,30 +307,40 @@ def outputs(
     return files
 
 
-def precision_measurements() -> dict[str, dict]:
-    """The rows of the measurements table of `docs/precision.md`, by rule code."""
+def precision_rows(pattern: re.Pattern) -> dict[str, dict]:
+    """The rows of a table of `docs/precision.md` that `pattern` matches, by rule code."""
     rows = {}
     for line in PRECISION_PAGE.read_text(encoding="utf-8").splitlines():
-        if m := MEASUREMENT.match(line):
+        if m := pattern.match(line):
             rows[m["code"]] = m.groupdict()
     return rows
 
 
-def unmeasured_exact_rules(rules: list[dict], measurements: dict[str, dict]) -> list[str]:
-    """The exact rules without a measurement that makes them exact in `docs/precision.md`."""
+def uncertified_exact_rules(rules: list[dict], certifications: dict[str, dict]) -> list[str]:
+    """The exact rules without a certification in `docs/precision.md`: a row whose census and
+    holdout run found no false claim."""
     stale = []
     for r in rules:
-        row = measurements.get(r["code"])
+        row = certifications.get(r["code"])
         if r["certainty"] != "exact":
             continue
         if row is None:
             stale.append(f"{r['code']}: no row")
-        elif int(row["sample"]) < EXACT_SAMPLE or int(row["f"]) > 0:
+        elif int(row["census_false"]) > 0 or int(row["holdout_false"]) > 0:
             stale.append(
-                f"{r['code']}: {row['sample']} sampled reports with {row['f']} wrong (exact "
-                f"needs at least {EXACT_SAMPLE} and none wrong)"
+                f"{r['code']}: {row['census_false']} false claim(s) in the census and "
+                f"{row['holdout_false']} in the holdout run (exact needs none)"
             )
     return stale
+
+
+def rules_without_claims(rules: list[dict]) -> list[str]:
+    """The rules whose documentation does not say what a report states."""
+    return [
+        f"{r['code']}: no `{CLAIM_SECTION}` section"
+        for r in rules
+        if not any(line.strip() == CLAIM_SECTION for line in r["doc"].splitlines())
+    ]
 
 
 def stale_opt_in_lists(rules: list[dict]) -> list[str]:
@@ -430,7 +449,7 @@ def main() -> int:
     args = parser.parse_args()
     rules = json.loads(run(args.heki, "rule", "--all", "--output-format", "json"))
     registry = json.loads(run(args.heki, "dump-experimental"))
-    measurements = precision_measurements()
+    measurements = precision_rows(MEASUREMENT)
     heuristic = {r["code"] for r in rules if r["certainty"] == "heuristic"}
     disagreements = {
         "Opt-in rule lists in the guides disagree with the rules": stale_opt_in_lists(rules),
@@ -440,9 +459,10 @@ def main() -> int:
         "Heuristic rules are marked differently from the rules": (
             stale_row_marks(rules, "heuristic", heuristic)
         ),
-        f"Exact rules lack their measurement in {shown(PRECISION_PAGE)}": (
-            unmeasured_exact_rules(rules, measurements)
+        f"Exact rules lack their certification in {shown(PRECISION_PAGE)}": (
+            uncertified_exact_rules(rules, precision_rows(CERTIFICATION))
         ),
+        "Rules do not say what a report states": rules_without_claims(rules),
     }
     if any(disagreements.values()):
         for heading, entries in disagreements.items():
