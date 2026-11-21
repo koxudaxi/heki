@@ -14,8 +14,9 @@ of private helpers) has a fixed size.
 
 Each shape is checked with every rule selected and one contract of each kind naming the classes
 and functions the shapes define, through `heki check` and through the `--watch` engine. The cost
-is the wall time and the peak (see `check_memory.py`) minus those of an empty module; the time
-limit is scaled to the machine by a fixed linear shape.
+is the wall time and the peak (the heap of the memory gate's counting build, or what the system
+reports, see `check_memory.py`) minus those of an empty module; the time limit is scaled to the
+machine by a fixed linear shape.
 
 `heki check --walk-steps` gives the steps each owner's walks took per function. They must grow
 at most 2.5 times from n / 2 to n (quadratic growth inside the budget shows without timing
@@ -34,6 +35,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -42,7 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_memory import measure  # noqa: E402
+from check_memory import HEAP_LINE, MIB, execute  # noqa: E402
 
 LIMIT_SECONDS = 1.0
 LIMIT_MIB = 1024.0
@@ -390,6 +393,18 @@ def source(family: Family, placement: str, n: int) -> str:
     return HELPERS + head + "".join(indent + line + "\n" for line in body.lines)
 
 
+def peak_mib(stderr: str, usage: os.struct_rusage) -> float:
+    """The peak of a run: the heap a counting build reports (the memory gate's build), else the
+    physical footprint `/usr/bin/time -l` reports on macOS, else the resident set size (0 for a
+    run that was stopped before reporting)."""
+    for pattern in (HEAP_LINE, re.compile(r"(\d+)\s+peak memory footprint")):
+        found = pattern.search(stderr)
+        if found:
+            return int(found.group(1)) / MIB
+    # `ru_maxrss` is in KiB on Linux; macOS runs report their footprint above.
+    return usage.ru_maxrss / 1024 if sys.platform != "darwin" else 0.0
+
+
 class Runner:
     def __init__(self, heki: str, root: Path) -> None:
         self.heki = heki
@@ -459,8 +474,9 @@ class Runner:
             env["HEKI_WATCH_MAX_RUNS"] = "0"
         if steps is not None:
             args[1:1] = ["--walk-steps", str(steps)]
-        seconds, peak, code, _ = measure(self.heki, args, self.root, env, timeout)
-        return seconds, peak, code
+        darwin = sys.platform == "darwin"
+        seconds, code, stderr, usage = execute(self.heki, args, self.root, env, darwin, timeout)
+        return seconds, peak_mib(stderr, usage), code
 
     def steps(self, text: str) -> dict[tuple[str, str], tuple[int, bool]]:
         path = self.root / "steps.json"

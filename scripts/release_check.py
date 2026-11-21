@@ -108,7 +108,8 @@ def smoke(wheel_path: Path, install: bool, expected: str) -> None:
         project.mkdir()
         (project / "pyproject.toml").write_text('[project]\nname = "smoke"\nversion = "0"\n')
         (project / "blocking.py").write_text(BLOCKING)
-        found = run(exe, "check", "--output-format", "concise", cwd=project)
+        # Named by its code, the rule runs whatever its certainty.
+        found = run(exe, "check", "--select", "EFF101", "--output-format", "concise", cwd=project)
         if found.returncode != 1 or not any(
             line.startswith(BLOCKING_REPORT) for line in found.stdout.splitlines()
         ):

@@ -1305,7 +1305,10 @@ fn strict_findings_are_counted_by_the_ratchet_baseline() {
         "concise",
     ]);
     assert_eq!(code, 1, "{stdout}");
-    assert!(stdout.contains("MUT205 `touch` writes `name`"), "{stdout}");
+    assert!(
+        stdout.contains("MUT205 [heuristic] `touch` writes `name`"),
+        "{stdout}"
+    );
 
     let (code, doc, _) = p.heki(&["rule", "MUT205"]);
     assert_eq!(code, 0);

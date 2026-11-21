@@ -2,9 +2,13 @@
 
 # unretained-async-task (EFF107)
 
-Family: Execution Effects (EFF) · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks for the result of `asyncio.create_task(...)`, `asyncio.ensure_future(...)`, or
@@ -39,6 +43,20 @@ the bound method holds it: `self.addCleanup(task.cancel)`, `loop.call_later(1, t
 `self.stop = task.cancel`.
 Being only the receiver of `add_done_callback(...)` or `set_name(...)` does not keep the task:
 the callback does not hold it strongly.
+
+## What a report states
+
+A report states that the task an `asyncio.create_task` (or `ensure_future`, or `loop.create_task`)
+call returns is bound to a local variable that nothing keeps.
+
+Its premises:
+
+- **Task factory**: the call is one of the factories, known by what its name is bound to.
+  Established.
+- **Never kept**: no use of the variable awaits, returns, yields, stores, passes, captures, cancels,
+  or asks the task for its result. Established from the uses in the function.
+
+Not part of the claim: whether the task is garbage collected before it ends.
 
 ## Why is this bad?
 The event loop keeps only a weak reference to a task. Once the function that created it returns,
