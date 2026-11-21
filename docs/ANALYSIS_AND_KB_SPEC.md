@@ -855,7 +855,7 @@ message = "write model state through GenerationStore instead"
        (`FunctionDecl::returns_param_attr`: `node.members().append(1)` and
        `node.view.append(1)` with `return self.items`; never a `cached_property`), when every
        class the receiver may be takes the name from one of those callees: along its MRO, the
-       first class binding the name defines one (`ProjectDecls::takes_from`).
+       first class binding the name defines one (`ProjectDecls::function_taken`).
   2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
      only: a public callee reports its own writes. A write is allowed
      when a function on its chain matches `allowed-writers` or `exempt-methods`, when an
