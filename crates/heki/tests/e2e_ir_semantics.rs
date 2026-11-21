@@ -986,6 +986,44 @@ fn a_definition_in_a_finally_body_is_one_function() {
     assert!(made.iter().all(|id| *id == made[0]), "{made:?}");
 }
 
+/// A file that is one definition or one expression with nothing after it: the scope spans the
+/// whole source, as the module body does, and is still a function of its own.
+#[test]
+fn a_scope_spanning_the_whole_file_is_its_own_function() {
+    let cases = [
+        ("def run(xs):\n    return xs", "py315", "run"),
+        ("@cache\ndef run(xs):\n    return xs", "py315", "run"),
+        ("class Box:\n    size = 1", "py315", "Box"),
+        ("lambda: 1", "py315", "<module>.<locals>.<lambda>"),
+        ("(x for x in xs)", "py315", "<module>.<locals>.<genexpr>"),
+        (
+            "(x async for x in xs)",
+            "py315",
+            "<module>.<locals>.<genexpr>",
+        ),
+        ("[x for x in xs]", "py311", "<module>.<locals>.<listcomp>"),
+    ];
+    for (i, (src, version, qualname)) in cases.into_iter().enumerate() {
+        let ir = dump_ir(&format!("ir_whole_file_scope_{i}"), src, version);
+        let qualnames: Vec<&str> = ir["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["qualname"].as_str().unwrap())
+            .collect();
+        assert_eq!(qualnames, ["<module>", qualname], "{src:?}");
+        let p = Project::new(&format!("ir_whole_file_scope_check_{i}"));
+        p.write("m.py", src);
+        let (code, _, stderr) = p.check(&["--target-version", version]);
+        assert_eq!(code, 0, "{src:?}: {stderr}");
+    }
+    let src = "def positions(names: list[str], wanted):\n    out = []\n    for w in wanted:\n        out.append(names.index(w))\n    return out";
+    assert_eq!(
+        reports("ir_whole_file_function", src, "OPT112"),
+        pairs(&[("positions", "OPT112")])
+    );
+}
+
 #[test]
 fn a_literal_default_keeps_its_sign() {
     let src = "def defaults(a=+1, b=-2, c=1j, d=0.5):\n    return a, b, c, d\n";

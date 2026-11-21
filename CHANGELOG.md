@@ -145,6 +145,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `SCHEMA.split(";")` or `SCHEMA.splitlines()`).
 - `EFF101` no longer reports `socket.getaddrinfo` with the `AI_NUMERICHOST` flag, which parses
   a numeric address and never asks a resolver.
+- A file that is one definition, class, lambda, or generator expression with nothing after it
+  (no final newline) is checked: its function was taken for the module body, which has the same
+  span, so it was never analyzed, and `heki check` panicked on such a generator expression
+  (`(x async for x in xs)`).
 
 ## [0.1.2] - 2026-11-21
 
