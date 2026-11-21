@@ -887,6 +887,10 @@ class Strip:
         if "probe" not in self._decoders:
             self._decoders["live"] = object()
 
+    def refill(self, tested, stored):
+        if tested not in self._decoders:
+            self._decoders[stored] = object()
+
     def contains(self, value):
         bounds = self._ranges
         if bounds is None:
@@ -949,6 +953,7 @@ def render(width, style):
 def render_logged(width):
     line = blank(width)
     line.misfill()
+    line.refill("a", "b")
     line.count("a")
     copy_runtime(Strip([]), line)
     other = blank(width + 1)
@@ -971,10 +976,11 @@ def render_logged(width):
             at("pkg/render.py", 26, "render_logged"),
             at("pkg/render.py", 27, "render_logged"),
             at("pkg/render.py", 28, "render_logged"),
-            at("pkg/render.py", 31, "render_logged"),
+            at("pkg/render.py", 29, "render_logged"),
             at("pkg/render.py", 32, "render_logged"),
             at("pkg/render.py", 33, "render_logged"),
             at("pkg/render.py", 34, "render_logged"),
+            at("pkg/render.py", 35, "render_logged"),
         ]
     );
 }
