@@ -562,9 +562,10 @@ impl<'i> Builder<'_, 'i> {
     /// call that is not a project call site).
     fn candidates_at(&self, path: &Path, caller: &FuncKey, span: Span) -> usize {
         let index: &'i ProjectIndex = self.inputs.index;
-        let Some((file_path, file)) = index.files.get_key_value(path) else {
-            return 1;
-        };
+        let (file_path, file) = index
+            .files
+            .get_key_value(path)
+            .expect("call chains run through indexed files");
         let mut by_file = self.candidates.borrow_mut();
         let sites = by_file.entry(file_path.as_path()).or_insert_with(|| {
             let mut sites = FxHashMap::default();
@@ -1054,10 +1055,8 @@ fn changes_made_in(
         .filter(|(state, _)| wanted(state))
         .map(|(state, span)| made(state, chain.clone(), b.location(path, *span), direct))
         .collect();
-    for h in index.handed_changes_of(&mut b.calls.borrow_mut(), func) {
-        if !wanted(h.state) {
-            continue;
-        }
+    let handed = index.handed_changes_of(&mut b.calls.borrow_mut(), func);
+    for h in handed.into_iter().filter(|h| wanted(h.state)) {
         let hop = CallHop {
             caller: func.clone(),
             callee: h.callee.callee.fqn(),
