@@ -1326,11 +1326,34 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    (`ExternalAccess::imports_project_module`, no read of the environment): outside a `try`
    taking an `ImportError`, every text its `name` argument may hold (as for `EFF103`'s
    statements, `summary/statements.rs`, a `str` method changing the case or the blanks giving
-   none) names a project module, or starts with one and a dot whose longest project module is
-   a regular package that heki read and that rebinds no `__path__`
-   (`ProjectDecls::holds_modules_starting_with`); a relative name is anchored at the texts of
-   `package`, or at the module's own `__package__` or `__name__`. The project modules it looks
-   up are declaration reads, so a module created or deleted re-summarizes the function.
+   none) names a project module the packages along the name lead the import to first
+   (`ProjectDecls::holds_module`), or starts with a package and a dot under which the import
+   finds only project modules (`ProjectDecls::holds_modules_starting_with`): the packages along
+   the name lead it to the project's directories alone, and no package under it changes its
+   `__path__`; a relative name is anchored at the texts of `package`, or at the module's own
+   `__package__` or `__name__`. Where an import looks under a package
+   (`ProjectDecls::search_under`) follows the packages along the name from the project's
+   top-level names: a regular package of the project is found first, a directory without
+   `__init__.py` is a namespace package with its parent's order, and a package's `__path__`
+   changes it. What a module does to the `__path__` of its own package, or of one its imports
+   name, is a declaration fact (`ModuleDecls::path_changes`, a `PathChange` per package):
+   `Appended` for directories after the package's own (`append`, `extend`, `+=`, `__path__ +
+   ds`, `pkgutil.extend_path`, `pkg_resources.declare_namespace`), `Replaced` for any other
+   change or a use it does not follow (handing the list to a function other than a builtin
+   that only reads it and `pkgutil`'s readers, returning or storing it elsewhere). In each
+   function, the uses of the values holding a path (its loads and the values bound to it) are
+   joined over the values each reaches through copies, phis, and `+=` (a `Closure`, so a value
+   merging the paths of many packages is decided once); binding a value to a package's
+   `__path__` leaves that path as it is and shares the list with any other package the value
+   holds. A value bound to a path appends only when the value it adds to (`p + ds`,
+   `extend_path(p, ...)`) holds that path on every way it comes, back through copies, phis, and
+   `+=` (a second `Closure`). The walks of one function spend one budget; past it a package's
+   path counts as replaced. `ProjectDecls`
+   joins them per package with the packages heki could not read (`changed_paths`, sorted, so
+   the packages under a name are one range). The project modules and packages it looks up are
+   declaration reads (`DeclKeys::modules`, `DeclKeys::package_paths`; a change of a package's
+   path changes the key of each package above it), so a module created, deleted, or changing a
+   path re-summarizes the function.
    A module body's accesses include those of the class bodies it runs, as its reference sites
    do, when a scope names a module body (`Contracts::checks_module_bodies`) or reference sites
    are kept. Without such a boundary the map stays empty. The language server compares a

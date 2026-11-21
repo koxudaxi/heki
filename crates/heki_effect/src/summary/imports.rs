@@ -10,10 +10,12 @@ use std::sync::Arc;
 
 impl Extractor<'_> {
     /// Whether a call of a function the catalog tags `environment = "import"`, passed `passed`,
-    /// imports or finds a module of the project: every text its `name` may hold names one
-    /// (`"pkg.config"`, a module constant), or starts with a package holding only the project's
-    /// modules and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`). A relative name is
-    /// anchored at every text `package` may hold.
+    /// imports or finds a module of the project: every text its `name` may hold names one that
+    /// the import finds in the project (`"pkg.config"`, a module constant;
+    /// `ProjectDecls::holds_module`), or starts with a package holding only the project's
+    /// modules and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`;
+    /// `ProjectDecls::holds_modules_starting_with`). A relative name is anchored at every text
+    /// `package` may hold.
     pub(super) fn imports_project_module(&self, passed: &Passed<'_>) -> bool {
         let slot = |at| resolver::passed_var(passed.args, passed.kwargs, passed.star_from, at);
         let Some(names) =
@@ -37,7 +39,7 @@ impl Extractor<'_> {
             packages.iter().all(|package| {
                 match absolute_module_name(name.text(), package.as_deref(), head) {
                     Some(module) if head => project.holds_modules_starting_with(&module),
-                    Some(module) => project.module(&module).is_some(),
+                    Some(module) => project.holds_module(&module),
                     None => false,
                 }
             })
