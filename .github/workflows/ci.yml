@@ -153,9 +153,11 @@ jobs:
           - { os: ubuntu-24.04, shard: 2, shards: 4 }
           - { os: ubuntu-24.04, shard: 3, shards: 4 }
           - { os: ubuntu-24.04, shard: 4, shards: 4 }
-          - { os: macos-15, shard: 1, shards: 3 }
-          - { os: macos-15, shard: 2, shards: 3 }
-          - { os: macos-15, shard: 3, shards: 3 }
+          # The account runs at most 5 macOS jobs at once: the build, then these 4.
+          - { os: macos-15, shard: 1, shards: 4 }
+          - { os: macos-15, shard: 2, shards: 4 }
+          - { os: macos-15, shard: 3, shards: 4 }
+          - { os: macos-15, shard: 4, shards: 4 }
           - { os: windows-2025, shard: 1, shards: 5 }
           - { os: windows-2025, shard: 2, shards: 5 }
           - { os: windows-2025, shard: 3, shards: 5 }
