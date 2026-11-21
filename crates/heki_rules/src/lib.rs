@@ -1,8 +1,8 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`,
-//!   `MUT206`, `MUT207`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`, `MUT202`, `MUT203`, `MUT204`,
+//!   `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -19,7 +19,7 @@ pub mod project;
 pub mod selection;
 pub mod snapshot;
 
-pub use contracts::{MAX_INVALIDATIONS, summary_contracts, typed_writes};
+pub use contracts::{MAX_INVALIDATIONS, opt_in_facts, summary_contracts, typed_writes};
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
@@ -234,6 +234,17 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.",
         doc: include_str!("../rule-docs/MUT112.md"),
+    },
+    RuleMeta {
+        code: "MUT113",
+        slug: "iterated-container-mutation",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).",
+        doc: include_str!("../rule-docs/MUT113.md"),
     },
     RuleMeta {
         code: "MUT201",
@@ -656,6 +667,7 @@ pub fn check_project(
     let mut out = Vec::new();
     mut_rules::mut101_mut111(&cx, &mut out);
     mut_rules::mut107(&cx, &mut out);
+    mut_rules::mut113(&cx, &mut out);
     mut_rules::mut108_mut110(&cx, &mut out);
     mut_rules::mut112(&cx, &mut out);
     mut_rules::mut109(&cx, &mut out)?;

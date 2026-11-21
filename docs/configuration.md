@@ -119,8 +119,8 @@ supported version that every clause admits:
   heuristic rule either way. A run of `full` or `concise` output that leaves heuristic rules off
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT101`,
-  `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`): they need their exact code or name. In
-  `ignore`, a prefix covers every rule it matches.
+  `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact code or
+  name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 

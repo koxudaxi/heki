@@ -136,6 +136,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | `MUT101` | heuristic |
 | Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | `MUT111` | heuristic |
 | Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | `MUT112` | heuristic |
+| Opt-in, experimental: a dict or set changed while a suspended generator, or a loop calling a helper, iterates it | `MUT113` | heuristic |
 
 A heuristic rule runs when its code or name is selected, or with `--heuristic`
 (`lint.heuristic = true` in the configuration). See
@@ -235,7 +236,7 @@ $ heki server                                   # LSP server for editors
 - 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
 - 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
 - ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
-- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 34 rules
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 35 rules
 - 📐 [Rule precision](https://heki.koxudaxi.dev/precision/) - exact and heuristic rules, and how they are measured
 - 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
 - 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI
