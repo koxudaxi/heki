@@ -270,6 +270,19 @@ A pre-commit hook (heki follows calls across files, so it checks the whole proje
 ```yaml
 # .pre-commit-config.yaml
 repos:
+  - repo: https://github.com/koxudaxi/heki
+    rev: v0.2.2
+    hooks:
+      - id: heki
+```
+
+pre-commit builds heki from that release's source with cargo on the first run, which takes a few
+minutes, and installs Rust for the build when cargo is missing. A local hook that runs the wheel
+from PyPI needs no compile:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
   - repo: local
     hooks:
       - id: heki
