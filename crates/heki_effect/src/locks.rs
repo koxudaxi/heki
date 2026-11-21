@@ -695,9 +695,9 @@ impl StateTests {
 pub struct BlockTests {
     dom: DominatorTree,
     /// Per block, in `sets`: the tests on every path to it, and those on every path past its
-    /// terminator (its branch read too).
+    /// terminator (its branch read too). The call sites below one branch share its set.
     at: Vec<Option<(usize, usize)>>,
-    sets: Vec<Answer<StateTests>>,
+    sets: Vec<Arc<Answer<StateTests>>>,
 }
 
 impl BlockTests {
@@ -716,7 +716,7 @@ impl BlockTests {
                 .position(|p| p.var == v)
                 .and_then(|i| u8::try_from(i).ok())
         };
-        let mut sets = vec![Answer::Known(StateTests::default())];
+        let mut sets = vec![Arc::new(Answer::Known(StateTests::default()))];
         let mut at: Vec<Option<(usize, usize)>> = vec![None; f.blocks.len()];
         // A dominator comes before the blocks it dominates in reverse postorder.
         for b in f.rpo_blocks() {
@@ -728,12 +728,12 @@ impl BlockTests {
             };
             let past = match f.block(b).terminator {
                 Terminator::Branch { cond, .. } => {
-                    let tests = sets[to].clone().and_then(|mut tests| {
+                    let tests = Answer::clone(&sets[to]).and_then(|mut tests| {
                         read_condition(def, cond, &param_of, resolve, global, &mut tests);
                         let count = tests.len();
                         kept(tests, count)
                     });
-                    sets.push(tests);
+                    sets.push(Arc::new(tests));
                     sets.len() - 1
                 }
                 _ => to,
@@ -756,10 +756,10 @@ impl BlockTests {
 
     /// The tests on every path to a call site in block `b`, before it: `None` when there is
     /// none, or when no run reaches the block.
-    pub fn of_site(&self, b: BlockId) -> Option<Box<Answer<StateTests>>> {
+    pub fn of_site(&self, b: BlockId) -> Option<Arc<Answer<StateTests>>> {
         let tests = &self.sets[self.at[b.0 as usize]?.0];
-        let none = matches!(tests, Answer::Known(t) if t.len() == 0);
-        (!none).then(|| Box::new(tests.clone()))
+        let none = matches!(**tests, Answer::Known(ref t) if t.len() == 0);
+        (!none).then(|| Arc::clone(tests))
     }
 }
 
