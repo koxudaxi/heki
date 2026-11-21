@@ -103,6 +103,7 @@ pub(crate) struct Sizes<'a, 'c> {
     /// Receiver types for attribute loads (empty: attributes are not resolved).
     types: &'c FxHashMap<VarId, Val>,
     pub ix: FnIndex<'c>,
+    constants: &'c ModuleConstants,
     /// Some display the module's own code fixes may grow in another module
     /// (`CheckContext::fixed_constants`): the IR's fixed trip counts are decided again.
     withheld: bool,
@@ -119,19 +120,34 @@ impl<'a, 'c> Sizes<'a, 'c> {
         unit: &'c ModuleUnit<'_>,
         constants: &'c ModuleConstants,
     ) -> Self {
+        let withheld = constants.displays.len() != unit.input.ir.constants.displays.len();
+        Self::of(cx, tcx, types, f, constants, withheld)
+    }
+
+    fn of(
+        cx: &'c CheckContext<'a>,
+        tcx: &'c TypeCtx<'a>,
+        types: &'c FxHashMap<VarId, Val>,
+        f: &'c IrFunction,
+        constants: &'c ModuleConstants,
+        withheld: bool,
+    ) -> Self {
+        let ix = FnIndex::new(f, constants);
         Self {
             cx,
             tcx,
             types,
-            ix: FnIndex::new(f, constants),
-            withheld: constants.displays.len() != unit.input.ir.constants.displays.len(),
+            ix: if withheld { ix.redeciding_trips() } else { ix },
+            constants,
+            withheld,
         }
     }
 
     /// A data-sized loop: its trip count is not fixed by the code (`LoopBound::Unbounded`, the
     /// IR's verdict, or a fixed count from a module display another module may grow), and it
     /// does not iterate a small display of another module or an attribute (or a builtin
-    /// wrapper of one: `enumerate(PREFIXES)`).
+    /// wrapper of one: `enumerate(PREFIXES)`), here or where the function creating this one
+    /// evaluates the iterable it passes (a generator expression's).
     pub(crate) fn data_sized(&self, lp: &NaturalLoop) -> bool {
         let decided_again = match lp.bound {
             LoopBound::Unbounded => true,
@@ -139,10 +155,40 @@ impl<'a, 'c> Sizes<'a, 'c> {
             LoopBound::RetryPattern | LoopBound::DaemonPolling => false,
         };
         decided_again
-            && !self
+            && self
                 .ix
-                .loop_iterable(lp)
-                .is_some_and(|it| self.fixed_items(it))
+                .fixed_trip(lp, &mut |inst| self.leaf_len(inst))
+                .is_none()
+            && self.passed_trip(lp).is_none()
+    }
+
+    /// How many items a load of a global or an attribute gives, when the declarations fix it
+    /// and this function does not grow it.
+    fn leaf_len(&self, inst: &Inst) -> Option<u32> {
+        let d = self.leaf_display(inst)?;
+        self.ix.load_unchanged(inst.kind.dst()?).then_some(d.len)
+    }
+
+    /// The trip count of a loop over the iterable this function receives from the one creating
+    /// it (`.0` of a generator expression, or of a comprehension before 3.12), as the creator
+    /// sees that iterable.
+    fn passed_trip(&self, lp: &NaturalLoop) -> Option<u32> {
+        let f = self.ix.f;
+        let (creator, iterable) = f.passed_from?;
+        let it = self.ix.loop_iterable(lp)?;
+        (f.var_name(it) == Some(".0")).then_some(())?;
+        let untyped = FxHashMap::default();
+        let outer = Sizes::of(
+            self.cx,
+            self.tcx,
+            &untyped,
+            self.tcx.ir().function(creator),
+            self.constants,
+            self.withheld,
+        );
+        outer
+            .ix
+            .iter_bound(iterable, &mut |inst| outer.leaf_len(inst))
     }
 
     /// The loop of a builtin calling a callable once per item (`map(f, xs)`, `sorted(xs,
@@ -168,10 +214,7 @@ impl<'a, 'c> Sizes<'a, 'c> {
     /// small display of another module or an attribute, or a builtin wrapper of one.
     fn fixed_items(&self, it: VarId) -> bool {
         self.ix
-            .iter_bound(it, &mut |inst| {
-                let d = self.leaf_display(inst)?;
-                self.ix.load_unchanged(inst.kind.dst()?).then_some(d.len)
-            })
+            .iter_bound(it, &mut |inst| self.leaf_len(inst))
             .is_some()
     }
 
@@ -196,11 +239,18 @@ impl<'a, 'c> Sizes<'a, 'c> {
     /// What an imported name loaded into `var` refers to (`consts` of `from pkg import
     /// consts`), without type inference.
     fn imported(&self, var: VarId) -> Option<Val> {
-        match &self.ix.def_inst(var)?.kind {
+        let inst = self.ix.def_inst(var)?;
+        Some(Val::Ref(self.cx.decls.canonical(self.import_of(inst)?)))
+    }
+
+    /// The fqn an imported name `inst` loads names, as this module's imports bind it: a load
+    /// of the name, or in a module body a copy of its `Import`.
+    fn import_of(&self, inst: &Inst) -> Option<&str> {
+        match &inst.kind {
             InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                let target = self.tcx.module.imports.get(name)?;
-                Some(Val::Ref(self.cx.decls.canonical(target)))
+                self.tcx.module.imports.get(name).map(String::as_str)
             }
+            InstKind::Import { .. } => self.tcx.import_target(inst.span),
             _ => None,
         }
     }
@@ -213,12 +263,15 @@ impl<'a, 'c> Sizes<'a, 'c> {
         let decls = self.cx.decls;
         match &inst.kind {
             InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                let fqn = self.tcx.module.imports.get(name).map_or_else(
+                let fqn = self.import_of(inst).map_or_else(
                     || format!("{}.{name}", self.tcx.module_name()),
                     |t| decls.canonical(t),
                 );
                 decls.small_global(&fqn).cloned()
             }
+            InstKind::Import { .. } => decls
+                .small_global(&decls.canonical(self.import_of(inst)?))
+                .cloned(),
             InstKind::AttrLoad { obj, attr, .. } => {
                 match self.types.get(obj).cloned().or_else(|| self.imported(*obj)) {
                     // A class attribute read through the class (`cls.order`).

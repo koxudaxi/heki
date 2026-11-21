@@ -347,7 +347,7 @@ from __future__ import annotations
 def f(n):
     hits = 0
     for i in range(n):
-        hits += "a" in set("abcdefghi")
+        hits += "a" in set("abcdefghijklmnopq")
     return hits
 
 
@@ -379,7 +379,7 @@ fn files_with_cr_or_crlf_line_breaks_get_the_fixes_of_lf_files_in_their_own_line
     );
     let lf = p.read("lf.py");
     assert!(
-        lf.contains("    hoisted = set(\"abcdefghi\")\n    for i in range(n):\n")
+        lf.contains("    hoisted = set(\"abcdefghijklmnopq\")\n    for i in range(n):\n")
             && lf.contains("from __future__ import annotations\n\nimport collections\n"),
         "{lf}"
     );

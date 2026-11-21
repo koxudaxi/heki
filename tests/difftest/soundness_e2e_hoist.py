@@ -181,10 +181,11 @@ def mixed_probe(n):
     return hits
 
 
-def empty_probe():
+def empty_probe(n):
+    """The loop runs zero times (`n` is 0)."""
     allowed = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     hits = []
-    for p in list():
+    for p in range(n):
         if p in allowed:
             hits.append(p)
     return hits
@@ -345,7 +346,7 @@ def rebuild_list(n):
 
 
 def rebuild_tuple_of_str(n):
-    letters = "abcdefghij"
+    letters = "abcdefghijklmnopq"
     hits = 0
     for i in range(n):
         if "abcdefghij"[i % 10] in tuple(letters):
@@ -607,18 +608,18 @@ def comprehension_clause_on_its_own_line(n):
 
 def generator_clause_on_its_own_line(n):
     return sum(1
-               for p in "abcdefghijkl"[:n]
-               if p in set("abcdefghi"))
+               for p in "abcdefghijklmnopqrstu"[:n]
+               if p in set("abcdefghijklmnopq"))
 
 
 def two_hoists_in_nested_loops(n):
     """Both rebuilds are hoisted; the inner set must not take the outer one's name."""
     outer = inner = 0
     for i in range(n):
-        if "a" in set("abcdefghi"):
+        if "a" in set("abcdefghijklmnopq"):
             outer += 1
         for j in range(n):
-            if "a" in set("jklmnopqr"):
+            if "a" in set("jklmnopqrstuvwxyz"):
                 inner += 1
     return outer, inner
 
@@ -654,7 +655,7 @@ def main() -> int:
             run(generator_probe, words),
             run(attribute_probe, [complex(i, 1) for i in items]),
             run(mixed_probe, n),
-            run(empty_probe),
+            run(empty_probe, 0),
             run(stored_flag, n),
             run(rebound_in_outer_loop, [n, n + 2], n % 2),
             run(flag_tested_elsewhere, n),
