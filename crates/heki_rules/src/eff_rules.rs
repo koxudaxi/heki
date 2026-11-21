@@ -19,8 +19,9 @@ use heki_effect::{
     EffectSummary, Facts, FuncKey, PerItem, Runner, SiteEffect, SiteMust, TypeCtx, WriteKind,
     anchors_call_site, boundary_reports_in,
 };
+pub(crate) use heki_ir::ItemOrigins;
 use heki_ir::walk::{Answer, Budget};
-use heki_ir::{BlockId, InstKind, IrFunction, ItemOrigin, ItemOrigins, ItemSource, Must, Progress};
+use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
 use heki_kb::{ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,7 +31,7 @@ use std::sync::LazyLock;
 /// The rules whose reports are split by the must-facts of execution effects
 /// (`heki_effect::EffectSummary::must_exec`): an established report is the exact rule's, the
 /// rest its heuristic sibling's.
-pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF111", "EFF103", "EFF113"];
+pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF111", "EFF103", "EFF113", "DATA101"];
 
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
@@ -579,7 +580,7 @@ fn established_queries(
 /// a part of one, or a catalog call sizing its result (`heki_kb::EcosystemEntry::items`), in
 /// the function the origin names (a generator expression's loop reads its creator's iterable).
 /// `None` for a method's receiver, a fixed collection, or a call the catalog does not size.
-fn data_origin(
+pub(crate) fn data_origin(
     cx: &CheckContext<'_>,
     tcx: &TypeCtx<'_>,
     ir: &heki_ir::ModuleIr,
@@ -587,9 +588,9 @@ fn data_origin(
 ) -> Option<String> {
     let f = ir.function(origin.function);
     let param = |p: u8| f.params.get(usize::from(p)).map(|p| p.name.as_str());
-    match origin.source {
-        ItemSource::Param(p) => Some(format!("parameter `{}`", param(p)?)),
-        ItemSource::ParamPart(p) => Some(format!("a part of parameter `{}`", param(p)?)),
+    let named = match origin.source {
+        ItemSource::Param(p) => format!("parameter `{}`", param(p)?),
+        ItemSource::ParamPart(p) => format!("a part of parameter `{}`", param(p)?),
         ItemSource::Call { block, index } => {
             let inst = f.block(block).insts.get(usize::try_from(index).ok()?)?;
             let types = tcx.infer(f);
@@ -612,10 +613,14 @@ fn data_origin(
                 (ResultItems::Text, true) => "the lines of the text",
                 _ => return None,
             };
-            Some(format!("{what} of `{symbol}`"))
+            format!("{what} of `{symbol}`")
         }
-        ItemSource::Receiver | ItemSource::Fixed => None,
-    }
+        ItemSource::Receiver | ItemSource::Fixed => return None,
+    };
+    Some(match origin.carries {
+        Carries::Items => named,
+        Carries::Count => format!("one value per item of {named}"),
+    })
 }
 
 /// What repeats an effect `EFF102` / `EFF103` report: a data-sized loop around the call, or the

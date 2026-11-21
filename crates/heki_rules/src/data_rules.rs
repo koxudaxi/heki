@@ -4,11 +4,12 @@ use crate::eff_rules::shortest;
 use crate::mut_rules::{CallInst, site_call};
 use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
-use heki_diagnostics::Diagnostic;
-use heki_effect::{CallSite, SiteEffect, TypeCtx};
+use heki_diagnostics::{Certainty, Diagnostic};
+use heki_effect::{CallSite, SiteEffect, TypeCtx, with_paths};
+use heki_ir::walk::{Answer, Budget, Def, Visit, reach};
 use heki_ir::{
-    BinOpKind, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop,
-    UnaryOpKind, VarId,
+    BinOpKind, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo, Must,
+    NaturalLoop, Progress, UnaryOpKind, VarId,
 };
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -42,7 +43,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             }
         }
         let starred = first_starred(f);
-        for (lc, _) in accumulating_loops(f)
+        for (lc, lp) in accumulating_loops(f)
             .into_iter()
             .filter(|(_, lp)| sizes.data_sized(lp))
         {
@@ -70,11 +71,12 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 let chain = shortest(&effects, ExecEffectKind::QuadraticRealloc)?;
                 let reallocates =
                     chain.len() == 1 || reallocates_argument(cx, at, f, &defs, inst, lc.phi_var);
-                reallocates.then(|| (inst.span, chain.to_vec()))
+                reallocates.then(|| (inst.span, chain.to_vec(), *v, at))
             });
-            let Some((span, chain)) = hit else {
+            let Some((span, chain, update, at)) = hit else {
                 continue;
             };
+            let established = established_update(cx, unit, &tcx, f, lc, lp, update, at);
             // Loop-carried values are header phis, which the IR builder only creates for
             // named locals (`read_local_recursive`).
             let var = lc
@@ -82,21 +84,122 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 .clone()
                 .expect("loop-carried values are named locals");
             let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
-            cx.emit(
+            let every = match &established {
+                Some(origins) => format!("on every iteration over {}", origins.join(" and ")),
+                None => "on every loop iteration".to_owned(),
+            };
+            if let Some(d) = cx.emit(
                 out,
                 "DATA101",
                 unit,
                 span,
                 &key.qualname,
                 var.clone(),
-                format!(
-                    "`{var}` is rebuilt from itself with `{root}` on every loop iteration (quadratic copying)"
-                ),
+                format!("`{var}` is rebuilt from itself with `{root}` {every}"),
                 Some("collect the parts in a list and combine them once after the loop".to_owned()),
                 &chain,
-            );
+            ) {
+                let premises = if established.is_some() {
+                    Certainty::Exact
+                } else {
+                    Certainty::Heuristic
+                };
+                d.certainty = premises.at_most(d.certainty);
+            }
         }
     }
+}
+
+/// The origins that establish a `DATA101` report of the accumulating update `update` of `lc` in
+/// `lp`, named as `EFF103` names them: the update copies the whole previous value whenever it
+/// returns (`heki_effect::ProjectIndex::site_must` of its call sites `at`), returns on every
+/// iteration of the loop that completes, and is the value every path around the back edge
+/// carries (no path resets the variable); the loop steps through items the data decides, and
+/// its trip count is not one the code fixes. `None` when a premise is not established.
+#[allow(clippy::too_many_arguments)]
+fn established_update(
+    cx: &CheckContext<'_>,
+    unit: &ModuleUnit<'_>,
+    tcx: &TypeCtx<'_>,
+    f: &IrFunction,
+    lc: &LoopCarriedInfo,
+    lp: &NaturalLoop,
+    update: VarId,
+    at: &[&CallSite],
+) -> Option<Vec<String>> {
+    at.iter().find_map(|s| {
+        cx.index
+            .site_must(&unit.input.path, s, ExecEffectKind::QuadraticRealloc)
+    })?;
+    let li = f.loops.iter().position(|l| l.header == lp.header)?;
+    let types = tcx.infer(f);
+    let owner = "heki_rules::data_rules::established_update";
+    with_paths(tcx, f, &types, owner, |paths, ix| {
+        let shape = ix.shape();
+        // An awaited call's value is the `await`'s (`acc = await to_thread(grow, acc)`).
+        let call = match shape.inst(update).map(|i| &i.kind) {
+            Some(InstKind::Await { value, .. }) => *value,
+            _ => update,
+        };
+        let Def::Inst(block, index) = shape.def(call) else {
+            return None;
+        };
+        let at = (block, index as usize);
+        if paths.on_every_iteration(li, at, Progress::Returned) != Answer::Known(Must::Every)
+            || !ix.fixed_trips(lp, &mut |_| None).is_open()
+        {
+            return None;
+        }
+        let budget = Budget::of_function(owner, f);
+        // Every value the back edge carries is the update, through copies and phis.
+        let reset = reach(
+            &budget,
+            lc.back_vars.iter().copied(),
+            |v, next| match shape.def(v) {
+                Def::Phi(b, i) => next.extend(
+                    f.block(b).phis[i as usize]
+                        .incoming
+                        .iter()
+                        .map(|(_, input)| *input),
+                ),
+                Def::Inst(..) => {
+                    if let Some(InstKind::Copy { src, .. }) = shape.inst(v).map(|i| &i.kind) {
+                        next.push(*src);
+                    }
+                }
+                Def::Param | Def::None => {}
+            },
+            |v| {
+                if v == update {
+                    return Visit::Prune;
+                }
+                match shape.def(v) {
+                    Def::Phi(..) => Visit::Expand,
+                    Def::Inst(..)
+                        if matches!(
+                            shape.inst(v).map(|i| &i.kind),
+                            Some(InstKind::Copy { .. })
+                        ) =>
+                    {
+                        Visit::Expand
+                    }
+                    _ => Visit::Stop(()),
+                }
+            },
+        );
+        if reset != Answer::Known(None) {
+            return None;
+        }
+        let origins = crate::eff_rules::ItemOrigins::new(unit.input.ir);
+        let Answer::Known(found) = origins.of_loop(&budget, f.id, li) else {
+            return None;
+        };
+        let named = found
+            .iter()
+            .map(|o| crate::eff_rules::data_origin(cx, tcx, unit.input.ir, *o))
+            .collect::<Option<Vec<String>>>()?;
+        (!named.is_empty()).then_some(named)
+    })
 }
 
 /// Whether the project call the call instruction `inst` makes (its call site among `sites`:

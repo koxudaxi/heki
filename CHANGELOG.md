@@ -64,6 +64,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Changed
 
+- `DATA101` marks a report exact when every premise is established (the update returns on every
+  iteration that completes, every path around the back edge carries it, the loop steps through
+  a parameter, the rows of a query, the lines of a file, or directory entries, and its trip count
+  is not fixed) and heuristic otherwise; its message names the loop's origin and drops
+  "(quadratic copying)".
 - `EFF101` and `EFF103` state exact claims, each premise established: `EFF101` that whenever
   the reported call returns, a call that waits for the network, a database, a child process, or a
   sleep has run on the event loop's thread, through functions that each make the next call on
