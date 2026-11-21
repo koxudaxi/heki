@@ -2197,7 +2197,8 @@ it, checked against a time limit: comparisons sharing an operand thirty deep, ma
 statements of slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many
 `continue`s and `isinstance` tests, a long chain of assignments a loop carries, many loops one
 after another, each with a lazy initialization (the blocks each covers count toward a budget
-proportional to the source), and many waits on one future before many `await`s of it.
+proportional to the source), many waits on one future before many `await`s of it, and task
+factories at the end of a long chain of copies.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -4672,8 +4673,20 @@ It does not report:
 - a call whose result is discarded (`asyncio.create_task(work())` as a statement): that is
   Ruff's `RUF006`;
 - `asyncio.TaskGroup.create_task`, which keeps its tasks;
-- receivers of unknown type.
+- receivers of unknown type;
+- an argument known not to be a coroutine, from which no new task is made: the result of a
+  project function that is a plain `def` or a generator function without decorators other than
+  `staticmethod`, `classmethod`, `abstractmethod`, or `override` (`create_task` raises
+  `TypeError` on what it returns, and `ensure_future` returns a future it is handed unchanged),
+  or a value typed as a future or a task (`loop.run_in_executor(...)`, `loop.create_future()`,
+  `asyncio.gather(...)`, `asyncio.wrap_future(...)`, `executor.submit(...)`, or an annotated
+  `asyncio.Future`). An argument of unknown kind (a parameter, an awaitable, a constructed
+  object, the result of a decorated function) may be a coroutine and is reported. The argument
+  is the first positional one or the one passed as `coro=` / `coro_or_future=`.
 
+A method of the task that is passed to a call, stored, or returned keeps the task too, because
+the bound method holds it: `self.addCleanup(task.cancel)`, `loop.call_later(1, task.cancel)`,
+`self.stop = task.cancel`.
 Being only the receiver of `add_done_callback(...)` or `set_name(...)` does not keep the task:
 the callback does not hold it strongly.
 

@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT108", "MUT111"]
+extend-select = ["MUT101", "MUT108", "MUT111", "EFF107"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -271,6 +271,13 @@ const FEED: &str =
     "import httpx\n\n\ndef rows():\n    return [httpx.get(\"https://example.com\")]\n";
 const FEED_GENERATOR: &str =
     "import httpx\n\n\ndef rows():\n    yield httpx.get(\"https://example.com\")\n";
+// A task factory's argument from another module (`EFF107`): `ensure_future` of a plain method's
+// result makes no new task (`FunctionDecl::makes_no_coroutine`), of an `async def`'s or a
+// decorated method's result it may.
+const WAITS: &str = "import asyncio\n\n\ndef logged(fn):\n    return fn\n\n\nclass Event:\n    def wait(self):\n        return asyncio.get_running_loop().create_future()\n";
+const WAITS_ASYNC: &str = "import asyncio\n\n\ndef logged(fn):\n    return fn\n\n\nclass Event:\n    async def wait(self):\n        await asyncio.sleep(0)\n";
+const WAITS_DECORATED: &str = "import asyncio\n\n\ndef logged(fn):\n    return fn\n\n\nclass Event:\n    @logged\n    def wait(self):\n        return asyncio.get_running_loop().create_future()\n";
+const WAITER: &str = "import asyncio\n\nfrom pkg.waits import Event\n\n\nasync def watch(e: Event):\n    f = asyncio.ensure_future(e.wait())\n    await asyncio.sleep(0)\n";
 const FEED_USER: &str = "from pkg.feed import rows\n\n\nasync def stream():\n    pending = rows()\n    for row in pending:\n        print(row)\n";
 // A private generator writing a guarded attribute, handed to a helper in another module: its
 // write runs where the helper iterates it, and it reports itself once the helper stops.
@@ -512,6 +519,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/worker_view.py", WORKER_VIEW),
         ("pkg/feed.py", FEED),
         ("pkg/feed_user.py", FEED_USER),
+        ("pkg/waits.py", WAITS),
+        ("pkg/waiter.py", WAITER),
         ("pkg/fills.py", FILLS),
         ("pkg/drain.py", DRAIN),
         ("pkg/handoff.py", HANDOFF),
@@ -998,6 +1007,33 @@ fn steps_body_runs() -> Vec<Step> {
         )
         .present(&[("pkg/handoff.py", "MUT201")])
         .absent(&[("pkg/fills.py", "MUT201")]),
+    ]
+}
+
+/// What a task factory's argument from another module is (`EFF107`): the method it calls becomes
+/// an `async def` and a plain `def` again, then gains a decorator that may replace it.
+fn steps_task_arguments() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the method whose result is scheduled becomes an async def: a new task",
+            vec![save("pkg/waits.py", WAITS_ASYNC)],
+        )
+        .present(&[("pkg/waiter.py", "EFF107")]),
+        Step::new(
+            "the method returns a future again",
+            vec![save("pkg/waits.py", WAITS)],
+        )
+        .absent(&[("pkg/waiter.py", "EFF107")]),
+        Step::new(
+            "the method gains a decorator that may replace it",
+            vec![save("pkg/waits.py", WAITS_DECORATED)],
+        )
+        .present(&[("pkg/waiter.py", "EFF107")]),
+        Step::new(
+            "the decorator is removed",
+            vec![save("pkg/waits.py", WAITS)],
+        )
+        .absent(&[("pkg/waiter.py", "EFF107")]),
     ]
 }
 
@@ -1692,6 +1728,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut108());
     steps.extend(steps_mut110());
     steps.extend(steps_body_runs());
+    steps.extend(steps_task_arguments());
     steps.extend(steps_small_displays());
     steps.extend(steps_mut202_mut109());
     steps.extend(steps_indirect_helpers());
@@ -1793,8 +1830,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\"]",
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),

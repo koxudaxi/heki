@@ -300,6 +300,18 @@ fn intersect(a: FxHashMap<VarId, Ty>, b: &FxHashMap<VarId, Ty>) -> FxHashMap<Var
         .collect()
 }
 
+/// What awaiting a value of type `t` gives: a coroutine's declared result, nothing tracked for
+/// a future or a task (the result it holds), and otherwise the value's own type, since the
+/// catalog types an external awaitable by what awaiting it gives
+/// (`psycopg.AsyncConnection.connect`).
+fn awaited(t: &Ty) -> Option<Ty> {
+    match t {
+        Ty::Coroutine(result) => Some((**result).clone()),
+        Ty::Inst(o) if heki_kb::FUTURE_CLASSES.contains(&o.class.as_str()) => None,
+        other => Some(other.clone()),
+    }
+}
+
 /// The join of every type, `None` when one is unknown or none covers them all.
 fn join_all(types: impl IntoIterator<Item = Option<Ty>>) -> Option<Ty> {
     let mut out: Option<Ty> = None;
@@ -872,18 +884,19 @@ impl<'e, 'a> Engine<'e, 'a> {
             InstKind::LoadName { name, .. } if self.reads_globals => Some(cx.global(name)),
             InstKind::LoadName { .. } => return Err(Pending),
             InstKind::Import { .. } => cx.import_type(inst.span),
-            InstKind::Copy { src, .. } | InstKind::Await { value: src, .. } => {
-                self.need(*src)?.cloned()
-            }
+            InstKind::Copy { src, .. } => self.need(*src)?.cloned(),
+            InstKind::Await { value, .. } => self.need(*value)?.and_then(awaited),
             // `with m as c` binds `m.__enter__()` (`async with`: `await m.__aenter__()`): what
             // its definition declares it returns; without a declaration, the manager itself, as
             // clients, sessions, and files return.
             InstKind::EnterWith { mgr, is_async, .. } => {
                 let manager = self.need(*mgr)?;
                 let enter = if *is_async { "__aenter__" } else { "__enter__" };
-                manager
-                    .and_then(|m| self.member_call(m, enter, Passed::default()))
-                    .or_else(|| manager.cloned())
+                match manager.and_then(|m| self.member_call(m, enter, Passed::default())) {
+                    Some(entered) if *is_async => awaited(&entered),
+                    Some(entered) => Some(entered),
+                    None => manager.cloned(),
+                }
             }
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
                 Some(Ty::Ref(fqn) | Ty::Class(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
@@ -1248,7 +1261,12 @@ impl<'e, 'a> Engine<'e, 'a> {
             Ty::Ref(c) | Ty::Class(c) if self.cx.project.is_project_class(c) => {
                 Some((c, false, Ty::inst(c.as_str())))
             }
-            Ty::Ref(_) | Ty::Class(_) | Ty::SelfType | Ty::Partial(_) | Ty::Union(_) => None,
+            Ty::Ref(_)
+            | Ty::Class(_)
+            | Ty::SelfType
+            | Ty::Partial(_)
+            | Ty::Coroutine(_)
+            | Ty::Union(_) => None,
         }
     }
 
@@ -1290,7 +1308,8 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .return_type
                 .as_ref()
                 .and_then(|t| cx.project.declared_ty(t))
-                .and_then(|t| t.bind_self(Some(&self_ty)));
+                .and_then(|t| t.bind_self(Some(&self_ty)))
+                .map(|t| decl.call_type(t));
         }
         match cx.project.method_targets(class, method, skip_self) {
             Callee::External(symbol)
