@@ -1646,15 +1646,18 @@ impl<'a> FnCtx<'a> {
         an: &Analysis,
         bb: BlockId,
     ) -> Vec<(VarId, Option<BuiltinKind>)> {
-        let mut out = Vec::new();
-        if let Some(mut st) = an.block_in[bb.0 as usize].clone() {
-            for (i, inst) in self.f.block(bb).insts.iter().enumerate() {
-                let mut eff = InstEffects::default();
-                self.step(&mut st, bb, i, inst, &mut eff);
-                out.extend(inst.kind.dst().map(|d| (d, st.exact_type(d))));
-            }
-        }
-        out
+        an.block_in[bb.0 as usize]
+            .clone()
+            .map_or_else(Vec::new, |mut st| {
+                let insts = self.f.block(bb).insts.iter().enumerate();
+                insts
+                    .filter_map(|(i, inst)| {
+                        let mut eff = InstEffects::default();
+                        self.step(&mut st, bb, i, inst, &mut eff);
+                        inst.kind.dst().map(|d| (d, st.exact_type(d)))
+                    })
+                    .collect()
+            })
     }
 
     /// State immediately before instruction `idx` of `bb` (`idx == insts.len()`: before the
