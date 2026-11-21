@@ -1633,15 +1633,27 @@ fn steps_mut110() -> Vec<Step> {
             vec![Action::Save("pkg/ro/low.py", low_resetting.clone())],
         )
         .present(&[("pkg/ro/stats.py", "MUT110")]),
+        // The report names the line of the change (`EffectSummary::param_inplace_sites`): a
+        // comment above it moves the line while every summary stays the same.
         Step::new(
-            "a comment above the helper two modules below, whose positions no chain shows",
+            "a comment above the helper two modules below moves the line the report names",
             vec![save(
                 "pkg/ro/low.py",
                 &format!("# helpers\n{low_resetting}"),
             )],
         )
-        .present(&[("pkg/ro/stats.py", "MUT110")])
-        .cutoff(),
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
+        Step::new(
+            "a comment between the helper's call and its change moves only the line the report names",
+            vec![save(
+                "pkg/ro/low.py",
+                &format!(
+                    "# helpers\n{}",
+                    low_resetting.replace("    values[-1] = 0\n", "    # the last one\n    values[-1] = 0\n")
+                ),
+            )],
+        )
+        .present(&[("pkg/ro/stats.py", "MUT110")]),
         Step::new(
             "the middle helper's parameter is annotated read-only: the report moves there",
             vec![Action::Save("pkg/ro/mid.py", mid_readonly)],

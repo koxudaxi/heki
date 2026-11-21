@@ -221,23 +221,81 @@ fn mut110_readonly_parameters_handed_to_helpers() {
     let one = at(&diags, c, 21);
     assert_eq!(
         message(one),
-        "`one_call` passes its read-only parameter `items` to `pkg.fill.push`, which changes it in place"
+        "`one_call` passes its read-only parameter `items` to `pkg.fill.push`; line 7 of `push` changes that object in place"
     );
     assert_eq!(
         one["help"],
         "pass a copy (`list(items)` / `dict(items)`), or annotate the helper's parameter with a mutable type"
     );
-    assert_eq!(chain(at(&diags, c, 21)), vec![(c.into(), 21)]);
+    // The call, then the line that changes the argument.
+    assert_eq!(
+        chain(at(&diags, c, 21)),
+        vec![(c.into(), 21), (f.into(), 7)]
+    );
     // Two calls deep: the chain ends at the function that changes the argument.
     assert_eq!(
         chain(at(&diags, c, 25)),
-        vec![(c.into(), 25), (f.into(), 11)]
+        vec![(c.into(), 25), (f.into(), 11), (f.into(), 7)]
     );
     let related = &at(&diags, c, 25)["related"];
     assert_eq!(
         related[1]["message"], "`push_via` calls `pkg.fill.push`",
         "{related:#}"
     );
+}
+
+// ====================================================================== the named line
+
+/// The claim is the named line: whenever it runs during the call, it changes the caller's object.
+/// So a change under a test of the argument's type is reported, and a parameter that is a copy on
+/// one path before the call, or a helper's parameter rebound to a copy on one path before the
+/// change, is not.
+const ANCHORED: &str = r#"from collections.abc import Sequence
+
+
+def sort_values(values):
+    values.sort()
+
+
+def copy_then_sort(values, fresh):
+    if fresh:
+        values = list(values)
+    values.sort()
+
+
+def append_to_lists(values):
+    if isinstance(values, list):
+        values.append(1)
+
+
+def copied_on_one_path(values: Sequence[float], fresh: bool) -> None:
+    if fresh:
+        values = list(values)
+    sort_values(values)
+
+
+def rebound_in_the_helper(values: Sequence[float]) -> None:
+    copy_then_sort(values, True)
+
+
+def under_a_type_test(values: Sequence[float]) -> None:
+    append_to_lists(values)
+"#;
+
+#[test]
+fn mut110_names_a_line_that_changes_the_callers_object_whenever_it_runs() {
+    let p = Project::new("mut110_anchored");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/anchored.py", ANCHORED);
+    let diags = diagnostics(&p, &[]);
+    let a = "pkg/anchored.py";
+    assert_eq!(found(&diags), vec![d(a, 30, "under_a_type_test", "values")]);
+    assert_eq!(
+        message(&diags[0]),
+        "`under_a_type_test` passes its read-only parameter `values` to `pkg.anchored.append_to_lists`; line 16 of `append_to_lists` changes that object in place"
+    );
+    assert_eq!(chain(&diags[0]), vec![(a.into(), 30), (a.into(), 16)]);
+    assert_eq!(diags[0]["severity"], "warning");
 }
 
 // ============================================================== defaults and `heki rule`

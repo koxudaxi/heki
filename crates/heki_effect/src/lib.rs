@@ -520,6 +520,11 @@ pub struct EffectSummary {
     /// making it; `EFF201` `mutates-params`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_change_sites: BTreeMap<u8, BTreeSet<Span>>,
+    /// `param index -> spans` of the function's own in-place changes of the argument itself
+    /// (`p.append(x)`, `p[k] = v`, also through a local alias): the changes `MUT110` names. A
+    /// local fact, never propagated.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_inplace_sites: BTreeMap<u8, BTreeSet<Span>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself
     /// (`p.a`, `p["k"]`) are changed in place (`p.a.append(...)`, `p["k"][i] = v`), also through
     /// local copies and calls. Rebinding a slot, `setattr`, and `__dict__` writes do not count,
@@ -802,6 +807,7 @@ impl EffectSummary {
             })
             .collect();
         out.param_change_sites.clear();
+        out.param_inplace_sites.clear();
         for w in &mut out.capacity_waits {
             w.hop.span = Span { start: 0, end: 0 };
         }
@@ -852,6 +858,7 @@ impl EffectSummary {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
             param_change_sites: BTreeMap::new(),
+            param_inplace_sites: BTreeMap::new(),
             iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),

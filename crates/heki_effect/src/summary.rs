@@ -383,6 +383,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     for (i, spans) in other.param_change_sites {
         into.param_change_sites.entry(i).or_default().extend(spans);
     }
+    for (i, spans) in other.param_inplace_sites {
+        into.param_inplace_sites.entry(i).or_default().extend(spans);
+    }
     for (i, slots) in other.inplace_param_slots {
         into.inplace_param_slots.entry(i).or_default().extend(slots);
     }
@@ -3090,6 +3093,13 @@ impl<'a> Extractor<'a> {
 
     /// The function's own change, at `span`, of parameter `i` at `path`.
     fn mutate_param(&mut self, i: u8, path: String, span: Span) {
+        if path.is_empty() {
+            self.summary
+                .param_inplace_sites
+                .entry(i)
+                .or_default()
+                .insert(span);
+        }
         let memo = self.memo_fills.contains(&self.pos);
         self.summary.note_param_change(i, path, memo);
         self.summary

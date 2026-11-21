@@ -485,10 +485,15 @@ fn watch_rechecks_a_call_chain_whose_end_moves() {
     wait_for(&rx, "[heki watch] 1 diagnostic(s) in 4 file(s)");
     let (code, check, _) = p.check(&[]);
     assert_eq!(code, 1, "{check}");
+    // The call, then the line of `relay` that changes the parameter.
     assert_eq!(
         check.matches("  = related: ").count(),
-        1,
+        2,
         "the chain ends in `relay`:\n{check}"
+    );
+    assert!(
+        check.contains("  = related: pkg/mid.py:6:5: `relay` changes the object in place here"),
+        "{check}"
     );
     let out = child.wait_with_output().unwrap();
     assert_eq!(out.status.code(), Some(1));

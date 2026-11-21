@@ -487,7 +487,9 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   quadratic concatenation make code slower, as the `OPT` rules' findings do, yet were errors.
 - **Decision**: `RuleMeta::consequence` says what happens in the code a rule reports, and sets
   its default severity: `Bug` (a wrong result, an exception, a lost update, a deadlock, or a
-  broken contract) is `error`, `Slowdown` is `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`,
+  broken contract) is `error`; `MinorBug` (a broken promise that callers seldom notice, such as
+  `MUT110`'s read-only annotation changed by a helper, with no harmful report among those
+  checked) and `Slowdown` are `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`,
   `DATA101`, and the `OPT` rules are slowdowns; `EFF106` (a synchronous lock or a transaction
   held across I/O can deadlock the event loop), `EFF107`, `EFF201`, and every `MUT` rule are
   bugs. A rule split off another (a heuristic sibling code) has its parent's consequence.

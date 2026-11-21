@@ -256,17 +256,29 @@ impl Rule<'_, '_> {
                     && let Some(decl) = readonly.filter(|d| d.readonly_params & (1u64 << p) != 0)
                 {
                     let name = &decl.param_names[usize::from(*p)];
+                    let (chain, (changer, j)) = self.chain(&call, k, None);
+                    // The line where the function at the end of the chain changes the object its
+                    // parameter `j` holds, which is the caller's parameter whenever it runs.
+                    let Some((change_path, change)) = self.inplace_site(&changer, j) else {
+                        continue;
+                    };
+                    let witness = cx.related_at(
+                        change_path,
+                        change,
+                        format!("`{}` changes the object in place here", changer.qualname),
+                    );
                     let message = format!(
-                        "`{}` passes its read-only parameter `{name}` to `{}`, which changes it in place",
+                        "`{}` passes its read-only parameter `{name}` to `{}`; line {} of `{}` changes that object in place",
                         site.caller.qualname,
-                        bc.callee.fqn()
+                        bc.callee.fqn(),
+                        witness.line,
+                        changer.qualname,
                     );
                     let help = format!(
                         "pass a copy (`list({name})` / `dict({name})`), or annotate the helper's parameter with a mutable type"
                     );
-                    let chain = self.chain(&call, k, None);
                     let (caller, span) = (&site.caller, site.span);
-                    self.emit(
+                    if let Some(d) = self.emit(
                         out,
                         "MUT110",
                         unit,
@@ -276,7 +288,9 @@ impl Rule<'_, '_> {
                         message,
                         &help,
                         &chain,
-                    );
+                    ) {
+                        d.related.push(witness);
+                    }
                 }
             }
         }
@@ -315,16 +329,27 @@ impl Rule<'_, '_> {
             call.site.caller.qualname,
             call.bc.callee.fqn()
         );
-        let chain = self.chain(call, k, what);
+        let (chain, _) = self.chain(call, k, what);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
         self.emit(
             out, "MUT108", unit, caller, span, target, message, FIX, &chain,
         );
     }
 
+    /// The first of the function's own in-place changes of its parameter `j` itself
+    /// (`EffectSummary::param_inplace_sites`), with the function's file.
+    fn inplace_site(&self, func: &FuncKey, j: u8) -> Option<(&Path, Span)> {
+        let index = self.cx.index;
+        let path = index.file_of(func)?;
+        let local = index.files.get(path)?.local_functions.get(func)?;
+        let first = local.param_inplace_sites.get(&j)?.first()?;
+        Some((path, *first))
+    }
+
     /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
-    /// the shortest chain of calls down to the function whose own body makes the change.
-    fn chain(&self, call: &Call<'_>, k: u8, what: Changed) -> Vec<CallHop> {
+    /// the shortest chain of calls down to the function whose own body makes the change, and
+    /// that function with its parameter.
+    fn chain(&self, call: &Call<'_>, k: u8, what: Changed) -> (Vec<CallHop>, (FuncKey, u8)) {
         let index = self.cx.index;
         let hop = |caller: &FuncKey, callee: &FuncKey, span: Span, path: &Path| CallHop {
             caller: caller.clone(),
@@ -392,6 +417,7 @@ impl Rule<'_, '_> {
             }
             i += 1;
         }
+        let end = (states[found].0.clone(), states[found].1);
         let mut chain = Vec::new();
         let mut at = Some(found);
         while let Some(i) = at {
@@ -399,14 +425,14 @@ impl Rule<'_, '_> {
             at = states[i].3;
         }
         chain.reverse();
-        chain
+        (chain, end)
     }
 
     /// One report per `(rule, function, span, target)`.
     #[allow(clippy::too_many_arguments)]
-    fn emit(
+    fn emit<'o>(
         &mut self,
-        out: &mut Vec<Diagnostic>,
+        out: &'o mut Vec<Diagnostic>,
         code: &'static str,
         unit: &ModuleUnit<'_>,
         func: &FuncKey,
@@ -415,14 +441,15 @@ impl Rule<'_, '_> {
         message: String,
         help: &str,
         chain: &[CallHop],
-    ) {
-        if self.seen.insert((code, func.clone(), span, target.clone())) {
-            let qualname = &func.qualname;
-            let help = Some(help.to_owned());
-            self.cx.emit(
-                out, code, unit, span, qualname, target, message, help, chain,
-            );
+    ) -> Option<&'o mut Diagnostic> {
+        if !self.seen.insert((code, func.clone(), span, target.clone())) {
+            return None;
         }
+        let qualname = &func.qualname;
+        let help = Some(help.to_owned());
+        self.cx.emit(
+            out, code, unit, span, qualname, target, message, help, chain,
+        )
     }
 }
 

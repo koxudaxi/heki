@@ -82,11 +82,15 @@ enum ShownAt {
     Call(Vec<FuncKey>),
     /// A method's own change of the container a `self` attribute holds.
     Change(String),
+    /// A function's own in-place change of the object its parameter holds (the line `MUT110`
+    /// names).
+    ParamChange(u8),
 }
 
 /// The places in its text `source` of the spans of `file` that other files' diagnostics can
-/// show: its call sites (the hops of call chains) and the changes its methods make to their own
-/// containers (the methods `MUT113` names).
+/// show: its call sites (the hops of call chains), the changes its methods make to their own
+/// containers (the methods `MUT113` names), and the in-place changes its functions make to their
+/// parameters (the lines `MUT110` names).
 fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace> {
     let lines = heki_ast::LineIndex::from_source(source);
     let place = |offset: u32| {
@@ -106,6 +110,12 @@ fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace>
                 .iter()
                 .map(|span| (*span, ShownAt::Change(attr.clone())))
         })
+        .chain(
+            file.local_functions
+                .values()
+                .flat_map(|s| &s.param_inplace_sites)
+                .flat_map(|(p, spans)| spans.iter().map(|span| (*span, ShownAt::ParamChange(*p)))),
+        )
         .collect();
     changes.sort();
     let calls = file.call_sites.iter().map(|s| {

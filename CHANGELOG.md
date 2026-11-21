@@ -107,7 +107,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
   changes the output label, the SARIF level, the language server's severity, and the exit code
   (see Breaking changes: a warning no longer fails the run). `[tool.heki.lint.severity]` still
   overrides it. Each rule page shows its default severity, and `heki rule --output-format json`
-  gives each rule's `consequence` (`bug` or `slowdown`).
+  gives each rule's `consequence` (`bug`, `minor-bug`, or `slowdown`). A bug that is rarely
+  harmful is a `warning` too: `MUT110` (`readonly-param-mutation`), a broken read-only
+  annotation.
+- `MUT110` names the line where the helper changes the parameter, in the message and as a
+  related location: "`median` passes its read-only parameter `values` to `helpers.sort_values`;
+  line 2 of `sort_values` changes that object in place". The claim is that line, which changes
+  the caller's object whenever it runs; it no longer says that every call changes it.
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and

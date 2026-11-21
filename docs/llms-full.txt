@@ -1935,7 +1935,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
 | MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
-| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). | ≈ |
+| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line. | ≈ |
 | MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | ≈ 🔌 🧪 |
 | MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
 | MUT113 | [iterated-container-mutation](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | ≈ 🔌 🧪 |
@@ -5566,9 +5566,9 @@ Source: https://heki.koxudaxi.dev/rules/readonly-param-mutation/
 
 # readonly-param-mutation (MUT110)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `warning` (a bug that is rarely harmful) · No automatic fix
 
-Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).
+Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.
 
 !!! note "Heuristic"
 
@@ -5582,8 +5582,8 @@ inside `Optional`, `| None`, `Annotated`, and quotes), passed as itself or throu
 `items.append(...)`, `table[key] = ...`), itself or through further helpers, any number of calls
 deep.
 
-The rule reports the call that hands the parameter over, with the calls down to the change as
-related locations. A generator function changes what it is handed where its generator is
+The rule reports the call that hands the parameter over, and names the line where the change
+happens, with the calls down to it and the line itself as related locations. A generator function changes what it is handed where its generator is
 iterated (`for`, `list(...)`, a function iterating it), and is reported there; one that is
 created and never iterated changes nothing.
 
@@ -5603,16 +5603,19 @@ It does not report:
 ## What a report states
 
 A report states that the function hands its parameter annotated `Sequence`, `Mapping`, or
-`ReadOnly`, as itself or through a local alias, to a function that changes it in place, directly or
-through the helpers shown.
+`ReadOnly`, as itself, to a function, and that whenever the named line runs during that call, it
+changes the caller's object in place. It does not say that every call reaches the line: the
+change often sits under a test of the argument's type (`if isinstance(values, list):`), and the
+claim is anchored there.
 
 Its premises:
 
 - **Read-only parameter**: the parameter's annotation. Established.
-- **Passed as itself**: the argument is the parameter or a local alias of it, not a copy.
-- **Changed in place**: the helper, or a helper it hands the argument to, changes it in place. Open:
-  a change on one of the helper's paths is enough, and through a method call one candidate
-  implementation is.
+- **Passed as itself**: on every path to the call, the argument is the parameter or a local
+  alias of it, not a copy or another value. Established.
+- **Changed at the line**: the named line changes in place the object bound to the parameter of
+  the function it is in, on every path to the line, and that parameter receives the argument
+  through the calls shown, each handing it on as itself. Established.
 
 ## Why is this bad?
 A `Sequence` or `Mapping` annotation promises the caller that the function only reads its
