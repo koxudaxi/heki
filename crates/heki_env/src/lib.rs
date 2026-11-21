@@ -165,6 +165,10 @@ pub struct CallOwnerRule {
     /// `"report"`: also report (`MUT207`) calls of a method named like a target on an object
     /// of unknown class; `"ignore"` (default) does not.
     pub unresolved: Option<String>,
+    /// `false`: a class target names the class itself (constructing a subclass is no call of
+    /// it); `true` (default) covers its subclasses. `Class.method` targets cover the method's
+    /// overrides either way.
+    pub subclasses: Option<bool>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -714,6 +718,7 @@ forbidden-callers = ["pkg.parser.*"]
 exempt-methods = ["__deepcopy__"]
 message = "use a GenerationStore operation instead"
 unresolved = "ignore"
+subclasses = false
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
@@ -775,6 +780,7 @@ fresh-objects = "allow"
                 exempt_methods: vec!["__deepcopy__".into()],
                 message: Some("use a GenerationStore operation instead".into()),
                 unresolved: Some("ignore".into()),
+                subclasses: Some(false),
             }
         );
         assert_eq!(

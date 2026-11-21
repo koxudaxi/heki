@@ -380,12 +380,22 @@ pub(crate) fn group_texts(
     (texts.join("|"), named.join(" or "))
 }
 
+/// Whether a class target names its subclasses too (`call-owners.subclasses`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Subclasses {
+    /// Constructing the class or a subclass calls the target.
+    Covered,
+    /// Constructing the class itself does.
+    Excluded,
+}
+
 /// Parse call targets (`call-owners.targets`, `effect-boundaries.call-targets`).
 pub(crate) fn parse_call_targets(
     cx: &CheckContext<'_>,
     all_classes: &[String],
     texts: &[String],
     context: &'static str,
+    subclasses: Subclasses,
 ) -> Result<CallTargets, RuleConfigError> {
     let mut patterns = Vec::new();
     let mut matchers = Vec::new();
@@ -405,8 +415,16 @@ pub(crate) fn parse_call_targets(
     // The classes each target names, found class by class.
     let mut constructors: FxHashMap<String, Vec<usize>> = FxHashMap::default();
     for class in all_classes {
-        for i in functions.naming_class(class) {
-            for named in std::iter::once(class.clone()).chain(cx.decls.subclasses_of(class)) {
+        let naming = functions.naming_class(class);
+        if naming.is_empty() {
+            continue;
+        }
+        let subclasses_of = match subclasses {
+            Subclasses::Covered => cx.decls.subclasses_of(class),
+            Subclasses::Excluded => Vec::new(),
+        };
+        for i in naming {
+            for named in std::iter::once(class.clone()).chain(subclasses_of.iter().cloned()) {
                 patterns[i].family.insert(named.clone());
                 constructors.entry(named).or_default().push(i);
             }
@@ -472,7 +490,11 @@ pub(crate) fn mut204(
     let mut rules = Vec::new();
     for rule in &cx.config.call_owners {
         let context = "call-owners.targets";
-        let targets = parse_call_targets(cx, &all_classes, &rule.targets, context)?;
+        let subclasses = match rule.subclasses {
+            Some(false) => Subclasses::Excluded,
+            _ => Subclasses::Covered,
+        };
+        let targets = parse_call_targets(cx, &all_classes, &rule.targets, context, subclasses)?;
         // The targets may call each other: a call of the guarded operation is checked where it
         // is made, so what the operation does inside is part of it.
         let guarded = Arc::clone(&targets.functions);

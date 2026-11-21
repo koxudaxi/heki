@@ -23,7 +23,7 @@ the allowed callers and resolves to a target:
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
   `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
-  its own.
+  its own; with `subclasses = false`, constructing exactly the class.
 
 A call through a value typed with a project `Protocol` that declares the method is judged by the
 protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
