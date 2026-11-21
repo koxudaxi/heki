@@ -2286,18 +2286,22 @@ impl<'a> Extractor<'a> {
 
     /// The bases of the class statements in the function ([`Contracts::reference_bases`]), each
     /// as a reference site of the project class it is (`Base`, `core.Base`, `Base[int]`). A base
-    /// is the value the statement passes ([`IrFunction::class_bases`]), typed in the statement's
+    /// is the value the statement passes ([`heki_ir::ModuleIr::class_bases`]), typed in the statement's
     /// block as any value is, so a name it reads is what the statement's scope binds (a
     /// parameter, a local, a closure cell, a class-body name), whatever the module imports under
     /// that name. A site is at the base when the statement loads it, else at the statement (a
     /// name an import or the module body binds is read without a load of its own).
     fn base_sites(&mut self) -> Vec<CallSite> {
         let (f, shape) = (self.f, self.shape);
-        let bases = f.class_bases.iter().filter_map(|&(class, index)| {
-            let (bb, statement) = shape.defining(class)?;
-            let base = *statement.kind.operands().get(index as usize)?;
-            Some((bb, statement.span, base))
-        });
+        let bases = self
+            .cx
+            .ir()
+            .class_bases_of(f.id)
+            .filter_map(|(class, index)| {
+                let (bb, statement) = shape.defining(class)?;
+                let base = *statement.kind.operands().get(index as usize)?;
+                Some((bb, statement.span, base))
+            });
         let mut out = Vec::new();
         for (bb, statement, base) in bases {
             self.pos = (bb, 0);
@@ -3040,11 +3044,8 @@ impl<'a> Extractor<'a> {
             let callees = self.sites[site]
                 .project_callees_mut()
                 .expect("a project call's site has project callees");
-            let params = &mut callees[ci].params;
-            if params.len() <= slot {
-                params.resize(slot + 1, ArgOrigin::default());
-            }
-            params[slot].origins = Some(Box::new(o));
+            // Every bound slot carries its binding, so the binder kept it in `params`.
+            callees[ci].params[slot].origins = Some(Box::new(o));
         }
     }
 
@@ -6313,8 +6314,10 @@ impl Bindings<'_> {
             return true;
         }
         let required = usize::from(decl.required_positional);
+        let first_keyword_only = usize::from(decl.positional_params);
         let keyword_only = |p: usize| {
-            u8::try_from(p).is_ok_and(|p| decl.required_keyword_only.binary_search(&p).is_ok())
+            p.checked_sub(first_keyword_only)
+                .is_some_and(|j| j < 32 && decl.required_keyword_only >> j & 1 == 1)
         };
         // The receiver and the positions bind the leading parameters, the keywords the others.
         let (mut bound, mut bound_keyword_only) = (passed.min(required), 0);
@@ -6323,7 +6326,8 @@ impl Bindings<'_> {
             bound_keyword_only += usize::from(keyword_only(p));
         }
         !call.unpacks()
-            && (bound < required || bound_keyword_only < decl.required_keyword_only.len())
+            && (bound < required
+                || bound_keyword_only < decl.required_keyword_only.count_ones() as usize)
     }
 
     /// The parameters of `decl` that take their literal defaults: no position or keyword binds

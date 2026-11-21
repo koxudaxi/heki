@@ -82,6 +82,7 @@ pub fn build_module_ir(
         class_by_span,
         lazy_import_names,
         functions: Vec::new(),
+        class_bases: Vec::new(),
         free_names: Vec::new(),
         lowered_at: FxHashMap::default(),
         loop_hints: Vec::new(),
@@ -124,12 +125,17 @@ pub fn build_module_ir(
         release_spare_capacity(f);
     }
     functions.shrink_to_fit();
+    let mut class_bases = ctx.class_bases;
+    // Nested functions finish before the functions holding them.
+    class_bases.sort_unstable_by_key(|&(function, _, _)| function);
+    class_bases.shrink_to_fit();
     ModuleIr {
         functions,
         module_fn,
         has_future_annotations: semantic.has_future_annotations,
         has_star_import: ctx.has_star_import,
         constants,
+        class_bases,
     }
 }
 
@@ -213,7 +219,6 @@ fn release_spare_capacity(f: &mut IrFunction) {
     f.var_names.shrink_to_fit();
     f.captured_vars.shrink_to_fit();
     f.starred.shrink_to_fit();
-    f.class_bases.shrink_to_fit();
     f.str_heads.shrink_to_fit();
     for bb in &mut f.blocks {
         bb.insts.shrink_to_fit();
@@ -300,6 +305,8 @@ struct ModuleLowerer<'a> {
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
     functions: Vec<IrFunction>,
+    /// The class bases of every lowered function (`ModuleIr::class_bases`).
+    class_bases: Vec<(FunctionId, VarId, u32)>,
     /// The free variables of every lowered function, by `FunctionId` (sorted).
     free_names: Vec<Vec<String>>,
     /// The function lowered from each definition, by its span.
@@ -416,7 +423,6 @@ impl<'a> ModuleLowerer<'a> {
             var_names: Vec::new(),
             captured_vars: Vec::new(),
             starred: Vec::new(),
-            class_bases: Vec::new(),
             str_heads: Vec::new(),
             blocks: Vec::new(),
             loops: Vec::new(),
@@ -520,8 +526,13 @@ impl<'a> ModuleLowerer<'a> {
             }
         }
 
-        let ir_fn = builder.finish();
+        let (ir_fn, bases) = builder.finish();
         self.functions[fn_id.0 as usize] = ir_fn;
+        self.class_bases.extend(
+            bases
+                .into_iter()
+                .map(|(class, index)| (fn_id, class, index)),
+        );
         fn_id
     }
 }
@@ -644,7 +655,7 @@ struct FnBuilder<'m, 'a> {
     a1_hazards: Vec<A1Hazard>,
     /// `*x` operands of displays and calls (`IrFunction::starred`).
     starred: Vec<(VarId, u32)>,
-    /// `IrFunction::class_bases`.
+    /// The class bases of the function (`ModuleIr::class_bases`).
     class_bases: Vec<(VarId, u32)>,
     /// `IrFunction::str_heads`.
     str_heads: Vec<(VarId, String)>,
@@ -3846,7 +3857,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     // Finalization: seal remaining blocks, apply trivial-Phi replacements,
     // and compute `LoopCarriedInfo` for every natural loop.
     // -------------------------------------------------------------------------
-    fn finish(mut self) -> IrFunction {
+    /// The function, and its class bases (`ModuleIr::class_bases`).
+    fn finish(mut self) -> (IrFunction, Vec<(VarId, u32)>) {
         if self.unmodeled {
             self.replace_body_with_opaque_call();
         }
@@ -3906,7 +3918,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             .loop_hints
             .push((self.id, std::mem::take(&mut self.finished_hints)));
 
-        IrFunction {
+        let class_bases = std::mem::take(&mut self.class_bases);
+        let f = IrFunction {
             id: self.id,
             name: self.name,
             qualname: self.qualname,
@@ -3921,7 +3934,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             var_names: self.var_names,
             captured_vars,
             starred: self.starred,
-            class_bases: self.class_bases,
             str_heads: self.str_heads,
             blocks: self.blocks,
             loops: self.finished_loops,
@@ -3931,7 +3943,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body: self.is_module_body,
             is_class_body: self.is_class_body,
             passed_from: None,
-        }
+        };
+        (f, class_bases)
     }
 }
 
