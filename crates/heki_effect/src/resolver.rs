@@ -14,6 +14,7 @@
 use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
+use heki_env::HekiConfig;
 use heki_ir::{
     BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
     SmallDisplay, VarId,
@@ -93,49 +94,81 @@ const BUILTIN_TYPES: &[&str] = &[
 // ------------------------------------------------------------------------------ module names
 
 /// How module names derive from project-relative paths.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleLayout {
-    /// [`detect_src_layout`].
-    pub src: bool,
-    /// The project root is a package itself (`__init__.py`, without a `src/` layout): heki names
+    /// The source roots below the project root: project-relative POSIX directories whose files
+    /// are named relative to them (`src/acme/io.py` is `acme.io` under `src`).
+    pub source_roots: Vec<String>,
+    /// The project root is a package itself (`__init__.py`, and no other source root): heki names
     /// its modules top-level, and relative imports may climb to it.
     pub root_is_package: bool,
 }
 
 impl ModuleLayout {
-    pub fn detect(root: &Path) -> Self {
-        let src = detect_src_layout(root);
+    /// The layout of the project at `root`: the `src` setting's directories, else the ones ty
+    /// detects ([`detect_source_roots`]).
+    pub fn detect(root: &Path, cfg: &HekiConfig) -> Self {
+        let source_roots: Vec<String> = match &cfg.src {
+            Some(dirs) => dirs.iter().filter(|d| !d.is_empty()).cloned().collect(),
+            None => detect_source_roots(root, cfg.project_name.as_deref()),
+        };
         Self {
-            src,
-            root_is_package: !src && root.join("__init__.py").is_file(),
+            root_is_package: source_roots.is_empty() && root.join("__init__.py").is_file(),
+            source_roots,
         }
+    }
+
+    /// Module name of `rel` (the normalized project-relative path `rel_posix` produces) below
+    /// the deepest source root holding it, else below the project root
+    /// ([`module_name_for_path`]).
+    pub fn module_name(&self, rel: &Path) -> Option<(String, bool)> {
+        let below_root = self
+            .source_roots
+            .iter()
+            .filter_map(|r| rel.strip_prefix(r).ok())
+            .min_by_key(|rest| rest.components().count());
+        module_name_for_path(below_root.unwrap_or(rel))
     }
 }
 
-/// `src/` layout: `root/src` is a source root, not a package. It holds the project's top-level
-/// packages, namespace packages, and modules (the layout packaging tools install from), unless
-/// it is a regular package itself (`src/__init__.py`, or a stub for one), imported as `src`.
-pub fn detect_src_layout(root: &Path) -> bool {
-    let src = root.join("src");
-    src.is_dir()
+/// A directory that is not a package (no `__init__.py`, or a stub for one). As a source root it
+/// holds the project's top-level packages, namespace packages, and modules (`src/` is the layout
+/// packaging tools install from); a regular package is imported by its own name (`src.pkg`).
+fn is_source_dir(dir: &Path) -> bool {
+    dir.is_dir()
         && !["__init__.py", "__init__.pyi"]
             .iter()
-            .any(|f| src.join(f).is_file())
+            .any(|f| dir.join(f).is_file())
 }
 
-/// Module name of `rel` (the normalized project-relative path `rel_posix` produces):
-/// `pkg/mod.py` -> `pkg.mod`, `pkg/__init__.py` -> `pkg` (package). With `src_layout`, a
-/// leading `src/` is stripped. Returns `(module_name, is_package)`.
-pub fn module_name_for_path(rel: &Path, src_layout: bool) -> Option<(String, bool)> {
+/// The source roots ty detects without a configured one: `src`, `<project-name>` when
+/// `<project-name>/<project-name>` is a directory, and `python` (maturin), each a directory that
+/// is not a package. `project_name` is `project.name` of the `pyproject.toml`, else the root's
+/// own name.
+pub fn detect_source_roots(root: &Path, project_name: Option<&str>) -> Vec<String> {
+    let own_name = root.file_name().and_then(|n| n.to_str());
+    let named = project_name
+        .or(own_name)
+        .filter(|name| root.join(name).join(name).is_dir());
+    let mut roots: Vec<String> = Vec::new();
+    for dir in ["src"].into_iter().chain(named).chain(["python"]) {
+        if is_source_dir(&root.join(dir)) && !roots.iter().any(|r| r == dir) {
+            roots.push(dir.to_owned());
+        }
+    }
+    roots
+}
+
+/// Module name of `rel`, a normalized path below a source root (or the project root):
+/// `pkg/mod.py` -> `pkg.mod`, `pkg/__init__.py` -> `pkg` (package). Returns
+/// `(module_name, is_package)`.
+pub fn module_name_for_path(rel: &Path) -> Option<(String, bool)> {
     let mut parts: Vec<String> = Vec::new();
     for c in rel.components() {
         match c {
             Component::Normal(s) => parts.push(s.to_str()?.to_owned()),
             _ => return None,
         }
-    }
-    if src_layout && parts.first().map(String::as_str) == Some("src") {
-        parts.remove(0);
     }
     let file = parts.pop()?;
     let stem = file
