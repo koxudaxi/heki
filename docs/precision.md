@@ -57,7 +57,7 @@ The premises the rules use:
 An exact report's message states its claim and the witnesses of its premises, nothing else: no
 cost estimate such as "(N+1)", and no advice (that goes into the help).
 
-Exact claims hold in every run consistent with six assumptions
+Exact claims hold in every run consistent with seven assumptions
 ([ARCHITECTURE.md, section 3.4](https://github.com/koxudaxi/heki/blob/main/ARCHITECTURE.md)):
 
 - **R1**: the functions and classes on a call chain are not replaced at run time.
@@ -69,9 +69,14 @@ Exact claims hold in every run consistent with six assumptions
 - **R5**: the checked files are the project.
 - **R6**: a library call's argument is a value it waits on (a nonzero sleep, a host name to look
   up) unless heki establishes otherwise.
+- **R7**: no asynchronous or resource-exhaustion exception (`MemoryError`, `KeyboardInterrupt`, a
+  signal) is raised. Under it, loading a local, a module name bound once, a builtin, or a member
+  of an imported module, and building a `list` or `tuple` display, do not raise; other attribute
+  loads, subscripts, `set` and `dict` displays, calls, awaits, and operators may.
 
 "A branch heki cannot decide can go both ways" is not an assumption: a report that needs it is
-heuristic.
+heuristic. Neither is a context manager heki does not resolve: it may suppress exceptions, so an
+exact report claims nothing that runs in its body after a statement that may raise.
 
 Each checked report gets one class:
 
@@ -97,7 +102,7 @@ A rule is certified exact when all four hold:
    by hand by two reviewers. A false claim needs a minimal reproduction, and is fixed as a
    defect of a premise's fact, never by a list of exclusions.
 3. **Holdout**: one run on a frozen holdout corpus of 100 packages, never looked at while the
-   rule was designed or fixed, finds no false claim outside a violation of R1-R6.
+   rule was designed or fixed, finds no false claim outside a violation of R1-R7.
 4. **Run-time oracle**: the claimed events (the call that runs, the statement executed on each
    iteration) happen where the code ran, checked with `sys.monitoring` on the differential test
    suite and on datamodel-code-generator.

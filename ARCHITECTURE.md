@@ -187,7 +187,7 @@ Automatic rewrites (family 3, `OPT`) are judged on two orthogonal axes: **behavi
   ownership), family 2 (execution effects), and the proven suggestions of family 3**.
 
 
-### 3.4 Exact and heuristic reports (assumptions R1–R6)
+### 3.4 Exact and heuristic reports (assumptions R1–R7)
 
 A report's claim is what its message states about the code, in the terms its rule page defines
 under "What a report states" ([ADR-018](docs/DESIGN_HISTORY_AND_ADR.md#adr-018)). The claim is a
@@ -231,9 +231,12 @@ rewrite:
 | **R4** | Imports resolve as configured (`src`, `known-first-party`, the layout) | An import that does not resolve gives no fact |
 | **R5** | The checked files are the project: code outside them reaches a module only through its public names | A fact about the callers of a private function counts only the checked files. A receiver typed by a `Protocol`, or by a union with a `Protocol` member, stays unresolved: its structural implementers are never a complete set |
 | **R6** | A library call's argument is a waiting value unless heki establishes otherwise | A catalog entry that waits lists the argument values for which it returns at once (`time.sleep(0)`, a numeric host for `getaddrinfo`); a call whose argument is established as one of them is silent, and an argument heki cannot evaluate counts as waiting |
+| **R7** | No asynchronous or resource-exhaustion exception (`MemoryError`, `KeyboardInterrupt`, a signal) is raised: without this, nothing would run "whenever" anything else does, as such an exception can arise at any instruction (A1(d) for rewrites) | Under R1, R3, and R4, a load of a defined local, of a module name bound once, of a builtin the module does not rebind, or of a member of an imported module, and a `list` or `tuple` display, do not raise; other attribute loads, subscripts, `set` and `dict` displays, calls, awaits, and operators may |
 
 "A branch heki cannot decide can go both ways" is not an assumption: it is what makes a report
-heuristic.
+heuristic. One more case is a choice of silence, not an assumption: a context manager heki does
+not resolve may suppress exceptions, so an exact fact does not pass through its body after an
+instruction that may raise.
 
 ---
 
@@ -764,7 +767,7 @@ message = "render entry points must not mutate model state"
    (b) a census of every report it has on the development corpus, each checked by hand, with
    every false claim fixed as a defect of a premise's fact, never by a list of exclusions;
    (c) one run on the frozen holdout corpus (100 packages never looked at while the rule was
-   designed or fixed) with no false claim outside a violation of R1–R6; and (d) the run-time
+   designed or fixed) with no false claim outside a violation of R1–R7; and (d) the run-time
    oracle (`sys.monitoring`) on the differential test suite and on datamodel-code-generator,
    finding every claimed event where the code ran. Every report a release adds or changes in an
    exact rule is checked. A false claim found later is a bug, fixed before the next release, or

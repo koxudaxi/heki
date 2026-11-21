@@ -385,13 +385,17 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
      plain words. *Rejected*: "data-sized" as part of the exact claim (a complete size evaluator
      does not exist, so every bound heki cannot read would be a false report); reporting a fixed
      count with its count ("on each of 50 iterations"), true but not worth the line.
-  5. **Assumptions R1–R6** ([ARCHITECTURE.md §3.4](../ARCHITECTURE.md)): static bindings,
+  5. **Assumptions R1–R7** ([ARCHITECTURE.md §3.4](../ARCHITECTURE.md)): static bindings,
      annotations (R2), the catalog, imports as configured, the checked files as the project
      (R5: a receiver typed by a `Protocol` stays unresolved, as its implementers are never a
      complete set), and a library call's argument as a waiting value unless heki establishes
-     otherwise (R6: a catalog entry that waits lists the values for which it returns at once).
+     otherwise (R6: a catalog entry that waits lists the values for which it returns at once),
+     and no asynchronous or resource-exhaustion exception (R7: `MemoryError`,
+     `KeyboardInterrupt`, a signal; without it nothing runs "whenever" anything else does).
      An exact claim holds in every run consistent with them; "a branch heki cannot decide can go
-     both ways" is not one of them. R2 is for the reporting rules only: the Soundness lane and
+     both ways" is not one of them. A context manager heki does not resolve may suppress
+     exceptions: exact facts do not pass through its body after an instruction that may raise,
+     a choice of silence rather than an assumption. R2 is for the reporting rules only: the Soundness lane and
      `--fix` never rely on annotations (ADR-004, A4). R2 grants an instance of `C` or of a
      project subclass, so a premise through a method call holds only when every candidate
      implementation has it: an override in a project subclass, of a project class or of a
@@ -446,7 +450,7 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
       report the rule has on the development corpus, each false claim fixed as a premise
       defect, never by an exclusion list; (c) one run on a frozen holdout corpus of 100
       packages, never looked at during design and fixes, finds no false claim outside a
-      violation of R1–R6; and (d) a run-time oracle (`sys.monitoring`) on the differential test
+      violation of R1–R7; and (d) a run-time oracle (`sys.monitoring`) on the differential test
       suite and on datamodel-code-generator finds every claimed event where the code ran.
       Every report a release adds or changes in an exact rule is checked; a confirmed false
       claim blocks the release until it is fixed or the rule is demoted in that release. The
