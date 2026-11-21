@@ -9,10 +9,10 @@ use super::{
     Allowance, AllowanceKeys, FunctionMatcher, MergedReports, delegated_reports, project_classes,
     reports_unresolved,
 };
-use crate::{CheckContext, DottedPattern, RuleConfigError};
+use crate::{CheckContext, DottedPattern, NamePart, RuleConfigError, last_name, module_of};
 use globset::{GlobSet, GlobSetBuilder};
 use heki_diagnostics::Diagnostic;
-use heki_effect::{CallHop, CallSite, FuncKey, SiteRole};
+use heki_effect::{CallHop, CallSite, ContractClass, FuncKey, SiteRole};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -256,67 +256,168 @@ impl ContractCalls {
 }
 
 /// Function patterns indexed by the names they may match ([`FunctionMatcher`]): the matchers
-/// a function satisfies are found from the dotted suffixes of its names and from its class.
+/// a function satisfies are found from the dotted suffixes of its names, from its module, and
+/// from its class.
 #[derive(Debug)]
 pub(crate) struct FunctionMatchers {
     matchers: Vec<FunctionMatcher>,
-    /// Literal whole texts, and the matchers of each.
-    literal: FxHashMap<String, Vec<usize>>,
-    /// Glob whole texts, and the matcher of each glob.
-    globs: GlobSet,
-    glob_matchers: Vec<usize>,
+    /// The whole texts without a module part, by their names.
+    names: PartIndex,
+    /// The texts with a module part, by their modules and qualnames.
+    modules: ModuleIndex,
     /// The classes of each `Class.method` matcher's class family, and the matchers of each.
     methods: FxHashMap<String, Vec<usize>>,
 }
 
-impl FunctionMatchers {
-    /// Index `matchers`; their globs, each compiled already, may still be too many for one set
-    /// (`GlobSet` under `context`).
-    pub(crate) fn new(
-        matchers: Vec<FunctionMatcher>,
+/// Parts of the matchers' texts ([`NamePart`]): the literal ones, with the matchers of each, and
+/// the globs, with the matcher of each.
+#[derive(Debug)]
+struct PartIndex {
+    literal: FxHashMap<String, Vec<usize>>,
+    globs: GlobSet,
+    glob_matchers: Vec<usize>,
+}
+
+impl PartIndex {
+    /// Index `parts`, each with its matcher; their globs, each compiled already, may still be
+    /// too many for one set (`GlobSet` under `context`).
+    fn new<'p>(
+        parts: impl Iterator<Item = (usize, &'p NamePart)>,
         context: &'static str,
     ) -> Result<Self, RuleConfigError> {
         let mut literal: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         let mut globs = GlobSetBuilder::new();
         let mut glob_matchers = Vec::new();
-        let mut methods: FxHashMap<String, Vec<usize>> = FxHashMap::default();
-        for (i, m) in matchers.iter().enumerate() {
-            match m.whole_glob() {
+        for (i, part) in parts {
+            match part.glob() {
                 Some(glob) => {
                     globs.add(glob.clone());
                     glob_matchers.push(i);
                 }
-                None => literal
-                    .entry(m.whole_text().to_owned())
-                    .or_default()
-                    .push(i),
-            }
-            for class in m.method_family().into_iter().flatten() {
-                methods.entry(class.clone()).or_default().push(i);
+                None => literal.entry(part.text().to_owned()).or_default().push(i),
             }
         }
         let globs = globs.build();
         Ok(Self {
-            matchers,
             literal,
             globs: globs.map_err(|cause| RuleConfigError::GlobSet { context, cause })?,
             glob_matchers,
+        })
+    }
+
+    /// Add to `out` the matchers whose part is `name` or a glob matching it.
+    fn find(&self, name: &str, out: &mut Vec<usize>) {
+        out.extend(self.literal.get(name).into_iter().flatten());
+        out.extend(
+            self.globs
+                .matches(name)
+                .into_iter()
+                .map(|g| self.glob_matchers[g]),
+        );
+    }
+}
+
+/// The texts with a module part: by module part (each literal one, and each glob once), then by
+/// qualname part, so that a function's module and qualname find them however many texts share a
+/// module.
+#[derive(Debug)]
+struct ModuleIndex {
+    literal: FxHashMap<String, PartIndex>,
+    globs: GlobSet,
+    /// The qualname parts of the texts under each glob of `globs`.
+    glob_parts: Vec<PartIndex>,
+}
+
+impl ModuleIndex {
+    /// Index the `(matcher, module part, qualname part)` of each text.
+    fn new<'p>(
+        parts: impl Iterator<Item = (usize, &'p NamePart, &'p NamePart)>,
+        context: &'static str,
+    ) -> Result<Self, RuleConfigError> {
+        let mut literal: FxHashMap<&str, Vec<(usize, &NamePart)>> = FxHashMap::default();
+        let mut globbed: Vec<(&globset::Glob, Vec<(usize, &NamePart)>)> = Vec::new();
+        let mut glob_at: FxHashMap<&str, usize> = FxHashMap::default();
+        for (i, module, qualname) in parts {
+            match module.glob() {
+                Some(glob) => {
+                    let at = *glob_at.entry(module.text()).or_insert_with(|| {
+                        globbed.push((glob, Vec::new()));
+                        globbed.len() - 1
+                    });
+                    globbed[at].1.push((i, qualname));
+                }
+                None => literal
+                    .entry(module.text())
+                    .or_default()
+                    .push((i, qualname)),
+            }
+        }
+        let mut globs = GlobSetBuilder::new();
+        let mut glob_parts = Vec::new();
+        for (glob, qualnames) in globbed {
+            globs.add(glob.clone());
+            glob_parts.push(PartIndex::new(qualnames.into_iter(), context)?);
+        }
+        let literal = literal
+            .into_iter()
+            .map(|(module, qualnames)| {
+                Ok((
+                    module.to_owned(),
+                    PartIndex::new(qualnames.into_iter(), context)?,
+                ))
+            })
+            .collect::<Result<_, RuleConfigError>>()?;
+        let globs = globs.build();
+        Ok(Self {
+            literal,
+            globs: globs.map_err(|cause| RuleConfigError::GlobSet { context, cause })?,
+            glob_parts,
+        })
+    }
+
+    /// Add to `out` the matchers whose module part names `module` and whose qualname part is
+    /// `qualname` or a glob matching it.
+    fn find(&self, module: &str, qualname: &str, out: &mut Vec<usize>) {
+        if let Some(parts) = self.literal.get(module) {
+            parts.find(qualname, out);
+        }
+        for g in self.globs.matches(module) {
+            self.glob_parts[g].find(qualname, out);
+        }
+    }
+}
+
+impl FunctionMatchers {
+    pub(crate) fn new(
+        matchers: Vec<FunctionMatcher>,
+        context: &'static str,
+    ) -> Result<Self, RuleConfigError> {
+        let wholes = || matchers.iter().map(FunctionMatcher::whole).enumerate();
+        let names = wholes()
+            .filter(|(_, w)| w.module().is_none())
+            .map(|(i, w)| (i, w.name()));
+        let modules = wholes().filter_map(|(i, w)| Some((i, w.module()?, w.name())));
+        let mut methods: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        for (i, m) in matchers.iter().enumerate() {
+            for class in m.method_family().into_iter().flatten() {
+                methods.entry(class.clone()).or_default().push(i);
+            }
+        }
+        Ok(Self {
+            names: PartIndex::new(names, context)?,
+            modules: ModuleIndex::new(modules, context)?,
+            matchers,
             methods,
         })
     }
 
-    /// The matchers whose whole text may name `name` or one of its dotted suffixes.
+    /// The matchers without a module part whose whole text may name `name` or one of its
+    /// dotted suffixes.
     fn naming(&self, name: &str, out: &mut Vec<usize>) {
         let suffixes =
             std::iter::once(name).chain(name.match_indices('.').map(|(i, _)| &name[i + 1..]));
         for suffix in suffixes {
-            out.extend(self.literal.get(suffix).into_iter().flatten());
-            out.extend(
-                self.globs
-                    .matches(suffix)
-                    .into_iter()
-                    .map(|g| self.glob_matchers[g]),
-            );
+            self.names.find(suffix, out);
         }
     }
 
@@ -325,6 +426,7 @@ impl FunctionMatchers {
         let mut found = Vec::new();
         self.naming(&key.fqn(), &mut found);
         self.naming(&key.qualname, &mut found);
+        self.modules.find(&key.module, &key.qualname, &mut found);
         if let Some((owner, _)) = key.qualname.rsplit_once('.') {
             let class = format!("{}.{owner}", key.module);
             found.extend(self.methods.get(&class).into_iter().flatten());
@@ -340,13 +442,17 @@ impl FunctionMatchers {
         !self.matching(key).is_empty()
     }
 
-    /// The matchers whose whole text names the class `class` (its fqn).
-    fn naming_class(&self, class: &str) -> Vec<usize> {
+    /// The matchers whose whole text names the project class `class`.
+    fn naming_class(&self, class: &ContractClass) -> Vec<usize> {
+        let qualname = class.qualname.as_deref().unwrap_or(&class.fqn);
         let mut found = Vec::new();
-        self.naming(class, &mut found);
+        self.naming(&class.fqn, &mut found);
+        if let Some(module) = module_of(&class.fqn, qualname) {
+            self.modules.find(module, qualname, &mut found);
+        }
         found.sort_unstable();
         found.dedup();
-        found.retain(|&i| self.matchers[i].names(class));
+        found.retain(|&i| self.matchers[i].names_def(&class.fqn, qualname));
         found
     }
 }
@@ -392,7 +498,7 @@ pub(crate) enum Subclasses {
 /// Parse call targets (`call-owners.targets`, `effect-boundaries.call-targets`).
 pub(crate) fn parse_call_targets(
     cx: &CheckContext<'_>,
-    all_classes: &[String],
+    all_classes: &[ContractClass],
     texts: &[String],
     context: &'static str,
     subclasses: Subclasses,
@@ -401,13 +507,10 @@ pub(crate) fn parse_call_targets(
     let mut matchers = Vec::new();
     for text in texts {
         let functions = FunctionMatcher::new(cx, all_classes, text, context)?;
-        let name = text
-            .rsplit_once('.')
-            .map_or(text.as_str(), |(_, last)| last);
         patterns.push(CallTargetPattern {
             text: text.clone(),
             family: functions.method_family().cloned().unwrap_or_default(),
-            name: DottedPattern::new(name, context)?,
+            name: DottedPattern::new(last_name(text), context)?,
         });
         matchers.push(functions);
     }
@@ -420,11 +523,11 @@ pub(crate) fn parse_call_targets(
             continue;
         }
         let subclasses_of = match subclasses {
-            Subclasses::Covered => cx.decls.subclasses_of(class),
+            Subclasses::Covered => cx.decls.subclasses_of(&class.fqn),
             Subclasses::Excluded => Vec::new(),
         };
         for i in naming {
-            for named in std::iter::once(class.clone()).chain(subclasses_of.iter().cloned()) {
+            for named in std::iter::once(class.fqn.clone()).chain(subclasses_of.iter().cloned()) {
                 patterns[i].family.insert(named.clone());
                 constructors.entry(named).or_default().push(i);
             }

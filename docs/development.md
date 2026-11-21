@@ -128,8 +128,9 @@ follows these rules:
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
 - A contract's targets are looked up from what an access names (the dotted suffixes of a
-  function's names, its class), never tried one by one: the cost grows with the sites, not with
-  sites times targets, and the targets of every contract of a rule are indexed together.
+  function's names, its module and qualname, its class), never tried one by one: the cost grows
+  with the sites, not with sites times targets, and the targets of every contract of a rule are
+  indexed together.
 
 The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
 the call graph, or the class hierarchy goes through them:

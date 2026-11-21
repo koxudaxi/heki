@@ -39,7 +39,7 @@ pub use cache_flow::{
     CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
 };
 pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
-pub use contracts::Contracts;
+pub use contracts::{ContractClass, Contracts};
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
@@ -1076,7 +1076,7 @@ pub struct ArgTargets {
     /// Each of the [`ArgOrigin::instance_classes`], first, with its project bases, when a
     /// contract names an attribute of one of them (empty otherwise): [`Contracts::target_of`]
     /// with an attribute a callee writes on the instance, of the class the write is tied to.
-    pub classes: Vec<Vec<String>>,
+    pub classes: Vec<Vec<ContractClass>>,
 }
 
 impl ArgOrigin {
