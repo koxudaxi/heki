@@ -613,6 +613,24 @@ const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import 
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
 
+// Witnesses through a helper (`MustExec::alternatives`): a helper calls a method whose two
+// implementations wait in different calls, the one in another module through a longer chain, so
+// the helper's shortest chain is the other's. An `async def` reaches the helper through a module
+// that imports neither: editing the far implementation's wait changes only an alternative
+// witness, and narrowing the helper's parameter to the other implementation changes only the
+// helper's own alternatives (its chain stays).
+const WIT_REPO: &str = "import requests\n\n\nclass Repo:\n    def get(self, key):\n        raise NotImplementedError\n\n\nclass Remote(Repo):\n    def get(self, key):\n        return requests.get(key)\n";
+const WIT_LOCAL: &str = "import requests\n\nfrom pkg.wit_repo import Repo\n\n\ndef _send(key):\n    return requests.post(key)\n\n\nclass Local(Repo):\n    def get(self, key):\n        return _send(key)\n";
+const WIT_LOCAL_PUT: &str = "import requests\n\nfrom pkg.wit_repo import Repo\n\n\ndef _send(key):\n    return requests.put(key)\n\n\nclass Local(Repo):\n    def get(self, key):\n        return _send(key)\n";
+const WIT_LOCAL_QUIET: &str = "from pkg.wit_repo import Repo\n\n\ndef _send(key):\n    return key\n\n\nclass Local(Repo):\n    def get(self, key):\n        return _send(key)\n";
+const WIT_FETCH: &str =
+    "from pkg.wit_repo import Repo\n\n\ndef fetch(r: Repo, key):\n    return r.get(key)\n";
+const WIT_FETCH_REMOTE: &str =
+    "from pkg.wit_repo import Remote\n\n\ndef fetch(r: Remote, key):\n    return r.get(key)\n";
+const WIT_MID: &str =
+    "from pkg.wit_fetch import fetch\n\n\ndef load(r):\n    return fetch(r, \"k\")\n";
+const WIT_SERVE: &str = "from pkg.wit_mid import load\nfrom pkg.wit_repo import Repo\n\n\nasync def serve(r: Repo):\n    load(r)\n";
+
 // Queue capacities (`EFF111` on `queue.Queue.put`, a wait on another thread): a queue one module builds and another
 // module's class stores, an `async def` putting on its parameter whose caller is in another
 // module, and a class constant bounding a queue that a subclass in another module may define
@@ -867,6 +885,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/exact_base.py", EXACT_BASE),
         ("pkg/exact_sub.py", EXACT_SUB),
         ("pkg/exact_use.py", EXACT_USE),
+        ("pkg/wit_repo.py", WIT_REPO),
+        ("pkg/wit_local.py", WIT_LOCAL),
+        ("pkg/wit_fetch.py", WIT_FETCH),
+        ("pkg/wit_mid.py", WIT_MID),
+        ("pkg/wit_serve.py", WIT_SERVE),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -963,6 +986,41 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
+    ]
+}
+
+/// A helper over a dispatch keeps every implementation's wait (`MustExec::alternatives`, compared
+/// by Early Cutoff): the report through it names and relates each, and follows an edit of the
+/// wait that is not on the helper's shortest chain.
+fn steps_helper_witnesses() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the implementation off the shortest chain waits in another call",
+            vec![save("pkg/wit_local.py", WIT_LOCAL_PUT)],
+        )
+        .present(&[("pkg/wit_serve.py", "EFF101")])
+        .absent(&[("pkg/wit_serve.py", "EFF111")]),
+        Step::new(
+            "it stops waiting",
+            vec![save("pkg/wit_local.py", WIT_LOCAL_QUIET)],
+        )
+        .present(&[("pkg/wit_serve.py", "EFF111")])
+        .absent(&[("pkg/wit_serve.py", "EFF101")]),
+        Step::new("it waits again", vec![save("pkg/wit_local.py", WIT_LOCAL)])
+            .present(&[("pkg/wit_serve.py", "EFF101")])
+            .absent(&[("pkg/wit_serve.py", "EFF111")]),
+        Step::new(
+            "the helper's parameter names only the implementation on its shortest chain",
+            vec![save("pkg/wit_fetch.py", WIT_FETCH_REMOTE)],
+        )
+        .present(&[("pkg/wit_serve.py", "EFF101")])
+        .absent(&[("pkg/wit_serve.py", "EFF111")]),
+        Step::new(
+            "the helper's parameter names the base class again",
+            vec![save("pkg/wit_fetch.py", WIT_FETCH)],
+        )
+        .present(&[("pkg/wit_serve.py", "EFF101")])
+        .absent(&[("pkg/wit_serve.py", "EFF111")]),
     ]
 }
 
@@ -2947,6 +3005,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
     steps.extend(steps_exact_effects());
+    steps.extend(steps_helper_witnesses());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(
