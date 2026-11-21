@@ -3,7 +3,8 @@
 //! subclass's) and calling a method through it, class methods called through their class,
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
 //! statements, module-level names bound twice, the parameters `*` arguments bind, project
-//! methods named like container mutators, and augmented assignments.
+//! methods named like container mutators, augmented assignments, and what calling and awaiting
+//! an `async def` give.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -938,5 +939,111 @@ fn a_class_derives_from_the_import_its_own_name_shadows() {
             ("pkg/cycle.py", CYCLE),
         ],
         &["EFF101"],
+    );
+}
+
+/// Calling an `async def` gives a coroutine, and awaiting it gives what the function's
+/// annotation says it returns: the awaited store's method runs, a coroutine has no `save`, and
+/// awaiting either of two coroutines gives either result, also for a coroutine kept in an
+/// attribute or a global and awaited in another function.
+const AWAITED: &str = r#"import time
+
+
+class Store:
+    def save(self):
+        time.sleep(1)
+
+
+async def open_store() -> Store:
+    return Store()
+
+
+class Pool:
+    async def acquire(self) -> Store:
+        return Store()
+
+
+class Cache:
+    def save(self):
+        time.sleep(1)
+
+
+async def open_cache() -> Cache:
+    return Cache()
+
+
+async def awaited(pool: Pool):
+    store = await open_store()
+    store.save()  # EFF101
+    other = await pool.acquire()
+    other.save()  # EFF101
+    pending = open_store()
+    ready = await pending
+    ready.save()  # EFF101
+
+
+async def either(flag):
+    pending = open_store() if flag else open_cache()
+    obj = await pending
+    obj.save()  # EFF101
+
+
+class Holder:
+    def __init__(self):
+        self.pending = open_store()
+        self.factory = open_store
+
+    async def run(self):
+        store = await self.pending
+        store.save()  # EFF101
+
+
+ready = open_store()
+factory = open_store
+
+
+async def use_global():
+    store = await ready
+    store.save()  # EFF101
+
+
+async def never_awaited(pool: Pool):
+    store = open_store()
+    store.save()
+    other = pool.acquire()
+    other.save()
+"#;
+
+/// A project coroutine and a catalogued awaitable (typed by what awaiting it gives) merged
+/// before the `await`: the awaited connection runs a query per item either way.
+const MIXED_AWAITED: &str = r#"import psycopg
+
+
+async def connect() -> psycopg.AsyncConnection:
+    return await psycopg.AsyncConnection.connect("dbname=t")
+
+
+async def load(ids, flag):
+    pending = connect() if flag else psycopg.AsyncConnection.connect("dbname=t")
+    conn = await pending
+    for i in ids:
+        await conn.execute("SELECT 1")  # EFF103
+
+
+async def each_awaited(ids, flag):
+    conn = await connect() if flag else await psycopg.AsyncConnection.connect("dbname=t")
+    for i in ids:
+        await conn.execute("SELECT 1")  # EFF103
+"#;
+
+#[test]
+fn a_call_of_an_async_def_is_a_coroutine_of_what_awaiting_it_gives() {
+    check_marks(
+        "awaited",
+        &[
+            ("pkg/awaited.py", AWAITED),
+            ("pkg/mixed_awaited.py", MIXED_AWAITED),
+        ],
+        &["EFF101", "EFF103"],
     );
 }
