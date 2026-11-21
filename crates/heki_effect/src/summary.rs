@@ -2165,11 +2165,14 @@ impl<'a> Extractor<'a> {
         if self.contracts.is_some_and(|c| c.import_probes()) {
             self.import_probes();
         }
-        let references = if self.references {
+        let mut references = if self.references {
             self.reference_sites()
         } else {
             Vec::new()
         };
+        if self.contracts.is_some_and(|c| c.reference_bases()) {
+            references.extend(self.base_sites());
+        }
         self.self_container_changes();
         self.lock_owner_tests();
         self.resolve_construction();
@@ -2299,12 +2302,76 @@ impl<'a> Extractor<'a> {
         if constructs.is_none() && callees.is_empty() {
             return None;
         }
-        Some(CallSite {
+        Some(self.handed_site(span, self.f.block_loop_depth(bb), callees, constructs))
+    }
+
+    /// The bases of the class statements in the function ([`Contracts::reference_bases`]), each
+    /// as a reference site of the project class it names, at the base (`Base`, `core.Base`,
+    /// `Base[int]`). The class's declaration says which project classes its bases are; the IR
+    /// keeps them among the other values the class captures, so the one naming a base only gives
+    /// its position: the class statement's when none is loaded inside the statement (a name an
+    /// import or the module body binds is read without a load of its own).
+    fn base_sites(&self) -> Vec<CallSite> {
+        let names_class = |v: VarId| {
+            self.class_called(v)
+                .or_else(|| match &self.defs.get(&v)?.kind {
+                    InstKind::SubscriptLoad { obj, .. } => self.class_called(*obj),
+                    _ => None,
+                })
+        };
+        let mut out = Vec::new();
+        for bb in &self.f.blocks {
+            for inst in &bb.insts {
+                let InstKind::MakeClosure {
+                    func_id: Some(id),
+                    captured,
+                    ..
+                } = &inst.kind
+                else {
+                    continue;
+                };
+                let body = self.cx.ir().function(*id);
+                if !body.is_class_body {
+                    continue;
+                }
+                let class = format!("{}.{}", self.key.module, body.qualname);
+                for base in self.cx.project.bases_of(&class) {
+                    if !self.cx.project.is_project_class(&base) {
+                        continue;
+                    }
+                    let span = captured
+                        .iter()
+                        .filter(|v| names_class(**v).as_ref() == Some(&base))
+                        .filter_map(|v| self.defs.get(v))
+                        .map(|def| def.span)
+                        .find(|at| inst.span.start <= at.start && at.end <= inst.span.end)
+                        .unwrap_or(inst.span);
+                    let loop_depth = self.loops_around(bb.id).iter().map(|l| l.depth).max();
+                    out.push(CallSite {
+                        is_base: true,
+                        ..self.handed_site(span, loop_depth.unwrap_or(0), Vec::new(), Some(base))
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// The site of a value handed on at `span`, inside `loop_depth` loops, calling `callees` or
+    /// constructing `constructs` when it is called.
+    fn handed_site(
+        &self,
+        span: Span,
+        loop_depth: u16,
+        callees: Vec<BoundCallee>,
+        constructs: Option<String>,
+    ) -> CallSite {
+        CallSite {
             caller: self.key.clone(),
             target: CallTarget::Project(callees),
             is_awaited: false,
             span,
-            loop_depth: self.f.block_loop_depth(bb),
+            loop_depth,
             recv_is_self: false,
             drives_coroutine_manually: false,
             constructs,
@@ -2321,13 +2388,14 @@ impl<'a> Extractor<'a> {
             dispatch: None,
             result_discarded: false,
             result_held: false,
+            is_base: false,
             queues: None,
             state_tests: None,
             under_lock: false,
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
-        })
+        }
     }
 
     /// Record `inst` when it reads an attribute of a module outside the project that an effect
@@ -4757,6 +4825,7 @@ impl<'a> Extractor<'a> {
                         result_discarded: false,
                         queues: None,
                         result_held: false,
+                        is_base: false,
                         state_tests: None,
                         under_lock: false,
                         complete: false,
@@ -5472,6 +5541,7 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             queues: None,
             result_held: false,
+            is_base: false,
             state_tests: if self.opt_in.locks {
                 self.state_tests().of_site(bb)
             } else {
@@ -6432,6 +6502,7 @@ fn role_site(
         result_discarded: false,
         queues: site.queues.clone(),
         result_held: false,
+        is_base: false,
         state_tests: site.state_tests.clone(),
         under_lock: site.under_lock,
         complete: false,

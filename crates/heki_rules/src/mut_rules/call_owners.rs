@@ -7,8 +7,8 @@
 //! facts.
 
 use super::{
-    Allowance, AllowanceKeys, FunctionMatcher, MergedReports, counts_references, delegated_reports,
-    project_classes, reports_unresolved,
+    Allowance, AllowanceKeys, FunctionMatcher, MergedReports, References, attribution,
+    counts_references, delegated_reports, project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, last_name, module_of,
@@ -574,10 +574,12 @@ pub(crate) fn site_callee(site: &CallSite) -> String {
     })
 }
 
-/// What a report says `site` does with its target: hands it on (a reference site), constructs
-/// it, or calls it.
+/// What a report says `site` does with its target: subclasses it (a base of a class
+/// statement), hands it on (another reference site), constructs it, or calls it.
 pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
-    if reference {
+    if site.is_base {
+        "subclasses"
+    } else if reference {
         "hands on"
     } else if site.constructs.is_some() {
         "constructs"
@@ -605,8 +607,8 @@ pub(super) struct CallOwnerRule<'r> {
     pub(super) note: Option<&'r str>,
     /// `unresolved = "report"`: calls heki cannot tie to a class are reported (`MUT207`).
     pub(super) report_unresolved: bool,
-    /// `references = "calls"`: a reference handing a target on counts as a call of it.
-    pub(super) counts_references: bool,
+    /// The references that count as calls of a target (`references`).
+    pub(super) references: References,
 }
 
 /// `MUT204`: calls of `call-owners` targets outside their allowed callers, reported like the
@@ -643,18 +645,19 @@ pub(crate) fn mut204(
                 forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
                 exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
             })?
-            .with_targets(guarded),
+            .with_targets(guarded)
+            .with_attribution(attribution(
+                rule.attribution.as_deref(),
+                "call-owners",
+                &rule.name,
+            )?),
             note: rule.message.as_deref(),
             report_unresolved: reports_unresolved(
                 rule.unresolved.as_deref(),
                 "call-owners",
                 &rule.name,
             )?,
-            counts_references: counts_references(
-                rule.references.as_deref(),
-                "call-owners",
-                &rule.name,
-            )?,
+            references: counts_references(rule.references.as_deref(), "call-owners", &rule.name)?,
         });
     }
     super::unresolved::mut207(cx, &rules, out);
@@ -662,7 +665,7 @@ pub(crate) fn mut204(
         return Ok(());
     }
     let sites = cx.sites_by_caller();
-    let references = if rules.iter().any(|r| r.counts_references) {
+    let references = if rules.iter().any(|r| r.references != References::Ignored) {
         cx.reference_sites_by_caller()
     } else {
         SitesByCaller::default()
@@ -678,7 +681,9 @@ pub(crate) fn mut204(
         let handed = references.get(key).into_iter().flatten().map(|s| (s, true));
         for (&(path, site), reference) in calls.chain(handed) {
             let called = contracts.called(site).into_iter();
-            for (c, groups) in called.filter(|(c, _)| !reference || rules[*c].counts_references) {
+            for (c, groups) in
+                called.filter(|(c, _)| !reference || rules[*c].references.counts(site))
+            {
                 let rule = &rules[c];
                 for group in groups {
                     let (target, called) = group_texts(&rule.targets, &group, Some(site));

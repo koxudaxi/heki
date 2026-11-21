@@ -53,7 +53,8 @@ count for a read.
     dotted name (`os.getenv`, `platform.*`); a dotted suffix, a leading glob, or a module part
     does not. With `references = "calls"`, a reached function handing a target on to be called
     later (passed, stored, returned, yielded, raised, or held by such a display) counts too, as
-    for `MUT204` ("`render` hands on `pkg.core.decide`");
+    for `MUT204` ("`render` hands on `pkg.core.decide`"), and with `"calls-and-bases"` a class
+    statement naming a class target among its bases ("`render` subclasses `pkg.core.Rule`");
   - `reads-environment`: reading the environment the program runs in: a call or a module
     attribute read the ecosystem catalog tags `environment` (`os.getenv`, `platform.system`,
     `importlib.util.find_spec`, `os.environ`, `sys.platform`, `sys.version_info`, ...), and,
@@ -132,7 +133,9 @@ Its premises:
   importing a module, open: the module is not established to be the project's. With
   `references = "calls"`, a target handed on is one for `calls`: the value is the target, and it
   reaches a use handing it on. Established; whether the code it is handed to calls it is not
-  part of the claim.
+  part of the claim. With `"calls-and-bases"`, so is a class statement whose declaration
+  resolves a base to a class target; whether the subclass is constructed is not part of the
+  claim.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -198,8 +201,9 @@ No automatic fix.
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
-  - `references`: `"ignore"` (default) or `"calls"`: whether a reference handing a
-    `call-targets` entry on counts for `calls`, as for `[[tool.heki.call-owners]]`.
+  - `references`: `"ignore"` (default), `"calls"`, or `"calls-and-bases"`: whether a reference
+    handing a `call-targets` entry on, and with `"calls-and-bases"` a class statement naming one
+    among its bases, counts for `calls`, as for `[[tool.heki.call-owners]]`.
   - `import-probes`: `"allow"` (default) or `"report"`: whether `reads-environment` also forbids
     import probes (needs `reads-environment`).
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are

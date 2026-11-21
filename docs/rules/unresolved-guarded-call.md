@@ -32,7 +32,10 @@ parameter that its function does not type, so the callers decide for such a rece
 reported unless every caller path binds to it an instance of a project class whose method of that
 name is no target: a class outside the target's family (`DataType` and its subclasses for
 `DataType.replace_reference`) whose MRO finds no method the target names either (for the target
-`reset`, any project class's `reset`; a `reset` inherited from a library base is none).
+`reset`, any project class's `reset`; a `reset` inherited from a library base is none). With
+`attribution = "lexical"`, a function that only runs inside allowed callers is not allowed, and a
+caller path through an allowed caller counts like any other: the call is the function's own, and
+its callers only tell the receiver's class.
 
 ## What a report states
 
@@ -45,7 +48,8 @@ Its premises:
 - **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
   heki's own resolution.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
-  inside allowed contexts. Established from the contract.
+  inside allowed contexts (with `attribution = "lexical"`: the function holding the access is not
+  allowed). Established from the contract.
 
 ## Why is this bad?
 `MUT204` reports a call only when every function it may call is a target, which needs the
@@ -84,5 +88,5 @@ No automatic fix.
 ## Options
 - `[[tool.heki.call-owners]]`:
   - `unresolved`: `"ignore"` (default) or `"report"`.
-  - `targets`, `allowed-callers`, `forbidden-callers`, `exempt-methods`, `message`: as for
-    `MUT204`.
+  - `targets`, `allowed-callers`, `forbidden-callers`, `exempt-methods`, `attribution`,
+    `message`: as for `MUT204`.

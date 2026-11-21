@@ -956,6 +956,8 @@ pub(crate) struct Allowance {
     /// Functions the contract guards (`call-owners` targets): they are part of the guarded
     /// operation, whose calls are checked where they are made, so they may use each other.
     targets: Option<std::sync::Arc<FunctionMatchers>>,
+    /// Which function these patterns are matched against for an access.
+    attribution: Attribution,
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
@@ -1084,6 +1086,7 @@ impl Allowance {
             exempt_patterns: Vec::new(),
             forbidden: patterns(keys.forbidden.0, keys.forbidden.1)?,
             targets: None,
+            attribution: Attribution::CallGraph,
         };
         for e in keys.exempt.0 {
             if e.contains(['.', ':']) || has_glob_syntax(e) {
@@ -1119,6 +1122,52 @@ impl Allowance {
             targets: Some(targets),
             ..self
         }
+    }
+
+    /// The same allowance, judging accesses as `attribution` says.
+    pub(crate) fn with_attribution(self, attribution: Attribution) -> Self {
+        Self {
+            attribution,
+            ..self
+        }
+    }
+
+    pub(crate) fn is_lexical(&self) -> bool {
+        self.attribution == Attribution::Lexical
+    }
+
+    /// The function an access made in `func` is judged in: `func`, or with `attribution =
+    /// "lexical"` the function whose code holds it. A lambda, comprehension, or generator
+    /// expression has no name a pattern could give, so its code belongs to the function it is
+    /// written in, and a class body's to the function running the class statement (the module
+    /// body at module level).
+    pub(crate) fn judged<'k>(
+        &self,
+        decls: &ProjectDecls,
+        func: &'k FuncKey,
+    ) -> std::borrow::Cow<'k, FuncKey> {
+        if !self.is_lexical() {
+            return std::borrow::Cow::Borrowed(func);
+        }
+        let mut qualname = func.qualname.as_str();
+        loop {
+            let (holder, last) = match qualname.rsplit_once('.') {
+                Some((holder, last)) => (Some(holder), last),
+                None => (None, qualname),
+            };
+            let synthetic = last.starts_with('<') && qualname != "<module>";
+            if !synthetic && !decls.is_project_class(&format!("{}.{qualname}", func.module)) {
+                break;
+            }
+            qualname = holder.map_or("<module>", |h| h.strip_suffix(".<locals>").unwrap_or(h));
+        }
+        if qualname == func.qualname {
+            return std::borrow::Cow::Borrowed(func);
+        }
+        std::borrow::Cow::Owned(FuncKey {
+            module: func.module.clone(),
+            qualname: qualname.to_owned(),
+        })
     }
 
     /// Whether the contract has `forbidden-*` patterns.
@@ -1777,22 +1826,86 @@ pub(crate) fn allows_fresh(
 }
 
 /// `references` values; the first is the default (a reference handing a target on is no call).
-const REFERENCES: &[&str] = &["ignore", "calls"];
+const REFERENCES: &[&str] = &["ignore", "calls", "calls-and-bases"];
 
-/// Whether a call contract counts a reference handing a target on as a call (`references`).
+/// What a call contract counts as a call of a target besides calling it (`references`), each
+/// value counting more than the one before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum References {
+    /// Nothing.
+    Ignored,
+    /// A reference handing it on.
+    Calls,
+    /// A reference handing it on, or a class statement naming it among its bases.
+    CallsAndBases,
+}
+
+impl References {
+    /// Whether the reference site `site` counts as a call.
+    pub(crate) fn counts(self, site: &CallSite) -> bool {
+        match self {
+            Self::Ignored => false,
+            Self::Calls => !site.is_base,
+            Self::CallsAndBases => true,
+        }
+    }
+}
+
+/// What a call contract counts as a call besides the calls themselves (`references`).
 pub(crate) fn counts_references(
     value: Option<&str>,
     section: &'static str,
     contract: &str,
-) -> Result<bool, RuleConfigError> {
-    Ok(mode(
+) -> Result<References, RuleConfigError> {
+    let value = mode(
         value,
         REFERENCES,
-        "`ignore` or `calls`",
+        "`ignore`, `calls`, or `calls-and-bases`",
         section,
         contract,
         "references",
-    )? == "calls")
+    )?;
+    Ok(match value {
+        "calls" => References::Calls,
+        "calls-and-bases" => References::CallsAndBases,
+        _ => References::Ignored,
+    })
+}
+
+/// `attribution` values; the first is the default (the call graph decides which function an
+/// access is judged in).
+const ATTRIBUTION: &[&str] = &["call-graph", "lexical"];
+
+/// Which function an owner contract judges an access in (`attribution`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Attribution {
+    /// A private helper hands its accesses to its callers, and a function that only runs inside
+    /// allowed functions is allowed.
+    #[default]
+    CallGraph,
+    /// The function whose code holds the access ([`Allowance::judged`]).
+    Lexical,
+}
+
+/// The `attribution` of an owner contract.
+pub(crate) fn attribution(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<Attribution, RuleConfigError> {
+    let value = mode(
+        value,
+        ATTRIBUTION,
+        "`call-graph` or `lexical`",
+        section,
+        contract,
+        "attribution",
+    )?;
+    Ok(if value == "lexical" {
+        Attribution::Lexical
+    } else {
+        Attribution::CallGraph
+    })
 }
 
 /// Whether an effect boundary's `reads-environment` forbids import probes (`import-probes`).
@@ -1877,7 +1990,12 @@ pub(crate) fn mut201(
             allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
             forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
             exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
-        })?;
+        })?
+        .with_attribution(attribution(
+            rule.attribution.as_deref(),
+            "write-owners",
+            &rule.name,
+        )?);
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
             let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;
@@ -1928,8 +2046,19 @@ pub(crate) fn mut201(
                     if rule.allow_fresh && site.construction == Construction::Yes {
                         continue;
                     }
+                    let lexical = rule.allowance.is_lexical();
+                    // A write a callee hands up is that callee's own, except the change of a
+                    // typed object handed to a helper that never sees its class.
+                    let own = site.via_chain.is_empty()
+                        || site.kind == WriteKind::IndirectHelper && site.via_chain.len() == 1;
+                    if lexical && !own {
+                        continue;
+                    }
+                    let judged = rule.allowance.judged(cx.decls, key);
+                    // The parameters of a scope a function holds are none of the function's.
+                    let obj_params = if *judged == *key { site.obj_params } else { 0 };
                     for (_, t) in write_hits(&rule.targets, site) {
-                        let mut chain: Vec<FuncKey> = vec![key.clone()];
+                        let mut chain: Vec<FuncKey> = vec![judged.clone().into_owned()];
                         chain.extend(
                             site.via_chain
                                 .iter()
@@ -1956,12 +2085,13 @@ pub(crate) fn mut201(
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let kept_below = chain[1..=origin].iter().any(|k| {
-                            is_private(&k.qualname) && !delegates(cx, sites, k, Handover::Every)
-                        });
-                        if kept_below
-                            || delegates(cx, sites, key, Handover::Every)
-                            || initializes_itself(cx, key, &t.classes, site.obj_params)
+                        let kept_below = || {
+                            chain[1..=origin].iter().any(|k| {
+                                is_private(&k.qualname) && !delegates(cx, sites, k, Handover::Every)
+                            })
+                        };
+                        if !lexical && (kept_below() || delegates(cx, sites, key, Handover::Every))
+                            || initializes_itself(cx, &judged, &t.classes, obj_params)
                         {
                             continue;
                         }
@@ -1976,14 +2106,16 @@ pub(crate) fn mut201(
                         }
                         // A function that only runs inside the owner's operations (every caller
                         // path starts in an allowed context) writes inside them.
-                        if runs_inside_allowed(
-                            cx,
-                            sites,
-                            &rule.allowance,
-                            &t.classes,
-                            key,
-                            site.obj_params,
-                        ) {
+                        if !lexical
+                            && runs_inside_allowed(
+                                cx,
+                                sites,
+                                &rule.allowance,
+                                &t.classes,
+                                key,
+                                site.obj_params,
+                            )
+                        {
                             continue;
                         }
                         let span = site.via_chain.first().map_or(site.span, |h| h.span);
@@ -2002,7 +2134,7 @@ pub(crate) fn mut201(
                         });
                         reports.add(
                             unit,
-                            key,
+                            &judged,
                             span,
                             (&t.text, &named),
                             (writer, site.span),
@@ -2015,7 +2147,7 @@ pub(crate) fn mut201(
                                     .unwrap_or_default();
                                 format!(
                                     "`{}` writes `{named}` ({}){via} {}",
-                                    key.qualname,
+                                    judged.qualname,
                                     site.kind.as_str(),
                                     rule.allowance.where_text(
                                         "write owners",
@@ -3308,7 +3440,12 @@ pub(crate) fn mut203(
                 allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
                 forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
                 exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
-            })?,
+            })?
+            .with_attribution(attribution(
+                rule.attribution.as_deref(),
+                "read-owners",
+                &rule.name,
+            )?),
             note: rule.message.as_deref(),
             report_unresolved: reports_unresolved(
                 rule.unresolved.as_deref(),
@@ -3412,6 +3549,7 @@ struct WalkState {
 /// initializer accessing its own instance and a function that only runs inside allowed
 /// contexts (MUT201's rules) are not reported. With `forbidden-*`, a report needs a forbidden
 /// function running the access between the reporting function and the access (both included).
+/// With `attribution = "lexical"`, the access is judged in the function holding it alone.
 pub(crate) fn delegated_reports(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
@@ -3421,6 +3559,22 @@ pub(crate) fn delegated_reports(
     obj: u64,
     span: Span,
 ) -> Vec<DelegatedReport> {
+    if allowance.is_lexical() {
+        let judged = allowance.judged(cx.decls, func);
+        // The parameters of a scope a function holds are none of the function's.
+        let obj = if *judged == *func { obj } else { 0 };
+        if allowance.allows(&judged)
+            || !allowance.in_scope(&judged)
+            || initializes_itself(cx, &judged, family, obj)
+        {
+            return Vec::new();
+        }
+        return vec![DelegatedReport {
+            func: judged.into_owned(),
+            span,
+            chain: Vec::new(),
+        }];
+    }
     if allowance.allows(func) {
         return Vec::new();
     }

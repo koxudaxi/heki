@@ -1608,6 +1608,11 @@ pub struct CallSite {
     /// suspended (`MUT113`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_held: bool,
+    /// A reference site that is a base of a class statement (`class Derived(Base)`): the class
+    /// it makes holds the base, and constructing that class runs the base's initialization
+    /// unless it overrides it ([`Contracts::reference_bases`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_base: bool,
     /// The tests of state on every path to the call (`EFF109`: a lock its callees take behind
     /// a test of state the holder changes is not reported; only computed while the rule runs,
     /// `None` when there is none).

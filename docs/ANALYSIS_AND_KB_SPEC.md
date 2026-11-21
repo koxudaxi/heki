@@ -524,9 +524,12 @@ callable a library API runs at the call (`CallSite::handed_callable`, also throu
 of `super`, of the typing forms `cast`, `TypeVar`, and `NewType`, and of `contextlib.suppress`; a
 receiver, an operand, a subscript, a dict key, a closure's captures (defaults and eagerly
 evaluated annotations are not told apart, nor a class's bases and keywords), and a module
-binding a name to the value itself (an import, a module alias). The class bodies a module runs
-add their references to the module body's (their other facts are not the module's). Like
-`call_sites`, they are local facts: the language server compares a function's references with
+binding a name to the value itself (an import, a module alias). With `references =
+"calls-and-bases"` (`Contracts::reference_bases`), the bases of a class statement are reference
+sites too (`CallSite::is_base`): one per base its declaration resolves to a project class,
+constructing that class, at the captured value naming it when the statement loads it there,
+else at the class statement. The class bodies a module runs add their references to the module
+body's (their other facts are not the module's). Like `call_sites`, they are local facts: the language server compares a function's references with
 its call sites (`Workspace::caller_view`) and shows them in call chains.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at

@@ -39,7 +39,9 @@ initialization (`setattr(self, name, v)` in `__init__`), functions that only run
 writers, `forbidden-writers`, and, with `fresh-objects = "allow"`, writes that construct the object
 they write. A parameter that every caller path binds to an object of a project class is not
 reported: `MUT201` reports the write at those callers. A computed name written on an object of
-unknown class is not reported (neither the class nor the attribute is known).
+unknown class is not reported (neither the class nor the attribute is known). With
+`attribution = "lexical"`, a function that only runs inside allowed writers is not allowed, and a
+caller path through an allowed writer counts like any other.
 
 ## What a report states
 
@@ -53,7 +55,8 @@ Its premises:
 - **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
   heki's own resolution.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
-  inside allowed contexts. Established from the contract.
+  inside allowed contexts (with `attribution = "lexical"`: the function holding the access is not
+  allowed). Established from the contract.
 
 ## Why is this bad?
 `MUT201` reports what it can back with a class: a write through an object it cannot type is not
@@ -97,4 +100,4 @@ No automatic fix.
 - `[[tool.heki.write-owners]]`:
   - `unresolved`: `"ignore"` (default) or `"report"`.
   - `targets`, `allowed-writers`, `forbidden-writers`, `exempt-methods`, `fresh-objects`,
-    `message`: as for `MUT201`.
+    `attribution`, `message`: as for `MUT201`.

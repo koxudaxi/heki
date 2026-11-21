@@ -126,6 +126,10 @@ pub struct WriteOwnerRule {
     /// object of unknown class, and computed attribute names written on a target class;
     /// `"ignore"` (default) does not.
     pub unresolved: Option<String>,
+    /// `"lexical"`: a write is judged in the function that holds it; `"call-graph"` (default):
+    /// a private helper hands its writes to its callers, and a function that only runs inside
+    /// allowed writers is allowed.
+    pub attribution: Option<String>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -144,6 +148,8 @@ pub struct ReadOwnerRule {
     /// `"report"`: also report (`MUT206`) reads of an attribute named like a target on an
     /// object of unknown class; `"ignore"` (default) does not.
     pub unresolved: Option<String>,
+    /// `"lexical"` or `"call-graph"` (default), as for `WriteOwnerRule`.
+    pub attribution: Option<String>,
 }
 
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
@@ -171,8 +177,11 @@ pub struct CallOwnerRule {
     pub subclasses: Option<bool>,
     /// `"calls"`: a reference to a target that hands it on to be called later (`[decide]`,
     /// `return decide`, `partial(decide)`, `field(default_factory=Rule)`) counts as a call of
-    /// it; `"ignore"` (default) does not.
+    /// it; `"calls-and-bases"` also a class statement naming a class target among its bases;
+    /// `"ignore"` (default) neither.
     pub references: Option<String>,
+    /// `"lexical"` or `"call-graph"` (default), as for `WriteOwnerRule`.
+    pub attribution: Option<String>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -206,8 +215,8 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
     /// the object they write count as writes of the boundary.
     pub fresh_objects: Option<String>,
-    /// `"calls"` or `"ignore"` (default), as for `call-owners`: whether a reference handing a
-    /// `call-targets` entry on counts as a call of it for `calls`.
+    /// `"calls"`, `"calls-and-bases"`, or `"ignore"` (default), as for `call-owners`: whether a
+    /// reference handing a `call-targets` entry on counts as a call of it for `calls`.
     pub references: Option<String>,
     /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
     /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
@@ -717,6 +726,7 @@ exempt-methods = ["__deepcopy__"]
 message = "use Store.set_fields() instead"
 fresh-objects = "report"
 unresolved = "report"
+attribution = "lexical"
 
 [[tool.heki.read-owners]]
 name = "reference-children"
@@ -726,6 +736,7 @@ forbidden-readers = ["pkg.parser.*"]
 exempt-methods = ["__deepcopy__"]
 message = "read children through GenerationIndex instead"
 unresolved = "report"
+attribution = "call-graph"
 
 [[tool.heki.call-owners]]
 name = "reference-mutators"
@@ -736,7 +747,8 @@ exempt-methods = ["__deepcopy__"]
 message = "use a GenerationStore operation instead"
 unresolved = "ignore"
 subclasses = false
-references = "calls"
+references = "calls-and-bases"
+attribution = "lexical"
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
@@ -774,6 +786,7 @@ import-probes = "report"
         assert_eq!(cfg.write_owners[0].forbidden_writers, ["pkg.render.*"]);
         assert_eq!(cfg.write_owners[0].fresh_objects.as_deref(), Some("report"));
         assert_eq!(cfg.write_owners[0].unresolved.as_deref(), Some("report"));
+        assert_eq!(cfg.write_owners[0].attribution.as_deref(), Some("lexical"));
         assert_eq!(
             cfg.write_owners[0].message.as_deref(),
             Some("use Store.set_fields() instead")
@@ -788,6 +801,7 @@ import-probes = "report"
                 exempt_methods: vec!["__deepcopy__".into()],
                 message: Some("read children through GenerationIndex instead".into()),
                 unresolved: Some("report".into()),
+                attribution: Some("call-graph".into()),
             }
         );
         assert_eq!(
@@ -801,7 +815,8 @@ import-probes = "report"
                 message: Some("use a GenerationStore operation instead".into()),
                 unresolved: Some("ignore".into()),
                 subclasses: Some(false),
-                references: Some("calls".into()),
+                references: Some("calls-and-bases".into()),
+                attribution: Some("lexical".into()),
             }
         );
         assert_eq!(

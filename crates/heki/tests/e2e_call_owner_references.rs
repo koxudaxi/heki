@@ -2,7 +2,9 @@
 //! end through the real binary: a reference handing a target on to be called later (passed,
 //! stored, returned, yielded, raised, held by a display) counts as a call of it, while a use that
 //! only names a class (`isinstance`, `except`, a base class, `cast`, a typing subscript, an
-//! annotation, a comparison) does not. Without the key only calls are reported.
+//! annotation, a comparison) does not. Without the key only calls are reported. With
+//! `references = "calls-and-bases"`, a class statement naming a class target among its bases
+//! counts too.
 
 mod common;
 
@@ -313,6 +315,151 @@ fn references_handing_a_target_on_count_as_calls_only_with_the_key() {
         reports(&project("references_counted", "references = \"calls\"\n")),
         with
     );
+
+    // The bases of the class statements count too: `Rule` is a name an import binds, read
+    // without a load of its own, so each is reported at its class statement.
+    let subclasses = |line: u64| {
+        (
+            line,
+            1,
+            "`<module>` subclasses `pkg.core.Rule` outside the call owners of `home`".to_owned(),
+        )
+    };
+    with.extend([subclasses(23), subclasses(126), subclasses(131)]);
+    with.sort();
+    assert_eq!(
+        reports(&project(
+            "references_counted_with_bases",
+            "references = \"calls-and-bases\"\n"
+        )),
+        with
+    );
+}
+
+const BASES: &str = r#"from dataclasses import dataclass
+
+import pkg.core as core
+from pkg.core import Rule, Strict
+
+
+class Plain(Rule):
+    pass
+
+
+@dataclass
+class Dotted(core.Rule):
+    pass
+
+
+class Parametrized(Rule[int]):  # type: ignore[misc]
+    pass
+
+
+class FromSubclass(Strict):
+    pass
+
+
+class WithMetaclass(metaclass=Rule):  # type: ignore[misc]
+    pass
+
+
+class Outer:
+    class Nested(Rule):
+        pass
+
+
+def factory() -> type:
+    class Local(Rule):
+        class Inner(core.Rule):
+            pass
+
+    return Local
+
+
+def _private_factory() -> None:
+    class Hidden(Rule):
+        pass
+
+
+def calls_the_private_factory() -> None:
+    _private_factory()
+
+
+def tagged() -> type:
+    tag = "local"
+
+    class Tagged(Rule):
+        name = tag
+
+    return Tagged
+
+
+import enum
+
+
+class Color(enum.Enum):
+    RED = 1
+"#;
+
+/// `(line, column, message)` of the `MUT204` reports of [`BASES`] with `subclasses` (a line of
+/// the contract, or nothing).
+fn base_reports(subclasses: &str) -> Vec<(u64, u64, String)> {
+    let p = Project::new(&format!("references_bases_{}", subclasses.len()));
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"pkg.core.Rule\"]\nallowed-callers = [\"pkg.core.*\"]\nreferences = \"calls-and-bases\"\n{subclasses}"
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/core.py",
+        &format!("{CORE}\n\nclass Strict(Rule):\n    pass\n"),
+    )
+    .write("pkg/bases.py", BASES);
+    reports(&p)
+}
+
+#[test]
+fn a_class_base_naming_a_target_counts_with_calls_and_bases() {
+    let at = |line: u64, column: u64, func: &str| {
+        (
+            line,
+            column,
+            format!("`{func}` subclasses `pkg.core.Rule` outside the call owners of `home`"),
+        )
+    };
+    let via = |line: u64, column: u64| {
+        (
+            line,
+            column,
+            "`calls_the_private_factory` subclasses `pkg.core.Rule` via `pkg.bases._private_factory` outside the call owners of `home`"
+                .to_owned(),
+        )
+    };
+    // At the base where the statement loads it (`core.Rule`, `Rule[int]`, a base read in a class
+    // body or a function), else at the class statement. A keyword is no base, a nested class is
+    // reported for the function running the outer class statement, and a private helper's base
+    // at its caller, as every reference. A class capturing a local of its function names its
+    // base after the capture, and a base outside the project names no target.
+    let named = [
+        at(7, 1, "<module>"),
+        at(12, 14, "<module>"),
+        at(16, 20, "<module>"),
+        at(29, 18, "<module>"),
+        at(34, 17, "factory"),
+        at(35, 21, "factory"),
+        via(47, 5),
+        at(53, 18, "tagged"),
+    ];
+    let mut covered = named.to_vec();
+    // By default a class target covers its subclasses, also as a base.
+    covered.push(at(20, 1, "<module>"));
+    covered.sort();
+    assert_eq!(base_reports(""), covered);
+    let mut exact = named.to_vec();
+    exact.sort();
+    assert_eq!(base_reports("subclasses = false\n"), exact);
 }
 
 #[test]
@@ -344,6 +491,40 @@ fn an_effect_boundary_counts_references_for_calls_only_with_the_key() {
     assert!(
         stdout.contains(
             "pkg/pure.py:5:12: EFF201 [heuristic] `render` hands on `pkg.core.decide` (via `pkg.pure_ops.helper`), which effect boundary `pure` forbids"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn an_effect_boundary_counts_class_bases_with_calls_and_bases() {
+    let boundary = |references: &str| {
+        let p = Project::new(&format!("references_boundary_bases_{}", references.len()));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"pkg.pure\"]\nforbid = [\"calls\"]\ncall-targets = [\"pkg.core.Rule\"]\n{references}"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/core.py", CORE)
+        .write(
+            "pkg/pure_ops.py",
+            "from pkg.core import Rule\n\n\ndef helper() -> None:\n    class Local(Rule):\n        pass\n",
+        )
+        .write(
+            "pkg/pure.py",
+            "from pkg.pure_ops import helper\n\n\ndef render() -> None:\n    helper()\n",
+        );
+        p.check(&["--output-format", "concise"])
+    };
+    let (code, stdout, stderr) = boundary("references = \"calls\"\n");
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let (code, stdout, stderr) = boundary("references = \"calls-and-bases\"\n");
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "pkg/pure.py:5:5: EFF201 [heuristic] `render` subclasses `pkg.core.Rule` (via `pkg.pure_ops.helper`), which effect boundary `pure` forbids"
         ),
         "{stdout}"
     );
