@@ -263,8 +263,8 @@ pub(crate) struct FunctionMatchers {
     matchers: Vec<FunctionMatcher>,
     /// The whole texts without a module part, by their names.
     names: PartIndex,
-    /// The texts with a module part, by their modules.
-    modules: PartIndex,
+    /// The texts with a module part, by their modules and qualnames.
+    modules: ModuleIndex,
     /// The classes of each `Class.method` matcher's class family, and the matchers of each.
     methods: FxHashMap<String, Vec<usize>>,
 }
@@ -317,6 +317,76 @@ impl PartIndex {
     }
 }
 
+/// The texts with a module part: by module part (each literal one, and each glob once), then by
+/// qualname part, so that a function's module and qualname find them however many texts share a
+/// module.
+#[derive(Debug)]
+struct ModuleIndex {
+    literal: FxHashMap<String, PartIndex>,
+    globs: GlobSet,
+    /// The qualname parts of the texts under each glob of `globs`.
+    glob_parts: Vec<PartIndex>,
+}
+
+impl ModuleIndex {
+    /// Index the `(matcher, module part, qualname part)` of each text.
+    fn new<'p>(
+        parts: impl Iterator<Item = (usize, &'p NamePart, &'p NamePart)>,
+        context: &'static str,
+    ) -> Result<Self, RuleConfigError> {
+        let mut literal: FxHashMap<&str, Vec<(usize, &NamePart)>> = FxHashMap::default();
+        let mut globbed: Vec<(&globset::Glob, Vec<(usize, &NamePart)>)> = Vec::new();
+        let mut glob_at: FxHashMap<&str, usize> = FxHashMap::default();
+        for (i, module, qualname) in parts {
+            match module.glob() {
+                Some(glob) => {
+                    let at = *glob_at.entry(module.text()).or_insert_with(|| {
+                        globbed.push((glob, Vec::new()));
+                        globbed.len() - 1
+                    });
+                    globbed[at].1.push((i, qualname));
+                }
+                None => literal
+                    .entry(module.text())
+                    .or_default()
+                    .push((i, qualname)),
+            }
+        }
+        let mut globs = GlobSetBuilder::new();
+        let mut glob_parts = Vec::new();
+        for (glob, qualnames) in globbed {
+            globs.add(glob.clone());
+            glob_parts.push(PartIndex::new(qualnames.into_iter(), context)?);
+        }
+        let literal = literal
+            .into_iter()
+            .map(|(module, qualnames)| {
+                Ok((
+                    module.to_owned(),
+                    PartIndex::new(qualnames.into_iter(), context)?,
+                ))
+            })
+            .collect::<Result<_, RuleConfigError>>()?;
+        let globs = globs.build();
+        Ok(Self {
+            literal,
+            globs: globs.map_err(|cause| RuleConfigError::GlobSet { context, cause })?,
+            glob_parts,
+        })
+    }
+
+    /// Add to `out` the matchers whose module part names `module` and whose qualname part is
+    /// `qualname` or a glob matching it.
+    fn find(&self, module: &str, qualname: &str, out: &mut Vec<usize>) {
+        if let Some(parts) = self.literal.get(module) {
+            parts.find(qualname, out);
+        }
+        for g in self.globs.matches(module) {
+            self.glob_parts[g].find(qualname, out);
+        }
+    }
+}
+
 impl FunctionMatchers {
     pub(crate) fn new(
         matchers: Vec<FunctionMatcher>,
@@ -326,7 +396,7 @@ impl FunctionMatchers {
         let names = wholes()
             .filter(|(_, w)| w.module().is_none())
             .map(|(i, w)| (i, w.name()));
-        let modules = wholes().filter_map(|(i, w)| Some((i, w.module()?)));
+        let modules = wholes().filter_map(|(i, w)| Some((i, w.module()?, w.name())));
         let mut methods: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         for (i, m) in matchers.iter().enumerate() {
             for class in m.method_family().into_iter().flatten() {
@@ -335,7 +405,7 @@ impl FunctionMatchers {
         }
         Ok(Self {
             names: PartIndex::new(names, context)?,
-            modules: PartIndex::new(modules, context)?,
+            modules: ModuleIndex::new(modules, context)?,
             matchers,
             methods,
         })
@@ -356,7 +426,7 @@ impl FunctionMatchers {
         let mut found = Vec::new();
         self.naming(&key.fqn(), &mut found);
         self.naming(&key.qualname, &mut found);
-        self.modules.find(&key.module, &mut found);
+        self.modules.find(&key.module, &key.qualname, &mut found);
         if let Some((owner, _)) = key.qualname.rsplit_once('.') {
             let class = format!("{}.{owner}", key.module);
             found.extend(self.methods.get(&class).into_iter().flatten());
@@ -378,7 +448,7 @@ impl FunctionMatchers {
         let mut found = Vec::new();
         self.naming(&class.fqn, &mut found);
         if let Some(module) = module_of(&class.fqn, qualname) {
-            self.modules.find(module, &mut found);
+            self.modules.find(module, qualname, &mut found);
         }
         found.sort_unstable();
         found.dedup();
