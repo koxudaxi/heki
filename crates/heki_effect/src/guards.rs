@@ -2,12 +2,15 @@
 //! effect not happen although the code reaching it runs.
 //!
 //! - **Input guards**: tests of the function's own inputs that dominate an effect, `if cache:`,
-//!   `if x is None:`, `isinstance(x, T)` (also inside `and` / `or` / `not`, early returns, and
-//!   conditional expressions), on a parameter or on an attribute of one that the function never
-//!   assigns. A call whose argument decides such a test against the effect (a constant, the
-//!   literal default of an omitted parameter, a test the caller has already made on the same
-//!   input) does not reach the effect; an undecided test on a caller input becomes the
-//!   caller's guard.
+//!   `if x is None:`, `isinstance(x, T)`, `hasattr(x, "write")` (also inside `and` / `or` /
+//!   `not`, early returns, and conditional expressions), on a parameter or on an attribute of
+//!   one that the function never assigns. A test of a value a phi merges (`buf = StringIO()`
+//!   when `buf is None`, then `isinstance(buf, str)`) is read along each edge into the phi:
+//!   the value that edge brings decides it, or is an input whose test it is, and the edge's
+//!   own facts come with it. A call whose argument decides such a test against the effect (a
+//!   constant, a value whose exact class the caller knows, the literal default of an omitted
+//!   parameter, a test the caller has already made on the same input) does not reach the
+//!   effect; an undecided test on a caller input becomes the caller's guard.
 //! - **Lazy initialization**: an effect inside the branch that only an unset attribute leads to
 //!   (`if not self._sock:`, `if self._sock: return`), when every way out of the branch sets the
 //!   attribute, runs at most once per object. `EffectGuards::once_per` records where the objects
@@ -119,15 +122,94 @@ impl ConstArg {
     /// The outcome of `test` on this value, when the value decides it.
     fn decide(&self, test: &GuardTest) -> Option<bool> {
         match test {
-            GuardTest::Truthy => self.truthy,
-            GuardTest::IsNone => Some(self.class == ConstClass::None),
-            GuardTest::IsInstance(classes) => self.class.is_instance(classes),
+            GuardTest::Truthy => self.truthy.or_else(|| self.class.decide(test)),
+            _ => self.class.decide(test),
         }
     }
 }
 
+/// Classes besides the builtin types whose relation to every [`ConstClass`] is fixed: an
+/// instance of one of those is an instance of one of these exactly when its MRO names it.
+/// `os.PathLike` is implemented by none of them, and the `io` ABCs register only the `io`
+/// implementations.
+const DECIDED_CLASSES: &[&str] = &[
+    "io.BufferedIOBase",
+    "io.BufferedRWPair",
+    "io.BufferedRandom",
+    "io.BufferedReader",
+    "io.BufferedWriter",
+    "io.BytesIO",
+    "io.FileIO",
+    "io.IOBase",
+    "io.RawIOBase",
+    "io.StringIO",
+    "io.TextIOBase",
+    "io.TextIOWrapper",
+    "os.PathLike",
+];
+
+/// The attributes of the file protocol, for which `hasattr` on a value of a [`ConstClass`] is
+/// decided: the buffers have every one but `__fspath__`, the builtin values none but
+/// `__iter__` of the strings and containers, in every Python version.
+const FILE_PROTOCOL: &[&str] = &[
+    "__enter__",
+    "__exit__",
+    "__fspath__",
+    "__iter__",
+    "__next__",
+    "close",
+    "fileno",
+    "flush",
+    "getvalue",
+    "isatty",
+    "read",
+    "readable",
+    "readline",
+    "readlines",
+    "seek",
+    "seekable",
+    "tell",
+    "truncate",
+    "writable",
+    "write",
+    "writelines",
+];
+
 impl ConstClass {
-    /// The builtin classes an instance of this class is an instance of.
+    /// The class of a display or comprehension of `kind` (an f-string, `Str`, has none: a single
+    /// replacement field is the result of `__format__`, which may be a `str` subclass).
+    fn of_builtin(kind: BuiltinKind) -> Option<Self> {
+        match kind {
+            BuiltinKind::List => Some(Self::List),
+            BuiltinKind::Tuple => Some(Self::Tuple),
+            BuiltinKind::Set => Some(Self::Set),
+            BuiltinKind::Dict => Some(Self::Dict),
+            _ => None,
+        }
+    }
+
+    /// The buffer class a call of `module.name` constructs.
+    fn of_buffer(module: &str, name: &str) -> Option<Self> {
+        match (module, name) {
+            ("io" | "_io", "StringIO") => Some(Self::StringIo),
+            ("io" | "_io", "BytesIO") => Some(Self::BytesIo),
+            _ => None,
+        }
+    }
+
+    /// The outcome of `test` on every value of this class: truthiness only for the buffers,
+    /// which define neither `__bool__` nor `__len__`.
+    fn decide(self, test: &GuardTest) -> Option<bool> {
+        match test {
+            GuardTest::Truthy => matches!(self, Self::StringIo | Self::BytesIo).then_some(true),
+            GuardTest::IsNone => Some(self == Self::None),
+            GuardTest::IsInstance(classes) => self.is_instance(classes),
+            GuardTest::HasAttr(name) => self.has_attr(name),
+        }
+    }
+
+    /// The classes an instance of this class is an instance of, among the builtin types and
+    /// [`DECIDED_CLASSES`].
     fn mro(self) -> &'static [&'static str] {
         match self {
             Self::None => &["builtins.NoneType", "builtins.object"],
@@ -140,13 +222,24 @@ impl ConstClass {
             Self::Tuple => &["builtins.tuple", "builtins.object"],
             Self::Set => &["builtins.set", "builtins.object"],
             Self::Dict => &["builtins.dict", "builtins.object"],
+            Self::StringIo => &[
+                "io.StringIO",
+                "io.TextIOBase",
+                "io.IOBase",
+                "builtins.object",
+            ],
+            Self::BytesIo => &[
+                "io.BytesIO",
+                "io.BufferedIOBase",
+                "io.IOBase",
+                "builtins.object",
+            ],
             Self::Other => &[],
         }
     }
 
-    /// `isinstance(value, classes)`: true when a class is in the value's builtin MRO, false
-    /// when every class is a builtin type outside it (or `os.PathLike`, which no builtin
-    /// implements); otherwise unknown.
+    /// `isinstance(value, classes)`: true when a class is in the value's MRO, false when every
+    /// class is a builtin type or one of [`DECIDED_CLASSES`] outside it; otherwise unknown.
     fn is_instance(self, classes: &[String]) -> Option<bool> {
         let mro = self.mro();
         if mro.is_empty() {
@@ -158,11 +251,28 @@ impl ConstClass {
         classes
             .iter()
             .all(|c| {
-                c == "os.PathLike"
+                DECIDED_CLASSES.contains(&c.as_str())
                     || c.strip_prefix("builtins.")
                         .is_some_and(|b| BuiltinKind::from_name(b).is_some())
             })
             .then_some(false)
+    }
+
+    /// `hasattr(value, name)` for a [`FILE_PROTOCOL`] name. A buffer can gain attributes of its
+    /// own (it has a `__dict__`), so only the ones its class has are decided; a builtin value
+    /// has only its class's.
+    fn has_attr(self, name: &str) -> Option<bool> {
+        if !FILE_PROTOCOL.contains(&name) {
+            return None;
+        }
+        match self {
+            Self::StringIo | Self::BytesIo => (name != "__fspath__").then_some(true),
+            Self::Str | Self::Bytes | Self::List | Self::Tuple | Self::Set | Self::Dict => {
+                Some(name == "__iter__")
+            }
+            Self::None | Self::Bool | Self::Int | Self::Float => Some(false),
+            Self::Other => None,
+        }
     }
 }
 
@@ -508,10 +618,10 @@ const MAX_REGION_CELLS: usize = 250_000;
 
 /// The cells left of a function's budget ([`REGION_CELLS_PER_SOURCE_BYTE`]); `None` once a
 /// walk needed more.
-struct Cells(Option<usize>);
+pub(crate) struct Cells(Option<usize>);
 
 impl Cells {
-    fn of(f: &IrFunction) -> Self {
+    pub(crate) fn of(f: &IrFunction) -> Self {
         let source_bytes = f.span.end.saturating_sub(f.span.start) as usize;
         Self(Some(
             (source_bytes * REGION_CELLS_PER_SOURCE_BYTE).clamp(MIN_REGION_CELLS, MAX_REGION_CELLS),
@@ -519,12 +629,12 @@ impl Cells {
     }
 
     /// Take `n` cells; `false` once the budget is spent.
-    fn take(&mut self, n: usize) -> bool {
+    pub(crate) fn take(&mut self, n: usize) -> bool {
         self.0 = self.0.and_then(|left| left.checked_sub(n));
         self.0.is_some()
     }
 
-    fn spent(&self) -> bool {
+    pub(crate) fn spent(&self) -> bool {
         self.0.is_none()
     }
 }
@@ -599,6 +709,7 @@ pub(crate) struct GuardInputs<'f, 'a> {
 pub(crate) struct LocalGuards {
     facts: OnceCell<LocalFacts>,
     regions: OnceCell<Vec<LazyRegion>>,
+    classes: OnceCell<Classes>,
     /// The blocks of each loop (by header) from which a path comes back to the header without
     /// leaving the loop, along normal and exception edges.
     repeating: OnceCell<FxHashMap<BlockId, FxHashSet<BlockId>>>,
@@ -619,12 +730,17 @@ struct LocalFacts {
 }
 
 impl LocalGuards {
+    fn classes(&self, cx: &GuardInputs<'_, '_>) -> &Classes {
+        self.classes.get_or_init(|| known_classes(cx))
+    }
+
     fn regions(&self, cx: &GuardInputs<'_, '_>) -> &[LazyRegion] {
         self.regions.get_or_init(|| {
             let mut cells = Cells::of(cx.f);
+            let classes = self.classes(cx);
             let mut regions = attr_regions(cx, &mut cells);
-            regions.extend(global_regions(cx, &mut cells));
-            regions.extend(local_regions(cx, &mut cells));
+            regions.extend(global_regions(cx, classes, &mut cells));
+            regions.extend(local_regions(cx, classes, &mut cells));
             // Which ones would fit depends on the order of the blocks: none is kept.
             if cells.spent() {
                 regions.clear();
@@ -660,7 +776,7 @@ impl LocalGuards {
 
     /// The input guards at the entry of `bb`; they hold throughout it, as no fact is killed.
     pub(crate) fn facts_at(&self, cx: &GuardInputs<'_, '_>, bb: BlockId) -> Vec<InputGuard> {
-        let facts = self.facts.get_or_init(|| Facts::run(cx));
+        let facts = self.facts.get_or_init(|| Facts::run(cx, self.classes(cx)));
         let Some(entry) = facts.entry.get(bb.0 as usize) else {
             return Vec::new();
         };
@@ -687,7 +803,7 @@ impl LocalGuards {
         recv: VarId,
     ) -> bool {
         let key = future_key(cx, recv);
-        let facts = self.facts.get_or_init(|| Facts::run(cx));
+        let facts = self.facts.get_or_init(|| Facts::run(cx, self.classes(cx)));
         let earlier_here = facts
             .awaited
             .get(&(key.clone(), bb))
@@ -761,7 +877,7 @@ impl LocalGuards {
     ) -> ArgBinding {
         let d = derived(cx, var);
         ArgBinding {
-            constant: const_arg(cx, var),
+            constant: const_arg(cx, self.classes(cx), var),
             input: cx.subject(var),
             derived_params: d.params,
             derived_fresh: d.fresh,
@@ -776,6 +892,17 @@ impl LocalGuards {
 impl<'a> GuardInputs<'_, 'a> {
     fn def(&self, v: VarId) -> Option<&'a InstKind> {
         self.defs.get(&v).map(|i| &i.kind)
+    }
+
+    /// The string literal `v` is.
+    fn const_str(&self, v: VarId) -> Option<String> {
+        match self.def(v)? {
+            InstKind::Const {
+                literal: ConstLiteral::Str(s),
+                ..
+            } => Some(s.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) fn phi(&self, v: VarId) -> Option<(BlockId, &'a PhiNode)> {
@@ -1000,7 +1127,11 @@ fn sets_on_every_way(
 /// test, assigns the global, and no assignment of a constant the test finds unset is followed
 /// by a normal return or the test (`_client = None` before the test, or after the
 /// initialization; one before a `raise` only undoes a failed one): once per process.
-fn global_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion> {
+fn global_regions(
+    cx: &GuardInputs<'_, '_>,
+    classes: &Classes,
+    cells: &mut Cells,
+) -> Vec<LazyRegion> {
     let f = cx.f;
     let def = |v: &VarId| cx.def(*v);
     let loads_global = |v: &VarId| match def(&through_copies(&def, *v)) {
@@ -1021,7 +1152,7 @@ fn global_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion
             .get(t.subject.as_str())
             .map_or(&[][..], Vec::as_slice);
         let resets = assigned.iter().any(|&(bb, v)| {
-            const_arg(cx, v).is_some_and(|c| t.found.takes(c))
+            const_arg(cx, classes, v).is_some_and(|c| t.found.takes(c))
                 && returns_or_retests(f, bb, t.test, cells)
         });
         let sets =
@@ -1067,7 +1198,11 @@ fn returns_or_retests(f: &IrFunction, from: BlockId, test: BlockId, cells: &mut 
 /// other branch: `if conn is None: conn = connect()`, or a first-iteration flag (`if first:
 /// ...; first = False`). They count for the loops that carry what the branch set ([`stays_set`]);
 /// never per call, as each call starts without it.
-fn local_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion> {
+fn local_regions(
+    cx: &GuardInputs<'_, '_>,
+    classes: &Classes,
+    cells: &mut Cells,
+) -> Vec<LazyRegion> {
     let f = cx.f;
     if f.loops.is_empty() {
         return Vec::new();
@@ -1105,7 +1240,7 @@ fn local_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion>
         let set_here = |v: VarId| def_block.get(&v).is_some_and(|b| blocks[b.0 as usize]);
         let mut carried = 0;
         for lp in f.loops.iter().filter(|lp| lp.body.contains(&t.test)) {
-            if stays_set(cx, &t, lp, &set_here, cells) {
+            if stays_set(cx, classes, &t, lp, &set_here, cells) {
                 carried |= loop_bit(lp);
             }
         }
@@ -1130,6 +1265,7 @@ fn local_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion>
 /// from the back edges only; the one from before the loop is that of the first iteration.
 fn stays_set(
     cx: &GuardInputs<'_, '_>,
+    classes: &Classes,
     t: &StateTest<(VarId, &str)>,
     lp: &NaturalLoop,
     set_here: &dyn Fn(VarId) -> bool,
@@ -1162,7 +1298,7 @@ fn stays_set(
                     continue;
                 }
                 Some(InstKind::LoadName { .. }) | None => false,
-                Some(kind) => match const_arg(cx, v) {
+                Some(kind) => match const_arg(cx, classes, v) {
                     Some(c) => t.found.excluded_by(c),
                     None => {
                         t.found.unset() && !matches!(kind, InstKind::Const { .. }) && set_here(v)
@@ -1196,7 +1332,7 @@ fn same_values(f: &IrFunction, root: VarId) -> FxHashSet<VarId> {
 /// Membership (by block id) of the blocks every path from the entry to which runs through `d`
 /// (normal and exception edges); it takes two cells per block of the function, for its walks
 /// and the membership kept.
-fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
+pub(crate) fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
     cells.take(2 * f.blocks.len());
     let reach = |start: BlockId, avoid: Option<BlockId>| {
         let mut seen = vec![false; f.blocks.len()];
@@ -1220,9 +1356,10 @@ fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
         .collect()
 }
 
-/// The constant (through copies) or display `var` is. A list, set, or dict display counts only
-/// as the argument alone, so nothing can have filled or emptied it.
-fn const_arg(cx: &GuardInputs<'_, '_>, var: VarId) -> Option<ConstArg> {
+/// What the caller knows of the argument `var`: the constant it is (through copies), or its
+/// exact class among `classes`. A list, set, or dict display has a truthiness only as the
+/// argument alone, so nothing can have filled or emptied it.
+fn const_arg(cx: &GuardInputs<'_, '_>, classes: &Classes, var: VarId) -> Option<ConstArg> {
     let mut v = var;
     while let Some(InstKind::Copy { src, .. }) = cx.def(v) {
         v = *src;
@@ -1230,37 +1367,168 @@ fn const_arg(cx: &GuardInputs<'_, '_>, var: VarId) -> Option<ConstArg> {
     if let Some(InstKind::Const { literal, .. }) = cx.def(v) {
         return ConstArg::of_literal(literal);
     }
+    let class = *classes.get(&var)?;
     let alone = || cx.uses.get(&var).is_some_and(|u| u.len() == 1);
-    match cx.def(var)? {
-        InstKind::AllocBuiltin {
+    let truthy = match cx.def(var) {
+        Some(InstKind::AllocBuiltin {
             kind: BuiltinKind::Tuple,
             elems,
             ..
-        } => Some(ConstArg {
-            class: ConstClass::Tuple,
-            truthy: Some(!elems.is_empty()),
-        }),
-        InstKind::AllocBuiltin { kind, elems, .. } if alone() => {
-            let class = match kind {
-                BuiltinKind::List => ConstClass::List,
-                BuiltinKind::Set => ConstClass::Set,
-                _ => return None,
-            };
-            Some(ConstArg {
-                class,
-                truthy: Some(!elems.is_empty()),
-            })
-        }
-        InstKind::DictLiteral { entries, .. } if alone() => Some(ConstArg {
-            class: ConstClass::Dict,
-            truthy: entries
-                .iter()
-                .any(|e| matches!(e, DictEntry::KeyValue { .. }))
-                .then_some(true)
-                .or(entries.is_empty().then_some(false)),
-        }),
+        }) => display_truthiness(cx.f, elems),
+        Some(InstKind::AllocBuiltin { elems, .. }) if alone() => display_truthiness(cx.f, elems),
+        Some(InstKind::DictLiteral { entries, .. }) if alone() => entries
+            .iter()
+            .any(|e| matches!(e, DictEntry::KeyValue { .. }))
+            .then_some(true)
+            .or(entries.is_empty().then_some(false)),
         _ => None,
+    };
+    Some(ConstArg { class, truthy })
+}
+
+/// Whether a list, tuple, or set display of `elems` is truthy: true with an element written
+/// as itself, false with none, unknown when every element is unpacked (`[*parts]` is empty when
+/// `parts` is).
+fn display_truthiness(f: &IrFunction, elems: &[VarId]) -> Option<bool> {
+    if elems.iter().any(|v| !f.is_unpacked(*v)) {
+        Some(true)
+    } else {
+        elems.is_empty().then_some(false)
     }
+}
+
+/// The exact classes of a function's values ([`known_classes`]).
+type Classes = FxHashMap<VarId, ConstClass>;
+
+/// What [`known_classes`] knows of a value so far.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClassState {
+    /// No value reaches it yet (a phi or copy not reached by the fixpoint).
+    Unset,
+    Exact(ConstClass),
+    /// Values of different or unknown classes reach it.
+    Mixed,
+}
+
+impl ClassState {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unset, s) | (s, Self::Unset) => s,
+            (Self::Exact(a), Self::Exact(b)) if a == b => self,
+            _ => Self::Mixed,
+        }
+    }
+}
+
+/// The passes [`known_classes`] takes at most; past them only the definitions' own classes are
+/// known, none of a copy or phi.
+const CLASS_PASSES: usize = 8;
+
+/// The exact class of every value of the function that has one: the class every value it may be
+/// (through copies and phis) has, each a constant, a list, tuple, set, or dict display or
+/// comprehension, or a buffer the function constructs ([`ConstClass::of_buffer`]). A monotone
+/// fixpoint over copies and phis in reverse postorder: a value only goes from unset to a class
+/// to mixed.
+fn known_classes(cx: &GuardInputs<'_, '_>) -> Classes {
+    let f = cx.f;
+    let mut state: FxHashMap<VarId, ClassState> = FxHashMap::default();
+    let mut merges: Vec<(VarId, Vec<VarId>)> = Vec::new();
+    let order = f.rpo_blocks();
+    for b in &order {
+        let block = f.block(*b);
+        for phi in &block.phis {
+            let inputs = phi.incoming.iter().map(|(_, w)| *w);
+            merges.push((phi.dst, inputs.filter(|w| *w != phi.dst).collect()));
+        }
+        for inst in &block.insts {
+            match &inst.kind {
+                InstKind::Copy { dst, src } => merges.push((*dst, vec![*src])),
+                kind => {
+                    if let Some(dst) = kind.dst() {
+                        let class = leaf_class(cx, dst, kind);
+                        state.insert(dst, class.map_or(ClassState::Mixed, ClassState::Exact));
+                    }
+                }
+            }
+        }
+    }
+    for (dst, _) in &merges {
+        state.insert(*dst, ClassState::Unset);
+    }
+    // A value neither a merge nor defined in a reached block (a parameter) is of unknown class.
+    let of = |state: &FxHashMap<VarId, ClassState>, v: &VarId| {
+        state.get(v).copied().unwrap_or(ClassState::Mixed)
+    };
+    let mut settled = false;
+    for _ in 0..CLASS_PASSES {
+        let mut changed = false;
+        for (dst, inputs) in &merges {
+            let joined = inputs
+                .iter()
+                .fold(ClassState::Unset, |acc, w| acc.join(of(&state, w)));
+            let old = of(&state, dst);
+            let new = old.join(joined);
+            if new != old {
+                state.insert(*dst, new);
+                changed = true;
+            }
+        }
+        if !changed {
+            settled = true;
+            break;
+        }
+    }
+    if !settled {
+        for (dst, _) in &merges {
+            state.insert(*dst, ClassState::Mixed);
+        }
+    }
+    state
+        .into_iter()
+        .filter_map(|(v, s)| match s {
+            ClassState::Exact(c) => Some((v, c)),
+            ClassState::Unset | ClassState::Mixed => None,
+        })
+        .collect()
+}
+
+/// The class of the value `kind` defines (`v`), when it is exact.
+fn leaf_class(cx: &GuardInputs<'_, '_>, v: VarId, kind: &InstKind) -> Option<ConstClass> {
+    match kind {
+        InstKind::Const { literal, .. } => Some(ConstArg::of_literal(literal)?.class),
+        InstKind::AllocBuiltin { kind, .. } => ConstClass::of_builtin(*kind),
+        InstKind::DictLiteral { .. } => Some(ConstClass::Dict),
+        kind => constructed_class(cx, v, kind),
+    }
+}
+
+/// The class of the object the call `kind` (defining `v`) constructs, when it is exact: an
+/// `io.StringIO` / `io.BytesIO` buffer, or the container a comprehension frame builds and
+/// returns (Python 3.11, `__comp_<id>(...)`, the only call without a callee value).
+fn constructed_class(cx: &GuardInputs<'_, '_>, v: VarId, kind: &InstKind) -> Option<ConstClass> {
+    if let InstKind::Call {
+        callee_var: Some(c),
+        ..
+    } = kind
+        && let Some(Val::Ref(fqn)) = cx.types.get(c)
+        && let Some((module, name)) = fqn.rsplit_once('.')
+    {
+        return ConstClass::of_buffer(module, name);
+    }
+    if let InstKind::MethodCall { recv, method, .. } = kind
+        && let Some(Val::Ref(module)) = cx.types.get(recv)
+    {
+        return ConstClass::of_buffer(module, method);
+    }
+    if let InstKind::Call {
+        callee_var: None, ..
+    } = kind
+        && let Some(Val::Inst(class)) = cx.types.get(&v)
+    {
+        let kind = BuiltinKind::from_name(class.strip_prefix("builtins.")?)?;
+        return ConstClass::of_builtin(kind);
+    }
+    None
 }
 
 // ------------------------------------------------------------------------ finished futures
@@ -1363,15 +1631,45 @@ struct Decomposing {
     done: FxHashMap<(VarId, bool), FactSet>,
 }
 
+/// A test of a value a phi merges (`isinstance(buf, str)` after `buf = StringIO()` on one
+/// branch only): the value along each edge into the phi decides it, or is an input whose test
+/// is an atom, or tells nothing.
+struct PhiTest {
+    /// The block of the phi.
+    block: BlockId,
+    /// The outcome of the test its truthiness means.
+    polarity: bool,
+    /// What the test is along the edge from each predecessor of the phi's block.
+    edges: Vec<(BlockId, EdgeOutcome)>,
+}
+
+/// [`PhiTest::edges`]: what the test of the value one edge brings into the phi is.
+#[derive(Clone, Copy)]
+enum EdgeOutcome {
+    /// The value's class decides it.
+    Decided(bool),
+    /// The value is an input, and this atom is its test.
+    Atom(u32),
+    Unknown,
+}
+
 /// A forward must-analysis of the conditions that hold at each block: branch edges add what
-/// their condition says (through copies, `not`, and the phis of `and` / `or` / conditional
-/// expressions), merges keep what holds on every edge, infeasible edges drop out.
+/// their condition says (through copies, `not`, the phis of `and` / `or` / conditional
+/// expressions, and the edges into the phi of a tested value), merges keep what holds on every
+/// edge, infeasible edges drop out.
 struct Facts<'c, 'f, 'a> {
     cx: &'c GuardInputs<'f, 'a>,
+    /// The exact classes of the function's values.
+    classes: &'c Classes,
     /// The input tests, interned (their atoms).
     tests: Vec<(GuardSubject, GuardTest)>,
     /// The input test a value is, and the outcome its truthiness means.
     test_of: FxHashMap<VarId, (u32, bool)>,
+    /// The tests of values a phi merges, by the value that is the test.
+    phi_tests: FxHashMap<VarId, PhiTest>,
+    /// The budget of the edges [`Self::phi_tests`] keep, proportional to the function's source:
+    /// past it a test of a merged value is no guard (the effect is kept).
+    phi_cells: Cells,
     /// The values whose truthiness tells which edge into an `and` / `or` merge was taken, with
     /// their atoms (after the tests).
     merged: FxHashMap<VarId, u32>,
@@ -1394,11 +1692,14 @@ struct Facts<'c, 'f, 'a> {
 impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
     /// The input tests and the futures known done of the function, and the ones at the entry
     /// of every block.
-    fn run(cx: &'c GuardInputs<'f, 'a>) -> LocalFacts {
+    fn run(cx: &'c GuardInputs<'f, 'a>, classes: &'c Classes) -> LocalFacts {
         let mut facts = Self {
             cx,
+            classes,
             tests: Vec::new(),
             test_of: FxHashMap::default(),
+            phi_tests: FxHashMap::default(),
+            phi_cells: Cells::of(cx.f),
             merged: FxHashMap::default(),
             futures: FxHashMap::default(),
             first_future: 0,
@@ -1465,16 +1766,10 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 done_tests.push((v, future));
             }
             if let Some((subject, test, polarity)) = self.test(v) {
-                let key = (subject, test);
-                let i = match self.tests.iter().position(|t| *t == key) {
-                    Some(i) => i,
-                    None => {
-                        self.tests.push(key);
-                        self.tests.len() - 1
-                    }
-                };
-                self.test_of
-                    .insert(v, (u32::try_from(i).unwrap_or(u32::MAX), polarity));
+                let atom = self.intern(subject, test);
+                self.test_of.insert(v, (atom, polarity));
+            } else if let Some(test) = self.phi_test(v) {
+                self.phi_tests.insert(v, test);
             }
             match cx.def(v) {
                 Some(InstKind::Copy { src, .. })
@@ -1542,13 +1837,34 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
         }
     }
 
-    /// The input test `v` is: a subject itself (truthiness), `isinstance(subject, C)`, or
-    /// `subject is None` / `is not None` (`==` / `!=`); with the outcome its truthiness means.
+    /// The atom of the input test `(subject, test)`.
+    fn intern(&mut self, subject: GuardSubject, test: GuardTest) -> u32 {
+        let key = (subject, test);
+        let i = match self.tests.iter().position(|t| *t == key) {
+            Some(i) => i,
+            None => {
+                self.tests.push(key);
+                self.tests.len() - 1
+            }
+        };
+        u32::try_from(i).unwrap_or(u32::MAX)
+    }
+
+    /// The input test `v` is: a subject itself (truthiness), or a [`Self::tested`] test of one;
+    /// with the outcome its truthiness means.
     fn test(&self, v: VarId) -> Option<(GuardSubject, GuardTest, bool)> {
         let cx = self.cx;
         if let Some(s) = cx.subject(v) {
             return Some((s, GuardTest::Truthy, true));
         }
+        let (value, test, polarity) = self.tested(v)?;
+        Some((cx.subject(value)?, test, polarity))
+    }
+
+    /// The test `v` makes of a value: `isinstance(x, C)`, `hasattr(x, "name")`, or `x is None`
+    /// / `is not None` (`==` / `!=`); with the outcome its truthiness means.
+    fn tested(&self, v: VarId) -> Option<(VarId, GuardTest, bool)> {
+        let cx = self.cx;
         let is_none = |v: &VarId| is_none(cx, v);
         match cx.def(v)? {
             InstKind::Call {
@@ -1556,13 +1872,17 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 args,
                 kwargs,
                 ..
-            } if kwargs.is_empty()
-                && args.len() == 2
-                && matches!(cx.types.get(c), Some(Val::Ref(n)) if n == "builtins.isinstance") =>
-            {
-                let subject = cx.subject(args[0])?;
-                let classes = cx.isinstance_classes.get(&args[1])?.clone();
-                Some((subject, GuardTest::IsInstance(classes), true))
+            } if kwargs.is_empty() && args.len() == 2 => {
+                let test = match cx.types.get(c) {
+                    Some(Val::Ref(n)) if n == "builtins.isinstance" => {
+                        GuardTest::IsInstance(cx.isinstance_classes.get(&args[1])?.clone())
+                    }
+                    Some(Val::Ref(n)) if n == "builtins.hasattr" => {
+                        GuardTest::HasAttr(cx.const_str(args[1])?)
+                    }
+                    _ => return None,
+                };
+                Some((args[0], test, true))
             }
             InstKind::Compare { op, lhs, rhs, .. } => {
                 let holds = match op {
@@ -1577,11 +1897,69 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 } else {
                     return None;
                 };
-                let subject = cx.subject(*side)?;
-                Some((subject, GuardTest::IsNone, holds))
+                Some((*side, GuardTest::IsNone, holds))
             }
             _ => None,
         }
+    }
+
+    /// The [`PhiTest`] `v` is: a [`Self::tested`] test of a phi (through copies).
+    fn phi_test(&mut self, v: VarId) -> Option<PhiTest> {
+        let cx = self.cx;
+        let (mut value, test, polarity) = self.tested(v)?;
+        while let Some(InstKind::Copy { src, .. }) = cx.def(value) {
+            value = *src;
+        }
+        let (block, phi) = cx.phi(value)?;
+        if !self.phi_cells.take(phi.incoming.len()) {
+            return None;
+        }
+        let mut edges = Vec::with_capacity(phi.incoming.len());
+        for (pred, w) in &phi.incoming {
+            let along = match cx.subject(*w) {
+                Some(s) => EdgeOutcome::Atom(self.intern(s, test.clone())),
+                None => match self.classes.get(w).and_then(|c| c.decide(&test)) {
+                    Some(outcome) => EdgeOutcome::Decided(outcome),
+                    None => EdgeOutcome::Unknown,
+                },
+            };
+            edges.push((*pred, along));
+        }
+        Some(PhiTest {
+            block,
+            polarity,
+            edges,
+        })
+    }
+
+    /// What `test` having outcome `outcome` says: what holds on every feasible edge into its
+    /// phi along which the value can have that outcome. The phi's value is the one of the edge
+    /// taken, and what held on that edge still holds, as no fact is killed. Nothing while an
+    /// edge is not done (a loop's back edge).
+    fn along_phi_edges(&self, test: &PhiTest, outcome: bool) -> FactSet {
+        let Some(edges) = test
+            .edges
+            .iter()
+            .map(|(pred, _)| self.edge(*pred, test.block))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return 0;
+        };
+        let mut all: Option<FactSet> = None;
+        for (edge, (_, along)) in edges.into_iter().zip(&test.edges) {
+            // An infeasible edge brings no value.
+            let e = edge.unwrap_or(IMPOSSIBLE)
+                | match *along {
+                    EdgeOutcome::Decided(o) if o != outcome => IMPOSSIBLE,
+                    EdgeOutcome::Atom(a) => fact(a, outcome),
+                    EdgeOutcome::Decided(_) | EdgeOutcome::Unknown => 0,
+                };
+            if contradictory(e) {
+                continue;
+            }
+            all = Some(all.map_or(e, |a| a & e));
+        }
+        all.unwrap_or(IMPOSSIBLE)
     }
 
     /// What `v` having truthiness `holds` says.
@@ -1624,6 +2002,10 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                 operand,
                 ..
             }) => out |= sub(*operand, !holds, walk),
+            Some(_) if self.phi_tests.contains_key(&v) => {
+                let test = &self.phi_tests[&v];
+                out |= self.along_phi_edges(test, holds == test.polarity);
+            }
             _ => {
                 // The phi has the value of the edge taken: what holds on every feasible edge
                 // whose incoming value has this truthiness. A loop phi whose back edge is not

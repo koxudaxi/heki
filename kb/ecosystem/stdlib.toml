@@ -649,6 +649,33 @@ symbol = "builtins.set.copy"
 copy_sanitizer = "shallow"
 opaque_to_layer3 = true
 
+# The builtin container constructors make a new container of their argument's elements, which
+# the new container still holds.
+[[entries]]
+symbol = "builtins.dict"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.list"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.tuple"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.set"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "builtins.frozenset"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
 # --- HTTP ---
 
 [[entries]]

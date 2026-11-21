@@ -7,7 +7,7 @@
 
 use crate::mut_rules::{Allowance, AllowanceKeys, ReadOnlyProducers};
 use crate::{DottedPattern, RuleConfigError, RuleSelection};
-use heki_effect::{Contracts, FuncKey, TypedWrites};
+use heki_effect::{Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -275,5 +275,15 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
         TypedWrites::Propagated
     } else {
         TypedWrites::Local
+    }
+}
+
+/// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins and `MUT113`'s
+/// iteration facts, each only with its rule. The readers assert it
+/// ([`heki_effect::ProjectIndex::opt_in_facts`]).
+pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
+    OptInFacts {
+        return_origins: selection.is_enabled("MUT112"),
+        iterations: selection.is_enabled("MUT113"),
     }
 }
