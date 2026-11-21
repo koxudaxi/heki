@@ -1,5 +1,5 @@
 use super::*;
-use crate::{BlockId, InstKind, ModuleIr, Terminator, VarId, build_module_ir};
+use crate::{BlockId, InstKind, ModuleIr, NaturalLoop, Terminator, VarId, build_module_ir};
 use heki_ast::parse_module;
 use heki_env::{PythonVersion, RuntimeProfile};
 use heki_semantic::analyze_module;
@@ -790,9 +790,11 @@ fn shape_tables_answer_as_the_linear_helpers() {
             );
             assert_eq!(shape.reachable(b), shape.rpo_index(b).is_some());
             assert_eq!(shape.loop_depth(b), f.block_loop_depth(b));
+            assert_eq!(shape.loop_depth(b) > 0, f.is_in_loop(b));
             assert_eq!(shape.innermost(b), f.innermost_loop(b));
             for (li, lp) in f.loops.iter().enumerate() {
                 assert_eq!(shape.in_loop(li, b), lp.body.contains(&b));
+                assert_eq!(shape.in_body(lp, b), lp.body.contains(&b));
             }
             for d in &f.blocks {
                 assert_eq!(
@@ -806,6 +808,16 @@ fn shape_tables_answer_as_the_linear_helpers() {
         }
         let outside = BlockId(f.blocks.len() as u32);
         assert!(!shape.in_loop(f.loops.len(), BlockId(0)));
+        // A loop no block of the function heads holds no block.
+        for lp in &f.loops {
+            for header in [BlockId(0), outside] {
+                let other = NaturalLoop {
+                    header,
+                    ..lp.clone()
+                };
+                assert!(f.blocks.iter().all(|bb| !shape.in_body(&other, bb.id)));
+            }
+        }
         assert_eq!(shape.innermost_index(outside), None);
         assert_eq!(shape.loop_depth(outside), 0);
         assert_eq!(shape.rpo_index(outside), None);

@@ -28,7 +28,7 @@ use crate::{
     UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::Answer;
+use heki_ir::walk::{Answer, FnShape};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode, Progress,
@@ -182,18 +182,20 @@ fn extract_module(
             module: input.module_name.clone(),
             qualname: func_qualname(f).to_owned(),
         };
+        let shape = FnShape::new(f);
         let Extracted {
             mut summary,
             mut sites,
             flow,
             mut references,
             mut external,
-        } = Extractor::new(f, &key, &cx, &input.path, contracts, opt_in).run();
+        } = Extractor::new(&shape, &key, &cx, &input.path, contracts, opt_in).run();
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
         if !f.is_module_body {
             for body in class_bodies_run_by(input.ir, f) {
-                let facts = Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
+                let body = FnShape::new(body);
+                let facts = Extractor::new(&body, &key, &cx, &input.path, contracts, opt_in).run();
                 absorb_class_body(&mut summary, facts.summary);
                 external.extend(facts.external);
                 sites.extend(
@@ -209,7 +211,8 @@ fn extract_module(
             // field's `default_factory`) is handed on by the module. Their other facts are not
             // the module's.
             for body in class_bodies_run_by(input.ir, f) {
-                let facts = Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
+                let body = FnShape::new(body);
+                let facts = Extractor::new(&body, &key, &cx, &input.path, contracts, opt_in).run();
                 references.extend(facts.references);
             }
         }
@@ -232,7 +235,7 @@ fn extract_module(
             slot.entries.extend(flow.entries);
             slot.writes.extend(flow.writes);
         }
-        if let Some(flow) = cache_flow::cache_flow(f, &key, &sites, &cx) {
+        if let Some(flow) = cache_flow::cache_flow(&shape, &key, &sites, &cx) {
             summary.lazily_read_self_attrs = flow.lazily_initialized().map(str::to_owned).collect();
             file.cache_flows.entry(key.clone()).or_default().push(flow);
         }
@@ -586,6 +589,7 @@ struct PendingSite {
 
 struct Extractor<'a> {
     f: &'a IrFunction,
+    shape: &'a FnShape<'a>,
     key: &'a FuncKey,
     cx: &'a TypeCtx<'a>,
     path: &'a Path,
@@ -690,13 +694,9 @@ struct Extractor<'a> {
     ownership: bool,
     /// The opt-in facts the enabled rules read.
     opt_in: OptInFacts,
-    /// The value each copy copies ([`Self::copied_from`]), built on first use.
-    copy_roots: OnceCell<FxHashMap<VarId, VarId>>,
     /// Per call instruction, whether the function has made it whenever it returns normally
     /// (filled before the visit when an enabled rule reads [`EffectSummary::must_exec`]).
     must_run: FxHashMap<(BlockId, usize), OnEveryReturn>,
-    /// The function's dominator tree over all its edges, built on first use.
-    dominators: OnceCell<heki_ir::DominatorTree>,
     /// [`KeyFacts`], built on first use.
     key_facts: OnceCell<KeyFacts<'a>>,
     /// The changes of checked containers of `self` the visit finds, recorded after it
@@ -785,10 +785,10 @@ struct CallObjects<'x> {
     /// return a new object at each read.
     results: FxHashSet<VarId>,
     defs: &'x FxHashMap<VarId, &'x Inst>,
+    shape: &'x FnShape<'x>,
     types: &'x FxHashMap<VarId, Val>,
     /// The method's own `self`, which `super()` is.
     self_var: Option<VarId>,
-    copied: RefCell<FxHashMap<VarId, VarId>>,
 }
 
 impl<'x> CallObjects<'x> {
@@ -804,9 +804,9 @@ impl<'x> CallObjects<'x> {
             calls_at,
             results: ex.project_calls.iter().map(|c| c.dst).collect(),
             defs: &ex.defs,
+            shape: ex.shape,
             types: &ex.types,
             self_var: ex.f.params.first().map(|p| p.var),
-            copied: RefCell::default(),
         }
     }
 
@@ -887,33 +887,13 @@ impl<'x> CallObjects<'x> {
     }
 
     /// The value `var` copies, through `Copy`; `super()` is the method's own `self`. A phi merges
-    /// different values. Each copy on the way keeps the answer.
+    /// different values.
     fn copied_value(&self, var: VarId) -> VarId {
-        let mut chain = Vec::new();
-        let mut cur = var;
-        let found = loop {
-            if let Some(&known) = self.copied.borrow().get(&cur) {
-                break known;
-            }
-            match self.defs.get(&cur).map(|inst| &inst.kind) {
-                Some(InstKind::Copy { src, .. }) => {
-                    chain.push(cur);
-                    cur = *src;
-                }
-                _ => {
-                    chain.push(cur);
-                    break match (self.types.get(&cur), self.self_var) {
-                        (Some(Val::Super(_)), Some(first)) => first,
-                        _ => cur,
-                    };
-                }
-            }
-        };
-        let mut copied = self.copied.borrow_mut();
-        for v in chain {
-            copied.insert(v, found);
+        let root = self.shape.copy_root(var);
+        match (self.types.get(&root), self.self_var) {
+            (Some(Val::Super(_)), Some(first)) => first,
+            _ => root,
         }
-        found
     }
 }
 
@@ -937,13 +917,14 @@ fn decorated_as(module: &ModuleDecls, f: &IrFunction, names: &[&str]) -> bool {
 
 impl<'a> Extractor<'a> {
     fn new(
-        f: &'a IrFunction,
+        shape: &'a FnShape<'a>,
         key: &'a FuncKey,
         cx: &'a TypeCtx<'a>,
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
         opt_in: OptInFacts,
     ) -> Self {
+        let f = shape.f;
         let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
@@ -978,6 +959,7 @@ impl<'a> Extractor<'a> {
         let live = ownership::Live::of(f, &defs);
         let mut ex = Self {
             f,
+            shape,
             key,
             cx,
             path,
@@ -1029,9 +1011,7 @@ impl<'a> Extractor<'a> {
             maybe_new: FxHashSet::default(),
             ownership: false,
             opt_in,
-            copy_roots: OnceCell::new(),
             must_run: FxHashMap::default(),
-            dominators: OnceCell::new(),
             key_facts: OnceCell::new(),
             self_changes: Vec::new(),
             references: contracts.is_some_and(|c| c.references()),
@@ -1061,8 +1041,13 @@ impl<'a> Extractor<'a> {
                 class_of,
             );
         }
-        let returned =
-            readonly::returned_values(f, &ex.defs, &ex.live, |kind| ex.derivations(kind), class_of);
+        let returned = readonly::returned_values(
+            shape,
+            &ex.defs,
+            &ex.live,
+            |kind| ex.derivations(kind),
+            class_of,
+        );
         ex.returned = returned;
         ex.summary.typed_params = (0..64u32)
             .zip(&f.params)
@@ -1074,6 +1059,7 @@ impl<'a> Extractor<'a> {
     fn guard_inputs(&self) -> GuardInputs<'_, 'a> {
         GuardInputs {
             f: self.f,
+            shape: self.shape,
             defs: &self.defs,
             uses: &self.uses,
             types: &self.types,
@@ -1155,7 +1141,7 @@ impl<'a> Extractor<'a> {
     fn key_of(&self, key_const: Option<&str>, index: VarId) -> Option<String> {
         match key_const {
             Some(k) => Some(k.to_owned()),
-            None => self.const_str(index),
+            None => self.resolved_str(index),
         }
     }
 
@@ -1421,7 +1407,7 @@ impl<'a> Extractor<'a> {
             } if matches!(self.val(*f), Some(Val::Ref(s)) if s == "builtins.getattr")
                 && (2..=3).contains(&args.len()) =>
             {
-                Some((*dst, args[0], self.const_str(args[1])?))
+                Some((*dst, args[0], self.resolved_str(args[1])?))
             }
             _ => None,
         }
@@ -1817,7 +1803,7 @@ impl<'a> Extractor<'a> {
     }
 
     /// The string constant behind `var` ([`TypeCtx::str_constant_with`]).
-    fn const_str(&self, var: VarId) -> Option<String> {
+    fn resolved_str(&self, var: VarId) -> Option<String> {
         self.cx
             .str_constant_with(var, &|v| self.defs.get(&v).copied(), &self.types)
     }
@@ -1834,7 +1820,7 @@ impl<'a> Extractor<'a> {
             .filter(|(_, (_, path))| path.is_none())
             .map(|(v, (i, _))| (*v, u32::from(*i)))
             .collect();
-        cache_flow::attr_writes(self.f, &objects)
+        cache_flow::attr_writes(self.shape, &objects)
             .into_iter()
             .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
             .map(|(_, w)| (w.block, w.index as usize))
@@ -1902,7 +1888,8 @@ impl<'a> Extractor<'a> {
             ),
             _ => return Vec::new(),
         };
-        let deep = readonly::deep_copy_requested(kwargs, |v| self.f.const_bool(v) == Some(true));
+        let deep =
+            readonly::deep_copy_requested(kwargs, |v| self.shape.bool_const(v) == Some(true));
         let own_items = args.len() > 1 || !kwargs.is_empty();
         let mut out = Vec::new();
         if let Some(r) = recv
@@ -1980,7 +1967,7 @@ impl<'a> Extractor<'a> {
         self.summary.refresh_typed_field_writes();
         let flow = self.events.take().map(|events| {
             let n = self.contracts.map_or(0, |c| c.invalidations());
-            let (entry, calls, writes) = invalidation::analyze(f, events, n);
+            let (entry, calls, writes) = invalidation::analyze(self.shape, events, n);
             for (site, flow) in calls {
                 self.sites[site].flow = Some(flow);
             }
@@ -2192,7 +2179,8 @@ impl<'a> Extractor<'a> {
             return;
         }
         let callees = std::mem::take(&mut self.callees);
-        let flow = IterFlow::with_callees(f, self.cx, &self.types, Roots::Summary, callees);
+        let flow =
+            IterFlow::with_callees(self.shape, self.cx, &self.types, Roots::Summary, callees);
         let it = param_iteration(f, &flow);
         self.summary.consumes_params = it.consumes;
         self.summary.unconditional_forwards = it.unconditional;
@@ -2217,7 +2205,7 @@ impl<'a> Extractor<'a> {
         let mut iterated: Vec<Vec<(Span, u16, Position)>> =
             vec![Vec::new(); self.project_calls.len()];
         for e in &flow.events {
-            let (span, depth) = (e.span, f.block_loop_depth(e.block));
+            let (span, depth) = (e.span, self.shape.loop_depth(e.block));
             for c in calls_in(&e.stepped) {
                 if !iterated[c].iter().any(|i| (i.0, i.1) == (span, depth)) {
                     iterated[c].push((span, depth, (e.block, e.index)));
@@ -2277,7 +2265,7 @@ impl<'a> Extractor<'a> {
                 for c in calls_in(&flow.expand_steps(&[*value])) {
                     let site = &self.sites[self.project_calls[c].site];
                     if !site.is_awaited {
-                        let depth = f.block_loop_depth(bb.id);
+                        let depth = self.shape.loop_depth(bb.id);
                         extra.push((
                             role_site(site, SiteRole::Call, inst.span, depth, Some((true, false))),
                             Some((bb.id, index)),
@@ -2787,7 +2775,7 @@ impl<'a> Extractor<'a> {
 
     /// [`ownership::made_here`] of the object `var` holds.
     fn made_here(&self, var: VarId, callees: &FxHashMap<VarId, &Callee>) -> bool {
-        ownership::made_here(self.copied_from(var), &self.defs, &|i, made_here| {
+        ownership::made_here(self.shape.copy_root(var), &self.defs, &|i, made_here| {
             self.ownership_source_given(i, callees, made_here)
         })
     }
@@ -2833,7 +2821,7 @@ impl<'a> Extractor<'a> {
                 .clone()
         };
         let (answers, returned) =
-            rec.resolve(self.f, &self.may_params, &param_of, &callee_of, returns);
+            rec.resolve(self.shape, &self.may_params, &param_of, &callee_of, returns);
         for p in std::mem::take(&mut self.pending_sites) {
             let mut site = p.site;
             site.construction = construction_of(&answers[p.query], p.rebinds);
@@ -3066,7 +3054,7 @@ impl<'a> Extractor<'a> {
                 // Reading a missing key of a `defaultdict` inserts it.
                 if self.opt_in.iterations
                     && !is_slice
-                    && !crate::consumption::is_unpacking(self.f, *index, span)
+                    && !crate::consumption::is_unpacking(self.shape, *index, span)
                     && matches!(self.val(*obj), Some(Val::Inst(c)) if c == "collections.defaultdict")
                     && !self.key_present(bb, index_in_block, *obj, *index)
                 {
@@ -3156,7 +3144,7 @@ impl<'a> Extractor<'a> {
                 // `obj.__dict__.get("attr"[, default])`.
                 if method == "get"
                     && let Some(owner) = self.dict_of.get(recv).cloned()
-                    && let Some(k) = args.first().and_then(|a| self.const_str(*a))
+                    && let Some(k) = args.first().and_then(|a| self.resolved_str(*a))
                 {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
@@ -3400,12 +3388,7 @@ impl<'a> Extractor<'a> {
     /// attribute load that runs no property getter (`m = obj.method`), or `getattr(obj, "method"[,
     /// default])` with a constant name.
     fn bound_method(&self, var: VarId) -> Option<(VarId, String)> {
-        let mut cur = var;
-        // Copies of an SSA variable form a tree, so the walk ends.
-        while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur).map(|i| &i.kind) {
-            cur = *src;
-        }
-        let kind = &self.defs.get(&cur)?.kind;
+        let kind = &self.defs.get(&self.shape.copy_root(var))?.kind;
         let (_, obj, attr) = self.attr_load(kind)?;
         match kind {
             InstKind::AttrLoad { .. } => {
@@ -3788,13 +3771,12 @@ impl<'a> Extractor<'a> {
                 .sides
                 .get(attr.as_str())
                 .and_then(|sides| sides.get(&key))
-                .is_some_and(|dominated| self.dominators().contains(dominated, bb))
+                .is_some_and(|dominated| self.shape.dominators().contains(dominated, bb))
     }
 
     /// [`KeyFacts`] of the function, from one walk on first use.
     fn key_facts(&self) -> &KeyFacts<'a> {
         self.key_facts.get_or_init(|| {
-            let preds = self.f.predecessors();
             let mut reads: FxHashMap<String, FxHashMap<(BlockId, KeyOf<'a>), usize>> =
                 FxHashMap::default();
             let mut sides: FxHashMap<String, FxHashMap<KeyOf<'a>, Vec<BlockId>>> =
@@ -3822,7 +3804,7 @@ impl<'a> Extractor<'a> {
                     && let Some((attr, key, on_then)) = self.key_test(cond)
                 {
                     let side = if on_then { then_bb } else { else_bb };
-                    if preds[side.0 as usize].len() == 1 {
+                    if self.shape.preds(side).len() == 1 {
                         let by_key = sides.entry(attr.clone()).or_default();
                         by_key.entry(key).or_default().push(side);
                     }
@@ -3833,7 +3815,7 @@ impl<'a> Extractor<'a> {
                 .map(|(attr, by_key)| {
                     let by_key = by_key
                         .into_iter()
-                        .map(|(key, blocks)| (key, self.dominators().dominated_by(blocks)))
+                        .map(|(key, blocks)| (key, self.shape.dominators().dominated_by(blocks)))
                         .collect();
                     (attr, by_key)
                 })
@@ -3850,7 +3832,7 @@ impl<'a> Extractor<'a> {
         let none = |v: VarId| self.constant(v) == Some(&ConstLiteral::None);
         // `c.get(key)` (without a default other than `None`): `None` only for a missing key or a
         // stored `None`.
-        let lookup = |v: VarId| match self.defs.get(&self.copied_from(v)).map(|i| &i.kind) {
+        let lookup = |v: VarId| match self.defs.get(&self.shape.copy_root(v)).map(|i| &i.kind) {
             Some(InstKind::MethodCall {
                 recv,
                 method,
@@ -3866,7 +3848,7 @@ impl<'a> Extractor<'a> {
             _ => None,
         };
         // `not` and copies (acyclic: neither reads a phi).
-        let (mut cur, mut negated) = (self.copied_from(cond), false);
+        let (mut cur, mut negated) = (self.shape.copy_root(cond), false);
         while let Some(InstKind::UnaryOp {
             op: UnaryOpKind::Not,
             operand,
@@ -3874,7 +3856,7 @@ impl<'a> Extractor<'a> {
         }) = self.defs.get(&cur).map(|i| &i.kind)
         {
             negated = !negated;
-            cur = self.copied_from(*operand);
+            cur = self.shape.copy_root(*operand);
         }
         let (container, key, on_then) = match self.defs.get(&cur).map(|i| &i.kind) {
             Some(InstKind::Compare {
@@ -3906,30 +3888,16 @@ impl<'a> Extractor<'a> {
     fn key_identity(&self, var: VarId) -> KeyOf<'a> {
         match self.constant(var) {
             Some(literal) => KeyOf::Const(literal),
-            None => KeyOf::Var(self.copied_from(var)),
+            None => KeyOf::Var(self.shape.copy_root(var)),
         }
     }
 
     /// The literal the constant `var` holds (through copies).
     fn constant(&self, var: VarId) -> Option<&'a ConstLiteral> {
-        match self.defs.get(&self.copied_from(var)).map(|i| &i.kind) {
+        match self.defs.get(&self.shape.copy_root(var)).map(|i| &i.kind) {
             Some(InstKind::Const { literal, .. }) => Some(literal),
             _ => None,
         }
-    }
-
-    /// `var` through copies.
-    fn copied_from(&self, var: VarId) -> VarId {
-        let roots = self
-            .copy_roots
-            .get_or_init(|| ownership::copy_roots(&self.defs));
-        roots.get(&var).copied().unwrap_or(var)
-    }
-
-    /// The function's dominator tree over all its edges.
-    fn dominators(&self) -> &heki_ir::DominatorTree {
-        self.dominators
-            .get_or_init(|| heki_ir::DominatorTree::of(self.f))
     }
 
     /// The attribute of `self` whose checked container (`MUT113`) `var` holds.
@@ -3946,13 +3914,13 @@ impl<'a> Extractor<'a> {
     fn rebound_before(&self, var: VarId, attr: &str, rebindings: &Rebindings<'_>) -> bool {
         let read = rebindings
             .reads
-            .get(&self.copied_from(var))
+            .get(&self.shape.copy_root(var))
             .filter(|(read, _)| *read == attr);
         let (Some(&(_, (read_bb, read_index))), Some(stores)) = (read, rebindings.stores.get(attr))
         else {
             return false;
         };
-        let tree = self.dominators();
+        let tree = self.shape.dominators();
         stores.all_new
             && (stores
                 .first_in_block
@@ -4000,6 +3968,7 @@ impl<'a> Extractor<'a> {
                     all_new: at.iter().all(|&(_, value)| new_object(value)),
                     first_in_block,
                     dominated: self
+                        .shape
                         .dominators()
                         .dominated_by(at.iter().map(|&((b, _), _)| b)),
                 };
@@ -4172,7 +4141,7 @@ impl<'a> Extractor<'a> {
         if let Some(owner) = self.dict_of.get(&recv).cloned() {
             match method {
                 "pop" | "__delitem__" | "setdefault" | "__setitem__" => {
-                    if let Some(k) = args.first().and_then(|a| self.const_str(*a)) {
+                    if let Some(k) = args.first().and_then(|a| self.resolved_str(*a)) {
                         if owner.is_self && matches!(method, "pop" | "__delitem__") {
                             self.summary.invalidates_cached.insert(k.clone());
                         }
@@ -4196,7 +4165,7 @@ impl<'a> Extractor<'a> {
         let item_key = if self.obj_attr_alias.contains_key(&recv)
             && matches!(method, "pop" | "__delitem__" | "setdefault" | "__setitem__")
         {
-            args.first().and_then(|a| self.const_str(*a))
+            args.first().and_then(|a| self.resolved_str(*a))
         } else {
             None
         };
@@ -4309,7 +4278,7 @@ impl<'a> Extractor<'a> {
         callee: &Callee,
         call: &Call<'_>,
     ) -> Option<(usize, Vec<(FuncKey, Vec<(u8, VarId)>)>)> {
-        let loop_depth = self.f.block_loop_depth(bb);
+        let loop_depth = self.shape.loop_depth(bb);
         self.call_escapes(callee, call);
         match callee {
             Callee::External(symbol) => {
@@ -4876,7 +4845,7 @@ impl<'a> Extractor<'a> {
             Items::Unpacked => Vec::new(),
         };
         PassedItems {
-            bit: per_item_bit(self.f.block_loop_depth(bb)),
+            bit: per_item_bit(self.shape.loop_depth(bb)),
             passed: per_item.passed,
             positions: match (per_item.passed, &per_item.items) {
                 (ItemArgs::Elements, _) | (_, Items::Unpacked) => None,
@@ -5054,7 +5023,7 @@ impl<'a> Extractor<'a> {
             target,
             is_awaited,
             span,
-            loop_depth: self.f.block_loop_depth(bb),
+            loop_depth: self.shape.loop_depth(bb),
             recv_is_self: false,
             drives_coroutine_manually: false,
             constructs: None,
@@ -5264,9 +5233,9 @@ impl<'a> Extractor<'a> {
     ) {
         let method = symbol.rsplit('.').next().unwrap_or(symbol);
         let deep_kwarg = || {
-            kwargs
-                .iter()
-                .any(|(k, v)| k.as_deref() == Some("deep") && self.f.const_bool(*v) == Some(true))
+            kwargs.iter().any(|(k, v)| {
+                k.as_deref() == Some("deep") && self.shape.bool_const(*v) == Some(true)
+            })
         };
         // The new object it returns, whether the receiver is only read, and how many leading
         // positional arguments are only read.
@@ -5324,7 +5293,7 @@ impl<'a> Extractor<'a> {
         let args = passed.args;
         if symbol == "builtins.setattr" || symbol == "builtins.object.__setattr__" {
             let Some(obj) = args.first() else { return };
-            match args.get(1).and_then(|a| self.const_str(*a)) {
+            match args.get(1).and_then(|a| self.resolved_str(*a)) {
                 Some(attr) => self.write_attr(*obj, &attr, WriteKind::SetAttr, span),
                 None => {
                     let owner = self.owner_of(*obj);
@@ -5334,9 +5303,10 @@ impl<'a> Extractor<'a> {
             return;
         }
         if symbol == "builtins.getattr" || symbol == "builtins.object.__getattribute__" {
-            if let (Some(obj), Some(attr)) =
-                (args.first(), args.get(1).and_then(|a| self.const_str(*a)))
-            {
+            if let (Some(obj), Some(attr)) = (
+                args.first(),
+                args.get(1).and_then(|a| self.resolved_str(*a)),
+            ) {
                 let owner = self.owner_of(*obj);
                 self.typed_read(owner, &attr, ReadKind::GetAttr, span);
             }

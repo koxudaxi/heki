@@ -12,6 +12,7 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::{IterFlow, Roots};
 use heki_effect::{CallSite, Callee, EffectSummary, Facts, SiteRole, TypeCtx};
+use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, InstKind, IrFunction, LoopBound, NaturalLoop, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -33,14 +34,14 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             let at = sites
                 .get(&(qualname.clone(), inst.span))
                 .map_or(&[][..], Vec::as_slice);
-            Some(super::site_call(&|v| ix.def_inst(v), at, inst, false)?.callee)
+            Some(super::site_call(&|v| ix.shape.inst(v), at, inst, false)?.callee)
         };
-        let mut flow = IterFlow::new(f, &tcx, &types, Roots::SinglePass, &recorded);
+        let mut flow = IterFlow::new(&ix.shape, &tcx, &types, Roots::SinglePass, &recorded);
         if flow.root_of.is_empty() {
             continue;
         }
         add_callee_consumption(cx, &sites, &qualname, f, &mut flow);
-        report(cx, unit, f, &flow, out);
+        report(cx, unit, &ix.shape, &flow, out);
     }
 }
 
@@ -155,16 +156,17 @@ enum Prior {
 fn report(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     flow: &IterFlow,
     out: &mut Vec<Diagnostic>,
 ) {
+    let f = shape.f;
     let qualname = CheckContext::key(unit, f).qualname;
     for (j, c2) in flow.events.iter().enumerate() {
         let doubled: Vec<(VarId, Prior)> = c2
             .roots
             .iter()
-            .filter_map(|&s| prior(f, flow, j, s).map(|p| (s, p)))
+            .filter_map(|&s| prior(shape, flow, j, s).map(|p| (s, p)))
             .collect();
         for (s, why) in &doubled {
             // `list(e)` twice with `e = enumerate(rows)`: report `e`, not also `rows`.
@@ -210,7 +212,7 @@ fn report(
 }
 
 /// The earlier exhaustion of root `s` that consumption `j` follows, if any.
-fn prior(f: &IrFunction, flow: &IterFlow, j: usize, s: VarId) -> Option<Prior> {
+fn prior(shape: &FnShape<'_>, flow: &IterFlow, j: usize, s: VarId) -> Option<Prior> {
     let c2 = &flow.events[j];
     let def_block = flow.def_at.get(&s).map(|(b, _)| *b);
     let before = flow
@@ -218,7 +220,7 @@ fn prior(f: &IrFunction, flow: &IterFlow, j: usize, s: VarId) -> Option<Prior> {
         .iter()
         .enumerate()
         .filter(|(i, c1)| *i != j && c1.full && c1.roots.contains(&s))
-        .filter(|(_, c1)| reaches(f, c1.done, (c2.block, c2.index), def_block))
+        .filter(|(_, c1)| reaches(shape, c1.done, (c2.block, c2.index), def_block))
         .map(|(_, c1)| c1.span)
         .min();
     if let Some(span) = before {
@@ -228,36 +230,41 @@ fn prior(f: &IrFunction, flow: &IterFlow, j: usize, s: VarId) -> Option<Prior> {
         return None;
     }
     // The innermost loop that repeats the consumption on the same object.
-    f.loops
+    shape
+        .f
+        .loops
         .iter()
-        .filter(|lp| lp.body.contains(&c2.block))
-        .filter(|lp| def_block.is_none_or(|d| !lp.body.contains(&d)))
+        .filter(|lp| shape.in_body(lp, c2.block))
+        .filter(|lp| def_block.is_none_or(|d| !shape.in_body(lp, d)))
         .filter(|lp| !matches!(lp.bound, LoopBound::ConstSmall(0 | 1)))
-        .filter(|lp| !iterates(f, flow, lp, s))
-        .filter(|lp| back_to_header(f, lp, c2.done))
+        .filter(|lp| !iterates(shape, flow, lp, s))
+        .filter(|lp| back_to_header(shape, lp, c2.done))
         .max_by_key(|lp| lp.depth)
         .map(|lp| Prior::Loop(lp.header))
 }
 
 /// The loop's own iterable consumes `s`: consuming the rest inside it ends the loop.
-fn iterates(f: &IrFunction, flow: &IterFlow, lp: &NaturalLoop, s: VarId) -> bool {
+fn iterates(shape: &FnShape<'_>, flow: &IterFlow, lp: &NaturalLoop, s: VarId) -> bool {
     let consumes_s = |iter: VarId| {
-        f.def_inst(iter).is_some_and(|(_, d)| {
+        shape.inst(iter).is_some_and(|d| {
             matches!(&d.kind, InstKind::MakeIter { iterable, .. } if flow.expand(&[*iterable]).contains(&s))
         })
     };
-    f.block(lp.header)
+    shape
+        .f
+        .block(lp.header)
         .insts
         .iter()
         .any(|i| matches!(i.kind, InstKind::IterNext { iter, .. } if consumes_s(iter)))
 }
 
 /// Normal-flow successors of `b`, without the back edges of loops that run at most once.
-fn successors(f: &IrFunction, b: BlockId) -> Vec<BlockId> {
+fn successors(shape: &FnShape<'_>, b: BlockId) -> Vec<BlockId> {
+    let f = shape.f;
     let once = |s: &BlockId| {
         f.loops.iter().any(|lp| {
             lp.header == *s
-                && lp.body.contains(&b)
+                && shape.in_body(lp, b)
                 && matches!(lp.bound, LoopBound::ConstSmall(0 | 1))
         })
     };
@@ -269,7 +276,7 @@ fn successors(f: &IrFunction, b: BlockId) -> Vec<BlockId> {
 /// Whether the program point `to` is reachable from the point `from` without entering `kill`
 /// (the source's defining block: going around it rebinds a fresh object).
 fn reaches(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     from: (BlockId, usize),
     to: (BlockId, usize),
     kill: Option<BlockId>,
@@ -278,7 +285,7 @@ fn reaches(
         return true;
     }
     let mut seen: FxHashSet<BlockId> = FxHashSet::default();
-    let mut stack = successors(f, from.0);
+    let mut stack = successors(shape, from.0);
     while let Some(b) = stack.pop() {
         if Some(b) == kill || !seen.insert(b) {
             continue;
@@ -286,21 +293,21 @@ fn reaches(
         if b == to.0 {
             return true;
         }
-        stack.extend(successors(f, b));
+        stack.extend(successors(shape, b));
     }
     false
 }
 
 /// Whether the loop's header is reachable from `from` without leaving the loop.
-fn back_to_header(f: &IrFunction, lp: &NaturalLoop, from: (BlockId, usize)) -> bool {
+fn back_to_header(shape: &FnShape<'_>, lp: &NaturalLoop, from: (BlockId, usize)) -> bool {
     let mut seen: FxHashSet<BlockId> = FxHashSet::default();
-    let mut stack = successors(f, from.0);
+    let mut stack = successors(shape, from.0);
     while let Some(b) = stack.pop() {
         if b == lp.header {
             return true;
         }
-        if lp.body.contains(&b) && seen.insert(b) {
-            stack.extend(successors(f, b));
+        if shape.in_body(lp, b) && seen.insert(b) {
+            stack.extend(successors(shape, b));
         }
     }
     false

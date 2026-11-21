@@ -271,7 +271,7 @@ impl<'m> ItemOrigins<'m> {
             fact: Fact::default(),
             next: Vec::new(),
         };
-        match ix.shape().def(v) {
+        match ix.shape.def(v) {
             Def::Param | Def::None => Self::of_param(&ix, v, &mut walk),
             Def::Phi(b, i) => {
                 let decided = ix.decided();
@@ -411,7 +411,7 @@ impl<'m> ItemOrigins<'m> {
             Some(walk.steps)
         };
         for (k, e) in elems.iter().enumerate() {
-            if ix.shape().is_starred(dst, k) {
+            if ix.shape.is_starred(dst, k) {
                 walk.ask_with(*e, gathered);
             } else {
                 walk.element(*e);
@@ -434,7 +434,7 @@ impl<'m> ItemOrigins<'m> {
     /// iterating, testing, and returning it may add items the walk does not see, and an append
     /// in a loop over the list itself adds as many items as it finds there.
     fn of_appends(&self, budget: &Budget, ix: &FnIndex<'m>, root: VarId, walk: &mut Decision) {
-        let shape = ix.shape();
+        let shape = &ix.shape;
         let aliases: RefCell<Vec<VarId>> = RefCell::new(Vec::new());
         let appends: RefCell<Vec<(BlockId, usize, VarId)>> = RefCell::new(Vec::new());
         let alias_of = |u: &Use| match *u {
@@ -692,7 +692,7 @@ impl Decision {
         value: VarId,
         aliases: &[VarId],
     ) {
-        let shape = ix.shape();
+        let shape = &ix.shape;
         let b = at.0;
         let Some(lp) = shape.innermost(b) else {
             let f = std::mem::replace(&mut self.f, ix.f.id);

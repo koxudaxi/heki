@@ -10,12 +10,12 @@ use crate::edits::{
     ends_statement, header_colon_follows, indentation, is_identifier, is_plain_assign, line_start,
     slice, squash, starts_statement, strip_token, trim_element,
 };
-use crate::interpreter::{Analysis, BuiltinScope, Def, FnCtx, UseSite};
+use crate::interpreter::{Analysis, BuiltinScope, FnCtx, UseSite};
 use crate::liveness::Liveness;
 use crate::obligations::{Checker, ObligationKind, ProofObligation, SafetyVerdict};
 use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTier};
 use heki_ast::{LineIndex, Span};
-use heki_ir::walk::Answer;
+use heki_ir::walk::{Answer, Def, FnShape};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
@@ -374,14 +374,14 @@ pub fn analyze_module(
         if f.is_module_body || f.is_class_body || !state_fits(f) {
             continue;
         }
-        let cx = FnCtx::new(f, kb, &m.builtins);
+        let ix = FnIndex::new(f, &ir.constants);
+        let cx = FnCtx::new(&ix.shape, kb, &m.builtins);
         let sites = find_sites(&cx);
         if sites.is_empty() {
             continue;
         }
-        let ix = FnIndex::new(f, &ir.constants);
         let an = cx.run();
-        let live = Liveness::compute(f);
+        let live = Liveness::compute(cx.shape);
         let mutations = cx.mutations(&an);
         let ck = Checker::new(
             &cx,
@@ -497,10 +497,6 @@ fn inst_at(f: &IrFunction, at: (BlockId, usize)) -> &Inst {
     &f.block(at.0).insts[at.1]
 }
 
-fn innermost_loop(f: &IrFunction, b: BlockId) -> Option<&NaturalLoop> {
-    f.innermost_loop(b)
-}
-
 /// The single use of `v`, if it is a `Copy` into a variable named `name`.
 fn sole_copy_to(cx: &FnCtx<'_>, v: VarId, name: &str) -> Option<(BlockId, usize)> {
     let [UseSite::Inst(b, i)] = cx.uses(v) else {
@@ -515,13 +511,14 @@ fn sole_copy_to(cx: &FnCtx<'_>, v: VarId, name: &str) -> Option<(BlockId, usize)
 }
 
 /// `v` is the self-accumulating loop-carried phi of a loop containing `b`.
-fn loop_carried_phi(f: &IrFunction, v: VarId, b: BlockId) -> bool {
+fn loop_carried_phi(shape: &FnShape<'_>, v: VarId, b: BlockId) -> bool {
+    let f = shape.f;
     f.loop_carried.iter().any(|lc| {
         lc.phi_var == v
             && lc.self_accumulating
             && f.loops
                 .iter()
-                .any(|lp| lp.header == lc.loop_header && lp.body.contains(&b))
+                .any(|lp| lp.header == lc.loop_header && shape.in_body(lp, b))
     })
 }
 
@@ -530,7 +527,7 @@ fn find_sites<'a>(cx: &FnCtx<'a>) -> Vec<Site<'a>> {
     let mut sites = Vec::new();
     let mut dedup_compares: FxHashSet<(BlockId, usize)> = FxHashSet::default();
     for bb in &f.blocks {
-        if !f.is_in_loop(bb.id) {
+        if cx.shape.loop_depth(bb.id) == 0 {
             continue;
         }
         for (i, inst) in bb.insts.iter().enumerate() {
@@ -544,8 +541,8 @@ fn find_sites<'a>(cx: &FnCtx<'a>) -> Vec<Site<'a>> {
                     in_place,
                 } => {
                     let name = f.var_name(*lhs);
-                    let carried = name.is_some() && loop_carried_phi(f, *lhs, bb.id);
-                    let list_rhs = cx.def_inst(*rhs).is_some_and(|(_, _, d)| {
+                    let carried = name.is_some() && loop_carried_phi(cx.shape, *lhs, bb.id);
+                    let list_rhs = cx.shape.inst(*rhs).is_some_and(|d| {
                         matches!(d.kind, InstKind::AllocBuiltin { kind: List, .. })
                     });
                     if let (true, Some(name)) = (carried, name) {
@@ -586,7 +583,7 @@ fn find_sites<'a>(cx: &FnCtx<'a>) -> Vec<Site<'a>> {
                     // `obj.attr += rhs`: AttrLoad -> BinOp(in place) -> AttrStore(same attr).
                     if *op == BinOpKind::Add
                         && *in_place
-                        && let Some((_, _, load)) = cx.def_inst(*lhs)
+                        && let Some(load) = cx.shape.inst(*lhs)
                         && let InstKind::AttrLoad { obj, attr, .. } = &load.kind
                         && bb.insts.iter().skip(i + 1).any(|s| {
                             matches!(&s.kind, InstKind::AttrStore { obj: o, attr: a, value }
@@ -604,7 +601,8 @@ fn find_sites<'a>(cx: &FnCtx<'a>) -> Vec<Site<'a>> {
                 InstKind::DictLiteral { dst, entries } if entries.len() >= 2 => {
                     let acc = entries.iter().find_map(|e| match e {
                         DictEntry::Unpack { dict }
-                            if f.var_name(*dict).is_some() && loop_carried_phi(f, *dict, bb.id) =>
+                            if f.var_name(*dict).is_some()
+                                && loop_carried_phi(cx.shape, *dict, bb.id) =>
                         {
                             Some(*dict)
                         }
@@ -628,7 +626,11 @@ fn find_sites<'a>(cx: &FnCtx<'a>) -> Vec<Site<'a>> {
                     rhs,
                     dst,
                 } => {
-                    let defined_inside = cx.def_inst(*rhs).filter(|(_, _, d)| {
+                    let defined = match cx.shape.def(*rhs) {
+                        Def::Inst(db, di) => Some((db, di as usize, inst_at(f, (db, di as usize)))),
+                        _ => None,
+                    };
+                    let defined_inside = defined.filter(|(_, _, d)| {
                         d.span.start >= inst.span.start && d.span.end <= inst.span.end
                     });
                     let kind = match defined_inside {
@@ -676,17 +678,21 @@ fn find_sites<'a>(cx: &FnCtx<'a>) -> Vec<Site<'a>> {
                     kwargs,
                     ..
                 } if kwargs.is_empty() => match (method.as_str(), args.as_slice()) {
-                    ("pop", [c]) if f.const_int(*c) == Some(0) => sites.push(Site::FrontPop {
-                        at,
-                        q: *recv,
-                        form: FrontForm::PopCall,
-                    }),
-                    ("insert", [c, _]) if f.const_int(*c) == Some(0) => {
+                    ("pop", [c]) if cx.shape.int_const(*c) == Some(0) => {
+                        sites.push(Site::FrontPop {
+                            at,
+                            q: *recv,
+                            form: FrontForm::PopCall,
+                        })
+                    }
+                    ("insert", [c, _]) if cx.shape.int_const(*c) == Some(0) => {
                         sites.push(Site::FrontInsert { at, q: *recv })
                     }
                     _ => {}
                 },
-                InstKind::SubscriptDelete { obj, index, .. } if f.const_int(*index) == Some(0) => {
+                InstKind::SubscriptDelete { obj, index, .. }
+                    if cx.shape.int_const(*index) == Some(0) =>
+                {
                     sites.push(Site::FrontPop {
                         at,
                         q: *obj,
@@ -702,7 +708,7 @@ fn find_sites<'a>(cx: &FnCtx<'a>) -> Vec<Site<'a>> {
                     ..
                 } => {
                     if let Some(name) = f.var_name(*obj)
-                        && loop_carried_phi(f, *obj, bb.id)
+                        && loop_carried_phi(cx.shape, *obj, bb.id)
                         && let Some(copy) = sole_copy_to(cx, *dst, name)
                     {
                         sites.push(Site::FrontPop {
@@ -1091,7 +1097,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let name = self.var(acc);
         let binop = inst_at(f, at);
         let dst = binop.kind.dst()?;
-        let (_, _, list_inst) = self.cx().def_inst(list)?;
+        let list_inst = self.cx().shape.inst(list)?;
         let mut obs = self.base();
         obs.push(self.ck.exact_type(&name, &st, acc, &[List]));
         obs.push(
@@ -1314,15 +1320,15 @@ impl<'a, 'c> Rules<'a, 'c> {
     /// Evaluating `v` runs no code and cannot raise: a constant, or a local name that is
     /// bound on every path and that no nested function can rebind.
     fn evaluates_no_code(&self, v: VarId) -> bool {
-        match self.cx().def_inst(v) {
-            Some((_, _, inst)) if matches!(inst.kind, InstKind::Const { .. }) => true,
+        match self.cx().shape.inst(v) {
+            Some(inst) if matches!(inst.kind, InstKind::Const { .. }) => true,
             _ => self.bound_local_name(v).is_some() && !self.cx().is_captured(v),
         }
     }
 
     /// A display of one element or entry, without unpacking (`{e}`, `{k: v}`).
     fn single_item_display(&self, v: VarId) -> bool {
-        match self.cx().def_inst(v).map(|(_, _, i)| &i.kind) {
+        match self.cx().shape.inst(v).map(|i| &i.kind) {
             Some(InstKind::AllocBuiltin { elems, .. }) => {
                 matches!(elems.as_slice(), [e] if !self.f().is_unpacked(*e))
             }
@@ -1335,8 +1341,8 @@ impl<'a, 'c> Rules<'a, 'c> {
 
     /// Source text of a side-effect-free, non-raising operand (constant or bound local).
     fn simple_text(&self, v: VarId) -> Option<String> {
-        match self.cx().def_inst(v) {
-            Some((_, _, inst)) if matches!(inst.kind, InstKind::Const { .. }) => {
+        match self.cx().shape.inst(v) {
+            Some(inst) if matches!(inst.kind, InstKind::Const { .. }) => {
                 self.m.text(inst.span).map(str::to_owned)
             }
             // Any other value: a local name bound on every path (`definitely_bound` is false
@@ -1533,7 +1539,7 @@ impl<'a, 'c> Rules<'a, 'c> {
     /// The exact type `v` gets where it is defined, which an SSA value keeps; the values of a
     /// block are typed in one step through it.
     fn defined_type(&self, v: VarId, facts: &mut SetOrderFacts) -> Option<BuiltinKind> {
-        match self.cx().def(v) {
+        match self.cx().shape.def(v) {
             Def::Inst(b, _) => {
                 if facts.typed_blocks.insert(b) {
                     let types = self.cx().defined_types(self.an(), b);
@@ -1541,10 +1547,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                 }
                 facts.types.get(&v).copied().flatten()
             }
-            Def::Phi(b) => self.an().block_in[b.0 as usize]
+            Def::Phi(b, _) => self.an().block_in[b.0 as usize]
                 .as_ref()
                 .and_then(|st| st.exact_type(v)),
-            Def::Param | Def::Undefined => None,
+            Def::Param | Def::None => None,
         }
     }
 
@@ -1728,7 +1734,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         if kind.is_some_and(|k| !matches!(k, Bytes | Tuple)) {
             return None;
         }
-        let lp = innermost_loop(f, at.0)?;
+        let lp = self.cx().shape.innermost(at.0)?;
         let name = self.var(acc);
         let binop = inst_at(f, at);
         let dst = binop.kind.dst()?;
@@ -1804,7 +1810,7 @@ impl<'a, 'c> Rules<'a, 'c> {
     ) -> Option<OptCandidate> {
         let f = self.f();
         let st = self.state(at)?;
-        let lp = innermost_loop(f, at.0)?;
+        let lp = self.cx().shape.innermost(at.0)?;
         let binop = inst_at(f, at);
         let target = format!("{}.{attr}", self.var(obj));
         let mut obs = self.base();
@@ -1828,7 +1834,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         });
         // `list += x` extends in place whatever `x` is: only an attribute that holds a `str`,
         // `bytes`, or `tuple` is copied by `+=`.
-        let receiver = receiver_root(f, obj);
+        let receiver = self.cx().shape.copy_root(obj);
         let held = match (&f.owner_class_qualname, f.params.first()) {
             (Some(class), Some(this)) if receiver == this.var => self.m.self_attr_kind(class, attr),
             _ => same_kind(
@@ -1889,9 +1895,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let InstKind::IterNext { iter, .. } = first.kind else {
             return None;
         };
-        self.cx()
-            .def_inst(iter)
-            .map(|(_, _, make_iter)| make_iter.span)
+        self.cx().shape.inst(iter).map(|make_iter| make_iter.span)
     }
 
     /// Line start and indentation of the `for` statement of `lp`. A comprehension's `for`
@@ -1906,7 +1910,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let InstKind::IterNext { iter, .. } = first.kind else {
             return None;
         };
-        let (_, _, make_iter) = self.cx().def_inst(iter)?;
+        let make_iter = self.cx().shape.inst(iter)?;
         if !header_colon_follows(self.m.source, make_iter.span.end) {
             return None;
         }
@@ -1987,7 +1991,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             // Sets / dicts already hash; `str` / `bytes` membership is a substring test.
             return None;
         }
-        let lp = innermost_loop(f, at.0)?;
+        let lp = self.cx().shape.innermost(at.0)?;
         let cmp = inst_at(f, at);
         let name = self.var(lst);
         let kind = st.exact_type(lst).map_or("list", BuiltinKind::name);
@@ -2058,7 +2062,7 @@ impl<'a, 'c> Rules<'a, 'c> {
     ) -> Option<OptCandidate> {
         let f = self.f();
         let st = self.state(at)?;
-        let lp = innermost_loop(f, at.0)?;
+        let lp = self.cx().shape.innermost(at.0)?;
         let cmp = inst_at(f, at);
         let call = inst_at(f, call_at);
         let target = format!("{callee}(...)");
@@ -2283,7 +2287,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         if st.exact_type(seen).is_some_and(|k| k != List) {
             return None;
         }
-        let lp = innermost_loop(f, at.0)?;
+        let lp = self.cx().shape.innermost(at.0)?;
         let cmp = inst_at(f, at);
         let app = inst_at(f, append);
         let name = self.var(seen);
@@ -2422,7 +2426,7 @@ impl<'a, 'c> Rules<'a, 'c> {
     ) -> Option<String> {
         let f = self.f();
         let cx = self.cx();
-        let idx_ok = |v: VarId| matches!(f.const_int(v), Some(0 | -1));
+        let idx_ok = |v: VarId| matches!(cx.shape.int_const(v), Some(0 | -1));
         match site {
             UseSite::Phi { .. } => None,
             UseSite::Term(b) => match &f.block(b).terminator {
@@ -2460,7 +2464,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                             ("append" | "extend" | "count" | "index" | "remove", [_, ..]) => true,
                             ("clear" | "reverse", []) => true,
                             ("pop", []) => true,
-                            ("insert", [c, _]) => f.const_int(*c) == Some(0),
+                            ("insert", [c, _]) => cx.shape.int_const(*c) == Some(0),
                             _ => false,
                         };
                         (!ok).then(|| {
@@ -2629,7 +2633,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         sorted.sort_unstable();
         sorted.into_iter().find_map(|d| {
             cx.uses(d).iter().find(|u| !consumes(d, u))?;
-            let made_at = cx.def_inst(d).map_or(f.span, |(_, _, i)| i.span);
+            let made_at = cx.shape.inst(d).map_or(f.span, |i| i.span);
             Some(format!(
                 "{} (line {}) is used for more than its elements: a `deque` iterator is another type",
                 self.ck.name(d),
@@ -2642,7 +2646,7 @@ impl<'a, 'c> Rules<'a, 'c> {
     /// very `q`, and nothing before `at` in that block changes it.
     fn non_empty_at(&self, at: (BlockId, usize), q: VarId, allocs: &[crate::AllocId]) -> bool {
         let f = self.f();
-        let tested = innermost_loop(f, at.0).is_some_and(|lp| {
+        let tested = self.cx().shape.innermost(at.0).is_some_and(|lp| {
             matches!(&f.block(lp.header).terminator,
                 Terminator::Branch { cond, then_bb, .. } if *cond == q && *then_bb == at.0)
         });
@@ -2666,7 +2670,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         if st.exact_type(q).is_some_and(|k| k != List) {
             return None;
         }
-        let lp = innermost_loop(f, at.0)?;
+        let lp = self.cx().shape.innermost(at.0)?;
         let inst = inst_at(f, at);
         let name = self.var(q);
         // The IR keeps the slice's bounds only when they are constants, and not its step:
@@ -2841,7 +2845,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                 ),
                 _ => (false, false),
             };
-            if init && !unpacks && !lp.body.contains(&loc.0) {
+            if init && !unpacks && !self.cx().shape.in_body(lp, loc.0) {
                 init_sites.push(loc);
             } else if init && unpacks {
                 bad_alloc = Some(match ai.kind {
@@ -3074,10 +3078,6 @@ fn copies_of(f: &IrFunction) -> rustc_hash::FxHashMap<VarId, VarId> {
             _ => None,
         })
         .collect()
-}
-
-fn receiver_root(f: &IrFunction, v: VarId) -> VarId {
-    copy_root(&copies_of(f), v)
 }
 
 /// `(attribute, kind)` of every `<receiver>.attribute = value` in `f` on a copy of `receiver`:
