@@ -33,8 +33,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `Session.flush` / `commit` and a driver's `commit()` / `rollback()`, `unless-cached` for
   Django's `QuerySet.count()` / `exists()` / `first()` / `last()`, `unless-connected` for a pool
   checkout), and context managers `exit_suppresses` (`false` for files, locks, HTTP sessions,
-  and database connections; `true` for `contextlib.suppress`). New argument tests: `one_of` and
-  `numeric_address`.
+  and database connections; `true` for `contextlib.suppress`), and calls whose results the
+  environment sizes `items` (`rows`, `lines`, `entries`, `text`). New argument tests: `one_of`
+  and `numeric_address`.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of

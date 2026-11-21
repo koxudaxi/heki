@@ -885,6 +885,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.engine.Connection.execute"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -900,6 +901,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.engine.Connection.scalars"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -917,6 +919,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.orm.Session.execute"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 # `Session.query(...)` only builds a lazy `Query` (as its builder methods do); the query runs
@@ -929,6 +932,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.orm.Session.scalars"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1108,6 +1112,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.orm.Query.all"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1221,12 +1226,14 @@ opaque_to_layer3 = true
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.execute"
 effects = ["db_query"]
 async_safe = true
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.scalars"
 effects = ["db_query"]
 async_safe = true
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1318,16 +1325,19 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlmodel.Session.exec"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.Session.execute"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.Session.scalars"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1464,6 +1474,7 @@ opaque_to_layer3 = true
 symbol = "psycopg.Connection.execute"
 effects = ["blocking_db", "db_query"]
 return_type = "psycopg.Cursor"
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1482,6 +1493,7 @@ opaque_to_layer3 = true
 symbol = "psycopg.Cursor.execute"
 effects = ["blocking_db", "db_query"]
 return_type = "psycopg.Cursor"
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2669,6 +2681,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.collection.Collection.find"
 return_type = "pymongo.cursor.Cursor"
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2729,6 +2742,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.collection.Collection.aggregate"
 effects = ["blocking_db", "db_query"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]

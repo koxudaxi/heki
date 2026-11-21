@@ -67,16 +67,19 @@ opaque_to_layer3 = true
 symbol = "builtins.open"
 effects = ["blocking_fs"]
 exit_suppresses = false
+items = "lines"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "io.open"
 effects = ["blocking_fs"]
+items = "lines"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.read_text"
 effects = ["blocking_fs"]
+items = "text"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -97,21 +100,25 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pathlib.Path.open"
 effects = ["blocking_fs"]
+items = "lines"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.listdir"
 effects = ["blocking_fs"]
+items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.scandir"
 effects = ["blocking_fs"]
+items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "os.walk"
 return_type = "os.walk()"
+items = "entries"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -738,6 +745,7 @@ opaque_to_layer3 = true
 symbol = "sqlite3.Connection.execute"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -768,6 +776,7 @@ opaque_to_layer3 = true
 symbol = "sqlite3.Cursor.execute"
 effects = ["blocking_db", "db_query"]
 return_type = "sqlite3.Cursor"
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -790,9 +799,11 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlite3.Cursor.fetchmany"
 effects = ["blocking_db"]
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Cursor.fetchall"
 effects = ["blocking_db"]
+items = "rows"
 opaque_to_layer3 = true

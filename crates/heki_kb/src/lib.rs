@@ -223,6 +223,22 @@ pub enum Emits {
     UnlessConnected,
 }
 
+/// What the items of a call's result are when the environment decides how many there are
+/// ([`EcosystemEntry::items`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultItems {
+    /// The rows of a query.
+    Rows,
+    /// The lines of a file or of a child process's output.
+    Lines,
+    /// The entries of a directory.
+    Entries,
+    /// Text read from a file or a child process: the pieces `str.splitlines` cuts are its
+    /// lines (iterated as it is, a string gives characters).
+    Text,
+}
+
 /// How much of its operand a copy sanitizer copies (`MUT202`): the object only, so the values
 /// below it stay shared (`copy.copy`), or everything below it too (`copy.deepcopy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +284,9 @@ pub struct EcosystemEntry {
     /// When the call's database effects (`blocking_db`, `db_query`) happen: on every call, or
     /// only in a state of the session, connection, or receiver the call does not show.
     pub emits: Emits,
+    /// What the items of the call's result are, when the environment decides how many there
+    /// are (the origin of a loop's items: `EFF103`).
+    pub items: Option<ResultItems>,
     /// Whether a `with` statement over an instance of this class, or over the result of this
     /// call, can suppress the exception its body raises: `Some(false)` when `__exit__` /
     /// `__aexit__` returns a false value on every path, `Some(true)` when it can return a true
@@ -2166,6 +2185,42 @@ mod tests {
         ),
     ];
 
+    /// The calls whose results' items the environment decides the number of.
+    const RESULT_ITEMS: &[(ResultItems, &[&str])] = &[
+        (
+            ResultItems::Rows,
+            &[
+                "sqlite3.Connection.execute",
+                "sqlite3.Cursor.execute",
+                "sqlite3.Cursor.fetchall",
+                "sqlite3.Cursor.fetchmany",
+                "sqlalchemy.orm.Session.execute",
+                "sqlalchemy.orm.Session.scalars",
+                "sqlalchemy.orm.Query.all",
+                "sqlalchemy.engine.Connection.execute",
+                "sqlalchemy.engine.Connection.scalars",
+                "sqlalchemy.ext.asyncio.AsyncSession.execute",
+                "sqlalchemy.ext.asyncio.AsyncSession.scalars",
+                "sqlmodel.Session.exec",
+                "sqlmodel.Session.execute",
+                "sqlmodel.Session.scalars",
+                "psycopg.Connection.execute",
+                "psycopg.Cursor.execute",
+                "pymongo.collection.Collection.find",
+                "pymongo.collection.Collection.aggregate",
+            ],
+        ),
+        (
+            ResultItems::Lines,
+            &["builtins.open", "io.open", "pathlib.Path.open"],
+        ),
+        (ResultItems::Text, &["pathlib.Path.read_text"]),
+        (
+            ResultItems::Entries,
+            &["os.listdir", "os.scandir", "os.walk"],
+        ),
+    ];
+
     /// The classes and factories whose context manager's exit returns a false value on every
     /// path.
     const EXITS_NEVER_SUPPRESS: &[&str] = &[
@@ -2216,10 +2271,15 @@ mod tests {
                 } else {
                     expected.exit_suppresses
                 };
+                let items = RESULT_ITEMS
+                    .iter()
+                    .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
+                    .map(|(items, _)| *items);
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
                     emits,
                     exit_suppresses,
+                    items,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");

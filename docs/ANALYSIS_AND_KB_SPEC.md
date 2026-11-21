@@ -1132,6 +1132,11 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   `QuerySet.count()` / `exists()` / `first()` / `last()` on an evaluated query set read its
   cache), `unless-connected` (a pool checkout, Django's `connection.cursor()`). Only `always`
   establishes that the call sends or waits on every call.
+- **`items`** on a call whose result's items the environment decides the number of: `rows`
+  (`Cursor.fetchall`, a DB-API `execute` whose cursor is iterated, `Session.execute`, pymongo's
+  `find`), `lines` (`open`), `entries` (`os.listdir`, `os.scandir`, `os.walk`), `text`
+  (`Path.read_text`, whose `splitlines()` pieces are lines). A loop over such items, or over a
+  parameter, is a loop over data (`EFF103`).
 - **`exit_suppresses`** on a class, or a factory whose result a `with` statement manages:
   `false` when `__exit__` / `__aexit__` returns a false value on every path (files, locks, HTTP
   sessions and pools, database connections), `true` when it can suppress the body's exception
