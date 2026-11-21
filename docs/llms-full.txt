@@ -2166,8 +2166,8 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
-| `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.0 | - |
-| `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.0 | - |
+| `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
+| `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -2185,7 +2185,7 @@ It reads the output of CPython 3.15's sampling profiler, and that format can sti
 
 - **Kind:** rule
 - **Target:** [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/)
-- **Since:** 0.2.0
+- **Since:** 0.2.1
 
 Its precision is measured on a small sample of reports only.
 
@@ -2193,7 +2193,7 @@ Its precision is measured on a small sample of reports only.
 
 - **Kind:** rule
 - **Target:** [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/)
-- **Since:** 0.2.0
+- **Since:** 0.2.1
 
 Its precision is measured on a small sample of reports only.
 

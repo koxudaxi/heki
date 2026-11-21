@@ -75,30 +75,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   of `self` changed in place while a method iterates it: by another method of the class while a
   generator is suspended inside the iteration, or by a function the loop's body calls; the next
   step raises `RuntimeError`.
-- `EFF109` (`lock-reacquired-while-held`, opt-in, experimental) reports a non-reentrant lock
-  (`threading.Lock`, `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`) taken again
-  while it is held: by a nested `with` or `acquire()`, or by a function the holder calls on its
-  own thread or task, any number of calls deep and across modules (a helper on `self`, an
-  awaited coroutine, a property, a generator iterated there), when both sides name the lock the
-  same way (an attribute of `self` or of another parameter, a module global, a variable of an
-  enclosing function). It does not report an acquisition a constant argument switches off, one
-  behind a test of state the holder changes (an attribute of the lock's owner, also through its
-  callees, or a module global it sets, tested by the function taking the lock or by one on the
-  way to it), a lock given back before it is taken again, a lock whose name may be bound to
-  another object first (by the holder, by a function it calls, or on the way to the inner
-  acquisition), or a lock another thread gives back as a signal. Its facts are computed only
-  while it is selected.
-  `[[tool.heki.ecosystem]]` takes `non-reentrant-lock = true` for other lock classes.
-- `EFF110` (`exclusive-object-fanout`, opt-in, experimental) reports an object that allows one
-  operation at a time (`asyncio.StreamReader`, an asyncpg `Connection`, a websockets connection,
-  an aiohttp WebSocket response) used by tasks a function starts together: two of them, or one
-  started for every item, through `asyncio.gather`, `asyncio.wait`, an `asyncio.TaskGroup`, or an
-  anyio task group, through helpers and keyword arguments. SQLAlchemy's `AsyncSession` is
-  reported only where the fan-out can be its first operation since it was made or committed.
-  It does not report different objects (a process's `stdout` and `stderr`), uses under a lock,
-  an object each task gets for itself, a task started again only once it is done, or a task
-  that may bind the object's name first. Its facts are computed only while it is selected.
-  `[[tool.heki.ecosystem]]` takes `one-at-a-time` for other methods.
 - SARIF output lists every file heki could not read or parse as an `error` notification of the
   run (`invocations[0].toolExecutionNotifications`, with its location), and then sets
   `executionSuccessful` to `false`; the results of the other files are kept. JSON output is
