@@ -347,6 +347,14 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
                 Some(kept) if kept.len() <= shared.len() => {}
                 _ => {
                     must.effects.insert(e, shared);
+                    // The claim names every call the implementations end in, not only the
+                    // kept chain's.
+                    if found.witnesses.len() > 1 {
+                        let every = found.witnesses.into_iter().map(Arc::new).collect();
+                        must.alternatives.insert(e, every);
+                    } else {
+                        must.alternatives.remove(&e);
+                    }
                 }
             }
         }
@@ -398,12 +406,19 @@ pub(crate) fn site_must_chain(
                 {
                     return None;
                 }
-                let chain = callee.must_exec.as_deref().and_then(|m| m.chain(e))?;
+                let must = callee.must_exec.as_deref();
+                let chain = must.and_then(|m| m.chain(e))?;
                 let Some(sink) = chain.last() else {
                     continue;
                 };
-                if !out.witnesses.contains(sink) {
-                    out.witnesses.push(CallHop::clone(sink));
+                // A callee whose own implementations end in different calls has each of them.
+                let ends = must
+                    .and_then(|m| m.alternatives.get(&e))
+                    .map_or(std::slice::from_ref(sink), Vec::as_slice);
+                for end in ends {
+                    if !out.witnesses.contains(end) {
+                        out.witnesses.push(CallHop::clone(end));
+                    }
                 }
                 if out.chain.is_empty() || chain.len() + 1 < out.chain.len() {
                     out.chain = std::iter::once(site_hop(site, path, bc.callee.fqn()))
