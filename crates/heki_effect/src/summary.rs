@@ -745,6 +745,8 @@ struct Extractor<'a> {
     /// The changes of checked containers of `self` the visit finds, recorded after it
     /// ([`Self::self_container_changes`]).
     self_changes: Vec<SelfChange>,
+    /// [`Extractor::builtin_method_runs`]'s answers.
+    builtin_methods: FxHashMap<(String, String, bool), bool>,
     /// [`Contracts::references`]: the references handing a target on are extracted.
     references: bool,
     /// `(call, argument)`: a callable a library API runs (`Self::handed_callable`), and the one
@@ -1064,6 +1066,7 @@ impl<'a> Extractor<'a> {
             must_run: FxHashMap::default(),
             key_facts: OnceCell::new(),
             self_changes: Vec::new(),
+            builtin_methods: FxHashMap::default(),
             references: contracts.is_some_and(|c| c.references()),
             handed: FxHashSet::default(),
             external: Vec::new(),
@@ -3314,7 +3317,7 @@ impl<'a> Extractor<'a> {
                 ..
             } if self.has_in_place_operator(*lhs, *op) => {
                 if self.changes_in_place(*dst, *lhs, *op) {
-                    self.container_mut(*lhs, None, None, span);
+                    self.container_mut(*lhs, op.in_place_method(), false, None, None, span);
                 }
                 // `self.items |= other` changes the container before storing it back.
                 self.container_change(*lhs, ContainerChange::Resizes, span);
@@ -4412,12 +4415,31 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// In-place mutation of the container held in `var` (mutator method or subscript write):
-    /// `const_key` is a literal key (`self.<attr>` keys), `item_key` the constant key of the
-    /// changed entry (also a `Final` constant).
+    /// [`ProjectDecls::method_not_overridden`], asked once per function for each class, method,
+    /// and lookup.
+    fn builtin_method_runs(&mut self, class: String, method: &str, by_name: bool) -> bool {
+        let key = (class, method.to_owned(), by_name);
+        if let Some(&known) = self.builtin_methods.get(&key) {
+            return known;
+        }
+        let runs = self
+            .cx
+            .project
+            .method_not_overridden(&key.0, method, by_name);
+        self.builtin_methods.insert(key, runs);
+        runs
+    }
+
+    /// In-place mutation of the container held in `var` (mutator method or subscript write) by
+    /// `method` (`append`, `__setitem__`, `__iadd__`, ...), looked up `by_name` (a method call)
+    /// or called implicitly (an item store, an augmented assignment): `const_key` is a literal
+    /// key (`self.<attr>` keys), `item_key` the constant key of the changed entry (also a
+    /// `Final` constant).
     fn container_mut(
         &mut self,
         var: VarId,
+        method: &str,
+        by_name: bool,
         const_key: Option<&str>,
         item_key: Option<String>,
         span: Span,
@@ -4432,11 +4454,16 @@ impl<'a> Extractor<'a> {
         match self.param_alias.get(&var).cloned() {
             Some((i, None)) => {
                 // A builtin container's own method or item store changes it in place; another
-                // class's (a `Sequence` whose `append` returns a new one) may not.
-                let builtin = matches!(
-                    self.val(var),
-                    Some(Val::Inst(class)) if BUILTIN_CONTAINERS.contains(&class.as_str())
-                );
+                // class's may not (a `Sequence` whose `append` returns a new one, or, under R2, a
+                // project subclass of the builtin whose `reverse` does nothing).
+                let class = match self.val(var) {
+                    Some(Val::Inst(class)) if BUILTIN_CONTAINERS.contains(&class.as_str()) => {
+                        Some(class.clone())
+                    }
+                    _ => None,
+                };
+                let builtin =
+                    class.is_some_and(|class| self.builtin_method_runs(class, method, by_name));
                 if builtin {
                     self.summary
                         .param_inplace_sites
@@ -4509,7 +4536,12 @@ impl<'a> Extractor<'a> {
         } else {
             None
         };
-        self.container_mut(obj, key_const, item_key, span);
+        let method = if is_delete {
+            "__delitem__"
+        } else {
+            "__setitem__"
+        };
+        self.container_mut(obj, method, false, key_const, item_key, span);
     }
 
     fn container_method(&mut self, recv: VarId, method: &str, args: &[VarId], span: Span) {
@@ -4544,7 +4576,7 @@ impl<'a> Extractor<'a> {
         } else {
             None
         };
-        self.container_mut(recv, None, item_key, span);
+        self.container_mut(recv, method, true, None, item_key, span);
     }
 
     fn hop(&self, callee: String, span: Span) -> CallHop {
@@ -5761,7 +5793,7 @@ impl<'a> Extractor<'a> {
                         Val::Ref(fqn) => Some(fqn.clone()),
                         _ => None,
                     },
-                    &|n| self.cx.global_str(n).map(str::to_owned),
+                    &|n| self.cx.global_literal(n),
                     v,
                 )
             })
@@ -5892,10 +5924,7 @@ impl<'a> Extractor<'a> {
             let hop = Arc::new(self.hop(api.clone(), span));
             let facts = self.summary.must_exec.get_or_insert_with(Box::default);
             for e in must {
-                facts
-                    .effects
-                    .entry(e)
-                    .or_insert_with(|| vec![Arc::clone(&hop)]);
+                facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
             }
         }
         let target = CallTarget::Layer2 {

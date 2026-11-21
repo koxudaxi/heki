@@ -216,6 +216,29 @@ pub enum BinOpKind {
     MatMult,
 }
 
+impl BinOpKind {
+    /// The method an augmented assignment with this operator calls (`x += y` calls
+    /// `x.__iadd__(y)`).
+    pub fn in_place_method(self) -> &'static str {
+        const METHODS: [&str; 13] = [
+            "__iadd__",
+            "__isub__",
+            "__imul__",
+            "__itruediv__",
+            "__ifloordiv__",
+            "__imod__",
+            "__ipow__",
+            "__ior__",
+            "__iand__",
+            "__ixor__",
+            "__ilshift__",
+            "__irshift__",
+            "__imatmul__",
+        ];
+        METHODS[self as usize]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnaryOpKind {

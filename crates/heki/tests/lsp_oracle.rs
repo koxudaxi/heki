@@ -613,6 +613,16 @@ const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import 
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
 
+// Imported literal constants (`TypeCtx::global_literal`): an `async def` sleeps for a constant
+// another module binds; the constant switches between no time and a wait, and a third module
+// starts and stops rebinding it.
+const LC_SETTINGS: &str = "PAUSE = 0\n";
+const LC_SETTINGS_WAIT: &str = "PAUSE = 1\n";
+const LC_USE: &str = "import time\n\nfrom pkg.lc_settings import PAUSE\n\n\nasync def nap():\n    time.sleep(PAUSE)\n";
+const LC_REBIND: &str = "def configure():\n    return None\n";
+const LC_REBIND_STORES: &str =
+    "import pkg.lc_settings\n\n\ndef configure():\n    pkg.lc_settings.PAUSE = 5\n";
+
 // Witnesses through a helper (`MustExec::alternatives`): a helper calls a method whose two
 // implementations wait in different calls, the one in another module through a longer chain, so
 // the helper's shortest chain is the other's. An `async def` reaches the helper through a module
@@ -885,6 +895,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/exact_base.py", EXACT_BASE),
         ("pkg/exact_sub.py", EXACT_SUB),
         ("pkg/exact_use.py", EXACT_USE),
+        ("pkg/lc_settings.py", LC_SETTINGS),
+        ("pkg/lc_use.py", LC_USE),
+        ("pkg/lc_rebind.py", LC_REBIND),
         ("pkg/wit_repo.py", WIT_REPO),
         ("pkg/wit_local.py", WIT_LOCAL),
         ("pkg/wit_fetch.py", WIT_FETCH),
@@ -995,6 +1008,33 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
+    ]
+}
+
+/// A catalog argument read from an imported constant (`ModuleDecls::literal_constants`): a sleep
+/// of no time is no wait, one of a second is, and so is one of a constant another module rebinds.
+fn steps_imported_constants() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the imported constant becomes a wait",
+            vec![save("pkg/lc_settings.py", LC_SETTINGS_WAIT)],
+        )
+        .present(&[("pkg/lc_use.py", "EFF101")]),
+        Step::new(
+            "it becomes no time again",
+            vec![save("pkg/lc_settings.py", LC_SETTINGS)],
+        )
+        .absent(&[("pkg/lc_use.py", "EFF101")]),
+        Step::new(
+            "a third module starts rebinding it",
+            vec![save("pkg/lc_rebind.py", LC_REBIND_STORES)],
+        )
+        .present(&[("pkg/lc_use.py", "EFF101")]),
+        Step::new(
+            "the third module stops rebinding it",
+            vec![save("pkg/lc_rebind.py", LC_REBIND)],
+        )
+        .absent(&[("pkg/lc_use.py", "EFF101")]),
     ]
 }
 
@@ -2159,6 +2199,21 @@ fn steps_mut114_mut202_mut109() -> Vec<Step> {
             vec![save("pkg/fields.py", FIELDS)],
         )
         .present(&[("pkg/fields_user.py", "MUT114")]),
+        // Under R2 the list may be an instance of a project subclass: one in another module that
+        // overrides `append` leaves the claim open (`ProjectDecls::method_not_overridden`).
+        Step::new(
+            "a new module subclasses list and overrides append",
+            vec![Action::Create(
+                "pkg/frozen_list.py",
+                "class FrozenList(list):\n    def append(self, item):\n        pass\n".to_owned(),
+            )],
+        )
+        .present(&[("pkg/fields_user.py", "MUT114")]),
+        Step::new(
+            "the subclass is deleted",
+            vec![Action::Delete("pkg/frozen_list.py")],
+        )
+        .present(&[("pkg/fields_user.py", "MUT114")]),
         Step::new(
             "a wrapper in another module starts returning a declared producer's value",
             vec![save("pkg/lookup.py", LOOKUP_SHARED)],
@@ -3051,6 +3106,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_effect_index());
     steps.extend(steps_exact_effects());
     steps.extend(steps_helper_witnesses());
+    steps.extend(steps_imported_constants());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(
