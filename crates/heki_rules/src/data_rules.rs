@@ -5,7 +5,7 @@ use crate::mut_rules::{CallInst, site_call};
 use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::{Certainty, Diagnostic};
-use heki_effect::{CallSite, SiteEffect, TypeCtx, with_paths};
+use heki_effect::{CallSite, CallTarget, SiteEffect, TypeCtx, with_paths};
 use heki_ir::walk::{Answer, Budget, Def, Visit, reach};
 use heki_ir::{
     BinOpKind, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo, Must,
@@ -112,7 +112,8 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
 
 /// The origins that establish a `DATA101` report of the accumulating update `update` of `lc` in
 /// `lp`, named as `EFF103` names them: the update copies the whole previous value whenever it
-/// returns (`heki_effect::ProjectIndex::site_must` of its call sites `at`), returns on every
+/// returns (`heki_effect::ProjectIndex::site_must` of its call sites `at`; a catalog call, not a
+/// project helper whose result may be another value), returns on every
 /// iteration of the loop that completes, and is the value every path around the back edge
 /// carries (no path resets the variable); the loop steps through items the data decides, and
 /// its trip count is not one the code fixes. `None` when a premise is not established.
@@ -127,10 +128,14 @@ fn established_update(
     update: VarId,
     at: &[&CallSite],
 ) -> Option<DataOrigins> {
-    at.iter().find_map(|s| {
-        cx.index
-            .site_must(&unit.input.path, s, ExecEffectKind::QuadraticRealloc)
-    })?;
+    // The update is the reallocating catalog call itself: a project helper may return another
+    // value than the reallocation on some path, which no must-fact of its result shows.
+    at.iter()
+        .filter(|s| matches!(s.target, CallTarget::Layer2 { .. }))
+        .find_map(|s| {
+            cx.index
+                .site_must(&unit.input.path, s, ExecEffectKind::QuadraticRealloc)
+        })?;
     let li = f.loops.iter().position(|l| l.header == lp.header)?;
     let types = tcx.infer(f);
     let owner = "heki_rules::data_rules::established_update";

@@ -51,8 +51,8 @@ Its premises:
   not fix its trip count. Open in a heuristic report: a trip count heki cannot bound counts as
   data-sized.
 - **Reallocates**: the call copies all of its inputs into a new value on every call, as the
-  ecosystem catalog describes it; through a project function, every implementation the call can
-  run does so on every path on which it returns.
+  ecosystem catalog describes it. Open in a heuristic report: a project function that
+  reallocates the value it is handed may return another value on some path.
 
 Not part of the claim: how large the value grows.
 
