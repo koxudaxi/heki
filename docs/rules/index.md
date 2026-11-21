@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 36 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 38 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -49,9 +49,11 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| EFF101 | [async-blocking-call](async-blocking-call.md) | Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`. | ≈ |
+| EFF101 | [async-blocking-call](async-blocking-call.md) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop. |  |
+| EFF111 | [async-possibly-blocking-call](async-possibly-blocking-call.md) | Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop. | ≈ |
 | EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. | ≈ |
-| EFF103 | [loop-db-query](loop-db-query.md) | Explicit DB query / external RPC executed inside a loop (N+1). | ≈ |
+| EFF103 | [loop-db-query](loop-db-query.md) | A loop over data whose every iteration sends a database statement. |  |
+| EFF113 | [loop-possible-db-query](loop-possible-db-query.md) | Heuristic sibling of `EFF103`: a loop that can run a database query on every iteration. | ≈ |
 | EFF105 | [async-blocking-fs](async-blocking-fs.md) | Opt-in: blocking local filesystem I/O reachable from `async def`. | ≈ 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](lock-or-tx-held-across-io.md) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
 | EFF107 | [unretained-async-task](unretained-async-task.md) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | ≈ 🔌 |
@@ -63,7 +65,7 @@ Quadratic re-allocation of DataFrames and arrays across loop iterations.
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| DATA101 | [loop-carried-concat](loop-carried-concat.md) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. | ≈ |
+| DATA101 | [loop-carried-concat](loop-carried-concat.md) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. |  |
 
 ## Complexity Rewrites (OPT)
 
@@ -71,13 +73,13 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| OPT101 | [list-quadratic-concat](list-quadratic-concat.md) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ |
-| OPT102 | [set-dict-quadratic-merge](set-dict-quadratic-merge.md) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ |
-| OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ |
-| OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ |
-| OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ |
+| OPT101 | [list-quadratic-concat](list-quadratic-concat.md) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
+| OPT102 | [set-dict-quadratic-merge](set-dict-quadratic-merge.md) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
+| OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
+| OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
+| OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
 | OPT112 | [loop-linear-list-lookup](loop-linear-list-lookup.md) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
-| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ |
-| OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ |
-| OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ |
-| OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ |
+| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
+| OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
+| OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
+| OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |

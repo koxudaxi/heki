@@ -66,6 +66,8 @@ fn marked(files: &[(&str, &str)], rules: &[&str]) -> Vec<(String, u64, String)> 
 }
 
 fn check_marks(name: &str, files: &[(&str, &str)], args: &[&str], rules: &[&str]) {
+    let rules = common::with_siblings(rules);
+    let rules = rules.as_slice();
     let p = Project::new(name);
     for (path, text) in files {
         p.write(path, text);
@@ -276,7 +278,7 @@ def run_any(conn: Conn, cmds: list[str]) -> None:
 
 
 async def handler(conn: Conn) -> None:
-    conn.send("x")  # EFF101
+    conn.send("x")  # EFF111
 "#;
 
 #[test]
@@ -350,7 +352,7 @@ def loops(d: Downloader, ds: list[Downloader], targets):
 
 
 async def handler(d: Downloader):
-    return d.db  # EFF101
+    return d.db  # EFF111
 "#;
 
 #[test]
@@ -520,7 +522,7 @@ def prev_none(cur: sqlite3.Cursor, rows):
     prev = None
     for r in rows:
         if prev is None:
-            cur.execute("SELECT 1")  # EFF103
+            cur.execute("SELECT 1")  # EFF113
         prev = r
 
 
@@ -528,7 +530,7 @@ def prev_reset(cur: sqlite3.Cursor, rows):
     prev = None
     for r in rows:
         if prev is None:
-            cur.execute("SELECT 1")  # EFF103
+            cur.execute("SELECT 1")  # EFF113
         prev = r if r else None
 
 
@@ -536,7 +538,7 @@ def empty_reset(cur: sqlite3.Cursor, rows):
     cache = []
     for r in rows:
         if not cache:
-            cache = cur.execute("SELECT 1").fetchall()  # EFF103
+            cache = cur.execute("SELECT 1").fetchall()  # EFF113
         if r:
             cache = []
 
@@ -774,7 +776,7 @@ class Holder:
 
     async def other(self, g: Future):
         if g.done():
-            return self._future.result()  # EFF101
+            return self._future.result()  # EFF111
         return None
 
 
@@ -789,19 +791,19 @@ async def through_helper(f: Future):
 
 
 async def not_done(f: Future):
-    return f.result()  # EFF101
+    return f.result()  # EFF111
 
 
 async def or_test(f: Future, ok: bool):
     if ok or f.done():
-        return f.result()  # EFF101
+        return f.result()  # EFF111
     return None
 
 
 async def one_branch(f: Future, ok: bool):
     if ok:
         await asyncio.wrap_future(f)
-    return f.result()  # EFF101
+    return f.result()  # EFF111
 
 
 async def handler_path(f: Future):
@@ -809,7 +811,7 @@ async def handler_path(f: Future):
         await asyncio.wrap_future(f)
     except OSError:
         pass
-    return f.result()  # EFF101
+    return f.result()  # EFF111
 
 
 class Waiter:
@@ -819,12 +821,12 @@ class Waiter:
 
 async def call_instance(f: Future, w: Waiter):
     await w()
-    return f.result()  # EFF101
+    return f.result()  # EFF111
 
 
 async def unpacked(fs: list[Future]):
     await asyncio.wrap_future(*fs)
-    return fs[0].result()  # EFF101
+    return fs[0].result()  # EFF111
 
 
 async def event_set(f: Future):
@@ -832,7 +834,7 @@ async def event_set(f: Future):
     loop = asyncio.get_running_loop()
     f.add_done_callback(lambda _: loop.call_soon_threadsafe(done.set))
     await done.wait()
-    return f.result()  # EFF101
+    return f.result()  # EFF111
 "#;
 
 #[test]
@@ -1083,7 +1085,7 @@ def run(xs: list[str], flag: bool, opts: dict, more: list, v: object) -> None:
 
 async def handler(x: str) -> None:
     load(x, cache=False)
-    load(x, cache=True)  # EFF101
+    load(x, cache=True)  # EFF111
 "#;
 
 /// The decided call one call below the loop: `check_load_dataset(name)` calls
@@ -1487,10 +1489,10 @@ async def flags(t):
 async def reading(src, data):
     read_any(BytesIO(data))
     read_any(StringIO("x"))
-    read_any(src)  # EFF101
-    read_any("https://example.com/")  # EFF101
-    read_any(None)  # EFF101
-    read_any(...)  # EFF101
+    read_any(src)  # EFF111
+    read_any("https://example.com/")  # EFF111
+    read_any(None)  # EFF111
+    read_any(...)  # EFF111
 
 
 def read_all(srcs, blobs):
@@ -1595,7 +1597,7 @@ def run_wrap(xs):
 
 async def handler(x):
     list(rows(x, cache=False))
-    list(rows(x))  # EFF101
+    list(rows(x))  # EFF111
 
 
 class Conn:
@@ -1681,7 +1683,7 @@ fn an_unpacked_display_decides_no_truthiness_test() {
             ),
             (
                 "pkg/use.py",
-                "from pkg.fetch import fetch\n\n\nasync def known(parts):\n    return fetch([1, *parts])\n\n\nasync def unpacked(parts):\n    return fetch([*parts])  # EFF101\n",
+                "from pkg.fetch import fetch\n\n\nasync def known(parts):\n    return fetch([1, *parts])\n\n\nasync def unpacked(parts):\n    return fetch([*parts])  # EFF111\n",
             ),
         ],
         &[],

@@ -287,7 +287,7 @@ the targets of write and read boundaries.
 | 1 | Local constructors and direct imports (relative imports, source roots, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
 | 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
-| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
+| 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
 A method called on an instance is the definition the class's MRO (Python's C3 linearization of
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
@@ -315,6 +315,28 @@ incremental analysis alike: an implementation before its `.pyi` stub, a package
 next to it), then the greater path. A relative import resolves inside the packages it climbs; one
 that climbs past the top-level package binds nothing (`ImportError`), except that a project root
 holding `__init__.py` is itself the package of the top-level modules.
+
+A module-level name bound once to another object by name, not by an import statement
+(`_set = object.__setattr__`, `sleep = time.sleep`, `Alias = Node`), is that object, as a value
+or in an annotation, in its module and imported from it (`ModuleDecls::aliases`,
+`ProjectDecls::object_named`), unless another module rebinds or deletes it. Any other global a
+module binds is the module's own object of unknown value (`Symbol::Unknown`), never the builtin
+of the same name: calling it is unresolved, unless a `[[tool.heki.ecosystem]]` entry declares it
+(`get = functools.partial(...)` listed as blocking, or with a `return-type`), which then
+describes it as it describes a library symbol. A name under a project module that the module
+does not bind (a compiled submodule, a star import) is what the catalog says of it.
+
+A method that no project class of the receiver's MRO defines comes from the first base outside
+the project, when heki takes it to define the method (a base it knows nothing of coming first
+leaves the call unresolved): a special method (`__init__`, `__copy__`, ...), a
+public method of a builtin type other than `object` (`dict.update`), or a member Layer 2 lists
+(`pydantic.BaseModel.model_copy`). Otherwise the call is unresolved (`abc.ABC._copy_model_type`
+and `typing.Generic.result_type` are no known symbols); on a union, a class whose bases are all
+project classes and builtin types without the member adds no target, any other one leaves the
+call unresolved. `object.__new__(C)`, also through an alias, and `C.__new__(C)` or
+`super().__new__(cls)` where no class of the MRO defines `__new__` and no base outside the project
+but builtin types may, allocate an instance of `C` without running its `__init__`: a
+construction of `C`.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
@@ -432,7 +454,31 @@ kept until the indexes change; a recording that reads one again adds what comput
 invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
 `unresolved_access_sites` hold only the names a `read-owners` or `call-owners` contract with
 `unresolved = "report"` ends a target with (`Contracts::unresolved_read`,
-`Contracts::unresolved_call`), so a summary keeps no read or call no rule asks for.
+`Contracts::unresolved_call`), so a summary keeps no read or call no rule asks for. A class the
+summaries hand to the contracts (`ContractClass`, in `ArgTargets` too) carries its qualname inside
+its module, read from the declarations, only when an `invalidation` target's class or a
+`readonly-returns` producer has a module part (`Contracts::names_class_modules`): such a pattern
+compares the module and the qualname, which the fqn alone does not tell apart.
+
+`FileSummary.reference_sites` holds, only when a call contract sets `references = "calls"`
+(`Contracts::references`), the references handing a project function, method, or class on to
+be called later: a load of one (a name, a module or class attribute, a bound method; for a name
+an import or the module body binds, which is read without a load of its own, each use handing
+it on) whose value
+reaches, through copies, phis, and the displays holding it, an argument of a call, a stored
+attribute, item, or global, a `return`, a `yield`, or a `raise`. Each is a `CallSite` of what
+calling the value calls (the class it constructs, or its project callees, without bindings),
+at the load, and none is in `call_sites`: no call edge, effect, or binding comes from them.
+Uses that only name the value hand nothing on: the callee of a call (a call site of its own), a
+callable a library API runs at the call (`CallSite::handed_callable`, also through the
+`functools.partial` object it is), an argument of a builtin that only inspects its arguments,
+of `super`, of the typing forms `cast`, `TypeVar`, and `NewType`, and of `contextlib.suppress`; a
+receiver, an operand, a subscript, a dict key, a closure's captures (defaults and eagerly
+evaluated annotations are not told apart, nor a class's bases and keywords), and a module
+binding a name to the value itself (an import, a module alias). The class bodies a module runs
+add their references to the module body's (their other facts are not the module's). Like
+`call_sites`, they are local facts: the language server compares a function's references with
+its call sites (`Workspace::caller_view`) and shows them in call chains.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
@@ -626,7 +672,8 @@ or changes of one length swapping on a line, which keep every span, count as mov
 
 The incremental index also records what summarizing each file read of the project declarations
 (`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the
-property getter names tried), and the language server records what each check read. An update of a
+property getter names tried, the names tried among the functions returning an attribute of a
+parameter), and the language server records what each check read. An update of a
 module's declarations reports the keys it changed (the module, and the hierarchy indexes that
 differ); every file that read one of them is re-analyzed. This covers names resolved through
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
@@ -939,7 +986,13 @@ message = "write model state through GenerationStore instead"
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
-       caught across calls**).
+       caught across calls**). `getattr(obj, "a"[, default])` with a constant name loads
+       `obj.a`, and so does a call or property read whose every project callee returns
+       attribute `a` of the parameter the object binds on every `return`
+       (`FunctionDecl::returns_param_attr`: `node.members().append(1)` and
+       `node.view.append(1)` with `return self.items`; never a `cached_property`), when every
+       class the receiver may be takes the name from one of those callees: along its MRO, the
+       first class binding the name defines one (`ProjectDecls::function_taken`).
   2. `typed_field_write_sites` propagate bottom-up with their call chains, from private callees
      only: a public callee reports its own writes. A write is allowed
      when a function on its chain matches `allowed-writers` or `exempt-methods`, when an
@@ -1030,7 +1083,33 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
+   `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
+   - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
+     `heki_effect::with_paths`: the module's bindings, the members of modules, and the context
+     managers whose exit never suppresses, `exit_suppresses`) say whether the function has made
+     the call whenever it returns normally (`CallSite::on_every_return`: made, returned, or
+     reachable at all).
+   - A call's targets are complete (`CallSite::complete`) when they are every implementation
+     the call can run under R2 and R5: for each of the receiver's class and its project
+     subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
+     every member of a union resolves; a protocol receiver never is complete.
+   - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
+     entry `emits` it on every call and no case of the entry tests an argument that may be a
+     parameter of the caller (R6 covers the arguments heki cannot evaluate).
+   - A function has run effect `e` whenever it returns when it makes, on every normal return,
+     an unconditional Layer 2 call with `e` (made, also if it raised), or a complete call whose
+     every non-abstract target runs at the call, as written (decorators that call the body each
+     time), on the caller's thread, and has run `e` whenever it returns (returned). A target
+     that never returns normally has run anything; a name bound twice has no facts. The facts
+     grow over each SCC with the summaries and take part in Early Cutoff.
+   - `EFF101` reports a boundary when its call has run a wait for input or output
+     (`ExecEffectKind::wait_kind`) whenever it returns, through synchronous targets
+     (`ProjectIndex::site_must`); `EFF103` when the call runs on every iteration that completes
+     of a loop over a parameter, a part of one, or a catalog call's `items`, whose trip count the
+     code does not fix (`heki_ir::ItemOrigins`, `FnIndex::fixed_trips`), and has sent a statement
+     whenever it returns. Everything else the heuristic tier finds is `EFF111` / `EFF113`.
 1. **Offload wrapper propagation** (from datamodel-code-generator `bodies.py:112`):
    - When a function `w(fn, *args)` calls `asyncio.to_thread(fn, ...)` (`offloads_blocking_arg =
      0`) or similar, the parameter index of `fn` is recorded in `w`'s `offloads_blocking_params`
@@ -1097,7 +1176,21 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
    bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
    function returning a generator is entered as what iterating its result runs. The search
-   reads no guards: an argument switching off a callee's branch does not stop it.
+   reads no guards: an argument switching off a callee's branch does not stop it. At each node
+   whose body runs, it also reads the function's accesses outside the project
+   (`FileSummary::external_accesses`, per function, local and IR-free): the calls of external
+   functions and classes (`Callee::External`), the reads of module attributes outside the
+   project (an `AttrLoad`, a global or local load, or an `Import` whose value is the named object
+   `Val::Ref(fqn)` of no project symbol: `sys.platform`, `from sys import platform`), and the
+   import probes (an `Import` whose block's exception edge reaches an `except` clause naming
+   `ImportError` or `ModuleNotFoundError`, through the clauses of each `try` and the re-raise to
+   the enclosing handler). An access is kept only when a boundary forbids it
+   (`Contracts::external_call`, `external_read`, `import_probes`): a `call-targets` or
+   `read-targets` entry names it by its full dotted name (its first name not a glob), or
+   `reads-environment` and the Layer 2 tag `environment` name it. Without such a boundary the
+   map stays empty. The language server compares a file's accesses before and after an edit,
+   without positions, and re-checks the files above a function whose accesses changed, as it
+   does for its Layer 2 call sites.
 
 ### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
 - **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**
@@ -1216,14 +1309,20 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
-section 2.2), and
+section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
+in, `os.getenv`, `platform.system`, `importlib.util.find_spec`; `"read"`: reading the module
+attribute does, `os.environ`, `sys.platform`, `sys.version_info`: what `EFF201`'s
+`reads-environment` forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal, a string
-literal with a given prefix or not empty, an instance of a given class, or an integer that sets
+literal with a given prefix, equal to one of given strings (`one_of`), containing one
+(`contains`), an IPv4 or IPv6 address (`numeric_address`), or not empty, a value established to
+name a file (`names_file`: a literal or module constant without an in-memory form, or a path
+built from such parts and `__file__`), an instance of a given class, or an integer that sets
 a named flag, alone or as an operand of `|` (`pd.read_csv` of a `https://` URL is
 `blocking_net`, of an `io.StringIO` nothing; `socket.getaddrinfo(..., flags=AI_NUMERICHOST)`
 resolves nothing); the first case that holds sets
-the call's `effects` and `return_type`, and an argument that is not passed, or may be passed
+the call's `effects`, `return_type`, and `emits`, and an argument that is not passed, or may be passed
 through `*` / `**` unpacking, selects none. A boolean flag case (`equals = false`) whose argument
 is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: the effects it
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
@@ -1237,6 +1336,32 @@ blocking effects of the final summary from its callers (`EffectSummary::declared
 its `return_type` types the call over the annotation. An `async_safe` entry
 keeps only its loop-sensitive effects when the catalog is loaded (built-in entries carry no
 blocking effect at all).
+
+Three more keys state when a call waits, which an exact claim needs (ADR-018):
+- **Wait kind.** A blocking effect waits for input or output the call performs (`blocking_net`,
+  `blocking_db`, `blocking_subprocess`, `sleep`, `blocking_fs`), or for another thread
+  (`blocking_sync`), which may already have done its part: that is state at run time
+  (`ExecEffectKind::wait_kind`).
+- **Arguments that end a wait at once.** Every wait entry has a case for each argument value with
+  which it returns at once: `time.sleep(0)`, `Popen.wait(timeout=0)`, a zero timeout or
+  `blocking=False` of the thread waits, a numeric host or `localhost` for `socket.getaddrinfo`
+  and `socket.gethostbyname`, a `data:` URL for `urlopen`. An argument heki cannot evaluate takes
+  the entry's own effects: it counts as a value for which the call waits (R6).
+- **`emits`** on the database entries: `always` (the default), `on-identity-map-miss`
+  (`Session.get`), `if-pending` (`Session.flush`, `Session.commit`, a driver's `commit()` /
+  `rollback()` without an open transaction does nothing), `unless-cached` (Django's
+  `QuerySet.count()` / `exists()` / `first()` / `last()` on an evaluated query set read its
+  cache), `unless-connected` (a pool checkout, Django's `connection.cursor()`). Only `always`
+  establishes that the call sends or waits on every call.
+- **`items`** on a call whose result's items the environment decides the number of: `rows`
+  (`Cursor.fetchall`, a DB-API `execute` whose cursor is iterated, `Session.execute`, pymongo's
+  `find`), `lines` (`open`), `entries` (`os.listdir`, `os.scandir`, `os.walk`), `text`
+  (`Path.read_text`, whose `splitlines()` pieces are lines). A loop over such items, or over a
+  parameter, is a loop over data (`EFF103`).
+- **`exit_suppresses`** on a class, or a factory whose result a `with` statement manages:
+  `false` when `__exit__` / `__aexit__` returns a false value on every path (files, locks, HTTP
+  sessions and pools, database connections), `true` when it can suppress the body's exception
+  (`contextlib.suppress`). A manager the catalog does not describe may suppress.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

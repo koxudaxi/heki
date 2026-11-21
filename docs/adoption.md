@@ -168,12 +168,14 @@ For custom tooling, `--output-format json` gives every field: see
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do, and no rule is exact yet:
+exact ones do: in 0.2.0, `EFF101`, `EFF103`, `DATA101`, the proven tier of the eight `OPT`
+rewrite rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), their
+reports whose rewrite heki proves safe, and the exact tier of `OPT113` ([Rule
+precision](precision.md#certifications) lists them).
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
-- `heki check --fix` applies the fixes of `OPT101` and `OPT102` only when they run: with
-  `lint.heuristic = true`, or when `select` or `extend-select` names them.
+- `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
 
 ## Effect snapshots (`MUT103`)
 

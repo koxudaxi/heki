@@ -3,15 +3,16 @@
 
 use crate::{
     CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
+    split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CacheEvent, CacheFlow, CallHop, CallSite, Callee,
-    Construction, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS, ProjectDecls,
-    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
-    WriteKind, attr_writes, self_attr_writes,
+    Construction, ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS,
+    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
+    TypedFieldWriteSite, Val, WriteKind, attr_writes, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Budget, FnShape, Visit, reach};
@@ -842,28 +843,33 @@ fn split_item(text: &str) -> Option<(&str, &str)> {
     (!key.contains(quote)).then_some((&text[..start], key))
 }
 
-/// Every project class (fqn), sorted.
-pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<String> {
-    let mut all: Vec<String> = cx
+/// Every project class, with its qualname, sorted by fqn.
+pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<ContractClass> {
+    let mut all: Vec<ContractClass> = cx
         .index
         .files
         .values()
         .flat_map(|f| {
-            f.decls
-                .classes
-                .keys()
-                .map(move |q| format!("{}.{q}", f.module_name))
+            f.decls.classes.keys().map(move |q| ContractClass {
+                fqn: format!("{}.{q}", f.module_name),
+                qualname: Some(q.clone()),
+            })
         })
         .collect();
-    all.sort();
+    all.sort_by(|a, b| a.fqn.cmp(&b.fqn));
     all
 }
 
-fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> FxHashSet<String> {
+/// The project classes (fqn) of `all` that `pattern` names, plus all their subclasses.
+fn class_set(
+    cx: &CheckContext<'_>,
+    pattern: &DottedPattern,
+    all: &[ContractClass],
+) -> FxHashSet<String> {
     let mut out = FxHashSet::default();
-    for c in all.iter().filter(|c| pattern.matches(c)) {
-        out.insert(c.clone());
-        out.extend(cx.decls.subclasses_of(c));
+    for c in all.iter().filter(|c| pattern.matches_class(c)) {
+        out.insert(c.fqn.clone());
+        out.extend(cx.decls.subclasses_of(&c.fqn));
     }
     out
 }
@@ -872,7 +878,7 @@ fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> 
 /// `InvalidTarget { section }`, a bad glob `Glob { context }`.
 pub(crate) fn parse_targets(
     cx: &CheckContext<'_>,
-    all: &[String],
+    all: &[ContractClass],
     targets: &[String],
     section: &'static str,
     context: &'static str,
@@ -883,7 +889,7 @@ pub(crate) fn parse_targets(
             Some((base, key)) => (base, Some(key.to_owned())),
             None => (t.as_str(), None),
         };
-        let Some((class, attr)) = base.rsplit_once('.') else {
+        let Some((class, attr)) = split_last_dot(base) else {
             return Err(RuleConfigError::InvalidTarget {
                 section,
                 target: t.clone(),
@@ -904,7 +910,7 @@ pub(crate) fn parse_targets(
 /// attribute read).
 pub(crate) fn parse_read_targets(
     cx: &CheckContext<'_>,
-    all: &[String],
+    all: &[ContractClass],
     targets: &[String],
     section: &'static str,
     context: &'static str,
@@ -941,41 +947,106 @@ pub(crate) struct Allowance {
     forbidden: Vec<DottedPattern>,
     /// Functions the contract guards (`call-owners` targets): they are part of the guarded
     /// operation, whose calls are checked where they are made, so they may use each other.
-    targets: Vec<FunctionMatcher>,
+    targets: Option<std::sync::Arc<FunctionMatchers>>,
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
 /// qualname (dotted suffixes, globs), and, for `Class.method`, the overrides of the method in
-/// the class family the class part names.
-#[derive(Debug)]
+/// the class family the class part names. The last segment of the text names the function,
+/// method, or class: a glob there matches within that name only (`pkg.*._*` names the private
+/// members of everything in `pkg`, not every function of a private module), as the attribute of
+/// a `Class.attr` target does. A text with a module part (`pkg:_*`) is anchored at its module
+/// already: its qualname part is matched whole.
+#[derive(Debug, Clone)]
 pub(crate) struct FunctionMatcher {
     whole: DottedPattern,
+    /// The text split at its last dot when the last segment is a glob and the text has no module
+    /// part: what holds the member (none for a text without a dot), and the member's name.
+    member: Option<(Option<DottedPattern>, DottedPattern)>,
     method: Option<(FxHashSet<String>, DottedPattern)>,
 }
 
 impl FunctionMatcher {
     pub(crate) fn new(
         cx: &CheckContext<'_>,
-        all_classes: &[String],
+        all_classes: &[ContractClass],
         text: &str,
         context: &'static str,
     ) -> Result<Self, RuleConfigError> {
-        let mut method = None;
-        if let Some((class, name)) = text.rsplit_once('.') {
-            let owners = class_set(cx, &DottedPattern::new(class, context)?, all_classes);
+        let mut out = Self::named(text, context)?;
+        if let Some((holder, last)) = split_last_dot(text) {
+            let owners = class_set(cx, &DottedPattern::new(holder, context)?, all_classes);
             if !owners.is_empty() {
-                method = Some((owners, DottedPattern::new(name, context)?));
+                out.method = Some((owners, DottedPattern::new(last, context)?));
             }
         }
+        Ok(out)
+    }
+
+    /// The matcher of `text` without the methods of a class family: what names a symbol
+    /// outside the project ([`Self::names_external`]).
+    pub(crate) fn named(text: &str, context: &'static str) -> Result<Self, RuleConfigError> {
+        // The whole text first, so that a bad glob is reported as configured.
+        let whole = DottedPattern::new(text, context)?;
+        let (holder, last) = match split_last_dot(text) {
+            Some((holder, last)) => (Some(DottedPattern::new(holder, context)?), last),
+            None => (None, text),
+        };
+        let member = if whole.module().is_none() && has_glob_syntax(last) {
+            Some((holder, DottedPattern::new(last, context)?))
+        } else {
+            None
+        };
         Ok(Self {
-            whole: DottedPattern::new(text, context)?,
-            method,
+            whole,
+            member,
+            method: None,
         })
     }
 
+    pub(crate) fn whole(&self) -> &DottedPattern {
+        &self.whole
+    }
+
+    /// Whether the whole text names a project function or class (`fqn` is `module.qualname`).
+    /// A glob in the last segment matches the last name only, and the rest of the text what
+    /// holds it: `pkg.api_*` names `pkg.api_commit`, not `pkg.api_helpers.api_reset`.
+    pub(crate) fn names_def(&self, fqn: &str, qualname: &str) -> bool {
+        let Some((holder, member)) = &self.member else {
+            return self.whole.matches_def(fqn, qualname);
+        };
+        [fqn, qualname]
+            .into_iter()
+            .any(|name| match (holder, name.rsplit_once('.')) {
+                (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
+                (Some(holder), Some((held_by, last))) => {
+                    member.matches(last) && holder.matches(held_by)
+                }
+                (Some(_), None) => false,
+            })
+    }
+
+    /// Whether the text names `symbol`, a function, class, or module attribute outside the
+    /// project, by its full dotted name: as [`Self::names_def`], but never by a dotted suffix
+    /// ([`DottedPattern::matches_whole`]), and only when its first name is not a glob. An entry
+    /// naming project functions by a suffix (`reset`, `*.reset`) or by a module part
+    /// (`pkg:reset`) names nothing outside the project.
+    pub(crate) fn names_external(&self, symbol: &str) -> bool {
+        let text = self.whole.name().text();
+        !has_glob_syntax(text.split('.').next().unwrap_or(text))
+            && self.member.as_ref().map_or_else(
+                || self.whole.matches_whole(symbol),
+                |(holder, member)| {
+                    symbol.rsplit_once('.').is_some_and(|(held_by, last)| {
+                        member.matches_whole(last)
+                            && holder.as_ref().is_some_and(|h| h.matches_whole(held_by))
+                    })
+                },
+            )
+    }
+
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
-        self.whole.matches(&key.fqn())
-            || self.whole.matches(&key.qualname)
+        self.names_def(&key.fqn(), &key.qualname)
             || self.method.as_ref().is_some_and(|(family, name)| {
                 key.qualname.rsplit_once('.').is_some_and(|(owner, last)| {
                     name.matches(last) && family.contains(&format!("{}.{owner}", key.module))
@@ -986,15 +1057,6 @@ impl FunctionMatcher {
     /// The class family of `Class.method` (empty for a function).
     pub(crate) fn method_family(&self) -> Option<&FxHashSet<String>> {
         self.method.as_ref().map(|(family, _)| family)
-    }
-
-    /// Every project class the whole text names, plus their subclasses.
-    pub(crate) fn classes(
-        &self,
-        cx: &CheckContext<'_>,
-        all_classes: &[String],
-    ) -> FxHashSet<String> {
-        class_set(cx, &self.whole, all_classes)
     }
 }
 
@@ -1012,10 +1074,10 @@ impl Allowance {
             allowed: patterns(keys.allowed.0, keys.allowed.1)?,
             exempt_names: FxHashSet::default(),
             forbidden: patterns(keys.forbidden.0, keys.forbidden.1)?,
-            targets: Vec::new(),
+            targets: None,
         };
         for e in keys.exempt.0 {
-            if e.contains('.') || has_glob_syntax(e) {
+            if e.contains(['.', ':']) || has_glob_syntax(e) {
                 out.allowed.push(DottedPattern::new(e, keys.exempt.1)?);
             } else {
                 out.exempt_names.insert(e.clone());
@@ -1032,13 +1094,16 @@ impl Allowance {
         let fqn = key.fqn();
         self.allowed
             .iter()
-            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
-            || self.targets.iter().any(|t| t.matches(key))
+            .any(|p| p.matches_def(&fqn, &key.qualname))
+            || self.targets.as_ref().is_some_and(|t| t.any(key))
     }
 
     /// The same allowance, with the guarded functions `targets` allowed too.
-    pub(crate) fn with_targets(self, targets: Vec<FunctionMatcher>) -> Self {
-        Self { targets, ..self }
+    pub(crate) fn with_targets(self, targets: std::sync::Arc<FunctionMatchers>) -> Self {
+        Self {
+            targets: Some(targets),
+            ..self
+        }
     }
 
     /// Whether the contract has `forbidden-*` patterns.
@@ -1055,7 +1120,7 @@ impl Allowance {
         let fqn = key.fqn();
         self.forbidden
             .iter()
-            .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
+            .any(|p| p.matches_def(&fqn, &key.qualname))
     }
 
     /// `outside the <owners> of `name``, or `inside the forbidden <who> of `name`` for a contract
@@ -1075,14 +1140,21 @@ impl Allowance {
 /// escape keeps its reports. So does a private function that only private functions of its own
 /// recursion call (`_walk` calling itself, exposed as a callback): going up through private
 /// callers never reaches a function that reports, so the access would be reported nowhere.
-fn delegates(cx: &CheckContext<'_>, sites: &SitesByCaller<'_>, key: &FuncKey) -> bool {
+fn delegates(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    key: &FuncKey,
+    handover: Handover,
+) -> bool {
     if !is_private(&key.qualname) {
         return false;
     }
     let callers_running = |func: &FuncKey| {
-        cx.index
-            .summary(func)
-            .map_or_else(Vec::new, |s| callers_of(cx, sites, func, s.body_facts()))
+        cx.index.summary(func).map_or_else(Vec::new, |s| {
+            let mut callers = callers_of(cx, sites, func, s.body_facts());
+            callers.retain(|c| handover.hands_over(c));
+            callers
+        })
     };
     let mut queue = vec![key.clone()];
     let mut seen: FxHashSet<FuncKey> = FxHashSet::from_iter([key.clone()]);
@@ -1100,6 +1172,43 @@ fn delegates(cx: &CheckContext<'_>, sites: &SitesByCaller<'_>, key: &FuncKey) ->
         }
     }
     false
+}
+
+/// Which call sites hand the accesses of a private callee to its callers ([`delegates`]).
+#[derive(Debug, Clone, Copy)]
+enum Handover {
+    /// Every call running the callee's body.
+    Every,
+    /// Every call but one through a protocol that declares the method
+    /// ([`heki_effect::CallSite::declared`]): the read and call contracts judge such a call by
+    /// the declaration, so what an implementation does inside stays with the implementation.
+    ByImplementation,
+}
+
+impl Handover {
+    fn hands_over(self, c: &Caller<'_>) -> bool {
+        match self {
+            Self::Every => true,
+            Self::ByImplementation => c.site.declared().is_none(),
+        }
+    }
+}
+
+/// Which callers of the function [`runs_inside_allowed_through`] starts from it follows: all,
+/// or only those keeping the accesses with the function (`!Handover::hands_over`).
+#[derive(Debug, Clone, Copy)]
+enum FirstCallers {
+    All,
+    KeptBy(Handover),
+}
+
+impl FirstCallers {
+    fn follows(self, c: &Caller<'_>) -> bool {
+        match self {
+            Self::All => true,
+            Self::KeptBy(handover) => !handover.hands_over(c),
+        }
+    }
 }
 
 /// One project call site that runs the facts `facts` of a function: the caller, the site and
@@ -1207,6 +1316,19 @@ fn runs_inside_allowed(
     func: &FuncKey,
     obj: u64,
 ) -> bool {
+    runs_inside_allowed_through(cx, sites, allowance, family, func, obj, FirstCallers::All)
+}
+
+/// [`runs_inside_allowed`] along the paths through the callers `first` of `func`.
+fn runs_inside_allowed_through(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    allowance: &Allowance,
+    family: &FxHashSet<String>,
+    func: &FuncKey,
+    obj: u64,
+    first: FirstCallers,
+) -> bool {
     let is_initializer =
         |k: &FuncKey| INITIALIZERS.contains(&k.qualname.rsplit('.').next().unwrap_or(&k.qualname));
     if is_initializer(func) {
@@ -1220,8 +1342,12 @@ fn runs_inside_allowed(
     let mut visited: FxHashSet<(FuncKey, Facts, u64)> = FxHashSet::default();
     visited.insert((func.clone(), facts, obj));
     let mut allowed_contexts = false;
+    let mut first = Some(first);
     while let Some((callee, facts, obj)) = queue.pop_front() {
-        let callers = callers_of(cx, sites, &callee, facts);
+        let mut callers = callers_of(cx, sites, &callee, facts);
+        if let Some(first) = first.take() {
+            callers.retain(|c| first.follows(c));
+        }
         if callers.is_empty() {
             // A function without project callers, outside every allowed context.
             return false;
@@ -1502,54 +1628,86 @@ pub(crate) fn facts_run_at<'s>(
 pub(crate) type SiteId = (String, Span);
 
 /// The reports of a contract rule, merged by `(reporting function, span, target)`: the first
-/// report of a key gives the message, the help, and the related chain, and every distinct violation site
-/// behind the key counts (`Diagnostic::sites`), so a second write inside a private helper that is
-/// reported at its caller is visible to the Ratchet baseline.
+/// report of a key gives the message, the help, and the related chain, and every distinct
+/// violation site behind the key counts (`Diagnostic::sites`), so a second write inside a
+/// private helper that is reported at its caller is visible to the Ratchet baseline. The
+/// message names the member the first report matched ([`matched_name`]) and lists the other
+/// members of a glob target the key stands for.
 #[derive(Default)]
 pub(crate) struct MergedReports<'u> {
     reports: BTreeMap<(FuncKey, Span, String), MergedReport<'u>>,
 }
 
+/// The name a report gives the target an access matched: the configured text, or, for a glob
+/// target, the member the access reaches (`pkg.types.DataType._flag` for `pkg.*._*`).
+pub(crate) fn matched_name(text: &str, member: impl FnOnce() -> String) -> String {
+    if names_members(text) {
+        member()
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Whether a report of the target `text` names the members it matched ([`matched_name`]): it
+/// is a glob (the key of an entry target, `Class.attr["key"]`, is no glob).
+pub(crate) fn names_members(text: &str) -> bool {
+    has_glob_syntax(split_item(text).map_or(text, |(base, _)| base))
+}
+
 struct MergedReport<'u> {
     unit: &'u ModuleUnit<'u>,
     message: String,
+    /// The member the message names, and the other members behind the key.
+    named: String,
+    also: BTreeSet<String>,
     help: Option<String>,
     chain: Vec<CallHop>,
     sites: BTreeSet<SiteId>,
 }
 
 impl<'u> MergedReports<'u> {
-    /// Add a report of `func` at `span` for `target`, standing for `site`, with the contract's
-    /// `message` as its help (`note`); `message` and `chain` are only built for the first
-    /// report of the key.
+    /// Add a report of `func` at `span` for `target` (the configured text) and the member it
+    /// matched (`named`, [`matched_name`]), standing for `site`, with the contract's `message`
+    /// as its help (`note`); `message` and `chain` are only built for the first report of the
+    /// key.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add(
         &mut self,
         unit: &'u ModuleUnit<'u>,
         func: &FuncKey,
         span: Span,
-        target: &str,
+        (target, named): (&str, &str),
         site: SiteId,
         note: Option<&str>,
         message: impl FnOnce() -> String,
         chain: impl FnOnce() -> Vec<CallHop>,
     ) {
-        self.reports
+        let report = self
+            .reports
             .entry((func.clone(), span, target.to_owned()))
             .or_insert_with(|| MergedReport {
                 unit,
                 message: message(),
+                named: named.to_owned(),
+                also: BTreeSet::new(),
                 help: note.map(str::to_owned),
                 chain: chain(),
                 sites: BTreeSet::new(),
-            })
-            .sites
-            .insert(site);
+            });
+        if report.named != named {
+            report.also.insert(named.to_owned());
+        }
+        report.sites.insert(site);
     }
 
     pub(crate) fn emit(self, cx: &CheckContext<'_>, code: &'static str, out: &mut Vec<Diagnostic>) {
         for ((func, span, target), r) in self.reports {
             let sites = u32::try_from(r.sites.len()).unwrap_or(u32::MAX);
+            let mut message = r.message;
+            if !r.also.is_empty() {
+                let also: Vec<String> = r.also.iter().map(|m| format!("`{m}`")).collect();
+                message.push_str(&format!(" (also {})", also.join(", ")));
+            }
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -1557,7 +1715,7 @@ impl<'u> MergedReports<'u> {
                 span,
                 &func.qualname,
                 target,
-                r.message,
+                message,
                 r.help,
                 &r.chain,
             ) {
@@ -1574,6 +1732,8 @@ const UNRESOLVED: &[&str] = &["ignore", "report"];
 /// `fresh-objects` values; the first is the default (writes that construct an object are no
 /// violation).
 const FRESH_OBJECTS: &[&str] = &["allow", "report"];
+/// The values of `import-probes`, the default first.
+const IMPORT_PROBES: &[&str] = &["allow", "report"];
 
 /// Whether a contract reports the accesses heki cannot tie to a class (`unresolved`).
 pub(crate) fn reports_unresolved(
@@ -1605,6 +1765,41 @@ pub(crate) fn allows_fresh(
         contract,
         "fresh-objects",
     )? == "allow")
+}
+
+/// `references` values; the first is the default (a reference handing a target on is no call).
+const REFERENCES: &[&str] = &["ignore", "calls"];
+
+/// Whether a call contract counts a reference handing a target on as a call (`references`).
+pub(crate) fn counts_references(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        REFERENCES,
+        "`ignore` or `calls`",
+        section,
+        contract,
+        "references",
+    )? == "calls")
+}
+
+/// Whether an effect boundary's `reads-environment` forbids import probes (`import-probes`).
+pub(crate) fn reports_import_probes(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        IMPORT_PROBES,
+        "`allow` or `report`",
+        section,
+        contract,
+        "import-probes",
+    )? == "report")
 }
 
 /// The value of a contract's mode key, one of `values` (the first when unset).
@@ -1752,11 +1947,11 @@ pub(crate) fn mut201(
                         // No initializer name is private, so on a reported chain only the
                         // outermost function can be the initializer of the written object.
                         let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
-                        let kept_below = chain[1..=origin]
-                            .iter()
-                            .any(|k| is_private(&k.qualname) && !delegates(cx, sites, k));
+                        let kept_below = chain[1..=origin].iter().any(|k| {
+                            is_private(&k.qualname) && !delegates(cx, sites, k, Handover::Every)
+                        });
                         if kept_below
-                            || delegates(cx, sites, key)
+                            || delegates(cx, sites, key, Handover::Every)
                             || initializes_itself(cx, key, &t.classes, site.obj_params)
                         {
                             continue;
@@ -1787,11 +1982,20 @@ pub(crate) fn mut201(
                             .via_chain
                             .last()
                             .map_or_else(|| key.fqn(), |h| h.callee.clone());
+                        let named = matched_name(&t.text, || {
+                            let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
+                            format!(
+                                "{}.{}{}",
+                                site.class_qualname,
+                                site.attr,
+                                entry.unwrap_or_default()
+                            )
+                        });
                         reports.add(
                             unit,
                             key,
                             span,
-                            &t.text,
+                            (&t.text, &named),
                             (writer, site.span),
                             rule.note,
                             || {
@@ -1801,9 +2005,8 @@ pub(crate) fn mut201(
                                     .map(|h| format!(" via `{}`", h.callee))
                                     .unwrap_or_default();
                                 format!(
-                                    "`{}` writes `{}` ({}){via} {}",
+                                    "`{}` writes `{named}` ({}){via} {}",
                                     key.qualname,
-                                    t.text,
                                     site.kind.as_str(),
                                     rule.allowance.where_text(
                                         "write owners",
@@ -1879,10 +2082,13 @@ impl ReadOnlyProducers {
         Ok(Self { rules })
     }
 
-    pub(crate) fn deep_for(&self, fqn: &str) -> Option<bool> {
+    /// Whether a producer names a project function (`fqn` and its `qualname`), an attribute of a
+    /// class ([`ContractClass::member`]), or an external symbol (the symbol twice), and then
+    /// whether one of those naming it is deep.
+    pub(crate) fn deep_for(&self, fqn: &str, qualname: &str) -> Option<bool> {
         let mut found = None;
         for (p, deep) in &self.rules {
-            if p.matches(fqn) {
+            if p.matches_def(fqn, qualname) {
                 found = Some(found.unwrap_or(false) || *deep);
             }
         }
@@ -1891,6 +2097,11 @@ impl ReadOnlyProducers {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.rules.is_empty()
+    }
+
+    /// Whether a producer has a module part.
+    pub(crate) fn names_modules(&self) -> bool {
+        self.rules.iter().any(|(p, _)| p.module().is_some())
     }
 }
 
@@ -1922,7 +2133,7 @@ impl ReadOnlyReturns {
             .filter(|(k, s)| {
                 s.returns_protected.is_some()
                     || s.is_lru_cache
-                    || producers.deep_for(&k.fqn()).is_some() && property(k, s)
+                    || producers.deep_for(&k.fqn(), &k.qualname).is_some() && property(k, s)
             })
             .map(|(k, _)| {
                 k.qualname
@@ -1947,15 +2158,19 @@ struct Ro {
     /// How the function got the value from the producer: the call of a function that returns
     /// it (a wrapper), then the wrapper's calls down to the producer (empty: a direct call).
     via: Vec<CallHop>,
+    /// `producer` is declared in `readonly-returns` (`MUT202`), not an `@lru_cache` function
+    /// (`MUT114`).
+    declared: bool,
 }
 
 impl Ro {
-    fn new(producer: String, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
+    fn new(producer: String, declared: bool, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
         shared.any().then_some(Self {
             producer,
             deep: shared.elements,
             shallow_copy: !shared.object,
             via,
+            declared,
         })
     }
 
@@ -1980,6 +2195,7 @@ impl Ro {
             deep: shared.elements,
             shallow_copy: !shared.object,
             via: named.via.clone(),
+            declared: named.declared,
         }
     }
 
@@ -1987,6 +2203,7 @@ impl Ro {
     fn derive(&self, step: ReturnStep) -> Option<Self> {
         Self::new(
             self.producer.clone(),
+            self.declared,
             step.apply(self.shared()),
             self.via.clone(),
         )
@@ -2415,17 +2632,18 @@ impl<'a> Mut202Fn<'a> {
     /// `@lru_cache` function, or a project function that returns one's value (its summary's
     /// `returns_protected`), reached through the call at `span`.
     fn producer(&self, callee: &Callee, span: Span) -> Option<Ro> {
-        let direct =
-            |producer: String, deep: bool| Ro::new(producer, Shared::produced(deep), vec![]);
+        let direct = |producer: String, declared: bool, deep: bool| {
+            Ro::new(producer, declared, Shared::produced(deep), vec![])
+        };
         match callee {
             Callee::Project(keys, _) => keys.iter().find_map(|k| {
                 let fqn = k.fqn();
                 let summary = self.cx.index.summary(k);
                 if summary.is_some_and(|s| s.is_lru_cache) {
-                    return direct(fqn, true);
+                    return direct(fqn, false, true);
                 }
-                if let Some(d) = self.returns.producers.deep_for(&fqn) {
-                    return direct(fqn, d);
+                if let Some(d) = self.returns.producers.deep_for(&fqn, &k.qualname) {
+                    return direct(fqn, true, d);
                 }
                 let r = summary?.returns_protected.as_ref()?;
                 let mut via = vec![CallHop {
@@ -2435,13 +2653,13 @@ impl<'a> Mut202Fn<'a> {
                     path: self.unit.input.path.clone(),
                 }];
                 via.extend(heki_effect::owned_chain(&r.chain));
-                Ro::new(r.producer.clone(), r.shared, via)
+                Ro::new(r.producer.clone(), r.declared, r.shared, via)
             }),
             Callee::External(sym) => self
                 .returns
                 .producers
-                .deep_for(sym)
-                .and_then(|d| direct(sym.clone(), d)),
+                .deep_for(sym, sym)
+                .and_then(|d| direct(sym.clone(), true, d)),
             Callee::TooMany | Callee::Unresolved => None,
         }
     }
@@ -2465,9 +2683,13 @@ impl<'a> Mut202Fn<'a> {
                 }
                 // `readonly-returns` may name a property: `obj.schema`.
                 if let Some(Val::Inst(class)) = self.types.get(obj) {
-                    let fqn = format!("{class}.{attr}");
-                    if let Some(deep) = self.returns.producers.deep_for(&fqn) {
-                        return Ro::new(fqn, Shared::produced(deep), vec![]);
+                    let class = ContractClass {
+                        fqn: class.clone(),
+                        qualname: self.cx.decls.class_qualname(class).map(str::to_owned),
+                    };
+                    let (fqn, qualname) = class.member(attr);
+                    if let Some(deep) = self.returns.producers.deep_for(&fqn, &qualname) {
+                        return Ro::new(fqn, true, Shared::produced(deep), vec![]);
                     }
                 }
                 // A property getter that returns a read-only producer's value.
@@ -2621,8 +2843,7 @@ impl<'a> Mut202Fn<'a> {
             .unwrap_or_default();
         let mut related = r.via.clone();
         related.extend(chain.iter().cloned());
-        let declared = self.returns.producers.deep_for(&r.producer).is_some();
-        if declared {
+        if r.declared {
             self.cx.emit(
                 out,
                 "MUT202",
@@ -3109,7 +3330,11 @@ pub(crate) fn mut203(
     let sites = cx.sites_by_caller();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
-        for read in &s.typed_field_read_sites {
+        for read in s
+            .typed_field_read_sites
+            .iter()
+            .filter(|r| r.counts_for_contracts())
+        {
             for rule in &rules {
                 for t in rule
                     .targets
@@ -3129,11 +3354,14 @@ pub(crate) fn mut203(
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
                             continue;
                         };
+                        let named = matched_name(&t.text, || {
+                            format!("{}.{}", read.class_qualname, read.attr)
+                        });
                         reports.add(
                             unit,
                             &r.func,
                             r.span,
-                            &t.text,
+                            (&t.text, &named),
                             (key.fqn(), read.span),
                             rule.note,
                             || {
@@ -3143,9 +3371,8 @@ pub(crate) fn mut203(
                                     format!(" via `{}`", key.fqn())
                                 };
                                 format!(
-                                    "`{}` reads `{}` ({}){via} {}",
+                                    "`{}` reads `{named}` ({}){via} {}",
                                     r.func.qualname,
-                                    t.text,
                                     read.kind.as_str(),
                                     rule.allowance.where_text(
                                         "read owners",
@@ -3170,6 +3397,9 @@ struct WalkState {
     func: FuncKey,
     /// Which facts of `func` run the access: its body, or what iterating its result runs.
     facts: Facts,
+    /// `func` runs the access itself: it is the accessing function, or it calls the function
+    /// below (not only returns its result).
+    runs_access: bool,
     /// Parameters of `func` the accessed object may be.
     obj: u64,
     /// A function from the accessing one up to `func` that runs the access falls under
@@ -3201,11 +3431,13 @@ pub(crate) fn delegated_reports(
         return Vec::new();
     }
     let in_scope = allowance.in_scope(func);
-    if !delegates(cx, sites, func) {
-        if !in_scope
-            || initializes_itself(cx, func, family, obj)
-            || runs_inside_allowed(cx, sites, allowance, family, func, obj)
-        {
+    let reports_itself = |func: &FuncKey, obj: u64, in_scope: bool, first: FirstCallers| {
+        in_scope
+            && !initializes_itself(cx, func, family, obj)
+            && !runs_inside_allowed_through(cx, sites, allowance, family, func, obj, first)
+    };
+    if !delegates(cx, sites, func, Handover::ByImplementation) {
+        if !reports_itself(func, obj, in_scope, FirstCallers::All) {
             return Vec::new();
         }
         return vec![DelegatedReport {
@@ -3221,12 +3453,27 @@ pub(crate) fn delegated_reports(
     let mut states = vec![WalkState {
         func: func.clone(),
         facts,
+        runs_access: true,
         obj,
         in_scope,
         down: None,
     }];
     let mut visited: FxHashSet<(FuncKey, Facts, u64, bool)> = FxHashSet::default();
     visited.insert((func.clone(), facts, obj, in_scope));
+    // The report at state `j` of the walk: at the access itself, or at `func`'s call site of
+    // the state below, with the hops down to the access.
+    let report_at = |states: &[WalkState], j: usize, func: &FuncKey, mut chain: Vec<CallHop>| {
+        let mut j = j;
+        while let Some((below, h)) = &states[j].down {
+            chain.extend(h.iter().cloned());
+            j = *below;
+        }
+        DelegatedReport {
+            func: func.clone(),
+            span: chain.first().map_or(span, |hop| hop.span),
+            chain,
+        }
+    };
     let mut out = Vec::new();
     let mut i = 0;
     while i < states.len() {
@@ -3236,7 +3483,24 @@ pub(crate) fn delegated_reports(
             states[i].obj,
             states[i].in_scope,
         );
-        for c in callers_of(cx, sites, &callee, facts) {
+        let (handing_over, keeping): (Vec<Caller<'_>>, Vec<Caller<'_>>) =
+            callers_of(cx, sites, &callee, facts)
+                .into_iter()
+                .partition(|c| Handover::ByImplementation.hands_over(c));
+        // Callers through a protocol declaring the method leave the accesses with the function
+        // running them, also when its other callers take them over.
+        if states[i].runs_access
+            && !keeping.is_empty()
+            && reports_itself(
+                &callee,
+                obj,
+                below_in_scope,
+                FirstCallers::KeptBy(Handover::ByImplementation),
+            )
+        {
+            out.push(report_at(&states, i, &callee, Vec::new()));
+        }
+        for c in handing_over {
             let caller_obj = c.bc.caller_params_of(obj);
             let hop = |from: &FuncKey, to: &FuncKey| CallHop {
                 caller: from.clone(),
@@ -3255,6 +3519,7 @@ pub(crate) fn delegated_reports(
                     states.push(WalkState {
                         func: c.caller.clone(),
                         facts: Facts::Result,
+                        runs_access: false,
                         obj: caller_obj,
                         in_scope: below_in_scope,
                         down: Some((i, hops)),
@@ -3268,31 +3533,19 @@ pub(crate) fn delegated_reports(
             let in_scope = below_in_scope
                 || allowance.in_scope(c.caller)
                 || c.via.is_some_and(|p| allowance.in_scope(p));
-            if delegates(cx, sites, c.caller) {
+            if delegates(cx, sites, c.caller, Handover::ByImplementation) {
                 if visited.insert((c.caller.clone(), c.into, caller_obj, in_scope)) {
                     states.push(WalkState {
                         func: c.caller.clone(),
                         facts: c.into,
+                        runs_access: true,
                         obj: caller_obj,
                         in_scope,
                         down: Some((i, hops)),
                     });
                 }
-            } else if in_scope
-                && !initializes_itself(cx, c.caller, family, caller_obj)
-                && !runs_inside_allowed(cx, sites, allowance, family, c.caller, caller_obj)
-            {
-                let mut chain = hops;
-                let mut j = i;
-                while let Some((below, h)) = &states[j].down {
-                    chain.extend(h.iter().cloned());
-                    j = *below;
-                }
-                out.push(DelegatedReport {
-                    func: c.caller.clone(),
-                    span: c.site.span,
-                    chain,
-                });
+            } else if reports_itself(c.caller, caller_obj, in_scope, FirstCallers::All) {
+                out.push(report_at(&states, i, c.caller, hops));
             }
         }
         i += 1;
@@ -3305,5 +3558,6 @@ pub(crate) fn delegated_reports(
 mod call_owners;
 
 pub(crate) use call_owners::{
-    CallTargetPattern, called_targets, group_texts, mut204, parse_call_targets, site_callee,
+    CallTargets, FunctionMatchers, Subclasses, call_verb, group_texts, mut204, parse_call_targets,
+    site_callee,
 };

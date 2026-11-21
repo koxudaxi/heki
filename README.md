@@ -9,8 +9,8 @@ mutate state or reach I/O.
 
 A report is *exact* when heki established every premise of its claim and its rule was
 certified, and only exact reports are shown by default. The others are *heuristic*: they can be
-wrong, every output labels them, and `heki check --heuristic` shows them too. No rule is exact
-yet.
+wrong, every output labels them, and `heki check --heuristic` shows them too. The exact rules
+are listed in [Rule precision](https://heki.koxudaxi.dev/precision/#certifications).
 
 📚 [Documentation](https://heki.koxudaxi.dev/) ·
 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) ·
@@ -46,7 +46,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `get_user` reaches the blocking call `requests.get` on the event loop
+app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -77,13 +77,12 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 
 ```console
 $ heki check --heuristic
-app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] `app.orders.customer_name` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)
+app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
   = related: app/orders.py:11:37: `order_summaries` calls `app.orders.customer_name`
   = related: app/orders.py:5:5: `customer_name` calls `sqlite3.Cursor.execute`
-  = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
 ```
@@ -92,7 +91,7 @@ Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with thei
 
 ### Your own conventions, too
 
-The checks above need no configuration, only `--heuristic` while their rules are heuristic.
+The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
 guards in tests, can be added as a few lines of it:
 
@@ -127,8 +126,10 @@ Each report shows the chain of calls that leads to the bug.
 
 | What goes wrong | Rule | Certainty |
 | --- | --- | --- |
-| A blocking call several helpers below an `async def` | `EFF101` | heuristic |
-| A database query, or a new HTTP client, on every loop iteration | `EFF103`, `EFF102` | heuristic |
+| A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` | exact |
+| A blocking call an `async def` can reach | `EFF111` | heuristic |
+| A database statement on every iteration of a loop over data | `EFF103` | exact |
+| A database query, or a new HTTP client, a loop can run on every iteration | `EFF113`, `EFF102` | heuristic |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | `MUT107` | heuristic |
 | A `Sequence` / `Mapping` argument changed in place by a helper | `MUT110` | exact |
 | Opt-in: a frozen or `ReadOnly` field changed in place | `MUT108` | heuristic |

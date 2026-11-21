@@ -497,6 +497,10 @@ pub struct ProtectedReturn {
     pub shared: Shared,
     /// Calls from this function down to the one that returns the producer's value.
     pub chain: SharedChain,
+    /// `producer` is declared in `readonly-returns` (`MUT202`), not an `@lru_cache` function
+    /// (`MUT114`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared: bool,
 }
 
 impl ProtectedReturn {
@@ -514,6 +518,7 @@ impl ProtectedReturn {
     pub fn add(
         slot: &mut Option<Self>,
         producer: String,
+        declared: bool,
         produced: Shared,
         step: ReturnStep,
         chain: SharedChain,
@@ -526,6 +531,7 @@ impl ProtectedReturn {
             producer,
             shared,
             chain,
+            declared,
         };
         match slot {
             Some(r) => r.join(found),
@@ -692,13 +698,16 @@ mod tests {
             producer: "m.deep".into(),
             shared: shared(false, true),
             chain: vec![hop("m.a"), hop("m.deep")],
+            declared: true,
         };
         long.join(ProtectedReturn {
             producer: "m.flat".into(),
             shared: shared(true, false),
             chain: vec![hop("m.flat")],
+            declared: false,
         });
         assert_eq!(long.producer, "m.flat");
+        assert!(!long.declared);
         assert_eq!(long.shared, shared(true, true));
         assert_eq!(long.chain.len(), 1);
     }

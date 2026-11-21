@@ -1161,10 +1161,15 @@ fn calls_on_unions_and_protocols_resolve_class_by_class() {
             "project true B.only,C.only"
         );
         // The one external method two classes inherit; external and project targets, or two
-        // external methods, leave it unresolved.
+        // external methods, leave it unresolved. A member the catalog does not list for the
+        // base is not known to be there: unresolved.
         assert_eq!(
-            method(&union(&["M1", "M2"]), "model_dump"),
-            "external pydantic.BaseModel.model_dump"
+            method(&union(&["M1", "M2"]), "model_copy"),
+            "external pydantic.BaseModel.model_copy"
+        );
+        assert_eq!(
+            method(&union(&["M1", "M2"]), "_copy_model_type"),
+            "unresolved"
         );
         assert_eq!(
             method(
@@ -1194,15 +1199,13 @@ fn calls_on_unions_and_protocols_resolve_class_by_class() {
             ),
             "too many"
         );
-        // A protocol dispatches to the classes implementing it; one without members to none.
+        // A protocol dispatches to the classes implementing it; one without members to none,
+        // and `typing.Protocol` is not known to define the method.
         assert_eq!(
             method(&Val::Inst("m.Runner".into()), "run"),
             "project true A.run,B.run"
         );
-        assert_eq!(
-            method(&Val::Inst("m.Marker".into()), "run"),
-            "external typing.Protocol.run"
-        );
+        assert_eq!(method(&Val::Inst("m.Marker".into()), "run"), "unresolved");
         // Calling a union value, reading a property on one.
         assert_eq!(
             callee(&cx.resolve_call(Some(&union(&["A", "B"])))),
