@@ -4,6 +4,8 @@
 //! Reported: candidates that are not `Disproved`, are profitable, and have proven cost
 //! (`OptCandidate::is_reportable`). A diagnostic carries `fix` only when the rewrite is `Safe`;
 //! whether `--fix` applies it by default is the rule's `auto_fix_default` (`OPT101` / `OPT102`).
+//! A report whose rewrite is not `Safe` has a premise it did not establish, so it is heuristic
+//! whatever its rule's certainty (ADR-018: the proven reports are the rule's exact tier).
 //!
 //! `OPT112` / `OPT113` are Advisory-lane reports without a rewrite: they use the Advisory
 //! receiver types (`heki_effect::TypeCtx`, PEP 484 annotations included), which the Soundness
@@ -12,7 +14,7 @@
 use crate::mut_rules::{CallInst, site_call};
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
-use heki_diagnostics::{Diagnostic, TextEdit};
+use heki_diagnostics::{Certainty, Diagnostic, TextEdit};
 use heki_effect::{CONTAINER_MUTATORS, CallSite, Items, TypeCtx, Val};
 use heki_ir::walk::FnShape;
 use heki_ir::{
@@ -74,6 +76,11 @@ pub(crate) fn opt(
             // This `OPT` rule is not selected for the file.
             continue;
         };
+        let proven = match c.verdict.tier {
+            SafetyTier::Safe => Certainty::Exact,
+            _ => Certainty::Heuristic,
+        };
+        d.certainty = proven.at_most(d.certainty);
         d.evidence = c.cost_evidence.clone().map(|cost| match c.verdict.tier {
             SafetyTier::Safe => format!("{cost}; established: {}", c.verdict.evidence()),
             _ => cost,

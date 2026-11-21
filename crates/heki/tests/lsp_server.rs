@@ -40,6 +40,20 @@ fn lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries() {
     assert_eq!(codes(&diags), vec!["OPT101"]);
     let opt = &diags[0];
     assert_eq!(opt["source"], "heki");
+    // The rule's certainty, and its page, which the site's address names.
+    assert_eq!(opt["data"], json!({"certainty": "heuristic"}));
+    let site = common::repo_file("zensical.toml")
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("site_url = \"")?
+                .strip_suffix('"')
+                .map(str::to_owned)
+        })
+        .unwrap();
+    assert_eq!(
+        opt["codeDescription"]["href"],
+        format!("{site}/rules/list-quadratic-concat/")
+    );
     assert_eq!(
         opt["range"],
         json!({"start": {"line": 10, "character": 8}, "end": {"line": 10, "character": 19}})
@@ -112,10 +126,11 @@ fn lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries() {
         related[1]["location"]["range"]["start"],
         json!({"line": 4, "character": 4})
     );
-    // The message is the sentence alone; the help follows the hops, at the diagnostic itself.
+    // The message is the sentence alone, labelled for a heuristic rule; the help follows the
+    // hops, at the diagnostic itself.
     assert_eq!(
         eff["message"],
-        "`handler` reaches the blocking call `time.sleep` on the event loop"
+        "`handler` reaches the blocking call `time.sleep` on the event loop [heuristic]"
     );
     assert_eq!(related.len(), 3, "{related:#?}");
     assert_eq!(related[2]["location"]["uri"], api);
@@ -341,7 +356,7 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
     // Write owners make every per-file check look at the other indexed files too.
     p.write(
         "heki.toml",
-        "[lint.severity]\nEFF101 = \"warning\"\n\n[[write-owners]]\nname = \"store\"\ntargets = [\"Model.fields\"]\nallowed-writers = [\"Store.*\"]\n",
+        "[lint.severity]\nEFF101 = \"error\"\n\n[[write-owners]]\nname = \"store\"\ntargets = [\"Model.fields\"]\nallowed-writers = [\"Store.*\"]\n",
     )
         .write("pkg/__init__.py", "")
         .write("pkg/util.py", UTIL)
@@ -383,7 +398,7 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
     );
     let diags = lsp.diagnostics(&api, |d| !d.is_empty());
     assert_eq!(codes(&diags), vec!["EFF101"]);
-    assert_eq!(diags[0]["severity"], 2, "lint.severity = warning");
+    assert_eq!(diags[0]["severity"], 1, "lint.severity = error");
     let related = diags[0]["relatedInformation"].as_array().unwrap();
     assert_eq!(related[0]["location"]["uri"], api);
     assert_eq!(related[1]["location"]["uri"], util);
@@ -742,4 +757,46 @@ fn lsp_reloads_when_a_save_finds_the_module_layout_switched() {
     lsp.diagnostics(&a, <[Value]>::is_empty);
     assert_eq!(p.check(&["--output-format", "concise"]).1, "");
     lsp.stop(true);
+}
+
+#[test]
+fn the_server_runs_the_heuristic_rules_as_the_command_line_and_the_configuration_say() {
+    let p = Project::new("lsp_heuristic");
+    p.write("pkg/__init__.py", "").write("pkg/api.py", API);
+    let api = uri(&p.dir.join("pkg/api.py"));
+    let published = |args: &[&str]| {
+        let mut lsp = Lsp::start(&p.dir, args);
+        lsp.request(
+            "initialize",
+            json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": {}}),
+        );
+        lsp.notify("initialized", json!({}));
+        lsp.notify(
+            "textDocument/didOpen",
+            json!({"textDocument": {"uri": api, "languageId": "python", "version": 1, "text": API}}),
+        );
+        lsp.settle();
+        let codes = codes(&lsp.latest.get(&api).cloned().unwrap_or_default());
+        lsp.stop(true);
+        codes
+    };
+    // `Lsp::start` passes `--heuristic`; `--no-heuristic` after it wins.
+    assert_eq!(published(&["server"]), ["OPT101"]);
+    assert_eq!(
+        published(&["server", "--no-heuristic"]),
+        Vec::<String>::new()
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nheuristic = true\n",
+    );
+    assert_eq!(
+        published(&["server", "--no-heuristic"]),
+        Vec::<String>::new()
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"OPT101\"]\n",
+    );
+    assert_eq!(published(&["server", "--no-heuristic"]), ["OPT101"]);
 }

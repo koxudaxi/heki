@@ -2,9 +2,13 @@
 
 # loop-db-query (EFF103)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Explicit DB query / external RPC executed inside a loop (N+1).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 74% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that run a database query on every iteration (the "N+1 queries" problem):
@@ -43,6 +47,28 @@ holds (`if first: cursor.execute(...); first = False`), or that every way on fro
 loop (`cursor.execute(...)` followed by `return`, `break`, or `raise`), runs once per run of the
 loop. A call whose arguments switch off the branch with the query (a constant, a literal
 default, a test the caller has made) is not followed into it.
+
+## What a report states
+
+A report states that every iteration of the loop runs a database query (or a command of a database
+client) through the call shown: one round trip per item, the "N+1" of the message.
+
+Its premises:
+
+- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
+  Open through a method call: one candidate implementation that leads on is enough.
+- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
+  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
+  and the cases listed above, are left out.
+- **On every iteration**: the call runs on every iteration of the loop. Open: it counts as running
+  on every iteration unless heki shows that it runs once per object, per process, or per run of the
+  loop (the cases above).
+- **Data-sized**: the code does not fix the size of the loop at 16 or fewer. Open: a size heki
+  cannot bound counts as data-sized.
+- **Queries**: the call sends a statement to the database, as the ecosystem catalog describes it;
+  DDL, bulk APIs, and calls that only build a query are left out.
+
+Not part of the claim: how many items the loop has, and how slow the query is.
 
 ## Why is this bad?
 One round trip per item makes the run time grow with the number of rows and with the network

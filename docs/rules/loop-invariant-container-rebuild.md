@@ -2,9 +2,13 @@
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 30 sampled reports (round 3, 2026-11-21), 97% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that rebuild the same container on every iteration just to test membership,
@@ -13,6 +17,24 @@ before the loop.
 
 Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
 functions.
+
+## What a report states
+
+A report states that the loop builds the same container (`set(keys)`, `list(...)`, `tuple(...)`,
+`dict(...)`) on every iteration to test membership in it.
+
+Its premises:
+
+- **Loop-invariant**: what the container is built from does not change during the loop. Established
+  by the Soundness lane.
+- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
+  a branch inside the loop counts.
+- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
+  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
+  `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
+  ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
+  the rule's exact tier.
 
 ## Why is this bad?
 The container is rebuilt from scratch on every iteration, which costs as much as the scan it

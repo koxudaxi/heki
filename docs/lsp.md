@@ -64,6 +64,11 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   `async def` to `time.sleep`) as related information you can jump to. The message is the
   report's one sentence; its help, what to do about it, is the last related-information entry
   (`help: ...`) at the diagnostic's own range, the way rust-analyzer shows a `help:` note.
+- The message of a [heuristic](precision.md) report ends in `[heuristic]`, and every diagnostic's
+  `data.certainty` is `"exact"` or `"heuristic"`. The rule code links to the rule's page
+  (`codeDescription`).
+- `heki server --heuristic` (or `--no-heuristic`) overrides `lint.heuristic` of the
+  configuration, as on the command line.
 - Quick fixes for the safe `OPT101` / `OPT102` rewrites.
 - `refactor.rewrite.heki` code actions for the proven-safe size-dependent rewrites. A fix whose
   result would not parse is never offered, as `heki check --fix` refuses it.
@@ -158,9 +163,11 @@ $ heki check --watch
   baseline as `heki check` compares them.
 - It only reports: `--fix`, `--diff`, and `--update-baseline` are ignored, with a warning.
 - It reloads everything when the configuration (`pyproject.toml`, `heki.toml`, `.heki.toml`, or
-  the `--config` file), the summary snapshot, or the baseline changes. So does `src/__init__.py`
-  or a root `__init__.py` appearing or disappearing: module names under `src/`, or relative
-  imports that climb to the root, change with the module layout. The server does the same.
+  the `--config` file), the summary snapshot, or the baseline changes. So does a change of the
+  detected source roots (`src/`, `python/`, or the directory named after the project appearing,
+  or becoming a package with an `__init__.py`) or a root `__init__.py` appearing or
+  disappearing: module names below a source root, or relative imports that climb to the root,
+  change with the module layout. The server does the same.
 - What fails once the watch runs (a configuration that no longer parses, a watched path that
   disappears) is reported, and the watch goes on until it is fixed.
 - A file counts as changed when its size, its modification time, or (on Unix) its inode or

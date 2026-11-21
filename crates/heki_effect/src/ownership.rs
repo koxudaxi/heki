@@ -4,11 +4,11 @@
 //!
 //! [`source`] tells what the instruction defining a value makes of it. `heki_rules` applies it
 //! forward over a function's values; the extractor applies it backward, from the values a
-//! function returns ([`origins_of`]), into [`EffectSummary::returns_origins`] and the calls whose
+//! function returns ([`origins_of`]), into [`EffectSummary::return_origins`] and the calls whose
 //! results they may be, which propagation resolves with what those calls return: a call's
 //! result is classified across functions, through any number of wrappers and nested calls.
 //!
-//! [`EffectSummary::returns_origins`]: crate::EffectSummary::returns_origins
+//! [`EffectSummary::return_origins`]: crate::EffectSummary::return_origins
 
 use crate::readonly::{COPY_METHODS, SLICE_COPYING_TYPES};
 use crate::resolver::Callee;
@@ -69,7 +69,7 @@ pub struct ResultOf {
 /// What an object may be as the function holding it sees it (`MUT112`): the origins it knows,
 /// the project calls whose results it may be, which propagation resolves with what their
 /// callees return, and the phis it may be, by their positions in the function's
-/// `EffectSummary::origin_nodes` (each phi is walked once, for every value that may be it).
+/// `ReturnOrigins::nodes` (each phi is walked once, for every value that may be it).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LocalOrigins {
     pub known: Origins,
@@ -81,6 +81,44 @@ pub struct LocalOrigins {
 impl LocalOrigins {
     pub fn is_empty(&self) -> bool {
         self.known.is_empty() && self.results.is_empty() && self.nodes.is_empty()
+    }
+}
+
+/// `MUT112`'s facts of one function ([`EffectSummary::return_origins`]): what the object it
+/// returns may be, and what each phi its origin walks meet may be.
+///
+/// [`EffectSummary::return_origins`]: crate::EffectSummary::return_origins
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReturnOrigins {
+    /// The returned object: its known origins, path by path (propagation adds what the project
+    /// calls in `results` return), the project calls whose results it may be, and the phis it
+    /// may be (local).
+    pub returned: LocalOrigins,
+    /// What each phi the origin walks of the function meet may be, at the positions that
+    /// [`LocalOrigins::nodes`] and the arguments' [`crate::ArgOrigin::origins`] name, each walked
+    /// once (local).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<LocalOrigins>,
+}
+
+/// The facts of a function that returns nothing `MUT112` knows of.
+pub(crate) static NO_RETURN_ORIGINS: ReturnOrigins = ReturnOrigins {
+    returned: LocalOrigins {
+        known: Origins {
+            new: false,
+            held: false,
+            params: 0,
+            elements: 0,
+        },
+        results: Vec::new(),
+        nodes: Vec::new(),
+    },
+    nodes: Vec::new(),
+};
+
+impl ReturnOrigins {
+    pub fn is_empty(&self) -> bool {
+        self.returned.is_empty() && self.nodes.is_empty()
     }
 }
 

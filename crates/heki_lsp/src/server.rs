@@ -58,6 +58,8 @@ struct Doc {
 
 #[derive(Default)]
 struct State {
+    /// The selection options of `heki server` over the configuration.
+    selectors: Selectors,
     root: Option<PathBuf>,
     /// The client registers file watchers on request (`workspace/didChangeWatchedFiles`).
     watch_files: bool,
@@ -213,10 +215,11 @@ impl State {
         let loaded = Workspace::load(
             &ProjectOptions {
                 paths: &paths,
+                working_dir: Some(&paths[0]),
                 overrides: Some(&texts),
                 ..ProjectOptions::default()
             },
-            &Selectors::default(),
+            &self.selectors,
             None,
         );
         self.pending.clear();
@@ -319,7 +322,8 @@ impl State {
         // The configuration, the summary snapshot, or an ignore file changed: everything is
         // analyzed again (an ignore file changes which files belong to the project), as
         // `heki check --watch` does.
-        let config_root = find_root(self.root.as_deref().unwrap_or(Path::new(".")));
+        let workspace_root = self.root.as_deref().unwrap_or(Path::new("."));
+        let config_root = find_root(workspace_root, workspace_root);
         let baseline = self
             .workspace
             .as_ref()
@@ -374,7 +378,7 @@ impl State {
     fn layout_changed(&self) -> bool {
         self.workspace
             .as_ref()
-            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root) != ws.env.layout)
+            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root, &ws.env.cfg) != ws.env.layout)
     }
 
     /// A document was closed (`text`: what it held): the file on the disk is its text again.
@@ -459,10 +463,13 @@ pub struct Backend {
 }
 
 impl Backend {
-    fn new(client: Client) -> Self {
+    fn new(client: Client, selectors: Selectors) -> Self {
         Self {
             client,
-            state: Arc::new(Mutex::new(State::default())),
+            state: Arc::new(Mutex::new(State {
+                selectors,
+                ..State::default()
+            })),
             activity: Arc::default(),
             shut_down: Arc::default(),
         }
@@ -795,14 +802,15 @@ impl<S: tower_service::Service<Request>> tower_service::Service<Request> for End
     }
 }
 
-/// Serve LSP over stdin / stdout until `exit` (or the end of stdin). Returns whether the
-/// session ended as the protocol asks, after `shutdown`: the exit code is then 0, else 1.
-pub fn run_stdio() -> std::io::Result<bool> {
+/// Serve LSP over stdin / stdout until `exit` (or the end of stdin), with `selectors` over the
+/// configuration of the workspace. Returns whether the session ended as the protocol asks, after
+/// `shutdown`: the exit code is then 0, else 1.
+pub fn run_stdio(selectors: Selectors) -> std::io::Result<bool> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let shut_down = runtime.block_on(async {
-        let (service, socket) = LspService::build(Backend::new)
+        let (service, socket) = LspService::build(|client| Backend::new(client, selectors))
             .custom_method("heki/stats", Backend::stats)
             .finish();
         let shut_down = Arc::clone(&service.inner().shut_down);
