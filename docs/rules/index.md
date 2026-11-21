@@ -48,10 +48,10 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| EFF101 | [async-blocking-call](async-blocking-call.md) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop. | ≈ |
+| EFF101 | [async-blocking-call](async-blocking-call.md) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop. |  |
 | EFF111 | [async-possibly-blocking-call](async-possibly-blocking-call.md) | Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop. | ≈ |
 | EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. | ≈ |
-| EFF103 | [loop-db-query](loop-db-query.md) | A loop over data whose every iteration sends a database statement. | ≈ |
+| EFF103 | [loop-db-query](loop-db-query.md) | A loop over data whose every iteration sends a database statement. |  |
 | EFF113 | [loop-possible-db-query](loop-possible-db-query.md) | Heuristic sibling of `EFF103`: a loop that can run a database query on every iteration. | ≈ |
 | EFF105 | [async-blocking-fs](async-blocking-fs.md) | Opt-in: blocking local filesystem I/O reachable from `async def`. | ≈ 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](lock-or-tx-held-across-io.md) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
@@ -64,7 +64,7 @@ Quadratic re-allocation of DataFrames and arrays across loop iterations.
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| DATA101 | [loop-carried-concat](loop-carried-concat.md) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. | ≈ |
+| DATA101 | [loop-carried-concat](loop-carried-concat.md) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. |  |
 
 ## Complexity Rewrites (OPT)
 

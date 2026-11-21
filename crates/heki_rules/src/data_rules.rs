@@ -1,14 +1,15 @@
 //! Family 2 data rule: `DATA101` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
-use crate::eff_rules::shortest;
+use crate::eff_rules::{DataOrigins, ItemOrigins, shortest};
 use crate::mut_rules::{CallInst, site_call};
 use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
-use heki_diagnostics::Diagnostic;
-use heki_effect::{CallSite, SiteEffect, TypeCtx};
+use heki_diagnostics::{Certainty, Diagnostic};
+use heki_effect::{CallHop, CallSite, CallTarget, SiteEffect, TypeCtx, with_paths};
+use heki_ir::walk::{Answer, Budget, Def, FnShape, Visit, reach};
 use heki_ir::{
-    BinOpKind, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop,
-    UnaryOpKind, VarId,
+    BinOpKind, BlockId, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo,
+    Must, NaturalLoop, Progress, UnaryOpKind, VarId,
 };
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -29,6 +30,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
+    let item_origins: std::cell::OnceCell<ItemOrigins<'_>> = std::cell::OnceCell::new();
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loop_carried.iter().all(|lc| !lc.self_accumulating) {
             continue;
@@ -36,13 +38,19 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
         let key = CheckContext::key(unit, f);
         let sizes = Sizes::new(cx, &tcx, &no_types, f, unit, &constants);
         let mut defs: FxHashMap<VarId, &Inst> = FxHashMap::default();
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            if let Some(d) = inst.kind.dst() {
-                defs.insert(d, inst);
+        // Where each value's instruction is (block, index).
+        let mut positions: FxHashMap<VarId, (BlockId, usize)> = FxHashMap::default();
+        for bb in &f.blocks {
+            for (index, inst) in bb.insts.iter().enumerate() {
+                if let Some(d) = inst.kind.dst() {
+                    defs.insert(d, inst);
+                    positions.insert(d, (bb.id, index));
+                }
             }
         }
         let starred = first_starred(f);
-        for (lc, _) in accumulating_loops(f)
+        let mut hits: Vec<Hit<'_>> = Vec::new();
+        for (lc, lp) in accumulating_loops(f)
             .into_iter()
             .filter(|(_, lp)| sizes.data_sized(lp))
         {
@@ -52,10 +60,11 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             // reallocates something else and returns `acc`).
             let hit = lc.updates.iter().find_map(|v| {
                 // An awaited call's value is the call's (`acc = await to_thread(grow, acc)`).
-                let inst = match &defs.get(v)?.kind {
-                    InstKind::Await { value, .. } => defs.get(value)?,
-                    _ => defs.get(v)?,
+                let call_var = match &defs.get(v)?.kind {
+                    InstKind::Await { value, .. } => *value,
+                    _ => *v,
                 };
+                let inst = defs.get(&call_var)?;
                 let call = CallInst::of(&inst.kind)?;
                 if !combines(f, &defs, &starred, &call, lc.phi_var) {
                     return None;
@@ -70,11 +79,32 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 let chain = shortest(&effects, ExecEffectKind::QuadraticRealloc)?;
                 let reallocates =
                     chain.len() == 1 || reallocates_argument(cx, at, f, &defs, inst, lc.phi_var);
-                reallocates.then(|| (inst.span, chain.to_vec()))
+                reallocates.then(|| (inst, chain.to_vec(), *v, at, positions[&call_var]))
             });
-            let Some((span, chain)) = hit else {
+            let Some((inst, chain, update, at, position)) = hit else {
                 continue;
             };
+            hits.push(Hit {
+                lc,
+                lp,
+                call: &inst.kind,
+                position,
+                span: inst.span,
+                chain,
+                update,
+                at,
+            });
+        }
+        if hits.is_empty() {
+            continue;
+        }
+        let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
+        let established = established_updates(cx, unit, &tcx, f, origins, &hits);
+        for (hit, established) in hits.iter().zip(established) {
+            let Hit {
+                lc, span, chain, ..
+            } = hit;
+            let span = *span;
             // Loop-carried values are header phis, which the IR builder only creates for
             // named locals (`read_local_recursive`).
             let var = lc
@@ -82,6 +112,23 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 .clone()
                 .expect("loop-carried values are named locals");
             let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
+            // An established report states the claim only: the advice does not fit a loop that
+            // reads the value on every iteration.
+            let (every, help, premises) = match &established {
+                Some(origins) => (
+                    format!("on {}", origins.every_iteration()),
+                    None,
+                    Certainty::Exact,
+                ),
+                None => (
+                    "on every loop iteration".to_owned(),
+                    Some(
+                        "collect the parts in a list and combine them once after the loop"
+                            .to_owned(),
+                    ),
+                    Certainty::Heuristic,
+                ),
+            };
             cx.emit(
                 out,
                 "DATA101",
@@ -89,14 +136,141 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 span,
                 &key.qualname,
                 var.clone(),
-                format!(
-                    "`{var}` is rebuilt from itself with `{root}` on every loop iteration (quadratic copying)"
-                ),
-                Some("collect the parts in a list and combine them once after the loop".to_owned()),
-                &chain,
-            );
+                format!("`{var}` is rebuilt from itself with `{root}` {every}"),
+                help,
+                chain,
+            )
+            .into_iter()
+            .for_each(|d| d.certainty = premises.at_most(d.certainty));
         }
     }
+}
+
+/// An accumulating update `DATA101` reports: the loop-carried value, its loop, the reallocating
+/// call's span and chain, the update's value, and the call sites at the call.
+struct Hit<'s> {
+    lc: &'s LoopCarriedInfo,
+    lp: &'s NaturalLoop,
+    /// The reallocating call, and where it is (block, index).
+    call: &'s InstKind,
+    position: (BlockId, usize),
+    span: heki_ast::Span,
+    chain: Vec<CallHop>,
+    update: VarId,
+    at: &'s [&'s CallSite],
+}
+
+/// The origins that establish each `DATA101` report of `hits` in `f`, named as `EFF103` names
+/// them, with one inference, one analysis of the paths, and one budget for the function: the
+/// update is the reallocating catalog call itself (a project helper may return another value)
+/// and copies the whole previous value whenever it returns (`ProjectIndex::site_must` of its
+/// call sites), the data it combines holds the previous value itself, not a value only some
+/// paths make it ([`holds_previous`]), it returns on every iteration of the loop that completes,
+/// and every path around the back edge carries it (no path resets the variable); the loop steps
+/// through items the data decides, and its trip count is not one the code fixes. `None` where a
+/// premise is not established.
+fn established_updates(
+    cx: &CheckContext<'_>,
+    unit: &ModuleUnit<'_>,
+    tcx: &TypeCtx<'_>,
+    f: &IrFunction,
+    origins: &ItemOrigins<'_>,
+    hits: &[Hit<'_>],
+) -> Vec<Option<DataOrigins>> {
+    let types = tcx.infer(f);
+    let owner = "heki_rules::data_rules::established_updates";
+    let budget = Budget::of_function(owner, f);
+    with_paths(tcx, f, &types, owner, |paths, ix| {
+        let shape = ix.shape();
+        hits.iter()
+            .map(|hit| {
+                hit.at
+                    .iter()
+                    .filter(|s| matches!(s.target, CallTarget::Layer2 { .. }))
+                    .find_map(|s| {
+                        cx.index
+                            .site_must(&unit.input.path, s, ExecEffectKind::QuadraticRealloc)
+                    })?;
+                let li = f.loops.iter().position(|l| l.header == hit.lp.header)?;
+                let established = holds_previous(shape, hit.call, hit.lc.phi_var)
+                    && paths.on_every_iteration(li, hit.position, Progress::Returned)
+                        == Answer::Known(Must::Every)
+                    && ix.fixed_trips(hit.lp, &mut |_| None).is_open()
+                    && carries_only(shape, f, &budget, &hit.lc.back_vars, hit.update);
+                match origins.of_loop(&budget, f.id, li) {
+                    Answer::Known(found) if established => {
+                        DataOrigins::of(cx, tcx, unit.input.ir, &found)
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    })
+}
+
+/// Whether the data the reallocating call `kind` combines holds `previous` itself, on every
+/// path: its receiver, its first positional argument, or an item of a list or tuple display that
+/// is that argument, is a copy of it (`pd.concat([df, part])`, `np.append(arr, x)`,
+/// `df.append(part)`).
+fn holds_previous(shape: &FnShape<'_>, kind: &InstKind, previous: VarId) -> bool {
+    let is_previous = |v: VarId| shape.copy_root(v) == shape.copy_root(previous);
+    // `pd.concat(...)` is a method call on the module: its data is the first argument.
+    CallInst::of(kind).is_some_and(|call| {
+        call.recv.is_some_and(|(recv, _)| is_previous(recv))
+            || call.args.first().is_some_and(|&first| {
+                is_previous(first)
+                    || matches!(
+                        shape.inst(first).map(|i| &i.kind),
+                        Some(InstKind::AllocBuiltin {
+                            kind: BuiltinKind::List | BuiltinKind::Tuple,
+                            elems,
+                            ..
+                        }) if elems.iter().any(|e| is_previous(*e))
+                    )
+            })
+    })
+}
+
+/// Whether every value `back_vars` carries around the back edge is `update`, through copies and
+/// phis.
+fn carries_only(
+    shape: &FnShape<'_>,
+    f: &IrFunction,
+    budget: &Budget,
+    back_vars: &[VarId],
+    update: VarId,
+) -> bool {
+    let reset = reach(
+        budget,
+        back_vars.iter().copied(),
+        |v, next| {
+            if let Def::Phi(b, i) = shape.def(v) {
+                next.extend(
+                    f.block(b).phis[i as usize]
+                        .incoming
+                        .iter()
+                        .map(|(_, input)| *input),
+                );
+            } else if let Some(InstKind::Copy { src, .. }) = shape.inst(v).map(|i| &i.kind) {
+                next.push(*src);
+            }
+        },
+        |v| {
+            if v == update {
+                return Visit::Prune;
+            }
+            match shape.def(v) {
+                Def::Phi(..) => Visit::Expand,
+                Def::Inst(..)
+                    if matches!(shape.inst(v).map(|i| &i.kind), Some(InstKind::Copy { .. })) =>
+                {
+                    Visit::Expand
+                }
+                _ => Visit::Stop(()),
+            }
+        },
+    );
+    reset == Answer::Known(None)
 }
 
 /// Whether the project call the call instruction `inst` makes (its call site among `sites`:

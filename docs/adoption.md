@@ -162,7 +162,7 @@ For custom tooling, `--output-format json` gives every field: see
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do, and no rule is exact yet:
+exact ones do ([Rule precision](precision.md#certifications) lists them):
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.

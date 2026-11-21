@@ -19,10 +19,9 @@ use heki_effect::{
     EffectSummary, Facts, FuncKey, PerItem, Runner, SiteEffect, SiteMust, TypeCtx, WriteKind,
     anchors_call_site, boundary_reports_in,
 };
+pub(crate) use heki_ir::ItemOrigins;
 use heki_ir::walk::{Answer, Budget};
-use heki_ir::{
-    BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemOrigins, ItemSource, Must, Progress,
-};
+use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
 use heki_kb::{ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,7 +31,7 @@ use std::sync::LazyLock;
 /// The rules whose reports are split by the must-facts of execution effects
 /// (`heki_effect::EffectSummary::must_exec`): an established report is the exact rule's, the
 /// rest its heuristic sibling's.
-pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF111", "EFF103", "EFF113"];
+pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF111", "EFF103", "EFF113", "DATA101"];
 
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
@@ -557,15 +556,20 @@ impl DataOrigins {
         })
     }
 
-    /// "on every iteration over parameter `ids`", or "on every iteration, once for each item of
-    /// parameter `ids`," for a count: what a message says repeats.
+    /// "every iteration over parameter `ids`", or "every iteration, once for each item of
+    /// parameter `ids`" for a count: what a message says repeats.
     pub(crate) fn every_iteration(&self) -> String {
         let named = self.names.join(" and ");
         if self.counts_only {
-            format!("every iteration, once for each item of {named},")
+            format!("every iteration, once for each item of {named}")
         } else {
             format!("every iteration over {named}")
         }
+    }
+
+    /// The end of a clause [`Self::every_iteration`] opens in the middle of a sentence.
+    pub(crate) fn clause_end(&self) -> &'static str {
+        if self.counts_only { "," } else { "" }
     }
 }
 
@@ -579,8 +583,9 @@ impl EstablishedQuery {
             (witnesses, _) => each_witness(witnesses),
         };
         format!(
-            "{} sends a database statement: {what}",
-            self.origins.every_iteration()
+            "{}{} sends a database statement: {what}",
+            self.origins.every_iteration(),
+            self.origins.clause_end()
         )
     }
 }
@@ -644,7 +649,7 @@ fn established_queries(
 /// a part of one, or a catalog call sizing its result (`heki_kb::EcosystemEntry::items`), in
 /// the function the origin names (a generator expression's loop reads its creator's iterable).
 /// `None` for a method's receiver, a fixed collection, or a call the catalog does not size.
-fn data_origin(
+pub(crate) fn data_origin(
     cx: &CheckContext<'_>,
     tcx: &TypeCtx<'_>,
     ir: &heki_ir::ModuleIr,
@@ -652,9 +657,9 @@ fn data_origin(
 ) -> Option<String> {
     let f = ir.function(origin.function);
     let param = |p: u8| f.params.get(usize::from(p)).map(|p| p.name.as_str());
-    match origin.source {
-        ItemSource::Param(p) => Some(format!("parameter `{}`", param(p)?)),
-        ItemSource::ParamPart(p) => Some(format!("a part of parameter `{}`", param(p)?)),
+    let named = match origin.source {
+        ItemSource::Param(p) => format!("parameter `{}`", param(p)?),
+        ItemSource::ParamPart(p) => format!("a part of parameter `{}`", param(p)?),
         ItemSource::Call { block, index } => {
             let inst = f.block(block).insts.get(usize::try_from(index).ok()?)?;
             let types = tcx.infer(f);
@@ -679,13 +684,11 @@ fn data_origin(
                 _ => return None,
             };
             // A catalog class's method is named by the library API it is.
-            Some(format!(
-                "{what} of `{}`",
-                entry.api.as_deref().unwrap_or(&symbol)
-            ))
+            format!("{what} of `{}`", entry.api.as_deref().unwrap_or(&symbol))
         }
-        ItemSource::Receiver | ItemSource::Fixed => None,
-    }
+        ItemSource::Receiver | ItemSource::Fixed => return None,
+    };
+    Some(named)
 }
 
 /// What repeats an effect `EFF102` / `EFF103` report: a data-sized loop around the call, or the
