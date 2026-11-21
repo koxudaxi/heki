@@ -20,6 +20,8 @@ It catches blocking I/O in `async` code, database queries and HTTP clients in lo
 quadratic loops. You can also add rules in `pyproject.toml` to restrict which functions may
 mutate state or reach I/O.
 
+![heki check in a terminal: EFF101 reports a blocking call two helpers below an async def, and EFF103 a database query one helper below a loop, each with its call chain](https://heki.koxudaxi.dev/assets/example-check.svg)
+
 By default, heki shows only *exact* reports: reports of a certified rule, built only from facts
 heki established. To certify a rule, two reviewers check by hand every exact report it makes on
 the development corpus (378 packages and 30.75 million lines, plus packages added for rules with
@@ -1856,8 +1858,26 @@ merge of two baselines).
 
 ## pre-commit
 
-heki ships as one binary on PyPI, so a hook needs no Rust toolchain. Its checks follow calls
-across files, so the hook checks the whole project instead of the staged files only.
+heki's checks follow calls across files, so the hook checks the whole project instead of the
+staged files only:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/koxudaxi/heki
+    rev: v0.2.2
+    hooks:
+      - id: heki
+```
+
+The first run builds heki from the source of that release: pre-commit installs the repository as
+a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
+`PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
+pre-commit keeps the installed hook for later runs. `pre-commit autoupdate` moves `rev` to the
+latest release.
+
+heki also ships as one binary on PyPI, so a local hook can run it without a compile or a Rust
+toolchain:
 
 === "uv"
 
@@ -2644,7 +2664,10 @@ you edit always shows its own boundary.
 ## When the server re-analyzes
 
 The server indexes the workspace in the background, then keeps only the per-function effect
-summaries in memory.
+summaries in memory. It runs the analyses one at a time, in the order of the editor's messages
+(an edit's analysis takes its place when its debounce ends), so the diagnostics do not depend on
+which analysis happens to start first: of documents opened together, each is analyzed with the
+ones opened before it already indexed.
 
 | Event | Re-analyzed |
 | ----- | ----------- |
