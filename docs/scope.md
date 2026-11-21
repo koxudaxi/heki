@@ -179,6 +179,9 @@ Two more cases stay quiet by design:
   holds), or right before the loop ends (`break`, `return`, `raise`), counts once per loop.
 - A blocking wait on a `concurrent.futures.Future` known to be done (`if f.done():`, after
   `await asyncio.wrap_future(f)`) returns at once.
+- `queue.Queue.put` waits only on a queue known to be bounded: a positive `maxsize` on some
+  path, every path known. A `put` on a queue heki cannot follow to where it is built is not
+  reported.
 
 A file that cannot be read or does not parse is reported (exit code 2), and every other file is
 checked as usual. A file that does not parse cannot run either, so heki assumes nothing it would
@@ -322,6 +325,12 @@ A generator's body runs where it is iterated:
   argument (`@lru_cache`, a dict) are not followed.
 - A future is known to be done only through `f.done()` and `await asyncio.wrap_future(f)`, not
   through an event or another future its done callback sets.
+- A queue is known to be bounded through local variables, the attributes its class family's own
+  bodies and methods store, module globals, and parameters whose project callers decide (a
+  helper's at each call, an `async def`'s by the join of every caller). Not followed: stores into
+  an attribute from outside the class family, a `maxsize` checked to be positive but not known,
+  an integer constant imported from another module or passed on through a parameter other than
+  a literal default, and a queue whose function has no project caller.
 - `EFF201` does not use guards.
 - An object a factory function returns counts as obtained once, like a pooled connection.
 
