@@ -109,7 +109,7 @@ supported version that every clause admits:
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
 | `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
-| `heuristic` | `false` | Whether every rule that is not opt-in runs by default and for a prefix or `ALL`, as the exact rules that run by default do: the heuristic rules, and the rules that the defaults leave off. `--heuristic` and `--no-heuristic` override it. |
+| `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -117,10 +117,6 @@ supported version that every clause admits:
   `ALL` enable the exact rules and the contract rules; with `heuristic = true` they also enable
   the heuristic rules that are not opt-in, as Ruff's `preview` does. Its code or name enables a
   heuristic rule either way.
-- The defaults leave off the `OPT` rules other than `OPT112`, whose reports are right about the
-  code but rarely harmful. A prefix or `ALL` enables them as it enables the rules that run by
-  default, so `extend-select = ["OPT"]` adds them; `heuristic = true` also adds them to the
-  defaults.
 - An exact rule's report that did not establish every premise of its claim (an `OPT` report
   whose rewrite is not proven) is heuristic, and is shown where a heuristic rule would run: with
   `heuristic = true`, or when its code or name is selected.
@@ -134,12 +130,7 @@ supported version that every clause admits:
 
 ```toml
 [tool.heki.lint]
-heuristic = true   # every rule that is not opt-in, the heuristic ones too
-```
-
-```toml
-[tool.heki.lint]
-extend-select = ["OPT"]   # the OPT rules, which the defaults leave off
+heuristic = true   # also the heuristic rules that are not opt-in
 ```
 
 ## Contracts

@@ -2,13 +2,13 @@
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 50 sampled reports (round 3, 2026-11-21), 88% were right about the code. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 88% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests

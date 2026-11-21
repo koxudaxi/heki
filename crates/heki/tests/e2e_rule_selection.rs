@@ -153,18 +153,14 @@ fn a_text_run_says_how_many_heuristic_rules_it_left_off() {
     }
 }
 
-/// The heuristic rules `lint.heuristic` adds to the default selection, from `heki rule`: those
-/// that would run by default once exact, and those a prefix would select once exact.
+/// The heuristic rules that would run by default once exact, from `heki rule`.
 fn heki_rules_off_by_default(p: &Project) -> usize {
     let (code, out, _) = p.heki(&["rule", "--all", "--output-format", "json"]);
     assert_eq!(code, 0);
     let rules: Vec<serde_json::Value> = serde_json::from_str(&out).unwrap();
     let off = rules
         .iter()
-        .filter(|r| {
-            (r["activation"] == "default" || r["activation"] == "selectable")
-                && r["certainty"] == "heuristic"
-        })
+        .filter(|r| r["activation"] == "default" && r["certainty"] == "heuristic")
         .count();
     assert!(off > 0);
     off

@@ -52,11 +52,10 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
-`--diff` shows them first. Like the other `OPT` rules, they are off by default: select them by
-code, or with `extend-select = ["OPT"]`:
+`--diff` shows them first. Both rules are heuristic, so they run with `--heuristic`:
 
 ```console
-$ heki check --extend-select OPT101,OPT102 --diff
+$ heki check --heuristic --diff
 --- a/app/report.py
 +++ b/app/report.py
 @@ -1,5 +1,5 @@
@@ -67,7 +66,7 @@ $ heki check --extend-select OPT101,OPT102 --diff
 +        rows.append(item)
      return rows
 Would fix 1 issue(s) in 1 file(s).
-$ heki check --extend-select OPT101,OPT102 --fix
+$ heki check --fix
 Fixed 1 issue(s) in 1 file(s).
 ```
 
@@ -78,7 +77,7 @@ heuristic whatever the rule's certainty. Here the list is also handed to other c
 loop:
 
 ```console
-$ heki check --extend-select OPT101 app/shared.py
+$ heki check --heuristic app/shared.py
 app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning, heuristic] `rows = rows + [...]` copies the whole list each time it runs in the loop
   |
 4 |         rows = rows + [item]
@@ -106,8 +105,7 @@ The other forms (`# heki: ignore`, `# noqa: EFF101`) and `per-file-ignores` are 
 ```console
 $ heki check --select EFF,MUT        # only these families
 $ heki check --extend-select EFF105  # add an opt-in rule
-$ heki check --extend-select OPT     # add the OPT suggestions, off by default
-$ heki check --ignore EFF103         # everything except one rule
+$ heki check --ignore OPT110         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are accepted. A prefix does not

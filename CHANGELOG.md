@@ -14,7 +14,7 @@ release can change rules, configuration keys, diagnostics, and output formats.
   exact, `medium` otherwise) and the tag `heuristic` to a heuristic descriptor and to every
   heuristic result, read by GitHub code scanning. The language server sets `data.certainty` on
   every diagnostic and links its code to the rule's page (`codeDescription`). `heki rule --output-format json` gives each
-  rule's `certainty`, `activation` (`default`, `selectable`, `opt-in`, or `contract`), `heuristic_note`, and
+  rule's `certainty`, `activation` (`default`, `opt-in`, or `contract`), `heuristic_note`, and
   `default_enabled` (whether it runs with no configuration).
 - `[tool.heki.lint] heuristic`, `heki check --heuristic` / `--no-heuristic`, and
   `heki server --heuristic` / `--no-heuristic`: see the first entry under Changed. A `full` or
@@ -58,21 +58,14 @@ release can change rules, configuration keys, diagnostics, and output formats.
   rewrite is not proven) are shown under the same conditions. A contract rule runs when its
   contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
   rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
-  a measurement certifies them and are left off by default (next entry). `MUT202`, which also reports `@lru_cache` / `@cache` results
+  a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
   without a contract, is selected like the other heuristic rules, so a `readonly-returns`
   contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
   of 0.1; baselines keep their keys.
-- The `OPT` rules other than `OPT112` are left off by default, even once exact: their reports
-  are right about the code but rarely harmful (2 of 100 sampled reports of the proven tier, and 5
-  of 100 of `OPT113`, did real harm). Their code, a prefix, or `ALL` selects them
-  (`extend-select = ["OPT"]`), and `lint.heuristic = true`, which runs every rule that is not
-  opt-in, adds them to the defaults; while they are heuristic, a prefix or `ALL` selects them
-  only with `lint.heuristic = true`, as for the other heuristic rules. `heki rule --all` lists them as `select`, the rule pages mark
-  them ➕, and `heki rule --output-format json` gives their `activation` as `selectable`.
 - Every output labels heuristic reports: `[error, heuristic]` in `full`,
   `EFF102 [heuristic] ...` in `concise`, `title=heki EFF102 (heuristic)` in `github`, and
   ` [heuristic]` after the language server's message. `heki rule --all` lists each rule's
-  certainty and when it runs (`on`, `off`, `select`, `opt-in`, or `contract`) instead of
+  certainty and when it runs (`on`, `off`, `opt-in`, or `contract`) instead of
   `default=true` / `false`.
 - A rule's default severity follows what happens in the code it reports, not its family: a bug
   (a wrong result, an exception, a lost update, a deadlock, or a broken contract) is an

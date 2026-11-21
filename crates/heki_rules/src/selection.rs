@@ -1,17 +1,15 @@
 //! Rule selection (docs/configuration.md, Ruff precedence).
 //!
-//! - Default: every `CORE_RULES` entry in the default selection
-//!   ([`RuleMeta::runs_by_default`]): the exact `Default` rules and the `Contract` rules, and with
-//!   `lint.heuristic` the heuristic `Default` rules and the `Selectable` rules too (every rule
-//!   that is not opt-in, Ruff's `preview` and the earlier default set).
+//! - Default: every `CORE_RULES` entry that runs without being named
+//!   ([`RuleMeta::runs_unnamed`]): the exact `Default` rules and the `Contract` rules, and with
+//!   `lint.heuristic` the heuristic `Default` rules too (Ruff's `preview`).
 //! - `select` (CLI over config) replaces the default set (an empty `select` in the
 //!   configuration selects no rule); `extend-select` adds; `ignore` and
 //!   `per-file-ignores` remove.
 //! - A selector is a code (`EFF105`), a slug (`async-blocking-fs`), or a code prefix
-//!   (`EFF`, `MUT2`, `ALL`). A prefix enables the rules [`RuleMeta::runs_for_prefix`] admits:
-//!   those of the default selection and the `Selectable` ones; opt-in rules such as `EFF105`, and
-//!   heuristic rules without `lint.heuristic`, need their exact code or slug. `ignore` prefixes
-//!   cover every matching rule.
+//!   (`EFF`, `MUT2`, `ALL`). A prefix enables only the rules that run without being named: opt-in
+//!   rules such as `EFF105`, and heuristic rules without `lint.heuristic`, need their exact code
+//!   or slug. `ignore` prefixes cover every matching rule.
 //! - An exact rule whose single reports can be heuristic (an `OPT` report whose rewrite is not
 //!   proven) shows those reports only where a heuristic rule would run: with `lint.heuristic`,
 //!   when its code or slug is selected, or for a contract rule.
@@ -121,18 +119,18 @@ fn enabled_before_ignore(
     cli: &Selectors,
     heuristic: bool,
 ) -> Result<BTreeSet<&'static str>, SelectionError> {
-    let for_prefix = |r: &RuleMeta| r.runs_for_prefix(heuristic);
+    let unnamed = |r: &RuleMeta| r.runs_unnamed(heuristic);
     let (select, extend) = selecting(lint, cli);
     let mut enabled: BTreeSet<&'static str> = match select {
         None => CORE_RULES
             .iter()
-            .filter(|r| r.runs_by_default(heuristic))
+            .filter(|r| unnamed(r))
             .map(|r| r.code)
             .collect(),
-        Some(select) => codes(select, &for_prefix)?,
+        Some(select) => codes(select, &unnamed)?,
     };
     for list in extend {
-        enabled.extend(codes(list, &for_prefix)?);
+        enabled.extend(codes(list, &unnamed)?);
     }
     Ok(enabled)
 }
@@ -158,15 +156,12 @@ impl RuleSelection {
             .chain(codes(&cli.ignore, &any_rule)?)
             .collect::<BTreeSet<_>>();
         enabled.retain(|code| !ignored.contains(code));
-        // The rules `lint.heuristic` would add that are heuristic: it also adds the exact
-        // `Selectable` rules to the default selection, which the note does not count.
         let heuristic_off = if heuristic {
             BTreeSet::new()
         } else {
             enabled_before_ignore(lint, cli, true)?
                 .into_iter()
                 .filter(|code| !enabled.contains(code) && !ignored.contains(code))
-                .filter(|code| find_rule(code).is_some_and(|r| r.certainty == Certainty::Heuristic))
                 .collect()
         };
         let named = named_rules(lint, cli);
@@ -340,54 +335,6 @@ mod tests {
         );
         let off = RuleSelection::resolve(&with_heuristic(), &cli(false)).unwrap();
         assert!(!off.is_enabled(h) && off.heuristic_off().contains(h));
-    }
-
-    #[test]
-    fn a_selectable_rule_runs_for_its_prefix_or_name_but_never_by_default() {
-        let selectable = |certainty| {
-            let rule = RuleMeta {
-                certainty,
-                activation: Activation::Selectable,
-                ..*find_rule("OPT110").unwrap()
-            };
-            let by_prefix = [rule.runs_for_prefix(false), rule.runs_for_prefix(true)];
-            let by_default = [rule.runs_by_default(false), rule.runs_by_default(true)];
-            (by_prefix, by_default)
-        };
-        // Exact, a prefix or `ALL` selects it; heuristic, it waits for `lint.heuristic` as a
-        // `Default` rule does. Only `lint.heuristic`, which runs every rule that is not opt-in,
-        // puts it in the default selection.
-        assert_eq!(selectable(Certainty::Exact), ([true, true], [false, true]));
-        assert_eq!(
-            selectable(Certainty::Heuristic),
-            ([false, true], [false, true])
-        );
-        // The catalog's selectable rules: on by name, off by default, and for `ALL` and their
-        // prefixes with `lint.heuristic`.
-        let s = CORE_RULES
-            .iter()
-            .find(|r| r.activation == Activation::Selectable)
-            .expect("a selectable rule");
-        let plain = LintConfig::default();
-        let default = sel(&plain, &[], &[], &[]);
-        assert!(!default.is_enabled(s.code));
-        // Off by default, it counts as a heuristic rule left off only while it is heuristic.
-        assert_eq!(
-            default.heuristic_off().contains(s.code),
-            s.certainty == Certainty::Heuristic
-        );
-        assert!(sel(&plain, &[], &[s.code], &[]).is_enabled(s.code));
-        for prefix in [&s.code[..3], "ALL"] {
-            assert!(
-                sel(&with_heuristic(), &[], &[prefix], &[]).is_enabled(s.code),
-                "{prefix}"
-            );
-            assert_eq!(
-                sel(&plain, &[], &[prefix], &[]).is_enabled(s.code),
-                s.certainty == Certainty::Exact,
-                "{prefix}"
-            );
-        }
     }
 
     #[test]

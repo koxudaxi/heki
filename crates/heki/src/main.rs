@@ -131,8 +131,7 @@ struct ServerArgs {
 #[derive(Debug, Args)]
 struct HeuristicArgs {
     /// Also run the heuristic rules, whose reports can be wrong about the code, by default and
-    /// for every prefix and `ALL`, and by default the rules that a prefix selects but the
-    /// defaults leave off: every rule that is not opt-in (`lint.heuristic = true`).
+    /// for every prefix and `ALL` (`lint.heuristic = true`).
     #[arg(long, overrides_with = "no_heuristic")]
     heuristic: bool,
     /// Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`).
@@ -184,7 +183,7 @@ impl RuleRecord {
     fn new(rule: &'static RuleMeta) -> Self {
         Self {
             rule,
-            default_enabled: rule.runs_by_default(false),
+            default_enabled: rule.runs_unnamed(false),
             heuristic_note: rule.heuristic_note(),
             experimental: experimental_rule(rule.code),
             default_severity: rule.default_severity(),
@@ -193,13 +192,11 @@ impl RuleRecord {
 }
 
 /// When a rule runs with no configuration, as `heki rule --all` lists it: `off` for a heuristic
-/// rule that would be on once exact, `select` for one that a prefix selects but the default
-/// selection never does.
+/// rule that would be on once exact.
 fn activation_word(rule: &RuleMeta) -> &'static str {
     match rule.activation {
-        Activation::Default if rule.runs_by_default(false) => "on",
+        Activation::Default if rule.runs_unnamed(false) => "on",
         Activation::Default => "off",
-        Activation::Selectable => "select",
         Activation::OptIn => "opt-in",
         Activation::Contract => "contract",
     }
@@ -513,8 +510,6 @@ mod tests {
         for (certainty, activation, word) in [
             (Certainty::Exact, Activation::Default, "on"),
             (Certainty::Heuristic, Activation::Default, "off"),
-            (Certainty::Exact, Activation::Selectable, "select"),
-            (Certainty::Heuristic, Activation::Selectable, "select"),
             (Certainty::Heuristic, Activation::OptIn, "opt-in"),
             (Certainty::Heuristic, Activation::Contract, "contract"),
         ] {

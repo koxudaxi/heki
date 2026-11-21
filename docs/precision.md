@@ -19,9 +19,6 @@ is heuristic, as that premise is open. Only exact reports are shown by default.
 - The heuristic reports of an exact rule are shown under the same conditions: with
   `lint.heuristic = true`, or when its code or name is selected.
 - A contract rule runs when its contract is declared, whatever its certainty.
-- An exact rule whose reports are right but rarely harmful is left off by default: its code, a
-  prefix, or `ALL` selects it (`extend-select = ["OPT"]`), and so does `lint.heuristic = true`,
-  which runs every rule that is not opt-in. The `OPT` rules other than `OPT112` are such rules.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
@@ -92,10 +89,7 @@ Each checked report gets one class:
 
 "Right about the code" is C, P, and B together; "real harm" is C and P. Real harm is published
 for each rule. It decides only whether an exact rule runs by default: it does when its share of
-real harm is worth the line it prints, and otherwise runs only when selected (by its code, a
-prefix, `ALL`, or `lint.heuristic = true`). For 0.2.0 the `OPT` rules other than `OPT112` are of the second kind: in
-the pre-check of their exact claims, 2 of 100 sampled reports of the proven tier and 5 of 100
-of `OPT113` did real harm.
+real harm is worth the line it prints, and is opt-in otherwise.
 
 ## How a rule becomes exact
 
