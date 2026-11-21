@@ -871,9 +871,14 @@ OPT103 = "warning"
 ## Where heki finds the configuration
 
 1. The project root is the nearest directory at or above the first path given (the current
-   directory when no path is given) that holds `heki.toml`, `.heki.toml`, `pyproject.toml`, or
-   `.git`. When none does, it is the first path's own directory (the directory given, or the
-   given file's directory).
+   directory when no path is given) that holds `heki.toml`, `.heki.toml`, or `pyproject.toml`.
+   The search stops at the top of the enclosing Git working tree (the directory holding `.git`):
+   a configuration above it belongs to another project. Without a configuration file, the root
+   is the current directory, as Ruff and ty take it, when it holds the first path; but never a
+   directory above the top of the Git working tree (then the root is that top), and outside the
+   current directory and any Git working tree it is the first path's own directory (the
+   directory given, or the given file's directory). The language server takes its workspace
+   folder for the current directory.
 2. heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` in that directory. A
    `pyproject.toml` without `[tool.heki]` still marks the root: its project gets the defaults.
 3. `--config <path>` names the file instead. The project root stays where step 1 finds it.
@@ -901,20 +906,32 @@ heki never ignores a setting. These are configuration errors (exit code 2):
 - a heki setting at the top level of a `pyproject.toml` (`[[ecosystem]]` instead of
   `[[tool.heki.ecosystem]]`).
 
-### Module names follow the project root
+### Module names follow the source roots
 
-Module names are the paths below the project root (`app/api.py` is `app.api`; a `src/` layout
-drops `src`). heki resolves the imports between the project's modules by these names, and they
-appear in messages that name a function by its full name and in the `target`s of
-[baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) entries, whose `path`s are relative to the root too.
-Without a `heki.toml`, `.heki.toml`, or `pyproject.toml` in the project's directory or above it,
-the root is the top of the enclosing Git working tree (the directory holding `.git`), so the
-names depend on where the project sits in the checkout: in a repository, `services/api/app.py`
-is `services.api.app`, and its `from helpers import slow` does not find
-`services/api/helpers.py`; the same files checked out on their own are `app` and `helpers`.
-Without any of them and outside a Git working tree, `heki check pkg` is rooted inside the
-package: its modules are `a` and `b`, not `pkg.a` and `pkg.b`, and `from pkg.b import slow` is
-not resolved. Put a `pyproject.toml` or a `heki.toml` in the project's directory to fix the root.
+Module names are the paths below a source root (`app/api.py` is `app.api` below the project
+root, `src/acme/io.py` is `acme.io` below `src`). heki resolves the imports between the
+project's modules by these names, and they appear in messages that name a function by its full
+name and in the `target`s of [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) entries, whose `path`s
+are relative to the project root.
+
+- The `src` setting lists the source roots: directories relative to the project root, like
+  Ruff's `src` and ty's `environment.root`. A file below several of them is named below the
+  deepest one, and a file below none is named below the project root. `src` does not accept
+  globs yet (Ruff's does): list the directories.
+- Without `src`, heki detects the source roots as ty does: `src`, the directory named after the
+  project (`project.name` of the `pyproject.toml`, else the root's own name) when it holds a
+  directory of the same name (`acme/acme/`), and `python` (the maturin layout), each when it is
+  a directory and not a package (no `__init__.py`). A source root that is a package is imported
+  by its own name (`src.helpers`).
+- Other layouts need `src`: a subdirectory application whose directories are imported as
+  top-level packages (`backend/config/env.py` imported as `config.env`) takes
+  `src = ["backend"]`, and a `lib/` layout (`lib/matplotlib`) takes `src = ["lib"]`.
+
+Without a configuration file the project root is where heki runs (see above): in a repository
+without one, `heki check` run in `services/api/` names `services/api/app.py` `app`, and its
+`from helpers import slow` finds `services/api/helpers.py`; run from the top of the repository,
+the same file is `services.api.app` and the import is not resolved. Put a `pyproject.toml` or a
+`heki.toml` in the project's directory to fix the root wherever heki runs.
 
 ## Top-level settings
 
@@ -923,6 +940,7 @@ not resolved. Put a `pyproject.toml` or a `heki.toml` in the project's directory
 | `target-version` | the oldest version `project.requires-python` admits, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). `--target-version` overrides it. See [below](https://heki.koxudaxi.dev/configuration/#the-default-target-version) for the inference and [Scope](https://heki.koxudaxi.dev/scope/#the-target-python-version) for what the version changes. |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths: globs, matched against the project-relative path and each of its components, and covering everything below a matched directory. |
 | `extend-exclude` | `[]` | Adds excluded paths. |
+| `src` | the detected source roots | Source roots, relative to the project root: the module names of the files below each are relative to it (`src = ["lib"]` names `lib/pkg/net.py` `pkg.net`). See [Module names follow the source roots](https://heki.koxudaxi.dev/configuration/#module-names-follow-the-source-roots). |
 | `baseline` | none | Ratchet baseline file, relative to the project root, used when `--baseline` is not given: by `heki check`, `--watch`, and the language server. See [Ratchet baselines](https://heki.koxudaxi.dev/adoption/#ratchet-baselines). |
 
 ### The default target version
@@ -2385,9 +2403,11 @@ $ heki check --watch
   baseline as `heki check` compares them.
 - It only reports: `--fix`, `--diff`, and `--update-baseline` are ignored, with a warning.
 - It reloads everything when the configuration (`pyproject.toml`, `heki.toml`, `.heki.toml`, or
-  the `--config` file), the summary snapshot, or the baseline changes. So does `src/__init__.py`
-  or a root `__init__.py` appearing or disappearing: module names under `src/`, or relative
-  imports that climb to the root, change with the module layout. The server does the same.
+  the `--config` file), the summary snapshot, or the baseline changes. So does a change of the
+  detected source roots (`src/`, `python/`, or the directory named after the project appearing,
+  or becoming a package with an `__init__.py`) or a root `__init__.py` appearing or
+  disappearing: module names below a source root, or relative imports that climb to the root,
+  change with the module layout. The server does the same.
 - What fails once the watch runs (a configuration that no longer parses, a watched path that
   disappears) is reported, and the watch goes on until it is fixed.
 - A file counts as changed when its size, its modification time, or (on Unix) its inode or

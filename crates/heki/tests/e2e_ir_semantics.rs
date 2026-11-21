@@ -962,6 +962,96 @@ def after_continue(pool: Pool, hosts):
     }
 }
 
+/// A loop no path enters takes its values only from its back edges: a value it computes from
+/// itself is defined through the header's phi, so a walk along definitions ends.
+#[test]
+fn a_loop_no_path_enters_defines_its_values_through_phis() {
+    let src = "\
+def attr_after_return(d):
+    return
+    while 1:
+        d.remove(1)
+        d = d.x
+
+
+def subscript_after_return(xs, d, adj):
+    return d
+    for x in xs:
+        if x in adj[d]:
+            adj[d].remove(x)
+        d = d[d[:, 0] != x]
+
+
+def after_break(rows, d):
+    while True:
+        break
+        for r in rows:
+            d.index(r)
+            d = d.parent
+    return d
+
+
+def unpacking(xs, d):
+    return
+    for x in xs:
+        _, d = d
+        d.remove(x)
+
+
+def walrus(d):
+    return
+    while (d := d.next):
+        d.remove(1)
+
+
+def live_handler(d):
+    try:
+        g()
+        return
+        while 1:
+            d = d.x
+            d.remove(1)
+    except OSError:
+        d.remove(2)
+
+
+def finally_after_returns(xs, d):
+    try:
+        return g()
+    finally:
+        return
+        for x in xs:
+            d.remove(x)
+            d = d.x
+
+
+raise SystemExit
+while 1:
+    d = d.x
+    d.remove(1)
+";
+    let p = Project::new("ir_dead_loop_cycles");
+    p.write("m.py", src);
+    for version in ["py311", "py315"] {
+        let (code, _, stderr) = p.check(&["--select", "ALL", "--target-version", version]);
+        assert!(code == 0 || code == 1, "{version}: exit {code}: {stderr}");
+    }
+    let ir = dump_ir("ir_dead_loop_cycles", src, "py315");
+    let f = function(&ir, "attr_after_return");
+    let header = f["loops"][0]["header"].as_u64().unwrap() as usize;
+    let phis = f["blocks"][header]["phis"].as_array().unwrap();
+    assert_eq!(phis.len(), 1, "{phis:?}");
+    let loads: Vec<&Value> = f["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .filter_map(|i| i["kind"].get("AttrLoad"))
+        .collect();
+    assert_eq!(loads.len(), 1, "{loads:?}");
+    assert_eq!(loads[0]["obj"], phis[0]["dst"]);
+}
+
 #[test]
 fn a_definition_in_a_finally_body_is_one_function() {
     let src = "def run(items):\n    try:\n        if items:\n            return 1\n    finally:\n        def cleanup():\n            return 2\n        cleanup()\n";
@@ -984,6 +1074,44 @@ fn a_definition_in_a_finally_body_is_one_function() {
         .collect();
     assert_eq!(made.len(), 3, "{made:?}");
     assert!(made.iter().all(|id| *id == made[0]), "{made:?}");
+}
+
+/// A file that is one definition or one expression with nothing after it: the scope spans the
+/// whole source, as the module body does, and is still a function of its own.
+#[test]
+fn a_scope_spanning_the_whole_file_is_its_own_function() {
+    let cases = [
+        ("def run(xs):\n    return xs", "py315", "run"),
+        ("@cache\ndef run(xs):\n    return xs", "py315", "run"),
+        ("class Box:\n    size = 1", "py315", "Box"),
+        ("lambda: 1", "py315", "<module>.<locals>.<lambda>"),
+        ("(x for x in xs)", "py315", "<module>.<locals>.<genexpr>"),
+        (
+            "(x async for x in xs)",
+            "py315",
+            "<module>.<locals>.<genexpr>",
+        ),
+        ("[x for x in xs]", "py311", "<module>.<locals>.<listcomp>"),
+    ];
+    for (i, (src, version, qualname)) in cases.into_iter().enumerate() {
+        let ir = dump_ir(&format!("ir_whole_file_scope_{i}"), src, version);
+        let qualnames: Vec<&str> = ir["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["qualname"].as_str().unwrap())
+            .collect();
+        assert_eq!(qualnames, ["<module>", qualname], "{src:?}");
+        let p = Project::new(&format!("ir_whole_file_scope_check_{i}"));
+        p.write("m.py", src);
+        let (code, _, stderr) = p.check(&["--target-version", version]);
+        assert_eq!(code, 0, "{src:?}: {stderr}");
+    }
+    let src = "def positions(names: list[str], wanted):\n    out = []\n    for w in wanted:\n        out.append(names.index(w))\n    return out";
+    assert_eq!(
+        reports("ir_whole_file_function", src, "OPT112"),
+        pairs(&[("positions", "OPT112")])
+    );
 }
 
 #[test]
