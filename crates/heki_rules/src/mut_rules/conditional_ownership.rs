@@ -22,7 +22,7 @@ use heki_diagnostics::Diagnostic;
 use heki_effect::cache_flow::is_memo_name;
 use heki_effect::ownership::{self, Holder, Place, Source};
 use heki_effect::{
-    CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, FuncKey, SiteRole, TypeCtx, Val,
+    CallHop, CallSite, Callee, EffectSummary, FuncKey, SiteRole, TypeCtx, Val, container_mutator,
     self_aliases,
 };
 use heki_ir::walk::FnShape;
@@ -1081,9 +1081,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             false,
         ) else {
             return match &inst.kind {
-                InstKind::MethodCall { recv, method, .. }
-                    if CONTAINER_MUTATORS.contains(&method.as_str()) =>
-                {
+                InstKind::MethodCall { recv, method, .. } if container_mutator(method) => {
                     vec![own(*recv, REMOVING_METHODS.contains(&method.as_str()))]
                 }
                 _ => Vec::new(),
